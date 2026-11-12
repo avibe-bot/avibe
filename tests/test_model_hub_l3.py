@@ -203,6 +203,7 @@ def test_turn_outcome_rendering_authority_covers_matrix_and_locales() -> None:
             rule.upstream_failure_key,
             rule.upstream_failure_without_status_key,
             rule.connection_failure_key,
+            rule.passthrough_model_key,
         )
         if key is not None
     }
@@ -453,6 +454,7 @@ def _terminal_resolution_facts(
         backend="claude",
         requested_model=model,
         target_model=model,
+        route_origin="manual",
         matching_sources=tuple(config.sources),
         inspected_hops=inspections,
         candidate_hops=candidates,
@@ -6491,7 +6493,7 @@ def test_production_adapter_retargets_api_keys_without_exposing_or_mutating_them
         "codex-test.json",
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -6532,7 +6534,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         base_url=base_url,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
     unsupported = EngineClientError(
@@ -7276,7 +7278,7 @@ def test_source_observation_accepts_catalog_pin_and_custom_declaration_without_s
         base_url="https://api.deepseek.com",
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
     generic_request_accepted = _ProtocolEvidence(
@@ -7375,7 +7377,7 @@ def test_qwen_catalog_pin_validation_remains_unverified(
         base_url=None,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -7457,7 +7459,7 @@ def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
         base_url=None,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -7593,7 +7595,7 @@ def _run_catalog_pin_observation(
         base_url=None,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -7767,7 +7769,7 @@ def test_custom_auto_numeric_auth_failure_message_stays_authentication_failed(
 ) -> None:
     state_store = EngineStateStore(tmp_path / "engine-state-custom-auto")
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -7859,7 +7861,7 @@ def test_source_observation_catalog_pin_and_declaration_still_require_authentica
         base_url=base_url,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
     rejected = _ProtocolEvidence(
@@ -7919,7 +7921,7 @@ def test_custom_declared_observation_preserves_transport_authentication_verdict(
         base_url=base_url,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
     parser_evidence = _ProtocolEvidence(
@@ -7982,7 +7984,7 @@ def test_declared_custom_anthropic_relay_verifies_from_its_models_listing(
 
     live_key = "relay-live-key"
     state_store = EngineStateStore(tmp_path / f"engine-state-relay-{stored_key}")
-    adapter = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    adapter = CLIProxyEngineAdapter(supervisor=Mock(lifecycle=None, _published_release=None), state_store=state_store)
 
     async def scenario() -> tuple[list[tuple[str, str, str]], list[dict], object]:
         requests: list[tuple[str, str, str]] = []
@@ -8167,7 +8169,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
         raise AssertionError((method, path))
 
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     adapter = CLIProxyEngineAdapter(
         supervisor=supervisor,
@@ -8248,7 +8250,7 @@ def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof
         raise AssertionError((method, path))
 
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     adapter = CLIProxyEngineAdapter(
         supervisor=supervisor,
@@ -8324,7 +8326,7 @@ def test_hub_subscription_observation_binds_on_the_engine_declared_protocol(
         raise AssertionError((method, path))
 
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     adapter = CLIProxyEngineAdapter(
         supervisor=supervisor,
@@ -10772,16 +10774,10 @@ def test_a_cancelled_buffered_turn_is_counted_even_when_it_reported_no_tokens(
     asyncio.run(exercise())
 
 
-def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
+def test_a_completed_turn_does_not_wait_for_its_owned_ledger_write(
     tmp_path: Path,
 ) -> None:
-    """Review 4964754924: the gateway owns the write, so no ending can cancel it.
-
-    Occupy the writing thread and the ledger write is queued but not started —
-    the window where cancelling the awaiting task also cancels the work. The turn
-    dies there, and the row still lands, because what the turn owns is the
-    decision to meter and not the write that carries it out.
-    """
+    """The response completes while its accepted, visible usage awaits persistence."""
 
     async def exercise() -> None:
         source = _source("src_meterown01", "Owned write")
@@ -10818,12 +10814,14 @@ def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
             turn = asyncio.create_task(gateway._handle_request(request))
             while not gateway._usage_writer.unpersisted:
                 await asyncio.sleep(0.01)
-            # The scenario is only the scenario while the write is still queued.
-            assert _usage_of(service, source.id) == {}
+            # The accepted call is already visible through the in-memory overlay,
+            # even though the durable worker is occupied.
+            metered = _usage_of(service, source.id)
+            assert metered["requests"] == 1
 
-            turn.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(turn, timeout=5)
+            result = await asyncio.wait_for(turn, timeout=1)
+            assert result.status == 200
+            assert not service.usage.path.exists()
 
         await gateway.close()
 
@@ -10835,16 +10833,10 @@ def test_a_cancelled_turn_cannot_take_the_ledger_write_it_queued_with_it(
     asyncio.run(exercise())
 
 
-def test_a_cancelled_resolve_cannot_take_the_ledger_write_it_queued_with_it(
+def test_a_completed_resolve_does_not_wait_for_its_owned_ledger_write(
     tmp_path: Path,
 ) -> None:
-    """Review 4964894667: the same window at the other metering owner.
-
-    A call the resolver consumed itself still reports tokens the vendor billed.
-    Occupy the writing thread and its row is queued but not started; the caller
-    is cancelled there, and the row lands anyway. Neither owner keeps a write of
-    its own, so neither can lose one — `UsageWriter` holds both.
-    """
+    """Resolver-owned usage is visible immediately and persists independently."""
 
     async def exercise() -> None:
         source = _source("src_meterown02", "Owned resolve write")
@@ -10880,12 +10872,13 @@ def test_a_cancelled_resolve_cannot_take_the_ledger_write_it_queued_with_it(
             )
             while not service.usage_writer.unpersisted:
                 await asyncio.sleep(0.01)
-            # The scenario is only the scenario while the write is still queued.
-            assert _usage_of(service, source.id) == {}
+            # The accepted call is already visible through the in-memory overlay,
+            # even though the durable worker is occupied.
+            metered = _usage_of(service, source.id)
+            assert metered["requests"] == 1
 
-            resolve.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(resolve, timeout=5)
+            await asyncio.wait_for(resolve, timeout=1)
+            assert not service.usage.path.exists()
 
         assert await service.usage_writer.drain(timeout=5) == 0
 
@@ -10931,13 +10924,13 @@ def test_a_burst_of_metering_neither_borrows_the_shared_pool_nor_grows_unbounded
         source = _source("src_meterburst1", "Burst")
         service = _service(tmp_path, sources=[source])
         transactions: list[int] = []
-        fold = service.usage.record_many
+        commit = service.usage.commit_buffered_flush
 
         def counting(calls) -> None:
             transactions.append(len(calls))
-            fold(calls)
+            commit(calls)
 
-        service.usage.record_many = counting
+        service.usage.commit_buffered_flush = counting
         writer = service.usage_writer
 
         def meter() -> None:
@@ -10951,20 +10944,13 @@ def test_a_burst_of_metering_neither_borrows_the_shared_pool_nor_grows_unbounded
             )
 
         with _occupied_ledger_writer():
-            meter()
-            # White-box on purpose: the batch boundary is the thing under test,
-            # and it is only observable once the first flush is holding one.
-            while not writer._writing:
-                await asyncio.sleep(0.01)
-            for _ in range(7):
+            for _ in range(8):
                 meter()
+            assert writer.unpersisted == 8
 
         assert await writer.drain(timeout=5) == 0
-        # Eight calls, two trips to disk — the second took every call that piled
-        # up behind the first, which is the whole of the bound. It carries one row
-        # rather than seven, because the seven were headed for one row anyway; the
-        # requests below are what proves that folded and lost are different things.
-        assert transactions == [1, 1]
+        # Eight calls share one durable transaction while the disk is occupied.
+        assert transactions == [1]
 
         metered = _usage_of(service, source.id)
         assert metered["requests"] == 8
@@ -11662,7 +11648,7 @@ def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
     async def exercise() -> None:
         recording_threads: list[int] = []
 
-        def capture(_calls: object) -> None:
+        def capture(_rows: object, *, measured) -> None:
             recording_threads.append(threading.get_ident())
 
         resolver_source = _source("src_meterloop01", "Resolver owner")
@@ -11682,7 +11668,7 @@ def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
                 )
             ],
         )
-        resolver_service.usage.record_many = capture
+        resolver_service.usage._write = capture
         requested_model = _canonicalize_fixed_test_routes(resolver_service)["codex"]
         await resolver_service.resolve(
             backend="codex",
@@ -11707,7 +11693,7 @@ def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
                 )
             ],
         )
-        gateway_service.usage.record_many = capture
+        gateway_service.usage._write = capture
         gateway_model = _canonicalize_fixed_test_routes(gateway_service)["codex"]
         gateway = ModelHubTurnGateway(gateway_service)
         await gateway._handle_request(
@@ -11720,6 +11706,8 @@ def test_neither_metering_owner_writes_the_ledger_on_the_event_loop(
             )
         )
 
+        await resolver_service.usage_writer.drain(timeout=5)
+        await gateway.close()
         assert len(recording_threads) == 2
         assert threading.get_ident() not in recording_threads
 
@@ -11742,7 +11730,7 @@ def test_a_usage_ledger_failure_cannot_change_the_served_turn(tmp_path: Path) ->
                 )
             ],
         )
-        service.usage.record_many = Mock(side_effect=OSError("read-only state directory"))
+        service.usage._write = Mock(side_effect=OSError("read-only state directory"))
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
         gateway = ModelHubTurnGateway(service)
         request = _prepared_gateway_request(
@@ -11757,7 +11745,8 @@ def test_a_usage_ledger_failure_cannot_change_the_served_turn(tmp_path: Path) ->
 
         assert result.status == 200
         assert result.body == body
-        service.usage.record_many.assert_called_once()
+        await gateway.close()
+        service.usage._write.assert_called_once()
         assert service.store.load().sources[0].state.status == "standby"
 
     asyncio.run(exercise())
@@ -11898,7 +11887,8 @@ def test_a_ledger_that_stopped_answering_cannot_hold_the_served_turn_open(
             # The scenario is only the scenario while the write is still queued,
             # and a queued write is still the writer's to finish.
             assert service.usage_writer.unpersisted == 1
-            assert _usage_of(service, source.id) == {}
+            assert _usage_of(service, source.id)["requests"] == 1
+            assert not service.usage.path.exists()
 
         assert await service.usage_writer.drain(timeout=5) == 0
         metered = _usage_of(service, source.id)

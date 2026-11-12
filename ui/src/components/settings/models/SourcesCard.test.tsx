@@ -35,7 +35,7 @@ describe('SourcesCard footer', () => {
       </I18nextProvider>,
     );
 
-    const panel = screen.getByRole('heading', { name: /Upstream sources|模型供应商/i }).closest('section');
+    const panel = screen.getByRole('heading', { name: /Providers|模型供应商/i }).closest('section');
     expect(panel?.className).toContain('w-full');
     expect(panel?.className).toContain('min-w-0');
     expect(panel?.className).not.toContain('max-h-full');
@@ -108,7 +108,7 @@ describe('SourcesCard footer', () => {
       </I18nextProvider>,
     );
 
-    const info = screen.getByRole('button', { name: /What upstream sources are|什么是模型供应商/i });
+    const info = screen.getByRole('button', { name: /What providers are|什么是模型供应商/i });
     await user.tab();
     expect(document.activeElement).toBe(info);
     await user.keyboard('[Enter]');
@@ -128,7 +128,7 @@ describe('SourcesCard footer', () => {
 
     const subscription = screen.getByRole('button', { name: /Add subscription|添加订阅/i });
     expect((subscription as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByRole('button', { name: /^Add source$|^添加供应商$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Add provider$|^添加供应商$/i })).toBeNull();
 
     const apiKey = screen.getByRole('button', { name: /Add API key|添加 API Key/i });
     await userEvent.click(apiKey);
@@ -146,7 +146,7 @@ describe('SourcesCard footer', () => {
     );
 
     expect(screen.getByText('Retained source')).toBeTruthy();
-    expect(screen.getByText(/Could not read the source list|没有读到来源列表/i)).toBeTruthy();
+    expect(screen.getByText(/Could not read the provider list|没有读到来源列表/i)).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
     expect(onRetry).toHaveBeenCalledOnce();
   });

@@ -283,6 +283,7 @@ def test_keypair_listing_warns_about_bitcoin_signing_capability(capfd, protectio
     assert command(_ns()) == 0
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
     assert secret["signing_addresses"]["btc_taproot"].startswith("bc1p")
+    assert "solana_signing_note" not in secret
     warning = secret["bitcoin_signing_warning"]
     if protection == "protected":
         assert "typed" in warning

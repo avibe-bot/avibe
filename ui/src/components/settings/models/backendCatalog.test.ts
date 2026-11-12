@@ -13,6 +13,7 @@ import {
   catalogModelIds,
   catalogModels,
   backendModelId,
+  chosenCandidate,
   draftRowFor,
   draftWithId,
   heldRowFor,
@@ -439,7 +440,7 @@ describe('the row chokepoint', () => {
   it('answers with the row that already exists, wherever it exists', () => {
     for (const { where, held, saved } of HOLDING) {
       expect(heldRowFor(proposal.id, held, saved), where).toEqual(stated('glm-5.2'));
-      expect(draftRowFor(proposal, held, saved), where).toEqual(stated('glm-5.2'));
+      expect(draftRowFor(chosenCandidate(proposal), held, saved), where).toEqual(stated('glm-5.2'));
     }
   });
 
@@ -449,12 +450,16 @@ describe('the row chokepoint', () => {
     // the baseline still does, and `PUT`'s three-way merge reads any difference
     // as an edit — so anything short of deep equality persists as a clearing the
     // user never asked for.
-    expect(draftRowFor(proposal, [], [saved])).toEqual(saved);
+    expect(draftRowFor(chosenCandidate(proposal), [], [saved])).toEqual(saved);
   });
 
-  it('builds from the proposal only when neither store holds the id', () => {
+  it('builds from the pick\'s own row, else the proposal, only when neither store holds the id', () => {
     expect(heldRowFor(proposal.id, [model('alpha')], [model('beta')])).toBeNull();
-    expect(draftRowFor(proposal, [model('alpha')], [model('beta')])).toEqual(candidateBackendModel(proposal));
+    expect(draftRowFor(chosenCandidate(proposal), [model('alpha')], [model('beta')])).toEqual(candidateBackendModel(proposal));
+    // A catalog or typed pick carries the row it lands as — but never over the user's own.
+    const own = { ...chosenCandidate(proposal), row: stated('glm-5.2') };
+    expect(draftRowFor(own, [model('alpha')], [])).toEqual(stated('glm-5.2'));
+    expect(draftRowFor({ ...own, row: model('glm-5.2') }, [], [stated('glm-5.2')])).toEqual(stated('glm-5.2'));
   });
 
   it('has nothing to hand back for the id a blank draft opens with', () => {

@@ -154,7 +154,7 @@ export const BackendModelCatalogDialog: React.FC<{
   const [query, setQuery] = React.useState('');
   const [saveFailedKey, setSaveFailedKey] = React.useState<TranslationKey | null>(null);
   const [editing, setEditing] = React.useState<{ model: BackendModel | null; seedId?: string } | null>(null);
-  const [picking, setPicking] = React.useState<{ seed: ReadonlySet<string> } | null>(null);
+  const [picking, setPicking] = React.useState<{ seed: ReadonlySet<string>; query?: string } | null>(null);
   const [removing, setRemoving] = React.useState<FocusedRemoval | null>(null);
   const [grabbedId, setGrabbedId] = React.useState<string | null>(null);
   /** A focused opening that fell back to the full list. */
@@ -464,7 +464,7 @@ export const BackendModelCatalogDialog: React.FC<{
     const held = new Set(draftRef.current.map((model) => model.id));
     const additions = picked
       .filter((pick) => !held.has(pick.candidate.id))
-      .map((pick) => draftRowFor(pick.candidate, draftRef.current, baselineRef.current?.models ?? []));
+      .map((pick) => draftRowFor(pick, draftRef.current, baselineRef.current?.models ?? []));
     mutate([...draftRef.current.filter((model) => !withdrawn.has(model.id)), ...additions]);
   };
 
@@ -512,7 +512,7 @@ export const BackendModelCatalogDialog: React.FC<{
     const expected = Object.fromEntries(
       requested.flatMap((model) => {
         const pick = baselineIds.has(model.id) ? undefined : chosenRef.current.get(model.id);
-        return pick ? [[model.id, pick.expected_suppliers] as const] : [];
+        return pick?.expected_suppliers ? [[model.id, pick.expected_suppliers] as const] : [];
       }),
     );
     if (Object.keys(expected).length > 0) body.expected_suppliers = expected;
@@ -751,7 +751,7 @@ export const BackendModelCatalogDialog: React.FC<{
           closeLabel={t('common.close') as string}
           className="model-hub-catalog-dialog flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
           onEscapeKeyDown={(event) => { if (busy || grabbedId) event.preventDefault(); }}
-          onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          keepOnOutsideClick
         >
           <DialogHeader className="model-hub-catalog-head shrink-0 justify-center border-b border-border">
             <DialogTitle className="model-hub-catalog-title">
@@ -825,9 +825,23 @@ export const BackendModelCatalogDialog: React.FC<{
                   ))}
                 </div>
               ) : visible.length === 0 ? (
-                <p className="px-1 py-10 text-center text-[12.5px] text-muted">
-                  {t(filtering ? 'settings.models.gateway.catalog.noMatch' : 'settings.models.gateway.catalog.empty')}
-                </p>
+                <div className="flex flex-col items-center gap-3 px-1 py-10 text-center text-[12.5px] text-muted">
+                  <p>{t(filtering ? 'settings.models.gateway.catalog.noMatch' : 'settings.models.gateway.catalog.empty')}</p>
+                  {/* A search of this list that finds nothing is usually a model to add:
+                      carry the query into the add dialog's wider search. */}
+                  {filtering && editable && canReadSources && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="model-hub-catalog-control max-w-full rounded-md px-3 text-[12.5px] font-semibold"
+                      disabled={busy}
+                      onClick={() => setPicking({ seed: NO_SEED, query: query.trim() })}
+                    >
+                      <Search aria-hidden="true" />
+                      <span className="truncate">{t('settings.models.gateway.catalog.searchAdd', { query: query.trim() })}</span>
+                    </Button>
+                  )}
+                </div>
               ) : (
                 <Reorder.Group
                   axis="y"
@@ -912,6 +926,7 @@ export const BackendModelCatalogDialog: React.FC<{
               backend={backend}
               listedIds={offerable(takenIds, picking.seed)}
               seedPicked={picking.seed}
+              initialQuery={picking.query}
               // 「Add none of these」 — the same answer as confirming with nothing
               // picked, and the same call, because a re-ask the user dismisses has
               // declined every id it seeded. An ordinary add seeds nothing, so this

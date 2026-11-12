@@ -6,13 +6,13 @@ import * as React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { ApiCallError, modelsApi, type OAuthResult } from './modelsApi';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
-  recommendedSubscriptionChannel,
   subscriptionOptionOrder,
 } from './subscriptionOptions';
 import type { Source } from './types';
@@ -69,29 +69,44 @@ const deferred = <T,>() => {
 };
 
 describe('add-subscription channel choice', () => {
-  it.each(['anthropic', 'openai'])('AUTH-SETUP-126: setup starts %s only with Hub custody after explicit sign-in', async (vendor) => {
+  it('stays open on a click outside, in the channel choice and with a code being pasted', async () => {
+    const onClose = vi.fn();
+    const choice = renderDialog({ onClose });
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    choice.unmount();
+
+    vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue({
+      flow_id: 'oaf_paste', intent: 'reauth', vendor: 'anthropic', channel: 'native_cli', state: 'awaiting_action',
+      presentation: { expects: 'paste_code', auth_url: 'https://provider.example/authorize' }, expires_at: '2099-01-01T00:00:00Z',
+    });
+    vi.spyOn(modelsApi, 'cancelOAuth').mockResolvedValue(undefined);
+    renderDialog({ onClose, reauth: subscription() });
+    const field = await screen.findByRole('textbox');
+    fireEvent.change(field, { target: { value: 'pasted-code' } });
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('pasted-code');
+  });
+
+  it.each(['anthropic', 'openai'])('AUTH-SETUP-126: setup starts %s with Hub custody straight from its sign-in button', async (vendor) => {
+    // The wizard's 「Sign in with …」 is the explicit choice; a one-option chooser in
+    // front of it asked the person to confirm the only thing there was.
     const start = vi.spyOn(modelsApi, 'startOAuth').mockImplementation(() => new Promise(() => {}));
     renderDialog({ vendor, hubOnly: true });
-    const options = screen.getAllByRole('radio');
-    expect(options).toHaveLength(1);
-    expect(options[0].getAttribute('aria-checked')).toBe('true');
-    expect(options[0].textContent).toContain(i18n.t('settings.models.addSub.opt.hub.label'));
-    expect(screen.queryByText(i18n.t('settings.models.addSub.hint.claude'))).toBeNull();
-    expect(start).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: i18n.t('settings.models.addSub.signIn') }));
+    expect(screen.queryAllByRole('radio')).toHaveLength(0);
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
     expect(start.mock.calls[0].slice(0, 2)).toEqual([vendor, 'hub']);
   });
 
-  it('flips the recommendation and visible order by vendor', () => {
-    expect(recommendedSubscriptionChannel('anthropic')).toBe('native_cli');
-    expect(subscriptionOptionOrder('anthropic')).toEqual(['native_cli', 'hub']);
-    expect(recommendedSubscriptionChannel('openai')).toBe('hub');
+  it('offers Model Hub first for every vendor, and own login second only where a CLI can hold it', () => {
+    expect(subscriptionOptionOrder('anthropic')).toEqual(['hub', 'native_cli']);
     expect(subscriptionOptionOrder('openai')).toEqual(['hub']);
+    expect(subscriptionOptionOrder('gemini')).toEqual(['hub']);
   });
 
-  it('uses the recommended option while the native slot is free', () => {
-    expect(initialSubscriptionChannel('anthropic', [])).toBe('native_cli');
+  it('starts on Model Hub custody, the default for a Claude subscription too', () => {
+    expect(initialSubscriptionChannel('anthropic', [])).toBe('hub');
     expect(initialSubscriptionChannel('openai', [])).toBe('hub');
   });
 
@@ -131,7 +146,7 @@ describe('add-subscription start recovery', () => {
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
     await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
-    expect(start.mock.calls[0].slice(0, 2)).toEqual(['anthropic', 'native_cli']);
+    expect(start.mock.calls[0].slice(0, 2)).toEqual(['anthropic', 'hub']);
     expect(start.mock.calls[1]).toEqual(start.mock.calls[0]);
     expect(start.mock.calls[0][2]).toMatch(/^ofn_[a-z0-9]{16,64}$/);
   });
@@ -172,10 +187,10 @@ describe('add-subscription start recovery', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Sign in|去登录/i }));
 
-    const link = await screen.findByRole('link', { name: authUrl });
+    const link = await screen.findByRole('link', { name: /^(Open sign-in page|打开登录页面)$/ });
     expect(link.getAttribute('href')).toBe(authUrl);
     expect(link.getAttribute('target')).toBe('_blank');
-    expect(screen.getByRole('button', { name: /^Copy$|^复制$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Copy link$|^复制链接$/i })).toBeTruthy();
     expect(open).not.toHaveBeenCalled();
   });
 
@@ -199,7 +214,7 @@ describe('add-subscription start recovery', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
     await waitFor(() => expect(reauth).toHaveBeenCalledTimes(2));
-    expect((await screen.findByRole('link', { name: authUrl })).getAttribute('href')).toBe(authUrl);
+    expect((await screen.findByRole('link', { name: /^(Open sign-in page|打开登录页面)$/ })).getAttribute('href')).toBe(authUrl);
     expect(open).not.toHaveBeenCalled();
   });
 });
@@ -331,7 +346,7 @@ describe('OAuth failure class behavior', () => {
       await Promise.resolve();
     });
     expect(reauth).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole('link', { name: replacementUrl }).getAttribute('href')).toBe(replacementUrl);
+    expect(screen.getByRole('link', { name: /^(Open sign-in page|打开登录页面)$/ }).getAttribute('href')).toBe(replacementUrl);
   });
 
   it('ignores a held-flow reread rejection after its journey is retired', async () => {
@@ -397,5 +412,78 @@ describe('OAuth failure class behavior', () => {
     renderDialog({ reauth: subscription() });
 
     expect(await screen.findByRole('button', { name: /^Retry$|^重试$/i })).toBeTruthy();
+  });
+});
+
+describe('AUTH-SETUP-165 the sign-in link and the callback step', () => {
+  const loopbackUrl = 'https://auth.openai.com/oauth/authorize?client_id=app&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=abc';
+  const awaiting = (authUrl: string, expects: 'paste_callback_url' | 'paste_code' = 'paste_callback_url') => ({
+    flow_id: 'oaf_callback',
+    client_nonce: 'ofn_callback',
+    vendor: 'openai',
+    channel: 'hub' as const,
+    state: 'awaiting_action' as const,
+    presentation: { expects, auth_url: authUrl },
+    expires_at: '2099-01-01T00:00:00Z',
+  });
+  const startWith = async (flow: ReturnType<typeof awaiting>, vendor = 'openai') => {
+    vi.spyOn(modelsApi, 'startOAuth').mockResolvedValue(flow);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow } as unknown as OAuthResult);
+    renderDialog({ vendor, hubOnly: true });
+    const signIn = screen.queryByRole('button', { name: i18n.t('settings.models.addSub.signIn') });
+    if (signIn) await userEvent.click(signIn);
+    await screen.findByRole('link', { name: /^(Open sign-in page|打开登录页面)$/ });
+  };
+  const field = () => screen.queryByPlaceholderText(/code=…$/);
+
+  it('AUTH-SETUP-165 offers the sign-in page as a button and a copyable link, never the raw URL as text', async () => {
+    await startWith(awaiting(loopbackUrl));
+    expect(screen.getByRole('link', { name: /^(Open sign-in page|打开登录页面)$/ }).getAttribute('href')).toBe(loopbackUrl);
+    expect(screen.getByRole('button', { name: /^(Copy link|复制链接)$/ })).toBeTruthy();
+    expect(screen.queryByText(loopbackUrl)).toBeNull();
+  });
+
+  it('AUTH-SETUP-165 folds the paste for a loopback redirect, and opens it on request with the real address and what to expect', async () => {
+    await startWith(awaiting(loopbackUrl));
+    expect(screen.getByText(i18n.t('settings.models.oauth.callback.auto'))).toBeTruthy();
+    expect(field()).toBeNull();
+
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('settings.models.oauth.callback.pasteInstead') }));
+    expect(field()?.getAttribute('placeholder')).toBe('http://localhost:1455/auth/callback?code=…');
+    expect(screen.getByText(i18n.t('settings.models.oauth.callback.cantConnect'))).toBeTruthy();
+  });
+
+  it('AUTH-SETUP-165 opens the paste once the person is back with the link used and nothing has arrived for 10 s', async () => {
+    await startWith(awaiting(loopbackUrl));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(screen.getByRole('button', { name: /^(Copy link|复制链接)$/ }));
+    await act(async () => { vi.advanceTimersByTime(9_000); });
+    expect(field()).toBeNull();
+    await act(async () => { vi.advanceTimersByTime(1_500); });
+    expect(field()).not.toBeNull();
+  });
+
+  it('AUTH-SETUP-165 keeps the paste open on a page reached from another device', async () => {
+    const location = vi.spyOn(window, 'location', 'get').mockReturnValue({ ...window.location, hostname: 'alex-app.avibe.bot' } as Location);
+    try {
+      await startWith(awaiting(loopbackUrl));
+      expect(field()?.getAttribute('placeholder')).toBe('http://localhost:1455/auth/callback?code=…');
+      expect(screen.queryByText(i18n.t('settings.models.oauth.callback.auto'))).toBeNull();
+    } finally {
+      location.mockRestore();
+    }
+  });
+
+  it('AUTH-SETUP-165 keeps the paste open where nothing can arrive by itself', async () => {
+    await startWith(awaiting('https://auth.example/authorize?redirect_uri=https%3A%2F%2Fapp.example%2Fcallback'));
+    expect(field()?.getAttribute('placeholder')).toBe('https://app.example/callback?code=…');
+    expect(screen.queryByText(i18n.t('settings.models.oauth.callback.auto'))).toBeNull();
+  });
+
+  it('AUTH-SETUP-165 leaves a pasted-code sign-in as it was, apart from the link', async () => {
+    await startWith(awaiting('https://claude.ai/oauth/authorize?redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode%2Fcallback', 'paste_code'), 'anthropic');
+    expect(screen.getByPlaceholderText('ac_…#st_…')).toBeTruthy();
+    expect(screen.queryByText(i18n.t('settings.models.oauth.callback.cantConnect'))).toBeNull();
+    expect(screen.queryByText(i18n.t('settings.models.oauth.callback.auto'))).toBeNull();
   });
 });

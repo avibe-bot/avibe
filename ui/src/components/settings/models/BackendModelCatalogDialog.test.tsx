@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
 import { blankBackendModel, candidateBackendModel } from './backendCatalog';
@@ -101,6 +102,15 @@ afterEach(async () => {
 });
 
 describe('BackendModelCatalogDialog', () => {
+  it('stays open on a click outside, keeping an unsaved edit', async () => {
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
+    const { onClose } = renderDialog();
+    await userEvent.click(await screen.findByRole('button', { name: 'Remove alpha' }));
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('enables catalog controls only after the baseline read completes', async () => {
     let finishRead!: (value: AgentSupply) => void;
     const pendingRead = new Promise<AgentSupply>((resolve) => { finishRead = resolve; });
@@ -410,7 +420,35 @@ describe('BackendModelCatalogDialog', () => {
     }));
   });
 
-  it('asks which row a typed ID names as the ID it would be saved as', async () => {
+  it('saves a catalog model no provider lists without promising its suppliers', async () => {
+    // A provider may still supply it under a dated ID the server matches; only the
+    // server can say, so the write states no expectation for it.
+    const user = userEvent.setup();
+    const catalog = [locked, model('alpha')];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([{
+      provider_id: 'anthropic', provider_name: 'Anthropic', model_id: 'claude-sonnet-4', models_dev_id: 'anthropic/claude-sonnet-4',
+      display_name: 'Claude Sonnet 4', context_window: 200000, max_output_tokens: 64000, input_modalities: ['text'],
+      output_modalities: ['text'], supports_tools: true, supports_reasoning: true, reasoning_efforts: [], native_protocol: 'anthropic',
+    } satisfies ModelsDevMatch]);
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog();
+
+    await user.click(await enabledAddModels());
+    await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
+    await user.type(screen.getByLabelText('Search models or providers'), 'sonnet 4');
+    await user.click(await screen.findByRole('checkbox', { name: /Claude Sonnet 4/ }));
+    await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    const [, body] = write.mock.calls[0];
+    expect(body.models.at(-1)).toMatchObject({ id: 'claude-sonnet-4', origin: 'models_dev', context_window: 200000 });
+    expect(body).not.toHaveProperty('expected_suppliers');
+  });
+
+  it('re-adds a typed ID as the row the user already has, not a blank one', async () => {
     const user = userEvent.setup();
     const FOO = model('foo', {
       native_protocol: 'openai_responses',
@@ -433,24 +471,14 @@ describe('BackendModelCatalogDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Add models' }));
     await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
     await user.type(await screen.findByLabelText('Search models or providers'), 'foo');
-    await user.click(await screen.findByRole('button', { name: 'Add "foo" as a custom model…' }));
+    await user.click(await screen.findByRole('button', { name: /^Add "foo" as a custom model/ }));
 
-    // Their own row, opened as itself: the id fixed, and the description they
-    // wrote still in it. The button is the tell — this is an edit, not an add.
-    expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('foo');
-    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('Foo Air');
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('180,000');
-    await user.type(screen.getByLabelText('Maximum output'), '8000');
-    await user.click(screen.getByRole('button', { name: 'Save model' }));
-    await user.click(await screen.findByRole('button', { name: 'Save' }));
-
-    // And the row goes back whole, changed only where they changed it. A blank
-    // row carrying the same id would have saved this list with the name and the
-    // window gone — the write is what the user would have to undo by hand.
-    await waitFor(() => expect(write).toHaveBeenCalledWith('opencode', {
-      baseline: catalog,
-      models: [model('glm-4.7', { native_protocol: 'openai_responses' }), { ...FOO, max_output_tokens: 8000 }],
-    }));
+    // The row comes back whole, so the list is the saved one again and there is
+    // nothing to save. A blank row carrying the same id would have been an edit
+    // that clears the name and the window.
+    expect(await screen.findByRole('button', { name: 'Edit Foo Air' })).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(write).not.toHaveBeenCalled();
   });
 
   it('keeps the recorded origin of a row re-added under an ID the editor only lands on at the end', async () => {
@@ -488,10 +516,9 @@ describe('BackendModelCatalogDialog', () => {
     await user.click(await screen.findByRole('button', { name: 'Remove Grok 4.6' }));
     await user.click(screen.getByRole('button', { name: 'Add models' }));
     await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
-    // A query that is not the saved id, so nothing resolves it to the saved row
-    // on the way in — the editor opens in add mode and stamps `models_dev`.
-    await user.type(await screen.findByLabelText('Search models or providers'), 'grok 4.6');
-    await user.click(await screen.findByRole('button', { name: 'Add "grok 4.6" as a custom model…' }));
+    // The editor in add mode, whose lookup stamps `models_dev` on what it fills.
+    await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
+    await user.type(await screen.findByLabelText('Model'), 'grok 4.6');
     await user.click(await screen.findByRole('option', { name: /Grok 4\.6/ }));
     await user.click(screen.getByRole('button', { name: 'Add model' }));
     await user.click(await screen.findByRole('button', { name: 'Save' }));
@@ -840,6 +867,21 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.getByText('No model matches this search')).toBeTruthy();
   });
 
+  it('carries a search that finds nothing in the list into the add dialog', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    renderDialog();
+
+    const box = screen.getByLabelText('Search name or model ID') as HTMLInputElement;
+    await waitFor(() => expect(box.disabled).toBe(false));
+    await user.type(box, 'fable');
+    await user.click(screen.getByRole('button', { name: 'Search providers and the model catalog for "fable"' }));
+    const search = await screen.findByLabelText('Search models or providers') as HTMLInputElement;
+    expect(search.value).toBe('fable');
+  });
+
   it.each(['Fable 5.2', 'fable-5-2', 'claude fable 5.2'])(
     'finds an unlabelled model by the name its ID spells: %s',
     async (query) => {
@@ -1061,11 +1103,11 @@ describe('BackendModelCatalogDialog', () => {
           for (const hop of GUARDED.hops) {
             expect(within(asked).getByText(`${hop.model_id} · Order #${hop.position}`)).toBeTruthy();
           }
-          expect(within(asked).getByText('Models that will be left with no source')).toBeTruthy();
+          expect(within(asked).getByText('Models that will be left with no provider')).toBeTruthy();
           for (const gap of GUARDED.gaps) {
             expect(within(asked).getByText(`Agents pinned to it: ${gap.agents.join(', ')}`)).toBeTruthy();
           }
-          expect(asked.textContent).toContain('Some models will be left with no usable source.');
+          expect(asked.textContent).toContain('Some models will be left with no usable provider.');
           return asked;
         },
         answer: async (user) => {

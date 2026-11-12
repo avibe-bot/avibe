@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { BackendModelEditorDialog } from './BackendModelEditorDialog';
 import { blankBackendModel } from './backendCatalog';
@@ -84,6 +85,14 @@ afterEach(() => {
 });
 
 describe('BackendModelEditorDialog', () => {
+  it('stays open on a click outside, keeping the model being typed', async () => {
+    const { onCancel } = renderEditor();
+    await userEvent.type(screen.getByLabelText('Model'), 'my-finetune');
+    await pressOutside();
+    expect(onCancel).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('my-finetune');
+  });
+
   it.each(['claude', 'codex', 'opencode'] as const)('does not add Off when saving an existing %s model', async (backend) => {
     const user = userEvent.setup();
     const model: BackendModel = {

@@ -1,0 +1,131 @@
+name: desktop-cache-maintenance
+
+# The package workflow is the only writer of release caches. After a successful
+# master warm-up this workflow keeps only the newest entry for each target and
+# removes the old desktop-shell namespace, whose PR writers are now disabled.
+# A failed push/schedule warm-up is retried once through workflow_dispatch so a
+# lost runner does not leave the Intel signal absent until the next nightly run.
+# Neither maintenance job is on the release path: a release still rebuilds on
+# a miss and reports that fact.
+on:
+  workflow_run:
+    workflows: [desktop-self-contained-package]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: desktop-cache-maintenance
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  retry-master-warmup:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'schedule')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Retry the unsigned master warm-up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run desktop-package.yml
+          --repo "$GITHUB_REPOSITORY"
+          --ref master
+          --field version=0.0.0
+          --field warmup=true
+
+  prune-desktop-caches:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'master')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Retain only current release cache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CACHE_BUDGET: "1600000000"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          delete_cache() {
+            local id="$1"
+            [[ "$id" =~ ^[0-9]+$ ]] || {
+              echo "Refusing to delete a non-numeric cache id: $id" >&2
+              exit 1
+            }
+            gh cache delete "$id" --repo "$GITHUB_REPOSITORY"
+          }
+
+          # A changed lockfile, toolchain, SDK, target, or Cua source creates a
+          # new key. Keep the newest entry for each target and remove the old
+          # one only after the package workflow has saved the replacement.
+          keep_newest_for_prefix() {
+            local prefix="$1" kept=false id key size
+            while IFS=$'\t' read -r id key size; do
+              [ -n "$id" ] || continue
+              if [ "$kept" = false ]; then
+                kept=true
+                echo "Keeping $key (${size} bytes)"
+              else
+                echo "Deleting superseded $key (${size} bytes)"
+                delete_cache "$id"
+              fi
+            done < <(
+              gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/master \
+                --key "$prefix" --sort created_at --order desc --limit 100 \
+                --json id,key,sizeInBytes --jq '.[] | [.id, .key, (.sizeInBytes | tostring)] | @tsv'
+            )
+          }
+
+          for prefix in \
+            cua-driver-aarch64-apple-darwin- \
+            cua-driver-x86_64-apple-darwin- \
+            macOS-aarch64-apple-darwin-desktop-package- \
+            macOS-x86_64-apple-darwin-desktop-package- \
+            Windows-x86_64-pc-windows-msvc-desktop-package-; do
+            keep_newest_for_prefix "$prefix"
+          done
+
+          # desktop-shell used to save a large cache for every PR. It is now
+          # restore-only; remove its historical entries across all refs so they
+          # cannot continue competing with the release cache namespace.
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | [.id, .key, .ref, (.size_in_bytes | tostring)] | @tsv' |
+            while IFS=$'\t' read -r id key ref size; do
+              [ -n "$id" ] || continue
+              case "$key" in
+                *desktop-cargo-*)
+                  echo "Deleting retired desktop-shell cache $key on $ref (${size} bytes)"
+                  delete_cache "$id"
+                  ;;
+              esac
+            done
+
+          total="$(gh api --paginate "/repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].size_in_bytes' | awk '{ total += $1 } END { printf "%.0f", total + 0 }')"
+          release_total="$(gh api --paginate "/repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | (startswith("cua-driver-") or startswith("macOS-aarch64-apple-darwin-desktop-package-") or startswith("macOS-x86_64-apple-darwin-desktop-package-") or startswith("Windows-x86_64-pc-windows-msvc-desktop-package-"))) | .size_in_bytes' |
+            awk '{ total += $1 } END { printf "%.0f", total + 0 }')"
+          headroom=$((10000000000 - total))
+          release_headroom=$((RELEASE_CACHE_BUDGET - release_total))
+          printf '| Cache inventory | Bytes |\n| --- | ---: |\n| Total | %s |\n| Total headroom to 10 GB | %s |\n| Current desktop release set | %s |\n| Desktop release-set budget headroom | %s |\n' \
+            "$total" "$headroom" "$release_total" "$release_headroom" >> "$GITHUB_STEP_SUMMARY"
+          if (( release_total > RELEASE_CACHE_BUDGET )); then
+            echo "::warning title=Desktop release cache budget exceeded::Current release entries use ${release_total} bytes; budget is ${RELEASE_CACHE_BUDGET}."
+          fi
+          if (( total > 10000000000 )); then
+            echo "::warning title=Actions cache budget exceeded::Repository cache usage is ${total} bytes, above the 10 GB operating budget."
+          fi

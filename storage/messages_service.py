@@ -10,6 +10,7 @@ such as agent output and mirrored IM records.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import uuid
@@ -18,6 +19,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DatabaseError
 
 from storage.agent_session_rows import INBOX_SESSION_VISIBILITIES
 from core.notification_categories import (
@@ -47,6 +49,9 @@ from storage.sessions_service import session_agent_display_label
 from vibe.authorization import AuthorizationContext, require_instance_role
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES, NOTIFY_TYPE, VAULT_TYPE
 from vibe.message_types import types_with
+
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -446,7 +451,8 @@ def search_messages(
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
-    Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, scoped
+    Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, with
+    optional FTS5 trigram candidates plus unindexed changes, scoped
     to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
     ``types`` (human prompts + harness prompts + the agent's rendered ``result``
     replies + Show annotations — all land on a message the chat
@@ -462,8 +468,7 @@ def search_messages(
     own restore flow rather than through search. A scope with no
     ``scope_settings`` row is
     treated as enabled (legacy / folder-less projects never got one). ``limit``
-    caps the number of
-    MATCHED messages scanned (newest first), so it bounds total work; the matches
+    caps the number of returned matched messages (newest first); the matches
     are then grouped into sessions. The snippet is built in Python (see
     :func:`build_snippet`) so the client renders ``match`` with a highlight and
     needs no offset math.
@@ -490,56 +495,74 @@ def search_messages(
     # predicates — and the predicate order — it had before the flag existed.
     archived_session_filters = () if include_archived else (agent_sessions.c.status != "archived",)
 
-    stmt = (
-        select(
-            messages.c.id,
-            messages.c.session_id,
-            messages.c.author,
-            messages.c.source,
-            messages.c.type,
-            messages.c.content_text,
-            messages.c.created_at,
-            agent_sessions.c.title,
-            agent_sessions.c.status,
-            scopes.c.native_id.label("project_id"),
-            scopes.c.display_name.label("project_name"),
-        )
-        .select_from(
-            messages.join(agent_sessions, agent_sessions.c.id == messages.c.session_id)
-            .join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
-            .join(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id, isouter=True)
-        )
-        .where(messages.c.platform == platform)
-        .where(messages.c.type.in_(type_list))
-        .where(messages.c.content_text.is_not(None))
-        .where(messages.c.content_text.ilike(f"%{like}%", escape="\\"))
-        # Archived sessions are soft-deleted — never surface their messages
-        # unless the caller explicitly opted in via ``include_archived``.
-        .where(*archived_session_filters)
-        # DELIBERATELY ``foreground`` ALONE, i.e. narrower than the inbox
-        # (``INBOX_SESSION_VISIBILITIES``, which also admits ``system``). Search
-        # returns RESULTS a user goes on to open and read in context, and the only
-        # system session is the runtime's workspace-notifications row: machine-authored
-        # failure notices, already surfaced as inbox cards, with no conversation around
-        # a hit to read. Admitting it would put runtime bookkeeping into every user text
-        # search for no reachable next action. (Today's notices are additionally not
-        # ``searchable`` by TYPE — this predicate is the one that stays true if that
-        # ever changes.)
-        .where(agent_sessions.c.visibility == "foreground")
-        # Archived PROJECTS are modelled as scope_settings.enabled = 0 (the
-        # sessions stay active), so exclude a disabled scope's messages too. A
-        # missing scope_settings row (legacy / folder-less project) is enabled.
-        .where(or_(scope_settings.c.enabled.is_(None), scope_settings.c.enabled != 0))
-        .order_by(transcript_order_value().desc(), messages.c.id.desc())
-        .limit(effective_limit)
-    )
-    if allowed_scope_ids is not None:
-        stmt = stmt.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
-    hidden = _hidden_ids(hidden_session_ids)
-    if hidden:
-        stmt = stmt.where(messages.c.session_id.not_in(hidden))
+    from storage.message_search_index import candidate_messages
 
-    rows = conn.execute(stmt).mappings().all()
+    index_attempt = False
+
+    def load_rows(indexed: bool) -> list[Mapping[str, Any]]:
+        nonlocal index_attempt
+        # Python SQLite does not BEGIN for SELECT in legacy transaction mode.
+        # Pin readiness and candidates to one snapshot; preserve caller writes.
+        with conn.begin_nested():
+            index_attempt = indexed
+            indexed_source = candidate_messages(conn, cleaned) if indexed else None
+            index_attempt = indexed_source is not None
+            message_rows = messages if indexed_source is None else indexed_source
+
+            stmt = (
+                select(
+                    message_rows.c.id,
+                    message_rows.c.session_id,
+                    message_rows.c.author,
+                    message_rows.c.source,
+                    message_rows.c.type,
+                    message_rows.c.content_text,
+                    message_rows.c.created_at,
+                    agent_sessions.c.title,
+                    agent_sessions.c.status,
+                    scopes.c.native_id.label("project_id"),
+                    scopes.c.display_name.label("project_name"),
+                )
+                .select_from(
+                    message_rows.join(agent_sessions, agent_sessions.c.id == message_rows.c.session_id)
+                    .join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+                    .join(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id, isouter=True)
+                )
+                .where(message_rows.c.platform == platform)
+                .where(message_rows.c.type.in_(type_list))
+                .where(message_rows.c.content_text.is_not(None))
+                .where(message_rows.c.content_text.ilike(f"%{like}%", escape="\\"))
+                .where(*archived_session_filters)
+                # Search is narrower than the inbox: system/background rows are
+                # not conversations a user can open from a search result.
+                .where(agent_sessions.c.visibility == "foreground")
+                # A disabled project never becomes searchable through session
+                # archive opt-in. Legacy scopes without settings are enabled.
+                .where(or_(scope_settings.c.enabled.is_(None), scope_settings.c.enabled != 0))
+                .order_by(transcript_order_value(message_rows).desc(), message_rows.c.id.desc())
+                .limit(effective_limit)
+            )
+            if allowed_scope_ids is not None:
+                stmt = stmt.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
+            hidden = _hidden_ids(hidden_session_ids)
+            if hidden:
+                stmt = stmt.where(message_rows.c.session_id.not_in(hidden))
+            return list(conn.execute(stmt).mappings().all())
+
+    try:
+        rows = load_rows(True)
+    except DatabaseError as exc:
+        if not index_attempt:
+            raise
+        # The accelerator is derived, never an availability gate for the ledger.
+        # Retry once with exactly the same access predicates, after rolling back
+        # only our savepoint. A failure of the original query still propagates.
+        code = getattr(exc.orig, "sqlite_errorcode", None)
+        logger.warning(
+            "Message search index failed (%s, sqlite_code=%s); retrying authoritative LIKE search",
+            type(exc.orig).__name__, code if type(code) is int else None,
+        )
+        rows = load_rows(False)
 
     # Group by session, preserving the newest-match-first row order: the first
     # time a session appears is its most-recent match, so insertion order already

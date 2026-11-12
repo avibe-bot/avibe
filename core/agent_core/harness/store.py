@@ -11,7 +11,10 @@ the same tests on it and on the in-memory store (C-5 ``transcript.md`` §2).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping, Optional, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, Protocol, Sequence
+
+if TYPE_CHECKING:
+    from core.agent_core.harness.runtime import RunTranscript
 
 from core.agent_core.messages import AssistantMessage, HostedImage, Message, ToolResultMessage, UserMessage
 
@@ -42,6 +45,14 @@ class ContextEntry:
 class TranscriptStore(Protocol):
     async def load(self, session_id: str) -> Sequence[ContextEntry]:
         """Context entries of the Session and its fork ancestry, ordered by ``context_seq``."""
+        ...
+
+    async def load_for_run(self, session_id: str) -> RunTranscript:
+        """Projection-valid checkpoint window and prefix facts for live execution.
+
+        Unlike ``load``, summarized bodies outside the runtime dependency closure
+        may be absent. Historical cuts must continue to use ``load``.
+        """
         ...
 
     async def load_cache_attempts(self, session_id: str) -> Sequence[Mapping[str, Any]]:

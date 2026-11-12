@@ -183,20 +183,10 @@ class FetchChain:
         return fact
 
     async def _record_local_usage(self, source, slot):
-        write = self.owner.usage_writer.record_service(
+        self.owner.usage_writer.record_service(
             source_id=source.id, service_id=slot.model_id, tool="web_fetch",
             billable=False, uncertain=False, at=self.owner.now(),
         )
-        settlement = asyncio.create_task(self.owner.usage_writer.wait_recorded(write))
-        try:
-            await asyncio.shield(settlement)
-        except asyncio.CancelledError as cancelled:
-            try:
-                await await_owned_task(settlement)
-            except BaseException:
-                # Drain owns the write; Stop still owns the public outcome.
-                pass
-            raise cancelled
 
     async def _local_attempt(self, slot: ExecutorSlot, source):
         sent = False
@@ -446,15 +436,16 @@ class FetchChain:
         return self._request_payload(service, self.requested_url)
 
     async def _settle_service(self, source, slot, result: FetchServiceResult, response, cooldown_generation, health_generation, sent):
-        write = self.owner.usage_writer.record_service(
-            source_id=source.id,
-            service_id=slot.model_id,
-            tool="web_fetch",
-            billable=result.billable,
-            uncertain=result.uncertain,
-            reported_usd=result.reported_usd,
-            at=self.owner.now(),
-        ) if sent else None
+        if sent:
+            self.owner.usage_writer.record_service(
+                source_id=source.id,
+                service_id=slot.model_id,
+                tool="web_fetch",
+                billable=result.billable,
+                uncertain=result.uncertain,
+                reported_usd=result.reported_usd,
+                at=self.owner.now(),
+            )
         async with self.owner._mutation_lock:
             previous = await asyncio.to_thread(self.owner.store.load)
             current = model_hub_builtin_source(source.id) or next((item for item in previous.sources if item.id == source.id), None)
@@ -478,8 +469,6 @@ class FetchChain:
                     if result.authenticated:
                         updated.verification_pending = None
                     await self.owner._save_runtime_config(previous, config)
-        if write is not None:
-            await self.owner.usage_writer.wait_recorded(write)
         if sent and result.record.get("status") == "completed":
             await self.owner.record_hosted_success(source, slot.model_id, "web_fetch", "service")
 

@@ -146,8 +146,25 @@ class EngineSupervisor:
         # Whether this engine process has answered a health check: before its
         # first answer a refused connection is a start still binding its port.
         self._engine_answered = False
+        self.lifecycle = None
+        self._generation = None
+        self._instance = None
+        self._published_release: str | None = None
+        if isinstance(self.installer, EngineRuntimeManager) and self.installer.lifecycle_enabled:
+            from vibe.model_hub_runtime.lifecycle import EngineLifecycle
+
+            EngineLifecycle(self.installer, self)
 
     def ensure_running(self) -> EngineConnection:
+        # The owner acquires the mutation fence BEFORE this supervisor lock.
+        # No recovery, download or cross-process lock wait happens under it.
+        if self.lifecycle is not None and not self.lifecycle.starting:
+            try:
+                return self.lifecycle.ensure_running()
+            except EngineUnavailableError:
+                raise
+            except Exception as exc:
+                raise EngineUnavailableError("models.engine.install_failed", reason=str(exc)) from exc
         with self._lock:
             if self._is_running_locked():
                 if self._healthy_locked():
@@ -174,6 +191,8 @@ class EngineSupervisor:
         engine still refuses the credentials fails its start like any other, and
         is not retried here.
         """
+        if self.lifecycle is not None and not self.lifecycle.starting:
+            return self.lifecycle.restart_running(only_lost=True)
         with self._lock:
             if not self._is_running_locked() or self._connection is None:
                 return
@@ -244,6 +263,8 @@ class EngineSupervisor:
             self._start_attempted = False
 
     def restart_if_running(self) -> None:
+        if self.lifecycle is not None and not self.lifecycle.starting:
+            return self.lifecycle.restart_running()
         with self._lock:
             if not self._is_running_locked():
                 # Not running here, but a previous service may have left an engine
@@ -311,7 +332,11 @@ class EngineSupervisor:
                 # An exited engine holds no stream; a start renders the
                 # current projection.
                 self._stop_locked()
-                self._start_locked()
+                # A config save is not fresh-start authorization. The next
+                # demand passes through the owner outside this lock; it keeps
+                # the committed generation rather than resolving a candidate.
+                if self.lifecycle is None:
+                    self._start_locked()
                 return
             # A lost acknowledgment may still have applied, and a stalled
             # management path does not prove live streams dead. The
@@ -397,7 +422,9 @@ class EngineSupervisor:
         return str(self._config_generation)
 
     def _render_config_locked(self, port: int, sources: list[SourceRecord], generation: str) -> str:
-        _managed, _binary, instance_dir, runtime_secrets = self._prepare_instance_locked()
+        if self._instance is None:
+            raise EngineUnavailableError("models.engine.start_failed", reason="engine_running_identity_unknown")
+        _managed, _binary, instance_dir, runtime_secrets = self._instance
         return render_engine_config(
             instance_dir / "config.yaml",
             host="127.0.0.1",
@@ -410,7 +437,10 @@ class EngineSupervisor:
         )
 
     def _prepare_instance_locked(self):
-        managed = self.installer.status()
+        if self.lifecycle is not None:
+            self._generation, managed = self.lifecycle.startable()
+        else:
+            managed = self.installer.status()
         # Status owns one coherent inspection snapshot, including its failure.
         # A second resolve could fail for a different reason or replace errno.
         binary = Path(managed["path"]) if managed.get("path") else None
@@ -440,7 +470,9 @@ class EngineSupervisor:
         """
         with self._lock:
             if self._is_running_locked() and self._connection is not None:
-                _managed, _binary, instance_dir, _secrets = self._prepare_instance_locked()
+                if self._instance is None:
+                    raise EngineUnavailableError("models.engine.start_failed", reason="engine_running_identity_unknown")
+                _managed, _binary, instance_dir, _secrets = self._instance
                 self.state_store.clear_runtime_configs(keep=instance_dir)
                 self._reload_locked(None)
                 return
@@ -481,9 +513,20 @@ class EngineSupervisor:
                 if callable(host_platform_reader)
                 else str(managed.get("platform") or "")
             )
+            lifecycle_status = self.lifecycle.status() if self.lifecycle is not None else None
+            if lifecycle_status and (not self.lifecycle._ready or not self.lifecycle.recovered):
+                listening = None  # never publish a provisional listener
+                if installed and health != "installing":
+                    health = "down"
             return {
                 "host_platform": host_platform,
                 "manifest": self.installer.contract_manifest(),
+                "engine_lifecycle": lifecycle_status,
+                "committed_release": ((managed.get("engine_lifecycle") or {}).get("committed") or {}).get("asset_release_tag"),
+                "running_release": (
+                    self.lifecycle.running_release if self.lifecycle and self.lifecycle._ready and self.lifecycle.recovered and self._is_running_locked()
+                    else self._published_release if self.lifecycle is None and self._is_running_locked() else None
+                ),
                 "status": {
                     "installed_version": (
                         managed.get("version")
@@ -508,6 +551,8 @@ class EngineSupervisor:
     def client_if_running(self) -> EngineClient | None:
         """Return a client for the current process without starting or repairing it."""
         with self._lock:
+            if self.lifecycle is not None and (not self.lifecycle.recovered or not self.lifecycle._ready):
+                return None
             if not self._is_running_locked() or self._connection is None:
                 return None
             return EngineClient(self._connection)
@@ -523,6 +568,7 @@ class EngineSupervisor:
                 os_errno=self._record_os_errno,
             )
         managed, binary, instance_dir, runtime_secrets = self._prepare_instance_locked()
+        self._instance = (managed, binary, instance_dir, runtime_secrets)
         port = self._port_allocator()
         config_path = instance_dir / "config.yaml"
         write_engine_config(
@@ -544,6 +590,8 @@ class EngineSupervisor:
         environment = engine_subprocess_environment()
         environment[PROCESS_IDENTITY_ENV] = marker
         launch = _EngineRecord(fingerprint_process_marker(marker))
+        if self.lifecycle is not None:
+            self.lifecycle.before_launch(launch.worker_fingerprint)
         if not self._store_engine_records_locked([launch]):
             # A launch no record names would become a permanent orphan if this
             # service died, so it never runs untracked.
@@ -611,6 +659,10 @@ class EngineSupervisor:
                     managed.get("version"),
                     time.monotonic() - started_at,
                 )
+                if self.lifecycle is None and isinstance(self.installer, EngineRuntimeManager):
+                    manifest = self.installer._load_manifest(allow_network=False)
+                    tag = manifest.payload.get("asset_release_tag") if manifest else None
+                    self._published_release = tag if isinstance(tag, str) else None
                 return connection
             time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
         os_errno = self._health_os_errno if exit_code is None else None
@@ -752,6 +804,11 @@ class EngineSupervisor:
         process = self._process
         self._process = None
         self._connection = None
+        self._generation = None
+        self._instance = None
+        self._published_release = None
+        if self.lifecycle is not None:
+            self.lifecycle.running_release = None
         self._verified_at = None
         self._health_failure_signature = None
         self._health_os_errno = None
@@ -767,6 +824,44 @@ class EngineSupervisor:
         # Also reached with no local handle (a restarted service): the record may
         # still name an engine the previous service left running.
         return self._reap_recorded_engines_locked()
+
+    def live_connection(self) -> EngineConnection | None:
+        """Read/health-check the live process, never restart it."""
+        with self._lock:
+            if self._is_running_locked() and self._healthy_locked():
+                return self._connection
+            lost = self._health_shows_config_lost_locked()
+            if lost is not None:
+                raise lost
+            return None
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._is_running_locked()
+
+    def running_generation(self):
+        with self._lock:
+            return self._generation.document() if self._is_running_locked() and self._generation is not None else None
+
+    def stop_for_activation(self) -> None:
+        with self._lock:
+            self._require_stopped_locked()
+
+    def recover_processes(self, witness: str | None) -> None:
+        with self._lock:
+            if witness is not None:
+                outcome = reap_marked_processes(logger, "Model Hub engine", worker_fingerprint=witness)
+                if outcome == "unconfirmed":
+                    raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+                if outcome == "reaped":
+                    logger.warning("Reaped a Model Hub engine left running by an earlier service")
+                if self._load_engine_records_locked() is None:
+                    # Preserve damaged ownership evidence only after the durable
+                    # witness's marker sweep has conclusively resolved it.
+                    record = self._engine_record_path
+                    if record.exists():
+                        record.replace(record.with_name(f"{record.name}.damaged-{time.time_ns()}"))
+            self._require_stopped_locked()
 
     @property
     def _engine_record_path(self) -> Path:
@@ -792,11 +887,13 @@ class EngineSupervisor:
         except ValueError:
             payload = None
         entries = payload.get("engines") if isinstance(payload, dict) else None
+        if not isinstance(entries, list) or not entries:
+            return None
         records: list[_EngineRecord] = []
-        for entry in entries if isinstance(entries, list) else ():
+        for entry in entries:
             fingerprint = entry.get("worker_fingerprint") if isinstance(entry, dict) else None
             if not is_valid_worker_fingerprint(fingerprint):
-                continue
+                return None
             pid = entry.get("pid")
             identity = process_identity_from_payload(entry, pid) if isinstance(pid, int) else None
             records.append(_EngineRecord(fingerprint, identity))

@@ -55,7 +55,7 @@ import { BACKEND_MODEL_INPUT_MODALITIES, BACKEND_MODEL_OUTPUT_MODALITIES, USAGE_
 /** Add-time Route placement returned by both source-creation paths. */
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
 export type SourceCreated = { source: Source } & Adoption;
-export type SourceRefresh = { source: Source; discovered: number };
+export type SourceRefresh = { source: Source; removed_hops: RouteHopRef[]; interrupted: SupplyGap[] };
 export type CredentialReplacement = {
   source: Source;
   removed_hops: RouteHopRef[];
@@ -256,6 +256,10 @@ export class ApiCallError extends Error {
   responseStatus?: number;
   /** Safe, structured add-time observation returned with a rejected create. */
   observation?: SourceObservation;
+  /** The HTTP status returned by the provider, distinct from the API envelope's status. */
+  upstreamStatus?: number;
+  /** Bounded and credential-redacted by the server. Render only as text. */
+  upstreamDetail?: string;
   constructor(
     code: string,
     detail?: string,
@@ -266,6 +270,8 @@ export class ApiCallError extends Error {
     responseStatus?: number,
     observation?: SourceObservation,
     changed: Record<string, RouteHop[]> = {},
+    upstreamStatus?: number,
+    upstreamDetail?: string,
   ) {
     super(detail || code);
     this.name = 'ApiCallError';
@@ -278,6 +284,8 @@ export class ApiCallError extends Error {
     this.changedSuppliers = changed;
     this.responseStatus = responseStatus;
     this.observation = observation;
+    this.upstreamStatus = upstreamStatus;
+    this.upstreamDetail = upstreamDetail;
   }
 }
 
@@ -440,6 +448,8 @@ export const apiFailure = (
   changedSuppliers: Record<string, RouteHop[]>;
   responseStatus?: number;
   observation?: SourceObservation;
+  upstreamStatus?: number;
+  upstreamDetail?: string;
 } | null =>
   err instanceof ApiCallError
     ? {
@@ -452,6 +462,8 @@ export const apiFailure = (
         changedSuppliers: err.changedSuppliers,
         responseStatus: err.responseStatus,
         observation: err.observation,
+        upstreamStatus: err.upstreamStatus,
+        upstreamDetail: err.upstreamDetail,
       }
     : null;
 
@@ -501,6 +513,8 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
               ? envelope.observation as SourceObservation
               : undefined,
             changedSuppliers(envelope.changed),
+            typeof envelope.upstream_status === 'number' ? envelope.upstream_status : undefined,
+            typeof envelope.upstream_detail === 'string' ? envelope.upstream_detail : undefined,
           );
         }
         return payload as T;

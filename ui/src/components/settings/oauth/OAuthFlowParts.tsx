@@ -9,26 +9,36 @@
 // row hands the value to the shared `CopyButton` and no caller owns a handler.
 import * as React from 'react';
 import { ExternalLink } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { CopyButton } from '@/components/ui/copy-button';
 import { Input } from '@/components/ui/input';
 
-/** Auth URL as a cyan link chip + a copy button (remote/phone operation). */
-export const OAuthLinkRow: React.FC<{ url: string }> = ({ url }) => (
-  <div className="flex flex-wrap items-center gap-2">
-    <a
-      href={url}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline-flex max-w-full items-center gap-1.5 break-all rounded-md bg-cyan-soft/40 px-2 py-1 font-mono text-[12px] text-cyan-ink transition-colors hover:bg-cyan-soft hover:text-cyan-ink"
-    >
-      <ExternalLink className="size-3 shrink-0" />
-      <span className="break-all">{url}</span>
-    </a>
-    <CopyButton value={url} />
-  </div>
-);
+/**
+ * The sign-in page as a button that opens it, and its link to copy for another device.
+ *
+ * The link is not printed: a provider's authorization URL runs to hundreds of
+ * characters of query string, which reads as noise and pushes the step it belongs to
+ * off a phone screen. `onUse` reports either use, for a caller that waits on what
+ * the person does next.
+ */
+export const OAuthLinkRow: React.FC<{ url: string; onUse?: (how: 'open' | 'copy') => void }> = ({ url, onUse }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button asChild variant="brand" size="sm">
+        <a href={url} target="_blank" rel="noopener noreferrer" onClick={() => onUse?.('open')}>
+          <ExternalLink aria-hidden="true" />
+          {t('settings.models.oauth.openSignIn')}
+        </a>
+      </Button>
+      <span className="contents" onClickCapture={() => onUse?.('copy')}>
+        <CopyButton value={url} label={t('settings.models.oauth.copyLink') as string} variant="outline" size="sm" />
+      </span>
+    </div>
+  );
+};
 
 /** Device code as a spaced mono chip + a copy button. */
 export const OAuthDeviceCodeRow: React.FC<{ code: string }> = ({ code }) => (

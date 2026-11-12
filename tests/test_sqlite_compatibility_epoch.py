@@ -27,17 +27,31 @@ pytestmark = pytest.mark.no_sqlite_template
 
 @pytest.fixture(autouse=True)
 def bridge_graph(tmp_path, monkeypatch):
-    """Keep these historical bridge/next-epoch fault cases on their original graph.
+    """Keep bridge/next-epoch fault cases at epoch 1 with today's additive schema.
 
-    The production epoch-2 transition is exercised in test_tool_trace_suppression.
+    Only the marker-only epoch-2 transition is omitted; dropping later additive
+    revisions would leave today's required tables absent from these fixtures.
+    Production epoch-2 behavior is exercised in test_tool_trace_suppression.
+    This source fixture is not evidence about a published historical binary.
     """
     graph = tmp_path / "bridge-alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     script = ScriptDirectory.from_config(migrations.alembic_config(tmp_path / "historical.sqlite"))
-    retained = {Path(revision.path).name for revision in script.iterate_revisions("20261108_0082", "base")}
-    for path in (graph / "versions").glob("*.py"):
-        if path.name != "__init__.py" and path.name not in retained:
-            path.unlink()
+    from storage.migration_policy import classify_migration
+
+    for revision in script.iterate_revisions("head", "20261108_0083"):
+        assert classify_migration(Path(revision.path)).permitted == "additive"
+    omitted = script.get_revision("20261108_0083")
+    (graph / "versions" / Path(omitted.path).name).unlink()
+    for revision in script.walk_revisions():
+        if revision.down_revision == omitted.revision:
+            path = graph / "versions" / Path(revision.path).name
+            source = path.read_text()
+            replacement = source.replace(
+                f'down_revision = "{omitted.revision}"', f'down_revision = "{omitted.down_revision}"',
+            )
+            assert replacement != source
+            path.write_text(replacement)
     monkeypatch.setattr(migrations, "alembic_dir", lambda: graph)
     importer._installed_schema_revision.cache_clear()
     importer._installed_schema_epoch.cache_clear()
@@ -113,9 +127,52 @@ def test_compatible_future_open_has_no_startup_mutation_or_receipt_adoption(brid
 
 
 @pytest.mark.parametrize("kind", OPENERS)
-@pytest.mark.parametrize("epoch", ["3", "true", '"1"', "null", "1.0", "-1", "not-json"])
+@pytest.mark.parametrize("epoch", ["4", "true", '"1"', "null", "1.0", "-1", "not-json"])
 def test_incompatible_epoch_refuses_every_opener_before_mutation(bridge_db, kind, epoch):
     _future(bridge_db, epoch=epoch)
+    before = _snapshot(bridge_db)
+    if kind == "readiness":
+        assert _open(kind, bridge_db) is False
+    else:
+        with pytest.raises(migrations.IncompatibleDatabaseRevisionError, match="compatibility_epoch"):
+            _open(kind, bridge_db)
+    assert _snapshot(bridge_db) == before
+
+
+@pytest.mark.parametrize("kind", OPENERS)
+def test_epoch_three_future_schema_opens_all_readers_without_startup_mutation(bridge_db, kind):
+    """The 3.2.6 bridge understands the combined future representation shape.
+
+    The future writer is not present here: the marker and revision are synthetic,
+    while the three reference tables contain representative immutable rows. Every
+    opener must compatible-open without importing, repairing, stamping, or writing.
+    """
+    _future(bridge_db, epoch="3", stamp="20990101_0003")
+    with closing(sqlite3.connect(bridge_db)) as conn, conn:
+        conn.execute(
+            "INSERT INTO session_cache_state(session_id, provider, model, record_json) VALUES (?, ?, ?, ?)",
+            ("future-session", "anthropic", "claude-test", '{"version":1,"started_at":110}'),
+        )
+        conn.execute(
+            "INSERT INTO skill_catalogs(digest, entries_json) VALUES (?, ?)",
+            ("future-digest", "[]"),
+        )
+        conn.execute(
+            "INSERT INTO vault_audit_access_snapshots(id, snapshot) VALUES (?, ?)",
+            (1, '{"version":1,"resources":[]}'),
+        )
+    before = _snapshot(bridge_db)
+    _open(kind, bridge_db)
+    assert _snapshot(bridge_db) == before
+    decision = migrations.preflight_database(bridge_db)
+    assert decision.compatible_open and decision.compatibility_epoch == 3
+
+
+@pytest.mark.parametrize("kind", OPENERS)
+def test_epoch_three_marker_on_epoch_two_head_does_not_enable_writer_epoch(bridge_db, kind):
+    """A future marker is accepted only for an unknown exact future revision."""
+    current_head = ScriptDirectory.from_config(migrations.alembic_config(bridge_db)).get_current_head()
+    _future(bridge_db, epoch="3", stamp=current_head)
     before = _snapshot(bridge_db)
     if kind == "readiness":
         assert _open(kind, bridge_db) is False
@@ -261,7 +318,7 @@ def test_new_migrations_cannot_escape_the_schema_stamp_epoch_transaction(bridge_
     assert _snapshot(bridge_db)["database.sql"] == before
 
 
-@pytest.mark.parametrize("declared, written", [(2, 1), (None, 2), (3, 3)])
+@pytest.mark.parametrize("declared, written", [(2, 1), (None, 2), (4, 4)])
 def test_epoch_mismatch_or_unsupported_target_rolls_back_before_commit(bridge_db, tmp_path, monkeypatch, declared, written):
     _next_graph(
         tmp_path, monkeypatch,

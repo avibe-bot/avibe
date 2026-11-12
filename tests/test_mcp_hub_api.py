@@ -83,11 +83,11 @@ def test_all_failed_batch_returns_per_server_reasons_and_identical_readd_is_unch
     payload = failed.get_json()
     assert failed.status_code == 200
     assert payload["ok"] is True  # echo is unchanged
-    names = {item["name"]: item for item in payload["failed"]}
-    assert "github" in names and names["github"]["error"]
+    names = {item["name"]: item for item in payload["added"]}
+    assert "github" in names and names["github"]["warning"]
     assert "other" in names
     assert payload["unchanged"][0]["name"] == "echo"
-    assert payload.get("error", {}).get("message") or names["github"]["error"]
+    assert payload.get("error") is None or payload["error"].get("message")
 
     empty_fail = {
         "mcpServers": {
@@ -98,9 +98,9 @@ def test_all_failed_batch_returns_per_server_reasons_and_identical_readd_is_unch
     none = client.post("/api/mcp", json={"text": json.dumps(empty_fail)}, headers=headers)
     none_body = none.get_json()
     assert none.status_code == 200
-    assert none_body["ok"] is False
-    assert {item["name"] for item in none_body["failed"]} == {"github", "other"}
-    assert none_body["error"]["message"]
+    assert none_body["ok"] is True
+    assert {item["name"] for item in none_body["added"]} == {"github", "other"}
+    assert all(item["warning"] for item in none_body["added"])
     assert "Unexpected MCP Hub response" not in json.dumps(none_body)
 
 
@@ -322,8 +322,9 @@ def test_owned_discovery_error_is_localized_for_web_but_cli_stays_english(owner,
     text = json.dumps({'mcpServers': {'broken': {'url': 'https://example.invalid/mcp'}}})
     added = client.post('/api/mcp', json={'text': text}, headers=headers).get_json()
     expected = 'MCP 发现失败；请检查服务器配置后重试。'
-    assert added['failed'][0]['error'] == expected
-    assert added['error']['message'] == f'broken: {expected}'
+    assert added['added'][0]['warning']['message']
+    assert added['added'][0]['warning']['messageKey'] == 'mcp.discovery_failed'
+    assert added['ok'] is True
     refreshed = client.post('/api/mcp/broken/refresh', headers=headers).get_json()
     assert refreshed['error']['message'] == expected
     assert 'private-token' not in json.dumps(added) + json.dumps(refreshed)

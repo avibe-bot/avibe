@@ -2,12 +2,15 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/runtime-dependency.schema.json",
   "title": "RuntimeDependency",
-  "description": "v5 managed engine dependency manifest + persisted user intent + server-owned installation and runtime status. not_installed -> installing -> not_started is the installation path; not_started is installed lazy-start idleness, and down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin. The one-time default-on upgrade marker is persisted in model_hub config, not returned on this runtime response.",
+  "description": "v5 managed engine dependency manifest + persisted user intent + server-owned installation and runtime status. not_installed -> installing -> not_started is the installation path; not_started is installed lazy-start idleness, and down means a demanded runtime failed or stopped. Lifecycle-required manifest values remain normative; an available/staged candidate and the bundled-only legacy hint are not execution authority. The one-time default-on upgrade marker is persisted in model_hub config, not returned on this runtime response.",
   "type": "object",
   "required": ["contract_version", "manifest", "status"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 23 },
+    "committed_release": { "type": ["string", "null"], "description": "Lifecycle-committed build identity, independent of staged files and the legacy bundled hint." },
+    "engine_lifecycle": { "type": ["object", "null"], "description": "Shared owner snapshot: available/staged/committed/running/legacy identities and blocked/operation state. Null for explicit manifest opt-out or adapters without owner status." },
+    "running_release": { "type": ["string", "null"], "description": "Healthy real-config process identity published before admission, or null when none is known." },
     "enabled": {
       "type": "boolean",
       "description": "Persisted user intent for the managed gateway. Fresh/default configuration is true; explicit stop persists false."
@@ -48,6 +51,7 @@
           "description": "resolved means a trusted inventory contains an exact host asset; unresolved means no trusted local inventory exists yet; unsupported means a trusted inventory exists without an exact host asset."
         },
         "version": { "type": "string", "minLength": 1 },
+        "asset_release_tag": { "type": ["string", "null"] },
         "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "assets": {
           "type": "array",

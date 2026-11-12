@@ -6,13 +6,14 @@ import asyncio
 import logging
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Awaitable, Callable
 
 from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 
+from .adapter import RawCallOutcome
 from .provenance import TurnUpstreamFailure
 from .resolver import SourceRecoveryAnnotation, parse_model_hub_timestamp
 
@@ -96,6 +97,53 @@ class RecoveryRequest:
     non_retryable_failure: bool = False
     # Carried across walks so a later blocked walk still names what failed.
     last_upstream_failure: TurnUpstreamFailure | None = None
+    # Existing Source ids, private to this request. No shared model-level health.
+    _unlisted: dict[str, _SourceRecovery] = field(default_factory=dict)
+
+    def defer_unlisted(self, source_id: str, identity: tuple, outcome: RawCallOutcome) -> None:
+        self.start()
+        previous = self._unlisted.get(source_id)
+        if previous is not None and previous.identity != identity:
+            previous = None
+        failures = previous.failures + 1 if previous is not None else 1
+        deadline, eligible = self.policy.failure_deadline(
+            "server_error", failures,
+            retry_after=outcome.retry_after,
+            retry_after_ms=outcome.retry_after_ms,
+            response_received_at=outcome.response_received_at,
+        )
+        if previous is not None:
+            eligible = max(eligible, previous.eligible_at)
+            deadline = max(deadline, previous.retry_at)
+        self._unlisted[source_id] = _SourceRecovery(
+            identity, "server_error", failures, deadline, eligible,
+        )
+
+    def annotations(
+        self, config: ModelHubConfig, shared: dict[str, SourceRecoveryAnnotation],
+    ) -> dict[str, SourceRecoveryAnnotation]:
+        """Add only this request's mandatory waits, retaining all global guards."""
+        result = dict(shared)
+        sources = {source.id: source for source in config.sources}
+        for source_id, state in tuple(self._unlisted.items()):
+            source = sources.get(source_id)
+            if source is None or source_identity(source) != state.identity:
+                del self._unlisted[source_id]
+                continue
+            remaining = state.eligible_at - self.policy.monotonic()
+            if remaining <= 0:
+                # Keep the private streak, but shared half-open admission owns readiness.
+                continue
+            deadline = self.policy.now() + timedelta(seconds=remaining)
+            global_state = shared.get(source_id)
+            if global_state is not None and global_state.retry_at:
+                if parse_model_hub_timestamp(global_state.retry_at) >= deadline:
+                    continue
+            result[source_id] = replace(
+                global_state or SourceRecoveryAnnotation(reason="server_error"),
+                reason="server_error", retry_at=deadline.isoformat(),
+            )
+        return result
 
     def start(self) -> None:
         if self.started is None:
@@ -126,6 +174,7 @@ class RecoveryRequest:
             })
 
     def clear(self) -> None:
+        self._unlisted.clear()
         if self.observer is not None:
             self.observer(None)
 
@@ -253,6 +302,28 @@ class RecoveryPolicy:
             )
         return result
 
+    def failure_deadline(
+        self,
+        reason: str,
+        failures: int,
+        *,
+        retry_after: str | None = None,
+        retry_after_ms: int | None = None,
+        response_received_at: datetime | None = None,
+        upstream_retry_at: datetime | None = None,
+    ) -> tuple[datetime, float]:
+        """The same backoff/advice calculation for shared and request-private waits."""
+        delays = RETRY_DELAYS[reason]
+        base, cap = delays[min(failures - 1, len(delays) - 1)], delays[-1]
+        local = self.jitter(base, min(cap, base * 1.2))
+        now, mono = self.now(), self.monotonic()
+        received = response_received_at
+        if received is None or received.tzinfo is None:
+            received = now
+        upstream = retry_after_deadline(retry_after, received, milliseconds=retry_after_ms)
+        deadline = max(now + timedelta(seconds=local), upstream or now, upstream_retry_at or now)
+        return deadline, mono + (deadline - now).total_seconds()
+
     def failed(
         self,
         source: ModelHubSourceConfig,
@@ -268,20 +339,11 @@ class RecoveryPolicy:
         if state is not None and state.failed_generation is not None and generation <= state.failed_generation:
             return state.retry_at, False
         failures = state.failures + 1 if state is not None else 1
-        delays = RETRY_DELAYS[reason]
-        base, cap = delays[min(failures - 1, len(delays) - 1)], delays[-1]
-        local = self.jitter(base, min(cap, base * 1.2))
-        now, mono = self.now(), self.monotonic()
-        received = response_received_at
-        if received is None or received.tzinfo is None:
-            received = now
-        upstream = retry_after_deadline(
-            retry_after,
-            received,
-            milliseconds=retry_after_ms,
+        deadline, eligible_at = self.failure_deadline(
+            reason, failures, retry_after=retry_after, retry_after_ms=retry_after_ms,
+            response_received_at=response_received_at, upstream_retry_at=upstream_retry_at,
         )
-        deadline = max(now + timedelta(seconds=local), upstream or now, upstream_retry_at or now)
-        eligible_at = mono + (deadline - now).total_seconds()
+        now, mono = self.now(), self.monotonic()
         if state is not None:
             eligible_at = max(eligible_at, state.eligible_at)
             deadline = max(deadline, state.retry_at, now + timedelta(seconds=eligible_at - mono))

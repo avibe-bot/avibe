@@ -32,7 +32,8 @@ let saved: Source = {
 };
 const calls: string[] = [];
 modelsApi.listSources = async () => [saved];
-modelsApi.observeApiKeySource = async () => { throw new Error('Automatic detection must not run'); };
+// Detection may start; it never answers here, and saving must not wait for it.
+modelsApi.observeApiKeySource = () => new Promise(() => undefined);
 modelsApi.createApiKeySource = async (draft) => {
   calls.push('save');
   if (!draft.save_unverified) throw new Error('Save must not require detection');
@@ -47,7 +48,7 @@ modelsApi.probeSource = async (id, model) => {
   if (protocol === 'search') throw new Error('Search services are not model-probed');
   return { source_id: id, model_id: model, protocol, reachable: true, latency_ms: 123, error: null };
 };
-modelsApi.refreshSource = async () => { calls.push('refetch'); return { source: saved, discovered: saved.models.length }; };
+modelsApi.refreshSource = async () => { calls.push('refetch'); return { source: saved, removed_hops: [], interrupted: [] }; };
 modelsApi.addCustomModel = async (_id, draft) => {
   calls.push('manual');
   saved = { ...saved, models: [...saved.models, {

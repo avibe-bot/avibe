@@ -57,6 +57,9 @@ jobs:
           npm ci
           npm run build:mobile
 
+      - name: Generate the App's license notices
+        run: python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp
+
       - name: Verify bundled mobile UI
         run: ios/scripts/verify_mobile_bundle.sh ios/Avibe/Resources/MobileApp
 

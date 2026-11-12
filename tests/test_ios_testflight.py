@@ -574,6 +574,7 @@ def test_the_testflight_workflow_runs_by_hand_from_master_and_scopes_its_secrets
     names = [step.get("name") for step in steps]
     order = [
         "Build bundled mobile UI",
+        "Generate the App's license notices",
         "Verify bundled mobile UI",
         "Import Apple Distribution identity and App Store profile",
         "Archive for App Store distribution",

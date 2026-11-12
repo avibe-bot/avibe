@@ -4,7 +4,7 @@
 import { Wizard } from '@/components/Wizard';
 
 import { frames, type FrameSpec } from '../../frame';
-import { toAssistants } from './assistants.design';
+import { toMoreAssistants } from './assistants.design';
 import { connectionApi, setupFixtures } from './fixtures';
 
 const route = '/setup';
@@ -33,7 +33,7 @@ const dialog = (name: string, title: string, click: string[], extra: Partial<Fra
   status: 'shipped',
   route,
   fixtures,
-  click: [...toAssistants, ...click],
+  click: [...toMoreAssistants, ...click],
   wait: 1000,
   // The pointer rests on the title, so the last click leaves no hover behind.
   hover: '[role="dialog"] h2',

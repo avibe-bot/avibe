@@ -1,13 +1,10 @@
 import { useEffect, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
 
 import { routeableCatalogModelIds } from '../components/settings/models/backendCatalog';
-import { modelHubCatalogPath } from '../components/settings/models/modelHubRoutes';
 import type { EffortMenu, PickerAgentCatalog } from '../components/settings/models/types';
 import { ApiError, useApi, type ApiContextType } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { useRouteSurfaceActive } from './routeSurfaceActivity';
-import { settingsOverlayContinuationState } from './settingsOverlay';
 import { getBackendUiMeta } from './agentBackends';
 
 export interface BackendModels {
@@ -50,7 +47,7 @@ export function modelOptionLabel(model: string, labels?: Record<string, string>)
 const isHubAgent = (agent: PickerAgentCatalog | null, backend: string): agent is PickerAgentCatalog =>
   agent !== null && agent.backend === backend && agent.mode === 'hub';
 
-const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): BackendModels | null => {
+export const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): BackendModels | null => {
   if (!isHubAgent(agent, backend)) return null;
   const catalog = agent.catalog_models ?? null;
   if (!catalog) return null;
@@ -244,25 +241,17 @@ async function nativeBackendModels(api: ApiContextType, backend: string): Promis
 }
 
 /**
- * A model picker's "Add model" exit: opens this backend's catalog in the Model
- * Hub, or is null when the picker shows none. Only a Model Hub backend has a
- * catalog to add to, and the Model Hub is an Instance Owner surface that sends
- * anyone else home.
+ * Whether a model picker shows its "Add model" exit. Only a Model Hub backend
+ * has a list to add to, and adding is an Instance Owner action.
  *
  * The one owner of that answer. It comes from a read made while the surface is
  * showing and is dropped the moment it may be stale — the surface is covered
  * (Settings may switch the backend to Direct), the backend changes, or `enabled`
  * turns off — so no exit outlives the read that justified it, and a failed read
  * shows none. `enabled` lets a picker read only while its menu is open.
- *
- * The exit is a detour to come back from, so it records where it starts, on a
- * phone too, where Settings otherwise keeps only the Workbench home mounted
- * behind it. From a picker already inside Settings it keeps the visit's origin.
  */
-export function useAddModelExit(backend: string, enabled = true): (() => void) | null {
+export function useAddModelAvailable(backend: string, enabled = true): boolean {
   const api = useApi();
-  const navigate = useNavigate();
-  const location = useLocation();
   const { capabilities } = useInstanceAuthorization();
   const surfaceActive = useRouteSurfaceActive();
   const readable = enabled && surfaceActive && Boolean(backend) && capabilities.can_manage_instance;
@@ -278,8 +267,7 @@ export function useAddModelExit(backend: string, enabled = true): (() => void) |
       setHubBackend(null);
     };
   }, [api, backend, readable]);
-  if (!readable || hubBackend !== backend) return null;
-  return () => navigate(modelHubCatalogPath(backend), { state: settingsOverlayContinuationState(location) });
+  return readable && hubBackend === backend;
 }
 
 /**

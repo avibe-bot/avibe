@@ -250,7 +250,10 @@ notarize on its own.
 3. **App.** The Cua Driver helper and then Avibe.app are signed, the app is
    notarized with `notarytool` through the API key, and its ticket is stapled.
    The launch smoke test, the DMG, and the updater archive all use this final
-   app.
+   app. A notary request that times out, loses its connection, or meets a 5xx
+   is tried up to three times; once the upload has an id, the retry waits on
+   that submission rather than submitting again. A verdict such as `Invalid`
+   fails at once.
 4. **DMG.** The image is signed, notarized, and stapled, then checked the way a
    download is: `stapler validate`, `spctl -a -t open --context
    context:primary-signature`, `spctl -a -t exec` on the app, and both code
@@ -644,14 +647,33 @@ sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
 self-contained DMG and NSIS artifacts, both manually and as the reusable TEST
 build unit for `.github/workflows/release_ai.yml`. Its signing policy is
 described above. Release builds restore the Rust dependency cache and the
-prepared Cua Driver but never save caches, because only reruns of the same tag
-could read them. The workflow's unsigned cache warm-up on `master` (daily, and on
-pushes that change a Rust cache input) is the writer they read from; it signs and
-uploads nothing. A restored Cua Driver is kept only when its provenance names the
-pinned inputs and it passes the checks a fresh build passes; otherwise it is
-rebuilt. Native packaging and a real
-installation on each supported architecture remain separate acceptance gates
-from unit/contract tests.
+prepared Cua Driver but never save caches; the master warm-up is the sole
+release-cache writer. It builds every target without signing or uploading, and
+caches only third-party Cargo output: the Rust cache key binds `Cargo.lock`,
+rustc, Apple SDK, and target, while first-party crates, version stamping,
+private Runtime, packaging, signing, notarization, and verification are rebuilt.
+Restore is exact-key only; a miss is safe but visible and rebuilds from source.
+PR shell jobs are restore-only, and post-warm-up maintenance deletes superseded
+target entries and retired PR caches within the 10 GB repository budget. A
+failed push or scheduled warm-up gets one automatic retry; a release still
+proceeds correctly on a miss. A restored Cua Driver is kept only when its
+provenance names the pinned inputs and it passes the checks a fresh build
+passes. Native packaging and a real installation on each supported architecture
+remain separate acceptance gates from unit/contract tests.
+
+For a TEST RC, the release resolver selects Apple silicon macOS and Windows;
+Intel macOS is deliberately not built by the RC. Stable releases still require
+all three targets and their complete signed asset sets. The unsigned master
+warm-up is also the early Intel signal: pushes changing `desktop/**` (excluding
+Markdown), `uv.lock`, or release helpers, plus the existing scheduled warm-up,
+build Intel on master. This catches Intel compile, SDK, launch-smoke, and DMG
+regressions before stable, but Intel-specific Developer ID signing,
+notarization, stapling, Gatekeeper, and updater-signature failures still first
+appear on a stable release. `.github/workflows/desktop-cache-keepalive.yml` is
+the retention mechanism: it performs lookup-only reads on master pushes and on a
+five-day schedule. Its warnings explicitly tell the operator to run the next
+warm-up when an entry is missing, unreadable, or not refreshed; it does not
+silently dispatch a build.
 
 A separate manual workflow, `.github/workflows/desktop-signpath-test.yml`, runs
 the SignPath TEST-signing integration test with `signpath_test=true` and a

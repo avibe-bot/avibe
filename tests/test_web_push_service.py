@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import base64
 import json
+import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
+import httpx
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 
+from core import web_push
 from core.web_push import (
     DEFAULT_WEB_PUSH_TIMEOUT_SECONDS,
     DEFAULT_WEB_PUSH_TTL_SECONDS,
@@ -29,6 +37,192 @@ def _payload(endpoint: str = "https://push.example.test/sub/1") -> dict:
             "auth": "auth-secret",
         },
     }
+
+
+def _decode_b64url_json(value: str) -> dict:
+    padding = "=" * (-len(value) % 4)
+    return json.loads(base64.urlsafe_b64decode(value + padding))
+
+
+def _test_badge_vapid_keys() -> web_push.VapidKeys:
+    private_key = ec.derive_private_key(1, ec.SECP256R1())
+    return web_push.VapidKeys(
+        private_key_pem=private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode("ascii"),
+        public_key=web_push._b64url_no_padding(
+            private_key.public_key().public_bytes(
+                serialization.Encoding.X962,
+                serialization.PublicFormat.UncompressedPoint,
+            )
+        ),
+    )
+
+
+def test_badge_update_fixture_relay_contract(monkeypatch, caplog):
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/web_push/badge_request_fixture.json"
+        ).read_text(encoding="utf-8")
+    )
+    monkeypatch.setattr(web_push.time, "time", lambda: fixture["test_clock"])
+    caplog.set_level(logging.INFO, logger="httpx")
+    seen = []
+
+    def relay(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "headers": {
+                    "authorization": request.headers["authorization"],
+                    "content-type": request.headers["content-type"],
+                },
+                "body_utf8": request.content.decode("utf-8"),
+            }
+        )
+        badge = json.loads(request.content)["badge"]
+        return httpx.Response(
+            201,
+            request=request,
+            json={
+                "ok": True,
+                "registration_id": fixture["registration_id"],
+                "badge": badge,
+                "apns_status": 200,
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(relay)) as client:
+        for request_fixture in fixture["requests"]:
+            web_push.send_badge_update(
+                subscription={
+                    "endpoint": (
+                        f"{fixture['aud_origin']}/api/push/apns/"
+                        f"{fixture['registration_id']}"
+                    )
+                },
+                badge=json.loads(request_fixture["body_utf8"])["badge"],
+                vapid_keys=_test_badge_vapid_keys(),
+                client=client,
+            )
+
+    assert seen == fixture["requests"]
+    assert fixture["registration_id"] not in caplog.text
+    assert "/api/push/apns/<redacted>/badge" in caplog.text
+    match = re.fullmatch(
+        r"vapid t=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+),"
+        r"k=([A-Za-z0-9_-]+)",
+        seen[0]["headers"]["authorization"],
+    )
+    assert match is not None
+    token = match.group(1)
+    header, claims_part, signature_part = token.split(".")
+    claims = _decode_b64url_json(claims_part)
+    assert claims["aud"] == fixture["aud_origin"]
+    assert claims["exp"] == fixture["exp"]
+    assert 0 < fixture["exp"] - fixture["test_clock"] <= 24 * 60 * 60
+    public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+        ec.SECP256R1(),
+        base64.urlsafe_b64decode(match.group(2) + "=" * (-len(match.group(2)) % 4)),
+    )
+    signature = base64.urlsafe_b64decode(
+        signature_part + "=" * (-len(signature_part) % 4)
+    )
+    public_key.verify(
+        utils.encode_dss_signature(
+            int.from_bytes(signature[:32], "big"),
+            int.from_bytes(signature[32:], "big"),
+        ),
+        f"{header}.{claims_part}".encode("ascii"),
+        ec.ECDSA(hashes.SHA256()),
+    )
+
+
+def test_badge_update_rejects_non_contract_success_body(tmp_path):
+    keys = load_or_create_vapid_keys(tmp_path / "vapid.json")
+    registration_id = "B" * 43
+
+    def relay(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            201,
+            request=request,
+            json={
+                "ok": True,
+                "registration_id": registration_id,
+                "badge": True,
+                "apns_status": 200,
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(relay)) as client:
+        with pytest.raises(web_push.BadgeUpdateProtocolError):
+            web_push.send_badge_update(
+                subscription={
+                    "endpoint": f"https://avibe.bot/api/push/apns/{registration_id}"
+                },
+                badge=1,
+                vapid_keys=keys,
+                client=client,
+            )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        (f"https://avibe.bot/api/push/apns/{'A' * 43}", True),
+        (f"https://avibe.bot/api/push/apns/{'A' * 42}", False),
+        (f"https://avibe.bot/api/push/apns/{'A' * 43}?x=1", False),
+        (f"https://avibe.bot.evil.test/api/push/apns/{'A' * 43}", False),
+        (f"https://avibe.bot:443/api/push/apns/{'A' * 43}", False),
+        (f"https://AVIBE.BOT/api/push/apns/{'A' * 43}", False),
+        (f"https://push.example.test/sub/{'A' * 43}", False),
+        (f"http://avibe.bot/api/push/apns/{'A' * 43}", False),
+    ],
+)
+def test_native_relay_subscription_filter_is_strict(endpoint, expected):
+    assert web_push.is_native_relay_subscription({"endpoint": endpoint}) is expected
+
+
+def test_successful_badge_baseline_is_durable_and_failure_does_not_advance_it(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    with engine.begin() as conn:
+        row = web_push_service.upsert_subscription(
+            conn,
+            user_key="remote:user-a",
+            payload=_payload(f"https://avibe.bot/api/push/apns/{'B' * 43}"),
+        )
+        assert web_push_service.get_last_successful_badge(
+            conn, endpoint=row["endpoint"]
+        ) is None
+        web_push_service.mark_send_success(
+            conn,
+            endpoint=row["endpoint"],
+            badge_count=0,
+        )
+        assert web_push_service.get_last_successful_badge(
+            conn, endpoint=row["endpoint"]
+        ) == 0
+        web_push_service.mark_send_failure(conn, endpoint=row["endpoint"])
+        assert web_push_service.get_last_successful_badge(
+            conn, endpoint=row["endpoint"]
+        ) == 0
+        web_push_service.mark_send_success(
+            conn,
+            endpoint=row["endpoint"],
+            badge_count=3,
+        )
+        assert web_push_service.get_last_successful_badge(
+            conn, endpoint=row["endpoint"]
+        ) == 3
+
+    engine.dispose()
 
 
 def test_subscription_upsert_and_disable(tmp_path):

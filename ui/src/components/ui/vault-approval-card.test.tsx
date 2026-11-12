@@ -31,6 +31,7 @@ const vault = vi.hoisted(() => ({
   status: 'locked',
   refresh: vi.fn(),
   approveProtectedRelease: vi.fn(),
+  signProtectedRequest: vi.fn(),
 }));
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
@@ -238,6 +239,63 @@ describe('VaultApprovalCard signing-address contract', () => {
     expect(screen.queryByText(en.vaults.approval.protectedWarning) !== null).toBe(
       protection === 'protected' && scheme !== 'schnorr-secp256k1-bip341-keypath',
     );
+  });
+});
+
+// The sandbox signs a protected request against the daemon-signed operation context, and the
+// daemon then settles it. An exact-message (Ed25519) completion is checked against the context the
+// request stored, so dropping it from the completion makes every protected Solana signature fail.
+describe('VaultApprovalCard protected signing completion', () => {
+  const operationContext = { v: 2, purpose: 'sign', requestId: 'vrq_protected_sign' };
+  const material = { name: 'SIGNING_KEY', kind: 'keypair', envelope };
+  const protectedSign = (delivery: Record<string, unknown>): VaultRequest => ({
+    ...protectedAccess,
+    id: 'vrq_protected_sign',
+    request_type: 'sign',
+    secret_name: 'SIGNING_KEY',
+    delivery: { ...delivery, operation_context: operationContext },
+    card: { request_type: 'sign', secret_name: 'SIGNING_KEY', kind: 'keypair', protection: 'protected', secret_unlock_material: material },
+  });
+  const solanaContext = { kind: 'solana-transaction-v1', messageHex: solanaMessage };
+  const evmContext = { kind: 'evm-transaction', chainId: '1', unsignedTransaction: {}, digestAlgorithm: 'keccak256', digest: '00'.repeat(32) };
+
+  it.each([
+    {
+      label: 'an Ed25519 message, with its exact signing context',
+      delivery: { scheme: 'ed25519', message_hex: solanaMessage, signing_context: solanaContext },
+      result: { scheme: 'ed25519', signature: 'ab'.repeat(64), recovery_id: null },
+      completion: { message_hex: solanaMessage, scheme: 'ed25519', signature: { signature: 'ab'.repeat(64) }, signing_context: solanaContext },
+    },
+    {
+      label: 'a secp256k1 digest, unchanged',
+      delivery: { scheme: 'ecdsa-secp256k1-recoverable', digest: '00'.repeat(32), signing_context: evmContext },
+      result: { scheme: 'ecdsa-secp256k1-recoverable', signature: 'cd'.repeat(64), recovery_id: 1 },
+      completion: { digest: '00'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable', signature: { signature: 'cd'.repeat(64), recovery_id: 1 } },
+    },
+  ])('settles $label', async ({ delivery, result, completion }) => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    vault.signProtectedRequest.mockResolvedValue(result);
+    const { open } = openWindow();
+    const onResolved = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard request={protectedSign(delivery)} onResolved={onResolved} onCancel={vi.fn()} />
+      </I18nextProvider>,
+    );
+    const sign = screen.getByRole('button', { name: en.vaults.approval.sign }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(sign.disabled).toBe(false));
+    fireEvent.click(sign);
+
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+    expect(open).toHaveBeenCalledOnce();
+    const [sentMaterial, sentContext, scheme, sentOperation, windowId] = vault.signProtectedRequest.mock.calls[0];
+    expect(sentMaterial).toEqual(material);
+    expect(sentContext).toEqual(delivery.signing_context);
+    expect(scheme).toBe(delivery.scheme);
+    expect(sentOperation).toEqual(operationContext);
+    expect(windowId).toMatch(/^[a-f0-9]{32}$/);
+    expect(api.signVaultDigest).toHaveBeenCalledExactlyOnceWith({ name: 'SIGNING_KEY', request_id: 'vrq_protected_sign', ...completion });
   });
 });
 
@@ -484,7 +542,7 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(onResolved).not.toHaveBeenCalled();
   });
 
-  it('shows the whole Solana message and its address, then approves with that message', async () => {
+  it('summarizes a Solana message by size, keeps every byte and the whole address in Details, then approves with that message', async () => {
     api.listVaultSecrets.mockResolvedValue({
       ok: true,
       secrets: [{ name: 'SOLANA_KEY', signing_addresses: { solana: solanaAddress } }],
@@ -497,15 +555,24 @@ describe('VaultApprovalCard protected access approval', () => {
       </I18nextProvider>,
     );
 
-    // The approver sees every byte that will be signed, labelled as a message and not as a hash.
-    expect(screen.getByText(solanaMessage)).toBeTruthy();
+    // The summary names a message and its size, never a hash, and never the bytes themselves.
     expect(screen.getByText(en.vaults.approval.message)).toBeTruthy();
+    expect(screen.getByText('150 bytes')).toBeTruthy();
     expect(screen.queryByText(en.vaults.approval.digest)).toBeNull();
     expect(screen.getByText('ed25519')).toBeTruthy();
+    expect(screen.queryByText(solanaMessage)).toBeNull();
     // The signing identity is the Solana address only, never an EVM or Bitcoin one.
     await vi.waitFor(() => expect(screen.getByText(solanaAddress)).toBeTruthy());
     expect(screen.getByText(en.vaults.addresses.solana)).toBeTruthy();
     expect(screen.queryByText(en.vaults.addresses.eth)).toBeNull();
+
+    // Details holds every byte that will be signed and the address in full, beside its row.
+    const details = screen.getByRole('button', { name: en.vaults.approval.details });
+    expect(details.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(details);
+    expect(details.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText(solanaMessage)).toBeTruthy();
+    expect(screen.getAllByText(solanaAddress)).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: en.vaults.approval.sign }));
 
@@ -534,6 +601,8 @@ describe('VaultApprovalCard protected access approval', () => {
     );
 
     expect(screen.getByText(en.vaults.approval.emptyMessage)).toBeTruthy();
+    // Nothing to keep in full: no bytes, and no address was listed for this key.
+    expect(screen.queryByRole('button', { name: en.vaults.approval.details })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: en.vaults.approval.sign }));
 
     await vi.waitFor(() => expect(onResolved).toHaveBeenCalled());

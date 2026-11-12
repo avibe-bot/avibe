@@ -3,7 +3,6 @@ import { ArrowDownToLine, Activity, Gauge, LoaderCircle, RefreshCw, Route, Scrol
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
@@ -15,6 +14,7 @@ import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { webFetchTool } from './webFetch';
 import { AddSearchServiceDialog } from './AddSearchServiceDialog';
 import { searchServicesActive, webSearchTool, builtinSearchSource } from './searchServices';
+import { AddModelsDialog } from './AddModelsDialog';
 import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { GatewayModule } from './GatewayModule';
@@ -28,7 +28,7 @@ import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { agentUsesHubRuntime, modelsSurfaceKindFromReads } from './modelHubSurfaceState';
 import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
-import { MODEL_HUB_MANAGE_PARAM } from './modelHubRoutes';
+import { MODEL_HUB_SOURCE_PARAM } from './modelHubRoutes';
 import { buildSupplyRelations } from './supplyRelations';
 import {
   emptySuspendedRouteAttempts,
@@ -336,8 +336,35 @@ type HubTab = 'sources' | 'tools' | 'quota' | 'usage' | 'logs';
 
 const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
   const { t } = useModelsTranslation();
+  // On a phone the strip is wider than the screen and scrolls sideways. Its open
+  // edges fade while there is more that way, so a cut-off tab reads as「more」
+  // rather than as a broken label, and the selected tab is kept in view.
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const [more, setMore] = React.useState<{ start: boolean; end: boolean }>({ start: false, end: false });
+  React.useEffect(() => {
+    const list = listRef.current;
+    if (!list) return undefined;
+    const measure = () => {
+      const start = list.scrollLeft > 1;
+      const end = list.scrollLeft + list.clientWidth < list.scrollWidth - 1;
+      setMore((current) => (current.start === start && current.end === end ? current : { start, end }));
+    };
+    measure();
+    list.addEventListener('scroll', measure, { passive: true });
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    observer?.observe(list);
+    return () => {
+      list.removeEventListener('scroll', measure);
+      observer?.disconnect();
+    };
+  }, []);
+  React.useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [tab]);
   return (
-    <div role="tablist" className="model-hub-tabs flex min-w-0 items-end gap-1 overflow-x-auto border-b border-border">
+    <div ref={listRef} role="tablist" data-more-start={more.start || undefined} data-more-end={more.end || undefined}
+      className="model-hub-tabs flex min-w-0 items-end gap-1 overflow-x-auto border-b border-border">
       {(['sources', 'tools', 'quota', 'usage', 'logs'] as const).map((id) => (
         <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] shrink-0 items-center gap-[7px] whitespace-nowrap border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
           {id === 'sources' ? <Route className="size-3.5" /> : id === 'tools' ? <Wrench className="size-3.5" /> : id === 'quota' ? <Gauge className="size-3.5" /> : id === 'usage' ? <Activity className="size-3.5" /> : <ScrollText className="size-3.5" />}
@@ -478,6 +505,8 @@ export const SettingsModelsPage: React.FC = () => {
   const sourceDetailReturnFocusRef = React.useRef<(() => HTMLElement | null) | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
+  /** The backend whose 「Add model」 dialog is open: picks are saved at once. */
+  const [addBackend, setAddBackend] = React.useState<AgentBackend | null>(null);
   const [catalogFocus, setCatalogFocus] = React.useState<CatalogFocus | null>(null);
   // The route the catalog was opened from. Its action unmounted with the route
   // dialog, so closing the catalog returns focus to that model row instead.
@@ -554,26 +583,6 @@ export const SettingsModelsPage: React.FC = () => {
     unread: () => [],
     degraded: (staleData) => staleData,
   });
-  // `?manage=<backend>` is a model picker's 「Add model」 exit. Once the supply
-  // read can say whether that backend is on the Hub, open its catalog (or
-  // nothing, if it is not) and drop the parameter so a reload or Back does not
-  // open it again. The replace keeps the Settings overlay's origin in state.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const location = useLocation();
-  const requestedCatalogBackend = searchParams.get(MODEL_HUB_MANAGE_PARAM);
-  const supplyKnown = supplyRead.kind === 'ready' || supplyRead.kind === 'degraded';
-  React.useEffect(() => {
-    if (requestedCatalogBackend === null || !supplyKnown) return;
-    const requested = agents.find((agent) => agent.backend === requestedCatalogBackend && agent.mode === 'hub');
-    if (requested) {
-      catalogOriginRef.current = null;
-      setCatalogFocus(null);
-      setMenuBackend(requested.backend);
-    }
-    const next = new URLSearchParams(searchParams);
-    next.delete(MODEL_HUB_MANAGE_PARAM);
-    setSearchParams(next, { replace: true, state: location.state });
-  }, [agents, location.state, requestedCatalogBackend, searchParams, setSearchParams, supplyKnown]);
   const chains = foldRegionRead<ModelChainIndex, ModelChainIndex>(chainsRead, {
     loading: () => ({}),
     ready: (data) => data,
@@ -1171,6 +1180,23 @@ export const SettingsModelsPage: React.FC = () => {
   const selectSource = React.useCallback((selection: SourceDetailSelection | null) => {
     sourceIntentAuthority.commit(() => applySourceDetailSelection(selection));
   }, [applySourceDetailSelection, sourceIntentAuthority]);
+  // `?source=<id>` is a failed turn's 「Open Models」: the Source it names opens in
+  // front, with its repair (a replaced key, a sign-in) first in its actions. Once the
+  // Source read can say whether it still exists, open it (or nothing) and drop the
+  // parameter so a reload or Back does not open it again.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
+  const requestedSourceId = searchParams.get(MODEL_HUB_SOURCE_PARAM);
+  const sourcesKnown = sourcesRead.kind === 'ready' || sourcesRead.kind === 'degraded';
+  React.useEffect(() => {
+    if (requestedSourceId === null || !sourcesKnown) return;
+    if (sources.some((source) => source.id === requestedSourceId)) {
+      selectSource({ sourceId: requestedSourceId, returnFocus: () => null });
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete(MODEL_HUB_SOURCE_PARAM);
+    setSearchParams(next, { replace: true, state: location.state });
+  }, [location.state, requestedSourceId, searchParams, selectSource, setSearchParams, sources, sourcesKnown]);
   /**
    * A committed delete leaves the detail dialog with no entity to render, so the
    * page closes it and returns the user to the list. It goes through
@@ -1684,13 +1710,8 @@ export const SettingsModelsPage: React.FC = () => {
                               }
                             }}
                           >
-                            {SUBSCRIPTION_PICKER_OPTIONS.map(({ vendor, recommendation }, index) => {
+                            {SUBSCRIPTION_PICKER_OPTIONS.map(({ vendor }, index) => {
                               const vendorLabel = t(`settings.models.subscriptionPicker.vendor.${vendor}`);
-                              // A hub-only vendor has no native channel to recommend against, so
-                              // it carries no badge rather than a 网关推荐 over its only custody.
-                              const recommendationLabel = recommendation
-                                ? t(`settings.models.subscriptionPicker.recommendation.${recommendation}`)
-                                : null;
                               return (
                                 <Button
                                   key={vendor}
@@ -1712,25 +1733,13 @@ export const SettingsModelsPage: React.FC = () => {
                                 >
                                   <VendorGlyph vendor={vendor} />
                                   <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold" title={vendorLabel}>{vendorLabel}</span>
-                                  {recommendationLabel && (
-                                    <Badge
-                                      variant="recommendation"
-                                      className={cn(
-                                        recommendation === 'native'
-                                          ? 'model-hub-accent-tile--mint model-hub-accent-ink--mint border-transparent'
-                                          : 'model-hub-accent-pill--neutral',
-                                      )}
-                                    >
-                                      {recommendationLabel}
-                                    </Badge>
-                                  )}
                                 </Button>
                               );
                             })}
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
+                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onAddModels={(agent) => setAddBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -1854,6 +1863,19 @@ export const SettingsModelsPage: React.FC = () => {
         if (result?.removed) focusRouteDestination(origin);
         else setRouteTarget(origin);
       }} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {addBackend && (
+        <AddModelsDialog
+          open
+          backend={addBackend}
+          onClose={() => setAddBackend(null)}
+          track={(work) => agentWriteRegistry.track(addBackend, work)}
+          onAdded={async (ids, agent) => {
+            setAddBackend(null);
+            await agentSaved(agent);
+            if (aliveRef.current) showToast(t('settings.models.gateway.catalog.added', { count: ids.length, model: ids[0] }) as string, 'success');
+          }}
+        />
+      )}
       <RouteChainDialog
         selection={routeSelection}
         covered={orderBackend !== null}

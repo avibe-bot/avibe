@@ -21,6 +21,29 @@
     },
     "aad_hex": "617661756c743a626c696e642d626f783a6161643a7631000000047365616c0000000c424c494e445f534543524554000000116d616368696e652d61657367636d2d7631000000010100000000000000000000000000000000000000000000000000000000"
   },
+  "keypair_import_blind_box": {
+    "scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1",
+    "hpke_info_utf8": "avault:blind-box:v1",
+    "master_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "public_key": "gvhYRR/emWVthJ2XlGcbHvSN1QlnHYTQTWGKKQz9Zjs=",
+    "fingerprint": "0cd6109d66dd3a5e36f072b67c7f77e00b7cf6e10bd7e574681b0af0ac8ae4b0",
+    "plaintext_hex": "62617365353820736563726574",
+    "box": {
+      "scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1",
+      "enc": "H5GPq8MzbqkYH/drpSeTY/sQHpnZmIqFCC5NPaG0Rz4=",
+      "ct": "JOmOGyngczAZoKK+/HIJU8RSgjv3r1JOZBr6QFo="
+    },
+    "aad_domain_utf8": "avault:blind-box:aad:v1",
+    "context": {
+      "purpose": "keypair-import",
+      "name": "SOLANA_KEY",
+      "curve": "ed25519",
+      "format": "base58-secret",
+      "scheme": "machine-aesgcm-v1",
+      "version": 1
+    },
+    "aad_hex": "617661756c743a626c696e642d626f783a6161643a76310000000e6b6579706169722d696d706f72740000000a534f4c414e415f4b4559000000116d616368696e652d61657367636d2d76310000000101000000000000000000000015656432353531393a6261736535382d73656372657400000000000000000000000000000000"
+  },
   "blind_box_aad_examples": {
     "domain_utf8": "avault:blind-box:aad:v1",
     "field_encoding": "uint32_be(len) || bytes",
@@ -28,6 +51,17 @@
     "version": 1,
     "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     "cases": [
+      {
+        "purpose": "keypair-import",
+        "name": "SOLANA_KEY",
+        "grant_id": "",
+        "sign_scheme": "ed25519:base58-secret",
+        "digest_hex": "",
+        "approval_nonce_hex": "",
+        "approval_expires_at_unix": null,
+        "operation_hash_hex": "",
+        "aad_hex": "617661756c743a626c696e642d626f783a6161643a76310000000e6b6579706169722d696d706f72740000000a534f4c414e415f4b4559000000116d616368696e652d61657367636d2d76310000000101000000000000000000000015656432353531393a6261736535382d73656372657400000000000000000000000000000000"
+      },
       {
         "purpose": "seal",
         "name": "BLIND_SECRET",

@@ -5,6 +5,7 @@ import {
   API_KEY_VENDOR_PRESETS,
   apiKeyVendorPreset,
   CUSTOM_VENDOR,
+  localizedApiKeyVendorOptions,
 } from './apiKeyVendors';
 import { SOURCE_PROTOCOLS } from './types';
 
@@ -70,5 +71,36 @@ describe('the shipped API-key vendor catalog', () => {
     // that would assert an interface nothing defines.
     expect(apiKeyVendorPreset(CUSTOM_VENDOR)).toBeNull();
     expect(apiKeyVendorPreset('a-vendor-this-catalog-does-not-carry')).toBeNull();
+  });
+});
+
+// Mainland users scan for mainland vendors: in Chinese they move up and carry
+// their Chinese names. Held as properties over the catalog's own markings, so a
+// vendor added with `region: cn` lands in the right group without a test edit.
+describe('the provider picker per UI language', () => {
+  it('reads the catalog verbatim in English', () => {
+    expect(localizedApiKeyVendorOptions('en')).toEqual(
+      API_KEY_VENDOR_PRESETS.map((preset) => ({ value: preset.id, label: preset.label })),
+    );
+  });
+
+  it('lists OpenAI and Anthropic, then mainland vendors, then the rest in Chinese', () => {
+    const ids = localizedApiKeyVendorOptions('zh-CN').map((option) => option.value);
+    const mainland = API_KEY_VENDOR_PRESETS.filter((preset) => preset.region === 'cn').map((preset) => preset.id);
+    const rest = API_KEY_VENDOR_PRESETS
+      .filter((preset) => preset.region !== 'cn' && !['openai', 'anthropic'].includes(preset.id))
+      .map((preset) => preset.id);
+    expect(mainland.length).toBeGreaterThan(0);
+    expect(ids).toEqual(['openai', 'anthropic', ...mainland, ...rest]);
+  });
+
+  it('puts a mainland vendor\'s Chinese name before its English one, in Chinese only', () => {
+    const named = API_KEY_VENDOR_PRESETS.filter((preset) => preset.label_zh);
+    expect(named.length).toBeGreaterThan(0);
+    const zh = new Map(localizedApiKeyVendorOptions('zh').map((option) => [option.value, option.label]));
+    for (const preset of named) {
+      expect(preset.region).toBe('cn');
+      expect(zh.get(preset.id)).toBe(`${preset.label_zh} ${preset.label}`);
+    }
   });
 });

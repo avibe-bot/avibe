@@ -193,15 +193,32 @@ Design consequences:
 
 - The sandbox passes `rp.id = "sandbox.avibe.bot"` for both registration and
   assertion.
-- The credential user handle must become a per-vault or per-install random
-  identifier, not the current hardcoded `"avibe-vault"` handle. The local daemon
-  can mint and store a non-secret protected-vault user handle, and the sandbox
-  uses it in WebAuthn creation options.
+- The credential user handle is a purpose-specific per-instance opaque value, not the
+  current hardcoded `"avibe-vault"` handle. The daemon stores the canonical standard-
+  base64 encoding of 32 random non-secret bytes in the existing `state_meta` KV under
+  `vault.webauthn_user_handle.v1`. Registration-options creation initializes it with a
+  write-first `INSERT ... ON CONFLICT DO NOTHING`, then reads and validates the winner
+  before taking the factor snapshot. A persisted malformed value fails closed and is
+  never replaced with the legacy constant.
 - `wrap_meta` should record `rp_id: "sandbox.avibe.bot"` for clarity and future
-  diagnostics. Pre-launch timing means there are no production passkeys to
-  migrate.
-- Credential IDs remain stored in the passkey copies and, once #818 lands, in
-  the daemon's protected WebAuthn authorization factor table.
+  diagnostics. It must not be confused with the credential user handle: the existing
+  `vault_user_handle` field remains the authenticated sandbox scope/AAD identifier.
+- Existing installations keep using credentials registered with legacy
+  `b"avibe-vault"` bytes without re-registration. A selected-factor server assertion
+  may carry a missing/null user handle, the legacy bytes, or the current persisted
+  instance bytes; all existing credential-ID, key, challenge, RP/origin, UV, counter,
+  expiry and operation checks remain mandatory. The handle alias never selects a factor
+  or authorizes an unknown credential.
+- Credential IDs remain stored in the passkey copies and, once #818 lands, in the
+  daemon's protected WebAuthn authorization factor table.
+
+The handle is stable across restart, upgrade, pairing changes, Vault deletion and
+re-establishment, and rollback preserves existing credential use. A fresh state root
+or config-only clone receives a new handle. A complete state backup/restore or
+bit-for-bit database copy preserves the handle and credentials and therefore remains
+the same logical instance identity; this bounded change does not infer an independent
+full-state fork or silently rotate restored state. Older binaries preserve the
+additive row and keep their historical fixed-handle limitation for new enrollment.
 
 Because all ceremonies run in the iframe, the browser binds the passkey to
 `sandbox.avibe.bot` even if the visible parent page is:
@@ -838,8 +855,13 @@ The daemon remains mostly unchanged:
 Expected client-visible `wrap_meta` changes:
 
 - `rp_id` should become `sandbox.avibe.bot`.
-- A non-secret per-vault user handle or key ID may be added for shared-RP
-  WebAuthn account separation.
+- The credential user handle is **not** a `wrap_meta` or scope migration. The daemon
+  issues it from `state_meta` at registration time; `vault_user_handle`,
+  `scopeIdFromVaultUserHandle`, root metadata/AAD and stored credential IDs remain
+  unchanged.
+- Registration options expose the daemon's `state_meta` handle as WebAuthn `user.id`.
+  It is not copied into `wrap_meta` and does not replace the existing
+  `vault_user_handle` scope/AAD metadata.
 - The daemon verification public key itself must be pinned in VMK-authenticated
   protected-vault root metadata so `releaseDEK` can verify daemon-signed
   agent-key bindings without trusting parent-supplied key material. A

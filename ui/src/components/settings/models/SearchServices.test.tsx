@@ -121,7 +121,7 @@ describe('search service activation and mixed order', () => {
     expect(onAddService).toHaveBeenCalledOnce();
     await userEvent.click(screen.getByRole('button', { name: /^Advanced/ }));
     expect(screen.getAllByRole('list', { name: 'Search order' })).toHaveLength(1);
-    expect(screen.getByRole('heading', { name: 'Status by Source' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Status by provider' })).toBeTruthy();
   });
 
   it.each(['en', 'zh'])('keeps the built-in row visible when overall web search is off in %s', (lng) => {
@@ -327,7 +327,7 @@ describe('search Source detail', () => {
     await userEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Cancel' }).at(-1)!);
     const remove = vi.spyOn(modelsApi, 'deleteSource').mockResolvedValue({ removed_hops: [], interrupted: [] });
     await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
-    await userEvent.click(screen.getByRole('button', { name: 'Remove source' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Remove provider' }));
     await waitFor(() => expect(remove).toHaveBeenCalledWith('src_tavily001', undefined));
   });
 
@@ -410,7 +410,7 @@ describe('search service add dialog', () => {
     expect(observe).not.toHaveBeenCalled();
     if (outcome === 'invalid') {
       expect(onAdded).not.toHaveBeenCalled();
-      expect(await screen.findByText('The API key was rejected. Check it and try again.')).toBeTruthy();
+      expect(await screen.findByText('API key invalid or lacks permission. Check or replace it.')).toBeTruthy();
     } else await waitFor(() => expect(onAdded).toHaveBeenCalledWith(answer));
   });
 

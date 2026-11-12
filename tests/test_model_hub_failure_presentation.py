@@ -20,6 +20,7 @@ from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
+    TurnSupplyBlocker,
     TurnSupplyFacts,
     TurnUpstreamFailure,
     render_turn_outcome_copy,
@@ -233,14 +234,15 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
 
 
 @pytest.mark.parametrize("last_said", ["text", "nothing", "connection"])
+@pytest.mark.parametrize("unlisted", [False, True])
 @pytest.mark.parametrize("backend,endpoint,status", [
     ("codex", "responses", 400), ("claude", "messages", 424),
 ])
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_upstream_refusal_text_reaches_reply_record_and_log(
-    tmp_path, caplog, backend, endpoint, status, language, last_said,
+    tmp_path, caplog, backend, endpoint, status, language, last_said, unlisted,
 ):
-    """MH-UPSTREAM-DETAIL-001: what the upstream said is shown, kept, and logged, not only its class."""
+    """MH-UPSTREAM-DETAIL-001: upstream facts survive short copy in the record and log."""
     detail = "upstream request failed: read tcp 198.51.100.7:443: i/o timeout"
     if last_said == "connection":
         # The engine's own transport envelope: no upstream answered at all.
@@ -255,6 +257,8 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
     ])
     service.store.load().sources[0].display_name = "Relay 服务"
     models = _canonicalize_fixed_test_routes(service)
+    if unlisted:
+        service.store.load().agents[backend].routes = {}
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     context = MessageContext(
@@ -298,11 +302,23 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
         connection = t("modelHub.launch.last_connection_failure", language, source="Relay 服务", detail=detail)
         # An older message never stands in for a newer refusal that had none,
         # and a connection failure is never presented as an upstream answer.
-        assert (suffix in notice.args[2]) is (last_said == "text")
+        assert (suffix in notice.args[2]) is (last_said == "text" and not unlisted)
         assert (connection in notice.args[2]) is (last_said == "connection")
+        if unlisted and last_said != "connection":
+            assert notice.args[2] == t(
+                "modelHub.launch.passthrough_model_unlisted", language, model=models[backend],
+            )
         gateway.correlation.settle("turn-detail", settled_by=SETTLED_BY_TERMINAL_RESULT)
         record = service.provenance.get("turn-detail")
         assert [attempt.get("upstream_detail") for attempt in record["failed_attempts"]] == texts[:attempts]
+        assert all(attempt["source_id"] == "src_recovery01" for attempt in record["failed_attempts"])
+        assert all(
+            attempt.get("http_status") == (None if last_said == "connection" else 500)
+            for attempt in record["failed_attempts"]
+        )
+        if unlisted:
+            assert all(attempt["configured_model_id"] == models[backend] for attempt in record["failed_attempts"])
+        assert record["outcome"] == "exhausted"
         logged = [entry.getMessage() for entry in caplog.records if "Model Hub attempt failed" in entry.getMessage()]
         status_text = "http_status=None" if last_said == "connection" else "http_status=500"
         assert len(logged) == attempts and all(status_text in line for line in logged)
@@ -328,7 +344,7 @@ def test_request_incompatible_copy_preserves_nonfallback_guidance(language):
         detail=detail,
     )
     assert (
-        "switching Sources will not help" in text
+        "switching providers will not help" in text
         if language == "en"
         else "切换模型供应商也无法解决" in text
     )
@@ -369,7 +385,7 @@ def test_http_200_sse_failure_is_presented_as_upstream_error(language):
     ) not in text
     assert "HTTP 200" not in text
     assert (
-        "switching Sources will not help" not in text
+        "switching providers will not help" not in text
         if language == "en"
         else "切换模型供应商也无法解决" not in text
     )
@@ -513,3 +529,36 @@ async def test_a_route_refusal_points_to_models_only_when_its_copy_sends_the_rea
 
     text, metadata = _notice(controller)
     assert (text, metadata.get("failure_next_step")) == (copy, "models" if pointed else None)
+
+
+@pytest.mark.parametrize(
+    ("blockers", "upstream", "opened"),
+    [
+        # The last upstream refusal is the Source the copy names first...
+        ((TurnSupplyBlocker(source="Relay", reason="auth_failed", source_id="src_relay"),),
+         TurnUpstreamFailure(source="Backup", http_status=401, detail="", source_id="src_backup"), "src_backup"),
+        # ...else the first Source that blocked the route...
+        ((TurnSupplyBlocker(source="", reason="route_unconfigured"),
+          TurnSupplyBlocker(source="Relay", reason="auth_failed", source_id="src_relay")), None, "src_relay"),
+        # ...and a refusal that names no Source opens Models itself.
+        ((), None, None),
+    ],
+)
+async def test_the_models_step_names_the_source_that_failed(blockers, upstream, opened):
+    from core.handlers.model_hub.service import ModelHubError
+
+    outcome = TurnOutcomeProjectionInput(
+        outcome="no_candidate",
+        discriminator="blocked_supply_state",
+        supply_facts=TurnSupplyFacts(
+            backend="claude", model="claude-opus-5-5", supply_state="interrupted", blockers=blockers,
+        ),
+        last_upstream_failure=upstream,
+    )
+    refused = ModelHubError("no_candidate", turn_outcome=outcome)
+    controller = _next_step_controller("en", public_url=None)
+
+    await emit_backend_failure(controller, _WORKBENCH, "claude", str(refused), display_text="❌ refused", cause=refused)
+
+    _text, metadata = _notice(controller)
+    assert (metadata.get("failure_next_step"), metadata.get("failure_source_id")) == ("models", opened)

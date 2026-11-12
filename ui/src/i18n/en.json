@@ -352,6 +352,27 @@
     },
     "errors": {
       "network": "Could not reach avibe.bot. Check your connection and retry."
+    },
+    "licenses": {
+      "about": "About",
+      "title": "Open-source licenses",
+      "intro": "The Avibe app includes the open-source components below. Thanks to their authors.",
+      "sourceTitle": "Source code for MPL-2.0 components",
+      "sourceBody": "These components are distributed unmodified under the Mozilla Public License 2.0. Get their source code from the crates.io archive or the upstream source.",
+      "family": "{{name}} and {{related}} related crates, {{version}}",
+      "archives": "crates.io archives: ",
+      "archive": "crates.io archive",
+      "archiveFor": "crates.io archive of {{name}}",
+      "sourceCode": "Source code",
+      "sourceFor": "Source code of {{name}}",
+      "texts": "License texts",
+      "covers": "Covers",
+      "generated": "This list is generated when the app is built.",
+      "components_one": "{{count}} component",
+      "components_other": "{{count}} components",
+      "crate": "{{name}} {{version}}",
+      "withAuthors": "{{crate}} ({{authors}})",
+      "separator": ", "
     }
   },
   "common": {
@@ -860,11 +881,11 @@
       "codexDescription": "OpenAI agent · ChatGPT login or OPENAI_API_KEY",
       "vibeyDescription": "Built-in agent · models and routes managed in Model Hub",
       "backToBackends": "Back to backends",
-      "gatewayOff": "The model gateway is off, so {{name}} has no model to run on.",
+      "gatewayOff": "Model Hub is off, so {{name}} has no model to run on.",
       "hubDisabled": "Model Hub disabled",
       "hubDisabledNotice": "Model Hub is disabled on this instance, so {{name}} has no model to run on.",
-      "noModelSource": "No model source",
-      "noModelSourceNotice": "{{name}} gets its models from Model Hub. Add a source in Models.",
+      "noModelSource": "No provider",
+      "noModelSourceNotice": "{{name}} gets its models from Model Hub. Add a provider in Models.",
       "builtinBadge": "Built-in",
       "openProviderPage": "Configure provider",
       "providerOauth": "OAuth (default)",
@@ -1151,8 +1172,8 @@
     "openSetup": "Open setup wizard",
     "models": {
       "title": "Models",
-      "subtitle": "See whether each agent model can run now and which source serves it; set a route for one model when needed.",
-      "addSource": "Add source",
+      "subtitle": "See whether each agent model can run now and which provider serves it; set a route for one model when needed.",
+      "addSource": "Add provider",
       "loadError": "Failed to load: {{detail}}",
       "sourceKind": {
         "api_key": "API key",
@@ -1160,57 +1181,57 @@
       },
       "shell": {
         "title": "Models",
-        "running": "Gateway running",
-        "stopped": "Gateway unavailable",
-        "unavailable": "Gateway currently unavailable",
-        "degraded": "Gateway running degraded",
-        "unread": "Gateway status unavailable",
-        "notStarted": "Gateway not ready",
-        "notInstalled": "Gateway component not installed",
-        "allDirect_one": "The only backend is direct",
-        "allDirect_other": "All {{count}} backends are direct",
+        "running": "Model Hub running",
+        "stopped": "Model Hub unavailable",
+        "unavailable": "Model Hub currently unavailable",
+        "degraded": "Model Hub running degraded",
+        "unread": "Model Hub status unavailable",
+        "notStarted": "Model Hub not ready",
+        "notInstalled": "Model Hub component not installed",
+        "allDirect_one": "The only backend uses its own login",
+        "allDirect_other": "All {{count}} backends use their own login",
         "starting": "Starting…",
-        "unsupported": "No gateway component for this platform yet",
+        "unsupported": "No Model Hub component for this platform yet",
         "closed": {
           "off": {
-            "title": "Model gateway is not ready",
-            "body": "Retry to restore access to sources, routes, and gateway models."
+            "title": "Model Hub is not ready",
+            "body": "Retry to restore access to providers, routes, and Model Hub models."
           },
           "down": {
-            "title": "Model gateway is unavailable",
-            "body": "The previous start did not become ready. Retry to start the gateway again."
+            "title": "Model Hub is unavailable",
+            "body": "The previous start did not become ready. Retry to start Model Hub again."
           },
           "enabledDown": {
-            "title": "Model gateway is unavailable",
-            "body": "Your configuration is saved. Retry to restore the gateway."
+            "title": "Model Hub is unavailable",
+            "body": "Your configuration is saved. Retry to restore Model Hub."
           },
           "notInstalled": {
-            "title": "Model gateway is not installed",
-            "body": "Retry to install and start the managed gateway component."
+            "title": "Model Hub is not installed",
+            "body": "Retry to install and start the managed Model Hub component."
           },
           "unsupported": {
-            "title": "Model gateway is unavailable",
-            "body": "This platform does not have a compatible managed gateway component."
+            "title": "Model Hub is unavailable",
+            "body": "This platform does not have a compatible managed Model Hub component."
           },
           "installing": {
-            "title": "Installing model gateway",
-            "body": "Sources and routing will appear after installation and startup complete."
+            "title": "Installing Model Hub",
+            "body": "Providers and routing will appear after installation and startup complete."
           },
           "starting": {
-            "title": "Starting model gateway",
-            "body": "Sources and routing will appear when the gateway is ready."
+            "title": "Starting Model Hub",
+            "body": "Providers and routing will appear when Model Hub is ready."
           },
           "unread": {
-            "title": "Model gateway status unavailable",
+            "title": "Can't read Model Hub status",
             "body": "Configuration stays hidden until the runtime state can be confirmed."
           }
         },
         "modelsInfo": {
           "label": "What a model is",
-          "body": "A model is what an Agent uses to generate a response. You can see whether each model can run, which source supplies it, and set a route for one when needed."
+          "body": "A model is what an Agent uses to generate a response. You can see whether each model can run, which provider supplies it, and set a route for one when needed."
         },
         "tab": {
-          "hub": "Sources & gateway",
+          "hub": "Providers & routing",
           "tools": "Tools",
           "quota": "Subscription quota",
           "usage": "Usage",
@@ -1219,11 +1240,11 @@
       },
       "direct": {
         "card": {
-          "current": "Currently: direct",
+          "current": "Currently: own login",
           "current.sub": "Each agent backend uses its own login and connects to the vendor directly."
         },
         "pill": {
-          "direct": "Direct"
+          "direct": "Own login"
         },
         "backend": {
           "claude": {
@@ -1237,20 +1258,20 @@
           }
         },
         "action": {
-          "switchToGateway": "Switch to gateway",
+          "switchToGateway": "Let Model Hub manage",
           "refreshAgents": "Detect Agent backends again"
         },
         "benefits": {
-          "title": "Switch to the gateway and you gain three things",
+          "title": "Switch to Model Hub and you gain three things",
           "1": "Your session survives a quota running out",
-          "1.detail": "When your Claude subscription is exhausted, it moves to the next source you added and the conversation continues.",
+          "1.detail": "When your Claude subscription is exhausted, it moves to the next provider you added and the conversation continues.",
           "2": "One key supplies several backends",
           "2.detail": "The same API key can serve Claude Code, Codex and OpenCode at once.",
           "3": "Mix and match models freely",
-          "3.detail": "Pair any backend with any model from any source."
+          "3.detail": "Pair any backend with any model from any provider."
         },
         "note": {
-          "perBackend": "Switch one backend at a time — the others stay direct. You can switch back at any time."
+          "perBackend": "Switch one backend at a time — the others keep their own login. You can switch back at any time."
         },
         "empty": {
           "title": "No agent backend was found on this machine",
@@ -1259,22 +1280,23 @@
         }
       },
       "gateway": {
-        "heading": "Gateway routes",
-        "infoLabel": "What gateway routes are",
+        "heading": "Routes",
+        "infoLabel": "What routes are",
         "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; unmatched models pass through to eligible API-key providers.",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
-        "switchToGateway": "Switch to gateway",
-        "switchToDirect": "Switch to direct",
+        "addModel": "Add model",
+        "switchToGateway": "Let Model Hub manage",
+        "switchToDirect": "Use own login",
         "modeMenu": {
           "title": "Runtime mode",
-          "gatewayCurrent": "Gateway (current)",
+          "gatewayCurrent": "Managed (current)",
           "gatewayDescription": "Assign requests to model providers by route and priority",
-          "directDescription": "Use {{backend}}'s own models and credentials; gateway routes and priority no longer apply"
+          "directDescription": "Use {{backend}}'s own models and credentials; Model Hub routes and priority no longer apply"
         },
         "fail": {
-          "switchToDirect": "The switch back to direct did not go through",
-          "switchToGateway": "The switch to gateway did not go through"
+          "switchToDirect": "The switch to own login did not go through",
+          "switchToGateway": "The switch to Model Hub did not go through"
         },
         "modelCount_one": "{{count}} model",
         "modelCount_other": "{{count}} models",
@@ -1295,13 +1317,13 @@
           "summary_other": "{{count}} Agents need attention",
           "modelMissing": "No model selected",
           "routeMissing": "{{model}} is not a known model name. Change this Agent's model, or add a route for {{model}}.",
-          "degraded": "Some sources are unavailable; requests fall back to the next one",
-          "waiting": "Waiting for a source to recover",
-          "interrupted": "No source is available for this model"
+          "degraded": "Some providers are unavailable; requests fall back to the next one",
+          "waiting": "Waiting for a provider to recover",
+          "interrupted": "No provider is available for this model"
         },
         "supply": {
-          "none": "No usable source",
-          "unread": "Could not read this backend's supply · the gateway itself is fine"
+          "none": "No usable provider",
+          "unread": "Could not read this backend's supply · Model Hub itself is fine"
         },
         "row": {
           "current": "{{source}} → {{model}}",
@@ -1313,14 +1335,14 @@
             "gateway": "{{mode}} · {{health}}"
           },
           "mode": {
-            "direct": "Direct",
-            "gateway": "Gateway"
+            "direct": "Own login",
+            "gateway": "Managed"
           },
           "status": {
             "ok": "Healthy",
             "degraded": "Degraded",
             "waiting": "Supply unavailable for now",
-            "interrupted": "No source is available",
+            "interrupted": "No provider is available",
             "unconfigured": "No model route configured",
             "unused": "No Agent uses this backend"
           },
@@ -1345,6 +1367,7 @@
           "guardSubtitleInUse": "Agents still use these models. They cannot run until you choose another model for them.",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
+          "searchAdd": "Search providers and the model catalog for \"{{query}}\"",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
           "baselineUnavailable": "This backend's model list could not be read.",
           "save": "Save",
@@ -1367,7 +1390,9 @@
           "moved_other": "Moved {{model}} to position {{position}} of {{count}}.",
           "dropped_one": "Dropped {{model}} at position {{position}} of {{count}}.",
           "dropped_other": "Dropped {{model}} at position {{position}} of {{count}}.",
-          "grabCancelled": "Cancelled moving {{model}} and restored its original position."
+          "grabCancelled": "Cancelled moving {{model}} and restored its original position.",
+          "added_one": "Added {{model}}",
+          "added_other": "Added {{count}} models"
         },
         "picker": {
           "title": "Add {{backend}} models",
@@ -1379,18 +1404,23 @@
           "groupBuiltin": "{{backend}} built-in",
           "groupProviders": "From your providers",
           "groupListed": "Already in the list",
-          "noMatch": "No model matches.",
+          "noMatch": "Neither your providers nor the model catalog has this model.",
           "unavailable": "The models you can add could not be read.",
-          "customFromQuery": "Add \"{{query}}\" as a custom model…",
+          "customFromQuery": "Add \"{{query}}\" as a custom model",
           "custom": "Add custom model…",
           "confirm_one": "Add {{count}} model",
-          "confirm_other": "Add {{count}} models"
+          "confirm_other": "Add {{count}} models",
+          "groupCatalog": "Model catalog",
+          "catalogNote": "No provider lists these. Once added, the ID is sent to your provider as is; the chat tells you if the provider doesn't serve it.",
+          "notListed": "Not listed by a provider",
+          "customFromQueryNote": "Uses the ID exactly as typed, with default parameters. You can change them later in Manage models.",
+          "searchingCatalog": "Searching the model catalog"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · Model list",
           "addTitle": "Add model",
           "editTitle": "Edit model",
-          "description": "Describe this model so the backend and the gateway can use it.",
+          "description": "Describe this model so the backend and Model Hub can use it.",
           "section": {
             "basic": "Basics",
             "parameters": "Parameters",
@@ -1450,13 +1480,13 @@
         "chip": "Taken over"
       },
       "legend": {
-        "native": "Native",
-        "viaGateway": "Gateway supply",
+        "native": "Own login",
+        "viaGateway": "Managed by Model Hub",
         "passthrough": "Passthrough",
         "connectedUnused": "Enabled · not currently used",
         "takeover": "Taken over · temporarily rerouted",
         "unavailable": "Supply paused",
-        "note": "Route chains are each backend's configured source order."
+        "note": "Route chains are each backend's configured provider order."
       },
       "status": {
         "allHealthy": "All healthy",
@@ -1465,31 +1495,31 @@
         "noIssues": "No models need attention"
       },
       "statusPill": {
-        "ok_one": "All good · {{count}} on the gateway",
-        "ok_other": "All good · {{count}} on the gateway",
-        "none": "No Agent is using the gateway yet",
-        "engineDown": "The gateway isn't ready to serve",
+        "ok_one": "All good · {{count}} on Model Hub",
+        "ok_other": "All good · {{count}} on Model Hub",
+        "none": "No Agent is using Model Hub yet",
+        "engineDown": "Model Hub isn't ready to serve",
         "interrupted_one": "{{count}} with no supply · needs attention",
         "interrupted_other": "{{count}} with no supply · needs attention",
-        "waiting_one": "{{count}} awaiting source recovery",
-        "waiting_other": "{{count}} awaiting source recovery",
+        "waiting_one": "{{count}} awaiting provider recovery",
+        "waiting_other": "{{count}} awaiting provider recovery",
         "needsAction": "{{source}} — {{detail}}",
         "cooldown": "{{source}} — {{detail}} · switched over, will switch back",
         "andMore_one": "{{count}} more",
         "andMore_other": "{{count}} more"
       },
       "upstream": {
-        "heading": "Upstream sources",
-        "infoLabel": "What upstream sources are",
-        "info": "An upstream source is an account or API key. The gateway gets models from it and supplies them to Agents through routes.",
-        "count_one": "{{count}} source",
-        "count_other": "{{count}} sources",
+        "heading": "Providers",
+        "infoLabel": "What providers are",
+        "info": "A provider is an account or API key. Model Hub gets models from it and supplies them to Agents through routes.",
+        "count_one": "{{count}} provider",
+        "count_other": "{{count}} providers",
         "group": {
-          "native": "Native · on this machine",
-          "hub": "Connected to gateway"
+          "native": "Own login · on this machine",
+          "hub": "Managed by Model Hub"
         },
         "kind": {
-          "nativeCredential": "Native · local credential",
+          "nativeCredential": "Own login · local credential",
           "subscription": "Subscription",
           "apiKey": "API key"
         },
@@ -1497,8 +1527,8 @@
           "anthropic": "Anthropic",
           "openai": "OpenAI"
         },
-        "empty": "No sources yet. Add a subscription or an API key first.",
-        "unread": "Could not read the source list · the gateway itself is fine",
+        "empty": "No providers yet. Add a subscription or an API key first.",
+        "unread": "Could not read the provider list · Model Hub itself is fine",
         "retry": "Retry",
         "addSubscription": "Add subscription",
         "addApiKey": "Add API key",
@@ -1506,7 +1536,7 @@
         "hidePrivateDetails": "Hide accounts and API connection details",
         "hiddenDetails": "Hidden",
         "state": {
-          "supplyingNative": "Supplying {{backend}} (native)",
+          "supplyingNative": "Supplying {{backend}} (own login)",
           "supplying": "Supplying {{backends}}",
           "standby": "Available · not currently supplying",
           "unavailableRetry": "Unavailable · retrying automatically after {{delay}}",
@@ -1520,22 +1550,18 @@
           "gemini": "Gemini",
           "kimi": "Kimi",
           "xai": "xAI"
-        },
-        "recommendation": {
-          "native": "Native recommended",
-          "gateway": "Gateway recommended"
         }
       },
       "sources": {
-        "title": "Sources",
-        "info": "Accounts and credentials available to gateway routes",
-        "count_one": "{{count}} source",
-        "count_other": "{{count}} sources",
+        "title": "Providers",
+        "info": "Accounts and credentials available to Model Hub routes",
+        "count_one": "{{count}} provider",
+        "count_other": "{{count}} providers",
         "group": {
-          "native": "Native · on this machine",
-          "hub": "Connected to gateway"
+          "native": "Own login · on this machine",
+          "hub": "Managed by Model Hub"
         },
-        "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
+        "subtitle": "Manage shared accounts and model inventories; provider order is set on each agent card",
         "modelCount_one": "{{count}} model",
         "modelCount_other": "{{count}} models",
         "lastDiscovery": "Last fetched {{time}}",
@@ -1545,8 +1571,8 @@
         "modelsEmptySubscription": "No supplied models were discovered."
       },
       "source": {
-        "nativeSupply": "Native supply",
-        "hubHosted": "Gateway-held",
+        "nativeSupply": "Own login",
+        "hubHosted": "Managed by Model Hub",
         "officialEndpoint": "Official endpoint",
         "customEndpoint": "Custom endpoint",
         "retryIn": "retry in {{minutes}} min",
@@ -1556,14 +1582,14 @@
       "routing": {
         "historyFailed": "Recorded turn could not be read.",
         "latestRecorded": "Latest recorded turn",
-        "modelNotFound": "Upstream returned model not found",
+        "modelNotFound": "The provider returned model not found",
         "errorDetails": "View error details",
         "errorReason": {
           "invalid_parameter": "Request parameters rejected",
           "protocol_error": "Protocol error",
           "tool_incompatible": "Tool incompatible",
           "stream_interrupted": "Stream interrupted",
-          "engine_down": "Gateway unavailable",
+          "engine_down": "Model Hub unavailable",
           "backend_error": "Agent backend reported a failure"
         },
         "errorKind": {
@@ -1576,9 +1602,9 @@
           "unconfigured": "Unconfigured"
         },
         "help": {
-          "automatic": "Matched by model name.\nSource order follows {{backend}} default routing.",
+          "automatic": "Matched by model name.\nProvider order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
-          "passthrough": "No matching model was found in the provider lists.\nThe original model name is sent to eligible API-key providers in default order for the upstream to handle.",
+          "passthrough": "No matching model was found in the provider lists.\nThe original model name is sent to eligible API-key providers in default order for the provider to handle.",
           "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
         },
         "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
@@ -1609,8 +1635,8 @@
         "cancelChanges": "Cancel changes",
         "manualPending": "After saving, this model will use a manual route and no longer follow default routing.",
         "exactModel": "Exact model ID",
-        "moveUp": "Move source up",
-        "moveDown": "Move source down",
+        "moveUp": "Move provider up",
+        "moveDown": "Move provider down",
         "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes",
         "errorShort": "Error"
       },
@@ -1618,7 +1644,7 @@
         "title": "{{backend}} · Default routing",
         "subtitle": "Applies to automatic and passthrough routes. Saved manual routes stay unchanged.",
         "infoLabel": "About default routing",
-        "reorder": "Reorder source",
+        "reorder": "Reorder provider",
         "section": {
           "ordered": "Provider priority",
           "ordered.note": "Match model names first; otherwise pass through to eligible API-key providers in this order.",
@@ -1630,13 +1656,13 @@
           "exclude": "Remove from order"
         },
         "empty": {
-          "noEligible": "No source is available to this backend yet.",
-          "ordered": "This order is empty. Add a source from below."
+          "noEligible": "No provider is available to this backend yet.",
+          "ordered": "This order is empty. Add a provider from below."
         },
         "cancel": "Cancel",
         "save": "Save default routing",
         "fail": {
-          "read": "The source list could not be read",
+          "read": "The provider list could not be read",
           "save": "Could not confirm the saved default routing. Retry to check."
         },
         "retry": "Retry",
@@ -1666,7 +1692,7 @@
         "autoRefresh": "Refreshes every 5 minutes",
         "refresh": "Refresh now",
         "refreshing": "Refreshing…",
-        "empty": "No signed-in subscription accounts yet. Add a Claude or ChatGPT subscription under Sources & gateway to see its quota here.",
+        "empty": "No signed-in subscription accounts yet. Add a Claude or ChatGPT subscription under Providers & routing to see its quota here.",
         "left": "left",
         "window": {
           "session": "5-hour limit",
@@ -1798,7 +1824,7 @@
       },
       "usage": {
         "title": "Usage",
-        "detail": "Metered tokens from the turns the gateway proxied, by local day.",
+        "detail": "Metered tokens from the turns Model Hub proxied, by local day.",
         "window": {
           "label": "Window",
           "option": "{{days}}d",
@@ -1811,11 +1837,11 @@
         "empty": {
           "report": {
             "title": "No usage in this window",
-            "body": "The gateway has not recorded a request in the selected time range."
+            "body": "Model Hub has not recorded a request in the selected time range."
           },
           "filter": {
             "title": "No matching usage",
-            "body": "Try another Source or model, or reset the filters."
+            "body": "Try another provider or model, or reset the filters."
           }
         },
         "blank": "—",
@@ -1837,9 +1863,9 @@
           "none": "No input tokens in this window"
         },
         "bySource": {
-          "title": "By source",
+          "title": "By provider",
           "col": {
-            "source": "Source",
+            "source": "Provider",
             "tokens": "Tokens",
             "requests": "Requests",
             "cached": "Cached",
@@ -1871,21 +1897,21 @@
           "cost": "At API price"
         },
         "filters": {
-          "source": "Source",
+          "source": "Provider",
           "model": "Model",
-          "all": "All {{label}}",
           "selected_one": "{{label}} · {{count}} selected",
           "selected_other": "{{label}} · {{count}} selected",
-          "search": "Search {{label}}",
           "noMatch": "No matching options",
           "hint": "Multi-select updates the report",
           "reset": "Reset filters",
-          "allSources": "All sources",
+          "allSources": "All providers",
           "allModels": "All models",
-          "sourceCount_one": "{{count}} source",
-          "sourceCount_other": "{{count}} sources",
+          "sourceCount_one": "{{count}} provider",
+          "sourceCount_other": "{{count}} providers",
           "modelCount_one": "{{count}} model",
-          "modelCount_other": "{{count}} models"
+          "modelCount_other": "{{count}} models",
+          "searchSources": "Search providers",
+          "searchModels": "Search models"
         },
         "stats": {
           "tokens": "All tokens",
@@ -1915,7 +1941,7 @@
           "total": "Total",
           "type": "Token type",
           "model": "Model",
-          "source": "Source"
+          "source": "Provider"
         },
         "series": {
           "input": "Input (non-cache)",
@@ -1950,9 +1976,9 @@
           "allBuckets": "View all buckets",
           "group": "Table grouping",
           "byModel": "By model",
-          "bySource": "By source",
+          "bySource": "By provider",
           "export": "Export CSV",
-          "identity": "Model / source",
+          "identity": "Model / provider",
           "requests": "Requests",
           "input": "Input",
           "nonCache": "Non-cache input",
@@ -1971,10 +1997,10 @@
           "startAt": "Start at",
           "endAt": "End at",
           "historyComplete": "History complete",
-          "sourceId": "Source ID",
+          "sourceId": "Provider ID",
           "modelId": "Model ID",
           "ledgerKey": "Internal ledger key",
-          "sourceLabel": "Source",
+          "sourceLabel": "Provider",
           "modelLabel": "Model",
           "tokenReports": "Token reports",
           "inputTokens": "Input tokens",
@@ -1986,7 +2012,7 @@
         "services": {
           "title": "Search services",
           "hostedTitle": "Search and page reading",
-          "identity": "Source / service",
+          "identity": "Provider / service",
           "billable": "Billable",
           "uncertain_one": "+{{requests}} with unknown billing",
           "uncertain_other": "+{{requests}} with unknown billing",
@@ -2014,8 +2040,8 @@
         "label": "Supplies: "
       },
       "mode": {
-        "hub": "Gateway",
-        "direct": "Direct"
+        "hub": "Managed",
+        "direct": "Own login"
       },
       "errors": {
         "engineDown": "Model engine is not ready yet; try again shortly",
@@ -2029,12 +2055,12 @@
       "experimental": "Experimental",
       "agents": {
         "title": "Agent",
-        "subtitle": "Each agent picks its own sources and order; a failure moves to the next one",
+        "subtitle": "Each agent picks its own providers and order; a failure moves to the next one",
         "backendSettings": "Backend settings",
-        "connectHub": "Switch to gateway",
+        "connectHub": "Let Model Hub manage",
         "modelCount_one": "{{count}} model",
         "modelCount_other": "{{count}} models",
-        "hubNoSupply": "On the gateway · no source enabled, the next turn will fail",
+        "hubNoSupply": "On Model Hub · no provider enabled, the next turn will fail",
         "directNote": "Uses the CLI's native configuration",
         "sourceOrder": "Default routing",
         "modelListCount_one": "{{count}} model",
@@ -2048,8 +2074,8 @@
         },
         "attribution": {
           "interrupted": "No supply for {{names}}",
-          "waiting": "Awaiting source recovery for {{names}}",
-          "unassigned": "No source can supply {{models}}"
+          "waiting": "Awaiting provider recovery for {{names}}",
+          "unassigned": "No provider can supply {{models}}"
         }
       },
       "modelStatus": {
@@ -2057,13 +2083,13 @@
         "cooldown": "Cooling down (auto-recovers)",
         "needsAction": "Needs attention",
         "checking": "Checking",
-        "direct": "Direct",
-        "noSource": "No available source",
-        "blocked": "Current source unavailable",
+        "direct": "Own login",
+        "noSource": "No available provider",
+        "blocked": "Current provider unavailable",
         "currentSwitched": "Currently switched to {{source}}",
         "currentSource": "Currently served by {{source}}",
         "takeover": "Now: {{source}} (takeover)",
-        "waiting": "Waiting for a source to recover",
+        "waiting": "Waiting for a provider to recover",
         "source": "Served by {{source}}",
         "unknown": "Unable to confirm",
         "retry": "Retry",
@@ -2079,12 +2105,12 @@
         "editHop": "Edit hop",
         "addHop": "Add a hop",
         "add": {
-          "source": "Source",
+          "source": "Provider",
           "model": "Model",
-          "search": "Search sources or models",
+          "search": "Search providers or models",
           "confirm": "Add",
-          "noMatch": "No source or model matches that",
-          "none": "No source/model pair is available to add",
+          "noMatch": "No provider or model matches that",
+          "none": "No provider/model pair is available to add",
           "manual": "Enter a model ID manually"
         },
         "edit": {
@@ -2093,16 +2119,16 @@
         },
         "editModel": "Edit model",
         "removeModel": "Remove model",
-        "sourceMissing": "Source missing",
+        "sourceMissing": "Provider missing",
         "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Replace or remove it before saving.",
         "reorder": {
-          "label": "Reorder by Source order",
+          "label": "Reorder by provider order",
           "grabbed": "Hop {{position}} grabbed. Use arrow keys to move.",
           "position": "Moved to hop {{position}}.",
           "dropped": "Dropped at hop {{position}}.",
           "cancelled": "Reorder cancelled. Restored to hop {{position}}.",
-          "sorted": "Reordered by Source order.",
-          "unchanged": "The route chain already matches Source order."
+          "sorted": "Reordered by provider order.",
+          "unchanged": "The route chain already matches provider order."
         },
         "grip": "Reorder this hop",
         "loading": "Loading route chain…",
@@ -2144,17 +2170,16 @@
         "deletedSource": "deleted"
       },
       "addKey": {
-        "saveFirstHint": "Save your provider and try fetching its models. Testing is optional and can be done afterwards.",
         "title": "Add API key",
         "subtitle": "API key and model interface",
         "field": {
-          "vendor": "Vendor",
-          "vendor.custom": "Custom · compatible endpoint",
-          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like to prefill the official address and pin the interface",
-          "vendor.search": "Search vendors",
-          "vendor.empty": "No vendor by that name",
+          "vendor": "Provider",
+          "vendor.custom": "Other provider · enter its address",
+          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address and API format are filled in for you",
+          "vendor.search": "Search providers",
+          "vendor.empty": "No provider by that name",
           "name": "Name (optional)",
-          "protocol": "Interface type",
+          "protocol": "API format",
           "protocol.hint": "A declared interface is not proof of credential validity or model compatibility",
           "baseUrl": "Base URL",
           "baseUrl.hint": "API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path",
@@ -2165,25 +2190,25 @@
         "pull": {
           "result_one": "Fetched {{count}} model",
           "result_other": "Fetched {{count}} models",
-          "empty": "Connected, but this source lists no models"
+          "empty": "Connected, but this provider lists no models"
         },
         "detect": "Detect",
         "confirm": "Add provider",
         "adding": "Connecting…",
         "adding.detail": "Connect, validate the interface, fetch the model list · usually 1–3s",
         "saving": "Saving…",
-        "saving.detail": "Saving this source",
+        "saving.detail": "Saving this provider",
         "fail": {
           "subtitle": "Model-call verification is still pending",
-          "auth": "The upstream rejected this credential",
-          "auth.detail": "Check the API key, interface type, and the Base URL's API root path",
+          "auth": "The provider rejected this credential",
+          "auth.detail": "Check the API key, API format, and the Base URL's API root path",
           "address": "Wrong address: 404 Not Found",
           "network": "Could not connect to this address (unreachable or timed out)",
           "undetermined": "Connected, but we could not identify the model interface",
           "inventory": "The interface was confirmed, but its model list did not come back",
           "unclassified": "Connection failed. Check the address and API key, then retry",
-          "engineDown": "The gateway is not responding — try again",
-          "save": "The source is not confirmed saved"
+          "engineDown": "Model Hub is not responding — try again",
+          "save": "The provider is not confirmed saved"
         },
         "retry": "Retry",
         "undetermined": {
@@ -2198,12 +2223,15 @@
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
           "search": "Search service",
-          "idleHint": "Identified automatically once Base URL and API key are filled",
-          "detecting": "Identifying the interface…",
-          "manual": "Manually specify interface type",
+          "idleHint": "Detected automatically once Base URL and API key are filled. Saving doesn't wait for it.",
+          "detecting": "Detecting the API format… You can save without waiting.",
+          "manual": "Choose the API format manually",
           "catalogPinned": "Built-in catalog",
           "catalogPinned.hint": "Interface supplied by the built-in catalog; credential verification is separate",
-          "declared": "Manually specified"
+          "declared": "Manually specified",
+          "detected": "Recognised as {{format}}",
+          "unrecognised": "Couldn't recognise the format, so {{format}} is used. Pick another if it's wrong.",
+          "unrecognisedRejected": "The endpoint rejected this key, so the format couldn't be recognised; {{format}} is used."
         },
         "inventory": {
           "title": "The interface is identified — but its model list did not come back this time"
@@ -2211,7 +2239,7 @@
         "addAnyway": "Add anyway",
         "saveUnverified": "Save unverified",
         "success": {
-          "title": "Done → the dialog closes and you land on Source details · Models",
+          "title": "Done → the dialog closes and you land on Provider details · Models",
           "detail": "The model list, refetch and reasoning tiers are all maintained there"
         },
         "cancel": "Cancel"
@@ -2229,25 +2257,22 @@
         "opt": {
           "added": "Already added",
           "native": {
-            "label": "Use natively",
+            "label": "Use own login",
             "desc": {
               "claude": "Claude Code manages this native sign-in on this machine; credentials stay in its own store."
             }
           },
           "hub": {
-            "label": "Sign in as a gateway source",
+            "label": "Add as a Model Hub provider",
             "desc": {
-              "claude": "Hand this subscription to the gateway so it can supply Codex, OpenCode and other Agents.",
-              "chatgpt": "The gateway supplies it to Codex and other Agents, with usage, quota and takeover all visible."
+              "claude": "Model Hub manages this subscription, so Vibey, Codex, OpenCode and others can use it.",
+              "chatgpt": "Model Hub supplies it to Codex and other Agents, with usage, quota and takeover all visible."
             }
           }
         },
-        "badge": {
-          "recommended": "Recommended",
-          "secondary": "Second choice"
-        },
         "tos": {
-          "claude": "The subscription terms authorize only you, inside Claude's official clients. Supplying it to other Agents is out-of-scope use and the account may be restricted."
+          "claude": "Anthropic's subscription terms cover only its own apps.",
+          "learnMore": "Learn more"
         },
         "hint": {
           "claude": "You can have both — add them one at a time."
@@ -2258,9 +2283,9 @@
         "error": {
           "oauthFailed": "Sign-in did not complete. You can retry.",
           "startFailed": "Could not confirm the sign-in started — you can retry",
-          "engineDown": "The gateway is not responding. Please retry.",
+          "engineDown": "Model Hub is not responding. Please retry.",
           "loginInProgress": "Another native login is already in progress. Finish or cancel it, then retry.",
-          "alreadyBound": "This backend's native login slot is already taken. Add it as a gateway-held source instead."
+          "alreadyBound": "This backend's native login slot is already taken. Add it as a Model Hub provider instead."
         }
       },
       "oauth": {
@@ -2274,7 +2299,7 @@
           "reauth": "Sign in to “{{name}}” again"
         },
         "starting": "Preparing…",
-        "connected": "Connected — added to your sources",
+        "connected": "Connected — added to your providers",
         "step1": {
           "authLink": "Open the authorization link (any device's browser works)",
           "devicePage": "Open the device authorization page"
@@ -2285,7 +2310,10 @@
         "callback": {
           "hint": "After signing in, paste the callback URL your browser landed on",
           "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again.",
-          "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to."
+          "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to.",
+          "cantConnect": "After you sign in, the page may say it can't connect. That's expected: copy the full address from the address bar and paste it here.",
+          "auto": "Signing in on the computer running Avibe? This will continue on its own.",
+          "pasteInstead": "Paste the address instead"
         },
         "deviceCode": {
           "hint": "Enter the device code on that page; this continues automatically"
@@ -2300,48 +2328,50 @@
           "start": "Couldn't start authorization, please retry",
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
-          "finalize": "Authorized, but couldn't create the source — please retry",
-          "nativeApply": "Authorization and source configuration were saved, but this attempt could not apply the backend configuration. Check and retry application in backend settings.",
-          "finalizeReauth": "Signed in, but this source still isn't working — please retry",
+          "finalize": "Authorized, but couldn't create the provider — please retry",
+          "nativeApply": "Authorization and provider configuration were saved, but this attempt could not apply the backend configuration. Check and retry application in backend settings.",
+          "finalizeReauth": "Signed in, but this provider still isn't working — please retry",
           "details": {
             "show": "Show details",
             "hide": "Hide details"
           }
-        }
+        },
+        "openSignIn": "Open sign-in page",
+        "copyLink": "Copy link"
       },
       "toast": {
         "reorderFailed": "Couldn't save the new order",
-        "connected": "Connected to the gateway",
+        "connected": "Connected to Model Hub",
         "connectFailed": "Couldn't connect, please retry",
         "refreshFailed": "Couldn't refresh, please retry"
       },
       "supply": {
-        "degraded": "On the gateway · a source is down, already switched to the next one",
-        "waiting": "On the gateway · every source is cooling down; turns fail until one recovers",
-        "interrupted": "On the gateway · supply interrupted, the next turn will fail",
-        "noSources": "On the gateway · no source enabled yet, the next turn will fail",
-        "nothingRunnable": "On the gateway · no enabled source can serve right now, the next turn will fail"
+        "degraded": "On Model Hub · a provider is down, already switched to the next one",
+        "waiting": "On Model Hub · every provider is cooling down; turns fail until one recovers",
+        "interrupted": "On Model Hub · supply interrupted, the next turn will fail",
+        "noSources": "On Model Hub · no provider enabled yet, the next turn will fail",
+        "nothingRunnable": "On Model Hub · no enabled provider can serve right now, the next turn will fail"
       },
       "supplyMode": {
         "title": "Supply mode",
-        "currentHub": "Current: Gateway",
-        "currentDirect": "Current: Direct",
-        "switchedHub": "Switched to Gateway",
-        "switchedDirect": "Switched to Direct",
+        "currentHub": "Current: managed by Model Hub",
+        "currentDirect": "Current: own login",
+        "switchedHub": "Now managed by Model Hub",
+        "switchedDirect": "Now using its own login",
         "switchFailed": "Couldn't switch mode, please retry",
         "hub": {
-          "title": "Gateway mode",
+          "title": "Managed by Model Hub",
           "recommended": "Recommended · default",
           "openModels": "Open Models page",
           "description": "Sign-ins, API keys and per-model Routes are managed in Settings → Models."
         },
         "direct": {
-          "title": "Direct mode",
+          "title": "Own login",
           "description": "{{backend}} uses its own configuration. Avibe does not manage its credentials or model routes.",
-          "detected": "Existing direct config detected: {{detail}} — import it into the gateway in one click",
-          "import": "Import to gateway…"
+          "detected": "Existing configuration detected: {{detail}} — import it into Model Hub in one click",
+          "import": "Import to Model Hub…"
         },
-        "fixHint": "Add or enable a source on the Models page to bring it back.",
+        "fixHint": "Add or enable a provider on the Models page to bring it back.",
         "warningWithFix": "{{warning}}. {{fixHint}}"
       },
       "migration": {
@@ -2365,7 +2395,7 @@
           "helper": "The key comes from a script and can't be read.",
           "token": "This login token isn't supported.",
           "headers": "Custom request headers aren't supported.",
-          "transport": "The gateway can't send this key that way.",
+          "transport": "Model Hub can't send this key that way.",
           "fallback": "Can't be migrated. Add it manually."
         },
         "applying": "Migrating…",
@@ -2378,7 +2408,7 @@
           "itemConflict": "The selected configuration could not be migrated safely. Reopen the migration dialog to scan the latest configuration. If it still fails, check the file format and access permissions.",
           "configurationBlocked": "Adjust the native configuration, then scan again.",
           "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub.",
-          "reauthorizationRequired": "This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing source in Model Hub instead of importing this login."
+          "reauthorizationRequired": "This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing provider in Model Hub instead of importing this login."
         },
         "applied_one": "Migration complete",
         "applied_other": "Migration complete",
@@ -2387,7 +2417,7 @@
         "notes": {
           "customBaseUrl": "Includes a custom Base URL",
           "keepNativeSanctioned": "Stays in the CLI's own store (sanctioned)",
-          "keepNativeReauthHint": "Kept native; add a separate gateway-held subscription explicitly",
+          "keepNativeReauthHint": "Kept native; add a separate subscription to Model Hub explicitly",
           "fromOpencode": "From the opencode config"
         },
         "source": {
@@ -2414,7 +2444,7 @@
       },
       "sourceDetail": {
         "advanced": "Advanced settings",
-        "back": "Back to sources",
+        "back": "Back to providers",
         "close": "Close provider details",
         "gone": "This provider is no longer available.",
         "modelsHeading": "Models",
@@ -2434,29 +2464,29 @@
           "needsAction": {
             "oauthExpired": "Sign in again",
             "balanceExhausted": "Out of balance",
-            "credentialRevoked": "Credential revoked",
+            "credentialRevoked": "Invalid or no access",
             "accountBanned": "Account restricted",
             "planExcludesProduct": "Plan doesn't include Codex",
             "spendLimitReached": "Usage limit reached"
           },
           "error": "Error",
           "standbyHintLabel": "What this status means",
-          "standbyHint": "This source is healthy. It reads as in use once a backend in Gateway mode serves a route through it.",
+          "standbyHint": "This provider is healthy. It reads as in use once a backend on Model Hub serves a route through it.",
           "saved": "Saved",
           "savedHintLabel": "About this connection",
-          "savedHint": "Your configuration is saved. This source has not completed a successful model request with its current configuration yet. The status updates after a successful request.",
+          "savedHint": "Your configuration is saved. This provider has not completed a successful model request with its current configuration yet. The status updates after a successful request.",
           "listUpdated": "· model list updated {{time}}"
         },
         "summary_one": "{{host}} · {{count}} model",
         "summary_other": "{{host}} · {{count}} models",
         "action": {
           "refetch": "Refetch",
-          "addModel": "Add model"
+          "addModel": "Add model ID"
         },
         "manage": {
           "label": "Manage {{source}}",
-          "edit": "Edit source",
-          "remove": "Remove source"
+          "edit": "Edit provider",
+          "remove": "Remove provider"
         },
         "edit": {
           "title": "Edit {{source}}",
@@ -2466,8 +2496,8 @@
           "cancel": "Cancel",
           "save": "Save",
           "saving": "Saving…",
-          "fail": "The source was not saved",
-          "verifyFail": "Could not verify whether the source was saved",
+          "fail": "The provider was not saved",
+          "verifyFail": "Could not verify whether the provider was saved",
           "validation": {
             "displayNameRequired": "Enter a display name",
             "displayNameTooLong": "Use 64 characters or fewer",
@@ -2475,12 +2505,12 @@
             "baseUrlCredential": "Remove credentials and credential-shaped query parameters from the Base URL"
           },
           "settlement": {
-            "title": "The source was updated"
+            "title": "The provider was updated"
           }
         },
         "remove": {
           "settlement": {
-            "title": "The source was removed"
+            "title": "The provider was removed"
           }
         },
         "refetch": {
@@ -2494,13 +2524,15 @@
           "edit": "Edit reasoning tiers for {{model}}"
         },
         "fail": {
-          "refetch": "The fetch did not come back. The list below is the last one this page actually read",
+          "refetch": "Could not fetch models. The last model list is shown below.",
+          "upstreamStatus": "HTTP {{status}}",
+          "upstreamError": "HTTP {{status}} · {{detail}}",
           "tier": "The tier was not saved",
           "tierManaged": "This model's tiers are set automatically, so the change was not saved",
           "addModel": "The model was not added",
           "removeModel": "The model was not removed",
-          "deleteSource": "The source was not removed",
-          "verifyDeleteSource": "Could not verify whether the source was removed"
+          "deleteSource": "The provider was not removed",
+          "verifyDeleteSource": "Could not verify whether the provider was removed"
         },
         "retry": "Try again",
         "dismissUnverified": "Dismiss unverified result",
@@ -2532,9 +2564,9 @@
         "addRow": {
           "hint": "Use this when a model is not discoverable, or when you only want one of them"
         },
-        "empty": "This source returned no models. Add one by hand, or refetch.",
-        "emptyNeverFetched": "This source's model list has never come back. Deal with the status above, fetch again, or add a model by hand.",
-        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers the provider or the catalog declared cannot be edited; the rest are yours to type. The interface type is confirmed when the source is added, shown here, and not editable."
+        "empty": "This provider returned no models. Add one by hand, or refetch.",
+        "emptyNeverFetched": "This provider's model list has never come back. Deal with the status above, fetch again, or add a model by hand.",
+        "footnote": "This page answers only \"which models does this provider have\". Which route a model takes is set under Routes. Tiers the provider or the catalog declared cannot be edited; the rest are yours to type. The API format is confirmed when the provider is added, shown here, and not editable."
       },
       "guard": {
         "label": "Hops that will be removed",
@@ -2544,18 +2576,18 @@
           "position": "Order #{{n}}"
         },
         "hint": {
-          "interrupt": "Some models will be left with no usable source."
+          "interrupt": "Some models will be left with no usable provider."
         },
         "gap": {
-          "label": "Models that will be left with no source",
+          "label": "Models that will be left with no provider",
           "subject": "{{backend}} · {{menuModel}}",
           "agents": "Agents pinned to it: {{agents}}"
         },
         "result": {
           "label": "Removed hops",
-          "gapLabel": "Models left with no source",
+          "gapLabel": "Models left with no provider",
           "hint": {
-            "interrupt": "Some models now have no usable source."
+            "interrupt": "Some models now have no usable provider."
           }
         },
         "cancel": "Cancel",
@@ -2568,12 +2600,12 @@
           "deleteSource": "Remove {{source}}?"
         },
         "subtitle": {
-          "refetch": "This refetch drops models from this source's inventory.",
-          "removeModel": "This model disappears from this source's inventory.",
-          "saveRoute": "This save leaves a configured model with no usable source",
-          "replaceKey": "The replacement changes this source's model inventory.",
-          "editSource": "Changing the endpoint can change this source's model inventory and routes.",
-          "deleteSource": "This removes the source from every Agent and route that uses it."
+          "refetch": "This refetch drops models from this provider's inventory.",
+          "removeModel": "This model disappears from this provider's inventory.",
+          "saveRoute": "This save leaves a configured model with no usable provider",
+          "replaceKey": "The replacement changes this provider's model inventory.",
+          "editSource": "Changing the endpoint can change this provider's model inventory and routes.",
+          "deleteSource": "This removes the provider from every Agent and route that uses it."
         },
         "confirm": {
           "refetch": "Refetch anyway",
@@ -2581,7 +2613,7 @@
           "saveRoute": "Save anyway",
           "replaceKey": "Replace anyway",
           "editSource": "Save anyway",
-          "deleteSource": "Remove source"
+          "deleteSource": "Remove provider"
         }
       },
       "repair": {
@@ -2591,8 +2623,8 @@
         "reenable": "Re-enable",
         "reauthTitle": "Sign in to “{{name}}” again?",
         "reauthBody": {
-          "immediate": "The old sign-in stops working as soon as you start, and every source using it goes unavailable. Finishing restores only this one — the others need their own sign-in.",
-          "onFailure": "If this sign-in doesn’t go through, the source needs attention until you sign in again."
+          "immediate": "The old sign-in stops working as soon as you start, and every provider using it goes unavailable. Finishing restores only this one — the others need their own sign-in.",
+          "onFailure": "If this sign-in doesn’t go through, the provider needs attention until you sign in again."
         },
         "reauthConfirm": "Start sign-in",
         "replaceTitle": "Replace the API key for “{{name}}”",
@@ -2603,9 +2635,9 @@
         "replaceFailed": "Couldn't replace the key, please retry",
         "forceTitle": "Replace it anyway?",
         "forceConfirm": "Replace anyway",
-        "gapsTitle": "These agents will have no source left:",
-        "gapsDone": "These agents now have no source left:",
-        "gaps": "Some agents now have no source left",
+        "gapsTitle": "These agents will have no provider left:",
+        "gapsDone": "These agents now have no provider left:",
+        "gaps": "Some agents now have no provider left",
         "repaired": "Working again",
         "refreshed": "Updated",
         "unresolved": "Still not working",
@@ -2613,7 +2645,7 @@
       },
       "tools": {
         "title": "Tools",
-        "subtitle": "Tools Vibey can use in a conversation. Searches send the query to the vendor that runs them; if one fails, the query may be retried with another of your Sources. Image prompts go to the image model's vendor. On metered Sources each call is billed.",
+        "subtitle": "Tools Vibey can use in a conversation. Searches send the query to the vendor that runs them; if one fails, the query may be retried with another of your providers. Image prompts go to the image model's vendor. On metered providers each call is billed.",
         "group": {
           "search": "Search",
           "generate": "Generate"
@@ -2669,12 +2701,12 @@
         },
         "order": {
           "title": "Execution order",
-          "caption": "When the current model can't search natively, Vibey asks these Sources to search for it, in this order.",
-          "captionCustom": "When the current model can't search natively, Vibey asks these Sources to search for it, in this order. Customized.",
+          "caption": "When the current model can't search natively, Vibey asks these providers to search for it, in this order.",
+          "captionCustom": "When the current model can't search natively, Vibey asks these providers to search for it, in this order. Customized.",
           "summaryAuto": "Execution order: automatic",
           "summaryCustom": "Execution order: customized",
           "reset": "Reset to automatic",
-          "empty": "None of your Sources can search for models that can't run {{toolInline}} natively.",
+          "empty": "None of your providers can search for models that can't run {{toolInline}} natively.",
           "moveUp": "Move {{source}} up",
           "moveDown": "Move {{source}} down",
           "moved_one": "Moved {{source}} to position {{position}} of {{count}}.",
@@ -2689,8 +2721,8 @@
           "offPosition": "—"
         },
         "sources": {
-          "title": "Status by Source",
-          "caption": "From real requests. A refusal stays until you clear it, or until the Source's settings, the engine or Avibe change. After a clear, the next request tries that Source again."
+          "title": "Status by provider",
+          "caption": "From real requests. A refusal stays until you clear it, or until the provider's settings, the engine or Avibe change. After a clear, the next request tries that provider again."
         },
         "pair": {
           "ok": "OK · {{date}}",
@@ -2783,7 +2815,7 @@
         "viewOrder": "View fetch order",
         "price": "${{usd}} / 1k pages",
         "egress": "Local reads leave this Avibe runtime directly: the site sees its egress IP and browser-like requests. Services receive the submitted URL when they read it.",
-        "custody": "Configured service keys stay with the gateway; Local, Exa (free) and Jina Reader (free) need no key.",
+        "custody": "Configured service keys stay in Model Hub; Local, Exa (free) and Jina Reader (free) need no key.",
         "vendorName": {
           "local": "Local",
           "exa-mcp": "Exa (free)",
@@ -2841,9 +2873,9 @@
         "priceDate": "API list price · {{date}}",
         "builtInPrice": "Built in · no key or setup",
         "priceNote": "Prices are the catalog's dated API list prices. Free allowances, plans and actual bills may differ.",
-        "custody": "Search service keys stay with the gateway, like other provider keys. They are never passed to the model or Agent.",
+        "custody": "Search service keys stay in Model Hub, like other provider keys. They are never passed to the model or Agent.",
         "keylessQueryDestination": "Queries go directly from this Avibe runtime to {{endpoint}}, which can see the connection's IP.",
-        "keylessCustody": "Added-service keys stay in the gateway; free built-in services need no key, and no key is given to the model or Agent.",
+        "keylessCustody": "Added-service keys stay in Model Hub; free built-in services need no key, and no key is given to the model or Agent.",
         "queryDestination": "Queries are sent to the service that runs the search.",
         "queryVendor": "Search queries are sent to {{vendor}}.",
         "placement": "A new search service joins before the model executors, including in a saved order. Change the order in Tools → Web search.",
@@ -2896,11 +2928,11 @@
         },
         "noKey": "No key needed",
         "priceFootnote": "Prices are API list prices. Model executors also use model tokens; your bill is final.",
-        "custodyShort": "Keys stay in the gateway, never with the model",
+        "custodyShort": "Keys stay in Model Hub, never with the model",
         "orderAbout": "About the search order"
       },
       "capability": {
-        "readFailed": "Couldn't read this Source's tool capabilities.",
+        "readFailed": "Couldn't read this provider's tool capabilities.",
         "col": "Capabilities",
         "chip": {
           "ok": "{{tool}} · OK · {{date}}",
@@ -2912,26 +2944,26 @@
           "executor": "This model ran {{toolInline}} for other models as the executor. Display only; it doesn't change routing.",
           "direct": "This model generated images on its image endpoint. Display only; it doesn't change routing.",
           "service": "This search service ran {{toolInline}} in a real request. Display only; it doesn't change routing.",
-          "refused": "This Source refused {{toolInline}} in a real request on this model. Until you clear it, Vibey does it another way.",
-          "replay": "This model runs {{toolInline}} on this Source but refused earlier results sent back to it, so they go back as plain text."
+          "refused": "This provider refused {{toolInline}} in a real request on this model. Until you clear it, Vibey does it another way.",
+          "replay": "This model runs {{toolInline}} on this provider but refused earlier results sent back to it, so they go back as plain text."
         },
         "recorded": "Recorded",
         "recordedValue": "{{time}} · a real request",
         "reason": "Reason",
         "kept": "Kept",
-        "keptValue": "until you clear it, or the Source's settings, the engine or Avibe change",
+        "keptValue": "until you clear it, or the provider's settings, the engine or Avibe change",
         "lastOk": "Last OK",
         "clear": "Clear",
         "clearTool": "Clear the {{tool}} refusal of {{model}}",
         "clearEffort": "Clear the {{effort}} refusal of {{model}}",
-        "clearHint": "Supported now? Select Clear on the chip, and the next request tries this Source again.",
+        "clearHint": "Supported now? Select Clear on the chip, and the next request tries this provider again.",
         "clearFailed": "Couldn't clear the refusal. Please retry.",
         "accessibleName": "{{label}}. {{explanation}}",
         "accessibleNameFacts": "{{label}}. {{explanation}} {{facts}}",
         "accessibleFact": "{{term}}: {{value}}.",
         "effort": {
           "unsupported": "{{effort}} · not supported",
-          "explain": "This Source refused this reasoning effort, so requests at it skip this Source."
+          "explain": "This provider refused this reasoning effort, so requests at it skip this provider."
         }
       }
     },
@@ -3075,7 +3107,7 @@
       "engine_unavailable": "The Hub isn't responding, please retry",
       "submission_failed": "Couldn't submit what you pasted, please retry",
       "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
-      "binding_failed": "Signed in, but couldn't attach this account to the source (another source may already use it). Please retry.",
+      "binding_failed": "Signed in, but couldn't attach this account to the provider (another provider may already use it). Please retry.",
       "account_already_added": "This account is already added. Sign in with a different account to add another subscription.",
       "expired": "Authorization timed out, please reconnect",
       "code_rejected": "The provider rejected this authorization code: the pasted address may be incomplete, come from an earlier sign-in link, or already be used or expired. Retry to get a new sign-in link, then paste the address it leads to.",
@@ -3086,15 +3118,15 @@
     "probe": {
       "native_cli_unavailable": "Can't use the CLI's sign-in",
       "no_candidate": {
-        "waiting": "Every source is cooling down",
-        "interrupted": "No source can serve this model right now"
+        "waiting": "Every provider is cooling down",
+        "interrupted": "No provider can serve this model right now"
       }
     },
     "source": {
       "cooldown": {
         "rate_limited": "Rate limited",
         "quota_exhausted": "Cycle quota used up",
-        "server_error": "Upstream server error"
+        "server_error": "Provider server error"
       },
       "backoff": {
         "connection_failed": "Connection failed, retrying shortly"
@@ -3102,10 +3134,10 @@
       "needs_action": {
         "oauth_expired": "Needs a new sign-in",
         "balance_exhausted": "Out of balance — top it up",
-        "credential_revoked": "Credential revoked — enter a new one",
+        "credential_revoked": "Credential invalid or lacks permission — check or replace it",
         "account_banned": "Account is restricted",
-        "plan_excludes_product": "Plan doesn't include Codex — upgrade it or use another Source",
-        "spend_limit_reached": "Usage limit reached — raise it or use another Source"
+        "plan_excludes_product": "Plan doesn't include Codex — upgrade it or use another provider",
+        "spend_limit_reached": "Usage limit reached — raise it or use another provider"
       },
       "error": {
         "unclassified": "Unknown error — temporarily unavailable"
@@ -3272,11 +3304,13 @@
     "provider_rerank_response_invalid": "The reranking provider returned an invalid response.",
     "provider_unavailable": "The provider is unavailable.",
     "provider_error": "The provider rejected the request.",
-    "endpoint_not_configured": "The provider endpoint is not configured."
+    "endpoint_not_configured": "The provider endpoint is not configured.",
+    "avault_upgrade_required": "This needs a newer avault. Update it under Settings → Dependencies first.",
+    "sandbox_curve_unsupported": "This Avibe's secure sandbox can't create Solana keys yet. Nothing was saved. Update Avibe, then try again."
   },
   "modelHub": {
     "errors": {
-      "authentication_failed": "The API key was rejected. Check it and try again.",
+      "authentication_failed": "API key invalid or lacks permission. Check or replace it.",
       "credential_replacement_unverified": "The new key could not be verified yet. Your old key is unchanged; please try again later.",
       "source_model_tiers_managed": "This model's tiers are set automatically, so the change was not saved"
     }
@@ -3831,6 +3865,7 @@
         "enable": "Enable notifications",
         "enabled": "Notifications on",
         "enabledPwa": "PWA notifications on",
+        "registering": "Registering this device…",
         "disable": "Disable",
         "disablePending": "Notifications are off; device cleanup is still pending.",
         "disableFailed": "Notifications are off, but cleanup could not be confirmed. Try again later.",
@@ -3840,6 +3875,7 @@
         "testBody": "Notifications are ready.",
         "testSent": "Test notification sent",
         "testFailed": "Test notification failed",
+        "testRegistering": "Still registering this device; try again in a moment",
         "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
       },
       "navUnread": "Inbox, {{count}} unread",
@@ -4960,7 +4996,7 @@
       "model": "Model",
       "modelPlaceholder": "e.g. claude-sonnet-4-6",
       "effort": "Effort",
-      "effortRefused": "No Source accepts {{effort}} now, so the agent was not created. Check the effort and create it again.",
+      "effortRefused": "No provider accepts {{effort}} now, so the agent was not created. Check the effort and create it again.",
       "effortUnconfirmed": "Model Hub could not confirm the effort just now, so the agent was not created. Try again.",
       "systemPrompt": "System prompt",
       "systemPromptHint": "Optional",
@@ -5638,9 +5674,13 @@
       "sheetTitle": "Agent & model",
       "model": "Model",
       "effort": "Effort",
+      "effortDefault": "Default",
+      "effortDefaultHint": "The model's own setting",
+      "effortDefaultNamed": "Default ({{effort}})",
+      "effortDefaultAgentHint": "The Agent's setting",
       "effortNotOn": "Not on {{sources}}",
-      "effortNotOnSome": "Not on some Sources",
-      "effortRefused": "No Source accepts it now · clear it under Models → Sources",
+      "effortNotOnSome": "Not on some providers",
+      "effortRefused": "No provider accepts it now · clear it under Models → Providers & routing",
       "speed": "Speed",
       "fast": "Fast",
       "fastOn": "Fast mode on",
@@ -5794,9 +5834,9 @@
           "image_not_saved": "The image could not be saved.",
           "image_no_store": "Nothing here can keep a generated image.",
           "executor_no_image": "The proxy executor returned no image.",
-          "gateway_unreachable": "Couldn't reach the model gateway.",
-          "gateway_refused": "The model gateway refused the call.",
-          "gateway_no_result": "The model gateway returned no result.",
+          "gateway_unreachable": "Couldn't reach Model Hub.",
+          "gateway_refused": "Model Hub refused the call.",
+          "gateway_no_result": "Model Hub returned no result.",
           "image_param_unsupported": "The chosen image model doesn't take one of the arguments.",
           "image_model_unavailable": "The chosen image model isn't available.",
           "image_argument_invalid": "The image call had an argument it can't send.",
@@ -5893,9 +5933,9 @@
         "nativeInterrupted": "Native search was interrupted; switched to {{provider}}.",
         "interruption": {
           "message": "Model response interrupted: {{reason}}",
-          "overloaded": "upstream overloaded",
+          "overloaded": "provider overloaded",
           "disconnected": "stream disconnected",
-          "upstream": "upstream error",
+          "upstream": "provider error",
           "retried": "retried automatically",
           "retriedLabel": "· retried automatically"
         },
@@ -5977,6 +6017,9 @@
       "retryRequired": "Retry needed · {{count}}",
       "retryHint": "Automatic startup retries stopped after failure. Your input is retained. Resolve the error, then use Send now or Retry on the failure notice.",
       "retryHintAgentUnavailable": "The Agent can't run, so your input is kept. Use Continue on Vibey on the failure notice, or Send now once the Agent is back.",
+      "waitingForModel": "Waiting for a model · {{count}}",
+      "retryHintNoModel": "Connect a model, then send.",
+      "openModels": "Connect a model",
       "sendNow": "Send now",
       "sendingNow": "Sending…",
       "confirmingNow": "Send status not confirmed",
@@ -6002,17 +6045,17 @@
       "hide": "Hide details",
       "outcome": {
         "served": "{{model}} was eventually served.",
-        "exhausted": "Every source for {{model}} failed upstream.",
+        "exhausted": "Every provider for {{model}} failed.",
         "failed_terminal": "The upstream API rejected the request for {{model}}.",
         "failed_local": "The request for {{model}} failed; see the reason below.",
-        "no_candidate": "No source could serve {{model}} when the request was made.",
+        "no_candidate": "No provider could serve {{model}} when the request was made.",
         "canceled": "The request for {{model}} was canceled."
       },
       "httpStatus": "HTTP status",
       "errorCode": "Error code",
       "reasonLabel": "Reason",
       "errorKind": "Failure kind",
-      "blockers": "Sources that were unavailable",
+      "blockers": "Providers that were unavailable",
       "upstreamNote": "These come from the upstream provider's API. Avibe keeps the status, error code, and the provider's error message with credentials removed, up to 400 characters.",
       "upstreamDetail": "Upstream said",
       "connectionDetail": "Connection error",
@@ -6027,19 +6070,22 @@
         "recovery": "Recovering",
         "manual": "Switched manually",
         "credential_expired": "Credential expired",
-        "credential_revoked": "Credential revoked",
+        "credential_revoked": "Credential invalid or lacks permission",
         "balance_exhausted": "Balance exhausted",
         "account_banned": "Account suspended",
         "plan_excludes_product": "Plan doesn't include this product",
         "spend_limit_reached": "Usage limit reached",
         "permission_denied": "Permission denied",
         "unclassified_error": "Unclassified upstream error",
-        "no_enabled_source": "No source is enabled",
-        "no_eligible_source": "No source can serve this model",
+        "no_enabled_source": "No provider is enabled",
+        "no_eligible_source": "No provider can serve this model",
         "route_unconfigured": "No route configured",
-        "source_missing": "Source no longer exists",
-        "model_unsupported": "Model not offered by this source"
+        "source_missing": "Provider no longer exists",
+        "model_unsupported": "Model not offered by this provider"
       }
+    },
+    "pendingSend": {
+      "sending": "Sending…"
     }
   },
   "vaults": {
@@ -6082,8 +6128,7 @@
       "btcLegacy": "BTC Legacy",
       "solana": "Solana",
       "copy": "Copy {{label}} address",
-      "protectedBitcoinWarning": "Typed Bitcoin Taproot transaction details are independently checked in the secure approval window. The network label is the requester's selection, not chain proof.",
-      "standardBitcoinTaprootWarning": "BTC Taproot uses schnorr-secp256k1-bip341-keypath. Older avault builds fail closed; Avibe never falls back to raw BIP340."
+      "protectedBitcoinWarning": "Typed Bitcoin Taproot transaction details are independently checked in the secure approval window. The network label is the requester's selection, not chain proof."
     },
     "chat": {
       "floatApprovals": "Waiting for your approval · {{count}}"
@@ -6121,7 +6166,7 @@
     "sort": {
       "label": "Sort",
       "name": "Name",
-      "recent": "Recently used",
+      "recent": "Last active",
       "added": "Recently added"
     },
     "grants": {
@@ -6293,20 +6338,18 @@
       "kindStaticHelp": "A token, password, or any text value.",
       "kindKeypair": "Signing key",
       "kindKeypairHelp": "A signing key generated in your browser.",
-      "nameHint": "Start with a letter or underscore; then use letters, numbers, or underscore · case preserved",
-      "signingKeyHelp": "A new secp256k1 signing key is created in your browser. The private key is sealed in your browser — standard keys are signed by avault locally, protected keys are signed in your browser — and only the public key is stored in the clear.",
-      "signingKeyProtectedHelp": "A new secp256k1 signing key is generated inside the sandbox and sealed there. Only the ciphertext and public addresses reach Avibe — the private key never leaves the sandbox. Protected Bitcoin spending is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; legacy and SegWit-v0 inputs remain unsupported.",
-      "signingKeyProtectedBornHint": "The private key was born inside the sandbox and never entered this app. Protected Bitcoin spending is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; keep legacy and SegWit-v0 inputs unsupported.",
+      "nameHint": "Start with a letter or underscore, then letters, numbers, or underscores. Case is kept.",
       "signingGenerate": "Generate",
       "signingImport": "Import",
-      "signingGenerateCta": "Generate signing key",
-      "signingRegenerate": "Generate a different key",
       "signingImportPlaceholder": "Paste a 32-byte hex private key (64 hex chars)",
       "signingAddresses": "Addresses",
       "signingAddressesLoading": "Generating addresses…",
       "signingAddressesUnavailable": "Couldn't derive addresses for this key.",
-      "signingAddressesHint": "Derived from the key. Standard Bitcoin Taproot key-path signing uses schnorr-secp256k1-bip341-keypath and requires a separately installed supporting avault build; older avault builds fail closed and never fall back to raw BIP340. Protected Bitcoin spending is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; network labels are requester-selected metadata, not chain proof.",
       "signingNeedsAvault": "Signing keys need avault {{version}} or newer installed.",
+      "chainLabel": "Chain",
+      "chainEvmBitcoin": "EVM / Bitcoin",
+      "chainSolana": "Solana",
+      "solanaImportPlaceholder": "Paste a Solana CLI keypair (a JSON array of 64 numbers) or a base58 secret key",
       "checkingAvault": "Checking avault…",
       "p2Unavailable": "Browser-side vault create requires avault {{version}} or newer. Installed: {{installed}}. Install a compatible avault release before saving standard secrets.",
       "browserSealingPending": "Browser-side sealing requires a compatible avault release. This UI never sends plaintext values to Python.",
@@ -6329,7 +6372,7 @@
       "protection": "Who can unlock this secret?",
       "protectedProtection": "Protected",
       "standardProtection": "Standard",
-      "protectedHelp": "The agent can't use it on its own. It's unlocked only after you decrypt it in your browser with your passkey (end-to-end encrypted). Safe even if this computer is stolen — good for crypto wallets and any important secret.",
+      "protectedHelp": "The agent can't use it on its own: you unlock it with your passkey in your browser each time (end-to-end encrypted), so it stays safe even if this computer is stolen. Good for crypto wallets and other important secrets.",
       "standardHelp": "The agent can use it on its own. Good for API keys, environment variables, and most secrets.",
       "alwaysAskSign": "Ask me before every signature",
       "alwaysAskSignHelp": "Standard keys can sign on their own. For a high-value key, turn this on so every signature needs your approval in the browser.",
@@ -6352,8 +6395,22 @@
         "fileReadFailed": "Couldn't read that file.",
         "secretExists": "A secret with this name already exists.",
         "secretNameCaseConflict": "A secret already uses this name with different letter casing.",
-        "updateFailed": "Save failed, please try again."
-      }
+        "updateFailed": "Save failed, please try again.",
+        "solanaImportFailed": "The key couldn't be imported. Check that it's a Solana CLI keypair or a base58 secret key, then try again."
+      },
+      "nameInvalid": "Use only letters, numbers, and underscores, starting with a letter or underscore.",
+      "signingCreateHint": "A new key is made when you create it. Its addresses appear after that.",
+      "signingKeyInfo": "The private key is made in your browser and encrypted before it is saved; Avibe keeps only the public key and its addresses. When something needs signing, avault on this computer signs it.",
+      "signingImportInfo": "The pasted private key is encrypted in your browser before it is saved; Avibe keeps only the public key and its addresses.",
+      "signingAddressesInfo": "These addresses are worked out from the key. Signing for a Bitcoin Taproot address needs a recent avault; an older one refuses instead of signing in an unsafe way. The network labels help you tell addresses apart; they say nothing about what is on chain.",
+      "solanaKeyInfo": "avault makes the Solana key on this computer and encrypts it there. Avibe and this browser only ever see its address.",
+      "solanaImportHint": "Its address appears after you create it. Recovery phrases aren’t supported yet.",
+      "solanaImportInfo": "The pasted key is encrypted in your browser, then avault on this computer checks it and stores it.",
+      "protectedKeyInfo": "The key is made and encrypted inside an isolated sandbox. The private key never leaves it; Avibe receives only the encrypted key and its address.",
+      "protectedBitcoinInfo": "Protected Bitcoin keys can approve spending only from a Taproot address, in a compatible sandbox. Legacy and SegWit addresses can’t be spent from.",
+      "moreInfo": "More info",
+      "keySource": "Key source",
+      "signingImportHint": "Its addresses appear as soon as you paste it, so you can check them before you create it."
     },
     "requests": {
       "title": "Pending requests",
@@ -6391,9 +6448,14 @@
       "signingAs": "Signing as",
       "digest": "Hash to sign",
       "copyDigest": "Copy hash to sign",
-      "message": "Message to sign",
+      "message": "Message",
       "copyMessage": "Copy message to sign",
       "emptyMessage": "Empty message (0 bytes)",
+      "messageBytes_one": "{{count}} byte",
+      "messageBytes_other": "{{count}} bytes",
+      "details": "Details",
+      "detailsAddress": "Signing address (Solana)",
+      "detailsMessage": "Exact bytes to sign (hex)",
       "source": "Source",
       "sourceTag": "Tag · {{name}}",
       "sourceSkill": "Skill · {{name}}",
@@ -6661,13 +6723,17 @@
       "subscriptionConnectedHint": "Subscription saved. Enter the workspace to use it.",
       "api_keyConnectedHint": "API Key saved. Enter the workspace to use it.",
       "forNamed": "For {{name}}",
-      "configureRoute": "Configure model route",
+      "configureRoute": "Choose a model",
       "defaultModel": "Default model",
-      "defaultModelNamed": "Model route for {{name}}, review and reorder",
+      "defaultModelNamed": "Default model for {{name}}, choose another",
       "noteEnabled": "Uses a Model Hub route",
       "notEnabled": "Not enabled",
       "installAndEnable": "Install and enable",
       "installedNotEnabled": "Installed, not enabled",
+      "moreAssistants": "More assistants",
+      "moreAssistantsNote": "Claude Code, Codex and OpenCode can work in Avibe too. Turn them on now or any time later.",
+      "moreAssistantsShow": "Show more assistants",
+      "moreAssistantsAttention": "Needs attention",
       "noteNotEnabled": "Enable to use your models",
       "noteNotInstalled": "Install {{name}} to use your models",
       "defaultModelWithBackups_one": "Default model · 1 backup",
@@ -6680,11 +6746,12 @@
       "permissionFailed": "Could not allow tool calls",
       "builtinAlwaysOn": "Built-in · always on",
       "noteBuiltinUnset": "No model yet. Pick one to start.",
-      "noteGatewayOff": "Model gateway is off. {{name}} needs it to run.",
+      "noteGatewayOff": "Model Hub is off. {{name}} needs it to run.",
       "noteHubDisabled": "Model Hub is disabled on this instance. {{name}} needs it to run.",
-      "noteNoSource": "No model source supplies {{name}} yet.",
+      "noteNoSource": "No provider supplies {{name}} yet.",
       "pickModelNamed": "Pick a model for {{name}}",
       "allModels": "All models…",
+      "recommended": "Recommended",
       "modelsUnreadable": "Could not read the models.",
       "noModelsToPick": "No provider supplies a model yet.",
       "suppliersChanged": "This model's providers changed. Pick it again.",
@@ -6753,7 +6820,7 @@
       "enter": "Enter workspace",
       "entryHint": "Connect any one subscription or API Key to enter the workspace",
       "sourceRequired": "Add a subscription or API Key before choosing an assistant.",
-      "addSource": "Add model source",
+      "addSource": "Add a provider",
       "entryFailed": "A ready assistant could not be confirmed. Refresh and try again.",
       "addSubscription": "Add subscription / sign in",
       "addKey": "Add API Key",
@@ -6800,7 +6867,36 @@
       "cardNotAdded": "Not added yet",
       "cardSelected": "Selected",
       "cardUseExistingNamed": "Use existing {{name}} configuration",
-      "cardAddSubscriptionNamed": "Add a {{name}} subscription or API Key",
+      "cardAddSubscriptionNamed": "Add a subscription or API Key for {{name}}",
+      "cardChecking": "Checking…",
+      "cardConnected_one": "Connected · {{count}} model",
+      "cardConnected_other": "Connected · {{count}} models",
+      "cardRejectedStatus": "Key rejected ({{status}}) · re-enter",
+      "cardRejected": "Key rejected · re-enter",
+      "cardCheckFailed": "Could not check the key · try again",
+      "cardListChanged": "Model list changed · review",
+      "cardEditNamed": "Change or remove {{name}}",
+      "nothingPassed": "No provider passed the check, so assistants have no model yet.",
+      "editKeyTitleNamed": "{{name}} API Key",
+      "editSubscriptionTitleNamed": "{{name}} subscription",
+      "editStatus": "{{key}} · {{check}}",
+      "editKeyLabel": "New API Key",
+      "editKeyNote": "Saving checks the new key with {{name}}. If it is rejected, the current key stays.",
+      "editSubscriptionNote": "To use another account, remove this one and sign in again.",
+      "editSave": "Save and check",
+      "editSaving": "Checking the new key…",
+      "editRejectedStatus": "API key invalid or lacks permission ({{status}}). Check or replace it.",
+      "editRejected": "API key invalid or lacks permission. Check or replace it.",
+      "editSaveFailed": "Could not save the key. Try again.",
+      "editReplaceImpact": "The new key lists fewer models, so some assistants will have no model. Save anyway?",
+      "editRecheck": "Check again",
+      "editListChanged": "The key works, but the provider no longer lists some models your assistants use. Updating the list removes them, and those assistants will need another model.",
+      "editUpdateList": "Update list",
+      "editRemove": "Remove",
+      "editRemoveConfirm": "Remove this key from Model Hub?",
+      "editRemoveImpact": "Assistants using this key will have no model until you add another. Remove anyway?",
+      "editRemoving": "Removing…",
+      "editRemoveFailed": "Could not remove the key. Try again.",
       "addMoreTitle": "Add more",
       "addMoreSubtitle": "Subscription / API Key",
       "addMoreAction": "Add a new subscription or API Key",
@@ -6819,12 +6915,14 @@
       "actionRetryImport_other": "Review migration status for {{count}}",
       "actionContinue": "Continue to assistants",
       "actionAdd": "Add subscription or API Key",
+      "later": "Set up later",
       "actionConnecting": "Connecting…",
       "actionChecking": "Checking connection…",
       "addTitle": "Add subscription or API Key",
       "addTitleMore": "Add more model providers",
-      "addDescription": "Add one source to get started. Model Hub handles routing.",
+      "addDescription": "Add one provider to get started. Model Hub handles routing.",
       "addDescriptionMore": "Review detected configurations and confirm migration without retyping",
+      "addDescriptionKey": "Enter the provider's address and API key.",
       "addMethodsLabel": "Add method",
       "addMethodDetected": "Detected",
       "addMethodSubscription": "Subscription",
@@ -7082,7 +7180,9 @@
     "transportStdio": "stdio",
     "transportHttp": "http",
     "toolMeta": "{{count}} tools · {{transport}}",
-    "tools": "Tools",
+    "toolsHeader": "Tools · {{count}}",
+    "toolsShowMore": "Show {{count}} more",
+    "toolsShowLess": "Show less",
     "generatedAt": "last refreshed {{time}}",
     "generatedAtWithVersion": "last refreshed {{time}} · server v{{version}}",
     "serverVersion": "server v{{version}}",
@@ -7115,6 +7215,7 @@
     "addSubtitle": "Once added, every Agent can call it.",
     "unchangedCount": "{{count}} already present.",
     "succeededCount": "{{count}} succeeded",
+    "savedNotConnected": "Saved, but could not connect: {{reason}}. Refresh, configure, or remove it from the list.",
     "failedCount": "{{count}} failed:",
     "failedLine": "{{name}} — {{error}}",
     "callHint": "vibe mcp {{name}} <tool>",
@@ -7145,6 +7246,7 @@
       "cwd": "Working directory",
       "issues": {
         "invalidUrl": "This URL is not valid.",
+        "missingScheme": "This looks like a URL. Add https:// at the start.",
         "unclosedQuote": "A quote is not closed.",
         "shellOperator": "Shell operators such as | && ; > are not supported. Use Import JSON.",
         "windowsPath": "Windows paths are ambiguous here. Use Import JSON."

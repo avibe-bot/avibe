@@ -5,12 +5,12 @@ Status: **Decision accepted. Phase 0 delivered; Phase 1 is planned in [`remote-d
 ## 1. Decisions
 
 1. The iOS App owns an in-process direct layer built on **iroh**. It tries the available LAN, opportunistic public IPv6, iroh IPv4 hole-punch, and our own authenticated relay paths. iroh uses its stable default path policy: direct-primary with RTT bias; we do not implement a custom strict ordering.
-2. `WKWebView` continues to use the selected instance's existing `https://<instance>-app.avibe.bot` origin. `WKWebView.proxyConfigurations` sends only that host through an App-owned loopback CONNECT listener. Browsers continue to use Cloudflare Tunnel normally.
+2. `WKWebView` continues to use the selected instance's existing `https://<instance>-app.avibe.bot` origin. `WKWebView.proxyConfigurations` sends only that host through an App-owned loopback CONNECT listener, which picks the direct path or the instance's public origin for each new connection; the route itself is not changed to switch paths ([`remote-direct-ios.md`](remote-direct-ios.md)). Browsers continue to use Cloudflare Tunnel normally.
 3. Cloudflare Tunnel remains the always-available public path, bootstrap, and authenticated rendezvous/signaling channel. The channel distributes the authorized instance identity, current endpoint information, relay configuration, expiry, and generation. iroh still performs its own authenticated QUIC path establishment and relay/direct upgrade; Cloudflare is not treated as a replacement iroh control protocol.
 4. The App and instance require no user-installed Tailscale application and no second user account.
 5. The origin, login, cookies, existing remote authentication, Web cache, and Vault passkeys remain unchanged. Direct transport never grants local-owner authority.
 6. The instance has a strict direct-ingress boundary: preserve the instance hostname in SNI and HTTP `Host`, use a fixed upstream, strip client-supplied forwarding headers, synthesize only trusted metadata, and enter the existing remote-auth/role/CSRF/session path. A legal CONNECT request with a local-looking HTTP host must not reach the local-owner path.
-7. A transport change explicitly reconnects SSE and WebSocket/terminal streams. Existing long-lived browser connections are not assumed to migrate when the proxy configuration changes, and uncertain mutations are never replayed automatically.
+7. When the direct path is lost, the connections it carried are closed; SSE reconnects with catch-up and terminals with a persistent server-side session reattach (their client-side view resets, and input during the reconnection is dropped). Existing long-lived connections are never assumed to migrate, and uncertain mutations are never replayed automatically.
 8. The instance iroh endpoint key is **ephemeral**: generate it at each service start, never persist it, and publish only its public identity through the authenticated Cloudflare channel. It is not the authorization boundary; inner public TLS and existing Avibe authentication are.
 9. The instance TLS private key for its `*-app.avibe.bot` certificate is generated on the instance and handled with the same sensitive-credential treatment as the current remote-access tunnel credential. Today, the tunnel token is persisted in the local `remote_access.vibe_cloud.tunnel_token` configuration field, omitted from normal API/status payloads, represented only by a hash in diagnostics, and injected into `cloudflared` through its child-process environment. The certificate key must follow the same redaction, permission, lifecycle, and no-log/no-WebView-exposure rules; this plan does not add a new avault custody API.
 10. The iOS minimum was set to **17.5** because upstream packages iroh-ffi for 17.5. It is open again: the App owner decides the App's minimum, and we are testing a 17.0 build of the gated artifact (Phase 1 plan, decision D5). The App ships through TestFlight only for this work. TestFlight now has an external group as well as the internal one, so every iOS build, not only an App Store build, excludes iroh's private Apple datapath feature and links only the artifact qualified by the build gate (`packaging/iroh-apple/`). The future macOS desktop shell is distributed directly, not through the Mac App Store, so it may retain that datapath; if the private symbols are unavailable on a future macOS, its fallback must be verified then. iOS builds contain no datapath code, and no runtime switch re-enables it.
@@ -49,7 +49,7 @@ The issue's original Bonjour/backend-candidate options are replaced by one trans
 - Public access remains available while a bounded direct probe runs; no indefinite loading state is allowed.
 - Permission denial, client isolation, stale candidates, certificate/identity mismatch, DHCP changes, network changes, or relay failure return to Cloudflare without clearing account state.
 - The instance still applies its normal remote authentication and authorization. Private-network location is not an access grant.
-- Instance switching, account switching, logout, and network changes use generation checks so late probes cannot reinstall an old proxy route.
+- Instance switching, account switching, logout, and network changes use generation checks so late probes cannot authorize the direct path for an old account, instance, or store.
 - WebKit assets, API requests, SSE, and WSS use the same selected origin; no cookie copying, alternate passkey RP, or second login flow is introduced.
 
 ## 4. Transport and rendezvous contract
@@ -87,9 +87,9 @@ Use iroh's stable default path selector. It may race direct paths and prefer a l
 ### Transport changes
 
 - Every account, instance, candidate set, and transport decision carries a generation.
-- On a selected transport change, explicitly rebuild SSE and WebSocket/terminal connections and preserve the existing browser data store.
+- When the direct path is lost, close the connections it carried, reconnect SSE and reattach terminals with a persistent server-side session, and preserve the existing browser data store.
 - Reuse existing SSE catch-up/Last-Event-ID behavior. Do not blindly replay POSTs, terminal input, uploads, or other mutations whose prior result is ambiguous.
-- On foreground, resume, Wi-Fi/cellular changes, sleep, DHCP changes, or process restart, validate/recreate the loopback listener and iroh endpoint; use Cloudflare while direct state is unavailable.
+- On foreground, resume, Wi-Fi/cellular changes, sleep, DHCP changes, or process restart, revalidate the direct path and the listener's port before new connections use direct; use the public origin while direct state is unavailable. The App's lifecycle rules, and which of them are still unmeasured, are in [`remote-direct-ios.md`](remote-direct-ios.md).
 
 ## 6. Phases
 
@@ -106,11 +106,11 @@ Use iroh's stable default path selector. It may race direct paths and prefer a l
 
 The work split, owners, decisions, and exit criteria are in [`remote-direct-phase1.md`](remote-direct-phase1.md).
 
-- Add the App loopback CONNECT listener and exact-host `proxyConfigurations` route.
+- Add the App loopback CONNECT listener, with a direct backend and a public-origin backend, and exact-host `proxyConfigurations` routes that are never changed to switch paths.
 - Discover or receive LAN and IPv6 candidates through the authenticated contract; verify the instance identity before routing WebKit traffic.
 - Keep Cloudflare as the public path during every probe and on every direct failure.
 - Add explicit SSE/WSS recovery and generation-safe account/instance/network switching.
-- Validate on physical iOS 17.5 and a current iOS release: Local Network permission allow/deny, same-LAN/AP isolation, Wi-Fi↔cellular, sleep/resume, stale candidates, certificate mismatch, auth roles, cookies/cache, WebAuthn, and ambiguous mutation recovery.
+- Validate on a physical iPhone at the App's minimum iOS version (17.0 today) and one at a current release: Local Network permission allow/deny, same-LAN/AP isolation, Wi-Fi↔cellular, sleep/resume, stale candidates, certificate mismatch, auth roles, cookies/cache, WebAuthn, and ambiguous mutation recovery.
 
 The feasibility spike found global IPv6 on one Mac but 250/250 mainland TCP probes to its temporary high-port listener timed out, while the same probe service reached 238/249 positive-control nodes. IPv6 therefore remains opportunistic, not a Phase 1 availability promise.
 

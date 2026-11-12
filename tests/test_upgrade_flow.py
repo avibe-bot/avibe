@@ -110,7 +110,8 @@ def test_build_upgrade_plan_forces_legacy_uv_tool_install(monkeypatch):
     assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade", "--force"]
 
 
-def test_build_upgrade_plan_uses_pip_for_non_uv_install():
+def test_build_upgrade_plan_uses_pip_for_non_uv_install(monkeypatch):
+    monkeypatch.setattr("vibe.release_dependencies.prepare_release", lambda spec, destination: (spec, None))
     plan = build_upgrade_plan(
         python_executable="/usr/bin/python3",
         uv_path="/usr/local/bin/uv",

@@ -270,6 +270,94 @@ fn target_selection_skips_newer_partial_release_until_signed_set_is_complete() {
 }
 
 #[test]
+fn rc_without_intel_is_not_an_update_for_intel_from_either_discovery_source() {
+    use avibe_runtime_host::update::{artifact_name, index_releases, manifest_name, Release, REPOSITORY};
+    let intel = "x86_64-apple-darwin";
+    let release = |tag: &str, prerelease: bool, version: &str, targets: Vec<&str>| Release {
+        tag: tag.into(),
+        prerelease,
+        commit: Some("a".repeat(40)),
+        assets: targets
+            .into_iter()
+            .flat_map(|target| {
+                let manifest = manifest_name(target);
+                [
+                    manifest.clone(),
+                    format!("{manifest}.sig"),
+                    artifact_name(version, target).unwrap(),
+                ]
+            })
+            .collect(),
+        silent: false,
+    };
+    let all_targets: Vec<_> = TARGETS.iter().map(|(target, _, _)| *target).collect();
+    let rc_targets: Vec<_> = all_targets.iter().copied().filter(|target| *target != intel).collect();
+    let rc = release("gh-v3.1.3rc1", true, "3.1.3-rc.1", rc_targets.clone());
+    let stable = release("v3.1.2", false, "3.1.2", all_targets.clone());
+    let github_releases = vec![rc.clone(), stable.clone()];
+    let index = serde_json::json!({
+        "schema_version": 1,
+        "repository": REPOSITORY,
+        "releases": github_releases.iter().map(|item| serde_json::json!({
+            "tag": item.tag, "prerelease": item.prerelease, "commit": item.commit,
+            "assets": item.assets.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>()
+        })).collect::<Vec<_>>()
+    });
+    let mirror_releases = index_releases(&serde_json::to_vec(&index).unwrap()).unwrap();
+    assert_eq!(github_releases, mirror_releases);
+    for releases in [github_releases, mirror_releases] {
+        for target in &all_targets {
+            let expected = if *target == intel { "v3.1.2" } else { "gh-v3.1.3rc1" };
+            let selected = Channel::Test.latest_for_target(releases.clone(), target).unwrap();
+            assert_eq!(selected.1.tag, expected);
+            if *target == intel {
+                // The shell compares this with its installed version: no upgrade/downgrade.
+                assert!(selected.0 <= semver::Version::parse("3.1.2").unwrap());
+                assert!(selected.0 < semver::Version::parse("3.1.3-rc.0").unwrap());
+            }
+            assert_eq!(
+                Channel::Stable
+                    .latest_for_target(releases.clone(), target)
+                    .unwrap()
+                    .1
+                    .tag,
+                "v3.1.2"
+            );
+        }
+        let mut after_stable = releases;
+        after_stable.push(release("v3.1.3", false, "3.1.3", all_targets.clone()));
+        for target in &all_targets {
+            for channel in [Channel::Test, Channel::Stable] {
+                assert_eq!(
+                    channel.latest_for_target(after_stable.clone(), target).unwrap().1.tag,
+                    "v3.1.3"
+                );
+            }
+        }
+    }
+    assert!(Channel::Test.latest_for_target(vec![rc.clone()], intel).is_none());
+    // Neither a platform nor a signature can be inferred from another platform's set.
+    for target in rc_targets {
+        for missing in [
+            manifest_name(target),
+            format!("{}.sig", manifest_name(target)),
+            artifact_name("3.1.3-rc.1", target).unwrap(),
+        ] {
+            let mut partial = rc.clone();
+            partial.assets.retain(|name| *name != missing);
+            assert_eq!(
+                Channel::Test
+                    .latest_for_target(vec![partial, stable.clone()], target)
+                    .unwrap()
+                    .1
+                    .tag,
+                "v3.1.2"
+            );
+        }
+    }
+}
+
+#[test]
 fn only_the_supported_index_schema_for_this_repository_is_read() {
     use avibe_runtime_host::update::index_releases;
     let index = serde_json::json!({

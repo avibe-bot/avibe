@@ -138,8 +138,14 @@ only while the reader has not touched it. A message sent before the bootstrap
 lands survives the live window replacing the painted rows.
 
 A sent message is on screen at once, drawn as sending, before the server
-answers: in the transcript, or, sent while a confirmed turn runs (the server
-queues it then), in the queue strip. It is page state beside the transcript and
+answers, and it is drawn once, in its final place (owner, 2026-11-12): in the
+transcript, or, sent while a turn is known to run (the server queues it then),
+in the queue strip. In a Bot's conversation the user's message is P1, so it goes
+to the transcript even while the Bot works, and the queue row the server holds
+while steering it into the Turn is drawn there too. While the page does not yet
+know whether a turn runs (a chat just opened, before its bootstrap's turn state
+or a live signal), the message waits as a neutral sending line by the composer,
+and the server's answer draws it where it went. It is page state beside the transcript and
 the queue, not a row of either, so it is never stored in a snapshot, never a
 paging cursor, and no live window replaces it. The send carries
 `metadata.client_message_id`, which the server keeps on the Delivery the POST

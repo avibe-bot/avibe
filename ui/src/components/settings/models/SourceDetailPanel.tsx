@@ -1,5 +1,6 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
 import { FlaskConical, Info, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -236,7 +237,7 @@ export const SourceDetailPanel: React.FC<{
   const [manualDraft, setManualDraft] = React.useState<{ modelId: string; failed: boolean; retryRead: boolean } | null>(null);
   const [guard, setGuard] = React.useState<GuardedAction | null>(null);
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
-  const [refetchFailed, setRefetchFailed] = React.useState(false);
+  const [refetchFailed, setRefetchFailed] = React.useState<{ status?: number; detail?: string } | null>(null);
   const [reenableFailed, setReenableFailed] = React.useState(false);
   const [removeFailure, setRemoveFailure] = React.useState<{ modelId: string; retryRead: boolean } | null>(null);
   const [query, setQuery] = React.useState('');
@@ -313,7 +314,7 @@ export const SourceDetailPanel: React.FC<{
   const refetch = (plan: ManageGuardPlan | null = null) => {
     if (busy) return Promise.resolve();
     setResult(null);
-    setRefetchFailed(false);
+    setRefetchFailed(null);
     setPendingAction('refetch');
     return trackMutation(async (latest, settlement) => {
       const before = new Set(latest.models.map((model) => model.id));
@@ -339,7 +340,8 @@ export const SourceDetailPanel: React.FC<{
             settlement.release();
           } else {
             setGuard(null);
-            setRefetchFailed(true);
+            const failure = apiFailure(error);
+            setRefetchFailed({ status: failure?.upstreamStatus, detail: failure?.upstreamDetail });
             try {
               const inventory = await settlement.readInventory();
               const current = inventory.sources.find((item) => item.id === latest.id);
@@ -431,7 +433,7 @@ export const SourceDetailPanel: React.FC<{
     const modelId = draft.modelId.trim();
     if (!modelId) return;
     setResult(null);
-    setRefetchFailed(false);
+    setRefetchFailed(null);
     setPendingAction('add_model');
     return trackMutation(async (latest, settlement) => {
       if (latest.models.some((model) => model.id === modelId)) {
@@ -506,7 +508,7 @@ export const SourceDetailPanel: React.FC<{
   const remove = (model: SuppliedModel, plan: ManageGuardPlan | null = null) => {
     if (busy) return Promise.resolve();
     setResult(null);
-    setRefetchFailed(false);
+    setRefetchFailed(null);
     setRemoveFailure(null);
     setPendingAction('other');
     return trackMutation(async (latest, settlement) => {
@@ -909,7 +911,14 @@ export const SourceDetailPanel: React.FC<{
       {(result || refetchFailed || reenableFailed || manageStage.kind === 'delete_failed') && <div className="model-hub-source-notices shrink-0 space-y-2 px-5 pt-3">
         {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
         {result && result.added.length === 0 && result.removed.length === 0 && <p className="model-hub-status-mint rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
-        {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.sourceDetail.fail.refetch')}</p>}
+        {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">
+          {t('settings.models.sourceDetail.fail.refetch')}
+          {(refetchFailed.status !== undefined || refetchFailed.detail) && <span className="mt-1 block break-words">
+            {refetchFailed.status !== undefined
+              ? t(`settings.models.sourceDetail.fail.${refetchFailed.detail ? 'upstreamError' : 'upstreamStatus'}`, refetchFailed)
+              : refetchFailed.detail}
+          </span>}
+        </p>}
         {reenableFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.repair.failed')}</p>}
         {manageStage.kind === 'delete_failed' && <p data-manage-failure="delete" data-manage-retry-read={String(manageStage.retryRead)} className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.fail.verifyDeleteSource' : 'settings.models.sourceDetail.fail.deleteSource')} <button type="button" disabled={busy} onClick={retryDelete} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button> <button type="button" disabled={busy} onClick={manageStage.retryRead ? dismissUnresolvedManage : cancelManage} className="font-semibold underline underline-offset-2">{t(manageStage.retryRead ? 'settings.models.sourceDetail.dismissUnverified' : 'common.cancel')}</button></p>}
       </div>}
@@ -1026,7 +1035,7 @@ export const SourceDetailPanel: React.FC<{
           <DialogPrimitive.Content
             className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-edge bg-popover outline-none"
             onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-            onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+            onPointerDownOutside={keepOpenOnOutsideClick}
           >
             <form className="contents" onSubmit={(event) => {
               event.preventDefault();

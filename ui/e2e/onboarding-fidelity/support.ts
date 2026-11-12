@@ -283,7 +283,9 @@ export async function openSetup(
   // Runs once the providers step is settled, just before the assistants step opens:
   // the providers step reads each assistant's connection too, so a case that holds
   // those reads for the assistants step must not hold the providers step's.
-  options: { beforeAssistants?: () => void } = {},
+  // The CLI assistants open folded under 「More assistants」; most cases are about their
+  // cards, so this unfolds them unless a case is about the fold itself.
+  options: { beforeAssistants?: () => void; keepFolded?: boolean } = {},
 ) {
   // Assistant captures enter through the same prerequisite as the product. Keep this
   // source local to this helper so provider-empty cases still begin without one.
@@ -306,6 +308,11 @@ export async function openSetup(
   await page.clock.runFor(950);
   await page.locator('[data-setup-screen="assistants"]').waitFor();
   await page.locator('.onboarding-assistants').waitFor();
+  if (!options.keepFolded) await showMoreAssistants(page, lang);
+}
+
+export async function showMoreAssistants(page: Page, lang: string) {
+  await page.getByRole('button', { name: lang === 'zh' ? '展开更多助手' : 'Show more assistants' }).click();
 }
 
 /**

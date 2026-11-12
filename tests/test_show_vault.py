@@ -170,6 +170,86 @@ async def test_node_snapshot_recovers_same_process_and_never_replays(tmp_path, m
         await server.wait_closed()
 
 
+def test_snapshot_refresh_skips_unchanged_writes_but_always_resolves(tmp_path, monkeypatch):
+    """A quiet API poll must validate discovery without republishing the file.
+
+    Lifecycle tests cover generations and retirement, but their value assertions
+    also pass when each identical refresh performs another atomic replacement.
+    """
+    from core import show_vault
+
+    snapshot = ShowVaultSnapshot(tmp_path)
+    endpoint = {"transport": "unix", "socket_path": "/synthetic/control.sock"}
+    calls = []
+    state = {"endpoint": None}
+
+    def resolve():
+        calls.append(True)
+        if state["endpoint"] is None:
+            raise internal_client.InternalServerUnavailable("synthetic absent endpoint")
+        return state["endpoint"]
+
+    monkeypatch.setattr(internal_client, "resolve_control_endpoint", resolve)
+    monkeypatch.setattr(internal_client, "control_endpoint_payload", lambda endpoint: endpoint)
+    replace = show_vault.os.replace
+    replacements = []
+
+    def record_replace(source, target):
+        replacements.append(True)
+        replace(source, target)
+
+    monkeypatch.setattr(show_vault.os, "replace", record_replace)
+    try:
+        snapshot.refresh()
+        assert replacements == []  # repeated unavailability is unchanged too
+        state["endpoint"] = endpoint
+        snapshot.refresh()
+        snapshot.refresh()
+        assert len(replacements) == 1
+        assert len(calls) == 3
+        state["endpoint"] = None
+        snapshot.refresh()
+        snapshot.refresh()
+        assert len(replacements) == 2
+        assert len(calls) == 5
+        assert json.loads(snapshot.path.read_text())["endpoint"] is None
+    finally:
+        snapshot.close()
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed", "symlink", "permissions"])
+def test_snapshot_refresh_repairs_invalid_unchanged_file(tmp_path, monkeypatch, damage):
+    """The no-write shortcut must not leave an absent, tampered or public file."""
+    if os.name == "nt" and damage in {"symlink", "permissions"}:
+        pytest.skip("POSIX symlink/mode fixture; Windows uses private DACLs")
+    snapshot = ShowVaultSnapshot(tmp_path)
+
+    def unavailable():
+        raise internal_client.InternalServerUnavailable("synthetic absent endpoint")
+
+    monkeypatch.setattr(internal_client, "resolve_control_endpoint", unavailable)
+    try:
+        expected = snapshot.path.read_bytes()
+        if damage == "missing":
+            snapshot.path.unlink()
+        elif damage == "malformed":
+            snapshot.path.write_bytes(b"{broken")
+        elif damage == "symlink":
+            other = tmp_path / "other.json"
+            other.write_bytes(expected)
+            snapshot.path.unlink()
+            snapshot.path.symlink_to(other)
+        else:
+            snapshot.path.chmod(0o644)
+        snapshot.refresh()
+        assert not snapshot.path.is_symlink()
+        assert snapshot.path.read_bytes() == expected
+        if os.name != "nt":
+            assert snapshot.path.stat().st_mode & 0o777 == 0o600
+    finally:
+        snapshot.close()
+
+
 def test_retired_snapshot_cannot_overwrite_successor_or_recreate_directory(tmp_path, monkeypatch):
     """Stop during discovery must fence the late worker, not just unlink its file."""
     old = ShowVaultSnapshot(tmp_path)

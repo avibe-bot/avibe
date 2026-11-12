@@ -348,6 +348,35 @@ def test_latest_installers_follow_the_highest_stable_release_that_ships_them():
     assert mirror.plan("avibe-bot/askill", selected, {}, None, latest).aliases == ()
 
 
+@pytest.mark.parametrize("attached_targets", [(), ("aarch64-apple-darwin",),
+                                           ("aarch64-apple-darwin", "x86_64-pc-windows-msvc")])
+def test_two_target_rc_index_never_invents_intel_or_changes_stable_aliases(attached_targets):
+    from scripts import desktop_release, desktop_updater
+
+    stable = github_release(
+        "v3.2.5", published_at="2026-11-10T00:00:00Z",
+        assets=tuple(desktop_release.asset_names("3.2.5", target)[0] for target in desktop_release.TARGETS),
+    )
+    baseline = mirror.plan(REPOSITORY, releases(stable), {}, None)
+    latest = {key: asset.sha256 for key, _, asset in baseline.aliases}
+    objects = {key: asset.size for key, asset in baseline.uploads}
+    objects.update({key: asset.size for key, _, asset in baseline.aliases})
+    rc_assets = ["avibe_os-3.2.6rc7.whl"]
+    for target in attached_targets:
+        rc_assets.extend(desktop_release.asset_names("3.2.6-rc.7", target))
+        rc_assets.extend(desktop_updater.names("3.2.6-rc.7", target))
+    rc = github_release("gh-v3.2.6rc7", published_at="2026-11-11T00:00:00Z",
+                        prerelease=True, assets=tuple(sorted(set(rc_assets))))
+    result = mirror.plan(REPOSITORY, releases(stable, rc), objects, baseline.index, latest)
+    assert result.aliases == () and result.deletions == ()
+    assert len(latest) == 3 and "latest/Avibe_x86_64-apple-darwin.dmg" in latest
+    rc_index = next(item for item in json.loads(result.index)["releases"] if item["tag"] == rc["tag_name"])
+    assert {asset["name"] for asset in rc_index["assets"]} == set(rc_assets)
+    assert all("x86_64-apple-darwin" not in name for name in rc_assets)
+    assert all(key.startswith("releases/gh-v3.2.6rc7/") for key, _ in result.uploads)
+    assert {asset.name for _, asset in result.uploads} == set(rc_assets)
+
+
 def test_latest_installers_are_copied_from_their_verified_source_and_stale_ones_removed(monkeypatch):
     item = github_release("v1.0.0", published_at="2026-01-01T00:00:00Z",
                           assets=(

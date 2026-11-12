@@ -406,6 +406,12 @@ def test_unit_file_runner_rejects_invalid_deadline(tmp_path: Path, timeout: str)
     assert "must be a positive integer" in result.stderr
 
 
+def test_scenario_evidence_waits_for_every_declared_junit_producer() -> None:
+    jobs = _jobs()
+    producers = {name for name, job in jobs.items() if "AVIBE_CI_JUNIT_DIR" in job.get("env", {})}
+    assert set(jobs["scenario-evidence"]["needs"]) == {"changes", *producers}
+
+
 def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     jobs = _jobs()
     checks = jobs["ui-checks"]
@@ -414,7 +420,7 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert build.get("needs") == "changes"
     assert set(jobs["unit-tests"]["needs"]) == {
         "changes", "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests",
-        "ui-browser-checks", "model-hub-hosted-wire", "manifest-consistency", "python-smoke",
+        "ui-browser-checks", "model-hub-hosted-wire", "model-hub-lifecycle-native", "manifest-consistency", "python-smoke",
         "ios-shell", "desktop-shell", "ruff", "memory-insight-contract",
         "show-router-integration", "build-linux-artifacts", "migration-release-guard", "npm-wrapper",
     }
@@ -475,6 +481,35 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert jobs["windows-install-smoke-runners"]["needs"] == ["changes", "build-linux-artifacts"]
 
 
+def test_browser_lanes_use_matching_preinstalled_engines_without_runtime_apt() -> None:
+    browsers = _jobs()["ui-browser-checks"]
+    lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
+    version = lock["packages"]["node_modules/@playwright/test"]["version"]
+    assert lock["packages"]["node_modules/playwright-core"]["version"] == version
+    assert browsers["container"] == {
+        "image": f"mcr.microsoft.com/playwright:v{version}-noble",
+        "options": "--init --ipc=host",
+    }
+    # Container run steps otherwise default to sh; the suite wrapper uses Bash
+    # and must preserve its existing fail-fast semantics.
+    assert browsers["defaults"]["run"]["shell"] == "bash"
+    assert browsers["timeout-minutes"] == 45
+    steps = browsers["steps"]
+    verify, = [step for step in steps if step.get("name") == "Verify preinstalled browsers"]
+    assert verify["timeout-minutes"] == 10
+    assert not verify.get("if") and not verify.get("continue-on-error")
+    assert "import { chromium, webkit } from 'playwright';" in verify["run"]
+    assert "for (const engine of [chromium, webkit])" in verify["run"]
+    assert "await engine.launch()" in verify["run"]
+    assert "await browser.close()" in verify["run"]
+    commands = "\n".join(step.get("run", "") for step in steps)
+    for forbidden in ("apt-get", "apt install", "playwright install", "playwright-apt"):
+        assert forbidden not in commands
+    assert not any(step.get("uses", "").startswith("actions/cache@") for step in steps)
+    suites, = [step for step in steps if "${{ matrix.suites }}" in step.get("run", "")]
+    assert steps.index(verify) < steps.index(suites)
+
+
 def test_browser_lanes_check_out_exactly_the_paths_the_classifier_treats_as_their_input() -> None:
     """A browser lane can only read what it checks out, so a change outside that set may skip the lanes.
 
@@ -528,7 +563,14 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         (index, step) for index, step in enumerate(steps)
         if step.get("name") == "Verify bundled mobile UI"
     )
-    assert node_index < bundle_index < verify_index
+    generate_index, generate_step = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Generate the App's license notices"
+    )
+    assert node_index < bundle_index < generate_index < verify_index
+    assert generate_step["run"] == (
+        "python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp"
+    )
     assert bundle_step["working-directory"] == "ui"
     assert bundle_step["run"].splitlines() == ["npm ci", "npm run build:mobile"]
     assert verify_step["run"] == (
@@ -596,6 +638,23 @@ def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path
     assert "npm run build:mobile" in incomplete.stderr
 
     (assets / "mobile.css").write_text("", encoding="utf-8")
+    unlicensed = subprocess.run(
+        ["/bin/sh", str(script), str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    assert unlicensed.returncode == 1
+    assert "app_licenses.py generate" in unlicensed.stderr
+
+    (bundle / "licenses-web.json").write_text(json.dumps({"schema_version": 1, "packages": [
+        {"name": "react", "version": "19.3.1", "license": "MIT", "files": [{"name": "LICENSE", "text": "MIT"}]},
+    ]}), encoding="utf-8")
+    generated = subprocess.run(
+        [sys.executable, str(ROOT / "ios/scripts/app_licenses.py"), "generate", "--bundle", str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    assert generated.returncode == 0, generated.stderr
     complete = subprocess.run(
         ["/bin/sh", str(script), str(bundle)],
         capture_output=True,
@@ -603,9 +662,23 @@ def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path
     )
     assert complete.returncode == 0, complete.stderr
 
+    # Data left from another pin fails the guard rather than shipping stale notices.
+    stale = json.loads((bundle / "licenses.json").read_text(encoding="utf-8"))
+    stale["native"]["release_tag"] = "iroh-apple-v0.0.0-1"
+    (bundle / "licenses.json").write_text(json.dumps(stale), encoding="utf-8")
+    mismatched = subprocess.run(
+        ["/bin/sh", str(script), str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    assert mismatched.returncode == 1
+    assert "different iroh pin" in mismatched.stderr
+
     project = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
     target_phases = project.split("buildPhases = (", 1)[1].split(");", 1)[0]
     assert target_phases.index("Verify Mobile App Bundle") < target_phases.index("Sources")
+    # User script sandboxing lets the phase read only its declared inputs.
+    assert '"$(SRCROOT)/Avibe/Resources/MobileApp/licenses.json",' in project
     assert (
         'shellScript = "AVIBE_MOBILE_BUNDLE_EXISTENCE_ONLY=1 '
         '/bin/sh \\"$SRCROOT/scripts/verify_mobile_bundle.sh\\"'
@@ -660,7 +733,7 @@ def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
 # The PR browser selection before parallelization: preserve these exact callers,
 # including spec filters, rather than deriving expected coverage from the matrix.
 _BROWSER_COMMANDS = (
-    "run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts",
+    "run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts mobile-otp.spec.ts",
     "run test:home-media",
     "run test:voice-shortcut",
     "run test:vault-integrity",
@@ -972,13 +1045,49 @@ _GITHUB_LINUX_SHELLS = {
 
 
 def _workflow_steps():
-    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+    for workflow in sorted((ROOT / ".github/workflows").iterdir()):
+        if workflow.suffix not in {".yml", ".yaml"}:
+            continue
         data = yaml.safe_load(workflow.read_text())
         default = ((data.get("defaults") or {}).get("run") or {}).get("shell")
         for job_id, job in (data.get("jobs") or {}).items():
             job_default = ((job.get("defaults") or {}).get("run") or {}).get("shell") or default
             for step in job.get("steps") or []:
                 yield workflow.name, job_id, step, step.get("shell") or job_default
+
+
+def test_release_publishers_do_not_replace_latest_product_release() -> None:
+    """Runtime assets must not displace the stable product release as GitHub's Latest.
+
+    Product stable promotion belongs to scripts/github_release.py finalize and
+    is covered by test_github_release.py; direct workflow publishers opt out.
+    """
+    unguarded = []
+    for workflow, job_id, step, _ in _workflow_steps():
+        location = f"{workflow} {job_id}: {step.get('name')}"
+        if step.get("uses", "").startswith("softprops/action-gh-release@"):
+            if str((step.get("with") or {}).get("make_latest")).lower() != "false":
+                unguarded.append(location)
+        # Join shell continuations, but never borrow --latest=false from another
+        # command (including another create in the same step) or from a comment.
+        for line in (step.get("run") or "").replace("\\\n", "").splitlines():
+            if "gh" not in line or "create" not in line:
+                continue
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+            for index in range(len(tokens) - 2):
+                if tokens[index:index + 3] != ["gh", "release", "create"]:
+                    continue
+                arguments = []
+                for token in tokens[index + 3:]:
+                    if all(char in ";&|()" for char in token):
+                        break
+                    arguments.append(token)
+                latest = [arg for arg in arguments if arg == "--latest" or arg.startswith("--latest=")]
+                if latest != ["--latest=false"]:
+                    unguarded.append(location)
+    assert not unguarded, f"Release publishers must explicitly opt out of Latest: {unguarded}"
 
 
 def test_steps_that_tee_a_command_keep_its_exit_status() -> None:

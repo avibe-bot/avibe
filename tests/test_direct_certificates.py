@@ -15,7 +15,9 @@ import json
 import os
 import ssl
 import stat
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,7 +30,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from config import paths
-from config.v2_config import V2Config
+from config.atomic_io import write_atomic
+from config.v2_config import V2Config, config_file_lock
 from vibe import direct_certificates as certificates
 from vibe import remote_access
 from vibe.direct_certificates import DirectCertificateClient, discard_direct_certificates
@@ -139,8 +142,8 @@ def setup(monkeypatch):
     cloud.public_url = f"https://{HOST}"
     cloud.backend_url = "https://control.invalid"
     config.save()
-    clock = SimpleNamespace(now=float(int(time.time())))
-    monkeypatch.setattr(certificates, "time", SimpleNamespace(time=lambda: clock.now))
+    clock = SimpleNamespace(now=float(int(time.time())), monotonic=time.monotonic())
+    monkeypatch.setattr(certificates, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.monotonic))
     backend = Backend(clock)
     monkeypatch.setattr(remote_access, "_device_json_request", backend)
     return SimpleNamespace(client=DirectCertificateClient(), clock=clock, backend=backend, config=config)
@@ -156,6 +159,160 @@ def installed(env):
     result = due(env, first)
     assert result.ready and result.reload_required
     return result
+
+
+def test_expected_pairing_fence_rejects_replacement_before_order_request(setup):
+    """A worker authorized for A cannot order after B is installed while it waits."""
+    env = setup
+    expected = remote_access._pairing_identity_fingerprint(
+        remote_access._pairing_identity_from_cloud(env.config.remote_access.vibe_cloud)
+    )
+    replacement = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
+    replacement["remote_access"]["vibe_cloud"]["instance_id"] = "instance-two"
+    result_box = []
+
+    with config_file_lock():
+        worker = threading.Thread(
+            target=lambda: result_box.append(
+                env.client.poll(
+                    allowed=True,
+                    expected_pairing_fingerprint=expected,
+                )
+            )
+        )
+        worker.start()
+        time.sleep(0.05)
+        write_atomic(paths.get_config_path(), json.dumps(replacement) + "\n")
+
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result_box and result_box[0].status == "pairing_changed"
+    assert result_box[0].last_error_code == "pairing_changed"
+    assert env.backend.calls == []
+    assert not (paths.get_state_dir() / "direct").exists()
+
+
+def _caller_grant(env):
+    env.config.remote_access.vibe_cloud.direct = True
+    env.config.save()
+    return {
+        "allowed": True,
+        "expected_pairing_fingerprint": remote_access._pairing_identity_fingerprint(
+            remote_access._pairing_identity_from_cloud(env.config.remote_access.vibe_cloud)
+        ),
+        "permission_deadline": env.clock.monotonic + 900,
+    }
+
+
+def _withdraw_grant(env, change):
+    if change == "expired":
+        env.clock.monotonic += 901
+    else:
+        with config_file_lock():
+            config = V2Config.load()
+            if change == "off":
+                config.remote_access.vibe_cloud.direct = False
+            else:
+                config.remote_access.vibe_cloud.instance_id = "instance-two"
+            config.save()
+
+
+@pytest.mark.parametrize("change", ["expired", "off", "pairing"])
+def test_initial_worker_waiting_for_lock_cannot_allocate_after_withdrawal(setup, monkeypatch, change):
+    env = setup
+    grant = _caller_grant(env)
+    waiting = threading.Event()
+    real_lock = certificates.config_file_lock
+
+    @contextmanager
+    def observed_lock():
+        waiting.set()
+        with real_lock():
+            yield
+
+    monkeypatch.setattr(certificates, "config_file_lock", observed_lock)
+    results = []
+    with real_lock():
+        worker = threading.Thread(target=lambda: results.append(env.client.poll(**grant)))
+        worker.start()
+        assert waiting.wait(2)
+        _withdraw_grant(env, change)
+    worker.join(3)
+    assert not worker.is_alive()
+    assert results[0].status in {"disabled", "pairing_changed"}
+    assert not env.backend.calls
+    assert not (paths.get_state_dir() / "direct").exists()
+
+
+@pytest.mark.parametrize("change", ["expired", "off", "pairing"])
+def test_prepared_order_rechecks_live_authorization_before_dispatch(setup, monkeypatch, change):
+    env = setup
+    grant = _caller_grant(env)
+    prepared, release = threading.Event(), threading.Event()
+    real_lock = certificates.config_file_lock
+    entered = 0
+
+    @contextmanager
+    def pause_after_preparation():
+        nonlocal entered
+        entered += 1
+        first = entered == 1
+        with real_lock():
+            yield
+        if first:
+            prepared.set()
+            assert release.wait(3)
+
+    monkeypatch.setattr(certificates, "config_file_lock", pause_after_preparation)
+    results = []
+    worker = threading.Thread(target=lambda: results.append(env.client.poll(**grant)))
+    worker.start()
+    try:
+        assert prepared.wait(2)
+        _withdraw_grant(env, change)
+    finally:
+        release.set()
+        worker.join(3)
+    assert not worker.is_alive()
+    assert results[0].status in {"disabled", "pairing_changed"}
+    assert not env.backend.calls
+
+
+@pytest.mark.parametrize("deadline", [float("nan"), float("inf"), float("-inf"), 0, True, "900"])
+def test_invalid_or_expired_permission_deadline_is_inert(setup, deadline):
+    grant = _caller_grant(setup)
+    grant["permission_deadline"] = deadline
+    result = setup.client.poll(**grant)
+    assert result.last_error_code == "permission_expired"
+    assert not setup.backend.calls
+    assert not (paths.get_state_dir() / "direct").exists()
+
+
+def test_fresh_caller_grant_positive_control(setup):
+    result = setup.client.poll(**_caller_grant(setup))
+    assert result.status == "queued"
+    assert len(setup.backend.calls) == 1
+
+
+@pytest.mark.parametrize("change", ["expired", "off", "pairing"])
+def test_response_after_authorization_withdrawal_is_not_published(setup, change):
+    env = setup
+    grant = _caller_grant(env)
+    issued = installed(env)
+    env.clock.now = issued.next_poll_at
+    previous = json.loads((paths.get_state_dir() / "direct/state.json").read_text())
+    renewed = env.backend.issue()
+
+    def late_response(config, method, suffix, payload):
+        _withdraw_grant(env, change)
+        return renewed
+
+    env.backend.error = late_response
+    result = env.client.poll(**grant)
+    assert not result.ready and not result.reload_required
+    assert result.certificate_file is None and result.key_file is None
+    current = json.loads((paths.get_state_dir() / "direct/state.json").read_text())
+    assert current["active_certificate"] == previous["active_certificate"]
 
 
 def test_backend_shared_spki_fingerprint_vector():

@@ -289,6 +289,8 @@ struct MobileControlPlaneConfiguration: Equatable {
 struct AccountWebsiteDataStoreOperations {
     let makeDataStore: @MainActor (UUID) -> WKWebsiteDataStore
     let removeIdentifier: @MainActor (UUID) async -> Error?
+    /// The named stores WebKit has on disk.
+    let listIdentifiers: @MainActor () async -> Set<UUID>
 
     static let live = AccountWebsiteDataStoreOperations(
         makeDataStore: { WKWebsiteDataStore(forIdentifier: $0) },
@@ -296,6 +298,13 @@ struct AccountWebsiteDataStoreOperations {
             await withCheckedContinuation { continuation in
                 WKWebsiteDataStore.remove(forIdentifier: identifier) {
                     continuation.resume(returning: $0)
+                }
+            }
+        },
+        listIdentifiers: {
+            await withCheckedContinuation { continuation in
+                WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+                    continuation.resume(returning: Set($0))
                 }
             }
         }
@@ -357,7 +366,7 @@ final class AccountWebsiteDataStore {
     private let operations: AccountWebsiteDataStoreOperations
     private(set) var identifier: UUID
     private(set) var dataStore: WKWebsiteDataStore
-    private var ownedIdentifiers: Set<UUID>
+    private(set) var ownedIdentifiers: Set<UUID>
 
     init(
         defaults: UserDefaults = .standard,
@@ -403,18 +412,31 @@ final class AccountWebsiteDataStore {
         }
     }
 
+    /// Removes every store this ledger owns except the current one. A store
+    /// leaves the ledger only once WebKit no longer lists it, not when its
+    /// removal reports success: a store whose network session is still
+    /// closing (one released at sign-out) gets its directory back right after
+    /// a removal WebKit reported as done. So the sweep that removes a store
+    /// keeps it, and a later sweep (the next launch or account change) removes
+    /// it again if it came back, or forgets it once it is gone.
     func sweepOrphans() async {
         let candidates = ownedIdentifiers.subtracting([identifier])
+        guard !candidates.isEmpty else {
+            return
+        }
+        let listed = await operations.listIdentifiers()
 
         for candidate in candidates.sorted(by: {
             $0.uuidString < $1.uuidString
         }) {
+            guard listed.contains(candidate) else {
+                ownedIdentifiers.remove(candidate)
+                continue
+            }
             if let error = await operations.removeIdentifier(candidate) {
                 Self.logger.error(
                     "Named WebKit store cleanup failed for \(candidate.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
                 )
-            } else {
-                ownedIdentifiers.remove(candidate)
             }
         }
 
@@ -1138,7 +1160,50 @@ enum MobileExternalURLPolicy {
         "https://avibe.bot/app/account/security",
     ]
 
+    /// Source links on the bundled Open-source licenses page: exactly the
+    /// URLs its generated `licenses.json` lists, nothing else on those hosts.
+    private static let licenseSourceURLs: Set<String> = {
+        guard
+            let url = Bundle.main.resourceURL?
+                .appendingPathComponent("MobileApp", isDirectory: true)
+                .appendingPathComponent("licenses.json"),
+            let data = try? Data(contentsOf: url)
+        else { return [] }
+        return licenseSourceURLs(from: data)
+    }()
+
     static func allows(_ url: URL) -> Bool {
+        allows(url, licenseSources: licenseSourceURLs)
+    }
+
+    static func allows(_ url: URL, licenseSources: Set<String>) -> Bool {
         allowedURLs.contains(url.absoluteString)
+            || licenseSources.contains(url.absoluteString)
+    }
+
+    /// The crates.io archives and upstream sources of the page's MPL-2.0 offer.
+    static func licenseSourceURLs(from data: Data) -> Set<String> {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data),
+            let root = object as? [String: Any],
+            let sources = root["sources"] as? [[String: Any]]
+        else { return [] }
+        var urls: [String] = []
+        for source in sources {
+            if let upstream = source["upstream"] as? String {
+                urls.append(upstream)
+            }
+            for crate in source["crates"] as? [[String: Any]] ?? [] {
+                if let registry = crate["registry"] as? String {
+                    urls.append(registry)
+                }
+            }
+        }
+        return Set(urls.filter { raw in
+            guard let url = URL(string: raw), url.scheme == "https", url.user == nil,
+                  url.query == nil, url.fragment == nil
+            else { return false }
+            return url.host == "static.crates.io" || url.host == "github.com"
+        })
     }
 }

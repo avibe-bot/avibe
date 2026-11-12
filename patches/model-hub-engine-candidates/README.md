@@ -4,8 +4,9 @@ A candidate is an engine build proposed for the signed engine channel
 (`docs/plans/model-hub-engine-channel.md`). It is separate from the engine
 Avibe packages (`vibe/model_hub_runtime/cliproxyapi_manifest.json`): merging a
 candidate record does not change what any Avibe release installs, and does not
-make the engine available to anyone. Only qualification and an approved
-promotion do that.
+make the engine available to anyone. The rehearsal is informational; only the
+existing protected workflow and explicit owner approval can publish or promote
+it.
 
 No candidate is recorded here yet.
 
@@ -39,7 +40,8 @@ file unchanged. Qualification rebuilds the source and requires the same bytes.
   once the engine is promoted; a correction is a new build revision.
 - `hosted_wire_changes` is optional. It maps a baseline engine release to the
   reviewed reason the hosted passthrough differs from it. Without an entry, a
-  difference from that baseline blocks qualification.
+  difference from that baseline remains visible in the untrusted rehearsal and
+  needs an owner decision before promotion.
 
 The directory name, the record's tag and the manifest's `asset_release_tag`
 must agree, and the directory holds only these two files.
@@ -51,4 +53,7 @@ python3 scripts/model_hub_engine_qualification.py candidate \
   --candidate-dir patches/model-hub-engine-candidates/<asset_release_tag>
 ```
 
-Qualification, publication and promotion are described in `docs/release.md`.
+Qualification, the `untrusted_rehearsal` result, publication and promotion are
+described in `docs/release.md`. The rehearsal does not prove that a malicious
+candidate reported honestly; full containment is rejected for this scope and a
+future stronger receipt requires a new product decision.

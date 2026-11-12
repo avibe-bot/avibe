@@ -58,6 +58,8 @@ import {
   verifyMobilePasskey,
   verifyMobileSecondFactor,
 } from './bridge';
+import { LicensesContent, LicensesEntry } from './LicensesPage';
+import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
 type Screen =
   | 'boot'
@@ -71,7 +73,8 @@ type Screen =
   | 'instances'
   | 'empty'
   | 'cli'
-  | 'account';
+  | 'account'
+  | 'licenses';
 
 type BusyAction =
   | 'boot'
@@ -747,7 +750,7 @@ function OtpCells({
       <Input
         ref={input}
         id="mobile-login-code"
-        className="absolute inset-0 z-10 h-full w-full cursor-text opacity-0"
+        className="absolute inset-0 z-10 h-full w-full cursor-text opacity-0 disabled:opacity-0"
         type="text"
         inputMode="numeric"
         autoComplete="one-time-code"
@@ -1580,17 +1583,21 @@ function Account({
   busy,
   locked,
   errorKey,
+  licenses,
   onBack,
   onSwitch,
   onLogout,
+  onLicenses,
 }: {
   session: Extract<MobileSessionState, { status: 'signedIn' }>;
   busy: boolean;
   locked: boolean;
   errorKey: MobileErrorKey | null;
+  licenses: boolean;
   onBack: () => void;
   onSwitch: () => void;
   onLogout: () => void;
+  onLicenses: () => void;
 }) {
   const { t } = useTranslation();
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id);
@@ -1642,6 +1649,26 @@ function Account({
           <ChevronRight className="size-4" />
         </Button>
       </section>
+      {licenses ? <LicensesEntry disabled={locked} onOpen={onLicenses} /> : null}
+    </CloudScreen>
+  );
+}
+
+function Licenses({
+  licenses,
+  onBack,
+  onOpenLink,
+}: {
+  licenses: AppLicenses;
+  onBack: () => void;
+  onOpenLink: (url: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <CloudScreen>
+      <Brand back onBack={onBack} />
+      <PageTitle title={t('mobileApp.licenses.title')} subtitle={t('mobileApp.licenses.intro')} />
+      <LicensesContent licenses={licenses} onOpenLink={onOpenLink} />
     </CloudScreen>
   );
 }
@@ -1696,6 +1723,8 @@ export function MobileOnboarding() {
   // avibe.bot's second-factor throttle window; a completed code waits for the button.
   const secondFactorRetryAt = useRef(0);
   const [screen, setScreen] = useState<Screen>('boot');
+  // Bundled with the App; absent while it carries no native notices.
+  const [licenses, setLicenses] = useState<AppLicenses | null>(null);
   const [session, setSession] = useState<MobileSessionState>({ status: 'signedOut' });
   const [email, setEmail] = useState('');
   const [emailMode, setEmailMode] = useState<EmailMode>('code');
@@ -1770,6 +1799,16 @@ export function MobileOnboarding() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [bootstrap]);
+
+  useEffect(() => {
+    let active = true;
+    void loadAppLicenses().then((data) => {
+      if (active) setLicenses(data);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -2250,6 +2289,7 @@ export function MobileOnboarding() {
         busy={busy === 'logout'}
         locked={locked}
         errorKey={errorKey}
+        licenses={licenses !== null}
         onBack={() => void leaveAccount()}
         onSwitch={() => {
           if (!isOperationLocked()) {
@@ -2258,6 +2298,21 @@ export function MobileOnboarding() {
           }
         }}
         onLogout={() => void logout()}
+        onLicenses={() => {
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('licenses');
+          }
+        }}
+      />
+    );
+  }
+  if (screen === 'licenses' && licenses) {
+    return (
+      <Licenses
+        licenses={licenses}
+        onBack={() => setScreen('account')}
+        onOpenLink={(url) => void openMobileExternal(url)}
       />
     );
   }

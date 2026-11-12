@@ -26,6 +26,8 @@
     "properties": {
       "id": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"},
       "label": {"type": "string", "minLength": 1},
+      "label_zh": {"type": "string", "minLength": 1},
+      "region": {"enum": ["cn"]},
       "official_base_url": {"type": "string", "format": "uri", "pattern": "^https://"},
       "protocol": {"enum": ["anthropic", "openai_responses", "openai_chat", "google", "search"]},
       "source_id": {"type": "string", "pattern": "^src_[a-z0-9]+$"},

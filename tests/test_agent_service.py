@@ -385,8 +385,8 @@ def test_model_selection_is_required_before_any_backend_dispatch(backend, model,
 @pytest.mark.parametrize(
     ("backend", "hub_switch", "gateway_enabled", "has_source", "refusal", "fixed_in_models"),
     [
-        ("vibey", "1", False, True, "The model gateway is off, so Vibey has no model to run on", True),
-        ("vibey", "1", True, False, "Vibey has no model source yet", True),
+        ("vibey", "1", False, True, "Model Hub is off, so Vibey has no model to run on", True),
+        ("vibey", "1", True, False, "Vibey has no model provider yet", True),
         # A source but no model: the built-in backend's models all come from its Model Hub list.
         ("vibey", "1", True, True, "Select a model for the Vibey Agent", True),
         ("vibey", "0", True, True, "Model Hub is disabled on this instance, so Vibey has no model to run on", False),
@@ -431,9 +431,69 @@ def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
             assert refused.value.fixed_in_models is fixed_in_models
             # A supply refusal fails the same way until Models changes, so the input waits for an
             # explicit retry rather than spending the automatic startup retries.
+            # The reason tells the queue whether Models is where to send its reader.
             assert prewrite_failure_evidence(request.context) == {
-                "reason": "model_supply_refusal", "requires_explicit_retry": True,
+                "reason": "model_supply_refusal" if fixed_in_models else "model_hub_disabled",
+                "requires_explicit_retry": True,
             }
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("bot_record", "builtin", "language", "expected"),
+    [
+        # The main Bot with no name of its own reads as its localized default, as the Workbench shows it.
+        ({"handle": "main", "display_name": ""}, True, "zh", "歪比还没有模型供应商"),
+        ({"handle": "main", "display_name": ""}, True, "en", "Vibey has no model provider yet"),
+        # A Bot the person named is called that name.
+        ({"handle": "helper", "display_name": "奶酪包"}, False, "zh", "奶酪包还没有模型供应商"),
+        # A Session with no Bot keeps the backend's name.
+        (None, False, "zh", "Vibey 还没有模型供应商"),
+        # A Bot named in Latin letters keeps the space Chinese puts between CJK and Latin.
+        ({"handle": "helper", "display_name": "Cheese 2"}, False, "zh", "Cheese 2 还没有模型供应商"),
+    ],
+)
+def test_a_no_model_refusal_names_the_sessions_bot(monkeypatch, bot_record, builtin, language, expected):
+    """The no-model refusal calls who is answering by the name the conversation shows it."""
+    from core.vibe_agents import BOT_METADATA_KEY, BUILTIN_BOT_METADATA_KEY, MAIN_BOT_HANDLE
+    from modules.agents.model_hub import ModelSupplyRefusal
+    from tests.scenario_harness.model_hub import config_with_sources
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    metadata = {}
+    if bot_record is not None:
+        metadata[BOT_METADATA_KEY] = bot_record
+    if builtin:
+        metadata[BUILTIN_BOT_METADATA_KEY] = MAIN_BOT_HANDLE
+    vibe_agent = SimpleNamespace(
+        id="agt_bot", name="main", backend="vibey", archived_at=None,
+        source="builtin" if builtin else "user", metadata=metadata, description="",
+    )
+
+    async def run():
+        controller = _Controller()
+        controller.config = SimpleNamespace(language=language)
+        controller.vibe_agent_store = SimpleNamespace(
+            get_by_id=lambda agent_id: vibe_agent if agent_id == vibe_agent.id else None,
+            get=lambda name: None,
+        )
+        hub = config_with_sources([])
+        hub.enabled = True
+        controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent()
+        agent.name = "vibey"
+        service.register(agent)
+        request = _request("hello")
+        request.vibe_agent_model = None
+        request.vibe_agent_id = vibe_agent.id
+        request.failure_handler = AsyncMock(return_value=True)
+
+        with pytest.raises(ModelSupplyRefusal) as refused:
+            await service.handle_message("vibey", request)
+        assert str(refused.value).startswith(expected)
 
     asyncio.run(run())
 

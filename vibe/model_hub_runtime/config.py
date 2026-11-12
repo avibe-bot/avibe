@@ -10,6 +10,7 @@ from config.atomic_io import write_atomic
 from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
 from config.v2_config import normalize_model_hub_base_url
 from vibe.model_hub_runtime.api_key_vendors import (
+    anthropic_api_root,
     google_api_base_url,
     official_api_key_base_url,
     openai_compatible_endpoint,
@@ -236,7 +237,9 @@ def _append_source(
         entry: dict[str, Any] = {
             "api-key": api_key,
             "prefix": source.prefix,
-            "base-url": base_url,
+            # The executor appends /v1/messages itself; a saved ``…/v1`` root
+            # would otherwise reach ``…/v1/v1/messages``.
+            "base-url": anthropic_api_root(base_url),
             "cloak": {"mode": "never"},
             "rebuild-mid-system-message": False,
         }

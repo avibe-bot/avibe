@@ -3,7 +3,8 @@
 Each table states what an installed Avibe must refuse: bytes no shipped key
 signed, a payload outside the strict schema, an index older than or different
 from one already accepted, and a selection that moves an engine anywhere but
-forward, except on an explicit withdrawal.
+forward, except on an explicit withdrawal. An index has no expiry: when it was
+issued, and how long ago it was accepted, refuse nothing.
 """
 
 from __future__ import annotations
@@ -12,9 +13,11 @@ import base64
 import copy
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -23,7 +26,6 @@ from core import model_hub_engine_channel as channel
 from core.model_hub_engine_channel import ChannelError, ResolutionAction
 from tests.engine_channel_support import (
     KEY_ID,
-    NOW,
     LocalVerifier,
     Signer,
     encode,
@@ -217,9 +219,10 @@ def _mutated_manifest(mutate) -> dict:
         lambda d: d.update(issued_at="2026-11-10 06:00:00"),
         lambda d: d.update(issued_at="2026-11-10T06:00:00+00:00"),
         lambda d: d.update(issued_at="2026-02-30T06:00:00Z"),
-        lambda d: d.update(expires_at=d["issued_at"]),
-        lambda d: d.update(expires_at="2026-11-09T06:00:00Z"),
-        lambda d: d.update(expires_at="2026-11-17T06:00:01Z"),
+        lambda d: d.pop("issued_at"),
+        # An index carries no expiry, and one that names one is not this contract's.
+        lambda d: d.update(expires_at="2026-11-17T06:00:00Z"),
+        lambda d: d.update(expires_at=None),
         lambda d: d.update(max_avibe_version="4.0.0"),
         lambda d: d.pop("revoked"),
         lambda d: d.update(releases={}),
@@ -315,9 +318,9 @@ def test_a_trust_root_document_outside_the_strict_shape_is_refused(signer, mutat
 # ----- anti-replay state -----------------------------------------------------
 
 
-def _accept(store: channel.ChannelStateStore, signer: Signer, raw: bytes, *, floor: int = 0, now=NOW) -> bool:
+def _accept(store: channel.ChannelStateStore, signer: Signer, raw: bytes, *, floor: int = 0) -> bool:
     envelope, payload = channel.authenticate(raw, roots=signer.roots(), verifier=LocalVerifier())
-    return store.accept(envelope, payload, floor=floor, now=now)
+    return store.accept(envelope, payload, floor=floor)
 
 
 def test_a_newer_index_replaces_the_recorded_one_and_an_identical_one_changes_nothing(tmp_path, signer) -> None:
@@ -328,8 +331,8 @@ def test_a_newer_index_replaces_the_recorded_one_and_an_identical_one_changes_no
     assert _accept(store, signer, first) is False
     assert _accept(store, signer, second) is True
 
-    snapshot = store.cached(roots=signer.roots(), verifier=LocalVerifier(), now=NOW)
-    assert snapshot.payload.sequence == 6 and snapshot.fresh
+    snapshot = store.cached(roots=signer.roots(), verifier=LocalVerifier())
+    assert snapshot.payload.sequence == 6 and snapshot.meets_floor
     assert snapshot.envelope.raw == second
 
 
@@ -390,53 +393,56 @@ def test_a_release_that_was_once_listed_keeps_its_identity_after_it_stops_being_
     assert _reason(lambda: _accept(store, signer, signed(signer, 3, releases=relisted))) == "release_mutated"
 
 
-@pytest.mark.parametrize(
-    ("now", "floor", "reason"),
-    [
-        (NOW + timedelta(days=7), 0, "expired"),
-        (NOW + timedelta(days=30), 0, "expired"),
-        (NOW - channel.CLOCK_SKEW - timedelta(seconds=1), 0, "not_yet_valid"),
-        (NOW, 6, "replayed"),
-    ],
-)
-def test_an_index_outside_its_validity_or_below_the_shipped_floor_is_not_recorded(
-    tmp_path, signer, now, floor, reason
-) -> None:
+def test_an_index_below_the_shipped_floor_is_not_recorded(tmp_path, signer) -> None:
     store = channel.ChannelStateStore(tmp_path / "channel")
 
-    assert _reason(lambda: _accept(store, signer, signed(signer, 5), floor=floor, now=now)) == reason
+    assert _reason(lambda: _accept(store, signer, signed(signer, 5), floor=6)) == "replayed"
     assert not store.state_path.exists()
+    assert _accept(store, signer, signed(signer, 6), floor=6) is True
 
 
-def test_a_small_clock_difference_does_not_reject_a_just_issued_index(tmp_path, signer) -> None:
+@pytest.mark.parametrize(
+    "issued_at",
+    [
+        datetime(2001, 1, 1, tzinfo=timezone.utc),
+        datetime(2999, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
+    ],
+    ids=["issued-long-ago", "dated-far-ahead"],
+)
+def test_an_index_is_accepted_and_keeps_deciding_whenever_it_was_issued(tmp_path, signer, issued_at) -> None:
+    """MH-ENGINE-CHANNEL-013: an index does not expire; only a higher sequence replaces it."""
+
     store = channel.ChannelStateStore(tmp_path / "channel")
+    releases = [release_entry(manifest_bytes(build=1)), release_entry(manifest_bytes(build=2))]
+    index = signed(signer, 5, releases=releases, issued_at=issued_at)
 
-    assert _accept(store, signer, signed(signer, 5), now=NOW - channel.CLOCK_SKEW) is True
+    # Whatever this machine's clock says, the index is accepted, and accepted again unchanged.
+    assert _accept(store, signer, index) is True
+    assert _accept(store, signer, index) is False
+    snapshot = store.cached(roots=signer.roots(), verifier=LocalVerifier())
+    assert snapshot.payload.issued_at == issued_at and snapshot.meets_floor
+    # It still selects: what it lists may be adopted and downloaded.
+    resolution = _resolve(snapshot.payload)
+    assert (resolution.action, resolution.target.asset_release_tag) == (ResolutionAction.ADOPT, V63_2)
+    assert resolution.download_authorized is True
+    # The date orders nothing. A higher sequence issued earlier replaces it; a lower one issued later does not.
+    earlier = datetime(1999, 1, 1, tzinfo=timezone.utc)
+    later = datetime(3000, 1, 1, tzinfo=timezone.utc)
+    assert _reason(lambda: _accept(store, signer, signed(signer, 4, releases=releases, issued_at=later))) == "replayed"
+    assert _accept(store, signer, signed(signer, 6, releases=releases, issued_at=earlier)) is True
+    assert store.load().sequence == 6
 
 
-def test_an_expired_recorded_index_still_proves_provenance_but_is_not_fresh(tmp_path, signer) -> None:
+def test_an_index_recorded_before_a_later_avibe_raised_its_floor_no_longer_meets_it(tmp_path, signer) -> None:
     store = channel.ChannelStateStore(tmp_path / "channel")
     _accept(store, signer, signed(signer, 5))
 
-    snapshot = store.cached(roots=signer.roots(), verifier=LocalVerifier(), now=NOW + timedelta(days=60))
+    at_floor = store.cached(roots=signer.roots(floor=5), verifier=LocalVerifier())
+    below_floor = store.cached(roots=signer.roots(floor=100), verifier=LocalVerifier())
 
-    assert snapshot.payload.sequence == 5 and snapshot.fresh is False
-    # The same expired bytes offered again as new input are refused.
-    assert _reason(lambda: _accept(store, signer, signed(signer, 5), now=NOW + timedelta(days=60))) == "expired"
-
-
-def test_an_index_recorded_before_a_later_avibe_raised_its_floor_no_longer_authorizes_adoption(
-    tmp_path, signer
-) -> None:
-    store = channel.ChannelStateStore(tmp_path / "channel")
-    _accept(store, signer, signed(signer, 5))
-
-    at_floor = store.cached(roots=signer.roots(floor=5), verifier=LocalVerifier(), now=NOW)
-    below_floor = store.cached(roots=signer.roots(floor=100), verifier=LocalVerifier(), now=NOW)
-
-    assert at_floor.fresh is True
+    assert at_floor.meets_floor is True
     # Still authenticated and readable, so its withdrawals keep applying.
-    assert below_floor.payload.sequence == 5 and below_floor.fresh is False
+    assert below_floor.payload.sequence == 5 and below_floor.meets_floor is False
 
 
 @pytest.mark.parametrize(
@@ -448,15 +454,204 @@ def test_an_index_recorded_before_a_later_avibe_raised_its_floor_no_longer_autho
         lambda path: path.write_text(json.dumps({**json.loads(path.read_text()), "schema_version": 2})),
     ],
 )
-def test_damaged_state_fails_closed_instead_of_starting_over(tmp_path, signer, damage) -> None:
+def test_damaged_state_is_replaced_only_by_an_authenticated_fetch(tmp_path, signer, damage, caplog) -> None:
+    """Readable history is enforced; lost history cannot be reconstructed from a single file.
+
+    Previously any damaged record permanently rejected even an authenticated
+    fetch. The Simple contract deliberately permits a new local floor instead.
+    """
     store = channel.ChannelStateStore(tmp_path / "channel")
-    _accept(store, signer, signed(signer, 5))
+    _accept(store, signer, _history(signer)["base"])
     damage(store.state_path)
     damaged = store.state_path.read_bytes()
 
-    assert _reason(lambda: _accept(store, signer, signed(signer, 6))) == "state_unreadable"
-    assert _reason(lambda: store.cached(roots=signer.roots(), verifier=LocalVerifier(), now=NOW)) == "state_unreadable"
+    assert _reason(lambda: store.cached(roots=signer.roots(), verifier=LocalVerifier())) == "state_unreadable"
     assert store.state_path.read_bytes() == damaged
+    # It is older than the lost sequence 10 and omits its withdrawal: both
+    # losses are intentional, not a promise that atomic replacement recovers history.
+    assert _accept(store, signer, _history(signer)["older"]) is True
+    assert store.load().sequence == 9
+    assert store.load().revoked == ()
+    assert "history" in caplog.text and "withdrawal" in caplog.text
+
+
+def test_rejected_authenticated_payload_does_not_leave_a_volatile_withdrawal_gate(tmp_path, signer):
+    from types import SimpleNamespace
+    from vibe.model_hub_runtime.engine_channel import EngineChannel
+
+    releases = [release_entry(manifest_bytes(build=build)) for build in (1, 2)]
+    manager = SimpleNamespace(
+        runtime_dir=tmp_path, manifest_path=None, manifest_url=None, offline=False,
+        bundled_manifest=lambda: SimpleNamespace(payload={"asset_release_tag": V63_1}),
+        host_platform=lambda: "linux-amd64",
+    )
+    engine_channel = EngineChannel(
+        manager, roots=signer.roots(), verifier=LocalVerifier(),
+        fetch=lambda: signed(signer, 10, releases=releases), avibe_version="3.2.6",
+    )
+    assert engine_channel.refresh().state == "accepted"
+    engine_channel._fetch = lambda: signed(signer, 9, releases=releases, revoked=[tombstone(V63_2, V63_1)])
+    status = engine_channel.refresh()
+    assert status.state == "rejected" and status.reason == "replayed"
+    assert engine_channel.resolve(current=V63_2).action is ResolutionAction.KEEP
+
+
+@pytest.mark.parametrize("failure", [
+    "signature", "schema", "replay", "equivocation", "history", "network", "publication", "inflight_replay", "unchanged",
+])
+def test_failed_refresh_preserves_prior_unpublished_withdrawals(tmp_path, signer, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    from config import atomic_io
+    from vibe.model_hub_runtime.engine_channel import EngineChannel
+
+    releases = [release_entry(manifest_bytes(build=build)) for build in (1, 2, 3)]
+    manager = SimpleNamespace(
+        runtime_dir=tmp_path, manifest_path=None, manifest_url=None, offline=False,
+        bundled_manifest=lambda: SimpleNamespace(payload={"asset_release_tag": V63_1}),
+        host_platform=lambda: "linux-amd64",
+    )
+    engine_channel = EngineChannel(
+        manager, roots=signer.roots(), verifier=LocalVerifier(),
+        fetch=lambda: signed(signer, 10, releases=releases), avibe_version="3.2.6",
+    )
+    assert engine_channel.refresh().state == "accepted"
+    before = engine_channel.store.state_path.read_bytes()
+    replace = atomic_io.os.replace
+
+    def fail_publication(*_args):
+        raise OSError("test-owned channel publication refused")
+
+    monkeypatch.setattr(atomic_io.os, "replace", fail_publication)
+    engine_channel._fetch = lambda: signed(signer, 11, releases=releases, revoked=[tombstone(V63_2, V63_1)])
+    assert engine_channel.refresh().reason == "state_unreadable"
+    assert engine_channel.resolve(current=V63_2).action is ResolutionAction.BLOCKED
+
+    attempt = signed(signer, 12, releases=releases, revoked=[tombstone(V63_3, V63_1)])
+    if failure == "signature":
+        attempt = signed(Signer(), 12, releases=releases, revoked=[tombstone(V63_3, V63_1)])
+    elif failure == "schema":
+        attempt = b"{}"
+    elif failure in {"replay", "equivocation", "inflight_replay"}:
+        attempt = signed(signer, 10 if failure == "equivocation" else 9, releases=releases, revoked=[tombstone(V63_3, V63_1)])
+    elif failure == "unchanged":
+        attempt = engine_channel.store.load().envelope
+    elif failure == "history":
+        attempt = signed(signer, 12, releases=[
+            releases[0], release_entry(manifest_bytes(build=2), minimum="3.2.7"), releases[2],
+        ], revoked=[tombstone(V63_3, V63_1)])
+    engine_channel._fetch = lambda: attempt
+    if failure == "network":
+        engine_channel._fetch = fail_publication
+    if failure == "inflight_replay":
+        from concurrent.futures import ThreadPoolExecutor
+
+        entered, proceed = threading.Event(), threading.Event()
+        accept = engine_channel.store.accept
+
+        def held_accept(*args, **kwargs):
+            entered.set()
+            assert proceed.wait(5)
+            return accept(*args, **kwargs)
+
+        with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=1) as executor:
+            patch.setattr(engine_channel.store, "accept", held_accept)
+            refresh = executor.submit(engine_channel.refresh)
+            try:
+                assert entered.wait(5)
+                assert engine_channel.resolve(current=V63_2).action is ResolutionAction.BLOCKED
+                assert engine_channel.resolve(current=V63_3).action is ResolutionAction.KEEP
+                assert not refresh.done()
+            finally:
+                proceed.set()
+            status = refresh.result(timeout=5)
+    else:
+        status = engine_channel.refresh()
+    expected_reason = {
+        "signature": "signature_invalid", "schema": "envelope_invalid", "replay": "replayed",
+        "equivocation": "equivocation", "history": "release_mutated", "network": "network",
+        "publication": "state_unreadable", "inflight_replay": "replayed", "unchanged": None,
+    }[failure]
+    assert status.reason == expected_reason
+    if failure == "unchanged":
+        assert status.state == "accepted" and not status.changed
+    else:
+        assert status.state == ("unavailable" if failure == "network" else "rejected")
+    assert engine_channel.store.state_path.read_bytes() == before
+    decision = engine_channel.resolve(current=V63_2)
+    assert decision.action is ResolutionAction.BLOCKED and decision.reason == "channel_state_write_failed"
+    # Failed publication is additive; rejected attempts contribute nothing.
+    expected = ResolutionAction.BLOCKED if failure == "publication" else ResolutionAction.KEEP
+    assert engine_channel.resolve(current=V63_3).action is expected
+
+    monkeypatch.setattr(atomic_io.os, "replace", replace)
+    engine_channel._fetch = lambda: signed(signer, 12, releases=releases, revoked=[
+        tombstone(V63_2, V63_1), tombstone(V63_3, V63_1),
+    ])
+    assert engine_channel.refresh().state == "accepted"
+    assert engine_channel.resolve(current=V63_2).action is ResolutionAction.WITHDRAW
+    # Successful publication hands authority back to the single file. Its
+    # deliberate loss contract remains unchanged; this is not a replay backup.
+    engine_channel.store.state_path.unlink()
+    engine_channel._fetch = lambda: signed(signer, 1, releases=releases)
+    assert engine_channel.refresh().state == "accepted"
+    assert engine_channel.resolve(current=V63_2, allow_adoption=False).action is ResolutionAction.KEEP
+
+
+def test_a_failed_recovery_write_preserves_the_damaged_file(tmp_path, signer, monkeypatch) -> None:
+    """The real atomic publisher must preserve damaged bytes if replacement fails."""
+    from config import atomic_io
+
+    store = channel.ChannelStateStore(tmp_path / "channel")
+    store.directory.mkdir()
+    store.state_path.write_bytes(b"{damaged")
+
+    def fail_replace(*_args):
+        raise OSError("replacement refused")
+
+    monkeypatch.setattr(atomic_io.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replacement refused"):
+        _accept(store, signer, signed(signer, 5))
+    assert store.state_path.read_bytes() == b"{damaged"
+    assert sorted(path.name for path in store.directory.iterdir()) == [".state.lock", "state.json"]
+
+
+def test_channel_acceptance_publishes_a_complete_file_before_returning(tmp_path, signer, monkeypatch) -> None:
+    """Channel reads see whole old/new documents through the shared atomic writer.
+
+    The generic helper covers overlapping writers. This verifies the channel
+    calls it under its acceptance lock, flushes before success, and publishes
+    the actual envelope/digest/history rather than a partial projection.
+    """
+    from config import atomic_io
+
+    store = channel.ChannelStateStore(tmp_path / "channel")
+    _accept(store, signer, signed(signer, 4))
+    before = store.state_path.read_bytes()
+    replace = atomic_io.os.replace
+    sync_directory = atomic_io._fsync_directory
+    published = []
+
+    def observe_replace(source, destination):
+        assert Path(source).parent == store.directory
+        assert Path(source) != store.state_path
+        assert store.state_path.read_bytes() == before
+        # Read through the real loader at both sides of atomic publication.
+        assert store.load().sequence == 4
+        replace(source, destination)
+        assert store.load().sequence == 5
+        published.append("replace")
+
+    def observe_directory_sync(directory):
+        assert published == ["replace"]
+        sync_directory(directory)
+        published.append("directory_sync")
+
+    monkeypatch.setattr(atomic_io.os, "replace", observe_replace)
+    monkeypatch.setattr(atomic_io, "_fsync_directory", observe_directory_sync)
+    assert _accept(store, signer, signed(signer, 5)) is True
+    assert published == ["replace", "directory_sync"]
+    assert sorted(path.name for path in store.directory.iterdir()) == [".state.lock", "state.json"]
 
 
 def test_a_recorded_envelope_swapped_on_disk_is_not_served_as_the_accepted_index(tmp_path, signer) -> None:
@@ -466,7 +661,7 @@ def test_a_recorded_envelope_swapped_on_disk_is_not_served_as_the_accepted_index
     state["envelope"] = base64.b64encode(signed(signer, 4)).decode()
     store.state_path.write_text(json.dumps(state))
 
-    assert _reason(lambda: store.cached(roots=signer.roots(), verifier=LocalVerifier(), now=NOW)) == "state_unreadable"
+    assert _reason(lambda: store.cached(roots=signer.roots(), verifier=LocalVerifier())) == "state_unreadable"
 
 
 def test_concurrent_refreshes_never_move_the_recorded_sequence_back(tmp_path, signer) -> None:
@@ -493,6 +688,62 @@ def test_concurrent_refreshes_never_move_the_recorded_sequence_back(tmp_path, si
     assert set(outcomes) <= {"accepted", "replayed"} and outcomes.count("accepted") >= 1
 
 
+@pytest.mark.reap_processes
+def test_acceptance_reloads_history_after_waiting_for_another_process(tmp_path, signer) -> None:
+    """The acceptance lock covers re-read/compare/publication across processes.
+
+    Thread-only coverage cannot detect a missing OS lock. A slower process
+    must see the newer floor published by the lock holder, not clobber it.
+    """
+    from storage.lock import MigrationFileLock
+
+    store = channel.ChannelStateStore(tmp_path / "channel")
+    _accept(store, signer, signed(signer, 5))
+    incoming = tmp_path / "incoming.json"
+    incoming.write_bytes(signed(signer, 6))
+    ready = tmp_path / "ready"
+    script = """
+import sys
+from pathlib import Path
+from core.model_hub_engine_channel import ChannelError, ChannelStateStore, TrustRoot, TrustRoots, authenticate
+from tests.engine_channel_support import LocalVerifier
+store = ChannelStateStore(Path(sys.argv[1]))
+envelope, payload = authenticate(Path(sys.argv[2]).read_bytes(),
+    roots=TrustRoots((TrustRoot('test-channel-key', sys.argv[3]),)), verifier=LocalVerifier())
+Path(sys.argv[4]).write_text('attempting acceptance')
+try:
+    store.accept(envelope, payload, floor=0)
+except ChannelError as exc:
+    print(exc.reason)
+else:
+    print('accepted')
+"""
+    child = None
+    try:
+        with MigrationFileLock(store.lock_path):
+            child = subprocess.Popen(
+                [sys.executable, "-c", script, str(store.directory), str(incoming), signer.public_key, str(ready)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=Path(__file__).resolve().parents[1],
+            )
+            deadline = time.monotonic() + 15
+            while not ready.exists():
+                if child.poll() is not None or time.monotonic() >= deadline:
+                    pytest.fail("accepting process did not become ready")
+                time.sleep(0.01)
+            # The child has authenticated and is waiting for the real OS lock.
+            assert child.poll() is None
+            _accept(store, signer, signed(signer, 7))
+        stdout, stderr = child.communicate(timeout=15)
+        assert child.returncode == 0, stderr
+        assert stdout.strip() == "replayed"
+        assert store.load().sequence == 7
+    finally:
+        if child is not None and child.poll() is None:
+            child.terminate()
+            child.communicate(timeout=15)
+
+
 # ----- selection -------------------------------------------------------------
 
 
@@ -503,7 +754,7 @@ def _payload(releases: list[tuple[str, int, str]], revoked: list[dict] | None = 
 
 def _resolve(payload, **overrides):
     arguments = {
-        "fresh": True,
+        "hold": None,
         "avibe_version": "3.2.6",
         "host_platform": "linux-amd64",
         "bundled": V63_1,
@@ -538,8 +789,9 @@ LISTED = [("v8.0.63", 1, "3.2.6"), ("v8.0.63", 2, "3.2.6"), ("v8.0.63", 3, "3.2.
         ({"bundled": V63_3, "current": V63_1}, ResolutionAction.KEEP, None, "up_to_date"),
         ({"quarantined": frozenset({V63_2})}, ResolutionAction.KEEP, None, "up_to_date"),
         ({"avibe_version": "3.2.7", "quarantined": frozenset({V63_3})}, ResolutionAction.ADOPT, V63_2, "newer_release"),
-        # Without authority to adopt, nothing is selected.
-        ({"fresh": False}, ResolutionAction.KEEP, None, "index_stale"),
+        # Without authority to adopt, nothing is selected, and the reason says which authority is missing.
+        ({"hold": channel.HOLD_OFFLINE}, ResolutionAction.KEEP, None, "offline"),
+        ({"hold": channel.HOLD_BELOW_FLOOR}, ResolutionAction.KEEP, None, "index_below_floor"),
         ({"allow_adoption": False}, ResolutionAction.KEEP, None, "adoption_disabled"),
         ({"host_platform": "freebsd-amd64"}, ResolutionAction.KEEP, None, "up_to_date"),
         ({"current": "custom-engine"}, ResolutionAction.KEEP, None, "engine_identity_unrecognized"),
@@ -573,8 +825,10 @@ WITHDRAWN = {"current": V63_2, "bundled": V63_2}
     [
         # The engine in effect was withdrawn: back to the named fallback, even below the bundled engine.
         ([tombstone(V63_2, V63_1)], WITHDRAWN, ResolutionAction.WITHDRAW, V63_1, True),
-        # Neither a stale index, switched-off updates, nor a newer eligible release changes that target.
-        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "fresh": False}, ResolutionAction.WITHDRAW, V63_1, False),
+        # Neither a hold, switched-off updates, nor a newer eligible release changes that target.
+        # A hold only withholds the download: the fallback must already be on the machine.
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "hold": channel.HOLD_OFFLINE}, ResolutionAction.WITHDRAW, V63_1, False),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "hold": channel.HOLD_BELOW_FLOOR}, ResolutionAction.WITHDRAW, V63_1, False),
         ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "allow_adoption": False}, ResolutionAction.WITHDRAW, V63_1, True),
         ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "avibe_version": "3.2.7"}, ResolutionAction.WITHDRAW, V63_1, True),
         # An unreadable bundled identity stops adoption, never a withdrawal.
@@ -595,7 +849,7 @@ WITHDRAWN = {"current": V63_2, "bundled": V63_2}
         ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "host_platform": "freebsd-amd64"}, ResolutionAction.BLOCKED, None, False),
         (
             [tombstone(V63_2, V63_1)],
-            {**WITHDRAWN, "host_platform": "freebsd-amd64", "fresh": False, "allow_adoption": False},
+            {**WITHDRAWN, "host_platform": "freebsd-amd64", "hold": channel.HOLD_OFFLINE, "allow_adoption": False},
             ResolutionAction.BLOCKED,
             None,
             False,

@@ -3468,6 +3468,41 @@ def test_load_state_file_adopts_a_file_written_before_identities_existed(tmp_pat
     )
 
 
+def test_write_state_file_skips_unchanged_state_and_recovers_failed_writes(tmp_path) -> None:
+    """Quiet polls must not replace cursors; changed or lost state still lands.
+
+    Existing ownership/delivery tests check values, not whether an unchanged
+    poll creates and replaces a whole snapshot again.
+    """
+    module = _load_module()
+    state_file = tmp_path / "pr.json"
+    identity = {"repo": "avibe-bot/avibe", "pr_number": 153, "watch_identity": "watch", "watch_id": "owner"}
+    state = {"review_cursor": 1, "snapshot": {"head": "a", "status": "open"}}
+    module._write_state_file(str(state_file), **identity, **state)
+    original = state_file.read_bytes()
+    with patch.object(module, "_state_file_scratch", side_effect=AssertionError("unchanged state wrote")):
+        module._write_state_file(str(state_file), **identity, **state)
+        # Dictionary insertion order is not a state change.
+        module._write_state_file(str(state_file), **identity, snapshot={"status": "open", "head": "a"}, review_cursor=1)
+    assert state_file.read_bytes() == original
+
+    changed = {**state, "snapshot": {"head": "b", "status": "open"}}
+    with patch.object(module.os, "replace", side_effect=OSError("synthetic disk failure")):
+        with pytest.raises(module.StatePersistenceError):
+            module._write_state_file(str(state_file), **identity, **changed)
+    assert state_file.read_bytes() == original
+    module._write_state_file(str(state_file), **identity, **changed)
+    assert json.loads(state_file.read_text())["snapshot"]["head"] == "b"
+    for damaged in (None, "{broken"):
+        if damaged is None:
+            state_file.unlink()
+        else:
+            state_file.write_text(damaged)
+        module._write_state_file(str(state_file), **identity, **changed)
+        assert json.loads(state_file.read_text())["snapshot"]["head"] == "b"
+    assert list(tmp_path.glob(".pr.json.*")) == []
+
+
 def test_write_state_file_refuses_a_path_another_watch_now_owns(tmp_path) -> None:
     """Ownership is verified on every replacement, not only at startup.
 

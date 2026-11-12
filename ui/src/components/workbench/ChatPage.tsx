@@ -79,6 +79,8 @@ import { AnnotationMessage } from './AnnotationMessage';
 import { FailureDetails } from './FailureDetails';
 import { FailureRetry, type FailureRetryOptions } from './FailureRetry';
 import { FailureNextStep } from './FailureNextStep';
+import { settingsOverlayContinuationState } from '../../lib/settingsOverlay';
+import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
 import { HARNESS_GROUP_RAIL, HarnessGroup, HarnessGroupCollapse } from './HarnessGroup';
@@ -147,6 +149,8 @@ import { useSkeletonHandover } from '../ui/skeleton-handover';
 import {
   clientMessageMetadata,
   newClientMessageId,
+  STEERING_STATES,
+  type PendingSendPlace,
   transcriptRowKey,
   usePendingSends,
 } from './usePendingSends';
@@ -1182,10 +1186,13 @@ export const ChatPage: React.FC = () => {
   const {
     rows: transcriptRows,
     queueRows,
+    stripRows,
+    undecidedRows: undecidedSendRows,
     pendingIds: pendingRowIds,
     add: addPendingSend,
+    move: movePendingSend,
     settle: settlePendingSend,
-  } = usePendingSends(sessionId, messages, queue);
+  } = usePendingSends(sessionId, messages, queue, { steeringInTranscript: botConversation });
   const [sentRowFollow, setSentRowFollow] = useState(0);
   // Sends the server queued, by client id. Each keeps its pending row until its
   // message is shown elsewhere: in the queue strip (a queue read begun after it
@@ -2386,15 +2393,25 @@ export const ChatPage: React.FC = () => {
       const clientId = newClientMessageId();
       const sentMetadata = { ...metadata, ...clientMessageMetadata(clientId) };
       const sentAt = new Date().toISOString();
-      // Sent while a turn runs, the server queues it (the controller either
-      // starts a turn or queues the input, atomically), so it goes straight to
-      // the queue strip. Only a confirmed run predicts that: the list's seeded
-      // ``working`` waits for the bootstrap, and a quick reply keeps its place
-      // under the question it answers. A turn ending in the same instant is the
-      // one misprediction, and the server's answer moves the row (below).
-      const place = !metadata?.quick_reply_for && workingRef.current && !workingSeededRef.current
-        ? 'queue'
-        : 'transcript';
+      // The row is drawn once, where the send goes (owner, 2026-11-12): it must
+      // not appear in one place and then jump to the other.
+      //  * A quick reply keeps its place under the question it answers.
+      //  * In a Bot's conversation the user's message is P1: an idle Bot starts
+      //    on it and a working one takes it into its Turn (steer), so it goes to
+      //    the transcript either way (usePendingSends draws its steering row there).
+      //  * Otherwise, sent while a turn is known to run, the server queues it
+      //    (the controller starts a turn or queues the input, atomically), so it
+      //    goes straight to the queue strip; known idle, to the transcript.
+      //  * While the turn state is not known yet (a chat just opened: only the
+      //    list's seed, or nothing), any guess can be wrong, so the row waits as
+      //    a neutral sending line by the composer until the answer places it.
+      // A turn ending in the same instant is the one remaining misprediction.
+      const turnStateKnown = turnKnownRef.current && !workingSeededRef.current;
+      const place: PendingSendPlace = metadata?.quick_reply_for || botConversation
+        ? 'transcript'
+        : !turnStateKnown
+          ? 'undecided'
+          : workingRef.current ? 'queue' : 'transcript';
       liveMessageIdsRef.current.add(clientId);
       addPendingSend({
         id: clientId,
@@ -2528,6 +2545,13 @@ export const ChatPage: React.FC = () => {
           // (queue.updated, a reconnect), so the message is never in neither
           // place. The composer is free again at once.
           settledLater = true;
+          // An undecided row now knows its place. A Bot steer (P1, still being taken
+          // into the Turn) stays in the transcript; only a genuinely queued or held
+          // message goes to the strip.
+          movePendingSend(
+            clientId,
+            botConversation && STEERING_STATES.has(String(body.state ?? '')) ? 'transcript' : 'queue',
+          );
           queuedSendsRef.current.set(clientId, {
             sessionId,
             deliveryId: String(body.id ?? ''),
@@ -2546,9 +2570,9 @@ export const ChatPage: React.FC = () => {
           await (latestWindow ?? (historicalWindowRef.current ? moveToLatest() : null));
           if (sessionId !== sessionIdRef.current) return;
           appendMessage(message);
-          // Drawn in the queue, it started a turn after all: it moves into the
-          // transcript in this render, and the transcript follows it there.
-          if (place === 'queue') setSentRowFollow((n) => n + 1);
+          // Not drawn in the transcript (undecided, or a queue guess a turn ending
+          // beat): it appears there in this render, and the transcript follows it.
+          if (place !== 'transcript') setSentRowFollow((n) => n + 1);
         }
       } catch (err) {
         if (!metadata?.quick_reply_for) {
@@ -2576,7 +2600,9 @@ export const ChatPage: React.FC = () => {
       api,
       appendMessage,
       addPendingSend,
+      movePendingSend,
       settlePendingSend,
+      botConversation,
       readerPrincipal,
       refreshQueue,
       markWorking,
@@ -3463,8 +3489,8 @@ export const ChatPage: React.FC = () => {
   // what the user sent, and anything else, stays in the strip. Only the rows drawn
   // change: Send now still acts on the real queue head.
   const shownQueueRows = details.harnessMessages
-    ? undefined
-    : queueRows.filter((row) => chatRowKind(row).kind !== 'harness');
+    ? stripRows
+    : stripRows.filter((row) => chatRowKind(row).kind !== 'harness');
 
   return (
     // Fill the viewport so the transcript is the only scrolling region and
@@ -3660,6 +3686,7 @@ export const ChatPage: React.FC = () => {
             so an archived chat loads with an empty queue. A stale tab can still be
             holding pre-archive rows, and every button here writes: Send now POSTs
             the flush, Recall appends into the disabled composer. */}
+        {writable && <PendingSendLine rows={undecidedSendRows} />}
         {writable && (
           <QueueStrip
             queue={queueRows}
@@ -4147,6 +4174,51 @@ const ActivityStrip: React.FC<{
   );
 };
 
+/** Opens Models from the queue strip, for those who manage the instance; nothing for anyone else,
+ *  whose failure notice already says who can fix it. */
+const QueueOpenModels: React.FC = () => {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { capabilities } = useInstanceAuthorization();
+  if (!capabilities.can_manage_instance) return null;
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      onClick={() => navigate(MODEL_HUB_SETTINGS_PATH, { state: settingsOverlayContinuationState(location) })}
+      className="h-6 justify-center px-2 text-[11px] text-cyan-ink"
+    >
+      {t('chat.queue.openModels')}
+      <ArrowRight className="size-3" aria-hidden="true" />
+    </Button>
+  );
+};
+
+/** Sends the server has not placed yet (usePendingSends' "undecided"): a quiet line by the composer,
+ *  so the message is visibly on its way without being drawn in a place it may not end up in. */
+const PendingSendLine: React.FC<{ rows: WorkbenchMessage[] }> = ({ rows }) => {
+  const { t } = useTranslation();
+  if (rows.length === 0) return null;
+  return (
+    <div className="shrink-0 px-4 md:px-8" role="status">
+      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-0.5 px-3 pb-1.5">
+        {rows.map((row) => (
+          <span key={transcriptRowKey(row)} className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted">
+            <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
+            <span className="shrink-0">{t('chat.pendingSend.sending')}</span>
+            <span className="min-w-0 truncate text-foreground/70">{row.text}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/** Hold reasons that mean "no model to run on" (modules/agents/model_hub.py), not a failed start. */
+const NO_MODEL_RETRY_REASONS: ReadonlySet<string> = new Set(['model_supply_refusal', 'model_hub_disabled']);
+
 export const QueueStrip: React.FC<{
   queue: WorkbenchMessage[];
   onRemove: (id: string) => void;
@@ -4174,6 +4246,11 @@ export const QueueStrip: React.FC<{
   // Any other hold keeps the general guidance, so the special copy needs every hold to
   // share the reason.
   const agentUnavailable = retryRequired && held.every((item) => item.retry_reason === 'agent_unavailable');
+  // An input held because there is no model to run it on (``model_supply_refusal``, or the
+  // operator switched the Model Hub off) did not crash: it waits for a model. Where Models is
+  // the fix, the strip offers it beside Send now to a reader who can open it.
+  const noModel = retryRequired && held.every((item) => NO_MODEL_RETRY_REASONS.has(String(item.retry_reason)));
+  const offerModels = noModel && held.every((item) => item.retry_reason === 'model_supply_refusal');
   const headFenced = isQueueDeliveryFenced(queue[0]);
   const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;
@@ -4183,7 +4260,7 @@ export const QueueStrip: React.FC<{
   const buttonBusy = sendingNow || (headFenced && !reconciling);
   const waiting = rows.some((item) => !isQueueDeliveryFenced(item));
   const title = retryRequired
-    ? t('chat.queue.retryRequired', { count: rows.length })
+    ? t(noModel ? 'chat.queue.waitingForModel' : 'chat.queue.retryRequired', { count: rows.length })
     : botName
       ? t(waiting ? 'bots.conversation.notDelivered' : 'bots.conversation.delivering', { count: rows.length })
       : t('chat.queue.title', { count: rows.length });
@@ -4195,6 +4272,8 @@ export const QueueStrip: React.FC<{
             <Clock className="size-3" />
             {title}
           </span>
+          <span className="inline-flex items-center gap-1">
+          {offerModels && <QueueOpenModels />}
           <Button
             type="button"
             variant="ghost"
@@ -4217,13 +4296,16 @@ export const QueueStrip: React.FC<{
               t('chat.queue.sendNow')
             )}
           </Button>
+          </span>
         </div>
         {reconciling && (
           <p role="status" className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.sendReconciling')}</p>
         )}
         {retryRequired && (
           <p className="px-1 pb-1.5 text-[11px] text-muted">
-            {t(agentUnavailable ? 'chat.queue.retryHintAgentUnavailable' : 'chat.queue.retryHint')}
+            {t(agentUnavailable
+              ? 'chat.queue.retryHintAgentUnavailable'
+              : noModel ? 'chat.queue.retryHintNoModel' : 'chat.queue.retryHint')}
           </p>
         )}
         {/* Why the user's own message is still here: the Bot's Turn refused it. A

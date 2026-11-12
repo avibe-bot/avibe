@@ -278,6 +278,10 @@ another operation runs, during a provider cooldown, or inside avibe.bot's
 second-factor throttle window waits for the button. A recovery code is free
 text and always waits for the button.
 
+The email code's real input remains invisible while disabled for verification;
+only the six decorative digits are displayed. An unsuccessful verification
+unlocks the same input for correction or a pasted replacement.
+
 The bundled surface fills the container safe area so its gradient reaches the
 status bar and Home indicator. Its shared `h-dvh` viewport owns vertical
 scrolling inside the mobile document lock, while the content column applies
@@ -632,7 +636,7 @@ pinned to Xcode 26.6.
 | Web content process termination | The primary WebView reloads the configured instance; a terminated child closes. |
 | `navigator.share` | Available in the Xcode 26.6 simulator secure-context probe: `{"secureContext":true,"navigatorShare":"function"}`. Presentation remains system-owned. |
 | Clipboard | Uses WebKit edit/clipboard behavior. The Web UI feature-detects writes, falls back to `execCommand`, and reports blocked reads. No native clipboard bridge is added. |
-| Notification and Service Worker | Browser Service Worker and `PushManager` delivery remain unsupported in this shell. Native notification controls use the `push` bridge and the instance's existing authorization, preference, and reconciliation paths. |
+| Notification and Service Worker | Browser Service Worker and `PushManager` delivery remain unsupported in this shell. Native notification controls use the `push` bridge and the instance's existing authorization, preference, and reconciliation paths. While the App is foregrounded, its notification-center delegate shows only the test notification sent from Settings (the instance's tag `web-push-test`, which the NSE carries into `threadIdentifier`) as a banner, in Notification Center, and with its sound. Every other notification, including an undecrypted fallback, stays silent in front, as iOS does by default: the Inbox and the badge in the App already show it. The delegate never applies a push's badge; the Web UI keeps the live Inbox total through `badge.set`. |
 | Fullscreen | Deferred. Phase 0a leaves `isElementFullscreenEnabled` at WebKit's default. |
 | Installation guidance | `InstallHint` and Show Page "Add to Home Screen" guidance are hidden in the native shell. |
 | PWA app launch suppression | Not reused. New-context launches use the shell's recursive child WebViews. |
@@ -748,12 +752,31 @@ project:
 ```sh
 cd ui
 npm run build:mobile
+cd ..
+python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp
 ```
 
 The generated `ios/Avibe/Resources/MobileApp` directory is ignored build
-output. Xcode verifies that `mobile.html` and the asset directory exist and
-fails with the command above when they do not; Xcode never invokes Node or npm.
-The CI verifier additionally checks every asset referenced by the entry.
+output. Xcode verifies that `mobile.html`, the asset directory and
+`licenses.json` exist and fails with the commands above when they do not; Xcode
+never invokes Node or npm. The CI verifier additionally checks every asset
+referenced by the entry and that `licenses.json` was generated for the current
+iroh release pin.
+
+`licenses.json` feeds Account → About → Open-source licenses, for everything
+third-party the App ships. `build:mobile` writes `licenses-web.json` from the
+modules and inlined stylesheets the bundle actually contains
+(`ui/scripts/bundleNotices.mjs`): each maps to its installed package, whose
+license and notice files are kept verbatim, and a bundled package without one
+fails the build. The native notices come only from the published
+`IrohLib-support.zip` that `packaging/iroh-apple/release.json` pins: the
+generator checks the asset's URL, size and SHA-256 against the pin, the pin's
+policy and collector hashes against this checkout, and every notice, MPL-2.0
+source offer, binding statement and Rust distribution text in the archive,
+which it reads in memory and never extracts. While the pin is `pending` nothing
+is downloaded and the page lists the bundled JavaScript only. Texts are grouped
+only when identical. Source links open in Safari through the external URL
+allowlist, which admits exactly the source URLs in the bundled data.
 
 Then open `ios/Avibe.xcodeproj` in Xcode, select an iPhone simulator, and run
 the shared `Avibe` scheme. The command-line build does not need an Apple
@@ -792,7 +815,8 @@ input set declared by `BROWSER_CHECKOUT` (except the Docker packaging file).
 A structural test derives both pull-request and push path lists from that
 single source, so new shared or out-of-tree UI inputs cannot silently skip the
 mobile build. The job installs the repository-pinned Node version and lockfile,
-runs `build:mobile`, verifies the generated entry and assets, then pins the same
+runs `build:mobile`, generates the license notices, verifies the generated
+entry, assets and notices, then pins the same
 Xcode 26.6 toolchain used by the desktop native workflow. It builds against the
 iOS Simulator SDK without signing and runs the XCTest navigation, new-window,
 download, bundled-page, and WebKit capability contracts on an available iPhone
@@ -806,7 +830,8 @@ PR builds never sign or upload. `.github/workflows/ios-testflight.yml` is the
 only signing path, started by hand (`gh workflow run ios-testflight.yml`, or
 Actions → ios-testflight → Run workflow) and only from `master`. In one job it:
 
-1. runs `npm ci`, `npm run build:mobile`, and the bundle verification;
+1. runs `npm ci`, `npm run build:mobile`, the license notice generation, and
+   the bundle verification;
 2. imports the Apple Distribution identity into a temporary keychain and
    installs the App Store profile (`ios/scripts/testflight.py prepare`), after
    checking that the profile is a current App Store profile for

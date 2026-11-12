@@ -134,17 +134,17 @@ describe('backend attention', () => {
     renderBackends();
 
     const vibey = await rowOf('Vibey');
-    expect(await within(vibey).findByText('Gateway unavailable')).toBeTruthy();
+    expect(await within(vibey).findByText('Model Hub unavailable')).toBeTruthy();
     expect(within(vibey).queryByText('No model selected')).toBeNull();
     expect(within(await rowOf('Claude Code')).queryByText('Gateway unavailable')).toBeNull();
 
     fireEvent.click(within(vibey).getByRole('link', { name: 'Configure' }));
-    expect(await screen.findByText('The model gateway is off, so Vibey has no model to run on.')).toBeTruthy();
+    expect(await screen.findByText('Model Hub is off, so Vibey has no model to run on.')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
   });
 
   // No source may supply the always-on backend: its status names that, and its page leads to Models.
-  it('says no model source supplies it, on the row and on the backend page', async () => {
+  it('says no provider supplies it, on the row and on the backend page', async () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
     mocks.api.getConfig.mockResolvedValue({
       agents: {}, capabilities: { model_hub: { enabled: true } }, agent_supply_blocks: { vibey: 'no_source' },
@@ -152,12 +152,12 @@ describe('backend attention', () => {
     renderBackends();
 
     const vibey = await rowOf('Vibey');
-    expect(await within(vibey).findByText('No model source')).toBeTruthy();
+    expect(await within(vibey).findByText('No provider')).toBeTruthy();
     expect(within(vibey).queryByText('No model selected')).toBeNull();
-    expect(within(await rowOf('Claude Code')).queryByText('No model source')).toBeNull();
+    expect(within(await rowOf('Claude Code')).queryByText('No provider')).toBeNull();
 
     fireEvent.click(within(vibey).getByRole('link', { name: 'Configure' }));
-    expect(await screen.findByText('Vibey gets its models from Model Hub. Add a source in Models.')).toBeTruthy();
+    expect(await screen.findByText('Vibey gets its models from Model Hub. Add a provider in Models.')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
   });
 

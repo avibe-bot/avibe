@@ -84,6 +84,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from core.agent_core.harness.fork import fork_point, latest_cut
 from core.agent_core.harness.projection import open_tool_calls
+from core.agent_core.harness.runtime import RunTranscript
 from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
@@ -134,10 +135,18 @@ PAYLOAD_VERSION = 1
 
 # Two bounded index seeks recover all route clocks; no per-Turn audit-history scan.
 CACHE_ATTEMPTS_SQL = """
-SELECT CASE WHEN json_valid(content_json) THEN json_extract(content_json, '$.cache_state') END
+SELECT CASE WHEN json_valid(content_json) THEN json_extract(content_json, '$.cache_state') END AS state,
+       CASE WHEN json_valid(content_json) THEN json_extract(content_json, '$.cache') END AS cache,
+       CASE WHEN json_valid(content_json) THEN json_extract(content_json, '$.cache_attempts') END AS attempts
 FROM agent_events
 WHERE session_id = :session_id AND event_type = :event_type
 ORDER BY created_at DESC, id DESC LIMIT 1
+"""
+
+CACHE_STATE_SQL = """
+SELECT provider, model, record_json
+FROM session_cache_state
+WHERE session_id = :session_id
 """
 
 PayloadKind = Literal["compaction", "context_edit", "agent_state", "replay_refusal"]
@@ -247,6 +256,34 @@ class SQLiteTranscriptStore:
     async def load(self, session_id: str) -> Sequence[ContextEntry]:
         return await asyncio.to_thread(self._load, session_id)
 
+    async def load_for_run(self, session_id: str) -> RunTranscript:
+        """Read the checkpoint window and runtime facts, not the Session's lifetime.
+
+        A released checkpoint without derived metadata is certified once off-loop.
+        Publication compares the metadata read in that snapshot, so a concurrent
+        repair or unrelated metadata writer cannot be overwritten.
+        """
+        snapshot, publications = await asyncio.to_thread(self._load_runtime, session_id)
+        if publications:
+            def publish(conn: Connection) -> None:
+                for row_id, expected, updated in publications:
+                    conn.execute(
+                        agent_events.update()
+                        .where(agent_events.c.id == row_id, agent_events.c.metadata_json == expected)
+                        .values(metadata_json=updated)
+                    )
+
+            await self._write(session_id, publish)
+        return snapshot
+
+    def _load_runtime(self, session_id: str):
+        from storage.agent_runtime_transcript import read_runtime
+
+        with self._engine.begin() as conn:
+            if not conn.connection.dbapi_connection.in_transaction:
+                conn.exec_driver_sql("BEGIN")
+            return read_runtime(conn, session_id)
+
     async def load_turn(self, session_id: str, turn_id: str) -> Sequence[ContextEntry]:
         """Load one durable Turn's own context, excluding older history and fork ancestry."""
         return await asyncio.to_thread(self._load, session_id, turn_id=turn_id)
@@ -324,19 +361,39 @@ class SQLiteTranscriptStore:
         return await self._write(session_id, work)
 
     async def load_cache_attempts(self, session_id: str) -> Sequence[Mapping[str, Any]]:
-        """Read only optional diagnostics, by the existing Session index and on a worker."""
+        """Merge legacy audit snapshots and current per-route state on a worker.
+
+        State belongs only to this Session: a fork's inherited response facts are
+        restored separately and must never see a parent's later mutable prefix.
+        """
         from core.agent_core.harness.cache_metrics import CacheTracker
 
         def read():
             tracker = CacheTracker()
             with self._engine.connect() as conn:
                 for event_type in ("model_attempt", "fork_turn"):
-                    raw = conn.execute(text(CACHE_ATTEMPTS_SQL), {"session_id": session_id, "event_type": event_type}).scalar()
+                    row = conn.execute(text(CACHE_ATTEMPTS_SQL), {
+                        "session_id": session_id, "event_type": event_type,
+                    }).mappings().first()
+                    if row is None:
+                        continue
+                    for field in ("state", "cache", "attempts"):
+                        try:
+                            raw = json.loads(row[field]) if row[field] else None
+                            if field == "cache":
+                                tracker.restore((), [raw])
+                            elif isinstance(raw, list):
+                                records = [item.get("cache") for item in raw if isinstance(item, dict)] if field == "attempts" else raw
+                                tracker.restore((), records)
+                        except (ValueError, TypeError, RecursionError):
+                            continue
+                for row in conn.execute(text(CACHE_STATE_SQL), {"session_id": session_id}).mappings():
                     try:
-                        records = json.loads(raw) if raw else []
-                        if isinstance(records, list):
-                            tracker.restore((), records)
-                    except (ValueError, TypeError):
+                        record = json.loads(row["record_json"])
+                        if (isinstance(record, dict) and record.get("provider") == row["provider"]
+                                and record.get("model") == row["model"]):
+                            tracker.restore((), [record])
+                    except (ValueError, TypeError, RecursionError):
                         continue
             return list(tracker.latest.values())
 

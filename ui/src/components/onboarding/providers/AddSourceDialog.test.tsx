@@ -16,9 +16,11 @@ import * as React from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { apiKeyVendorPreset } from '@/components/settings/models/apiKeyVendors';
 import { createSourceCollectionReadAuthority } from '@/components/settings/models/collectionReadAuthority';
+import { SUBSCRIPTION_VENDORS } from '@/components/settings/models/subscriptionOptions';
 import type { Source } from '@/components/settings/models/types';
 
 const showToast = vi.hoisted(() => vi.fn());
@@ -287,6 +289,16 @@ describe('AddSourceDialog — the frame', () => {
 });
 
 describe('AddSourceDialog — what a switch preserves', () => {
+  it('stays open on a click outside, keeping the half-typed key', async () => {
+    renderDialog();
+    const user = userEvent.setup();
+    await chooseMethod(user, 'API Key');
+    await user.type(within(body()).getByLabelText('API key'), 'sk-half-typed');
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    expect((within(body()).getByLabelText('API key') as HTMLInputElement).value).toBe('sk-half-typed');
+  });
+
   it('keeps a half-typed key across a switch away and back', async () => {
     renderDialog();
     const user = userEvent.setup();
@@ -304,16 +316,22 @@ describe('AddSourceDialog — what a switch preserves', () => {
     expect(primary().disabled).toBe(false);
   });
 
+  it('offers the subscriptions Settings offers, in the same order', () => {
+    renderDialog();
+    const rows = [...body().querySelectorAll('[data-state="offer"]')];
+    expect(rows.map((row) => row.getAttribute('data-provider'))).toEqual([...SUBSCRIPTION_VENDORS]);
+  });
+
   it('keeps the subscription someone had chosen', async () => {
     renderDialog();
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /Sign in with Claude/ }));
-    expect(primary().textContent).toContain('Claude');
+    await user.click(within(body()).getByRole('button', { name: /Sign in with Gemini/ }));
+    expect(primary().textContent).toContain('Gemini');
 
     await chooseMethod(user, 'API Key');
     await chooseMethod(user, 'Subscription');
 
-    expect(primary().textContent).toContain('Claude');
+    expect(primary().textContent).toContain('Gemini');
   });
 
   it('opens a named brand on the way in that brand is offered', async () => {
@@ -773,7 +791,7 @@ describe('AddSourceDialog — what comes back from an authorization', () => {
   const signIn = async () => {
     renderDialog();
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: /Sign in with Claude/ }));
+    await user.click(within(body()).getByRole('button', { name: /Sign in with Claude/ }));
     await user.click(primary());
     await screen.findByTestId('oauth-stub');
     return user;

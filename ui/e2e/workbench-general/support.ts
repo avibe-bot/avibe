@@ -81,11 +81,6 @@ const AGENTS = {
   default_agent_name: 'codex',
 };
 
-// Web fonts are a read from a public CDN and are what the product actually
-// draws with; blocking them would make every capture compare the design against
-// fallback metrics. Nothing else off this origin is allowed.
-const FONT_HOSTS = ['https://fonts.googleapis.com/', 'https://fonts.gstatic.com/'];
-
 /**
  * Answers the product's reads locally and refuses everything else. The guard is
  * registered LAST so Playwright consults it FIRST: anything that is not a
@@ -158,7 +153,6 @@ export async function serveProduct(page: Page, lang: Lang = 'en') {
       }
       return route.fallback();
     }
-    if (isRead && FONT_HOSTS.some((host) => url.startsWith(host))) return route.fallback();
 
     denied.push(`${method} ${url}`);
     return route.abort();

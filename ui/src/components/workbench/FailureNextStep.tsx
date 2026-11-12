@@ -7,7 +7,7 @@ import type { WorkbenchMessage } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { ADMITTED_RETRY_STATES, isBackendFailureNotice, offersContinueOnVibey } from '../../lib/chatMessageTypes';
 import { settingsOverlayContinuationState } from '../../lib/settingsOverlay';
-import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
+import { MODEL_HUB_SETTINGS_PATH, modelHubSourcePath } from '../settings/models/modelHubRoutes';
 import { Button } from '../ui/button';
 import type { FailureRetryOptions } from './FailureRetry';
 
@@ -28,14 +28,18 @@ export function FailureNextStep({
   onRetry?: (messageId: string, options?: FailureRetryOptions) => Promise<boolean>;
 }) {
   if (!isBackendFailureNotice(message)) return null;
-  if (message.metadata?.failure_next_step === 'models') return <OpenModelsStep />;
+  if (message.metadata?.failure_next_step === 'models') {
+    const sourceId = message.metadata?.failure_source_id;
+    return <OpenModelsStep sourceId={typeof sourceId === 'string' && sourceId ? sourceId : null} />;
+  }
   if (!readOnly && onRetry && offersContinueOnVibey(message)) {
     return <ContinueOnVibeyStep message={message} disabled={disabled} onRetry={onRetry} />;
   }
   return null;
 }
 
-function OpenModelsStep() {
+/** Opens Models on the Source the failure names, when it names one; Models itself otherwise. */
+function OpenModelsStep({ sourceId }: { sourceId: string | null }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
@@ -48,7 +52,9 @@ function OpenModelsStep() {
       type="button"
       size="2xs"
       variant="secondary"
-      onClick={() => navigate(MODEL_HUB_SETTINGS_PATH, { state: settingsOverlayContinuationState(location) })}
+      onClick={() => navigate(sourceId ? modelHubSourcePath(sourceId) : MODEL_HUB_SETTINGS_PATH, {
+        state: settingsOverlayContinuationState(location),
+      })}
     >
       {t('chat.failureNextStep.openModels')}
       <ArrowRight />

@@ -60,6 +60,24 @@ Sources. This singleton ruling is **owner-vetoable (2026-08-08)**. The channel h
 remains a first-class product story, not an escape hatch or hidden pre-pass; §4.3 alone
 defines its exact runtime behavior.
 
+**Claude subscription amendment — owner 2026-11-11 (item 2 of the new-user review).**
+Supersedes the Claude half of the ruling above and the warning paragraph below.
+Vibey is what Avibe offers, and only a Model Hub-held subscription can supply it,
+so a Claude subscription now signs in to Model Hub by default, as ChatGPT already
+did:
+
+- The setup wizard's 「Sign in with Claude」 / 「Sign in with ChatGPT」 start the
+  Model Hub sign-in directly; the one-option chooser in between is gone.
+- The account-restriction warning becomes one grey line under that button:
+  “Anthropic's subscription terms cover only its own apps. Learn more” /
+  「Anthropic 的订阅条款只覆盖它自己的应用。了解更多」, linking to the Model Hub
+  docs. The owner chose this over removing it.
+- Settings › Models: Model Hub management (“Managed”) is the default and first
+  option for a Claude subscription; Claude Code's own login (“Own login”) stays
+  available second. The Recommended / Second choice badges, and the subscription
+  menu's recommendation badges, are removed.
+- The `native_cli` singleton and the channel handoff are unchanged.
+
 A user may explicitly add either subscription as a Gateway-held upstream, and a
 Gateway-held subscription may participate in a cross-vendor configured chain. The only
 warning is one factual sentence shown when the user chooses the Claude-as-Gateway
@@ -124,6 +142,30 @@ Explicit non-persona: relay-station operators ("站长") — Avibe ships no
 operations console.
 
 ## 3. Vocabulary (v3 recut; UI copy uses only these nouns)
+
+**Provider / Model Hub amendment — owner 2026-11-12.** The new-user review found
+one thing under four English names (source, upstream source, vendor, provider)
+and a second name for the hub in English only. The owner chose the full rename
+of user-facing copy; it supersedes the Source and Gateway rows and the
+“Provider (as a UI noun) — Banned” ruling below:
+
+- What the tables call a Source is 供应商 / **provider** in every UI string,
+  including the setup wizard and the API-key form (which previously said
+  来源, 服务商, Vendor). The Models tab is 供应商与路由 / **Providers & routing**.
+- The hub is 模型网关 / **Model Hub**; English no longer uses “gateway” as a
+  noun. The routing module heading is 路由 / **Routes**.
+- The API-key form says **API format** for the interface type, and its custom
+  choice is “Other provider · enter its address” instead of 兼容端点 / 钉死接口.
+- In the wizard, the assistant card's default-model control opens the model
+  picker and writes the Agent's model; route chains are edited only in
+  Settings › Models.
+- Only copy changes: wire values (`hub | direct`, `source_id`), API fields, and
+  code identifiers keep the Source / Gateway names, and this spec keeps them as
+  technical prose.
+- Per-backend mode words (owner chose option B the same day): Gateway mode reads
+  模型网关管理 / **Managed** (“Managed · Ready”), Direct mode and a native hop
+  both read Agent 管理 / **Own login**; the switches read “Let Model Hub manage”
+  and “Use own login”. The wire values stay `hub | direct` and `native_cli`.
 
 | Concept | zh | en | Notes |
 | --- | --- | --- | --- |
@@ -763,6 +805,16 @@ start the model-output stream.
 | `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after model output began | `stream_started: true`; after first user-visible model output | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
 | `network_failure.transport_after_first_byte` | stream interrupted without explicit code | `stream_started: true`; after first user-visible model output | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
 
+**Request-private unlisted-model 503 ruling (owner 2026-11-12, Part 3).** A literal
+HTTP 503 classified as `server_error` for the actual upstream model sent after
+Hub admission, when that model is absent from the admitted Hub Source inventory,
+does not write shared Source health or cooldown. The same request carries the
+existing server-error recovery window, backoff, and validated `Retry-After`
+advice in private Source-id state. Inventory membership is frozen at admission.
+Listed-model 503s, other statuses, global blockers, and exact HTTP 200 buffered
+overload retain the shared behavior above and below; no model-keyed or persisted
+state is added.
+
 The engine answers its own failed upstream connection or read, before any upstream
 response, with one of exactly two JSON error bodies, both produced by the pinned
 engine's error writers: the Anthropic form
@@ -1361,6 +1413,19 @@ outcome/discriminator → copy-key relation is closed in the final mirror regist
 checked mechanically against both `vibe/i18n` locale files. A new outcome, discriminator,
 or supply message ships as one new matrix row plus its enum/key/mirror fixtures; none may
 land as standalone prose.
+
+**Unlisted-model summary (owner product review, 2026-11-12).** The
+`turn.exhausted`, `turn.request_nonfallback`, `turn.streamed_fallback`, and
+`turn.no_candidate.blocked` rows also accept display-only `passthrough_model`:
+exact route inspection says the model was not listed by the providers, and the
+request received an upstream HTTP refusal (not merely a connection failure).
+Their registered `passthrough_model_key` selects
+`modelHub.launch.passthrough_model_unlisted` instead of the ordinary summary and
+upstream suffix: “The provider doesn't list {model}; try another model.” Source
+names, each attempted status, and safe upstream text remain in the existing
+collapsed failure details. This is inventory context, not proof of why the
+provider rejected the request. It changes no outcome, wire marker, retry,
+recovery window, Source state, or input holding.
 
 `upstream_detail` is display-only text. It is never read by classification and
 never written to resolution events or probes. Owner decision (2026-10-07): an upstream

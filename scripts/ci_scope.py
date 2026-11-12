@@ -28,13 +28,13 @@ PR_TEST_JOBS = ("unit-test-shards", "ui-tests", "scenario-evidence", "model-hub-
 HEAVY_JOBS = (
     "ui-browser-checks", "ios-shell", "desktop-shell", "install-upgrade-shards",
     "web-fetch-runtime", "web-fetch-macos", "windows-install-smoke-runners",
-    "windows-agent", "windows-model-hub", "windows-control-ipc",
+    "windows-agent", "windows-model-hub", "windows-control-ipc", "model-hub-lifecycle-native",
 )
 PRODUCERS = (*FAST_JOBS, *PR_TEST_JOBS, *HEAVY_JOBS)
 GATES = {
     "unit-tests": (
         "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests",
-        "ui-browser-checks", "model-hub-hosted-wire", "manifest-consistency",
+        "ui-browser-checks", "model-hub-hosted-wire", "model-hub-lifecycle-native", "manifest-consistency",
         "python-smoke", "ios-shell", "desktop-shell",
         "ruff", "memory-insight-contract", "show-router-integration",
         "build-linux-artifacts", "migration-release-guard", "npm-wrapper",
@@ -110,6 +110,11 @@ def heavy_routes(scope: Scope) -> dict[str, str]:
         "windows-agent": windows,
         "windows-model-hub": windows,
         "windows-control-ipc": windows,
+        "model-hub-lifecycle-native": affected((
+            "core/controller.py", "core/managed_runtime.py", "core/internal_server.py", "core/handlers/model_hub/",
+            "vibe/model_hub_runtime/", "vibe/api.py", "vibe/cli.py", "vibe/model_hub_client.py", "config/",
+            "tests/test_model_hub", "tests/model_hub_",
+        )),
     }
 
 

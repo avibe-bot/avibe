@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import collections
+import hashlib
 import json
 import logging
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import literal_column, or_, select
 
 from storage import messages_service, web_push_service
 from storage.models import agent_sessions, messages
@@ -68,6 +69,18 @@ _RECENT_DELIVERY_LOCK = threading.Lock()
 _DELIVERY_DISPOSITIONS_STATE_KEY = "web_push.recent_delivery_dispositions"
 WEB_PUSH_AUTHORIZATION_SYNC_WAIT_SECONDS = 5.0
 
+BADGE_RECONCILIATION_DELAY_SECONDS = 0.25
+BADGE_RETRY_DEFAULT_SECONDS = 5.0
+BADGE_RETRY_MAX_SECONDS = 60.0
+BADGE_RETRY_MAX_ATTEMPTS = 3
+BADGE_DISPOSITION_SENT = "badge_sent"
+BADGE_DISPOSITION_SUPPRESSED_SAME = "suppressed_same"
+BADGE_DISPOSITION_NO_NATIVE_SUBSCRIPTION = "no_native_subscription"
+BADGE_DISPOSITION_FAILED = "failed"
+_RECENT_BADGE_DISPOSITIONS: collections.deque[dict[str, Any]] = collections.deque(maxlen=64)
+_RECENT_BADGE_LOCK = threading.Lock()
+_BADGE_DISPOSITIONS_STATE_KEY = "web_push.recent_badge_dispositions"
+
 
 @dataclass(frozen=True)
 class OwnerAuthorizationDecision:
@@ -79,6 +92,19 @@ class OwnerAuthorizationDecision:
     authorized: bool
     disposition: str | None
     reason: str
+
+
+@dataclass
+class _PendingBadgeReconciliation:
+    revision: int
+    context: AuthorizationContext | None
+    retry_attempts: int = 0
+    delay_seconds: float = BADGE_RECONCILIATION_DELAY_SECONDS
+    wakeup: threading.Event = field(default_factory=threading.Event)
+
+
+_BADGE_RECONCILIATION_LOCK = threading.Lock()
+_BADGE_RECONCILIATIONS: dict[str, _PendingBadgeReconciliation] = {}
 
 
 def _load_notification_config() -> tuple[Any, bool]:
@@ -594,6 +620,77 @@ def recent_delivery_dispositions(
     return list(reversed(scoped[-limit:]))
 
 
+def recent_badge_dispositions(*, limit: int = 20) -> list[dict[str, Any]]:
+    """Return recent badge reconciliation outcomes without owner or endpoint data."""
+
+    try:
+        from core.chat_discovery import get_state_meta
+
+        stored = get_state_meta(_BADGE_DISPOSITIONS_STATE_KEY)
+    except Exception:
+        logger.debug("web push badge: could not read stored dispositions", exc_info=True)
+        stored = None
+    if not isinstance(stored, list):
+        with _RECENT_BADGE_LOCK:
+            stored = list(_RECENT_BADGE_DISPOSITIONS)
+    return list(reversed(stored[-limit:]))
+
+
+def _record_badge_disposition(
+    *,
+    user_key: str,
+    badge: int | None,
+    disposition: str,
+    native_subscriptions: int,
+    sent: int = 0,
+    suppressed: int = 0,
+    failed: int = 0,
+    reason: str | None = None,
+) -> None:
+    entry: dict[str, Any] = {
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "owner_ref": hashlib.sha256(user_key.encode("utf-8")).hexdigest()[:12],
+        "owner_kind": "remote" if user_key.startswith("remote:") else "local",
+        "badge": badge,
+        "disposition": disposition,
+        "native_subscriptions": native_subscriptions,
+        "sent": sent,
+        "suppressed": suppressed,
+        "failed": failed,
+    }
+    if reason:
+        entry["reason"] = reason
+    with _RECENT_BADGE_LOCK:
+        if not _RECENT_BADGE_DISPOSITIONS:
+            try:
+                from core.chat_discovery import get_state_meta
+
+                stored = get_state_meta(_BADGE_DISPOSITIONS_STATE_KEY)
+            except Exception:
+                stored = None
+            if isinstance(stored, list):
+                _RECENT_BADGE_DISPOSITIONS.extend(
+                    stored[-_RECENT_BADGE_DISPOSITIONS.maxlen :]
+                )
+        _RECENT_BADGE_DISPOSITIONS.append(entry)
+        entries = list(_RECENT_BADGE_DISPOSITIONS)
+        try:
+            from core.chat_discovery import set_state_meta
+
+            set_state_meta(_BADGE_DISPOSITIONS_STATE_KEY, entries)
+        except Exception:
+            logger.debug("web push badge: could not store disposition", exc_info=True)
+    logger.info(
+        "web push badge: disposition=%s badge=%s native=%s sent=%s suppressed=%s failed=%s",
+        disposition,
+        badge,
+        native_subscriptions,
+        sent,
+        suppressed,
+        failed,
+    )
+
+
 def evaluate_delivery_authorization_for_context(
     user_key: str,
     context: AuthorizationContext | None,
@@ -845,15 +942,20 @@ def _web_push_owner_metadata_for_message(
     depend on session creation time. For upgraded rows, still honor the legacy
     stored session owner, but only after checking newer trusted user-message
     metadata.
+
+    Messages enter this ledger on acceptance, not submission. SQLite's rowid
+    orders those inserts even when the wall clock steps backwards; timestamp-
+    prefixed message IDs and transcript timestamps do not. Keep the result's
+    rowid as an upper bound so a later prompt cannot steal its notification.
     """
 
     if not message_id:
         return None, {}
+    insertion_order = literal_column("messages.rowid")
     agent_row = conn.execute(
         select(
             messages.c.session_id,
-            messages_service.transcript_order_value(messages).label("transcript_at"),
-            messages.c.id,
+            insertion_order,
             messages.c.type,
             messages.c.metadata_json,
         )
@@ -863,13 +965,11 @@ def _web_push_owner_metadata_for_message(
         .where(messages.c.type.in_(_NOTIFIABLE_TYPES))
     ).first()
     if not agent_row or not agent_row[0] or not _is_notifiable_message(
-        agent_row[3],
-        _parse_metadata(agent_row[4]),
+        agent_row[2],
+        _parse_metadata(agent_row[3]),
     ):
         return None, {}
-    session_id, transcript_at, row_id = agent_row[0], agent_row[1], agent_row[2]
-
-    user_order = messages_service.transcript_order_value(messages)
+    session_id, result_insertion_order = agent_row[0], agent_row[1]
 
     user_rows = conn.execute(
         select(messages.c.metadata_json)
@@ -884,13 +984,8 @@ def _web_push_owner_metadata_for_message(
                 messages.c.metadata_json.contains(WEB_PUSH_USER_KEYS_METADATA),
             )
         )
-        .where(
-            or_(
-                user_order < transcript_at,
-                and_(user_order == transcript_at, messages.c.id < row_id),
-            )
-        )
-        .order_by(user_order.desc(), messages.c.id.desc())
+        .where(insertion_order < result_insertion_order)
+        .order_by(insertion_order.desc())
     ).all()
     for user_row in user_rows:
         try:
@@ -1037,6 +1132,248 @@ def _badge_count_for_user_key(
         bot_session_ids=current_bot_session_ids(conn),
     )
     return badge_total(category_counts, get_notification_preferences(user_key))
+
+
+def _owner_delivery_lock(user_key: str):
+    from config import paths
+    from storage.lock import MigrationFileLock
+
+    owner_hash = hashlib.sha256(user_key.encode("utf-8")).hexdigest()
+    return MigrationFileLock(
+        paths.get_state_dir()
+        / "web_push"
+        / "owner_delivery_locks"
+        / f"{owner_hash}.lock",
+        timeout_seconds=None,
+    )
+
+
+def _badge_retry_delay(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code not in {429, 503}:
+        return None
+    raw_retry_after = getattr(response, "headers", {}).get("retry-after")
+    try:
+        retry_after = float(raw_retry_after)
+    except (TypeError, ValueError):
+        retry_after = BADGE_RETRY_DEFAULT_SECONDS
+    return min(
+        BADGE_RETRY_MAX_SECONDS,
+        max(BADGE_RECONCILIATION_DELAY_SECONDS, retry_after),
+    )
+
+
+def schedule_badge_reconciliation(
+    user_key: str,
+    context: AuthorizationContext | None,
+) -> None:
+    """Coalesce owner badge changes and reconcile them off the request path."""
+
+    user_key = user_key.strip() if isinstance(user_key, str) else ""
+    if not user_key:
+        return
+    start_worker = False
+    with _BADGE_RECONCILIATION_LOCK:
+        pending = _BADGE_RECONCILIATIONS.get(user_key)
+        if pending is None:
+            _BADGE_RECONCILIATIONS[user_key] = _PendingBadgeReconciliation(
+                revision=1,
+                context=context,
+            )
+            start_worker = True
+        else:
+            pending.revision += 1
+            pending.context = context
+            pending.retry_attempts = 0
+            pending.delay_seconds = BADGE_RECONCILIATION_DELAY_SECONDS
+            pending.wakeup.set()
+    if not start_worker:
+        return
+    worker = threading.Thread(
+        target=_badge_reconciliation_worker,
+        args=(user_key,),
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except Exception:
+        with _BADGE_RECONCILIATION_LOCK:
+            _BADGE_RECONCILIATIONS.pop(user_key, None)
+        logger.warning("web push badge: could not start reconciliation worker")
+
+
+def _badge_reconciliation_worker(user_key: str) -> None:
+    while True:
+        with _BADGE_RECONCILIATION_LOCK:
+            pending = _BADGE_RECONCILIATIONS.get(user_key)
+            if pending is None:
+                return
+            revision = pending.revision
+            delay = max(0.0, pending.delay_seconds)
+            wakeup = pending.wakeup
+            wakeup.clear()
+        if delay and wakeup.wait(delay):
+            continue
+        with _BADGE_RECONCILIATION_LOCK:
+            pending = _BADGE_RECONCILIATIONS.get(user_key)
+            if pending is None:
+                return
+            if pending.revision != revision:
+                continue
+            context = pending.context
+        retry_after = None
+        try:
+            retry_after = _reconcile_badge_for_owner(user_key, context)
+        except Exception:
+            logger.exception("web push badge: owner reconciliation failed before delivery")
+            _record_badge_disposition(
+                user_key=user_key,
+                badge=None,
+                disposition=BADGE_DISPOSITION_FAILED,
+                native_subscriptions=0,
+                failed=1,
+                reason="reconciliation_error",
+            )
+        with _BADGE_RECONCILIATION_LOCK:
+            current = _BADGE_RECONCILIATIONS.get(user_key)
+            if current is None:
+                return
+            if current.revision != revision:
+                continue
+            if (
+                retry_after is not None
+                and current.retry_attempts < BADGE_RETRY_MAX_ATTEMPTS
+            ):
+                current.retry_attempts += 1
+                current.delay_seconds = retry_after
+                continue
+            del _BADGE_RECONCILIATIONS[user_key]
+            return
+
+
+def _reconcile_badge_for_owner(
+    user_key: str,
+    context: AuthorizationContext | None,
+) -> float | None:
+    from core.web_push import is_native_relay_subscription, send_badge_update
+    from storage.db import create_sqlite_engine
+
+    if user_key != "local":
+        authorization = evaluate_delivery_authorization_for_context(user_key, context)
+        if not authorization.get("authorized"):
+            _record_badge_disposition(
+                user_key=user_key,
+                badge=None,
+                disposition=BADGE_DISPOSITION_FAILED,
+                native_subscriptions=0,
+                failed=1,
+                reason=str(authorization.get("disposition") or "authorization_unavailable"),
+            )
+            return
+    contexts = (
+        {user_key: context}
+        if user_key != "local" and context is not None
+        else {}
+    )
+    retry_after: float | None = None
+    with _owner_delivery_lock(user_key):
+        engine = create_sqlite_engine()
+        try:
+            with engine.connect() as conn:
+                badge_count = _badge_count_for_user_key(
+                    conn,
+                    user_key=user_key,
+                    contexts=contexts,
+                )
+                native_subscriptions = [
+                    subscription
+                    for subscription in web_push_service.list_enabled(
+                        conn,
+                        user_key=user_key,
+                    )
+                    if is_native_relay_subscription(subscription)
+                ]
+                deliveries = [
+                    subscription
+                    for subscription in native_subscriptions
+                    if web_push_service.get_last_successful_badge(
+                        conn,
+                        endpoint=subscription["endpoint"],
+                    )
+                    != badge_count
+                ]
+            if not native_subscriptions:
+                _record_badge_disposition(
+                    user_key=user_key,
+                    badge=badge_count,
+                    disposition=BADGE_DISPOSITION_NO_NATIVE_SUBSCRIPTION,
+                    native_subscriptions=0,
+                )
+                return None
+            suppressed_count = len(native_subscriptions) - len(deliveries)
+            if not deliveries:
+                _record_badge_disposition(
+                    user_key=user_key,
+                    badge=badge_count,
+                    disposition=BADGE_DISPOSITION_SUPPRESSED_SAME,
+                    native_subscriptions=len(native_subscriptions),
+                    suppressed=suppressed_count,
+                )
+                return None
+
+            sent_count = 0
+            failed_count = 0
+            for subscription in deliveries:
+                try:
+                    send_badge_update(
+                        subscription=subscription,
+                        badge=badge_count,
+                    )
+                    with engine.begin() as conn:
+                        web_push_service.mark_send_success(
+                            conn,
+                            endpoint=subscription["endpoint"],
+                            badge_count=badge_count,
+                        )
+                    sent_count += 1
+                except Exception as exc:
+                    status_code = getattr(
+                        getattr(exc, "response", None),
+                        "status_code",
+                        None,
+                    )
+                    with engine.begin() as conn:
+                        web_push_service.mark_send_failure(
+                            conn,
+                            endpoint=subscription["endpoint"],
+                            disable=status_code in {404, 410},
+                        )
+                    candidate_retry = _badge_retry_delay(exc)
+                    if candidate_retry is not None:
+                        retry_after = max(retry_after or 0.0, candidate_retry)
+                    failed_count += 1
+                    logger.warning(
+                        "web push badge: relay request failed status=%s",
+                        status_code,
+                    )
+            disposition = (
+                BADGE_DISPOSITION_FAILED
+                if failed_count
+                else BADGE_DISPOSITION_SENT
+            )
+            _record_badge_disposition(
+                user_key=user_key,
+                badge=badge_count,
+                disposition=disposition,
+                native_subscriptions=len(native_subscriptions),
+                sent=sent_count,
+                suppressed=suppressed_count,
+                failed=failed_count,
+            )
+        finally:
+            engine.dispose()
+    return retry_after
 
 
 def _remote_access_enabled() -> bool:
@@ -1218,14 +1555,6 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     disposition,
                 )
                 return
-            badge_counts = {
-                user_key: _badge_count_for_user_key(
-                    conn,
-                    user_key=user_key,
-                    contexts=contexts,
-                )
-                for user_key in authorized_keys
-            }
             deliveries = []
             seen_endpoints: set[str] = set()
             for user_key in authorized_keys:
@@ -1234,7 +1563,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     if not isinstance(endpoint, str) or endpoint in seen_endpoints:
                         continue
                     seen_endpoints.add(endpoint)
-                    deliveries.append((subscription, badge_counts[user_key], user_key))
+                    deliveries.append((subscription, user_key))
         if not deliveries:
             _mark_owners_without_delivery(attempt, [])
             _finish_delivery_attempt(attempt, WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION)
@@ -1245,35 +1574,62 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
             return
         sent_count = 0
         failed_count = 0
+        suppressed_read_count = 0
         owner_sent_counts: dict[str, int] = {}
         owner_failed_counts: dict[str, int] = {}
-        for subscription, badge_count, delivery_owner in deliveries:
-            try:
-                send_web_push(
-                    subscription=subscription,
-                    payload={**payload, "badge_count": badge_count},
-                )
-                with engine.begin() as conn:
-                    web_push_service.mark_send_success(conn, endpoint=subscription["endpoint"])
-                sent_count += 1
-                owner_sent_counts[delivery_owner] = owner_sent_counts.get(delivery_owner, 0) + 1
-            except Exception as exc:
-                status_code = getattr(getattr(exc, "response", None), "status_code", None)
-                disable = status_code in {404, 410}
-                logger.warning("web push: send failed", exc_info=True)
-                with engine.begin() as conn:
-                    web_push_service.mark_send_failure(
+        owner_suppressed_read_counts: dict[str, int] = {}
+        for subscription, delivery_owner in deliveries:
+            with _owner_delivery_lock(delivery_owner):
+                with engine.connect() as conn:
+                    if not _message_still_unread(conn, payload.get("message_id")):
+                        suppressed_read_count += 1
+                        owner_suppressed_read_counts[delivery_owner] = (
+                            owner_suppressed_read_counts.get(delivery_owner, 0) + 1
+                        )
+                        continue
+                    badge_count = _badge_count_for_user_key(
                         conn,
-                        endpoint=subscription["endpoint"],
-                        disable=disable,
+                        user_key=delivery_owner,
+                        contexts=contexts,
                     )
-                failed_count += 1
-                owner_failed_counts[delivery_owner] = owner_failed_counts.get(delivery_owner, 0) + 1
+                try:
+                    send_web_push(
+                        subscription=subscription,
+                        payload={**payload, "badge_count": badge_count},
+                    )
+                    with engine.begin() as conn:
+                        web_push_service.mark_send_success(
+                            conn,
+                            endpoint=subscription["endpoint"],
+                            badge_count=badge_count,
+                        )
+                    sent_count += 1
+                    owner_sent_counts[delivery_owner] = (
+                        owner_sent_counts.get(delivery_owner, 0) + 1
+                    )
+                except Exception as exc:
+                    status_code = getattr(
+                        getattr(exc, "response", None),
+                        "status_code",
+                        None,
+                    )
+                    disable = status_code in {404, 410}
+                    logger.warning("web push: send failed", exc_info=True)
+                    with engine.begin() as conn:
+                        web_push_service.mark_send_failure(
+                            conn,
+                            endpoint=subscription["endpoint"],
+                            disable=disable,
+                        )
+                    failed_count += 1
+                    owner_failed_counts[delivery_owner] = (
+                        owner_failed_counts.get(delivery_owner, 0) + 1
+                    )
         # Provider outcomes are per owner: in a merged delivery the owner whose
         # endpoint failed must not be told the attempt was sent, and an
         # authorized owner with no enabled endpoint is told so explicitly.
-        _mark_owners_without_delivery(attempt, [owner for _s, _b, owner in deliveries])
-        for delivery_owner in {owner for _s, _b, owner in deliveries}:
+        _mark_owners_without_delivery(attempt, [owner for _s, owner in deliveries])
+        for delivery_owner in {owner for _s, owner in deliveries}:
             owner_entry = attempt["owners"].setdefault(
                 delivery_owner,
                 {"policy": "unknown", "disposition": None, "reason": ""},
@@ -1282,10 +1638,17 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                 owner_entry["disposition"] = WEB_PUSH_DISPOSITION_SENT
             elif owner_failed_counts.get(delivery_owner):
                 owner_entry["disposition"] = WEB_PUSH_DISPOSITION_PROVIDER_FAILURE
-        _finish_delivery_attempt(
-            attempt,
-            WEB_PUSH_DISPOSITION_SENT if sent_count else WEB_PUSH_DISPOSITION_PROVIDER_FAILURE,
-        )
+            elif owner_suppressed_read_counts.get(delivery_owner):
+                owner_entry["disposition"] = WEB_PUSH_DISPOSITION_SUPPRESSED_READ
+        if sent_count:
+            disposition = WEB_PUSH_DISPOSITION_SENT
+        elif failed_count:
+            disposition = WEB_PUSH_DISPOSITION_PROVIDER_FAILURE
+        elif suppressed_read_count:
+            disposition = WEB_PUSH_DISPOSITION_SUPPRESSED_READ
+        else:
+            disposition = WEB_PUSH_DISPOSITION_NO_SUBSCRIPTION
+        _finish_delivery_attempt(attempt, disposition)
     finally:
         engine.dispose()
 

@@ -64,17 +64,21 @@ const candidate = (src: Source, id: string) => ({
   native_protocol: src.protocol,
 });
 
+const candidatesRead = ok({
+  candidates: {
+    builtin: [],
+    providers: [
+      ...openaiKey.models.map((model) => candidate(openaiKey, model.id)),
+      ...anthropicKey.models.map((model) => candidate(anthropicKey, model.id)),
+    ],
+    in_list: [],
+  },
+});
+
+/** What the model picker offers each assistant: every model the saved keys supply. */
 export const candidatesApi = {
-  '/api/models/agents/vibey/models/candidates': ok({
-    candidates: {
-      builtin: [],
-      providers: [
-        ...openaiKey.models.map((model) => candidate(openaiKey, model.id)),
-        ...anthropicKey.models.map((model) => candidate(anthropicKey, model.id)),
-      ],
-      in_list: [],
-    },
-  }),
+  '/api/models/agents/vibey/models/candidates': candidatesRead,
+  '/api/models/agents/claude/models/candidates': candidatesRead,
 };
 
 // ── Assistants ──────────────────────────────────────────────────────────

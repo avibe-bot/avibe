@@ -1805,8 +1805,8 @@ async def test_interrupted_native_search_emits_immediately_and_only_web_projects
     stored = step["content"]["hosted"]
     line = step["text"]
     assert stored["interruption"] == "overloaded" and "retried" not in stored
-    assert line == ("🔎 Web search · Model response interrupted: upstream overloaded" if language == "en"
-                    else "🔎 网页搜索 · 模型回复中断：上游服务过载")
+    assert line == ("🔎 Web search · Model response interrupted: provider overloaded" if language == "en"
+                    else "🔎 网页搜索 · 模型回复中断：供应商服务过载")
     if platform == "telegram":
         assert harness.controller.im_client.sent.count(line) == 1
     else:
@@ -2564,6 +2564,34 @@ async def test_a_route_model_hub_refuses_mid_run_shows_the_hubs_copy(engine, ses
 
     copy = launch_refusal_copy(harness.controller, refused)
     assert copy and harness.controller.im_client.sent[-1] == f"❌ {copy}"
+
+
+async def test_a_route_refused_mid_run_whose_fix_is_in_models_says_where(engine, session, tmp_path, published) -> None:
+    """The refusal itself, not only its copy, reaches the notice: its next step comes from it."""
+    from core.handlers.model_hub.provenance import TurnOutcomeProjectionInput, TurnSupplyFacts
+    from core.handlers.model_hub.service import ModelHubError
+    from modules.agents.model_hub import launch_refusal_copy, models_next_step_text
+
+    refused = ModelHubError("no_candidate", turn_outcome=TurnOutcomeProjectionInput(
+        outcome="no_candidate",
+        discriminator="route_unconfigured",
+        supply_facts=TurnSupplyFacts(backend="vibey", model="m", supply_state="interrupted"),
+    ))
+    harness = _Harness(engine, tmp_path, "telegram", _tool_turn())
+    resolve, calls = harness.controller._resolve, []
+
+    async def route(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise refused
+        return await resolve(*args, **kwargs)
+
+    harness.controller.model_hub_runtime = SimpleNamespace(resolve=route)
+
+    await harness.agent.handle_message(harness.request("look"))
+
+    copy = launch_refusal_copy(harness.controller, refused)
+    assert harness.controller.im_client.sent[-1] == f"❌ {copy}\n{models_next_step_text(harness.controller)}"
 
 
 

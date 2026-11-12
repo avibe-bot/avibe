@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs", "tomlkit>=0.11.1"]
+requires = ["hatchling", "hatch-vcs", "tomlkit>=0.11.1", "uv==0.13.7"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Local-first Agent OS for Web and IM agent workflows"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 authors = [
     { name = "cyhhao", email = "cyhhao@users.noreply.github.com" }
 ]
@@ -129,6 +129,7 @@ version-file = "vibe/_version.py"
 # Include generated assets even though they are in .gitignore (build artifacts)
 artifacts = [
     "ui/dist/**",
+    "vibe/dependency_constraints.txt",
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
     "vibe/git_runtime_manifest.json",
@@ -163,7 +164,10 @@ include = [
     "scripts/show_runtime_manifest_asset.py",
     "scripts/release_asset_download.py",
     "scripts/release_package_version.py",
+    "scripts/release_dependency_constraints.py",
+    "uv.lock",
     "ui/dist/**",
+    "vibe/dependency_constraints.txt",
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
     "vibe/git_runtime_manifest.json",
@@ -195,7 +199,7 @@ asyncio_mode = "auto"
 markers = [
     "e2e_model_hub: opt-in hermetic Model Hub HTTP and gateway scenarios",
     "e2e_service: opt-in acceptance that drives the installed vibe service from a fresh home, on every platform",
-    "integration: tests excluded from the unit shards because they need external infrastructure (Docker + platform tokens) or minutes of real filesystem work",
+    "integration: tests excluded from the unit shards because they need external infrastructure (Docker + platform tokens) or minutes of real filesystem work, or the dedicated native engine lifecycle harness",
     "uses_real_paths: opt out of the autouse home/config isolation so the test can exercise real path resolvers (must remain read-only)",
     "no_sqlite_template: opt out of the pre-migrated SQLite template for migration/bootstrap tests",
     "allow_foreign_signals(reason): opt out of the autouse guard that refuses os.kill/os.killpg to processes the test did not start (state the reason)",

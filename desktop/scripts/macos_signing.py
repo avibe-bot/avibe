@@ -99,6 +99,14 @@ TIMESTAMP_ATTEMPTS = 3
 STAPLER_NETWORK_ERROR = "NSURLErrorDomain"
 STAPLER_RETRY_DELAYS_SECONDS = (15, 30, 60, 90, 120)
 STAPLER_ATTEMPTS = len(STAPLER_RETRY_DELAYS_SECONDS) + 1
+# notarytool fails a command when one of its requests to the notary service
+# times out, loses its connection, or meets a 5xx, although the submission may
+# be fine: in gh-v3.2.6rc4 a status poll of an uploaded submission timed out
+# (NSURLErrorDomain -1001). Only such a failure is retried; a verdict such as
+# Invalid, and any other error, ends notarization at once.
+NOTARY_TRANSIENT_ERROR = re.compile(r"NSURLErrorDomain Code=-100[145]\b|status ?code: (?:Optional\()?5\d\d\b", re.IGNORECASE)
+NOTARY_RETRY_DELAYS_SECONDS = (30, 60)
+NOTARY_ATTEMPTS = len(NOTARY_RETRY_DELAYS_SECONDS) + 1
 
 
 class SigningError(RuntimeError):
@@ -380,12 +388,46 @@ def notary_credentials(key_path: str, key_id: str, issuer: str) -> list[str]:
     return ["--key", key_path, "--key-id", key_id, "--issuer", issuer]
 
 
+def notarytool(arguments: list[str], *, label: str) -> dict:
+    """Run a notarytool command for its JSON result, retrying only a transient
+    network failure. A command that prints a result, whatever its status, is
+    not retried."""
+
+    attempt = 1
+    while True:
+        result = subprocess.run(
+            ["xcrun", "notarytool", *arguments, "--output-format", "json"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            outcome = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            outcome = None
+        if isinstance(outcome, dict):
+            return outcome
+        error = result.stderr.strip()
+        if NOTARY_TRANSIENT_ERROR.search(error) is None or attempt == NOTARY_ATTEMPTS:
+            raise SigningError(f"notarytool {label} failed: {error}")
+        delay = NOTARY_RETRY_DELAYS_SECONDS[attempt - 1]
+        print(
+            f"notarytool {label} lost its connection to Apple; retrying in {delay} s ({attempt}/{NOTARY_ATTEMPTS})",
+            flush=True,
+        )
+        time.sleep(delay)
+        attempt += 1
+
+
 def notarize(path: Path, *, key_path: str, key_id: str, issuer: str) -> None:
     """Submit to the notary service, require `Accepted`, then staple and validate.
 
     An app is submitted as a ditto zip of the bundle; the ticket is stapled to
-    the bundle itself. The submission log is printed either way: it lists every
-    rejected or warned binary, and contains no credentials.
+    the bundle itself. The upload and the wait are separate commands, so a
+    retry after the service has given the upload an id waits on that same
+    submission instead of submitting again. The submission log is printed
+    either way: it lists every rejected or warned binary, and contains no
+    credentials.
     """
 
     credentials = notary_credentials(key_path, key_id, issuer)
@@ -394,31 +436,25 @@ def notarize(path: Path, *, key_path: str, key_id: str, issuer: str) -> None:
         if path.suffix == ".app":
             submission = Path(temporary) / f"{path.stem}.zip"
             run(["ditto", "-c", "-k", "--keepParent", str(path), str(submission)])
-        result = subprocess.run(
-            ["xcrun", "notarytool", "submit", str(submission), *credentials,
-             "--wait", "--timeout", "2h", "--output-format", "json"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    try:
-        outcome = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise SigningError(f"notarytool submit failed for {path.name}: {result.stderr.strip()}") from None
-    submission_id, status = outcome.get("id"), outcome.get("status")
+        submission_id = notarytool(["submit", str(submission), *credentials], label=f"submit {path.name}").get("id")
+    if not submission_id:
+        raise SigningError(f"notarytool submit returned no submission id for {path.name}")
+    outcome = notarytool(
+        ["wait", str(submission_id), *credentials, "--timeout", "2h"], label=f"wait {path.name} ({submission_id})"
+    )
+    status = outcome.get("status")
     print(f"notarization {path.name}: id={submission_id} status={status}", flush=True)
-    if submission_id:
-        log = subprocess.run(
-            ["xcrun", "notarytool", "log", str(submission_id), *credentials],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        try:
-            issues = json.loads(log.stdout).get("issues")
-        except json.JSONDecodeError:
-            issues = log.stdout.strip() or log.stderr.strip()
-        print(f"notary issues for {path.name}: {json.dumps(issues, indent=2)}", flush=True)
+    log = subprocess.run(
+        ["xcrun", "notarytool", "log", str(submission_id), *credentials],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        issues = json.loads(log.stdout).get("issues")
+    except json.JSONDecodeError:
+        issues = log.stdout.strip() or log.stderr.strip()
+    print(f"notary issues for {path.name}: {json.dumps(issues, indent=2)}", flush=True)
     if status != "Accepted":
         raise SigningError(f"notarization of {path.name} ended {status!r}, not Accepted")
     stapler("staple", path)

@@ -1385,6 +1385,18 @@ class Controller:
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
 
+        adapter = getattr(self, "model_hub_engine_adapter", None)
+        recover_engine = getattr(adapter, "recover_lifecycle", None)
+        if callable(recover_engine):
+            try:
+                await recover_engine()
+            except Exception:
+                logger.exception("Model Hub engine journal recovery failed; starts stay fenced")
+            finally:
+                schedule_engine = getattr(adapter, "start_lifecycle_scheduler", None)
+                if callable(schedule_engine):
+                    schedule_engine()
+
         model_hub_service = getattr(self, "model_hub_service", None)
         recover_model_hub = getattr(
             model_hub_service,
@@ -2219,6 +2231,7 @@ class Controller:
         service_stops: list[tuple[str, asyncio.Task[None]]] = []
         for service_name in (
             "model_hub_service",
+            *(("model_hub_engine_adapter",) if getattr(self, "model_hub_service", None) is None else ()),
             "scheduled_task_service",
             "watch_service",
         ):
@@ -2463,10 +2476,39 @@ class Controller:
             except Exception:
                 break
 
+    def _run_background_storage_pass(self, cancel_event=None) -> dict:
+        """Share the joined maintenance worker without sharing job cadences."""
+        import time
+
+        from storage.db import get_cached_sqlite_engine
+        from storage.message_search_index import run_pass
+
+        self._message_search_pending = False
+        try:
+            search_status = run_pass(get_cached_sqlite_engine(), cancel_event=cancel_event)
+            self._message_search_pending = search_status == "pending"
+            if search_status == "unsupported" and getattr(self, "_message_search_last_status", None) != search_status:
+                logger.warning("Message search acceleration unavailable; using LIKE without accumulating an index journal")
+            self._message_search_last_status = search_status
+        except Exception as exc:
+            # Neither Message text nor SQL parameters belong in maintenance logs.
+            original = getattr(exc, "orig", exc)
+            code = getattr(original, "sqlite_errorcode", None)
+            logger.warning(
+                "Message search index maintenance failed (%s, sqlite_code=%s)",
+                type(original).__name__, code if type(code) is int else None,
+            )
+        now = time.monotonic()
+        if now < getattr(self, "_next_trace_retention_check", 0):
+            return {"status": "not_due"}
+        self._next_trace_retention_check = now + self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS
+        return self._run_agent_events_retention_pass(cancel_event)
+
     async def _agent_events_retention_loop(self) -> None:
         """Bounded retention for internal agent trace events (avibe#1506).
 
-        Checks immediately and then hourly; the storage marker inside
+        Retention checks immediately and then hourly. Search indexing gets short
+        resumable passes (one-second pauses while pending, otherwise one minute).
         ``agent_events_retention.run_once`` owns the once-per-day cadence, so
         short-lived sessions still get their first pass on startup. Work runs
         on a single-worker executor so shutdown can join it.
@@ -2489,7 +2531,7 @@ class Controller:
                 try:
                     future = loop.run_in_executor(
                         executor,
-                        self._run_agent_events_retention_pass,
+                        self._run_background_storage_pass,
                         cancel_event,
                     )
                     self._trace_retention_future = future
@@ -2512,7 +2554,7 @@ class Controller:
                     raise
                 except Exception:
                     logger.error("Agent trace-event retention failed", exc_info=True)
-                await asyncio.sleep(self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS)
+                await asyncio.sleep(1 if getattr(self, "_message_search_pending", False) else 60)
         finally:
             cancel_event.set()
             await self._join_trace_retention_future()

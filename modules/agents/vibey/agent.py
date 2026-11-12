@@ -208,8 +208,10 @@ class _Run:
     reason: Optional[str] = None
     # The error that decided ``reason`` (``RunEnded.cause``): the failure's kind, text, and Model Hub attribution.
     cause: Optional[AgentError] = None
-    # Model Hub's copy for a route it refused during the run (``_preflight``).
+    # Model Hub's copy for a route it refused during the run (``_preflight``), and the refusal itself:
+    # the failure notice reads its next step (and the Source it names) from the refusal, not the copy.
     refusal: Optional[str] = None
+    refusal_cause: Optional[BaseException] = None
     errors: list[AgentError] = field(default_factory=list)
     final_row: Optional[str] = None
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
@@ -1010,6 +1012,7 @@ class VibeyAgent(BaseAgent):
                 )
             except Exception as error:
                 turn.refusal = launch_refusal_copy(self.controller, error)
+                turn.refusal_cause = error
                 raise
             bind_launch(context, launch)
             # Every resolved hop, the first and each retry's, carries the output the Agent asks for on it.
@@ -1223,7 +1226,10 @@ class VibeyAgent(BaseAgent):
         builtin_agent: bool, persist: bool = True, catalog: Optional[dict] = None,
     ) -> PromptState:
         """Read, compare and publish optional prefix state off the loop, once per Turn."""
-        entries = await self.store.load(agent.session_id)
+        # Request preview is strictly read-only, including optional derived
+        # checkpoint metadata. Historical reads remain the preview's contract.
+        runtime = await self.store.load_for_run(agent.session_id) if persist else None
+        entries = runtime.entries if runtime is not None else await self.store.load(agent.session_id)
         endpoint = router.preflight.endpoint
 
         def prepare():
@@ -1240,7 +1246,10 @@ class VibeyAgent(BaseAgent):
                 route=route_identity(endpoint, agent=request.vibe_agent_id or "", model=request.subagent_model or request.vibe_agent_model or "",
                                      effort=request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort or ""),
                 checkpoint_seq=max((entry.context_seq for entry in entries if entry.kind == "compaction"), default=0),
-                cold=cache_cold(probe, entries, now=now),
+                cold=cache_cold(
+                    probe, entries, now=now,
+                    last_model_at=runtime.response_clocks if runtime is not None else None,
+                ),
             )
             if persist and decision.state != previous:
                 if not self.prompt_snapshots.save(agent.session_id, decision.state, snapshot=decision.reason is not None):
@@ -1285,7 +1294,7 @@ class VibeyAgent(BaseAgent):
                     agent_events_service.append(
                         conn, scope_id=scope_id, session_id=session_id, platform=request.context.platform or "avibe",
                         event_type=event_type, content={"version": 1, "at": now, **data}, visibility="trace",
-                        backend=BACKEND, agent_name=request.vibe_agent_name,
+                        backend=BACKEND, agent_name=getattr(request, "vibe_agent_name", None),
                         turn_id=(request.context.platform_specific or {}).get("turn_token"),
                     )
         except Exception:
@@ -1457,7 +1466,10 @@ class VibeyAgent(BaseAgent):
             await emit_output(self.controller, context, TurnEnd(silent=True, output=terminal_output_for(request)))
             return
         self._log_failure(run, reason, kind, origin, diagnostic)
-        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
+        await self._fail(
+            request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source,
+            cause=run.refusal_cause if run.refusal else None,
+        )
 
     @staticmethod
     def _log_failure(
@@ -1615,7 +1627,7 @@ class VibeyAgent(BaseAgent):
         is not yet settled is left to that Turn's owner and nothing is written: ``False``.
         """
         session_id = runtime.session_id
-        open_calls = open_tool_calls(await self.store.load(session_id))
+        open_calls = open_tool_calls((await self.store.load_for_run(session_id)).entries)
         if not open_calls:
             return True
         suite = self._tools()
@@ -1947,7 +1959,7 @@ class VibeyAgent(BaseAgent):
         def build() -> list[RenderedPromptBlock]:
             # Every lookup runs here, off the loop: the enabled-Agent list and the Bot read SQLite.
             bot = bot_for_turn(
-                getattr(self.controller, "vibe_agent_store", None), agent_id=request.vibe_agent_id, cwd=cwd
+                getattr(self.controller, "vibe_agent_store", None), agent_id=getattr(request, "vibe_agent_id", None), cwd=cwd
             )
             return build_system_prompt_blocks(
                 bot=bot,
@@ -2426,9 +2438,16 @@ class VibeyAgent(BaseAgent):
         language = self._language()
         # Every route runs through the Model Hub: when it leaves Vibey no model (disabled, its gateway
         # off, no source), that explains the failure, and the supply refusal is the failure's cause.
-        supply = await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
+        supply = await asyncio.to_thread(
+            hub_supply_refusal,
+            self.controller,
+            BACKEND,
+            language,
+            agent_id=getattr(request, "vibe_agent_id", None),
+            agent_name=getattr(request, "vibe_agent_name", None),
+        )
         if supply is not None:
-            hold_refused_input(request.context)
+            hold_refused_input(request.context, fixed_in_models=supply.fixed_in_models)
         refusal = str(supply) if supply is not None else (
             launch_refusal_copy(self.controller, error) or error_text(None, language)
         )

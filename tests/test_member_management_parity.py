@@ -110,6 +110,7 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("POST", "/api/remote-access/direct/suspend"),
     ("POST", "/api/wechat/qr_login/start"),
     ("POST", "/api/wechat/qr_login/poll"),
     ("POST", "/api/users/{user_id}/admin"),
@@ -141,7 +142,8 @@ def test_complete_registered_api_management_inventory():
     # master 297 + 12 MCP Hub routes, classified in tests/test_mcp_hub_api.py, + 8 Bots routes (Owner, above), + 2 notification preference methods
     # + 2 home preference methods (Viewer, like the notification preferences)
     # + 1 direct-path rendezvous (Viewer: transport bootstrap for any signed-in remote user)
-    assert len(endpoints) == 322
+    # + 1 direct lifecycle suspend (Owner, with an additional local-only token guard)
+    assert len(endpoints) == 323
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):
