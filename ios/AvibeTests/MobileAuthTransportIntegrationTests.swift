@@ -5,7 +5,14 @@ import XCTest
 
 @MainActor
 final class MobileAuthTransportIntegrationTests: XCTestCase {
-    private static let fixtureEventTimeout: TimeInterval = 30
+    /// Each fixture event here (a request reaching the fixture server, a
+    /// navigation finishing, an account operation ending) comes after WebKit
+    /// launches a web content process for a new WebView, so it is bounded by
+    /// that launch (`WebKitReadiness`), which also outlasts the transport's
+    /// own standard deadlines.
+    private static let fixtureEventTimeout = TimeInterval(
+        WebKitReadiness.webContentLaunch.components.seconds
+    )
 
     func testFailureMappingIsStageAccurateForEveryOperation() {
         struct MappingCase {
