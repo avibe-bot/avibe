@@ -9831,7 +9831,7 @@ def _vault_secret_row(secret: dict) -> dict:
             "solana_signing_note": (
                 None
                 if secret.get("signing_curve") != "ed25519"
-                else "Protected Solana signing is not supported yet."
+                else "Sign with --scheme ed25519 --message-hex <exact non-empty serialized message, lowercase hex> and --signing-context-json '{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"<the same hex>\"}'; --digest is refused. Needs browser approval and a compatible Vault sandbox."
                 if secret.get("protection") == "protected"
                 else "Sign with --scheme ed25519 --message-hex <exact serialized message bytes>; --digest is refused."
             ),
@@ -19978,7 +19978,8 @@ def build_parser():
             "do not hash them first. Standard keys sign immediately via avault and return the public "
             "signature inline. Protected keys — and standard keys marked always-ask — instead create a "
             "pending per-use request you approve in the browser; then 'vibe vault await <request-id>' "
-            "returns the public signature. Protected Solana keys cannot sign yet."
+            "returns the public signature. Protected keys also need --signing-context-json: a Solana key "
+            "uses {\"kind\":\"solana-transaction-v1\",\"messageHex\":<the same lowercase hex>}."
         ),
         epilog=(
             "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
