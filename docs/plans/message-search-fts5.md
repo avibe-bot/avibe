@@ -85,6 +85,13 @@ candidates per historical row. A query-plan test protects the actual lookup,
 not merely the existence of the FTS table. Sorting remains over candidates that
 pass all original filters, and LIMIT applies **after** those filters.
 
+Readiness and the final query share a real SQLite read snapshot through a nested
+savepoint, preserving a caller's existing transaction. This matters when another
+runtime deactivates journaling: old readiness must not be combined with newer
+unjournaled Message writes. Corruption or failure of the derived candidate path
+logs the error and retries the original query once with the same filters. A
+failure of the authoritative query still propagates.
+
 Only ASCII upper/lower equivalence is applied in Python, matching SQLite's
 built-in `lower`; no Unicode folding, accent removal or stemming is introduced.
 Tokens are individually quoted/escaped and bound as a parameter. Punctuation,
@@ -112,16 +119,19 @@ before their target tables and leaves Messages untouched.
 
 Other indexing errors are logged, not treated as a successful rebuild. The
 original query continues while backfill is incomplete; after readiness, dirty
-ids preserve complete search results while the worker retries. The index is
-additive derived state, not a replacement for Messages. Corruption of an already
-ready index is not silently reclassified as a module-capability failure.
+ids preserve completeness during ordinary lag, and a failed index read falls
+back to the original query. The index is additive derived state, not a
+replacement for Messages. Corruption is not silently reclassified as a
+module-capability failure or automatically repaired by deleting database pages.
+The fault remains visible in diagnostics even when the ledger search succeeds.
 
 ## Acceptance evidence
 
 Primary owner coverage is `tests/test_message_search_index.py`:
 
 - real forward migration is empty/additive and preserves Message data and epoch;
-  explicit isolated reverse-DDL removes only search artifacts;
+  head-shaped unversioned model schemas replay safely, and explicit isolated
+  reverse-DDL removes only search artifacts;
 - partial backfill, insertion behind the cursor, text update, deletion, reopened
   connections and `VACUUM` preserve result identity;
 - actual subprocess termination before/after batch commit, cancellation and
@@ -133,15 +143,23 @@ Primary owner coverage is `tests/test_message_search_index.py`:
   accumulate an unused journal or reuse stale readiness on recovery;
 - oversized text keeps suffix matches and transitions back into the index when
   shortened; the query plan reaches Messages through their primary key;
-- mutations to the trigger proof's SQL, source fields or target shape fail the
+- concurrent index deactivation cannot mix readiness and ledger snapshots;
+  caller rollback/read-only connections survive the savepoint; corrupt derived
+  index data falls back without widening access;
+- controller checks retry pending indexing without accelerating hourly retention,
+  and mutations to the trigger proof's SQL, source fields or target shape fail the
   additive classifier.
 
 Existing Message search, controller maintenance, migration policy, no-copy and
 compatibility-epoch suites are also run. Exact-head PR review/CI and a serialized
 local Incus synthetic large-database benchmark remain required before readiness.
+The shared fixture is capped at approximately 1.5 GB including its documented
+scale and actual file size; this does **not** empirically validate a 6 GB database.
 The benchmark must compare identical results before/after planner optimization
-and indexing, migration/backfill duration, database/WAL growth and normal writer
-latency. No live user database copy or owner-machine load test is authorized.
+and indexing, migration/backfill duration, database/WAL growth, peak disk use
+(including working copies) and normal writer latency. No linear extrapolation
+from the smaller fixture is a measured 6 GB result. No live user database copy or
+owner-machine load test is authorized.
 
 ## Intentional limits and follow-ups
 

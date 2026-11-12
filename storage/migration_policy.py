@@ -336,7 +336,7 @@ def _validate_search_journal_operations(operations: list[ops.MigrateOperation]) 
     }
     expected = {
         " ".join((
-            f"CREATE TRIGGER message_search_{name} AFTER {event} ON messages "
+            f"CREATE TRIGGER IF NOT EXISTS message_search_{name} AFTER {event} ON messages "
             "WHEN EXISTS (SELECT 1 FROM message_search_state WHERE id = 1) BEGIN "
             + " ".join(
                 f"INSERT OR IGNORE INTO message_search_dirty (message_id) VALUES ({row}.id);"

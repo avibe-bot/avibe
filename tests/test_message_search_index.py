@@ -321,6 +321,88 @@ def test_unsupported_version_deactivates_journal_then_rebuilds_after_old_writes(
     assert "m0002" not in ids(search(engine))
 
 
+def test_corrupt_ready_index_falls_back_to_same_authorized_results(engine, caplog):
+    scope = seed(engine)
+    expected = search(engine, scope_ids=[scope], hidden_session_ids=[])
+    drain(engine)
+    # Damage only the derived index, not the authoritative ledger.
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE message_search_fts_data")
+    engine.dispose()
+    assert search(engine, scope_ids=[scope], hidden_session_ids=[]) == expected
+    assert search(engine, scope_ids=["not-readable"])["total"] == 0
+    assert "retrying authoritative LIKE search" in caplog.text
+
+
+@pytest.mark.no_sqlite_template
+def test_head_shaped_unversioned_schema_replays_search_migration(tmp_path):
+    from storage.models import metadata
+
+    path = tmp_path / "head-shape.sqlite"
+    engine = create_sqlite_engine(path)
+    try:
+        metadata.create_all(engine)
+        migrations.run_migrations(path)
+        with engine.begin() as conn:
+            triggers = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'message_search_%'"
+            ).all()
+            assert len(triggers) == 3
+            assert conn.exec_driver_sql("SELECT count(*) FROM message_search_state").scalar_one() == 0
+        seed(engine, count=1)
+        drain(engine)
+        with engine.begin() as conn:
+            conn.execute(messages.update().values(content_text="replayedneedle"))
+        assert search(engine, "replayedneedle")["total"] == 1
+    finally:
+        engine.dispose()
+
+
+def test_search_snapshot_preserves_caller_rollback_and_read_only_connections(engine):
+    seed(engine, count=1)
+    drain(engine)
+    with engine.connect() as conn:
+        conn.execute(messages.update().values(content_text="uncommittedneedle"))
+        assert messages_service.search_messages(conn, query="uncommittedneedle")["total"] == 1
+        conn.rollback()
+    assert search(engine, "uncommittedneedle")["total"] == 0
+    read_only = create_sqlite_engine(Path(engine.url.database), read_only=True)
+    try:
+        with read_only.connect() as conn:
+            assert messages_service.search_messages(conn, query="watch")["total"] == 1
+    finally:
+        read_only.dispose()
+
+
+def test_readiness_and_candidate_query_share_a_snapshot(engine):
+    seed(engine, count=2)
+    with engine.begin() as conn:
+        conn.execute(messages.update().where(messages.c.id == "m0000").values(content_text="needle"))
+        conn.execute(messages.update().where(messages.c.id == "m0001").values(content_text="other"))
+    drain(engine)
+    switched = False
+
+    def deactivate_between_reads(conn, cursor, statement, parameters, context, executemany):
+        nonlocal switched
+        if statement == "SELECT rowid FROM message_search_fts LIMIT 0" and not switched:
+            switched = True
+            with engine.begin() as writer:
+                writer.exec_driver_sql("DELETE FROM message_search_state")
+                writer.exec_driver_sql("DELETE FROM message_search_dirty")
+                writer.execute(messages.update().where(messages.c.id == "m0000").values(content_text="other"))
+                writer.execute(messages.update().where(messages.c.id == "m0001").values(content_text="needle"))
+
+    event.listen(engine, "before_cursor_execute", deactivate_between_reads)
+    try:
+        # Both committed states have exactly one hit. Mixing old index readiness
+        # with new ledger contents would incorrectly return none.
+        assert search(engine, "needle")["total"] == 1
+        assert switched
+    finally:
+        event.remove(engine, "before_cursor_execute", deactivate_between_reads)
+    assert ids(search(engine, "needle")) == ["m0001"]
+
+
 def test_busy_writer_defers_batch_and_restores_pool_timeout(engine):
     seed(engine)
     with engine.connect() as writer:

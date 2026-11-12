@@ -130,11 +130,15 @@ def test_source_fixture_exercises_probe_and_detects_reader_write_loss(tmp_path, 
 
 def test_source_fixture_proves_trace_only_reader_refusal_is_not_a_capability_pass(tmp_path, monkeypatch):
     real_probe = contract.run_probe
+    from alembic.script import ScriptDirectory
+    from storage import migrations
+
+    candidate_head = ScriptDirectory.from_config(migrations.alembic_config()).get_current_head()
 
     def unsupported_reader(python, action, home, *, current=False):
         if not current and action == "open":
             with sqlite3.connect(home / "state/vibe.sqlite") as conn:
-                assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261108_0083",)
+                assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (candidate_head,)
             return {"refused": True}
         result = real_probe(Path(sys.executable), action, home, current=True)
         if action == "identity":

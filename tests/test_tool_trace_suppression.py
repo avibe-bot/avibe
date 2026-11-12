@@ -113,7 +113,7 @@ def crash_before_commit(conn, cursor, statement, parameters, context, executeman
     if sys.argv[2] == 'before-commit' and statement.startswith('UPDATE alembic_version SET') and '20261108_0083' in statement:
         os._exit(71)
 event.listen(Engine, 'after_cursor_execute', crash_before_commit)
-migrations.run_migrations(Path(sys.argv[1]))
+migrations.run_migrations(Path(sys.argv[1]), revision='20261108_0083')
 os._exit(72)
 """, str(path), crash], check=False, capture_output=True, text=True)
     assert result.returncode == (71 if crash == "before-commit" else 72), result.stderr
@@ -133,6 +133,7 @@ os._exit(72)
 
 @pytest.mark.no_sqlite_template
 def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_path, monkeypatch):
+    from alembic.script import ScriptDirectory
     from storage import importer
     from tests.test_sqlite_readiness import COMPLETED, DATA_MARKER
 
@@ -144,8 +145,9 @@ def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_p
                      (DATA_MARKER, json.dumps(COMPLETED), COMPLETED["updated_at"]))
     graph = tmp_path / "alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
+    previous = ScriptDirectory.from_config(migrations.alembic_config(path)).get_current_head()
     (graph / "versions" / "20990101_9999_additive.py").write_text(
-        "from alembic import op\nrevision='20990101_9999'\ndown_revision='20261108_0083'\n"
+        f"from alembic import op\nrevision='20990101_9999'\ndown_revision={previous!r}\n"
         "MIGRATION_COMPATIBILITY='additive'\n"
         "def upgrade():\n    op.create_index('ix_epoch_two_next', 'agents', ['description'], unique=False)\n"
     )
