@@ -967,6 +967,7 @@ const NON_KEY_LITERALS = [
   'avibe.terminal.fontSize.v1',
   'avibe.terminal.sessionId',
   'avibe.vault.crypto',
+  'avibe.vault.hdAddressCheckFailed',
   'avibe.workbench.windows.v1',
   'vibe.nativePush.pendingRegistration',
   'vibe.nativePush.disabledIntent',
