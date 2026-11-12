@@ -429,6 +429,7 @@ class WeChatBot(BaseIMClient):
 
         # getUpdates cursor
         self._sync_buf: str = ""
+        self._persisted_sync_buf: Optional[str] = None
         self._poll_timeout_ms: int = _POLL_TIMEOUT_MS
         self._session_expired_logged: bool = False
         self._connection_notified: bool = False
@@ -1635,22 +1636,27 @@ class WeChatBot(BaseIMClient):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             self._sync_buf = data.get("sync_buf", "")
+            self._persisted_sync_buf = self._sync_buf
             if self._sync_buf:
                 logger.info("Loaded persisted sync buffer (%d chars)", len(self._sync_buf))
         except Exception as exc:
             logger.warning("Failed to load sync buffer: %s", exc)
 
     def _save_sync_buf(self) -> None:
-        """Persist the current sync buffer to disk."""
-        if not self._sync_buf:
+        """Persist a changed cursor; a failed write remains eligible for retry."""
+        sync_buf = self._sync_buf
+        if not sync_buf or sync_buf == self._persisted_sync_buf:
             return
         try:
             path = self._get_sync_buf_path()
             path.write_text(
-                json.dumps({"sync_buf": self._sync_buf}, ensure_ascii=False),
+                json.dumps({"sync_buf": sync_buf}, ensure_ascii=False),
                 encoding="utf-8",
             )
+            self._persisted_sync_buf = sync_buf
         except Exception as exc:
+            # write_text may have truncated the previous file before failing.
+            self._persisted_sync_buf = None
             logger.warning("Failed to save sync buffer: %s", exc)
 
     # ------------------------------------------------------------------

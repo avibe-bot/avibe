@@ -2110,6 +2110,15 @@ def _write_state_file(
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} now {conflict}")
+    # Quiet polls often reproduce the complete snapshot. Compare the file, not
+    # just an in-memory cache: deletion/corruption must still be repaired. Keep
+    # JSON types significant while ignoring dictionary insertion order.
+    try:
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if json.dumps(existing, sort_keys=True) == json.dumps(payload, sort_keys=True):
+            return
+    except (OSError, ValueError):
+        pass
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         # Written aside and moved into place: a cycle killed mid-write must not

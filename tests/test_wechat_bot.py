@@ -48,6 +48,36 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(WeChatBot._extract_text(msg), "look at this\n[Quoted message: quoted image summary]")
 
+    def test_sync_cursor_skips_unchanged_writes_and_retries_failure(self):
+        """Polling the same cursor (also after restart) must not rewrite it.
+
+        The API timeout test already returns the previous cursor; it never checks
+        the adapter's disk writes or that a failed save remains retryable.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("modules.im.wechat.get_state_dir", return_value=Path(tmpdir)):
+                bot = self._make_bot()
+                bot._sync_buf = "cursor-a"
+                bot._save_sync_buf()
+                restored = self._make_bot()
+                restored._load_sync_buf()
+                self.assertEqual(restored._sync_buf, "cursor-a")
+                with patch.object(Path, "write_text", side_effect=AssertionError("unchanged cursor wrote")) as write:
+                    bot._save_sync_buf()
+                    restored._save_sync_buf()
+                    write.assert_not_called()
+
+                restored._sync_buf = "cursor-b"
+                with patch.object(Path, "write_text", side_effect=OSError("synthetic disk failure")) as write:
+                    restored._save_sync_buf()
+                    self.assertEqual(write.call_count, 1)
+                restored._save_sync_buf()
+                path = Path(tmpdir) / "wechat_sync_buf.json"
+                self.assertEqual(json.loads(path.read_text()), {"sync_buf": "cursor-b"})
+                with patch.object(Path, "write_text", side_effect=AssertionError("saved cursor wrote again")) as write:
+                    restored._save_sync_buf()
+                    write.assert_not_called()
+
     def test_normalize_poll_timeout_clamps_values(self):
         self.assertEqual(WeChatBot._normalize_poll_timeout("70000"), 60000)
         self.assertEqual(WeChatBot._normalize_poll_timeout("1000"), 5000)
