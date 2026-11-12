@@ -218,12 +218,17 @@ it('does not report the wallet done while the requested ask-before-signing did n
   fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
   fireEvent.click(screen.getByRole('switch', { name: hd.askAccount0 }));
   api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [storedFor(OFFICIAL.split(' '))] } });
+  // The first attempt is refused, the retry loses the connection, the third sticks.
   api.updateVaultHdAccount.mockResolvedValueOnce({ ok: false, code: 'boom', message: 'nope' } as never);
+  api.updateVaultHdAccount.mockRejectedValueOnce(new TypeError('Failed to fetch'));
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
   expect(await screen.findByText(hd.askFailed)).toBeTruthy();
   expect((screen.getByRole('button', { name: hd.done.finish }) as HTMLButtonElement).disabled).toBe(true);
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.askRetry })); });
-  expect(api.updateVaultHdAccount).toHaveBeenCalledTimes(2);
+  expect(screen.getByText(hd.askFailed)).toBeTruthy();
+  expect((screen.getByRole('button', { name: hd.done.finish }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.askRetry })); });
+  expect(api.updateVaultHdAccount).toHaveBeenCalledTimes(3);
   expect(screen.queryByText(hd.askFailed)).toBeNull();
   expect((screen.getByRole('button', { name: hd.done.finish }) as HTMLButtonElement).disabled).toBe(false);
   expect(api.createVaultSecret).toHaveBeenCalledOnce();

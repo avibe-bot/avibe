@@ -625,13 +625,19 @@ export const VaultSecretForm: React.FC<{
   // Account #0's ask-before-signing, set once the wallet exists (the create body may not carry it).
   // A failure keeps the done screen from claiming completion, and can be retried in place.
   const applyHdAsk = async () => {
-    const asked = await api.updateVaultHdAccount(secretName, 0, { always_ask: true }, { handleError: false });
-    if (asked.ok) {
-      setHdAskFailed(false);
-      setError(null);
-    } else {
+    // A refused answer and a dropped connection both leave #0 without the restriction asked for.
+    try {
+      const asked = await api.updateVaultHdAccount(secretName, 0, { always_ask: true }, { handleError: false });
+      if (asked.ok) {
+        setHdAskFailed(false);
+        setError(null);
+        return;
+      }
       setHdAskFailed(true);
       setError(vaultErrorMessage(t, asked, t('vaults.dialog.errors.updateFailed')));
+    } catch (err: unknown) {
+      setHdAskFailed(true);
+      setError(vaultErrorMessage(t, err, t('vaults.dialog.errors.updateFailed')));
     }
   };
 
