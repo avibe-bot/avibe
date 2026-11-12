@@ -4,6 +4,7 @@ The live CI acceptance owns package resolution. These tests protect host isolati
 and keep its independent marker-verification child executable on every platform.
 """
 from pathlib import Path
+from types import SimpleNamespace
 import os
 import sys
 
@@ -25,6 +26,15 @@ def test_acceptance_isolates_old_cli_launcher_and_package_manager_state(tmp_path
     for key in ("HOME", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_PYTHON_INSTALL_DIR", "AVIBE_HOME"):
         assert Path(env[key]).is_relative_to(root)
     assert env["UV_PYTHON_DOWNLOADS"] == "never"
+
+
+def test_windows_legacy_coverage_uses_the_unchanged_module_not_self_replacement(monkeypatch):
+    python = Path("old-runtime-python")
+    launcher = Path("stable-launcher")
+    monkeypatch.setattr(acceptance, "os", SimpleNamespace(name="nt"))
+    assert acceptance.legacy_upgrade_command(python, launcher) == [str(python), "-m", "vibe.cli", "upgrade"]
+    monkeypatch.setattr(acceptance, "os", SimpleNamespace(name="posix"))
+    assert acceptance.legacy_upgrade_command(python, launcher) == [str(launcher), "upgrade"]
 
 
 def test_constraint_verifier_child_is_valid_python():

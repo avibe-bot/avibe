@@ -874,6 +874,10 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     assert not shards.get("continue-on-error")
     assert all(not step.get("continue-on-error") for step in shards["steps"])
     steps = {step["name"]: step for step in shards["steps"] if "name" in step}
+    safety = steps["Verify Python 3.15 acceptance harness isolation on macOS"]
+    assert safety["if"] == "runner.os == 'macOS'"
+    assert "pytest -q tests/test_python315_install_regression.py" in safety["run"]
+    assert not steps["Install package and test dependencies"].get("if")
     test_steps = [steps["Run install and upgrade regressions"]]
     for suite in suites:
         selected = [step for step in test_steps if step["if"] == f"matrix.suite == '{suite}' && runner.os == 'Linux'"]

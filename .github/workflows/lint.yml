@@ -922,7 +922,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.13.7-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       - name: Install package and test dependencies
-        if: runner.os == 'Linux'
         run: |
           uv pip install --system dist/*.whl pytest
 
@@ -958,6 +957,13 @@ jobs:
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             -v
+
+      # Every matrix member must leave real test evidence for scenario-evidence.
+      # Linux already runs the full installer suite; Mac owns the harness-safety
+      # tests as well as the live 3.15 acceptance below.
+      - name: Verify Python 3.15 acceptance harness isolation on macOS
+        if: runner.os == 'macOS'
+        run: python -m pytest -q tests/test_python315_install_regression.py
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         id: python315

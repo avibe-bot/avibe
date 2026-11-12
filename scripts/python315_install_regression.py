@@ -4,7 +4,9 @@
 Only PyYAML (no cp315 wheel) and http-ece (pure-Python, sdist-only) may build
 from source. All state, launchers and caches belong to this invocation. No service
 is started. Candidate constraints bootstrap the old client's dependencies only;
-the old upgrade receives neither constraints nor new-client Python flags.
+the old upgrade receives neither constraints nor new-client Python flags. On
+Windows it uses the unchanged module entry point because 3.2.5's console launcher
+has a pre-existing self-replacement bug; it does not prove that vibe.exe path.
 """
 from __future__ import annotations
 
@@ -136,6 +138,15 @@ def verify(root: Path, env: dict[str, str], constraints: Path, version: str) -> 
         raise RuntimeError(f"The stable launcher did not activate {version}: {output}")
 
 
+def legacy_upgrade_command(old_python: Path, old_launcher: Path) -> list[str]:
+    # Public 3.2.5 misidentifies its Windows console launcher after uv strips
+    # .exe from argv[0], then tries to replace the still-open executable.
+    # Exercise the same unchanged old CLI without holding that executable.
+    if os.name == "nt":
+        return [str(old_python), "-m", "vibe.cli", "upgrade"]
+    return [str(old_launcher), "upgrade"]
+
+
 def acceptance(wheel: Path, root: Path) -> None:
     uv = shutil.which("uv")
     if not uv:
@@ -173,7 +184,11 @@ def acceptance(wheel: Path, root: Path) -> None:
     env["AVIBE_UPDATE_METADATA_URL"] = advertised.as_uri()
     env["AVIBE_UPGRADE_PACKAGE_SPEC"] = str(wheel)
     # No --python, constraints, or mocked installer are passed to the old CLI.
-    output = run([str(launcher(legacy)), "upgrade"], env, legacy)
+    # On Windows this is module-entry recovery coverage, NOT proof that the
+    # already-released 3.2.5 vibe.exe can replace itself (a separate known bug).
+    if os.name == "nt":
+        print("Windows legacy coverage uses unchanged 3.2.5 python -m vibe.cli upgrade; normal vibe.exe self-upgrade is not validated", flush=True)
+    output = run(legacy_upgrade_command(old_python, launcher(legacy)), env, legacy)
     print(output, flush=True)
     if "Using uv:" not in output or "Upgrade successful!" not in output:
         raise RuntimeError("Public 3.2.5 did not perform its real uv upgrade")
@@ -190,7 +205,9 @@ def main() -> None:
     args = parser.parse_args()
     assert sys.version_info[:2] == (3, 15), sys.version
     with tempfile.TemporaryDirectory(prefix='avibe-python315-') as directory:
-        acceptance(args.wheel.resolve(), Path(directory))
+        # TEMP may use an 8.3 alias on Windows. Use one canonical spelling
+        # for fixture directories, PATH discovery and command invocations.
+        acceptance(args.wheel.resolve(), Path(directory).resolve())
     print('CPython 3.15 constrained install and public 3.2.5 upgrade passed', flush=True)
 
 

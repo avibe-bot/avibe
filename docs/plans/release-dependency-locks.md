@@ -28,7 +28,14 @@ Acceptance installs the built wheel and its shipped constraints on a real 3.15
 interpreter and exercises the unmodified public 3.2.5 upgrader without new-client
 Python flags. New installers and upgrades enforce a Python >=3.10 floor without
 pinning an upper bound or a minor; Windows on Arm retains its explicit x64
-Python policy. Native dependency source builds are disallowed in the acceptance,
+Python policy. On Windows, the public 3.2.5 client is invoked through its unchanged
+`python -m vibe.cli upgrade` entry point: its `vibe.exe` path has a pre-existing
+self-replacement defect and is **not** shown to pass by this acceptance. Windows
+3.2.5 users can rerun the official `install.ps1`, or invoke that module with the
+Python interpreter from their existing Avibe environment. A separate future-client
+launcher fix is required for normal 3.2.6-to-later Windows CLI upgrades.
+
+Native dependency source builds are disallowed in the acceptance,
 except PyYAML 6.0.3 (no cp315 wheel, supported source build). The existing pure
 Python http-ece 1.2.1 also remains a source-only package. These exceptions are
 explicit build-input trust boundaries, not hash-verified or compiler-free claims.
