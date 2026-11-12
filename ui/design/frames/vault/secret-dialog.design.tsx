@@ -6,11 +6,19 @@ import { VaultsPage } from '@/components/workbench/VaultsPage';
 
 import { frames } from '../../frame';
 import { consolePage } from '../workbench/fixtures';
-import { provisionRequest, vaultApi, vaultFixtures } from './fixtures';
+import { provisionRequest, vaultApi, vaultFixtures, vaultSecrets } from './fixtures';
 
 const noop = () => {};
 const fixtures = vaultFixtures();
 const quiet = vaultFixtures(vaultApi({ grants: [], requests: [] }));
+// The same list, with ask-before-signing already on for the standard signing key.
+const askOn = vaultFixtures(vaultApi({
+  grants: [],
+  requests: [],
+  secrets: vaultSecrets.map((s) => (s.name === 'ETH_HOT_KEY' ? { ...s, policy: { ...s.policy, always_ask: true } } : s)),
+}));
+const editKey = ['li:has-text("ETH_HOT_KEY") >> role=button[name="{t:vaults.rowActions}"]', 'role=menuitem[name="{t:vaults.editSecret}"]'];
+const askSwitch = 'role=switch[name="{t:vaults.dialog.alwaysAskSign}"]';
 
 const create = () => <VaultSecretDialog open onOpenChange={noop} onCreated={noop} />;
 const provide = () => (
@@ -98,6 +106,39 @@ const designFrames = frames([
     route: '/vaults',
     fixtures: quiet,
     click: editRow(2),
+    render: page,
+  },
+  {
+    name: 'edit-keypair',
+    title: '编辑签名密钥 · 可以打开「每次签名都要我确认」',
+    width: 1192,
+    height: 940,
+    status: 'shipped',
+    route: '/vaults',
+    fixtures: quiet,
+    click: editKey,
+    render: page,
+  },
+  {
+    name: 'edit-keypair-ask-on',
+    title: '编辑签名密钥 · 打开后提示：保存后暂时不能关闭',
+    width: 1192,
+    height: 940,
+    status: 'shipped',
+    route: '/vaults',
+    fixtures: quiet,
+    click: [...editKey, askSwitch],
+    render: page,
+  },
+  {
+    name: 'edit-keypair-ask-locked',
+    title: '编辑签名密钥 · 已打开，暂时不能关闭',
+    width: 1192,
+    height: 940,
+    status: 'shipped',
+    route: '/vaults',
+    fixtures: askOn,
+    click: editKey,
     render: page,
   },
   {

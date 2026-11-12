@@ -475,6 +475,9 @@ export type VaultMetadataUpdatePayload = {
   description?: string | null;
   tags?: string[];
   policy?: Record<string, unknown>;
+  /** Ordinary standard keypairs only: may raise ask-before-signing; lowering returns 409
+   *  `vault_policy_downgrade_unavailable` until the Passkey flow exists. */
+  always_ask?: boolean;
 };
 
 export type VaultFieldValuePayload = {
