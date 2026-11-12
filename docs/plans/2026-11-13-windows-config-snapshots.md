@@ -81,4 +81,21 @@ belong to the PR's exact-head `windows-model-hub` and `windows-agent` checks,
 including the unchanged installed-service acceptance and existing helper/job
 regressions.
 
+The first native run (`43296700007`, head `5c674463c39a`) passed all 29
+snapshot/transaction cases on both Windows runners, including supplementary
+Unicode paths, held readers, negative controls and read-only rejection. Both
+existing Windows agent/helper jobs also passed. The snapshot step then failed
+because PowerShell's case-insensitive search mistook SQLAlchemy's "Skipped
+unsupported reflection" warning for a pytest skip. The check now matches
+pytest's uppercase `SKIPPED` case-sensitively; no test or success requirement
+is removed. Installed-service acceptance did not run on that head.
+
+The native lifecycle suite also exposed an obsolete failure-injection target:
+the admission test patched `os.replace`, bypassed by native publication.
+Admission and channel publication tests now inject at `replace_snapshot`, the
+same cross-platform publication boundary used by the atomic IO tests. Their
+failure and preservation assertions remain unchanged; Model Hub product
+behavior is unchanged. These two existing test files are the bounded test
+scope addition required by reusing the shared publisher.
+
 This lane has no merge, installation, deployment or service-restart authority.

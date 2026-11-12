@@ -1295,7 +1295,7 @@ jobs:
           & $env:AVIBE_CI_PYTHON -m pytest -v -ra tests/test_config_snapshots.py tests/test_config_write_transaction.py *>&1 |
             Tee-Object -FilePath config-snapshots.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (Select-String -Path config-snapshots.log -Pattern 'SKIPPED' -SimpleMatch -Quiet) {
+          if (Select-String -Path config-snapshots.log -Pattern 'SKIPPED' -SimpleMatch -CaseSensitive -Quiet) {
             throw "Native config snapshot checks must run on each supported Windows runner"
           }
 
