@@ -23,7 +23,7 @@ Policy is checked when an operation captures its signing target. A toggle affect
 
 Creation and signing require avault >=0.1.11; older/unknown binaries fail with an upgrade message before persistence or custody. No version/pin/release change is included. Development integration uses a master-built binary in test-owned state until the owner approves the release.
 
-Existing keypair schema, envelope, AAD and call bytes remain unchanged. Old Avibe can list/delete an HD row, rejects signing because its signer kind is not local, and refuses run/fetch/inject/reveal because its kind is keypair. Existing envelope cryptography separately rejects the HD type. The rollback check targets released 3.2.5 in an isolated Incus environment, through the lead's serialized slot.
+Existing keypair schema, envelope, AAD and call bytes remain unchanged. Old Avibe can list/delete an HD row, rejects signing because its signer kind is not local, and refuses run/fetch/inject/reveal because its kind is keypair. Existing envelope cryptography separately rejects the HD type. The released-3.2.5 runtime rollback check passed in an isolated Incus environment through the lead's serialized slot (details below).
 
 ## Validation inventory
 
@@ -42,8 +42,9 @@ Existing keypair schema, envelope, AAD and call bytes remain unchanged. Old Avib
 - Focused HD contracts: 74 passing cases before the CLI race regression was added. Existing API/CLI/Solana: 605 passed, 6 pre-existing skips. Expanded service/REST/ACL/parser set: 453 passed, one explicit opt-in master-binary skip. Changed-file Ruff, Skill validation and UI build passed. Revalidation and PR review/CI remain in progress.
 - Real master-built avault API consumer check passed: honest 0.1.10 version first rejected, then a test-only probe override exercised real browser blind-box import and six verified signatures (#0/#1 × EVM/Bitcoin/Solana). No production version bypass exists. Test store was explicit file-only with isolated HOME/XDG/AVAULT_HOME, not the owner's keychain.
 - On-path bug fixed: the CLI previously printed success with a null signature if ask-before-signing changed between its preflight and the API's later policy check. It now hands off the API's one pending request, retaining command metadata and `--no-callback`.
-- Pending: lead-serialized Incus rollback check against released 3.2.5; end-to-end Web acceptance with the separate UI lane; exact-head Codex/CI and owner merge approval.
+- Released runtime rollback passed: one unseeded Incus worktree environment ran tag 3.2.5 (`ea402b8bc`) → HD build `7f222a584` → the same released tag. The new storage owner persisted the independently generated encrypted test-wallet fixture into the database initialized by the old reader. After downgrade, the released APIs listed and deleted the row; inline signing and sign-request creation refused before custody; run/fetch/inject and value-envelope reads refused; identity, ciphertext and public metadata were unchanged by downgrade or rejected uses. A custody-failure sentinel prevents missing keys/binaries from being mistaken for a valid refusal. All updates and final service health passed. The environment used 4 CPUs/8 GiB without nesting and was deleted through the runner; no other project or master hold was touched. This proves persisted-data compatibility, not a second real custody import (covered separately above).
+- Pending: end-to-end Web acceptance with the separate UI lane; fresh exact-head Codex/CI after integration with the protected-signing guidance below; owner merge approval.
 
-## Follow-ups outside this backend change
+## Integrated protected-signing guidance
 
-The existing Vault Skill still contains older blanket protected Bitcoin/Solana restrictions, while current master has typed protected signing integrations. Those release-sensitive statements should be reconciled with the owning protected-signing workstream and sandbox pin; this change adds only standard-HD guidance and does not claim new protected-HD support.
+PR #3629 corrected the stale blanket protected Bitcoin/Solana prohibitions on master. This branch retains its bounded typed Bitcoin and exact-message Solana guidance and examples alongside the standard-HD additions, at Skill version 0.9.0. HD wallets remain standard-only; no new protected-HD support or runtime/pin change is claimed.

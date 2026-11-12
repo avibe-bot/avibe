@@ -629,6 +629,15 @@ session_cache_state = Table(
     Column("record_json", Text, nullable=False),
 )
 
+# Reader-first catalog snapshots. Production observations remain inline until a
+# separately released compatibility boundary activates reference writes.
+skill_catalogs = Table(
+    "skill_catalogs",
+    metadata,
+    Column("digest", Text, primary_key=True),
+    Column("entries_json", Text, nullable=False),
+)
+
 skill_usage_daily = Table(
     "skill_usage_daily",
     metadata,

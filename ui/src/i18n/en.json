@@ -6083,6 +6083,9 @@
         "source_missing": "Provider no longer exists",
         "model_unsupported": "Model not offered by this provider"
       }
+    },
+    "pendingSend": {
+      "sending": "Sending…"
     }
   },
   "vaults": {
@@ -6125,8 +6128,7 @@
       "btcLegacy": "BTC Legacy",
       "solana": "Solana",
       "copy": "Copy {{label}} address",
-      "protectedBitcoinWarning": "Typed Bitcoin Taproot transaction details are independently checked in the secure approval window. The network label is the requester's selection, not chain proof.",
-      "standardBitcoinTaprootWarning": "BTC Taproot uses schnorr-secp256k1-bip341-keypath. Older avault builds fail closed; Avibe never falls back to raw BIP340."
+      "protectedBitcoinWarning": "Typed Bitcoin Taproot transaction details are independently checked in the secure approval window. The network label is the requester's selection, not chain proof."
     },
     "chat": {
       "floatApprovals": "Waiting for your approval · {{count}}"
@@ -6336,29 +6338,18 @@
       "kindStaticHelp": "A token, password, or any text value.",
       "kindKeypair": "Signing key",
       "kindKeypairHelp": "A signing key generated in your browser.",
-      "nameHint": "Start with a letter or underscore; then use letters, numbers, or underscore · case preserved",
-      "signingKeyHelp": "A new secp256k1 signing key is created in your browser. The private key is sealed in your browser — standard keys are signed by avault locally, protected keys are signed in your browser — and only the public key is stored in the clear.",
-      "signingKeyProtectedHelp": "A new secp256k1 signing key is generated inside the sandbox and sealed there. Only the ciphertext and public addresses reach Avibe — the private key never leaves the sandbox. Protected Bitcoin spending is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; legacy and SegWit-v0 inputs remain unsupported.",
-      "signingKeyProtectedBornHint": "The private key was born inside the sandbox and never entered this app. Protected Bitcoin spending is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; keep legacy and SegWit-v0 inputs unsupported.",
+      "nameHint": "Start with a letter or underscore, then letters, numbers, or underscores. Case is kept.",
       "signingGenerate": "Generate",
       "signingImport": "Import",
-      "signingGenerateCta": "Generate signing key",
-      "signingRegenerate": "Generate a different key",
       "signingImportPlaceholder": "Paste a 32-byte hex private key (64 hex chars)",
       "signingAddresses": "Addresses",
       "signingAddressesLoading": "Generating addresses…",
       "signingAddressesUnavailable": "Couldn't derive addresses for this key.",
-      "signingAddressesHint": "Derived from the key. Standard Bitcoin Taproot key-path signing uses schnorr-secp256k1-bip341-keypath and requires a separately installed supporting avault build; older avault builds fail closed and never fall back to raw BIP340. Protected Bitcoin spending is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; network labels are requester-selected metadata, not chain proof.",
       "signingNeedsAvault": "Signing keys need avault {{version}} or newer installed.",
       "chainLabel": "Chain",
       "chainEvmBitcoin": "EVM / Bitcoin",
       "chainSolana": "Solana",
-      "solanaGenerateHelp": "avault creates the Solana key on this computer and seals it there. Avibe and this browser only see its address.",
-      "solanaGenerateHint": "A new key is created when you save. Its address appears once the key is saved.",
       "solanaImportPlaceholder": "Paste a Solana CLI keypair (a JSON array of 64 numbers) or a base58 secret key",
-      "solanaImportHelp": "The key is encrypted in this browser for avault, which checks it. Its address appears once the key is saved. Recovery phrases are not supported.",
-      "solanaProtectedHelp": "A new Solana key is generated inside the sandbox and sealed there. Only the ciphertext and the key's public key (its address) reach Avibe; the private key never leaves the sandbox.",
-      "solanaProtectedBornHint": "The private key was born inside the sandbox and never entered this app.",
       "checkingAvault": "Checking avault…",
       "p2Unavailable": "Browser-side vault create requires avault {{version}} or newer. Installed: {{installed}}. Install a compatible avault release before saving standard secrets.",
       "browserSealingPending": "Browser-side sealing requires a compatible avault release. This UI never sends plaintext values to Python.",
@@ -6381,7 +6372,7 @@
       "protection": "Who can unlock this secret?",
       "protectedProtection": "Protected",
       "standardProtection": "Standard",
-      "protectedHelp": "The agent can't use it on its own. It's unlocked only after you decrypt it in your browser with your passkey (end-to-end encrypted). Safe even if this computer is stolen — good for crypto wallets and any important secret.",
+      "protectedHelp": "The agent can't use it on its own: you unlock it with your passkey in your browser each time (end-to-end encrypted), so it stays safe even if this computer is stolen. Good for crypto wallets and other important secrets.",
       "standardHelp": "The agent can use it on its own. Good for API keys, environment variables, and most secrets.",
       "alwaysAskSign": "Ask me before every signature",
       "alwaysAskSignHelp": "Standard keys can sign on their own. For a high-value key, turn this on so every signature needs your approval in the browser.",
@@ -6406,7 +6397,20 @@
         "secretNameCaseConflict": "A secret already uses this name with different letter casing.",
         "updateFailed": "Save failed, please try again.",
         "solanaImportFailed": "The key couldn't be imported. Check that it's a Solana CLI keypair or a base58 secret key, then try again."
-      }
+      },
+      "nameInvalid": "Use only letters, numbers, and underscores, starting with a letter or underscore.",
+      "signingCreateHint": "A new key is made when you create it. Its addresses appear after that.",
+      "signingKeyInfo": "The private key is made in your browser and encrypted before it is saved; Avibe keeps only the public key and its addresses. When something needs signing, avault on this computer signs it.",
+      "signingImportInfo": "The pasted private key is encrypted in your browser before it is saved; Avibe keeps only the public key and its addresses.",
+      "signingAddressesInfo": "These addresses are worked out from the key. Signing for a Bitcoin Taproot address needs a recent avault; an older one refuses instead of signing in an unsafe way. The network labels help you tell addresses apart; they say nothing about what is on chain.",
+      "solanaKeyInfo": "avault makes the Solana key on this computer and encrypts it there. Avibe and this browser only ever see its address.",
+      "solanaImportHint": "Its address appears after you create it. Recovery phrases aren’t supported yet.",
+      "solanaImportInfo": "The pasted key is encrypted in your browser, then avault on this computer checks it and stores it.",
+      "protectedKeyInfo": "The key is made and encrypted inside an isolated sandbox. The private key never leaves it; Avibe receives only the encrypted key and its address.",
+      "protectedBitcoinInfo": "Protected Bitcoin keys can approve spending only from a Taproot address, in a compatible sandbox. Legacy and SegWit addresses can’t be spent from.",
+      "moreInfo": "More info",
+      "keySource": "Key source",
+      "signingImportHint": "Its addresses appear as soon as you paste it, so you can check them before you create it."
     },
     "requests": {
       "title": "Pending requests",
@@ -6726,6 +6730,10 @@
       "notEnabled": "Not enabled",
       "installAndEnable": "Install and enable",
       "installedNotEnabled": "Installed, not enabled",
+      "moreAssistants": "More assistants",
+      "moreAssistantsNote": "Claude Code, Codex and OpenCode can work in Avibe too. Turn them on now or any time later.",
+      "moreAssistantsShow": "Show more assistants",
+      "moreAssistantsAttention": "Needs attention",
       "noteNotEnabled": "Enable to use your models",
       "noteNotInstalled": "Install {{name}} to use your models",
       "defaultModelWithBackups_one": "Default model · 1 backup",

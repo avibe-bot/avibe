@@ -99,6 +99,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "session_digests",
     "session_cache_state",
     "skill_usage_daily",
+    "skill_catalogs",
     "show_session_events",
     "media_objects",
     "media_object_references",

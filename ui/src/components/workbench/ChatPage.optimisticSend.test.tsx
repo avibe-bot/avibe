@@ -195,7 +195,9 @@ const deferred = <T,>(): Deferred<T> => {
   return { promise, resolve, reject };
 };
 
-const SESSION = 'ses_a';
+// An ordinary Session: `ses_<handle>` ids are Bot conversations, which place a send differently.
+const SESSION = 'sesa';
+const BOT_SESSION = 'ses_main';
 
 const idleTurnState: SessionRuntimeState = {
   in_flight: false,
@@ -266,7 +268,7 @@ const ChatLinks = () => {
   return (
     <>
       <button type="button" onClick={() => navigate(`/chat/${SESSION}`)}>open chat a</button>
-      <button type="button" onClick={() => navigate('/chat/ses_b')}>open chat b</button>
+      <button type="button" onClick={() => navigate('/chat/sesb')}>open chat b</button>
     </>
   );
 };
@@ -349,7 +351,7 @@ beforeEach(() => {
   mocks.api.recoverSessionDraftAfterRejectedSend.mockResolvedValue(undefined);
   mocks.api.setSessionDraft.mockResolvedValue({ ok: true });
   mocks.apiFetch.mockImplementation((url: string, init?: RequestInit) => {
-    if (init?.method === 'POST' && url === `/api/sessions/${SESSION}/messages`) {
+    if (init?.method === 'POST' && (url === `/api/sessions/${SESSION}/messages` || url === `/api/sessions/${BOT_SESSION}/messages`)) {
       const reply = deferred<Response>();
       posts.push({ body: JSON.parse(String(init.body)), reply });
       return reply.promise;
@@ -469,11 +471,11 @@ describe('ChatPage optimistic send', () => {
     await act(async () => result);
     expect(rowsOf('do this next')).toHaveLength(1);
 
-    const chatB = bootstrap([message('b1', 'chat b answer', { session_id: 'ses_b' })]);
+    const chatB = bootstrap([message('b1', 'chat b answer', { session_id: 'sesb' })]);
     mocks.api.getSessionBootstrap.mockImplementation((id: string) => Promise.resolve(
       id === SESSION
         ? { ...bootstrap([message('m1', 'earlier answer')]), queued: [queued] }
-        : { ...chatB, session: { ...chatB.session, id: 'ses_b' } },
+        : { ...chatB, session: { ...chatB.session, id: 'sesb' } },
     ));
     act(() => screen.getByRole('button', { name: 'open chat b' }).click());
     await screen.findByText('chat b answer');
@@ -702,9 +704,9 @@ describe('ChatPage optimistic send', () => {
   it('keeps a pending row with the chat it was sent in', async () => {
     await openChat();
     send('for chat a');
-    const chatB = bootstrap([message('b1', 'chat b answer', { session_id: 'ses_b' })]);
+    const chatB = bootstrap([message('b1', 'chat b answer', { session_id: 'sesb' })]);
     mocks.api.getSessionBootstrap.mockImplementation((id: string) => Promise.resolve(
-      id === SESSION ? bootstrap([message('m1', 'earlier answer')]) : { ...chatB, session: { ...chatB.session, id: 'ses_b' } },
+      id === SESSION ? bootstrap([message('m1', 'earlier answer')]) : { ...chatB, session: { ...chatB.session, id: 'sesb' } },
     ));
 
     act(() => screen.getByRole('button', { name: 'open chat b' }).click());
@@ -821,6 +823,22 @@ describe('ChatPage send while the agent is busy', () => {
     expect(transcriptRowsOf('do this next')[0].getAttribute('data-message-id')).toBe('d1');
   });
 
+  it('drops a queued row from the strip once a turn has taken it into the transcript, before the queue is read again', async () => {
+    await openBusyChat();
+    const { post, result } = send('do this next');
+    const queued = serverRow(post, 'q1', { type: 'queued', state: 'queued' });
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [queued] });
+    await act(async () => post.reply.resolve(Response.json({ ...queued, queued: true }, { status: 201 })));
+    await act(async () => result);
+    expect(queueRowsOf('do this next')).toHaveLength(1);
+
+    // The turn took it: its Message arrives while the strip still holds the old read.
+    mocks.api.listSessionQueue.mockReturnValue(new Promise(() => {}));
+    act(() => mocks.events!.onMessageNew(serverRow(post, 'q1')));
+    expect(queueRowsOf('do this next')).toHaveLength(0);
+    expect(transcriptRowsOf('do this next')).toHaveLength(1);
+  });
+
   it('moves it into the transcript when the server started a turn after all, stream first', async () => {
     await openBusyChat();
     const { post } = send('do this next');
@@ -907,17 +925,121 @@ describe('ChatPage send while the agent is busy', () => {
     expect(queueRowsOf('Yes')).toHaveLength(0);
   });
 
-  it('does not take a run the list only seeded as confirmed', async () => {
-    // A cached chat whose list row says running: until the bootstrap confirms
-    // it, a send goes to the transcript.
+  // Owner, 2026-11-12: a message must appear once, in its final place. While only the list's seed
+  // says a turn runs, the page cannot know where the send goes, so the row waits beside the composer
+  // and the server's answer draws it, once, where it went.
+  const seededChat = async () => {
     const snapshotSession = { id: SESSION, title: 'Chat', status: 'active', agent_name: 'vibey', agent_backend: 'vibey', agent_status: 'running' } as WorkbenchSession;
     await storeChat({ ...bootstrap([message('m1', 'cached answer')]), session: snapshotSession });
     mount();
     await screen.findByText('cached answer');
+  };
+  const sendingLineOf = (text: string) => screen.queryAllByText(text).filter((node) => node.closest('[role="status"]'));
 
-    send('sent while painted');
+  it('holds a send made before the turn state is known beside the composer, then queues it once', async () => {
+    await seededChat();
+    const queueRead = deferred<{ queued: WorkbenchMessage[] }>();
+    mocks.api.listSessionQueue.mockReturnValue(queueRead.promise);
+    const { post, result } = send('sent while painted');
 
-    expect(transcriptRowsOf('sent while painted')).toHaveLength(1);
+    expect(sendingLineOf('sent while painted')).toHaveLength(1);
+    expect(transcriptRowsOf('sent while painted')).toHaveLength(0);
     expect(queueRowsOf('sent while painted')).toHaveLength(0);
+
+    await act(async () => post.reply.resolve(Response.json(queuedAnswer(post), { status: 201 })));
+    await act(async () => result);
+    expect(sendingLineOf('sent while painted')).toHaveLength(0);
+    expect(queueRowsOf('sent while painted')).toHaveLength(1);
+    expect(transcriptRowsOf('sent while painted')).toHaveLength(0);
   });
+
+  it('holds a send made before the turn state is known, then draws it once in the transcript when it started a turn', async () => {
+    await seededChat();
+    const { post, result } = send('sent while painted');
+    expect(transcriptRowsOf('sent while painted')).toHaveLength(0);
+
+    await act(async () => post.reply.resolve(Response.json(serverRow(post), { status: 201 })));
+    await act(async () => result);
+    expect(sendingLineOf('sent while painted')).toHaveLength(0);
+    expect(queueRowsOf('sent while painted')).toHaveLength(0);
+    expect(transcriptRowsOf('sent while painted')).toHaveLength(1);
+  });
+});
+
+describe("ChatPage send in a Bot's conversation", () => {
+  const running: SessionRuntimeState = { ...idleTurnState, in_flight: true, foreground: 'running', native_turn_started: true };
+  const openBusyBot = async () => {
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mount(`/chat/${BOT_SESSION}`);
+    const answer = bootstrap([message('m1', 'earlier answer', { session_id: BOT_SESSION })]);
+    await act(async () => live.resolve({ ...answer, session: { ...answer.session, id: BOT_SESSION }, turn_state: running }));
+    await screen.findByText('earlier answer');
+  };
+  const queueRowsOf = (text: string) => screen.queryAllByText(text)
+    .map((node) => node.closest('[data-queue-row]'))
+    .filter((row): row is HTMLElement => row !== null);
+  const transcriptRowsOf = (text: string) => rowsOf(text).filter((row) => row !== null);
+
+  // The user's message is P1 there: a working Bot takes it into its Turn. It goes to the transcript
+  // at once, and the queue row the server holds while steering it is drawn there too, not in the strip.
+  it.each(['answer first', 'queue read first'] as const)(
+    'draws a message sent while the Bot works in the transcript, through the steer, never in the queue strip (%s)',
+    async (order) => {
+      await openBusyBot();
+      const queueRead = deferred<{ queued: WorkbenchMessage[] }>();
+      mocks.api.listSessionQueue.mockReturnValue(queueRead.promise);
+      const { post, result } = send('also check the tests');
+      const row = transcriptRowsOf('also check the tests')[0];
+      expect(row).toBeTruthy();
+      expect(queueRowsOf('also check the tests')).toHaveLength(0);
+
+      // The server answers a steer as queued (core/internal_server.py), in a steering state.
+      const steering = serverRow(post, 'q1', { type: 'queued', state: 'pending_steer', session_id: BOT_SESSION });
+      const answer = async () => {
+        await act(async () => post.reply.resolve(Response.json({ ...steering, queued: true }, { status: 201 })));
+        await act(async () => result);
+      };
+      const read = async () => {
+        await act(async () => queueRead.resolve({ queued: [steering] }));
+        await act(async () => mocks.events!.onQueueUpdated({ session_id: BOT_SESSION }));
+      };
+      mocks.api.listSessionQueue.mockResolvedValue({ queued: [steering] });
+      if (order === 'answer first') { await answer(); await read(); } else { await read(); await answer(); }
+      expect(transcriptRowsOf('also check the tests')).toEqual([row]);
+      expect(row.getAttribute('aria-busy')).toBe('true');
+      expect(queueRowsOf('also check the tests')).toHaveLength(0);
+
+      // The Turn took it: its Message keeps the Delivery's id.
+      act(() => mocks.events!.onMessageNew(serverRow(post, 'q1', { session_id: BOT_SESSION })));
+      mocks.api.listSessionQueue.mockResolvedValue({ queued: [] });
+      await act(async () => mocks.events!.onQueueUpdated({ session_id: BOT_SESSION }));
+      expect(transcriptRowsOf('also check the tests')).toHaveLength(1);
+      expect(queueRowsOf('also check the tests')).toHaveLength(0);
+    },
+  );
+
+  it('keeps a steer whose receipt is unknown in the queue strip, which says it could not be confirmed', async () => {
+    await openBusyBot();
+    const { post } = send('also check the tests');
+    const reconciling = serverRow(post, 'q1', { type: 'queued', state: 'reconciling_steer', session_id: BOT_SESSION });
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [reconciling] });
+    await act(async () => mocks.events!.onQueueUpdated({ session_id: BOT_SESSION }));
+    expect(queueRowsOf('also check the tests')).toHaveLength(1);
+    expect(transcriptRowsOf('also check the tests')).toHaveLength(0);
+    expect(screen.getByText('chat.queue.sendReconciling')).toBeTruthy();
+  });
+
+  it('keeps Send now off while the queue head is a steer drawn in the transcript', async () => {
+    await openBusyBot();
+    const { post } = send('also check the tests');
+    const steering = serverRow(post, 'q1', { type: 'queued', state: 'steering', session_id: BOT_SESSION });
+    const harness = message('q2', 'a later note', { type: 'queued', state: 'queued', author: 'user', source: 'user', session_id: BOT_SESSION });
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [steering, harness] });
+    await act(async () => mocks.events!.onQueueUpdated({ session_id: BOT_SESSION }));
+    expect(queueRowsOf('a later note')).toHaveLength(1);
+    // The strip reads the real head: it is fenced, so there is nothing Send now could do.
+    const sendNow = screen.getByRole('button', { name: /chat\.queue\.(sendNow|sendingNow)/ }) as HTMLButtonElement;
+    expect(sendNow.disabled).toBe(true);
+  });
+
 });

@@ -9836,7 +9836,7 @@ def _vault_secret_row(secret: dict) -> dict:
             "solana_signing_note": (
                 None
                 if secret.get("signing_curve") != "ed25519"
-                else "Protected Solana signing is not supported yet."
+                else "Sign with --scheme ed25519 --message-hex <exact non-empty serialized message, lowercase hex> and --signing-context-json '{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"<the same hex>\"}'; --digest is refused. Needs browser approval and a compatible Vault sandbox."
                 if secret.get("protection") == "protected"
                 else "Sign with --scheme ed25519 --message-hex <exact serialized message bytes>; --digest is refused."
             ),
@@ -19997,10 +19997,10 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message with a keypair secret (standard signs inline; protected needs approval)",
         description=(
-            "Sign with a keypair or HD wallet. secp256k1 uses --digest; Solana uses exact "
-            "--message-hex bytes, never a hash. HD wallets require --chain and an enabled account. "
-            "Protected/ask-first keys create browser approvals; read the result with "
-            "'vibe vault await REQUEST_ID' instead of signing again."
+            "Sign with a keypair or HD wallet (--chain required). Solana signs exact --message-hex "
+            "bytes, never a hash; secp256k1 uses --digest. Protected/ask-first keys need browser "
+            "approval; use 'vibe vault await REQUEST_ID'. Protected Solana needs "
+            "--signing-context-json: {\"kind\":\"solana-transaction-v1\",\"messageHex\":<same lowercase hex>}."
         ),
         epilog=(
             "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"

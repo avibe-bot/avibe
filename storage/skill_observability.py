@@ -12,6 +12,7 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Connection
 
 from storage.models import agent_events, agent_sessions, scopes, session_turns, skill_usage_daily, state_meta
+from storage.skill_catalogs import read_content
 
 EVENT_TYPES = ("skill.catalog_result", "skill.load_result")
 # Literal allowlist matches the partial index; bound IN values do not let
@@ -283,7 +284,8 @@ def record(
         insert(agent_events).values(**payload).on_conflict_do_nothing(index_elements=["id"])
     ).rowcount
     if not inserted:
-        previous = conn.execute(select(agent_events).where(agent_events.c.id == event["id"])).mappings().one()
+        previous = dict(conn.execute(select(agent_events).where(agent_events.c.id == event["id"])).mappings().one())
+        previous["content_json"] = read_content(conn, previous)
         # Scope/agent labels may have changed since the first receipt. Compare
         # immutable submitted content and identity, not today's mutable joins.
         if any(

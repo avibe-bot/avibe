@@ -35,7 +35,16 @@ await i18n.init({ lng: 'en', resources: { en: { translation: en } }, interpolati
 const LocationProbe = () => <span data-testid="location">{useLocation().pathname}</span>;
 const wrap = (node: React.ReactNode, active = true) => <MemoryRouter><I18nextProvider i18n={i18n}><RouteSurfaceActiveContext.Provider value={active}>{node}</RouteSurfaceActiveContext.Provider><LocationProbe /></I18nextProvider></MemoryRouter>;
 const data = () => ({ __onboardingDetected: true, agents: Object.fromEntries(['claude', 'codex', 'opencode'].map((name) => [name, { enabled: true, cli_path: name, status: 'missing' }])) });
-const row = (name: string) => within(screen.getByLabelText(name));
+// The CLI assistants start folded under 「More assistants」; reaching a card unfolds them
+// the way a person does.
+const unfold = () => {
+  const more = screen.queryByRole('button', { name: en.onboarding.setup.moreAssistantsShow });
+  if (more) fireEvent.click(more);
+};
+const row = (name: string) => {
+  if (!screen.queryByLabelText(name)) unfold();
+  return within(screen.getByLabelText(name));
+};
 // The shell's own adapter: every screen stays mounted, Back is a deactivation rather
 // than an unmount, and the screen publishes its action instead of drawing one. The
 // cases below go through that adapter because the retained-screen bugs only exist there.
@@ -239,6 +248,10 @@ describe('assistant installation presentation', () => {
       ? new Promise((resolve) => { finishClaude = resolve; })
       : Promise.resolve({ ok: true, path: '/isolated/bin/codex' }));
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
+    // Vibey first, and the CLI assistants folded behind it until asked for.
+    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent))
+      .toEqual(['Vibey', en.onboarding.setup.moreAssistants]);
+    unfold();
     // The cards are the whole section: the design keeps each assistant's name at the top
     // of its own card and gives the section no heading of its own. The built-in one
     // stands first, with no switch: it is always on.
@@ -382,6 +395,7 @@ describe('assistant installation presentation', () => {
     mock.api.getBackendRuntime.mockImplementation(async (_name, path) => ({ installed: true, status: 'ok', cli_path: path, resolved_path: path, has_update: true, current_version: '1', latest_version: '2' }));
     const next = vi.fn();
     render(wrap(<AgentDetection data={saved} onNext={next} />));
+    unfold();
     await screen.findByRole('button', { name: en.backendLifecycle.statusUpdateAvailable });
     expect(row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ }).hasAttribute('disabled')).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Enter workspace' }));
@@ -454,6 +468,9 @@ describe('assistant installation presentation', () => {
   it('retains a detection error separately from missing installation', async () => {
     mock.api.detectCli.mockRejectedValue(new Error('Probe failed'));
     render(wrap(<AgentDetection data={{ ...data(), __onboardingDetected: false }} onNext={vi.fn()} />));
+    // Folded, each failed assistant still says so; the error itself is on its card.
+    await waitFor(() => expect(screen.getAllByText(en.onboarding.setup.moreAssistantsAttention)).toHaveLength(3));
+    unfold();
     await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(3));
     expect(row('Claude Code').queryByRole('button', { name: 'Install' })).toBeNull();
     expect(row('Claude Code').getByRole('button', { name: 'Retry' })).toBeTruthy();
