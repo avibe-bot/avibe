@@ -1,0 +1,106 @@
+{
+  "warning": "PUBLIC SYNTHETIC / PUBLISHED REFERENCE TEST FIXTURES ONLY. Synthetic entropy was generated exclusively for this corpus and has never intentionally been funded. All words, passphrases and seeds are intentionally public: NEVER RECEIVE FUNDS, never import into a real wallet, and never reuse these keys. Published reference addresses may already have third-party on-chain activity; no chain lookup was performed.",
+  "entropy_source": "Python secrets.token_bytes / OS CSPRNG, generated once and frozen for reproducibility",
+  "entries": [
+    {
+      "id": "synthetic-12w-no-pass-00",
+      "entropy_hex": "3880f65421b93dae4b4b09c9f4f66e7a",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-12w-no-pass-01",
+      "entropy_hex": "5e0d1ce52d1709ea8bbe316eafcbfe26",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-12w-no-pass-02",
+      "entropy_hex": "791ed5edfa30428a8baebd64bee6d44a",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-12w-no-pass-03",
+      "entropy_hex": "db40770f78f6aa632f4327dd2eb8217c",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-12w-no-pass-04",
+      "entropy_hex": "e1b5803f5fa5088a07771dca26784ac2",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-12w-pass-00",
+      "entropy_hex": "f3d34ed8355a2ec4b9dd2fed4e560bbe",
+      "passphrase": "PUBLIC-test-only"
+    },
+    {
+      "id": "synthetic-12w-pass-01",
+      "entropy_hex": "b30d2a4d0761331b481dab7890783888",
+      "passphrase": "café"
+    },
+    {
+      "id": "synthetic-12w-pass-02",
+      "entropy_hex": "eff4854fbb048dc4c522757947f3597b",
+      "passphrase": "Ångström"
+    },
+    {
+      "id": "synthetic-12w-pass-03",
+      "entropy_hex": "d886f9b88d98daf5ac4580a8776418b3",
+      "passphrase": "㍍ガバヴァぱばぐゞちぢ十人十色"
+    },
+    {
+      "id": "synthetic-12w-pass-04",
+      "entropy_hex": "30cc84d064d1098f4142273da0a98323",
+      "passphrase": "  PUBLIC é 🧀  "
+    },
+    {
+      "id": "synthetic-24w-no-pass-00",
+      "entropy_hex": "8bdbdecd29a317736dfde6b8b389399e761bf6c47f44dd5fe01004ab926ffb08",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-24w-no-pass-01",
+      "entropy_hex": "8458d73763d3ccdb2b1491227c22814da8571fbc22cd0dc1001f067a27573fd6",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-24w-no-pass-02",
+      "entropy_hex": "6afa9dfcc80548fc6014fe4e0d03f651bef968db1821ff3b895800bc79df1292",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-24w-no-pass-03",
+      "entropy_hex": "c83b6e197553b85cd8be8535b20b86c3f199b2171c42461f1a1133f1c36e1fe4",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-24w-no-pass-04",
+      "entropy_hex": "68e03a9ad093a02063da85ac3a9840cacfd8db5170ca45acca098e45a724660d",
+      "passphrase": ""
+    },
+    {
+      "id": "synthetic-24w-pass-00",
+      "entropy_hex": "c979016091ae3d28855c3e68936727f489d4208a979b8e69b59a73b66662b716",
+      "passphrase": "PUBLIC-test-only"
+    },
+    {
+      "id": "synthetic-24w-pass-01",
+      "entropy_hex": "e76170a3fd3a648170169a7e63c180a89a4828d4918404fa98b483e3bbc15cc4",
+      "passphrase": "café"
+    },
+    {
+      "id": "synthetic-24w-pass-02",
+      "entropy_hex": "68e20b024847e050095e48e59ac2696197fd75a6439dc69e582ea9482024942a",
+      "passphrase": "Ångström"
+    },
+    {
+      "id": "synthetic-24w-pass-03",
+      "entropy_hex": "e01572d74edc8d6f54885495b565e386e97896fcced9ad4c20733fe104298f54",
+      "passphrase": "㍍ガバヴァぱばぐゞちぢ十人十色"
+    },
+    {
+      "id": "synthetic-24w-pass-04",
+      "entropy_hex": "43850f9dafe1b9177d52ed8b82ef0833bc665b848de09673423afd5d518b9410",
+      "passphrase": "  PUBLIC é 🧀  "
+    }
+  ]
+}

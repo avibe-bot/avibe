@@ -9,7 +9,9 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sqlite3
 import subprocess
+from threading import Barrier
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +21,7 @@ import pytest
 from sqlalchemy import select
 
 from storage import resource_access_service, vault_hd, vault_service
-from storage.models import vault_audit, vault_requests, vault_secrets
+from storage.models import resource_access_policies, vault_audit, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import api, cli
@@ -142,6 +144,111 @@ def test_duplicate_create_never_calls_custody_again(custody):
     assert error.value.code == "secret_exists"
     assert custody.calls == []
     assert len(rows(vault_secrets)) == 1
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_interrupted_hd_import_before_persistence_leaves_no_wallet(custody, failure):
+    """A custody interruption must not persist a stub that a retry cannot replace."""
+    def interrupt():
+        raise failure("test-only custody interruption")
+
+    custody.hook = interrupt
+    with pytest.raises(failure, match="test-only custody interruption"):
+        api.create_vault_secret(copy.deepcopy(CREATE))
+    assert rows(vault_secrets) == []
+    assert rows(vault_audit) == []
+    custody.hook = None
+    assert api.create_vault_secret(copy.deepcopy(CREATE))["secret"]["account_limit"] == 20
+    assert len(rows(vault_secrets)) == 1
+
+
+def test_hd_create_storage_failure_rolls_back_row_policy_and_audit(custody, monkeypatch):
+    """Unlike malformed custody output, this fails after INSERT in the real transaction."""
+    original_audit = vault_service.audit
+    before_policies = rows(resource_access_policies)
+
+    def fail_after_audit(conn, *args, **kwargs):
+        original_audit(conn, *args, **kwargs)
+        assert conn.execute(select(vault_secrets.c.id)).first() is not None
+        raise RuntimeError("test-only persistence failure")
+
+    monkeypatch.setattr(vault_service, "audit", fail_after_audit)
+    with pytest.raises(RuntimeError, match="test-only persistence failure"):
+        api.create_vault_secret(copy.deepcopy(CREATE))
+    assert len(custody.calls) == 1
+    assert rows(vault_secrets) == []
+    assert rows(vault_audit) == []
+    assert rows(resource_access_policies) == before_policies
+    monkeypatch.setattr(vault_service, "audit", original_audit)
+    api.create_vault_secret(copy.deepcopy(CREATE))
+    assert len(rows(vault_secrets)) == len(rows(vault_audit)) == 1
+
+
+def test_hd_create_lost_response_retry_preserves_committed_wallet(custody, monkeypatch):
+    """Failure after commit is an existing wallet, not permission to overwrite its seed."""
+    with monkeypatch.context() as patch:
+        patch.setattr(api, "_publish_vaults_updated", Mock(side_effect=RuntimeError("test-only lost response")))
+        with pytest.raises(RuntimeError, match="test-only lost response"):
+            api.create_vault_secret(copy.deepcopy(CREATE))
+    committed, = rows(vault_secrets)
+    custody.calls.clear()
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret(copy.deepcopy(CREATE))
+    assert error.value.code == "secret_exists"
+    assert custody.calls == []
+    assert rows(vault_secrets) == [committed]
+    assert len(rows(vault_audit)) == 1
+
+
+def test_hd_simultaneous_imports_have_one_complete_winner(custody):
+    """Both requests pass preflight before either persists; the loser cannot replace keys."""
+    barrier = Barrier(2)
+    custody.hook = lambda: barrier.wait(timeout=10)
+
+    def attempt(_):
+        try:
+            return api.create_vault_secret(copy.deepcopy(CREATE))
+        except api.VaultApiError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(attempt, range(2)))
+    assert sum(isinstance(result, dict) and result["ok"] for result in results) == 1
+    assert "secret_exists" in results
+    assert len(custody.calls) == 2
+    row, = rows(vault_secrets)
+    assert {key: row[key] for key in ("ciphertext", "nonce", "wrap_meta")} == FIXTURE["import_response"]["envelope"]
+    assert len(json.loads(row["public_meta"])["hd_accounts"]) == 20
+    assert len(rows(vault_audit)) == 1
+
+
+def test_hd_sqlite_backup_restore_preserves_full_row_and_account_state(custody, monkeypatch, tmp_path):
+    """SQLite's backup API includes committed WAL state; raw database copying is not assumed safe.
+
+    This protects storage bytes, not machine-key portability. Real custody
+    restoration/signing is a separate opt-in acceptance check.
+    """
+    from storage.db import create_sqlite_engine
+
+    create(custody)
+    for _ in range(19):
+        api.update_vault_hd_account("HD_TEST_WALLET", {})
+    api.update_vault_hd_account("HD_TEST_WALLET", {"name": "Last account", "always_ask": True}, account=19)
+    expected_rows = rows(vault_secrets)
+    expected_meta = meta()
+    engine = api._vault_engine()
+    restored_path = tmp_path / "restored.sqlite"
+    with sqlite3.connect(str(engine.url.database)) as source, sqlite3.connect(restored_path) as target:
+        source.backup(target)
+    restored = create_sqlite_engine(restored_path)
+    try:
+        monkeypatch.setattr(api, "_vault_engine", lambda: restored)
+        assert rows(vault_secrets) == expected_rows
+        assert meta() == expected_meta
+        assert len(meta()["accounts"]) == 20
+        assert meta()["accounts"][19]["always_ask"] is True
+    finally:
+        restored.dispose()
 
 
 @pytest.mark.parametrize("entrypoint", ["create", "inline", "request", "cli"])
