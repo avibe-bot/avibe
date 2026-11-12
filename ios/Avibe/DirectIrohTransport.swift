@@ -166,13 +166,26 @@ final class DirectIrohTransport {
         weak var stream: DirectIrohByteStream?
     }
 
+    private enum ProbeReason {
+        /// The network changed under a usable path.
+        case networkChange
+        /// A direct candidate failed before anything was forwarded.
+        case candidateFailure
+        /// An answer that had run out was renewed.
+        case renewal
+    }
+
     /// One endpoint and one connection, for one accepted answer.
     private final class Session {
         let id: Int
         let offer: DirectRendezvousOffer
         let link: Link
-        /// `false` while the path is probed again after a network change.
+        /// `false` while the path is probed again, and once its answer has
+        /// run out.
         var isUsable = true
+        /// The answer's lifetime passed without a renewed answer. Nothing
+        /// new is opened or probed on the path until one arrives.
+        var isExpired = false
         private var streams: [WeakStream] = []
 
         init(id: Int, offer: DirectRendezvousOffer, link: Link) {
@@ -205,6 +218,8 @@ final class DirectIrohTransport {
     private let scheduler: any DirectIrohScheduling
     private let timing: DirectIrohTiming
     private let notificationCenter: NotificationCenter
+    /// A clock that never runs backwards: seconds since the device started.
+    private let uptime: @MainActor () -> TimeInterval
     private var lifecycleObservers: [NSObjectProtocol] = []
 
     /// Made at the first selection; kept in memory for this launch only.
@@ -223,6 +238,9 @@ final class DirectIrohTransport {
     private var probeTask: Task<Void, Never>?
     /// The next rendezvous request: a retry, or the refresh of a live path.
     private var fetchTimer: (any DirectIrohTimer)?
+    /// The end of the accepted answer's lifetime, counted from the moment
+    /// its request was sent. Only a newly accepted answer moves it.
+    private var expiryTimer: (any DirectIrohTimer)?
     private var debounceTimer: (any DirectIrohTimer)?
     private var stableTimer: (any DirectIrohTimer)?
     private var spacingTimer: (any DirectIrohTimer)?
@@ -247,7 +265,8 @@ final class DirectIrohTransport {
         scheduler: (any DirectIrohScheduling)? = nil,
         timing: DirectIrohTiming = .standard,
         notificationCenter: NotificationCenter = .default,
-        isInBackground: Bool? = nil
+        isInBackground: Bool? = nil,
+        uptime: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         self.engine = engine
         self.fetchRendezvous = fetchRendezvous
@@ -255,6 +274,7 @@ final class DirectIrohTransport {
         self.scheduler = scheduler ?? DirectIrohTaskScheduler()
         self.timing = timing
         self.notificationCenter = notificationCenter
+        self.uptime = uptime
         // The App can be launched into the background.
         self.isInBackground = isInBackground
             ?? (UIApplication.shared.applicationState == .background)
@@ -337,7 +357,7 @@ final class DirectIrohTransport {
             return
         }
         pathHighWater = max(pathHighWater, tag.pathGeneration)
-        startProbe(afterNetworkChange: false)
+        startProbe(.candidateFailure)
     }
 
     /// Opens one stream over the path reported usable for `tag`. Throws
@@ -426,6 +446,7 @@ final class DirectIrohTransport {
         fetchStamp = token
         let fetch = fetchRendezvous
         let seconds = timing.fetchSeconds
+        let askedAt = uptime()
         fetchTask = Task { @MainActor [weak self] in
             let result: Result<Data, Error>
             do {
@@ -443,14 +464,15 @@ final class DirectIrohTransport {
             }
             self.fetchStamp = nil
             self.fetchTask = nil
-            self.fetchDidFinish(result, selection: selection, key: key)
+            self.fetchDidFinish(result, selection: selection, key: key, askedAt: askedAt)
         }
     }
 
     private func fetchDidFinish(
         _ result: Result<Data, Error>,
         selection: DirectIrohSelection,
-        key: DirectIrohLaunchKey
+        key: DirectIrohLaunchKey,
+        askedAt: TimeInterval
     ) {
         let answer: DirectRendezvousAnswer
         do {
@@ -477,6 +499,23 @@ final class DirectIrohTransport {
                 emit(.lost)
             }
         case .ready(let offer):
+            // The instance issued the answer after the request was sent, so
+            // counting its span from then never outlasts the instance's own
+            // expiry, whatever the phone's clock says and however long the
+            // answer took to arrive.
+            let elapsed = max(0, uptime() - askedAt)
+            let remaining = TimeInterval(offer.lifetimeSeconds) - elapsed
+            // An answer with too little left is not worth a dial, and an
+            // instance that keeps sending such answers is asked no faster
+            // than the retry ladder allows.
+            guard remaining >= timing.minimumLifetimeSeconds else {
+                fetchDidFail(DirectRendezvousRejection.invalidLifetime)
+                return
+            }
+            let refresh = max(
+                timing.refreshRetrySeconds,
+                TimeInterval(offer.lifetimeSeconds) * timing.refreshFraction - elapsed
+            )
             if
                 let session,
                 session.offer.generation == offer.generation,
@@ -484,7 +523,14 @@ final class DirectIrohTransport {
             {
                 // The same endpoint and addresses: the admission is
                 // extended and the path stays.
-                scheduleRefresh(of: offer)
+                armExpiry(after: remaining)
+                scheduleFetch(after: refresh)
+                if session.isExpired {
+                    // Renewed after it had run out: usable again once the
+                    // path answers a probe.
+                    session.isExpired = false
+                    startProbe(.renewal)
+                }
                 return
             }
             // A new endpoint key or address set. The old path is retired
@@ -493,9 +539,55 @@ final class DirectIrohTransport {
             let hadSession = session != nil
             endSession()
             startDial(offer, key: key, host: selection.host)
+            armExpiry(after: remaining)
+            scheduleFetch(after: refresh)
             if hadSession {
                 emit(.lost)
             }
+        }
+    }
+
+    private func armExpiry(after seconds: TimeInterval) {
+        expiryTimer?.cancel()
+        expiryTimer = scheduler.schedule(after: seconds) { [weak self] in
+            self?.expiryTimer = nil
+            self?.answerDidExpire()
+        }
+    }
+
+    private func cancelExpiry() {
+        expiryTimer?.cancel()
+        expiryTimer = nil
+    }
+
+    /// The accepted answer ran out and no newer one was accepted: every
+    /// refresh failed, or none came back in time. Nothing is opened, dialled
+    /// or probed under it any more. A live path is kept but not usable, so
+    /// what it already carries is not closed on the phone's own timing; the
+    /// instance closes the connection when the admission ends, and that is
+    /// reported as `lost`.
+    private func answerDidExpire() {
+        guard let session else {
+            // Still dialling under the answer.
+            if dialStamp != nil {
+                cancelDial()
+                scheduleRetry()
+            }
+            return
+        }
+        Self.logger.info("Direct transport: the rendezvous answer ran out")
+        session.isExpired = true
+        cancelProbe()
+        debounceTimer?.cancel()
+        debounceTimer = nil
+        let wasUsable = session.isUsable
+        session.isUsable = false
+        raiseFloor()
+        if fetchStamp == nil, fetchTimer == nil {
+            startFetch()
+        }
+        if wasUsable {
+            emit(.verifying)
         }
     }
 
@@ -506,8 +598,9 @@ final class DirectIrohTransport {
             )
         }
         if session != nil {
-            // A refresh failed. The path stays until its connection ends;
-            // the admission is asked for again soon.
+            // A refresh failed. It extends nothing: the path stays until its
+            // answer runs out or its connection ends, and the admission is
+            // asked for again soon.
             scheduleFetch(after: timing.refreshRetrySeconds)
             return
         }
@@ -528,10 +621,6 @@ final class DirectIrohTransport {
         let delay = ladder.isEmpty ? 1 : ladder[min(failures, ladder.count - 1)]
         failures += 1
         scheduleFetch(after: delay)
-    }
-
-    private func scheduleRefresh(of offer: DirectRendezvousOffer) {
-        scheduleFetch(after: TimeInterval(offer.lifetimeSeconds) * timing.refreshFraction)
     }
 
     private func scheduleFetch(after seconds: TimeInterval) {
@@ -650,6 +739,7 @@ final class DirectIrohTransport {
     private func dialDidFinish(_ outcome: Result<Link, Error>, offer: DirectRendezvousOffer) {
         guard case .success(let link) = outcome else {
             Self.logger.info("Direct transport: no path to the instance")
+            cancelExpiry()
             scheduleRetry()
             return
         }
@@ -657,7 +747,6 @@ final class DirectIrohTransport {
         let session = Session(id: stamp, offer: offer, link: link)
         self.session = session
         watchClose(of: session)
-        scheduleRefresh(of: offer)
         stableTimer?.cancel()
         stableTimer = scheduler.schedule(after: timing.stableSeconds) { [weak self] in
             self?.stableTimer = nil
@@ -671,6 +760,10 @@ final class DirectIrohTransport {
         dialTask?.cancel()
         dialTask = nil
         dialStamp = nil
+        if session == nil {
+            // The answer that was being dialled is given up with its dial.
+            cancelExpiry()
+        }
     }
 
     // MARK: The live path
@@ -707,8 +800,9 @@ final class DirectIrohTransport {
         emit(.lost)
     }
 
-    private func startProbe(afterNetworkChange: Bool) {
-        guard let session, let selection else {
+    private func startProbe(_ reason: ProbeReason) {
+        // Nothing is probed under an answer that has run out.
+        guard let session, !session.isExpired, let selection else {
             return
         }
         cancelProbe()
@@ -731,19 +825,20 @@ final class DirectIrohTransport {
             }
             self.probeStamp = nil
             self.probeTask = nil
-            self.probeDidFinish(passed: passed, afterNetworkChange: afterNetworkChange)
+            self.probeDidFinish(passed: passed, reason: reason)
         }
     }
 
-    private func probeDidFinish(passed: Bool, afterNetworkChange: Bool) {
-        guard let session else {
+    private func probeDidFinish(passed: Bool, reason: ProbeReason) {
+        guard let session, !session.isExpired else {
             return
         }
         guard passed else {
-            sessionDidEnd(retryNow: afterNetworkChange)
+            sessionDidEnd(retryNow: reason == .networkChange)
             return
         }
-        guard afterNetworkChange else {
+        switch reason {
+        case .candidateFailure:
             // The path answers: the failed candidate was refused or slow.
             isSpacingFailureProbes = true
             spacingTimer?.cancel()
@@ -751,13 +846,16 @@ final class DirectIrohTransport {
                 self?.spacingTimer = nil
                 self?.isSpacingFailureProbes = false
             }
-            return
+        case .networkChange:
+            session.isUsable = true
+            // The contract asks again after a network change. An answer of
+            // the same generation keeps this path.
+            startFetch()
+            emit(.usable(generation: session.offer.generation))
+        case .renewal:
+            session.isUsable = true
+            emit(.usable(generation: session.offer.generation))
         }
-        session.isUsable = true
-        // The contract asks again after a network change. An answer of the
-        // same generation keeps this path.
-        startFetch()
-        emit(.usable(generation: session.offer.generation))
     }
 
     private func cancelProbe() {
@@ -777,6 +875,7 @@ final class DirectIrohTransport {
         guard let session else {
             return
         }
+        cancelExpiry()
         self.session = nil
         raiseFloor()
         session.cancelStreams()
@@ -811,13 +910,22 @@ final class DirectIrohTransport {
         }
         debounceTimer?.cancel()
         if let session {
+            guard !session.isExpired else {
+                // Nothing is probed under an answer that has run out: the
+                // rendezvous is asked again instead.
+                debounceTimer = scheduler.schedule(after: timing.networkDebounceSeconds) { [weak self] in
+                    self?.debounceTimer = nil
+                    self?.startFetch()
+                }
+                return
+            }
             cancelProbe()
             let wasUsable = session.isUsable
             session.isUsable = false
             raiseFloor()
             debounceTimer = scheduler.schedule(after: timing.networkDebounceSeconds) { [weak self] in
                 self?.debounceTimer = nil
-                self?.startProbe(afterNetworkChange: true)
+                self?.startProbe(.networkChange)
             }
             if wasUsable {
                 emit(.verifying)

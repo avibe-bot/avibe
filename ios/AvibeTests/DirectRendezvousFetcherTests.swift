@@ -15,11 +15,7 @@ final class DirectRendezvousFetcherTests: XCTestCase {
 
         // The instance's answer, byte for byte.
         instance.answer = .json(answer)
-        let data = try await DirectRendezvousFetcher.fetch(
-            in: webView,
-            origin: instance.origin,
-            clientEndpointID: client
-        )
+        let data = try await fetch(in: webView, origin: instance.origin).get()
         XCTAssertEqual(data, Data(answer.utf8))
         let request = try XCTUnwrap(instance.rendezvousRequests.last)
         XCTAssertEqual(request.method, "POST")
@@ -68,14 +64,10 @@ final class DirectRendezvousFetcherTests: XCTestCase {
         // The WebView is asked only while it shows the instance's origin.
         let asked = instance.rendezvousRequests.count
         let other = try XCTUnwrap(WebOrigin(scheme: "http", host: "127.0.0.1", port: 9))
-        do {
-            _ = try await DirectRendezvousFetcher.fetch(
-                in: webView,
-                origin: other,
-                clientEndpointID: client
-            )
+        switch await fetch(in: webView, origin: other) {
+        case .success:
             XCTFail("Another origin was asked.")
-        } catch {
+        case .failure(let error):
             XCTAssertEqual(error as? DirectRendezvousFetchError, .pageNotReady)
         }
         XCTAssertEqual(instance.rendezvousRequests.count, asked)
@@ -88,11 +80,7 @@ final class DirectRendezvousFetcherTests: XCTestCase {
         let webView = try await instance.loadedWebView(path: "/tampered")
         instance.answer = .json("{\"version\":1,\"status\":\"unavailable\"}")
 
-        let data = try await DirectRendezvousFetcher.fetch(
-            in: webView,
-            origin: instance.origin,
-            clientEndpointID: client
-        )
+        let data = try await fetch(in: webView, origin: instance.origin).get()
         XCTAssertEqual(data, Data("{\"version\":1,\"status\":\"unavailable\"}".utf8))
         XCTAssertEqual(instance.rendezvousRequests.count, 1)
         // The page's own script does see its replacement.
@@ -123,16 +111,41 @@ final class DirectRendezvousFetcherTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        do {
-            _ = try await DirectRendezvousFetcher.fetch(
-                in: webView,
-                origin: instance.origin,
-                clientEndpointID: client,
-                deadlineMilliseconds: deadlineMilliseconds
-            )
+        let outcome = await fetch(
+            in: webView,
+            origin: instance.origin,
+            deadlineMilliseconds: deadlineMilliseconds
+        )
+        switch outcome {
+        case .success:
             XCTFail("The request succeeded.", file: file, line: line)
-        } catch {
+        case .failure(let error):
             XCTAssertEqual(error as? DirectRendezvousFetchError, expected, file: file, line: line)
+        }
+    }
+
+    /// One request, bounded as the transport bounds it: a script that never
+    /// answers must fail a test, not hang it.
+    private func fetch(
+        in webView: WKWebView,
+        origin: WebOrigin,
+        deadlineMilliseconds: Int = DirectRendezvousFetcher.defaultDeadlineMilliseconds
+    ) async -> Result<Data, Error> {
+        let client = client
+        do {
+            let data: Data = try await directIrohDeadline(180) {
+                try await directIrohCall {
+                    try await DirectRendezvousFetcher.fetch(
+                        in: webView,
+                        origin: origin,
+                        clientEndpointID: client,
+                        deadlineMilliseconds: deadlineMilliseconds
+                    )
+                }
+            }
+            return .success(data)
+        } catch {
+            return .failure(error)
         }
     }
 

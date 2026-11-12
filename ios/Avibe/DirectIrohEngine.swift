@@ -254,8 +254,11 @@ struct DirectIrohTiming: Sendable {
     /// The share of an answer's lifetime after which it is asked again, so
     /// the admission is extended before it ends.
     var refreshFraction = 0.8
-    /// How soon a failed refresh is tried again while the path stays up.
+    /// How soon a failed refresh is tried again while the path stays up,
+    /// and the least time between an accepted answer and the next request.
     var refreshRetrySeconds: TimeInterval = 15
+    /// An answer with less than this left of its lifetime is not used.
+    var minimumLifetimeSeconds: TimeInterval = 30
     /// The quiet time after a network change before the path is probed.
     var networkDebounceSeconds: TimeInterval = 0.5
     /// The least time between two probes asked for by failed candidates.

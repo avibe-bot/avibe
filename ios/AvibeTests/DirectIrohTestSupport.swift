@@ -400,6 +400,12 @@ final class DirectIrohManualScheduler: DirectIrohScheduling {
     }
 }
 
+/// The transport's clock, moved by hand.
+@MainActor
+final class DirectIrohManualClock {
+    var now: TimeInterval = 1_000
+}
+
 @MainActor
 final class DirectIrohFakeNetwork: DirectIrohNetworkMonitoring {
     private var onChange: (@MainActor () -> Void)?

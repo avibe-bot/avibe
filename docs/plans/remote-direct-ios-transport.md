@@ -1,6 +1,8 @@
 # Remote direct paths: the App's iroh transport (A2)
 
-Status: **Core built and inactive; not linked, not registered, not qualified.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The code in this document's pull request compiles and is tested against stand-ins for the iroh binding. No App build links an iroh binary (`packaging/iroh-apple/release.json` is `pending`), nothing in the App creates the transport, and `AvibeApp` registers none. Section 8 lists what is left for the first build that uses a transport; that build is the owner's to approve.
+Status: **Core written and inactive; not linked, not registered, not qualified.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The pull request that adds this document holds the core and its tests against stand-ins for the iroh binding; the `ios-shell` result for its head is in that pull request, not here. No App build links an iroh binary (`packaging/iroh-apple/release.json` is `pending`), nothing in the App creates the transport, and `AvibeApp` registers none.
+
+This is not the whole of A2. The binding adapter, the join to the proxy seam, the registration, and everything that runs real iroh are still to be implemented and qualified (section 8). A build that registers a transport is a separate gate with its own approval and evidence; nothing here grants it.
 
 Statements below are **rule** (what the code does), **read** (taken from the pinned source, not run), or **proposal** (a bound to be set from measurement).
 
@@ -38,7 +40,8 @@ From `IrohLib.swift` of the gate artifact and the iroh-ffi source at the pinned 
 - **`DirectIrohByteStream.cancel()`** ends the stream's calls in progress at once and drops their late bytes. It then asks the binding to reset the sending half and stop the receiving half. Because of item 2 above, each request waits for that half's call in progress:
   - In the common case one half is free. The sidecar ends both directions when either is reset or stopped (`direct-transport/src/main.rs`, `forward_stream`), so the other half's pending call ends one round trip later.
   - On a dead network, the pending calls end when the connection closes: through the idle timeout, or at once when the transport ends the session.
-  - If both halves are busy (a read waiting and a write blocked on flow control) on a live connection, the binding's calls stay until the instance makes progress. The App's side has already returned; one of the peer's 64 stream slots stays taken until then. Nothing in the stock binding can shorten this.
+  - If both halves are busy (a read waiting and a write blocked on flow control) on a live connection, the binding's calls stay until the instance makes progress. The App's side has already returned; one of the peer's 64 stream slots stays taken until then. Nothing in the stock binding can shorten this short of closing the connection, which would also close every healthy relay on it.
+- **A prompt return in Swift is not a cancellation in the binding.** After any abandoned call, a Rust future, its Swift task, and for a stream a slot at the peer, stay until one of the events above. The stand-ins show only the App's side. Whether those leftovers end, and how many can pile up under repeated cancellation, is shown only against the real binding (section 8) and is a condition of qualifying the transport, not something this document settles.
 - **An abandoned call poisons its stream** (rule). When a caller's task is cancelled during a read or a write, bytes are unaccounted for, so the stream cancels itself and is never used again.
 - **`cancel()` does not undo a clean end** (rule). After `closeWrite` returned, the sending half is not reset, so bytes already written are still delivered; after the instance's end of stream, the receiving half is not stopped. A stream released without `cancel()` is abandoned the same way, never finished as if complete.
 
@@ -49,7 +52,8 @@ Nothing exists until a rendezvous answer is `ready` and accepted (rule): no endp
 - **The launch key** is made at the first selection, kept in memory, and never stored. Making it opens nothing. Its public half is the `client_endpoint_id` of every request in this launch.
 - **The request** is a `POST` to an absolute URL native code builds from the selected instance's origin. The script refuses to run unless its document's origin is that origin, and when a service worker controls the document. It copies the CSRF header from the `vibe_csrf_token` cookie, refuses redirects, checks the response's final URL, reads at most 16 KiB, and ends at its deadline (5 s, proposal). The answer returns through `callAsyncJavaScript`. No bridge method accepts an answer, and page script cannot reach the content world the script runs in.
 - **An answer is accepted only if** its `version` is 1; `instance_id` and `hostname` are the selection's; `alpn` is `avibe-direct/1`; `client.endpoint_id` is this launch's; `endpoint.id` is 64 lowercase hex and not this launch's own; `generation` is 1 to 128 bytes; and the answer's own span is positive.
-- **Lifetime** is the answer's own span, `min(expires_at - issued_at, client.admitted_until - issued_at, 300)` seconds, counted from receipt. The phone's clock is not compared with the instance's. This reads the contract's "`expires_at` is in the future" as "the answer has not run out since native code fetched it": a wrong clock on the phone must neither refuse a fresh answer nor keep a stale one.
+- **Lifetime** is the answer's own span, `min(expires_at - issued_at, client.admitted_until - issued_at, 300)` seconds, counted on a clock that never runs backwards **from the moment the request was sent** (rule; rendezvous contract, section 5). The instance issued the answer after that moment, so the App's deadline is never later than the instance's own, whatever the phone's wall clock says and however long the answer took. An answer that arrives with less than 30 s of its span left (proposal) is not accepted, so an instance that sends short-lived answers is asked no faster than the retry ladder.
+- **Only a newly accepted answer moves that deadline** (rule). A refresh that fails, arrives late, or belongs to another selection extends nothing. When the deadline passes, nothing is opened, dialled, or probed under the answer any more (section 5).
 - **Addresses.** Only numeric socket addresses of the class their `kind` names: `lan` is 10/8, 172.16/12, 192.168/16, or fc00::/7; `ipv6` is 2000::/3 without 2001::/23, 2001:db8::/32, 3fff::/20, and 2002::/16. Everything else is dropped, including IPv4-mapped and NAT64 forms, zones, names, and unknown kinds. The first 32 entries are looked at and at most eight kept. What is dialled is written again from the parsed bytes. An answer with no admitted address is treated as a failure.
 - **`unavailable`** asks again after `retry_after_seconds`, kept between 30 s and 15 min.
 
@@ -59,7 +63,7 @@ A **session** is one endpoint and one connection for one accepted answer.
 
 1. **Dial.** Bind an endpoint for the launch key, then dial the answer's endpoint ID at the admitted addresses with the ALPN, in one `connect` (bounds: 2 s and 1.5 s, proposals). The peer's identity is compared again after the handshake.
 2. **Probe.** Open a stream, write the canonical CONNECT head, and read the instance's `200` (1 s, proposal). The probe's stream is then abandoned. Only now is `usable(generation)` reported.
-3. **Refresh.** The answer is asked again at 80 % of its lifetime, so the admission is extended before the sidecar ends it. The same generation and endpoint keep the session. A failed refresh keeps it too and is tried again after 15 s.
+3. **Refresh.** The answer is asked again at 80 % of its lifetime, so the admission is extended before the sidecar ends it. A newly accepted answer of the same generation and endpoint keeps the session and moves its deadline. A failed refresh moves nothing and is tried again after 15 s.
 
 | Event | Session | Report | Next |
 | --- | --- | --- | --- |
@@ -69,6 +73,9 @@ A **session** is one endpoint and one connection for one accepted answer.
 | That probe passes | Usable again; its streams were never touched | `usable`, same generation | Ask the rendezvous again |
 | That probe fails | Ended | `lost` | Ask again at once |
 | A refresh answers with another generation, or `unavailable` | Ended before anything new is dialled | `lost`, then `usable(new)` when the new path answers | Dial the new answer, or wait as told |
+| The answer's lifetime passes with no newer answer accepted | Kept, not usable: no new stream, no probe | `verifying` | Keep asking. The instance closes the connection when the admission ends, which is the first row. |
+| A newly accepted answer of the same generation, after that | Probed | `usable`, same generation, if the probe passes; `lost` if not | — |
+| The lifetime passes while the answer is still being dialled | — | — | The dial is closed; ladder |
 | A network change with no session | — | — | Whatever was under way stops; start over after 0.5 s |
 | `deselect`, a new `select` | Ended | none | — |
 | The App enters the background | Ended | `lost` if a session was up | Start over on the return, if still selected |
@@ -77,6 +84,7 @@ A **session** is one endpoint and one connection for one accepted answer.
 - **A page that is still loading** (`pageNotReady`) is asked again after 0.5 s, up to 40 times, before it counts as a failure.
 - **`lost` is reported after the next attempt is arranged,** so the controller already sends new connections to the public origin when the report arrives.
 - **The background** is handled by the transport itself as well as by the controller's `deselect`: no endpoint or socket outlives `didEnterBackground`.
+- **An answer that runs out closes nothing by itself** (rule). The App stops using the path for anything new, and reports `verifying`, which closes no committed relay. Closing what the path carries on the phone's own timing would add nothing: the instance ends an expired admission's connection itself, and that arrives as `lost`.
 
 ## 6. Fencing
 
@@ -109,7 +117,8 @@ In `ios-shell`, on the simulator:
 | Nothing is bound before an accepted `ready` answer | `DirectIrohTransportTests.testNothingExistsBeforeAnAcceptedReadyAnswer`, `testAHostThatIsNotADNSNameIsNeverAskedFor` |
 | Dial, identity, probe, and only then `usable` | `testAReadyAnswerIsDialledProbedAndOnlyThenReportedUsable`, `testAnotherIdentityOrARefusedProbeIsClosedAndNeverUsable` |
 | Bounds, `deselect`, and late results | `testADialThatDoesNotAnswerEndsAtItsBoundAndALateConnectionIsClosed`, `testDeselectEndsADialAtOnceAndWhatArrivesLateIsClosed`, `testAnAnswerThatArrivesAfterDeselectChangesNothing` |
-| Each row of the table in section 5 | `testAClosedConnectionIsLostItsStreamsEndAndTheRendezvousIsAskedAgain`, `testANetworkChangeIsVerifyingThenUsableOnTheSamePathOrLost`, `testANetworkChangeBeforeAnyPathStartsOver`, `testAFailedCandidateProbesThePathAndOnlyADeadPathIsLost`, `testARefreshKeepsTheSameGenerationAndRetiresAReplacedOne`, `testFailuresBackOffAndAPageThatIsStillLoadingIsAskedAgainSoon` |
+| An answer is not used past its lifetime; only a newly accepted answer renews it; the span counts from the request; a late answer is not accepted | `testAnAnswerIsNotUsedPastItsLifetimeAndOnlyANewAnswerRenewsIt`, `testAnAnswerCountsFromWhenItWasAskedForAndOneThatArrivesTooLateIsNotAccepted`, `testAnAnswerThatRunsOutWhileItIsDialledIsGivenUp` |
+| Each other row of the table in section 5 | `testAClosedConnectionIsLostItsStreamsEndAndTheRendezvousIsAskedAgain`, `testANetworkChangeIsVerifyingThenUsableOnTheSamePathOrLost`, `testANetworkChangeBeforeAnyPathStartsOver`, `testAFailedCandidateProbesThePathAndOnlyADeadPathIsLost`, `testARefreshKeepsTheSameGenerationAndRetiresAReplacedOne`, `testFailuresBackOffAndAPageThatIsStillLoadingIsAskedAgainSoon` |
 | Stream fencing and late opens | `testAStreamOpensOnlyUnderCurrentTags`, `testAStreamThatOpensAfterItsPathEndedIsAbandonedNotReturned`, `testACancelledOpenEndsAtOnceAndItsLateStreamIsAbandoned` |
 | Nothing lives in the background | `testNothingLivesInTheBackground`, `testATransportCreatedInTheBackgroundDoesNothingUntilTheForeground` |
 
@@ -120,22 +129,23 @@ In `ios-shell`, on the simulator:
 - Devices: the Local Network prompt and its denial, real Wi-Fi, IPv6 and cellular, suspension, battery, and iOS 17.
 - Every bound in `DirectIrohTiming`. They are proposals.
 
-## 8. Left for the first build that uses a transport
+## 8. Still to implement and qualify
 
-In order, each after its dependency lands. None of it is in this pull request.
+None of this is in this pull request, and none of it is done. Each item follows its dependency.
 
-1. **After A1 links the gated binary:** `DirectIrohBinding`, the `DirectIrohEngine` over the generated types (about 150 lines, one type per protocol in section 1). With it:
-   - tests with two real endpoints in one process over loopback: bind (no relay, the ID from the key equals `endpoint.id()`), a wrong identity, the stream mapping, and cancellation of each call against the real binding;
+1. **After A1 links the gated binary:** `DirectIrohBinding`, the `DirectIrohEngine` over the generated types. A1 compiles the unmodified generated wrapper in its own Swift module, `IrohLib`; the adapter imports it and qualifies every generated name, so none enters the App's namespace. With the adapter:
+   - tests with two real endpoints in one process over loopback: bind (no relay, the ID from the key equals `endpoint.id()`), a wrong identity, and the stream mapping;
+   - **resource bounds against the real binding**, which the stand-ins cannot show: repeated cancellation of `connect`, `openBi`, `read`, and `writeAll`; a stream that opens late; both halves blocked on a live connection; and the end of a session. Each must show that the binding's leftover calls end and that their number is bounded. If a cancelled stream on a live connection cannot be bounded without closing the connection, that trade-off goes to a decision with these measurements; it is not accepted here.
    - the interoperability test against the published sidecar.
 2. **After #3537 merges:**
    - `extension DirectIrohByteStream: DirectByteStream {}` and `extension DirectIrohTransport: DirectTransporting`, which maps `DirectTarget`, `DirectStreamTag`, and `DirectPathReport` to this file's types;
    - the rendezvous closure: the runtime's primary WebView for the target, only while that runtime is current and its store is the target's, passed to `DirectRendezvousFetcher`;
-   - the transport passed to `AppModel` by `AvibeApp`. This is the line that makes the App use a transport, and it is the owner's to approve.
-3. **With that build:** `NSLocalNetworkUsageDescription` in both locales, and the interplay with #3537's tests (`DirectPathAppTests`' shipped-App test must keep passing until the transport is registered, and then be replaced by its positive control).
+   - `NSLocalNetworkUsageDescription` in both locales;
+   - the transport passed to `AppModel` by `AvibeApp`. This is the line that makes a build use a transport. It waits for its own approval and for the evidence above, and #3537's shipped-App test keeps passing until then.
 
 ## 9. Open
 
 1. **D3 stays the iOS owner's.** This implements the first option (a fixed script in the runtime's WebView). It can run only while that WebView shows a document of the instance. A second hidden WebView on the instance origin would not depend on the page, at the cost of one more WebView per account.
 2. **D4.** No preflight detects a denied Local Network permission: a denied dial fails like an unreachable address and the App stays on the public origin. Recognizing denial earlier would only save dials; it needs a device to design.
-3. **Both halves busy** (section 3). If device measurement shows cancelled streams lingering in practice, the fix belongs upstream (a cancellable read) or in a patched binding, which the owner has not approved.
+3. **Both halves busy** (section 3). The stock binding cannot end such a stream without closing its connection. No patched binding and no upstream change is authorized. The real-binding tests of section 8 measure it; the decision follows them.
 4. **The sidecar closes a connection that has had no stream for five minutes.** An App left open on an idle page then sees `lost` and dials again. Whether to keep one idle stream instead is a measurement question.

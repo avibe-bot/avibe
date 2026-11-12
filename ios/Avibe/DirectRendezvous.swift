@@ -272,7 +272,7 @@ struct DirectRendezvousOffer: Equatable, Sendable {
     /// At least one and at most eight addresses, each checked by the App.
     let addresses: [DirectCandidateAddress]
     /// How long the answer and the client's admission last, counted from
-    /// the moment the answer was received: at most 300 seconds.
+    /// the moment its request was sent: at most 300 seconds.
     let lifetimeSeconds: Int
 }
 
@@ -403,10 +403,10 @@ enum DirectRendezvous {
         else {
             throw DirectRendezvousRejection.invalidEndpoint
         }
-        // The lifetime is the answer's own span, counted by the caller from
-        // the moment of receipt. The phone's clock is not compared with the
-        // instance's: a wrong clock must neither refuse a fresh answer nor
-        // keep a stale one, and native code fetched this answer just now.
+        // The lifetime is the answer's own span, which the caller counts
+        // from the moment it sent the request. The phone's wall clock is not
+        // compared with the instance's: a wrong clock must neither refuse a
+        // fresh answer nor keep a stale one.
         guard
             issuedAt >= 0,
             expiresAt > issuedAt,

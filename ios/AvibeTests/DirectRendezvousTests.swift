@@ -257,6 +257,14 @@ final class DirectRendezvousTests: XCTestCase {
             },
             120
         )
+        XCTAssertEqual(
+            try lifetime {
+                $0["issued_at"] = 4_000_000_000
+                $0["expires_at"] = 4_000_000_300
+                $0["client"] = self.clientObject(id: self.client.hex, admittedUntil: 4_000_000_300)
+            },
+            300
+        )
         // The admission can end before the answer does.
         XCTAssertEqual(
             try lifetime {
