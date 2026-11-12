@@ -292,6 +292,19 @@
     }
   },
   "vault": {
+    "policy": {
+      "invalid_request": "此签名策略请求无效，请刷新后重试。",
+      "authz_required": "关闭签名前询问需要重新通过通行密钥确认。",
+      "authz_invalid": "无法验证通行密钥授权，策略未更改。",
+      "authz_expired": "此次确认已过期，请重新发起确认。",
+      "authz_used": "此次确认已使用，请刷新策略后继续。",
+      "state_changed": "确认期间密钥或策略已更改，请刷新后重试。",
+      "setup_required": "请先完成 Vault 通行密钥设置，再重新发起策略确认。",
+      "legacy_registration_missing": "此现有通行密钥缺少服务器可验证的注册信息。现有 Vault 访问不受影响，请保持签名前询问开启。",
+      "factor_unavailable": "现有 Vault 授权凭据或设置暂不可用，现有 Vault 数据未被替换。",
+      "context_unsupported": "此密钥或授权上下文暂不支持策略确认，其他设置仍可编辑。",
+      "setup_conflict": "已有另一份 Vault 设置保存成功，请刷新并使用已保存的设置。"
+    },
     "hd": {
       "invalidWallet": "此操作需要标准档助记词钱包及有效的账户信息。签名时请选择 evm、bitcoin 或 solana，以及已启用的账户（0–19）；签名方案必须与链匹配。请在 Vault 中创建或导入钱包，不要向服务器发送助记词或种子明文。",
       "invalidAccount": "无法更新此钱包账户。请按顺序启用账户，最多 20 个。只能编辑已启用的账户；名称需为 1–80 个字符（或重置名称），「签名前问我」需为布尔值。",

@@ -292,6 +292,19 @@
     }
   },
   "vault": {
+    "policy": {
+      "invalid_request": "This signing-policy request is invalid. Refresh and try again.",
+      "authz_required": "Use a fresh Passkey confirmation to turn off ask-before-signing.",
+      "authz_invalid": "The Passkey authorization could not be verified. The policy was not changed.",
+      "authz_expired": "This confirmation expired. Start a new confirmation to try again.",
+      "authz_used": "This confirmation was already used. Refresh the policy before continuing.",
+      "state_changed": "The key or policy changed during confirmation. Refresh and try again.",
+      "setup_required": "Set up your Vault Passkey first, then start a new policy confirmation.",
+      "legacy_registration_missing": "This existing Passkey has no server-verifiable registration. Existing Vault access is unchanged; keep ask-before-signing on.",
+      "factor_unavailable": "The existing Vault authorization factor or setup is unavailable. Existing Vault data has not been replaced.",
+      "context_unsupported": "This key or authorization context is not supported for policy confirmation. You can still edit its other settings.",
+      "setup_conflict": "A different Vault setup is already saved. Reload and use the saved setup instead."
+    },
     "hd": {
       "invalidWallet": "This operation requires a standard-tier HD wallet with valid account metadata. To sign, select evm, bitcoin or solana and an enabled account (0–19); the signing scheme must match the chain. Create or import the wallet in Vault without sending words or seed bytes to the server.",
       "invalidAccount": "Could not update this wallet account. Enable accounts in order, up to 20. Only enabled accounts can be edited; use a name of 1–80 characters (or reset it) and a boolean ask-before-signing setting.",

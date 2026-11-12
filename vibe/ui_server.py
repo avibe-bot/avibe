@@ -6180,7 +6180,10 @@ def vault_settings_patch():
 def vault_vmk_get():
     from vibe import api
 
-    return jsonify(api.get_vault_vmk())
+    try:
+        return jsonify(api.get_vault_vmk())
+    except ValueError as exc:
+        return _vault_error_response(exc)
 
 
 @app.route("/api/vault/authz/factors/webauthn/options", methods=["POST"])
@@ -6201,6 +6204,54 @@ def vault_authz_webauthn_register_post():
         return jsonify(api.register_vault_authz_webauthn_factor(request.json or {}, origin=_vault_sandbox_webauthn_origin()))
     except ValueError as exc:
         return _vault_error_response(exc)
+
+
+@app.post("/api/vault/setup", include_in_schema=False)
+async def vault_setup_post(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(await asyncio.to_thread(
+                api.complete_vault_setup, request.json,
+                origin=_vault_sandbox_webauthn_origin(), user_context=getattr(g, "authorization_context", None),
+            ))
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/vault/secrets/{name}/signing-policy/challenge", include_in_schema=False)
+async def vault_signing_policy_challenge_post(name: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(await asyncio.to_thread(
+                api.create_vault_signing_policy_challenge, name, request.json,
+                origin=_vault_sandbox_webauthn_origin(), user_context=getattr(g, "authorization_context", None),
+            ))
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/vault/secrets/{name}/signing-policy", include_in_schema=False)
+async def vault_signing_policy_post(name: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(await asyncio.to_thread(
+                api.complete_vault_signing_policy_downgrade, name, request.json,
+                origin=_vault_sandbox_webauthn_origin(), user_context=getattr(g, "authorization_context", None),
+            ))
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/vault/signing-addresses", methods=["POST"])

@@ -145,7 +145,7 @@ def test_complete_registered_api_management_inventory():
     # + 1 direct lifecycle suspend (Owner, with an additional local-only token guard)
     # + 2 HD account metadata mutations (Editor, like other Vault metadata;
     # the service also requires resource-management authority).
-    assert len(endpoints) == 325
+    assert len(endpoints) == 328
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):
@@ -166,6 +166,9 @@ def test_complete_registered_api_management_inventory():
     for method, path in (
         ("POST", "/api/vault/secrets/{name}/accounts"),
         ("PATCH", "/api/vault/secrets/{name}/accounts/{account}"),
+        ("POST", "/api/vault/setup"),
+        ("POST", "/api/vault/secrets/{name}/signing-policy"),
+        ("POST", "/api/vault/secrets/{name}/signing-policy/challenge"),
     ):
         assert (method, path) in endpoints
         assert http_authorization_policy(method, path).minimum_role == "editor"

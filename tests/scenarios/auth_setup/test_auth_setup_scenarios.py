@@ -6052,3 +6052,69 @@ def test_avault_keychain_authorization_recovers_a_failed_vault_call(monkeypatch,
     assert retried.status_code == 200
     assert retried.get_json()["public_key"] == "pk"
     assert avault.calls().count("key authorize") == 1
+
+
+def test_vault_shared_setup_reload_policy_confirmation_and_last_delete_close_loop(monkeypatch):
+    """AUTH-SETUP-167: setup-required -> durable setup -> reload -> proof -> zero items.
+
+    Existing signing unit tests do not cross the management routes or reconcile
+    setup acknowledgement with the sandbox's actual lingering establishing flag.
+    The ceremony uses synthetic public registration/assertion bytes; verifier,
+    transactions and HTTP serialization stay real. No browser consent is claimed.
+    """
+    import base64
+
+    from sqlalchemy import select
+    from storage import vault_policy, vault_service
+    from storage.models import vault_auth_factors
+    from storage.vault_crypto import Sealed
+    from tests.vault_webauthn_helpers import WebAuthnTestCredential
+    from vibe import api
+
+    credential = WebAuthnTestCredential(rp_id="sandbox.avibe.bot", origin="https://sandbox.avibe.bot")
+    monkeypatch.setattr(ui_server, "_vault_sandbox_webauthn_origin", lambda: credential.origin)
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="CONFIRM_KEY", kind="keypair", signer_kind="local",
+            sealed=Sealed("synthetic", "nonce", "wrap"), policy={"always_ask": True}, public_meta={
+                "signing_public_key": {"curve": "secp256k1", "public_key": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"},
+            })
+    client = app.test_client()
+    headers = csrf_headers(client)
+    path = "/api/vault/secrets/CONFIRM_KEY/signing-policy"
+    blocked = client.post(path + "/challenge", json={"always_ask": False}, headers=headers)
+    assert blocked.status_code == 409 and blocked.get_json()["code"] == "vault_policy_setup_required"
+    options = client.post("/api/vault/authz/factors/webauthn/options", json={}, headers=headers).get_json()
+    registration = credential.registration_payload(challenge_id=options["challenge_id"], challenge_b64=options["webauthn"]["challenge"])
+    setup = client.post("/api/vault/setup", json={"wrap_meta": credential.wrap_meta(), "authz_factor_registration": registration}, headers=headers)
+    assert setup.status_code == 200
+    root = setup.get_json()
+    # Simulated page reload: another HTTP client reads only persisted state.
+    client = app.test_client()
+    headers = csrf_headers(client)
+    assert client.get("/api/vault/vmk").get_json() == root
+    with api._vault_engine().connect() as conn:
+        factor_id = conn.execute(select(vault_auth_factors.c.id)).scalar_one()
+    for count in (2, 3):
+        context = client.post(path + "/challenge", json={"always_ask": False}, headers=headers).get_json()["context"]
+        authorization = credential.assertion_authz(challenge_id=context["challengeId"], factor_id=factor_id,
+            challenge_b64=base64.b64encode(vault_policy.challenge_bytes(context)).decode(), sign_count=count)
+        payload = {"context": context, "authorization": authorization}
+        lowered = client.post(path, json=payload, headers=headers)
+        assert lowered.status_code == 200 and lowered.get_json()["secret"]["policy"]["always_ask"] is False
+        assert client.post(path, json=payload, headers=headers).get_json()["code"] == "vault_policy_authz_used"
+        if count == 2:
+            assert client.patch("/api/vault/secrets/CONFIRM_KEY", json={"always_ask": True}, headers=headers).status_code == 200
+            # Actual seal payload may still mark the VMK as establishing. The
+            # Web adapter drops consumed registration but keeps exact root bytes.
+            create = client.post("/api/vault/secrets", json={
+                "name": "TEMP_PROTECTED", "protection": "protected", "establishing_vmk": True,
+                "sealed": {"ciphertext": "synthetic", "nonce": "record-nonce", "wrap_meta": {
+                    **credential.wrap_meta(), "wrapped_dek": "synthetic-dek", "dek_nonce": "record-dek-nonce",
+                }},
+            }, headers=headers)
+            assert create.status_code == 200
+            assert client.delete("/api/vault/secrets/TEMP_PROTECTED", headers=headers).status_code == 200
+            assert client.get("/api/vault/vmk").get_json() == root
+    with api._vault_engine().connect() as conn:
+        factor = conn.execute(select(vault_auth_factors)).mappings().one()
+        assert factor["disabled_at"] is None and factor["sign_count"] == 3
