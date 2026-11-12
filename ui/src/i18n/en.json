@@ -6016,6 +6016,7 @@
       "retryRequired": "Retry needed · {{count}}",
       "retryHint": "Automatic startup retries stopped after failure. Your input is retained. Resolve the error, then use Send now or Retry on the failure notice.",
       "retryHintAgentUnavailable": "The Agent can't run, so your input is kept. Use Continue on Vibey on the failure notice, or Send now once the Agent is back.",
+      "waitingForModel": "Waiting for a model · {{count}}",
       "retryHintNoModel": "Connect a model, then send.",
       "openModels": "Connect a model",
       "sendNow": "Send now",

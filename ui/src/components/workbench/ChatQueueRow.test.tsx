@@ -224,6 +224,7 @@ describe('QueueStrip — compatible queued messages read as one batch', () => {
       </MemoryRouter>,
     );
     expect(screen.getByText(en.chat.queue.retryHintNoModel)).toBeTruthy();
+    expect(screen.getByText('Waiting for a model · 1')).toBeTruthy();
     expect(screen.queryByText(/Automatic startup retries stopped/)).toBeNull();
     expect(Boolean(screen.queryByRole('button', { name: en.chat.queue.openModels }))).toBe(manages);
     expect(screen.getByRole('button', { name: 'Send now' })).toBeTruthy();

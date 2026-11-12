@@ -478,6 +478,19 @@ def refusal_subject_name(
     return display_name_for_backend(backend)
 
 
+_ENDS_LATIN = re.compile(r"[A-Za-z0-9]$")
+
+
+def spaced_before_cjk(name: str, language: str) -> str:
+    """``name`` as it sits before Chinese text in a Chinese sentence: CJK runs straight on
+    (「歪比还没有」), a Latin letter or digit takes a space (「Vibey 还没有」). The Chinese copy
+    has no space of its own after the name, so this decides it."""
+
+    if str(language or "").lower().startswith("zh") and _ENDS_LATIN.search(name):
+        return f"{name} "
+    return name
+
+
 def hub_supply_refusal(
     controller: Any,
     backend: str,
@@ -499,7 +512,7 @@ def hub_supply_refusal(
         return None
     subject = refusal_subject_name(controller, backend, language, agent_id=agent_id, agent_name=agent_name)
     return ModelSupplyRefusal(
-        t(_HUB_SUPPLY_REFUSALS[block], language, backend=subject),
+        t(_HUB_SUPPLY_REFUSALS[block], language, backend=spaced_before_cjk(subject, language)),
         fixed_in_models=block != "hub_disabled",
     )
 

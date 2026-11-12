@@ -4215,7 +4215,7 @@ export const QueueStrip: React.FC<{
   const buttonBusy = sendingNow || (headFenced && !reconciling);
   const waiting = rows.some((item) => !isQueueDeliveryFenced(item));
   const title = retryRequired
-    ? t('chat.queue.retryRequired', { count: rows.length })
+    ? t(noModel ? 'chat.queue.waitingForModel' : 'chat.queue.retryRequired', { count: rows.length })
     : botName
       ? t(waiting ? 'bots.conversation.notDelivered' : 'bots.conversation.delivering', { count: rows.length })
       : t('chat.queue.title', { count: rows.length });

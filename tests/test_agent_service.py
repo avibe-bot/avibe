@@ -444,12 +444,14 @@ def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
     ("bot_record", "builtin", "language", "expected"),
     [
         # The main Bot with no name of its own reads as its localized default, as the Workbench shows it.
-        ({"handle": "main", "display_name": ""}, True, "zh", "歪比 还没有模型供应商"),
+        ({"handle": "main", "display_name": ""}, True, "zh", "歪比还没有模型供应商"),
         ({"handle": "main", "display_name": ""}, True, "en", "Vibey has no model provider yet"),
         # A Bot the person named is called that name.
-        ({"handle": "helper", "display_name": "奶酪包"}, False, "zh", "奶酪包 还没有模型供应商"),
+        ({"handle": "helper", "display_name": "奶酪包"}, False, "zh", "奶酪包还没有模型供应商"),
         # A Session with no Bot keeps the backend's name.
         (None, False, "zh", "Vibey 还没有模型供应商"),
+        # A Bot named in Latin letters keeps the space Chinese puts between CJK and Latin.
+        ({"handle": "helper", "display_name": "Cheese 2"}, False, "zh", "Cheese 2 还没有模型供应商"),
     ],
 )
 def test_a_no_model_refusal_names_the_sessions_bot(monkeypatch, bot_record, builtin, language, expected):
