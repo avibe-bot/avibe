@@ -695,9 +695,10 @@ export const VaultsPage: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
+      const requestedAt = Date.now();
       const res = await api.listVaultSecrets();
       setSecrets(res.secrets ?? []);
-      pruneHdWalletBlocks((res.secrets ?? []).map((secret) => secret.name));
+      pruneHdWalletBlocks((res.secrets ?? []).map((secret) => secret.name), requestedAt);
       setNow(Date.now());
     } catch (err: unknown) {
       setError(messageFromError(t, err));

@@ -182,7 +182,7 @@ it.each([
   expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('address check failed'), { name: 'AGENT_WALLET' });
   // The automatic delete was refused: the wallet stays blocked in this browser, with no way to "finish".
   expect(api.deleteVaultSecret).toHaveBeenCalledWith('AGENT_WALLET');
-  expect(JSON.parse(localStorage.getItem('avibe.vault.hdAddressCheckFailed') ?? '[]')).toEqual(['AGENT_WALLET']);
+  expect(JSON.parse(localStorage.getItem('avibe.vault.hdAddressCheckFailed') ?? '[]').map((b: { name: string }) => b.name)).toEqual(['AGENT_WALLET']);
   expect(screen.queryByRole('button', { name: hd.done.finish })).toBeNull();
   // Deleting again succeeds: unblocked, and closing reports nothing created.
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.deleteWallet })); });
