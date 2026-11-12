@@ -95,8 +95,8 @@ const GuideNote: FC<{ testId: string; tone?: 'muted' | 'destructive'; children: 
 /**
  * Settings → Computer Use: the macOS permission setup as one numbered guide
  * whose progress is read from the desktop status endpoint while the page is
- * visible. Inside the desktop shell each current step carries its action; any
- * other host follows the same live status read-only.
+ * visible. Inside the desktop shell incomplete permission steps can open their
+ * settings even while the driver is unavailable; other hosts follow read-only.
  */
 export const SettingsComputerUsePage: FC = () => {
   const { t } = useTranslation();
@@ -274,7 +274,7 @@ export const SettingsComputerUsePage: FC = () => {
         <ol className="flex flex-col" data-testid="computer-use-steps">
           {COMPUTER_USE_GUIDE_STEPS.map((step, index) => {
             const state = progress?.[step] ?? 'pending';
-            const actionable = actions !== null && state === 'current';
+            const actionable = actions !== null && (step === 'enable' ? state === 'current' : state !== 'complete');
             const running = runningStep === step;
             return (
               <li
