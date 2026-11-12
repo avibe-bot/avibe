@@ -684,8 +684,8 @@ describe('seed-phrase wallet sign approval', () => {
     expect(screen.getByText(en.vaults.approval.path.replace('{{path}}', "m/44'/60'/0'/0/1"))).toBeTruthy();
     expect(screen.getByText(snapshot.eth)).toBeTruthy();
     expect(screen.queryByText('0xLIVE')).toBeNull();
-    // It carries a parseable context, so no blind-signature warning.
-    expect(screen.queryByText(en.vaults.approval.rawDigestNote)).toBeNull();
+    // A context rides along, but this path never decodes or checks it: still a blind signature.
+    expect(screen.getByText(en.vaults.approval.rawDigestNote)).toBeTruthy();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: i18n.t('vaults.approval.sign'), exact: true })); });
     await vi.waitFor(() => expect(api.signVaultDigest).toHaveBeenCalledExactlyOnceWith({
       name: 'AGENT_WALLET', request_id: 'vrq_hd', digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable',
