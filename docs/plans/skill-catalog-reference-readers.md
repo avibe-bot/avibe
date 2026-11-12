@@ -4,10 +4,12 @@
 
 This is the **reader-first 3.2.6 stage**, not write activation. Revision
 `20261112_0088` adds one empty, independent `skill_catalogs` table. It does not
-scan, rewrite, backfill, or delete existing events. The compatibility epoch and
-supported reader epochs are unchanged. Every production observation still writes
-its complete inline `entries` array, byte-for-byte as before. This stage alone
-therefore provides **no database growth reduction**.
+scan, rewrite, backfill, or delete existing events. The current compatibility
+epoch remains 2, while the coordinated reader bridge accepts a future epoch-3
+marker only after all three representation readers have landed. Every
+production observation still writes its complete inline `entries` array,
+byte-for-byte as before. This stage alone therefore provides **no database
+growth reduction**.
 
 The subsequent coordinated 3.2.7 representation change owns write suppression and
 its breaking epoch boundary, after all participating readers are released. A

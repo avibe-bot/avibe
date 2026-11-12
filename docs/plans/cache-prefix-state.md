@@ -7,7 +7,8 @@ Revision `20261112_0085` adds the independent `session_cache_state` table:
 version-1 cache record, including its bounded prefix fingerprint. The existing
 record's `started_at` orders state against legacy observations. The table has no
 foreign key, trigger, backfill, or mutation of existing rows. It is additive in
-compatibility epoch 2; this change does not claim support for epoch 3.
+compatibility epoch 2; the separate 3.2.6 reader bridge accepts a future epoch-3
+marker without enabling epoch-3 writers.
 
 **This is a reader bridge, not the growth-reduction activation.** All production
 response and audit writers remain unchanged, including inline `cache.prefix`,
@@ -56,10 +57,11 @@ skips prefixless records and can revive a stale pre-upgrade inline prefix. Until
 the first billed request on each route, that can misclassify new diagnostics
 (e.g. tool changes or provider misses). It does not corrupt conversation data or
 change clearing behavior, but is not an acceptable rollback claim. Therefore
-3.2.6 keeps all old writer bytes and epoch support unchanged. A coordinated
-3.2.7 epoch-3 activation, owned by the integration lane, must first establish
-released reader support across cache, Vault audit, and Skill catalog consumers.
-Do not widen the supported-reader epoch set in this independent PR.
+3.2.6 keeps all old writer bytes and epoch-2 production behavior unchanged,
+while its coordinated reader bridge accepts a future epoch-3 database only after
+all three representation readers are present. A coordinated 3.2.7 epoch-3
+activation, owned by the integration lane, still owns the writer switch across
+cache, Vault audit, and Skill catalog consumers.
 
 The future cache writer must atomically upsert latest usage-bearing state with
 each response/attempt/side-turn commit, never overwrite newer state with older
