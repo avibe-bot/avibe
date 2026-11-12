@@ -146,7 +146,7 @@ interface AvibeNative {
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
-| [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number}`. Read-only, no parameters. | `direct.transportChanged({preferred, sequence, closed})` |
+| [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number, closure: number}`. Read-only, no parameters. | `direct.transportChanged({preferred, sequence, closure})` |
 
 Phase 0a PR 2 implements this v1 subset:
 
@@ -232,49 +232,38 @@ Rules:
 
 ### `direct`: which path new connections prefer
 
-Specified for remote direct paths ([the App side](remote-direct-ios.md)). A
-shell can carry the instance origin's connections through a local proxy that
-chooses, for each new connection, a direct path or Cloudflare. The origin does
-not change. Connections already open stay on the path they were opened on,
-and connections on both paths can exist at the same time, so the shell never
-reports a single path for "the instance". It reports two things: which path
-new connections prefer, and that it closed connections because their path was
-lost.
+Specified for remote direct paths ([the App side](remote-direct-ios.md)).
 
-- `preferred` is `"tunnel"` (Cloudflare, the default) or `"direct"`. It
-  describes only what the shell will try first for the calling document's
-  next connections, never where an existing connection runs. It is
-  `"direct"` only for the selected instance's origin; for every other caller,
-  and in a shell with no direct transport, it is always `"tunnel"`, and the
-  event never fires.
-- `sequence` is an integer that grows with every event while the shell
-  process lives. The call and the event carry it. The Web UI keeps the highest
-  `sequence` it has seen, ignores anything older that arrives late, and treats
-  a repeat of the same `sequence` as already handled.
-- The shell emits `direct.transportChanged({preferred, sequence, closed})`:
-  - when `preferred` changes, with `closed: false`;
-  - once for each lost path on which it closed at least one connection,
-    after closing them, with `closed: true`.
-- The shell delivers the event to the current runtime's instance-origin
-  documents only: the primary main frame and instance-origin child windows.
-  The script checks the origin of the document it runs in.
-- `closed: true` means some connections were closed because their path was
-  lost, not that all were. Healthy connections continue on either path. The
-  event is aggregate: it cannot say which of the Web UI's streams were on the
-  lost path. So on it the Web UI reconnects, at once and through their
-  existing reconnect owners, only what reconnects without loss: the SSE
-  stream (which catches up) and terminals that reattach without loss, even if
-  they were healthy. Plain shells, uploads, and requests in flight are not
-  touched by the event; they react only to their own connection's error. The
-  event adds no retry of any request. On a change of `preferred` alone the
-  Web UI does nothing.
-- `direct.status()` takes no parameters; any parameter is `invalid_argument`.
-- The surface is closed on purpose. No call lets web content choose an
-  address, start a probe, or supply a rendezvous answer, and nothing it
-  returns carries an address, endpoint identity, or network name. Show Pages
-  are same-origin with the Workbench and can reach the bridge, so anything a
-  call accepted, an Agent-authored page could supply. Native code fetches the
-  rendezvous itself.
+A shell can carry the instance origin's connections through a local proxy that chooses, for each new connection, a direct path or the public origin (Cloudflare in Avibe's deployment). The origin does not change. Connections already open stay on the path they were opened on, and connections on both paths can exist at the same time, so the shell never reports a single path for "the instance". It reports two separate things: which path new connections prefer, and a count of closures, that is, of the times it closed connections because their path was lost.
+
+- **`preferred`** is `"tunnel"` (the public origin, the default) or `"direct"`.
+  - It says only what the shell will try first for the calling document's next connections, never where an existing connection runs.
+  - It is `"direct"` only for the selected instance's origin. For every other caller, and in a shell with no direct transport, it is always `"tunnel"`.
+- **`closure`** is a non-negative integer for the calling document's instance host.
+  - It grows by one each time the shell closes connections for that host because their path was lost or its local port was recovered.
+  - It never decreases while the shell process lives, and starts at 0.
+  - Each increase asks the Web UI to act once.
+- **`sequence`** grows with every change of either value while the shell process lives, and orders `preferred` only.
+
+The shell emits `direct.transportChanged({preferred, sequence, closure})` after any change of `preferred` or increase of `closure`. A shell with no direct transport never emits it. It goes to the current runtime's instance-origin documents only, the primary main frame and instance-origin child windows, and its script checks the origin of the document it runs in.
+
+The Web UI keeps two values per document, separately:
+
+- **Latest preference.** Apply `preferred` from a status or event only if its `sequence` is higher than the highest seen.
+- **Last handled closure.** Read `direct.status()` before opening the SSE stream or a terminal, and take its `closure` as the baseline. After that, whenever a status or event shows a higher `closure`, run the reconnect action once and record the new value.
+
+Closure is compared only with closure, never with `sequence`. So it is acted on once even when its event arrives after a newer preference, arrives twice, or is first seen in a status read.
+
+The reconnect action exists because the count is aggregate: neither side can tell which streams ran on the closed path. It reconnects, through their existing reconnect owners, only what does not repeat an action, even if it was healthy:
+
+- **The SSE stream** catches up.
+- **Terminals whose server-side session persists** (tmux-backed) reattach to it. Client-side state does not survive: scrollback, viewport, search, and selection reset. Input typed during the reconnection is dropped, not buffered or replayed.
+
+Plain shells, uploads, and requests in flight are not touched; they react only to their own connection's error. The action retries no request. A change of `preferred` alone triggers nothing.
+
+`direct.status()` takes no parameters; any parameter is `invalid_argument`.
+
+The surface is closed on purpose. No call lets web content choose an address, start a probe, or supply a rendezvous answer, and nothing it returns carries an address, endpoint identity, or network name. Show Pages are same-origin with the Workbench and can reach the bridge, so anything a call accepted, an Agent-authored page could supply. Native code fetches the rendezvous itself.
 
 ## 5. Composer and keyboard
 
