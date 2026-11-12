@@ -298,6 +298,7 @@
       "stateChanged": "签名期间钱包发生变化，或无法保存使用记录。未交付签名。请先检查钱包及其审计记录，再决定是否重试。"
     },
     "signing": {
+      "policyDowngradeUnavailable": "可以开启签名前确认，但暂不支持关闭。此设置未更改。",
       "invalidProtectedSolanaRecord": "保护档 Solana 密钥需要由沙箱生成、且与 Ed25519 公钥元数据匹配的密钥对记录。此路径不接受密钥对生成参数或盲盒导入。请保留保护档位不变。",
       "invalidKey": "签名需要与签名方案匹配的已固定有效公钥：secp256k1 方案需要 secp256k1 压缩公钥，ed25519 需要 Solana Ed25519 公钥。未交付签名。请保留现有密钥及其保护档位，修复公钥元数据后再试。",
       "protectedUnsupported": "保护档 Bitcoin Taproot 签名需要类型化交易审批流程和兼容的沙箱；旧式地址及 SegWit-v0 输入仍不支持。",
