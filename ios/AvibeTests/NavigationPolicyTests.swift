@@ -4032,3 +4032,83 @@ final class ZZZWebContentProbeTests: XCTestCase {
         await probeFreshWebViewLoads("end")
     }
 }
+
+// EXPERIMENT: which error does a test report when it throws while a hosted
+// WebViewController is in a given state? (#3418's "InvalidTransition".)
+private enum ZZProbeError: Error { case thrownByTest }
+
+final class ZZZInvalidTransitionProbeTests: XCTestCase {
+    @MainActor
+    private func hostedController() -> (WebViewController, WKWebView, UIWindow) {
+        let controller = WebViewController(
+            instanceOrigin: WebOrigin.parseConfigured("https://alice-app.avibe.bot")!,
+            websiteDataStore: .nonPersistent(),
+            accountFallbackVisibilityChanged: { _ in },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.loadViewIfNeeded()
+        controller.view.frame = window.bounds
+        controller.view.layoutIfNeeded()
+        let webView = controller.view.subviews.compactMap { $0 as? WKWebView }.first!
+        return (controller, webView, window)
+    }
+
+    @MainActor
+    func testA_throwWhileControllerLoadIsPending() async throws {
+        let (_, webView, window) = hostedController()
+        defer { window.isHidden = true }
+        webView.stopLoading()
+        webView.loadHTMLString("<title>T</title>", baseURL: URL(string: "https://alice-app.avibe.bot")!)
+        XCTFail("A: recorded before the throw")
+        throw ZZProbeError.thrownByTest
+    }
+
+    @MainActor
+    func testB_throwAfterControllerLoaded() async throws {
+        let (_, webView, window) = hostedController()
+        defer { window.isHidden = true }
+        webView.stopLoading()
+        webView.loadHTMLString("<title>T</title>", baseURL: URL(string: "https://alice-app.avibe.bot")!)
+        for _ in 0..<200 {
+            if (try? await webView.evaluateJavaScript("document.title")) as? String == "T" { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("B: recorded before the throw")
+        throw ZZProbeError.thrownByTest
+    }
+
+    @MainActor
+    func testC_throwWithEvaluatePendingOnPlainWebView() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(frame: window.bounds, configuration: configuration)
+        window.addSubview(webView)
+        window.makeKeyAndVisible()
+        webView.loadHTMLString("<title>T</title>", baseURL: nil)
+        let pending = Task { @MainActor in try? await webView.evaluateJavaScript("document.title") }
+        _ = pending
+        XCTFail("C: recorded before the throw")
+        throw ZZProbeError.thrownByTest
+    }
+
+    @MainActor
+    func testD_controllerDeinitWhileEvaluatePending() async throws {
+        var hosted: (WebViewController, WKWebView, UIWindow)? = hostedController()
+        hosted!.1.stopLoading()
+        hosted!.1.loadHTMLString("<title>T</title>", baseURL: URL(string: "https://alice-app.avibe.bot")!)
+        let webView = hosted!.1
+        let result = Task { @MainActor () -> String in
+            do { _ = try await webView.evaluateJavaScript("document.title"); return "ok" }
+            catch { return "error: \(error)" }
+        }
+        hosted!.2.isHidden = true
+        hosted = nil
+        print("ZZ-D evaluate -> \(await result.value)")
+    }
+}
