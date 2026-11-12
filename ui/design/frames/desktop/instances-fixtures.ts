@@ -38,7 +38,7 @@ export const desktopInstanceFrames: (Omit<FrameSpec, 'render'> & { fixture: Desk
   name: `${state}-${lang}`,
   title: `${title} · ${lang}`,
   width: 1200, height: 800, themes: ['light', 'dark'], status: 'proposed', route: '/',
-  fixture: { state, lang },
+  fixture: { state, lang, connection: ['signed-out', 'email', 'code', 'code-error', 'setup-entry'].includes(state) ? 'signed-out' : state === 'switching' ? 'switching' : state === 'offline' ? 'offline' : 'signed-in', updateAvailable: ['updates', 'offline'].includes(state) },
   fixtures: workbenchFixtures({
     ...agentsApi(),
     ...homeFactsApi({ model: true, push: true, computerUse: true, chatApps: true, paired: true }),

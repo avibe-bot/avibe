@@ -58,7 +58,7 @@ Max selected C on 2026-11-12 at 11:21:19, with the final revisions at 19:15:23, 
 1. The existing Apps launcher and Settings button.
 2. Avatar, current instance name, a color-only state dot, and the local Desktop version/update entry on the right.
 
-The second row replaces the former version/running row. It has no email and no separate third version row. The email appears only in the upward account menu header. Inside the account control, the instance name, connection/update dot and upward chevron form one tight group (`avatar · Studio · dot · chevron`); the local version/update trigger remains a separate control at the far right. The account menu contains Switch instance, the local Remote access status (`MacBook Pro · On` / `MacBook Pro · 已开启`) and Sign out. It has no close/turn-off control and no Desktop update action; the remote-access switch stays in the Settings remote-access page.
+The second row replaces the former version/running row. It has no email and no separate third version row. The email appears only in the upward account menu header. Inside the account control, the instance name, connection indicator and upward chevron form one tight group (`avatar · Studio · dot · chevron`); the local version/update trigger remains a separate control at the far right. The account menu contains Switch instance, the local Remote access status (`MacBook Pro · On` / `MacBook Pro · 已开启`) and Sign out. It has no close/turn-off control and no Desktop update action; the remote-access switch stays in the Settings remote-access page.
 
 The row follows the rc9 Apps button container's left edge for the avatar: the Apps container begins at **x=16** in the frame, while the rc9 `ProjectRow` icon begins at **x=29**. The selected contract deliberately prioritizes the Apps container, so the difference is **13px**. The label follows the avatar at the row's normal icon gap. This is an explicit exception to the project-row icon coordinate, recorded for implementation rather than hidden by a second custom offset.
 
@@ -85,18 +85,24 @@ Reference: `gh-v3.2.6rc9`, commit `f42211308e7058418556a838f5a3dc2a5a6ebc02`, re
 
 ### Footer contract and alignment
 
-The real `AppShell.tsx` footer supplies the first row: `AppsLauncher`, a 39px row, `gap-2`, and a compact `w-11` Settings icon. The new second row replaces the location previously occupied by `VersionBadge` and running status. It is one compact 32px row, with no email; the local version/update trigger occupies its right edge. The kit renders the real Apps launcher and Workbench tree; only the proposed account row and update popover are drawn with product primitives.
+The real `AppShell.tsx` footer supplies the first row: `AppsLauncher`, a 39px row, `gap-2`, and a compact `w-11` Settings icon. The new second row replaces the location previously occupied by `VersionBadge` and running status. It is one compact 32px row, with no email; the local version/update trigger occupies its right edge. The kit renders the real Apps launcher and Workbench tree inside the temporary proposed shell composition documented in the Known-by-design section; the account row and updater use product primitives.
 
 The account row's avatar alignment follows the Apps button container's left edge at x=16, per the final owner instruction. The rc9 `WorkbenchSidebar.tsx::ProjectRow` remains the evidence baseline at `pl-[13px]`, with its icon at x=29 and label at x=49; the selected account avatar therefore differs by 13px. The instance label, state indicator and chevron are a single inline group: the indicator's left edge must be no more than 8px after the label's right edge. The version/update trigger is outside that group and remains independently right-aligned. Full account/source/target identity remains in the accessible title. The upward menu is 320px wide, left-aligned to the row with an 8px gap; viewport collision adjustment, scrolling and focus restoration require implementation checks.
 
-| State | Second row | Meaning / action |
-|---|---|---|
-| Signed in | Avatar · Studio · green point · weak `3.2.6rc9` | Studio is the committed, connected instance. Open the account menu (Switch instance, local remote-access status, Sign out). |
-| Signed out | Avatar · Sign in / sign up · green point · weak local version | Local use is available without login. Open the independent email page directly. |
-| Update available | Avatar · Studio · gold point · update icon | An update for Desktop on this Mac is available. It does not mean Studio needs upgrading; open the local update popover from the row's right side. |
-| Switching | Avatar · This Mac → Studio · busy icon | Keep the committed source visible until successful connection; do not replace the source with progress text or mark Studio current early. |
+**Footer invariant:** connection state and local Desktop update availability are orthogonal fixture dimensions. `connection` is a typed enum (`signed-in`, `signed-out`, `switching`, `offline`); `updateAvailable` is an independent boolean, never a connection-enum value. The left status indicator reads only connection state. The right update affordance exists if and only if `updateAvailable` is true, and its contents do not change when connection state changes. Switching, offline recovery and signing out cannot suppress it. When false, the ordinary full-width footer shows the muted local version. Popup openness is a separate presentation choice.
 
-Green represents selected-instance connectivity, not the local Runtime's detailed health. Gold represents a local Desktop update on this Mac. Busy state takes display priority over the point; an update remains available from the right-side trigger. Offline recovery retains the source identity and explicit local return in its dedicated frame. Native account/local update facts must come from the trusted shell coordinator, not remote page claims. Escape/outside-click and popup focus handling are implementation requirements.
+| Connection | Update available | Left account/instance group | Right local Desktop entry | Existing combination fixture |
+|---|---|---|---|---|
+| Signed in | No | Studio · green point · chevron | Muted `3.2.6rc9` | `account`, `mini`, C `home`, `chat`, `agents`, `menu` |
+| Signed in | Yes | Studio · green point · chevron | Update icon / gold point | `updates`, C `update` (open panel); C `collapsed` (compact icon) |
+| Signed out | No | Sign in / sign up · green local point · chevron | Muted local version | Main `signed-out` |
+| Signed out | Yes | Same sign-in / local group | Update icon / gold point | C `signed-out` |
+| Switching | No | Committed source → target · busy icon · chevron | Muted local version | Main `switching` |
+| Switching | Yes | Same source → target / busy group | Same update affordance as connected | C `switching` |
+| Offline | No | Selected instance · disconnected icon · chevron | Muted local version | Supported projection; the offline capture below exercises the simultaneous-update case |
+| Offline | Yes | Same selected instance / disconnected group | Same update affordance as connected | Main `offline` |
+
+Green represents selected-instance connectivity (or available local access when signed out), not local Runtime detailed health. The gold update point belongs exclusively to the right local-update control; it never replaces the left connection indicator. Busy/offline presentation does not affect the right control. Offline recovery retains the source identity and explicit local return. The future compact-rail fixture preserves the independent update icon beside the account icon instead of hiding updates. Native account/local-update facts must come from the trusted shell coordinator, not remote-page claims. Escape/outside-click and popup focus handling remain implementation requirements.
 
 ### Local version and update entry
 
@@ -252,7 +258,7 @@ Public preview: https://max-app.avibe.bot/p/CPAPBAF4yGc/
 
 ## Change contract and verification
 
-The delivery preserves the owner-selected design and its stable frame IDs. Only this specification, fixtures, frames and the two draft kit components enter the PR. No production behavior, capability, API, dependency or token changes. Rejected placement frames, generated screenshots and trash are excluded. All frames retain `proposed`, following `ui/design/AGENTS.md`: approval is recorded in the owner-approved PR, and `shipped` requires shipped components.
+The delivery preserves the owner-selected design and its stable frame IDs. Only this specification, fixtures, frames, the two draft kit components and a design-only DOM check enter the PR. No production behavior, capability, API, dependency or token changes. Rejected placement frames, generated screenshots and trash are excluded. All frames retain `proposed`, following `ui/design/AGENTS.md`: approval is recorded in the owner-approved PR, and `shipped` requires shipped components.
 
 Prior round 8 verification on Avibe `000bcdf994`: design typecheck passed; all 112 locale/theme captures exported at 1200×800. DOM checks measured a 6px label-to-point and point-to-chevron gap, and exactly two footer children in 48 Workbench captures. Round 7 verified the update popover's four edges stay inside the viewport with its left edge at the Apps container's x=16. Main accepted that clipping correction. The active geometry supersedes historical top/right and Settings-update explorations.
 
@@ -263,5 +269,7 @@ Delivery verification on Avibe `366b89ce13`: design typecheck and UI production 
 The proposed shell in `ui/design/kit/desktop-instances.tsx` composes the real WorkbenchSidebar, AppsLauncher and page components, but its safe strip, column/footer layout and Settings button are draft composition. It is not the shipped AppShell and does not certify its capability behavior or native geometry. The existing `ui/design/shell/DesktopScreen.tsx` and `SidebarColumn.tsx` do not expose a footer slot.
 
 Scope ruling (main, 2026-11-13 01:44:41): this PR stays docs + design only. Phase 1 contract §5 assigns AppShell/Wizard/VersionBadge adapters to frontend U1; that lane will extract the real footer/view slot. After U1 merges, the design owner will open a small follow-up PR to consume that slot and remove the duplicate shell composition. Do not hide or replace shipped DOM with CSS/portals as a substitute. Frames remain proposed until the owner approves the PR, and static geometry is not evidence of shipped shell parity.
+
+The reproducible design check is `node design/checks/desktop-instances.mjs` from `ui/`. It enumerates all instance frame/theme combinations and checks update visibility against the independent availability fixture, compares update DOM across connection states and connection-indicator DOM across update states, requires the signed-out/switching/offline + update combinations in both languages/themes, and checks avatar x=16, adjacent gaps ≤8px, two-row footers, viewport-contained menus and fixture-only network reads. It does not certify native updater behavior.
 
 Known preview limit: Show annotation injection can log the documented `react/jsx-runtime` resolution warning inside canvas iframes (`docs/plans/design-frames.md`, Known by design). Direct design capture is the static verification surface; this lane does not modify the Show runtime.

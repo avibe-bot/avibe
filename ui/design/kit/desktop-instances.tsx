@@ -14,7 +14,8 @@ import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
 import { AppsLauncher } from '@/components/AppsLauncher';
 
 export type DesktopInstanceState = 'signed-out' | 'updates' | 'setup-entry' | 'account' | 'instances' | 'empty' | 'loading' | 'list-error' | 'email' | 'code' | 'code-error' | 'registering' | 'registered' | 'registration-error' | 'conflict' | 'add' | 'advanced' | 'offline' | 'switching' | 'mini';
-export type DesktopInstanceFixture = { state: DesktopInstanceState; lang: 'zh' | 'en' };
+export type ConnectionStatus = 'signed-in' | 'signed-out' | 'switching' | 'offline';
+export type DesktopInstanceFixture = { state: DesktopInstanceState; lang: 'zh' | 'en'; connection: ConnectionStatus; updateAvailable: boolean };
 const copy = (lang: 'zh' | 'en') => (zh: string, en: string) => lang === 'zh' ? zh : en;
 type Copy = ReturnType<typeof copy>;
 function Heading({ title, children }: { title: string; children?: ReactNode }) {
@@ -63,47 +64,47 @@ function DesktopUpdatePopover({ t }: { t: Copy }) {
   return <div data-update-menu className="absolute bottom-full left-0 z-[60] mb-2 w-80 rounded-xl border border-edge bg-popover p-4 text-popover-foreground shadow-elevation-2"><div className="flex items-center gap-2"><Download className="size-4 text-gold-ink" /><p className="text-sm font-semibold">{t('Desktop 有更新', 'Desktop update available')}</p></div><p className="mt-2 text-xs leading-5 text-muted">{t('这台 Mac 的 Avibe Desktop。当前连接的 Studio 不受影响。', 'Avibe Desktop on this Mac. The connected Studio is unchanged.')}</p><div className="mt-4 flex flex-wrap gap-2"><Button variant="brand" size="sm">{t('安装更新', 'Install update')}</Button><Button variant="outline" size="sm">{t('检查更新', 'Check for updates')}</Button><Button variant="link" size="sm" className="px-0">{t('查看内容', 'View notes')}</Button></div></div>;
 }
 export type InstancePlacement = 'top' | 'bottom';
-export type PlacementStatus = 'signed-in' | 'signed-out' | 'update' | 'switching' | 'offline';
 
-function AccountEntry({ fixture, placement, remote, status, compact = false, menu = false, updatePanel = false }: {
-  fixture: DesktopInstanceFixture; placement: InstancePlacement; remote: boolean; status: PlacementStatus; compact?: boolean; menu?: boolean; updatePanel?: boolean;
+function AccountEntry({ fixture, placement, remote, compact = false, menu = false, updatePanel = false }: {
+  fixture: DesktopInstanceFixture; placement: InstancePlacement; remote: boolean; compact?: boolean; menu?: boolean; updatePanel?: boolean;
 }) {
-  const t = copy(fixture.lang), signedOut = status === 'signed-out', busy = status === 'switching';
+  const t = copy(fixture.lang), { connection, updateAvailable } = fixture;
+  const signedOut = connection === 'signed-out', busy = connection === 'switching';
   const instance = remote ? 'Studio' : t('本机 · MacBook Pro', 'This Mac · MacBook Pro');
-  const indicator = status === 'offline' ? <WifiOff data-status-indicator className="size-3 shrink-0 text-gold-ink" aria-label={t('当前实例已断开', 'Current instance disconnected')} /> : busy ? <RefreshCw data-status-indicator className="size-3 shrink-0 text-cyan-ink" aria-label={t('正在连接 Studio', 'Connecting to Studio')} /> : status === 'update' ? <span data-status-indicator className="size-1.5 shrink-0 rounded-full bg-gold" aria-label={t('Desktop 有更新', 'Desktop update available')} /> : placement === 'bottom' ? <span data-status-indicator className="size-1.5 shrink-0 rounded-full bg-mint" aria-label={t('当前实例已连接', 'Current instance connected')} /> : null;
-  return <div data-placement-entry={placement} className="relative min-w-0">
-    <div className={cn('flex items-center gap-1', compact && 'justify-center')}>
-      <Button data-account-trigger variant="ghost" className={cn('min-w-0 flex-1 justify-start gap-1.5 rounded-md px-0 text-left text-xs', placement === 'top' && 'h-10 px-0 text-xs', placement === 'bottom' ? 'h-8' : 'h-10', compact && 'flex-none justify-center')} title={signedOut ? t('登录 · 本机', 'Sign in · This Mac') : busy ? t('当前本机，正在连接 Studio', 'Current: This Mac, connecting to Studio') : `${instance}${status === 'offline' ? t(' · 已断开', ' · Disconnected') : ''}`} aria-expanded={menu}>
-        <UserRound className="size-3.5 shrink-0 text-muted" />
+  const indicator = connection === 'offline' ? <WifiOff data-status-indicator className="size-3 shrink-0 text-gold-ink" aria-label={t('当前实例已断开', 'Current instance disconnected')} /> : busy ? <RefreshCw data-status-indicator className="size-3 shrink-0 text-cyan-ink" aria-label={t('正在连接 Studio', 'Connecting to Studio')} /> : placement === 'bottom' ? <span data-status-indicator className="size-1.5 shrink-0 rounded-full bg-mint" aria-label={t('当前实例已连接', 'Current instance connected')} /> : null;
+  return <div data-placement-entry={placement} data-connection-status={connection} data-update-available={updateAvailable} data-compact={compact} className="relative min-w-0">
+    <div className={cn('flex items-center gap-1', compact && 'gap-0.5')}>
+      <Button data-account-trigger variant="ghost" className={cn('min-w-0 flex-1 justify-start gap-1.5 rounded-md px-0 text-left text-xs', placement === 'top' && 'h-10 px-0 text-xs', placement === 'bottom' ? 'h-8' : 'h-10', compact && 'flex-none justify-center')} title={signedOut ? t('登录 · 本机', 'Sign in · This Mac') : busy ? t('当前本机，正在连接 Studio', 'Current: This Mac, connecting to Studio') : `${instance}${connection === 'offline' ? t(' · 已断开', ' · Disconnected') : ''}`} aria-expanded={menu}>
+        <UserRound data-account-avatar className="size-3.5 shrink-0 text-muted" />
         {!compact && placement === 'top' && <span className="min-w-0 flex-1"><span className="block truncate text-xs">{signedOut ? t('登录或注册', 'Sign in / sign up') : instance}</span><span className="block truncate text-xs font-normal text-muted">{busy ? t('本机 → Studio · 连接中', 'This Mac → Studio · Connecting') : instance}</span></span>}
         {!compact && placement === 'bottom' && <span data-account-group className="flex min-w-0 flex-1 items-center gap-1.5"><span data-account-label className="min-w-0 truncate">{busy ? t('本机 → Studio', 'This Mac → Studio') : signedOut ? t('登录或注册', 'Sign in / sign up') : instance}</span>{indicator}<ChevronDown data-account-chevron className="size-3 shrink-0 rotate-180 text-muted" /></span>}
         {compact && indicator}
         {!compact && placement === 'top' && <>{indicator}<ChevronDown className="size-3 shrink-0 text-muted" /></>}
       </Button>
-      {!compact && placement === 'bottom' && <div className="relative shrink-0"><Button data-version-trigger aria-label={status === 'update' ? t('Desktop 有更新', 'Desktop update available') : t('本机 Desktop 版本 3.2.6rc9', 'Local Desktop version 3.2.6rc9')} variant="ghost" size="sm" className="h-8 gap-1 px-1.5 text-2xs text-muted" aria-expanded={updatePanel}>{status === 'update' ? <><Download className="size-3 text-gold-ink" /><span className="size-1.5 rounded-full bg-gold" aria-hidden="true" /></> : <span>3.2.6rc9</span>}</Button></div>}
+      {(!compact || updateAvailable) && placement === 'bottom' && <div className="relative shrink-0"><Button data-version-trigger data-update-trigger={updateAvailable || undefined} aria-label={updateAvailable ? t('Desktop 有更新', 'Desktop update available') : t('本机 Desktop 版本 3.2.6rc9', 'Local Desktop version 3.2.6rc9')} variant="ghost" size="sm" className={cn("h-8 gap-1 px-1.5 text-2xs text-muted", compact && "px-0")} aria-expanded={updatePanel}>{updateAvailable ? <><Download className="size-3 text-gold-ink" />{!compact && <span className="size-1.5 rounded-full bg-gold" aria-hidden="true" />}</> : <span>3.2.6rc9</span>}</Button></div>}
     </div>
-    {updatePanel && placement === 'bottom' && <DesktopUpdatePopover t={t} />}
+    {updateAvailable && updatePanel && placement === 'bottom' && <DesktopUpdatePopover t={t} />}
     {menu && <Account t={t} upward={placement === 'bottom'} />}
   </div>;
 }
 
 /** Proposed placement only. Shipped tree, Inbox and Apps launcher remain real. C replaces the former version row. */
-export function PlacementShell({ fixture, placement = 'bottom', status = 'signed-in', remote = true, compact = false, menu = false, updatePanel = false, page, flush = false }: {
-  fixture: DesktopInstanceFixture; placement?: InstancePlacement; status?: PlacementStatus; remote?: boolean; compact?: boolean; menu?: boolean; updatePanel?: boolean; page: ReactNode; flush?: boolean;
+export function PlacementShell({ fixture, placement = 'bottom', remote = true, compact = false, menu = false, updatePanel = false, page, flush = false }: {
+  fixture: DesktopInstanceFixture; placement?: InstancePlacement; remote?: boolean; compact?: boolean; menu?: boolean; updatePanel?: boolean; page: ReactNode; flush?: boolean;
 }) {
  const t = copy(fixture.lang);
- const entry = <AccountEntry fixture={fixture} placement={placement} status={status} remote={remote} compact={compact} menu={menu} updatePanel={false} />;
+ const entry = <AccountEntry fixture={fixture} placement={placement} remote={remote} compact={compact} menu={menu} updatePanel={false} />;
  return <div className="relative flex h-full flex-col bg-background text-foreground" lang={fixture.lang}>
    <div data-native-safe-strip className="pointer-events-none relative z-[60] h-7 shrink-0"><div className={cn('absolute inset-y-0 left-0 bg-surface', compact ? 'w-16' : 'w-(--app-sidebar-w)')} /></div>
    <div className="flex min-h-0 flex-1">
-     <aside data-placement-sidebar className={cn('relative flex shrink-0 flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] pb-4 pt-[0.625rem]', compact ? 'w-16 px-3' : 'w-(--app-sidebar-w) px-4')}>
+     <aside data-placement-sidebar className={cn('relative flex shrink-0 flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] pb-4 pt-[0.625rem]', compact ? 'w-16 pl-4 pr-2' : 'w-(--app-sidebar-w) px-4')}>
        {compact ? <div className="flex flex-1 flex-col gap-4">{placement === 'top' && entry}<Button variant="ghost" size="icon" aria-label={t('首页', 'Home')}><Home className="size-4" /></Button><Button variant="ghost" size="icon" aria-label={t('收件箱', 'Inbox')}><Inbox className="size-4" /></Button><Button variant="ghost" size="icon" aria-label={t('项目', 'Projects')}><Folder className="size-4" /></Button></div> : <div className={cn('relative flex min-h-0 flex-1 flex-col', placement === 'top' && '[&>div>div:first-child>a]:invisible')}>
          <WorkbenchSidebar />
          {placement === 'top' && <div className="absolute top-0 left-0 right-10 z-20">{entry}</div>}
        </div>}
        <div data-sidebar-footer className="relative flex shrink-0 flex-col gap-2">
          {compact ? <Button variant="outline" size="icon" aria-label={t('设置', 'Settings')}><Settings className="size-4" /></Button> : <div className="flex h-[39px] items-stretch gap-2"><AppsLauncher /><Button variant="outline" size="icon" className="h-auto w-11" aria-label={t('设置', 'Settings')}><Settings className="size-[18px] text-muted" /></Button></div>}
-         {placement === 'bottom' && <AccountEntry fixture={fixture} placement="bottom" status={status} remote={remote} compact={compact} menu={menu} updatePanel={updatePanel && !compact} />}
+         {placement === 'bottom' && <AccountEntry fixture={fixture} placement="bottom" remote={remote} compact={compact} menu={menu} updatePanel={updatePanel && !compact} />}
        </div>
      </aside>
      <main data-placement-content className={cn('relative min-w-0 flex-1 overflow-auto', !flush && 'px-10 py-8', flush && '-mt-7')}>{page}</main>
@@ -116,9 +117,7 @@ export function DesktopInstances({ fixture }: { fixture: DesktopInstanceFixture 
   const t = copy(fixture.lang), { state } = fixture;
   const remote = ['account', 'instances', 'offline', 'mini', 'updates'].includes(state);
   const workbench = ['account', 'mini', 'signed-out', 'updates'].includes(state);
-  const signedOut = ['signed-out', 'email', 'code', 'code-error', 'setup-entry'].includes(state);
-  const status: PlacementStatus = signedOut ? 'signed-out' : state === 'offline' ? 'offline' : state === 'switching' ? 'switching' : state === 'updates' ? 'update' : 'signed-in';
   const page = ['instances', 'empty', 'loading', 'list-error'].includes(state) ? <Picker fixture={fixture} /> : ['email', 'code', 'code-error'].includes(state) ? <Login fixture={fixture} /> : ['registering', 'registered', 'registration-error', 'conflict'].includes(state) ? <Registration fixture={fixture} /> : ['add', 'advanced'].includes(state) ? <Add fixture={fixture} /> : state === 'setup-entry' ? <SetupEntry t={t} /> : <Connection fixture={fixture} />;
-  if (workbench) return <div className="relative h-full"><PlacementShell fixture={fixture} status={status} remote={remote} menu={state === 'account'} updatePanel={state === 'updates'} page={<Workbench />} />{state === 'mini' && <Mini t={t} />}</div>;
-  return <div lang={fixture.lang} className="relative flex h-full flex-col bg-background text-foreground"><div aria-hidden="true" className="h-7 shrink-0 bg-surface" /><div className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm"><ArrowLeft className="size-4" />{state === 'setup-entry' ? t('返回设置', 'Back to setup') : t('返回工作台', 'Back to Workbench')}</Button></div><main className="min-h-0 flex-1 overflow-y-auto px-10 pb-5">{page}</main><footer className="shrink-0 border-t border-edge bg-surface px-4 py-2"><div className="w-56"><AccountEntry fixture={fixture} placement="bottom" status={status} remote={remote} /></div></footer></div>;
+  if (workbench) return <div className="relative h-full"><PlacementShell fixture={fixture} remote={remote} menu={state === 'account'} updatePanel={state === 'updates'} page={<Workbench />} />{state === 'mini' && <Mini t={t} />}</div>;
+  return <div lang={fixture.lang} className="relative flex h-full flex-col bg-background text-foreground"><div aria-hidden="true" className="h-7 shrink-0 bg-surface" /><div className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm"><ArrowLeft className="size-4" />{state === 'setup-entry' ? t('返回设置', 'Back to setup') : t('返回工作台', 'Back to Workbench')}</Button></div><main className="min-h-0 flex-1 overflow-y-auto px-10 pb-5">{page}</main><footer className="shrink-0 border-t border-edge bg-surface px-4 py-2"><div className="w-56"><AccountEntry fixture={fixture} placement="bottom" remote={remote} /></div></footer></div>;
 }
