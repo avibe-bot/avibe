@@ -162,6 +162,16 @@ final class DirectIrohTransport {
         }
     }
 
+    /// An accepted answer and the moment it runs out, on the clock that
+    /// never runs backwards. The deadline is data: it is compared with the
+    /// clock wherever something new would be started, committed, or
+    /// reported under the answer. The timer set for it only wakes the
+    /// transport up.
+    private struct Lease {
+        let offer: DirectRendezvousOffer
+        let deadline: TimeInterval
+    }
+
     private struct WeakStream {
         weak var stream: DirectIrohByteStream?
     }
@@ -252,9 +262,11 @@ final class DirectIrohTransport {
     private var probeTask: Task<Void, Never>?
     /// The next rendezvous request: a retry, or the refresh of a live path.
     private var fetchTimer: (any DirectIrohTimer)?
-    /// The end of the accepted answer's lifetime, counted from the moment
-    /// its request was sent. Only a newly accepted answer moves it.
-    private var expiryTimer: (any DirectIrohTimer)?
+    /// The accepted answer in force: for the dial under way, or for the
+    /// session. Only a newly accepted answer replaces it.
+    private var lease: Lease?
+    /// A wake-up at the lease's deadline. Not the authority on it.
+    private var leaseTimer: (any DirectIrohTimer)?
     private var debounceTimer: (any DirectIrohTimer)?
     private var stableTimer: (any DirectIrohTimer)?
     private var spacingTimer: (any DirectIrohTimer)?
@@ -339,6 +351,11 @@ final class DirectIrohTransport {
         self.report = report
         failures = 0
         pageRetries = 0
+        // Path generations are compared within one selection only: nothing
+        // is assumed about how the controller numbers them across
+        // selections. A tag of another selection is refused as such.
+        pathHighWater = -1
+        pathFloor = 0
         guard !isInBackground else {
             return
         }
@@ -359,6 +376,7 @@ final class DirectIrohTransport {
     /// forwarded. The path is probed: if it answers, the candidate was
     /// refused or slow and the path stays; if not, it is lost.
     func pathDidFail(for tag: DirectIrohStreamTag) {
+        reconcileLease()
         guard
             let session,
             session.isUsable,
@@ -406,6 +424,7 @@ final class DirectIrohTransport {
     }
 
     private func admit(_ tag: DirectIrohStreamTag) throws -> Admission {
+        reconcileLease()
         guard
             let session,
             session.isUsable,
@@ -428,6 +447,7 @@ final class DirectIrohTransport {
     /// every such event made the controller advance its path generation,
     /// so the tag the stream was asked under is stale.
     private func adopt(_ stream: DirectIrohByteStream, _ admitted: Admission) -> Bool {
+        reconcileLease()
         guard
             let session,
             session.id == admitted.sessionID,
@@ -488,6 +508,11 @@ final class DirectIrohTransport {
             guard let self, self.fetchStamp == token else {
                 return
             }
+            // Before the answer is read, and while this request still
+            // counts as under way: a lease the clock has passed is marked
+            // so, and an answer of the same generation then renews it
+            // through a probe.
+            self.reconcileLease()
             self.fetchStamp = nil
             self.fetchTask = nil
             self.fetchDidFinish(result, selection: selection, key: key, askedAt: askedAt)
@@ -526,11 +551,15 @@ final class DirectIrohTransport {
             }
         case .ready(let offer):
             // The instance issued the answer after the request was sent, so
-            // counting its span from then never outlasts the instance's own
-            // expiry, whatever the phone's clock says and however long the
-            // answer took to arrive.
-            let elapsed = max(0, uptime() - askedAt)
-            let remaining = TimeInterval(offer.lifetimeSeconds) - elapsed
+            // a deadline counted from then is never later than the
+            // instance's own, whatever the phone's wall clock says and
+            // however long the answer took to arrive.
+            let accepted = Lease(
+                offer: offer,
+                deadline: askedAt + TimeInterval(offer.lifetimeSeconds)
+            )
+            let now = uptime()
+            let remaining = accepted.deadline - now
             // An answer with too little left is not worth a dial, and an
             // instance that keeps sending such answers is asked no faster
             // than the retry ladder allows.
@@ -540,19 +569,21 @@ final class DirectIrohTransport {
             }
             let refresh = max(
                 timing.refreshRetrySeconds,
-                TimeInterval(offer.lifetimeSeconds) * timing.refreshFraction - elapsed
+                TimeInterval(offer.lifetimeSeconds) * timing.refreshFraction - max(0, now - askedAt)
             )
             if
                 let session,
                 session.offer.generation == offer.generation,
                 session.offer.endpointID == offer.endpointID
             {
-                // The same endpoint and addresses: the admission is
-                // extended and the path stays.
-                armExpiry(after: remaining)
+                // The same endpoint and addresses: the path stays, under
+                // the new answer's deadline.
+                lease = accepted
+                armLeaseTimer()
                 scheduleFetch(after: refresh)
                 if session.isExpired {
-                    // Renewed after it had run out: usable again once the
+                    // Renewed after the old answer had run out, whether or
+                    // not its timer had fired: usable again only once the
                     // path answers a probe.
                     session.isExpired = false
                     startProbe(.renewal)
@@ -564,8 +595,7 @@ final class DirectIrohTransport {
             // public origin until the new path answers.
             let hadSession = session != nil
             endSession()
-            startDial(offer, key: key, host: selection.host)
-            armExpiry(after: remaining)
+            startDial(under: accepted, key: key, host: selection.host)
             scheduleFetch(after: refresh)
             if hadSession {
                 emit(.lost)
@@ -573,34 +603,63 @@ final class DirectIrohTransport {
         }
     }
 
-    private func armExpiry(after seconds: TimeInterval) {
-        expiryTimer?.cancel()
-        expiryTimer = scheduler.schedule(after: seconds) { [weak self] in
-            self?.expiryTimer = nil
-            self?.answerDidExpire()
+    // MARK: The lease
+
+    private func armLeaseTimer() {
+        leaseTimer?.cancel()
+        leaseTimer = nil
+        guard let lease else {
+            return
+        }
+        leaseTimer = scheduler.schedule(after: max(0, lease.deadline - uptime())) { [weak self] in
+            guard let self else {
+                return
+            }
+            self.leaseTimer = nil
+            // The clock decides, not the timer: one that fires early only
+            // sets itself again.
+            self.reconcileLease()
+            if let lease = self.lease, self.uptime() < lease.deadline {
+                self.armLeaseTimer()
+            }
         }
     }
 
-    private func cancelExpiry() {
-        expiryTimer?.cancel()
-        expiryTimer = nil
+    private func dropLease() {
+        leaseTimer?.cancel()
+        leaseTimer = nil
+        lease = nil
     }
 
-    /// The accepted answer ran out and no newer one was accepted: every
-    /// refresh failed, or none came back in time. Nothing is opened, dialled
-    /// or probed under it any more. A live path is kept but not usable, so
-    /// what it already carries is not closed on the phone's own timing; the
-    /// instance closes the connection when the admission ends, and that is
-    /// reported as `lost`.
-    private func answerDidExpire() {
+    /// Compares the lease with the clock and, if it has run out, makes the
+    /// state say so. It runs first wherever something would be started,
+    /// committed, or reported under the lease: a stream's admission and
+    /// adoption, a probe, the end of a request, a dial, or a probe, a
+    /// network change, and every timer. So nothing is decided on a lease
+    /// the clock has passed, however late its own timer runs.
+    private func reconcileLease() {
+        guard let lease, uptime() >= lease.deadline else {
+            return
+        }
         guard let session else {
-            // Still dialling under the answer.
+            // Still dialling under it: the dial is given up.
             if dialStamp != nil {
                 cancelDial()
                 scheduleRetry()
+            } else {
+                dropLease()
             }
             return
         }
+        guard !session.isExpired else {
+            return
+        }
+        // No newer answer was accepted in time: every refresh failed, or
+        // none came back. Nothing is opened or probed on the path any more.
+        // It is kept but not usable, so what it already carries is not
+        // closed on the phone's own timing; the instance closes the
+        // connection when the admission ends, and that is reported as
+        // `lost`.
         Self.logger.info("Direct transport: the rendezvous answer ran out")
         session.isExpired = true
         cancelProbe()
@@ -608,11 +667,17 @@ final class DirectIrohTransport {
         debounceTimer = nil
         let wasUsable = session.suspend()
         raiseFloor()
-        if fetchStamp == nil, fetchTimer == nil {
-            startFetch()
-        }
+        ensureAsking()
         if wasUsable {
             emit(.verifying)
+        }
+    }
+
+    /// Makes sure the rendezvous is asked again, unless a request is under
+    /// way or already set.
+    private func ensureAsking() {
+        if fetchStamp == nil, fetchTimer == nil {
+            startFetch()
         }
     }
 
@@ -651,8 +716,12 @@ final class DirectIrohTransport {
     private func scheduleFetch(after seconds: TimeInterval) {
         fetchTimer?.cancel()
         fetchTimer = scheduler.schedule(after: seconds) { [weak self] in
-            self?.fetchTimer = nil
-            self?.startFetch()
+            guard let self else {
+                return
+            }
+            self.fetchTimer = nil
+            self.reconcileLease()
+            self.ensureAsking()
         }
     }
 
@@ -664,8 +733,11 @@ final class DirectIrohTransport {
 
     // MARK: Dial
 
-    private func startDial(_ offer: DirectRendezvousOffer, key: DirectIrohLaunchKey, host: String) {
+    private func startDial(under accepted: Lease, key: DirectIrohLaunchKey, host: String) {
         cancelDial()
+        lease = accepted
+        armLeaseTimer()
+        let offer = accepted.offer
         stamp += 1
         let token = stamp
         dialStamp = token
@@ -679,8 +751,12 @@ final class DirectIrohTransport {
                 engine: engine,
                 timing: timing
             )
+            // A dial that ends after its lease ran out is given up here,
+            // before its result can be taken.
+            self?.reconcileLease()
             guard let self, self.dialStamp == token else {
-                // Deselected, replaced, or in the background meanwhile.
+                // Deselected, replaced, run out, or in the background
+                // meanwhile.
                 if case .success(let link) = outcome {
                     link.close()
                 }
@@ -764,7 +840,7 @@ final class DirectIrohTransport {
     private func dialDidFinish(_ outcome: Result<Link, Error>, offer: DirectRendezvousOffer) {
         guard case .success(let link) = outcome else {
             Self.logger.info("Direct transport: no path to the instance")
-            cancelExpiry()
+            dropLease()
             scheduleRetry()
             return
         }
@@ -787,7 +863,7 @@ final class DirectIrohTransport {
         dialStamp = nil
         if session == nil {
             // The answer that was being dialled is given up with its dial.
-            cancelExpiry()
+            dropLease()
         }
     }
 
@@ -827,6 +903,7 @@ final class DirectIrohTransport {
 
     private func startProbe(_ reason: ProbeReason) {
         // Nothing is probed under an answer that has run out.
+        reconcileLease()
         guard let session, !session.isExpired, let selection else {
             return
         }
@@ -845,6 +922,8 @@ final class DirectIrohTransport {
             } catch {
                 passed = false
             }
+            // A probe that ends after the lease ran out reports nothing.
+            self?.reconcileLease()
             guard let self, self.probeStamp == token else {
                 return
             }
@@ -903,7 +982,7 @@ final class DirectIrohTransport {
         guard let session else {
             return
         }
-        cancelExpiry()
+        dropLease()
         self.session = nil
         raiseFloor()
         session.cancelStreams()
@@ -936,6 +1015,7 @@ final class DirectIrohTransport {
         guard selection != nil, !isInBackground else {
             return
         }
+        reconcileLease()
         debounceTimer?.cancel()
         if let session {
             guard !session.isExpired else {

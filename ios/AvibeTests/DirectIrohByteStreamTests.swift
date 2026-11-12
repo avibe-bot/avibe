@@ -250,7 +250,8 @@ final class DirectIrohByteStreamTests: XCTestCase {
         gate.resolve(())
         try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(log.count(of: "reset"), 0)
-        XCTAssertGreaterThanOrEqual(log.count(of: "finish"), 1)
+        // Handed to the binding once, and by nobody else afterwards.
+        XCTAssertEqual(log.count(of: "finish"), 1)
 
         // The same when the stream is cancelled the moment `closeWrite`
         // returns, and when it is then released.
@@ -264,6 +265,234 @@ final class DirectIrohByteStreamTests: XCTestCase {
         try await eventually("the second receiving half is stopped") { log.count(of: "stop") == 2 }
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(log.count(of: "reset"), 0)
+    }
+
+    func testAFinishThatFailsAbandonsTheSendingHalfExactlyOnce() async throws {
+        // Without a cancel: the caller gets the binding's error, and the
+        // half, which nothing says the failure closed, is reset.
+        do {
+            let log = DirectIrohEventLog()
+            let fake = DirectIrohFakeStream(log: log)
+            let stream = DirectIrohByteStream(fake.halves)
+            try await stream.write(Data("abc".utf8))
+            let gate = fake.send.holdFinish()
+            let closing = Task<Void, Error> {
+                try await stream.closeWrite()
+            }
+            try await eventually("the finish reaches the binding") { log.count(of: "finish") == 1 }
+            gate.fail(DirectIrohTestError.scripted)
+            let outcome = await directIrohOutcome(of: closing)
+            XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohTestError, .scripted)
+            try await eventually("the sending half is reset") { log.count(of: "reset") == 1 }
+
+            // The half is over: nothing more reaches the binding for it,
+            // and a later cancel does not reset it a second time.
+            await assertThrows(.cancelled) { try await stream.closeWrite() }
+            await assertThrows(.cancelled) { try await stream.write(Data("x".utf8)) }
+            stream.cancel()
+            try await eventually("the receiving half is stopped") { log.count(of: "stop") == 1 }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(log.count(of: "reset"), 1)
+            XCTAssertEqual(log.count(of: "finish"), 1)
+            XCTAssertEqual(log.count(of: "write"), 1)
+        }
+        // With a cancel while the finish is in the binding: the cancel
+        // leaves the half to that call, and the call resets it when its
+        // finish fails.
+        do {
+            let log = DirectIrohEventLog()
+            let fake = DirectIrohFakeStream(log: log)
+            let stream = DirectIrohByteStream(fake.halves)
+            let gate = fake.send.holdFinish()
+            let closing = Task<Void, Error> {
+                try await stream.closeWrite()
+            }
+            try await eventually("the finish reaches the binding") { log.count(of: "finish") == 1 }
+            stream.cancel()
+            let outcome = await directIrohOutcome(of: closing)
+            XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .cancelled)
+            try await eventually("the receiving half is stopped") { log.count(of: "stop") == 1 }
+            XCTAssertEqual(log.count(of: "reset"), 0)
+            gate.fail(DirectIrohTestError.scripted)
+            try await eventually("the sending half is reset by its own call") {
+                log.count(of: "reset") == 1
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(log.count(of: "reset"), 1)
+            XCTAssertEqual(log.count(of: "finish"), 1)
+        }
+    }
+
+    func testTheSendingHalfTakesNothingAfterCloseWriteAndIsFinishedOnce() async throws {
+        let log = DirectIrohEventLog()
+        let fake = DirectIrohFakeStream(log: log)
+        let stream = DirectIrohByteStream(fake.halves)
+        try await stream.write(Data("abc".utf8))
+        let gate = fake.send.holdFinish()
+        let closing = Task<Void, Error> {
+            try await stream.closeWrite()
+        }
+        try await eventually("the finish reaches the binding") { log.count(of: "finish") == 1 }
+
+        // While the finish is in the binding.
+        await assertThrows(.closed) { try await stream.write(Data("late".utf8)) }
+        await assertThrows(.busy) { try await stream.closeWrite() }
+
+        gate.resolve(())
+        let outcome = await directIrohOutcome(of: closing)
+        XCTAssertNotNil(outcome)
+        XCTAssertNil(Self.failure(of: outcome))
+
+        // After it returned: closing again is nothing, and a write is
+        // refused. Neither reaches the binding.
+        try await stream.closeWrite()
+        await assertThrows(.closed) { try await stream.write(Data("late".utf8)) }
+        await assertThrows(.closed) { try await stream.write(Data()) }
+        XCTAssertEqual(log.count(of: "finish"), 1)
+        XCTAssertEqual(log.count(of: "write"), 1)
+        XCTAssertEqual(fake.send.written, Data("abc".utf8))
+    }
+
+    func testOneReadAndOneWriteAtATime() async throws {
+        let log = DirectIrohEventLog()
+        let fake = DirectIrohFakeStream(log: log)
+        let stream = DirectIrohByteStream(fake.halves)
+        let gate = fake.send.holdWrites()
+        let pendingRead = fake.receive.enqueuePending()
+
+        let writing = Task<Void, Error> {
+            try await stream.write(Data("abc".utf8))
+        }
+        let reading = Task<Data?, Error> {
+            try await stream.read(maxLength: 16)
+        }
+        try await eventually("both calls reach the binding") {
+            log.count(of: "write") == 1 && log.count(of: "read") == 1
+        }
+
+        // A second call of either kind, and a close during a write, are
+        // refused without reaching the binding. The stream goes on.
+        await assertThrows(.busy) { try await stream.write(Data("x".utf8)) }
+        await assertThrows(.busy) { try await stream.closeWrite() }
+        await assertThrows(.busy) { _ = try await stream.read(maxLength: 16) }
+
+        gate.resolve(())
+        pendingRead.resolve(Data("hello".utf8))
+        let written = await directIrohOutcome(of: writing)
+        XCTAssertNil(Self.failure(of: written))
+        guard case .success(let bytes)? = await directIrohOutcome(of: reading) else {
+            return XCTFail("The read failed.")
+        }
+        XCTAssertEqual(bytes, Data("hello".utf8))
+        try await stream.closeWrite()
+        XCTAssertEqual(log.count(of: "write"), 1)
+        XCTAssertEqual(log.count(of: "read"), 1)
+        XCTAssertEqual(log.count(of: "finish"), 1)
+    }
+
+    func testACleanEndAndACancelAreOneDecision() async throws {
+        // The cancel first: the read does not report a clean end, even
+        // though the binding then returns one.
+        do {
+            let log = DirectIrohEventLog()
+            let fake = DirectIrohFakeStream(log: log)
+            let stream = DirectIrohByteStream(fake.halves)
+            let pendingRead = fake.receive.enqueuePending()
+            let reading = Task<Data?, Error> {
+                try await stream.read(maxLength: 16)
+            }
+            try await eventually("the read reaches the binding") { log.count(of: "read") == 1 }
+
+            stream.cancel()
+            pendingRead.resolve(Data())
+            let outcome = await directIrohOutcome(of: reading)
+            XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .cancelled)
+            try await eventually("the receiving half is stopped") { log.count(of: "stop") == 1 }
+            await assertThrows(.cancelled) { _ = try await stream.read(maxLength: 16) }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(log.count(of: "read"), 1)
+            XCTAssertEqual(log.count(of: "stop"), 1)
+        }
+        // The end first: it is the stream's answer from then on, the
+        // binding is not asked again, and a cancel does not stop the half.
+        do {
+            let log = DirectIrohEventLog()
+            let fake = DirectIrohFakeStream(log: log)
+            let stream = DirectIrohByteStream(fake.halves)
+            fake.receive.enqueue(Data())
+            let first = try await stream.read(maxLength: 16)
+            let second = try await stream.read(maxLength: 16)
+            XCTAssertNil(first)
+            XCTAssertNil(second)
+            XCTAssertEqual(log.count(of: "read"), 1)
+
+            stream.cancel()
+            try await eventually("the sending half is reset") { log.count(of: "reset") == 1 }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(log.count(of: "stop"), 0)
+            XCTAssertEqual(log.count(of: "read"), 1)
+        }
+    }
+
+    func testAReadOrAWriteThatFailsAbandonsItsHalfAndLeavesTheOther() async throws {
+        let log = DirectIrohEventLog()
+        let fake = DirectIrohFakeStream(log: log)
+        let stream = DirectIrohByteStream(fake.halves)
+
+        // The receiving half fails: it is stopped once; sending goes on.
+        let pendingRead = fake.receive.enqueuePending()
+        let reading = Task<Data?, Error> {
+            try await stream.read(maxLength: 16)
+        }
+        try await eventually("the read reaches the binding") { log.count(of: "read") == 1 }
+        pendingRead.fail(DirectIrohTestError.scripted)
+        let readOutcome = await directIrohOutcome(of: reading)
+        XCTAssertEqual(Self.failure(of: readOutcome) as? DirectIrohTestError, .scripted)
+        try await eventually("the receiving half is stopped") { log.count(of: "stop") == 1 }
+        await assertThrows(.cancelled) { _ = try await stream.read(maxLength: 16) }
+        try await stream.write(Data("abc".utf8))
+        XCTAssertEqual(log.count(of: "reset"), 0)
+
+        // The sending half fails: it is reset once.
+        let gate = fake.send.holdWrites()
+        let writing = Task<Void, Error> {
+            try await stream.write(Data("def".utf8))
+        }
+        try await eventually("the write reaches the binding") { log.count(of: "write") == 2 }
+        gate.fail(DirectIrohTestError.scripted)
+        let writeOutcome = await directIrohOutcome(of: writing)
+        XCTAssertEqual(Self.failure(of: writeOutcome) as? DirectIrohTestError, .scripted)
+        try await eventually("the sending half is reset") { log.count(of: "reset") == 1 }
+
+        stream.cancel()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(log.count(of: "reset"), 1)
+        XCTAssertEqual(log.count(of: "stop"), 1)
+        XCTAssertEqual(log.count(of: "read"), 1)
+    }
+
+    func testACallerThatIsAlreadyCancelledHandsNothingToTheBinding() async throws {
+        let log = DirectIrohEventLog()
+        let fake = DirectIrohFakeStream(log: log)
+        let stream = DirectIrohByteStream(fake.halves)
+        let entered = DirectIrohPending<Void>()
+        let proceed = DirectIrohPending<Void>()
+        let closing = Task<Void, Error> {
+            entered.resolve(())
+            try? await proceed.wait()
+            try await stream.closeWrite()
+        }
+        try await entered.wait()
+        closing.cancel()
+        proceed.resolve(())
+
+        let outcome = await directIrohOutcome(of: closing)
+        XCTAssertTrue(Self.failure(of: outcome) is CancellationError)
+        // Nothing was handed over, so the stream is abandoned whole.
+        try await eventually("both halves are abandoned") {
+            log.count(of: "reset") == 1 && log.count(of: "stop") == 1
+        }
+        XCTAssertEqual(log.count(of: "finish"), 0)
     }
 
     func testAStreamReleasedWithoutCancelIsAbandonedNotFinished() async throws {
@@ -299,11 +528,20 @@ final class DirectIrohByteStreamTests: XCTestCase {
         line: UInt = #line,
         _ operation: () async throws -> Void
     ) async {
+        await assertThrows(.cancelled, file: file, line: line, operation)
+    }
+
+    private func assertThrows(
+        _ expected: DirectIrohError,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ operation: () async throws -> Void
+    ) async {
         do {
             try await operation()
-            XCTFail("The stream still works.", file: file, line: line)
+            XCTFail("Nothing was thrown.", file: file, line: line)
         } catch {
-            XCTAssertEqual(error as? DirectIrohError, .cancelled, file: file, line: line)
+            XCTAssertEqual(error as? DirectIrohError, expected, file: file, line: line)
         }
     }
 

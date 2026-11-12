@@ -109,8 +109,9 @@ final class DirectRendezvousFetcherTests: XCTestCase {
         await assertFetch(in: webView, instance, failsWith: .controlled)
         XCTAssertEqual(instance.rendezvousRequests.count, 1)
 
-        // Takes control between the look and the request, and is gone
-        // again when it is looked for: the change itself is remembered.
+        // Takes control between the look and the request. The stand-in
+        // then lets go again, which a real worker does not do: it shows
+        // that the change itself is remembered, not only the last look.
         try await standInServiceWorkers(in: webView, takingControl: "atFetch")
         await assertFetch(in: webView, instance, failsWith: .controlled)
 

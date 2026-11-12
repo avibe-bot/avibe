@@ -12,6 +12,10 @@ enum DirectIrohError: Error, Equatable {
     case timedOut
     /// The stream was cancelled, or an operation on it was abandoned.
     case cancelled
+    /// A write after `closeWrite`: the sending half takes no more bytes.
+    case closed
+    /// A second read, write, or `closeWrite` while one is in progress.
+    case busy
     /// The tags a stream was asked under are no longer current, or no path
     /// is usable for them.
     case stale
@@ -104,69 +108,72 @@ protocol DirectIrohReceiveHalf: AnyObject, Sendable {
 
 // MARK: Calls that cannot be cancelled
 
-/// One call of an operation that may ignore task cancellation. The caller
-/// gets the operation's result, or an error as soon as its task is
-/// cancelled or `fail` is called; the operation is then left to finish by
-/// itself, and a value it still produces goes to `discard`.
+/// One call of an operation that may ignore task cancellation.
+///
+/// `begin` starts the operation, and from then on the operation runs to its
+/// end whatever happens to its caller: the task `begin` creates owns it.
+/// `wait` gives the caller the result, or an error as soon as the caller's
+/// task is cancelled or `fail` is called. Exactly one outcome reaches the
+/// caller. A value the operation produces after the caller got an error
+/// goes to `discard`; an error it produces then goes nowhere.
 final class DirectIrohCall<Value: Sendable>: @unchecked Sendable {
     private enum State {
-        case idle
+        /// Begun, or not yet: no result and no waiting caller.
+        case running
+        /// The result arrived before the caller asked for it.
+        case finished(Result<Value, Error>)
         case waiting(CheckedContinuation<Value, Error>)
+        /// `fail` was called before the caller asked.
+        case failed(Error)
+        /// The caller has its outcome.
         case done
     }
 
     private let lock = NSLock()
-    private var state = State.idle
-    private var earlyFailure: Error?
+    private var state = State.running
+    private var discard: @Sendable (Value) -> Void = { _ in }
 
-    /// Ends the call with `error` unless it already ended. Before `run`,
-    /// it makes `run` throw without starting the operation.
-    func fail(_ error: Error) {
-        let continuation: CheckedContinuation<Value, Error>? = lock.withLock {
-            switch state {
-            case .idle:
-                if earlyFailure == nil {
-                    earlyFailure = error
-                }
-                return nil
-            case .waiting(let waiting):
-                state = .done
-                return waiting
-            case .done:
-                return nil
-            }
-        }
-        continuation?.resume(throwing: error)
-    }
-
-    func run(
+    /// Starts `operation`. Call it once.
+    func begin(
         discard: @escaping @Sendable (Value) -> Void = { _ in },
         _ operation: @escaping @Sendable () async throws -> Value
-    ) async throws -> Value {
+    ) {
+        lock.withLock {
+            self.discard = discard
+        }
+        Task {
+            let result: Result<Value, Error>
+            do {
+                result = .success(try await operation())
+            } catch {
+                result = .failure(error)
+            }
+            self.settle(result)
+        }
+    }
+
+    /// The operation's result, or the error of whichever came first: `fail`,
+    /// or the cancellation of the calling task. Call it once.
+    func wait() async throws -> Value {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Value, Error>) in
-                let early: Error? = self.lock.withLock {
-                    if let failure = self.earlyFailure {
+                let ready: Result<Value, Error>? = self.lock.withLock {
+                    switch self.state {
+                    case .running:
+                        self.state = .waiting(continuation)
+                        return nil
+                    case .finished(let result):
                         self.state = .done
-                        return failure
+                        return result
+                    case .failed(let error):
+                        self.state = .done
+                        return .failure(error)
+                    case .waiting, .done:
+                        return .failure(DirectIrohError.cancelled)
                     }
-                    self.state = .waiting(continuation)
-                    return nil
                 }
-                if let early {
-                    continuation.resume(throwing: early)
-                    return
-                }
-                Task {
-                    let result: Result<Value, Error>
-                    do {
-                        result = .success(try await operation())
-                    } catch {
-                        result = .failure(error)
-                    }
-                    if !self.settle(result), case .success(let late) = result {
-                        discard(late)
-                    }
+                if let ready {
+                    continuation.resume(with: ready)
                 }
             }
         } onCancel: {
@@ -174,20 +181,63 @@ final class DirectIrohCall<Value: Sendable>: @unchecked Sendable {
         }
     }
 
-    /// `false` when the caller already left: the result came too late.
-    private func settle(_ result: Result<Value, Error>) -> Bool {
-        let continuation: CheckedContinuation<Value, Error>? = lock.withLock {
-            guard case .waiting(let waiting) = state else {
-                return nil
+    /// Ends the caller's wait with `error`, unless the caller already has
+    /// its outcome. The operation is not touched.
+    func fail(_ error: Error) {
+        let effect: Effect = lock.withLock {
+            switch state {
+            case .running:
+                state = .failed(error)
+                return .none
+            case .finished(let result):
+                // The result was there, and nobody will take it now.
+                state = .failed(error)
+                return .discard(result)
+            case .waiting(let waiting):
+                state = .done
+                return .resume(waiting, .failure(error))
+            case .failed, .done:
+                return .none
             }
-            state = .done
-            return waiting
         }
-        guard let continuation else {
-            return false
+        perform(effect)
+    }
+
+    private enum Effect {
+        case none
+        case resume(CheckedContinuation<Value, Error>, Result<Value, Error>)
+        case discard(Result<Value, Error>)
+    }
+
+    private func settle(_ result: Result<Value, Error>) {
+        let effect: Effect = lock.withLock {
+            switch state {
+            case .running:
+                state = .finished(result)
+                return .none
+            case .waiting(let waiting):
+                state = .done
+                return .resume(waiting, result)
+            case .finished, .failed, .done:
+                // The caller already left: the result came too late.
+                return .discard(result)
+            }
         }
-        continuation.resume(with: result)
-        return true
+        perform(effect)
+    }
+
+    private func perform(_ effect: Effect) {
+        switch effect {
+        case .none:
+            break
+        case .resume(let continuation, let result):
+            continuation.resume(with: result)
+        case .discard(let result):
+            if case .success(let value) = result {
+                let discard = lock.withLock { self.discard }
+                discard(value)
+            }
+        }
     }
 }
 
@@ -198,7 +248,10 @@ func directIrohCall<Value: Sendable>(
     discard: @escaping @Sendable (Value) -> Void = { _ in },
     _ operation: @escaping @Sendable () async throws -> Value
 ) async throws -> Value {
-    try await DirectIrohCall<Value>().run(discard: discard, operation)
+    try Task.checkCancellation()
+    let call = DirectIrohCall<Value>()
+    call.begin(discard: discard, operation)
+    return try await call.wait()
 }
 
 /// Runs `operation` with a deadline. The operation must end promptly when

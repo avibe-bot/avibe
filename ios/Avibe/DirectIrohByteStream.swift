@@ -6,46 +6,77 @@ import Foundation
 ///
 /// The binding's stream calls cannot be cancelled, and each half holds a
 /// lock across its own awaits, so `reset` and `stop` cannot interrupt a
-/// write or a read in progress (see `DirectIrohEngine.swift`). This type is
-/// what makes the stream prompt anyway:
+/// write or a read in progress (see `DirectIrohEngine.swift`). This type
+/// owns each half's state, and every change of it happens under one lock:
 ///
-/// - `cancel()`, and the cancellation of a caller's task, end every call in
-///   progress at once. The binding's own call is left to finish by itself,
-///   and bytes it still produces are dropped.
-/// - A call that was abandoned leaves the stream cancelled: bytes it was
-///   reading or writing are unaccounted for, so the stream is never used
-///   again.
-/// - Cancelling asks the binding to reset the sending half and to stop the
-///   receiving half. Each request takes effect once that half's call in
-///   progress has ended: when the instance reacts to the other half, when
-///   the transport accepts or delivers bytes, or when the connection closes.
+/// - **A binding call that was started runs to its end and records its own
+///   outcome.** Starting it and recording that it runs are one step; its
+///   completion and `cancel()` take the same lock, so one of them comes
+///   first and the other sees it.
+/// - **`cancel()`, and the cancellation of a caller's task, end every call
+///   in progress at once** for the caller. If `cancel()` came first, the
+///   call's result is not returned, whatever it was: a read does not
+///   report bytes or a clean end from a cancelled stream.
+/// - **A half that ended cleanly is left alone.** After the instance's end
+///   of stream the receiving half is never stopped. From the step in which
+///   `closeWrite` hands `finish` to the binding, the sending half is never
+///   reset by `cancel()`: the bytes written before are still to be
+///   delivered. If that `finish` fails, the call that made it resets the
+///   half.
+/// - **A half that did not end cleanly is abandoned exactly once:** the
+///   sending half reset, the receiving half stopped. Each request takes
+///   effect once that half's call in progress has ended in the binding:
+///   when the instance reacts to the other half, when the transport
+///   accepts or delivers bytes, or when the connection closes.
 ///
-/// One read and one write may be in progress at a time, as in a relay.
+/// One read and one write may be in progress at a time, as in a relay. A
+/// second one, a write after `closeWrite`, and a second `closeWrite` while
+/// the first is in progress are refused without reaching the binding.
 final class DirectIrohByteStream: @unchecked Sendable {
     /// The most bytes asked of the binding in one read: it allocates the
     /// whole limit for every call.
     static let maxReadBytes = 64 * 1024
 
+    private enum SendState {
+        case open
+        /// A `writeAll` is in the binding.
+        case writing
+        /// `finish` was handed to the binding. The call that did it owns
+        /// the half until it records `finished` or `abandoned`.
+        case finishing
+        /// Finished cleanly. No more binding calls; never reset.
+        case finished
+        /// Reset, or about to be: by `cancel()`, on release, or after a
+        /// write or a `finish` that failed.
+        case abandoned
+    }
+
+    private enum ReceiveState {
+        case open
+        /// A `read` is in the binding.
+        case reading
+        /// The instance finished sending. No more binding calls; never
+        /// stopped.
+        case ended
+        /// Stopped, or about to be: by `cancel()`, on release, or after a
+        /// read that failed.
+        case abandoned
+    }
+
+    /// What a call that reached the binding found when it came back.
+    private enum Completion<Value> {
+        case value(Value)
+        case failure(Error)
+    }
+
     private let send: any DirectIrohSendHalf
     private let receive: any DirectIrohReceiveHalf
     private let lock = NSLock()
     private var isCancelled = false
-    /// `closeWrite` was asked for and its `finish` handed to the binding.
-    /// From then on the sending half is never reset: what was written is
-    /// still to be delivered, and `finish` does not wait for that. It is
-    /// set in the same step that registers the call, so no `cancel()` can
-    /// fall between a `finish` that completed and its record.
-    private var didFinishSending = false
-    /// The instance finished sending: nothing is left to stop.
-    private var didReceiveEnd = false
+    private var sendState = SendState.open
+    private var receiveState = ReceiveState.open
     private var lastCall = 0
     private var calls: [Int: (Error) -> Void] = [:]
-
-    private struct Cancellation {
-        let fails: [(Error) -> Void]
-        let resetSend: Bool
-        let stopReceive: Bool
-    }
 
     init(_ halves: DirectIrohStreamHalves) {
         send = halves.send
@@ -53,14 +84,15 @@ final class DirectIrohByteStream: @unchecked Sendable {
     }
 
     deinit {
-        // Released without `cancel()`: a half that was left open is
+        // Released without `cancel()`. No call is in progress, or the
+        // stream would still be held: a half that is still open is
         // abandoned, not finished as if its bytes were complete.
         guard !isCancelled else {
             return
         }
-        Self.abort(
-            send: didFinishSending ? nil : send,
-            receive: didReceiveEnd ? nil : receive
+        Self.abandon(
+            send: sendState == .open ? send : nil,
+            receive: receiveState == .open ? receive : nil
         )
     }
 
@@ -69,93 +101,169 @@ final class DirectIrohByteStream: @unchecked Sendable {
     func read(maxLength: Int) async throws -> Data? {
         let receive = receive
         let limit = min(max(maxLength, 1), Self.maxReadBytes)
-        let data = try await perform {
-            try await receive.read(sizeLimit: limit)
-        }
-        guard !data.isEmpty else {
-            lock.withLock {
-                didReceiveEnd = true
+        return try await perform(
+            start: { () throws -> Start<Data?> in
+                switch self.receiveState {
+                case .open:
+                    self.receiveState = .reading
+                    return .call
+                case .reading:
+                    throw DirectIrohError.busy
+                case .ended:
+                    // Settled from the recorded end: the binding is not
+                    // asked again.
+                    return .settled(nil)
+                case .abandoned:
+                    throw DirectIrohError.cancelled
+                }
+            },
+            call: { () async throws -> Data in
+                try await receive.read(sizeLimit: limit)
+            },
+            finish: { (completion: Completion<Data>) throws -> Data? in
+                guard self.receiveState == .reading else {
+                    // `cancel()` came first and stopped the half: whatever
+                    // the binding returned, a clean end included, is not
+                    // this read's answer.
+                    throw DirectIrohError.cancelled
+                }
+                switch completion {
+                case .value(let data):
+                    guard !data.isEmpty else {
+                        self.receiveState = .ended
+                        return nil
+                    }
+                    self.receiveState = .open
+                    return data
+                case .failure(let error):
+                    self.receiveState = .abandoned
+                    Self.abandon(send: nil, receive: receive)
+                    throw error
+                }
             }
-            return nil
-        }
-        return data
+        )
     }
 
     /// Returns once the transport has accepted `data`. Not returning is the
-    /// backpressure.
+    /// backpressure. Throws `closed` after `closeWrite`.
     func write(_ data: Data) async throws {
         let send = send
-        try await perform {
-            if !data.isEmpty {
+        try await perform(
+            start: { () throws -> Start<Void> in
+                switch self.sendState {
+                case .open:
+                    guard !data.isEmpty else {
+                        return .settled(())
+                    }
+                    self.sendState = .writing
+                    return .call
+                case .writing:
+                    throw DirectIrohError.busy
+                case .finishing, .finished:
+                    throw DirectIrohError.closed
+                case .abandoned:
+                    throw DirectIrohError.cancelled
+                }
+            },
+            call: { () async throws -> Void in
                 try await send.writeAll(data)
+            },
+            finish: { (completion: Completion<Void>) throws -> Void in
+                guard self.sendState == .writing else {
+                    // `cancel()` came first and reset the half.
+                    throw DirectIrohError.cancelled
+                }
+                switch completion {
+                case .value:
+                    self.sendState = .open
+                case .failure(let error):
+                    self.sendState = .abandoned
+                    Self.abandon(send: send, receive: nil)
+                    throw error
+                }
             }
-        }
+        )
     }
 
-    /// This side has finished sending. Reads continue. Once this has
-    /// started, a `cancel()` no longer resets the sending half, even if it
-    /// ends this call first: the binding's `finish` still completes, and
-    /// the bytes written before it are delivered.
+    /// This side has finished sending. Reads continue. When this returns,
+    /// the sending half is finished and is never reset afterwards. Calling
+    /// it again then does nothing.
     func closeWrite() async throws {
         let send = send
-        var handedOver = false
-        do {
-            try await perform(
-                marking: {
-                    self.didFinishSending = true
-                    handedOver = true
-                },
-                {
-                    try await send.finish()
+        try await perform(
+            start: { () throws -> Start<Void> in
+                switch self.sendState {
+                case .open:
+                    self.sendState = .finishing
+                    return .call
+                case .writing, .finishing:
+                    throw DirectIrohError.busy
+                case .finished:
+                    return .settled(())
+                case .abandoned:
+                    throw DirectIrohError.cancelled
                 }
-            )
-        } catch {
-            if handedOver, error is CancellationError || (error as? DirectIrohError) == .cancelled {
-                // The call was registered and then ended without its
-                // result, possibly before the binding's `finish` was
-                // started. Finishing again is harmless: on a half that is
-                // already finished it fails.
-                Task {
-                    try? await send.finish()
+            },
+            call: { () async throws -> Void in
+                try await send.finish()
+            },
+            finish: { (completion: Completion<Void>) throws -> Void in
+                // `cancel()` leaves a half that is finishing to this call,
+                // so the state is still `finishing` here either way.
+                switch completion {
+                case .value:
+                    self.sendState = .finished
+                case .failure(let error):
+                    // Nothing says a `finish` that failed closed the half.
+                    self.sendState = .abandoned
+                    Self.abandon(send: send, receive: nil)
+                    throw error
                 }
             }
-            throw error
-        }
+        )
     }
 
     /// Ends both directions at once. A `read` or `write` in progress throws.
     func cancel() {
-        let pending: Cancellation? = lock.withLock {
+        let ended: [(Error) -> Void]? = lock.withLock {
             guard !isCancelled else {
                 return nil
             }
             isCancelled = true
-            let fails = Array(calls.values)
+            switch sendState {
+            case .open, .writing:
+                sendState = .abandoned
+                Self.abandon(send: send, receive: nil)
+            case .finishing, .finished, .abandoned:
+                // Finishing: the call that handed `finish` over still owns
+                // the half and records how it ended.
+                break
+            }
+            switch receiveState {
+            case .open, .reading:
+                receiveState = .abandoned
+                Self.abandon(send: nil, receive: receive)
+            case .ended, .abandoned:
+                break
+            }
+            let pending = Array(calls.values)
             calls.removeAll()
-            return Cancellation(
-                fails: fails,
-                resetSend: !didFinishSending,
-                stopReceive: !didReceiveEnd
-            )
+            return pending
         }
-        guard let pending else {
-            return
-        }
-        for fail in pending.fails {
+        for fail in ended ?? [] {
             fail(DirectIrohError.cancelled)
         }
-        Self.abort(
-            send: pending.resetSend ? send : nil,
-            receive: pending.stopReceive ? receive : nil
-        )
     }
 
     /// Abandons a stream nobody will use: one that opened too late.
     static func abort(_ halves: DirectIrohStreamHalves) {
-        abort(send: halves.send, receive: halves.receive)
+        abandon(send: halves.send, receive: halves.receive)
     }
 
-    private static func abort(
+    /// Asks the binding to reset a sending half and to stop a receiving
+    /// half. Each request is made once for a half, by whoever moved it to
+    /// `abandoned`.
+    private static func abandon(
         send: (any DirectIrohSendHalf)?,
         receive: (any DirectIrohReceiveHalf)?
     ) {
@@ -171,45 +279,77 @@ final class DirectIrohByteStream: @unchecked Sendable {
         }
     }
 
-    private func perform<Value: Sendable>(
-        _ operation: @escaping @Sendable () async throws -> Value
-    ) async throws -> Value {
-        try await perform(marking: nil, operation)
+    private enum Start<Value> {
+        /// The binding is called.
+        case call
+        /// The answer is already known: the binding is not called.
+        case settled(Value)
     }
 
-    /// Runs one binding call. `mark` runs under the stream's lock in the
-    /// step that registers the call, and only if the stream is not
-    /// cancelled: a state change it makes and the call's start are one
-    /// step for `cancel()`.
-    private func perform<Value: Sendable>(
-        marking mark: (() -> Void)?,
-        _ operation: @escaping @Sendable () async throws -> Value
+    /// Runs one operation of a half.
+    ///
+    /// `start` and `finish` run under the stream's lock. `start` decides
+    /// from the half's state whether the binding is called, and records
+    /// that it is; a stream that is already cancelled never gets that far.
+    /// If the binding is called, the call runs to its end even if its
+    /// caller leaves, and `finish` then records what the half became and
+    /// what the caller gets. When `cancel()` came first, `finish` still
+    /// records the half's state, and the caller gets `cancelled` instead.
+    private func perform<Raw: Sendable, Value: Sendable>(
+        start: () throws -> Start<Value>,
+        call bindingCall: @escaping @Sendable () async throws -> Raw,
+        finish: @escaping @Sendable (Completion<Raw>) throws -> Value
     ) async throws -> Value {
+        if Task.isCancelled {
+            // The caller is gone before anything started.
+            cancel()
+            throw CancellationError()
+        }
         let call = DirectIrohCall<Value>()
-        let registered: Int? = lock.withLock {
+        let started: Start<Value> = try lock.withLock {
             guard !isCancelled else {
-                return nil
+                throw DirectIrohError.cancelled
             }
-            mark?()
-            lastCall += 1
-            calls[lastCall] = { error in
-                call.fail(error)
+            let decision = try start()
+            if case .call = decision {
+                lastCall += 1
+                let id = lastCall
+                calls[id] = { error in
+                    call.fail(error)
+                }
+                // Started in the step that recorded it: the half is never
+                // left in a state no call will settle.
+                call.begin {
+                    let completion: Completion<Raw>
+                    do {
+                        completion = .value(try await bindingCall())
+                    } catch {
+                        completion = .failure(error)
+                    }
+                    let outcome: Value = try self.lock.withLock {
+                        self.calls[id] = nil
+                        // Records what the half became, whoever came
+                        // first. If it was `cancel()`, the caller gets
+                        // `cancelled`, never this result.
+                        let value = try finish(completion)
+                        guard !self.isCancelled else {
+                            throw DirectIrohError.cancelled
+                        }
+                        return value
+                    }
+                    return outcome
+                }
             }
-            return lastCall
+            return decision
         }
-        guard let id = registered else {
-            throw DirectIrohError.cancelled
-        }
-        defer {
-            lock.withLock {
-                calls[id] = nil
-            }
+        if case .settled(let value) = started {
+            return value
         }
         do {
-            return try await call.run(operation)
+            return try await call.wait()
         } catch let error as CancellationError {
-            // The caller's task was cancelled and the binding's call
-            // abandoned in the middle of its bytes.
+            // The caller's task was cancelled and the binding's call left
+            // in the middle of its bytes: the stream is over.
             cancel()
             throw error
         }

@@ -547,6 +547,7 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
 
         // The answer runs out: new connections leave the path at once.
+        harness.clock.now += 300
         XCTAssertTrue(harness.scheduler.fire(300))
         XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
         await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 3)) }
@@ -587,6 +588,7 @@ final class DirectIrohTransportTests: XCTestCase {
         try await relay.write(Data("y".utf8))
 
         // Run out again, and this time the instance ends the connection.
+        harness.clock.now += 300
         XCTAssertTrue(harness.scheduler.fire(300))
         XCTAssertEqual(harness.reports.count, 4)
         connection.drop()
@@ -618,9 +620,10 @@ final class DirectIrohTransportTests: XCTestCase {
         }
         XCTAssertEqual(harness.scheduler.pending.sorted(), [30, 140, 200])
 
-        // A refresh whose answer arrives after its own span is no answer:
-        // it renews nothing, and the first answer still runs out when it
-        // was going to.
+        // A refresh whose answer arrives after its own span is no answer.
+        // By then the first answer has run out too, although its timer has
+        // not fired: the path stops being usable, and the late answer does
+        // not renew it, so nothing is probed.
         XCTAssertTrue(harness.scheduler.fire(140))
         try await eventually("the refresh is asked") { harness.rendezvous.held.count == 2 }
         harness.clock.now += 300
@@ -630,8 +633,9 @@ final class DirectIrohTransportTests: XCTestCase {
         try await eventually("the late answer is not accepted") {
             harness.scheduler.pending.contains(15)
         }
-        XCTAssertEqual(harness.scheduler.pending.filter { $0 == 200 }, [200])
-        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+        XCTAssertEqual(harness.log.count(of: "open"), 1)
+        await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1")) }
 
         // The same before any path: an answer that arrives too late is
         // never dialled.
@@ -655,12 +659,202 @@ final class DirectIrohTransportTests: XCTestCase {
         harness.select()
         try await eventually("the instance is dialled") { endpoint.dials.count == 1 }
 
+        harness.clock.now += 300
         XCTAssertTrue(harness.scheduler.fire(300))
         try await eventually("the dial is closed") {
             harness.log.count(of: "endpoint.close") == 1
         }
         XCTAssertEqual(harness.scheduler.pending, [0.25])
         XCTAssertEqual(harness.reports, [])
+    }
+
+    // MARK: The lease is the clock's, not its timer's
+
+    func testALeaseTheClockHasPassedIsNotUsedAlthoughItsTimerHasNotFired() async throws {
+        let harness = Harness()
+        let connection = try await harness.bringUp(generation: "boot:1")
+        let relay = try await harness.transport.openStream(for: harness.tag("boot:1", path: 2))
+
+        // A timer that fires before the deadline changes nothing.
+        XCTAssertTrue(harness.scheduler.fire(300))
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+        XCTAssertEqual(harness.scheduler.pending.filter { $0 == 300 }, [300])
+        _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 2))
+
+        // The clock passes the deadline. No timer fires.
+        harness.clock.now += 300
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+
+        // The next thing asked of the path finds the lease run out: no
+        // stream, no probe for a failed candidate, none for a network
+        // change, and `verifying` is reported at that moment.
+        await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 3)) }
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+        harness.transport.pathDidFail(for: harness.tag("boot:1", path: 3))
+        harness.network.change()
+        harness.rendezvous.fail(DirectRendezvousFetchError.failed)
+        let asked = harness.rendezvous.requests.count
+        XCTAssertTrue(harness.scheduler.fire(0.5))
+        try await eventually("the rendezvous is asked instead") {
+            harness.rendezvous.requests.count == asked + 1 && harness.scheduler.pending.contains(15)
+        }
+        XCTAssertEqual(connection.streams.count, 3)
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+
+        // What the path already carries stays, and the timer that fires
+        // at last finds nothing left to do.
+        try await relay.write(Data("x".utf8))
+        XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        XCTAssertTrue(harness.scheduler.fire(300))
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+        XCTAssertEqual(harness.scheduler.pending.filter { $0 == 300 }, [])
+    }
+
+    func testADialThatEndsAfterItsLeaseRanOutIsClosedNotUsed() async throws {
+        let harness = Harness()
+        let endpoint = harness.engine.prepare()
+        harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+        harness.select()
+        try await eventually("the instance is dialled") { endpoint.dials.count == 1 }
+
+        // The clock passes the deadline with the dial still under way and
+        // the lease's timer not fired. Then the dial succeeds.
+        harness.clock.now += 300
+        endpoint.connection.resolve(
+            harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        )
+        try await eventually("the late path is closed") {
+            harness.log.count(of: "connection.close") == 1
+                && harness.log.count(of: "endpoint.close") == 1
+        }
+        XCTAssertEqual(harness.reports, [])
+        XCTAssertEqual(harness.scheduler.pending, [0.25])
+    }
+
+    func testAProbeThatEndsAfterTheLeaseRanOutReportsNothing() async throws {
+        let harness = Harness()
+        // The dial's probe, then the verification's.
+        let connection = try await harness.bringUp(
+            generation: "boot:1",
+            answers: [
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+            ]
+        )
+        try await eventually("the dial's probe is abandoned") {
+            harness.log.count(of: "reset") == 1
+        }
+        let gate = connection.holdNextOpen()
+        harness.network.change()
+        XCTAssertTrue(harness.scheduler.fire(0.5))
+        try await eventually("the verification reaches the binding") {
+            harness.log.count(of: "open") == 2
+        }
+
+        // The clock passes the deadline while the probe is under way, and
+        // the probe then passes.
+        harness.clock.now += 300
+        gate.resolve(())
+        try await eventually("the probe has ended") { harness.log.count(of: "reset") == 2 }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+        await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 9)) }
+        XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+    }
+
+    func testAStreamThatOpensAfterTheLeaseRanOutIsAbandoned() async throws {
+        let harness = Harness()
+        let connection = try await harness.bringUp(generation: "boot:1")
+        try await eventually("the probe's stream is abandoned") {
+            harness.log.count(of: "reset") == 1
+        }
+        let gate = connection.holdNextOpen()
+        let opening = Task<DirectIrohByteStream, Error> {
+            try await harness.transport.openStream(for: harness.tag("boot:1"))
+        }
+        try await eventually("the open reaches the binding") { harness.log.count(of: "open") == 2 }
+
+        harness.clock.now += 300
+        gate.resolve(())
+        let outcome = await directIrohOutcome(of: opening)
+        XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .stale)
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+        try await eventually("the late stream is abandoned") {
+            harness.log.count(of: "reset") == 2
+        }
+    }
+
+    func testAnAnswerAfterTheClockPassedTheLeaseRenewsOnlyThroughAProbe() async throws {
+        // A fresh answer of the same generation: its timer never fired.
+        let harness = Harness()
+        let connection = try await harness.bringUp(
+            generation: "boot:1",
+            answers: [
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+            ]
+        )
+        harness.clock.now += 300
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:1", client: harness.engine.key.endpointID)
+        )
+        XCTAssertTrue(harness.scheduler.fire(240))
+        try await eventually("the path is probed and usable again") {
+            harness.reports == [
+                .usable(generation: "boot:1"),
+                .verifying,
+                .usable(generation: "boot:1"),
+            ]
+        }
+        XCTAssertEqual(connection.streams.count, 2)
+        XCTAssertEqual(harness.log.count(of: "bind"), 1)
+        XCTAssertEqual(harness.rendezvous.requests.count, 2)
+
+        // A refresh that fails after the clock passed the lease.
+        let failing = Harness()
+        _ = try await failing.bringUp(generation: "boot:1")
+        failing.clock.now += 300
+        failing.rendezvous.fail(DirectRendezvousFetchError.failed)
+        XCTAssertTrue(failing.scheduler.fire(240))
+        try await eventually("the refresh is tried again") {
+            failing.rendezvous.requests.count == 2 && failing.scheduler.pending.contains(15)
+        }
+        XCTAssertEqual(failing.reports, [.usable(generation: "boot:1"), .verifying])
+        XCTAssertEqual(failing.log.count(of: "open"), 1)
+    }
+
+    func testAnAnswerAcceptedDuringADialReplacesItAndTheOldDialIsClosed() async throws {
+        let harness = Harness()
+        let first = harness.engine.prepare()
+        harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+        harness.select()
+        try await eventually("the instance is dialled") { first.dials.count == 1 }
+
+        // The refresh comes round while the first dial is still under way.
+        let second = harness.engine.prepare()
+        second.connection.resolve(
+            harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        )
+        harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+        XCTAssertTrue(harness.scheduler.fire(240))
+        try await eventually("the new answer's path comes up") {
+            harness.reports == [.usable(generation: "boot:1")]
+        }
+        try await eventually("the first dial's endpoint is closed") {
+            harness.log.count(of: "endpoint.close") == 1
+        }
+
+        // What the first dial still produces is closed, not used.
+        first.connection.resolve(
+            harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        )
+        try await eventually("the first dial's connection is closed") {
+            harness.log.count(of: "connection.close") == 1
+        }
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+        XCTAssertEqual(harness.log.count(of: "bind"), 2)
+        XCTAssertEqual(harness.scheduler.pending.sorted(), [30, 240, 300])
+        _ = try await harness.transport.openStream(for: harness.tag("boot:1"))
     }
 
     // MARK: Streams
@@ -792,6 +986,7 @@ final class DirectIrohTransportTests: XCTestCase {
 
         // The answer runs out and is renewed on the same connection, all
         // while the binding is still opening the stream.
+        harness.clock.now += 300
         XCTAssertTrue(harness.scheduler.fire(300))
         XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
         harness.rendezvous.answer(
@@ -846,6 +1041,43 @@ final class DirectIrohTransportTests: XCTestCase {
         // The path is untouched.
         XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
         XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+    }
+
+    func testPathGenerationsAreComparedWithinOneSelectionOnly() async throws {
+        let harness = Harness()
+        // The dial's probe, a relay, and the verification's probe.
+        _ = try await harness.bringUp(
+            generation: "boot:1",
+            answers: [
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+            ]
+        )
+        _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 50))
+        harness.network.change()
+        XCTAssertTrue(harness.scheduler.fire(0.5))
+        try await eventually("the path is usable again") { harness.reports.count == 3 }
+        // Within the selection, a tag from before the change is stale.
+        await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 50)) }
+        let old = harness.tag("boot:9", path: 99)
+
+        // Another runtime opens. Nothing is assumed about how its tags are
+        // numbered: a low number opens, and a tag of the selection before
+        // does not, whatever its number.
+        let endpoint = harness.engine.prepare()
+        endpoint.connection.resolve(
+            harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        )
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:9", client: harness.engine.key.endpointID)
+        )
+        harness.select(DirectIrohFixtures.selection(2))
+        try await eventually("the new selection's path comes up") {
+            harness.reports.last == .usable(generation: "boot:9") && harness.reports.count == 4
+        }
+        _ = try await harness.transport.openStream(for: harness.tag("boot:9", path: 0))
+        await assertStale { _ = try await harness.transport.openStream(for: old) }
     }
 
     // MARK: The background
