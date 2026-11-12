@@ -56,9 +56,9 @@ def _state(backend, record, *, session_id=SESSION, provider=None, model=None, ra
 async def _restore(backend, session_id=SESSION):
     # A fresh store and tracker, as a new process/Turn would use them.
     store = SQLiteTranscriptStore(backend.engine)
-    rows = await store.load(session_id)
+    runtime = await store.load_for_run(session_id)
     tracker = CacheTracker()
-    tracker.restore(rows, await store.load_cache_attempts(session_id))
+    tracker.restore((), (*runtime.cache_records, *await store.load_cache_attempts(session_id)))
     return tracker
 
 
@@ -148,6 +148,27 @@ async def test_state_reader_merges_legacy_audits_and_ignores_damaged_or_misattri
     latest = {**newer, "started_at": 130}
     await backend.store.append_audit(SESSION, "fork_turn", {"version": 1, "cache_state": [latest]})
     assert list((await _restore(backend)).latest.values()) == [latest]
+
+
+async def test_checkpoint_capsule_preserves_prefixless_supersession_across_reloads(backend):
+    from tests.test_agent_runtime_transcript import _checkpoint
+    from tests.agent_core.fakes import user
+
+    candidate, message, old = _record()
+    await backend.store.append_response(SESSION, message, final=True, cache=old)
+    _, _, newer = _record(now=110)
+    prefixless = {key: value for key, value in newer.items() if key != "prefix"}
+    await backend.store.append_response(SESSION, message, final=True, cache=prefixless)
+    current = await backend.store.consume_input(SESSION, backend.stored_input(SESSION), user("after checkpoint"))
+    await _checkpoint(backend.store, current.context_seq, session=SESSION)
+    _state(backend, old)
+    for _ in range(2):  # initial certificate publication, then its cached reader
+        runtime = await backend.store.load_for_run(SESSION)
+        assert runtime.cache_records == (prefixless,)
+        assert not any(row.kind == "response" for row in runtime.entries)
+        following = (await _restore(backend)).begin(candidate, (), now=120)
+        assert following["expected_read_basis"] == "missing_prefix"
+        assert following["idle_s"] == 10
 
 
 @pytest.mark.parametrize("kind", ["attempt", "fork_turn"])
