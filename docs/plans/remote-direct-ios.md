@@ -1,142 +1,325 @@
 # Remote direct paths: the iOS App side
 
-Status: **In progress.** On 2026-11-11 the owner asked us to go ahead with the App side of remote direct paths instead of waiting for an answer on [#3222](https://github.com/avibe-bot/avibe/issues/3222). The iOS owner's review is requested after the fact: we change what he asks for, and the open items in section 9 stay his. This work does not raise the App's minimum iOS version, adds no capability or entitlement, and does not touch signing, TestFlight, or the notification service extension.
+Status: **Design, rewritten on 2026-11-12 for a persistent local proxy.** The owner chose this architecture after the WebKit measurement in section 2. It replaces the earlier design, in which the App switched WebKit between the tunnel and the direct path by changing the data store's proxy configuration. Nothing here is built: #3537 (Swift) and #3532 (Web UI) implement the earlier design and are reworked against this one after it lands. The iOS owner's review is requested after the fact, as before; the open items in section 13 stay his. This work does not raise the App's minimum iOS version (17.0), adds no capability or entitlement, and does not touch signing, TestFlight, or the notification service extension.
 
-Parent plans: [`remote-direct-phase1.md`](remote-direct-phase1.md) (rows A2 to A5 and I4), [`remote-direct-ingress.md`](remote-direct-ingress.md) (stream framing), [`remote-direct-rendezvous.md`](remote-direct-rendezvous.md) (what a client must do). Bridge contract: [`ios-app.md`](ios-app.md) section 4.
+Statements about behaviour below are of three kinds, and say which: **measured** (with where), **candidate** (the design's choice, gated by a named qualification cell in section 11), or **rule** (what the code must do).
+
+Parent plans: [`remote-direct-phase1.md`](remote-direct-phase1.md) (rows A1 to A5, I4), [`remote-direct-ingress.md`](remote-direct-ingress.md) (stream framing), [`remote-direct-rendezvous.md`](remote-direct-rendezvous.md) (what a client must do). Bridge contract: [`ios-app.md`](ios-app.md) section 4.
 
 ## 1. What the App does
 
-The App keeps loading `https://<slug>-app.avibe.bot`. When a direct path to the selected instance is usable, WebKit's connections for that one host go through a loopback proxy inside the App, which carries them over the direct transport to the instance. When it is not, they go through Cloudflare Tunnel exactly as today. The origin, cookies, cache, and passkeys are the same on both paths. TLS runs between WebKit and the instance on both paths: the App relays ciphertext and adds no trust override.
+The App keeps loading `https://<slug>-app.avibe.bot`, on the same account data store, with the same cookies, cache, and passkeys. WebKit's connections for the instance's exact host go to one loopback listener inside the App, by an HTTP CONNECT proxy route that WebKit holds for the data store. The listener never terminates TLS: WebKit's TLS session, with its SNI and certificate validation, runs end to end to the instance on every path. For each new CONNECT the listener chooses a backend:
+
+- **direct**: a stream over the App's direct transport to the instance's strict ingress;
+- **public**: the App's own TCP connection to the same exact host on port 443, the instance's public origin (in Avibe's deployment, its Cloudflare Tunnel hostname).
 
 ```text
-WKWebView on the account's data store (runtime, child windows, hidden transports)
-  -> proxyConfigurations: HTTP CONNECT proxy 127.0.0.1:<port>, matchDomains [<instance host>]
-  -> CONNECT listener        answers CONNECT <instance host>:443 only
-  -> transport stream        canonical CONNECT head out, the instance's status back, then bytes
-  -> instance strict ingress TLS for <instance host>; ordinary remote authentication
+WKWebView on the account data store (runtime, child windows, hidden transports)
+  -> route (never cleared; changed only to add a host or move port): CONNECT proxy 127.0.0.1:P, matchDomains [exact instance hosts]
+  -> App listener on 127.0.0.1:P   CONNECT <allowed host>:443 only
+       -> direct backend           transport stream; canonical CONNECT head; the instance's status; then bytes
+       -> public backend           TCP to <same host>:443; then bytes
+  -> TLS for <host>, inside the tunnel, between WebKit and the instance; ordinary remote authentication
 ```
 
-`WKWebsiteDataStore.proxyConfigurations` and `ProxyConfiguration.matchDomains` are public API from iOS 17.0. Measured on macOS WebKit in the feasibility spike: the route carries main navigation, subresources, `fetch`, SSE, and WebSocket for the matched host; the match is a **suffix** match; changing the configuration does not move connections that are already open. None of this is measured on an iPhone yet (section 8).
+When the direct path is lost, the listener closes the connections it carried on that path. WebKit then opens new connections, and the listener sends them to the public backend. Leaving home Wi-Fi therefore recovers over Cloudflare without killing or relaunching the App. That is the owner's required outcome; section 11 lists what must still be measured before it is a fact on devices.
 
-## 2. Components and who owns what
+What the App never does: change or remove a route to switch paths; move, migrate, or replay a connection; accept a CONNECT for any authority but an allowed instance host on port 443; read or terminate TLS.
 
-| Component | Where | Owns | Plan row |
-| --- | --- | --- | --- |
-| Transport | `DirectTransporting`, a protocol with no implementation yet | The iroh endpoint, the native rendezvous fetch, probing, and network-change handling. Reports when the selected instance has a usable path, and opens byte streams over it. It is told when the App is on the tunnel although it reported a path usable, and decides when to probe again. | A2 |
-| CONNECT listener | `DirectConnectListener` | One loopback socket on a port the system chooses. Refuses everything but `CONNECT <instance host>:443`, then relays bytes. | A3 |
-| Path controller | `DirectPathController` | The transport state (tunnel or direct), the tags, and every decision to install or remove the route. | A3 |
-| Route owner | `DirectRouteOwner` | The only code that writes `proxyConfigurations` on an account data store. | A3 |
-| Store lifecycle | `AccountWebsiteDataStore.rotate()` | Removes the route with the store it was installed on. No second lifecycle. | A3 |
-| Bridge | `NativeBridge.swift` | `direct.status()` and the `direct.transportChanged` event. | A4 |
-| Web UI | `ui/src/lib/native.ts` and the existing reconnect owners | Rebuilds the SSE stream and terminal WebSockets when the transport changes. | I4 |
+## 2. What is measured, and what follows from it
 
-**With no transport registered, the path never activates:** no listener is created, `proxyConfigurations` is never written (not even cleared), the status is always `tunnel`, and no event fires. What does exist from launch: the path controller and its route owner, the store's rotation hook, two observers for background and foreground, and the `direct` capability on the bridge. The first App pull request ships exactly that state and tests it by counting route writes and listeners.
+Measured on the iOS 26.5 simulator (build 23F77) in Actions run 43050816127, with a TLS fixture, GET requests only (`packaging/webkit-proxy-change/` at `384a152e`, on the branch `experiment/webkit-proxy-change`). Every matrix case uses a new named data store created in a running process.
 
-## 3. Transport state and tags
-
-The state is `tunnel` by default. It is `direct` only while all of these hold: a transport reported a usable path for the current tags, the listener is bound, and the route is installed. Any failure returns to `tunnel` at once.
-
-A **selection** is one opened runtime, between the App's `openRuntime` and `stopRuntime`. Every route carries the tags of the selection it was made for:
-
-| Tag | Source | Changes when |
-| --- | --- | --- |
-| Selection number | The path controller; advances at every selection and at every return from the background | A runtime opens or stops, including the same instance again |
-| Account and instance | `MobileRuntimeContext`, the lease `MobileSessionCoordinator` issues | Account switch, instance switch |
-| Account generation | Inside the same lease | Any sign-in, refresh, sign-out, or store rotation |
-| Data-store identifier | `AccountWebsiteDataStore.identifier` when the runtime opened | The store rotates |
-| Instance authority | The instance URL: its exact host, port 443 | Instance switch |
-| Rendezvous generation | The rendezvous answer the transport used | The instance's endpoint key or address set changes |
-
-Rules:
-
-- A transport report is bound to the selection it was requested for. A report that arrives after that selection ended is dropped.
-- Before a route is installed, the controller asks `MobileSessionCoordinator.isCurrentRuntime` for the lease, as the App's route and WebView registration already do, and compares the tag's store identifier with the current one. A late result therefore never installs a route on a store that is going away or has gone.
-- `isCurrentRuntime` is also false while the coordinator runs a request of its own with no account transition: `pushManagementRequest` holds `phase = .operation` until its request ends. A route that becomes ready in that window is not installed either. The App stays on the tunnel, the transport is told, and its next report is admitted. This is the conservative reading; section 9 asks whether it should be otherwise.
-- Within a selection, a rendezvous generation that a newer one replaced is never accepted again. Generations never repeat, so this costs a correct transport nothing.
-- A route for a new generation is a new route: the old listener and its relays are closed first.
-
-## 4. What happens when
-
-| Event | Result |
+| Observation | Cases |
 | --- | --- |
-| A runtime opens (cold restore or instance selected) | New selection, state `tunnel`. The transport is told the target and starts its own work. |
-| The transport reports a usable path | Tags checked, listener bound, route installed, state `direct`, event emitted. |
-| The transport reports the path lost; a stream cannot be opened; the instance refuses a CONNECT; the listener fails or reaches its connection limit | Route removed, listener and its relays closed, state `tunnel`, event emitted. Requests in flight on the direct path fail as network errors. Nothing replays them. |
-| The App enters the background | Returns to `tunnel` and deselects the transport. A listening socket does not survive suspension reliably ([TN2277](https://developer.apple.com/library/archive/technotes/tn2277/_index.html)). |
-| The App returns to the foreground | A new selection for the open runtime. Whatever the transport reported before is void; it probes again. |
-| The network changes | The transport's to detect (A2): it reports the path lost at once and probes again. The controller needs no network monitor of its own. |
-| Account covers the runtime | Nothing. The runtime and its route stay. |
-| Instance switch, instance picker | The runtime stops: state `tunnel`, transport deselected. The next runtime is a new selection with a new authority. |
-| The runtime's WebView is refused at registration and the App returns to the picker | The selection ends with the browser it was made for. A newer runtime's selection is not touched by an old WebView arriving late. |
-| Sign-in, refresh, sign-out, account switch | `MobileSessionCoordinator` releases the runtime first, as today, so the state is already `tunnel` when anything else happens. |
-| The data store rotates | `rotate()` removes any route from the outgoing store before replacing it. The new store starts with none, and only a later selection, whose tags carry the new identifier, can install one. |
-| The rendezvous generation changes | The old generation is replaced: back to `tunnel`, then `direct` again on the new one. |
-| The web content process is terminated | The primary reloads, as today. The route belongs to the data store and is unaffected. |
+| A route written to a new store before its first load is used by the page and by `fetch`, over HTTP/1.1 and HTTP/2. | `cold-before-webview`, `cold-before-first` |
+| A route written while the store already has a live or pooled connection to that host is not used: reload, WebView recreation on the same store, and new requests stay on the old connection. With a slow request keeping the old HTTP/1.1 connection busy, the extra socket WebKit opened also ignored the new route. | lifecycle `reload`, `recreate`; `idle`; `inflight-install` |
+| Emptying the route did not stop proxying while the old proxy connection lived, and after a NetworkProcess restart the emptied route came back. | `remove-open`, `restart-empty` |
+| After the store's only connection to that host was closed, the next connection followed a changed route: from a proxy to none, and (HTTP/1.1 only) from none to an absent or refusing proxy, where the fetch then failed. Neither is a change between two proxy ports, and neither shows that closing the App's own sockets empties WebKit's pool. | `remove-close`; `failover-absent-false`, `failover-refuse-false` |
+| With a constant route, closing the proxy's old CONNECT moved later fetches, a rebuilt `EventSource`, and a new WebSocket to the proxy's new backend. A CONNECT that was not closed kept its backend for the requests pooled on it. | `constant-proxy`, `constant-proxy-surviving` |
+| `allowFailover = true`: with nothing listening, or a refusing proxy, the next HTTP/1.1 fetch went directly to the origin. With a stalling proxy, it failed within the bound either way. | `failover-absent-*`, `failover-refuse-*`, `failover-stall-*` |
+| App relaunch with a different route written before the first load switched to it. | lifecycle `relaunch` |
 
-## 5. The listener
+What follows: **changing the route is not a way to switch paths**, and clearing it is unsafe. A constant route to a listener that switches backends is the way, measured on this simulator, to move new connections. Nothing here is measured on iOS 17, on a device, with real Cloudflare, during suspension, across a radio change, or for non-idempotent requests.
 
-It binds `127.0.0.1` only, on a port the system picks, and exists only while a route is being installed or is installed.
+## 3. Components
+
+| Component | Owns | Plan row |
+| --- | --- | --- |
+| `DirectTransporting` | The iroh endpoint, the rendezvous fetch, probing, and loss detection (section 12). Reports path state; opens direct streams. | A2 |
+| Listener | The one loopback socket, the CONNECT checks, the backend choice for each CONNECT, the relays, and their path generations. | A3 |
+| Public backend | Native TCP to the instance's public origin, the exact host on port 443, bounded and cancellable. | A3 |
+| Path controller | Tags, the preference, path generations, invalidation, and the bridge state. | A3 |
+| Route owner | The only code that writes `proxyConfigurations`. It writes; it never clears. | A3 |
+| Store lifecycle | `AccountWebsiteDataStore.rotate()` tells the controller first, as today. | A3 |
+| Bridge | `direct.status()` and `direct.transportChanged`. | A4 |
+| Web UI | Reconnects SSE and safe terminals when the shell reports closed connections. | I4 |
+
+**Without a registered transport, nothing of this runs**: no listener is created, no route is written, the status is always `tunnel`, and no event fires (rule). The first build that registers a transport is the owner's to approve.
+
+## 4. The listener and its port
+
+- **One listener per App process** (rule), bound to `127.0.0.1`. It is not bound until a transport is registered and a route is about to be written.
+- **Port epochs.** The listener's port P is chosen by the system at the first bind. It keeps that port for as long as it can (section 9). If it must move to a new port, that starts a new port epoch, and every live route is rewritten to it (recovery R1, section 9). Within one epoch, every route points at the same P.
+- **Exclusive binding** (rule). P is bound without `SO_REUSEPORT`, so no other socket can share it while the listener holds it.
+- **The ownership check** (rule). After every bind, the App connects to P and sends a random nonce made for this launch; only the listener's own accept loop echoes it. This is a liveness and correlation check, to catch a listener that is not serving or a port that is not ours. It is not cryptographic authentication, and a hostile local process is not assumed unable to interfere with it. A failed check is a port loss (section 9).
+- **The allowlist** is the set of exact hosts written to any route in this process, on port 443 only (rule). It is bounded at 16 hosts. Past that bound no host is added to any route, and new hosts use WebKit's normal path. Being on the allowlist only lets a host be relayed. Whether the direct backend may carry it is decided per CONNECT by the live selection (section 6), and that decision shrinks immediately when the selection or account ends.
 
 | Request from WebKit | Answer |
 | --- | --- |
-| `CONNECT <instance host>:443 HTTP/1.1` | Relayed, as below |
-| Another host, a subdomain of the instance host, another port, no port, userinfo, an IP literal | `403` |
-| Any method but `CONNECT` | `405` |
-| Not HTTP/1.1, a body, a repeated `Host`, a `Host` that disagrees with the target, a malformed head, a head over 4 KiB | `400` |
+| `CONNECT <allowed host>:443 HTTP/1.1` | A backend is chosen (section 6) |
+| Any other authority: another host, a subdomain, another port, no port, userinfo, an IP literal | `403` |
+| Any method but `CONNECT` | `405`. The one exception is the ownership check, answered only when it carries this launch's nonce. |
+| Not HTTP/1.1, a body, a repeated `Host`, a disagreeing `Host`, a malformed head, a head over 4 KiB | `400` |
 | Head not complete within 5 seconds | Closed |
-| More than 64 connections at once | The extra connection is closed at once, with no answer, and the path returns to the tunnel |
+| More than 64 connections at once | The extra connection is closed at once, with no answer |
 
-The subdomain row is the reason the listener checks the authority itself: `matchDomains` would route `x.<instance host>` to it too.
+`matchDomains` is a suffix match, so `x.<host>` reaches the listener too; the `403` row is why the listener checks the authority itself.
 
-For an accepted request the listener opens one transport stream (2-second bound) and writes the canonical head from the ingress contract, `CONNECT <host>:443 HTTP/1.1` with `Host: <host>:443`, not the bytes WebKit sent: the instance requires that exact `Host`, and WebKit's other proxy headers are of no use to it. It reads the instance's status (4 KiB, 3 seconds). `200` becomes `200 Connection Established` to WebKit and the relay starts. Anything else reaches WebKit as a failed proxy connection with the instance's status, and the path returns to the tunnel.
+A relay copies both directions with backpressure (64 KiB chunks, the next read only after the previous write), passes a half-close on, and gives the other direction 30 seconds after one side finishes. A relay has no idle timeout: a healthy SSE stream is quiet between heartbeats, and a terminal can be idle for hours.
 
-The relay copies in both directions with backpressure: each direction reads the next chunk (64 KiB at most) only after the previous one was accepted. A finished side is passed on as a half-close, and the other direction then has 30 seconds to finish, the ingress's own bound. There is no idle timeout: a healthy SSE stream is quiet between heartbeats and a terminal can be idle for hours.
+**What a CONNECT does not tell the listener.** A CONNECT names a host. It does not say which data store, WebView, app, or process sent it, nor which account's lease it belongs to. The listener therefore cannot authenticate its caller, and nothing here claims it can.
 
-The listener does not detect a silently dead path under established relays. The transport must (A2): it keeps the connection alive, notices loss within the probe budget, and reports it, which closes every relay.
+- Any process on the phone can connect to `127.0.0.1:P` and is served like WebKit. It reaches only the allowed hosts, through TLS it must complete itself with the instance, and the instance's remote authentication decides every request it makes.
+- What such a caller can take: the 64 connection slots, which push WebKit's new connections to failure or failover. And, while direct is preferred for a host, its streams ride this App's admitted direct peer and count against that peer's ingress limits at the instance.
+- The same holds for a connection from an older data store of this App: the listener cannot tell it apart. Lifecycle, not authentication, keeps it in bounds (section 7): an account transition closes every relay, and releases the old store's WebViews before the new runtime opens, as today.
 
-Any process on the phone can connect to a loopback port. It gains a byte pipe to the instance's strict ingress and nothing else: no TLS key, no session. It can at most use up the 64 connections, which sends the App back to the tunnel.
+These are exposures of the design. They are tested in section 11 and not claimed absent.
 
-## 6. Fallback bounds
+## 5. Routes: writing them, and when
 
-- A failure is handled in the same main-actor turn it is reported in: the route is removed before the event is emitted, so every connection WebKit opens afterwards uses the tunnel.
-- A CONNECT that cannot be served fails within 2 seconds (stream open) or 3 seconds (the instance's answer).
-- `allowFailover` stays `false`, as measured in the spike: the App decides when the tunnel is used, and a refused CONNECT is visible instead of silently retried elsewhere.
-- Phase 1's target, tunnel content within 2 seconds of a failed probe, also needs the transport's probe and loss detection (A2) and device measurements (A5).
+The **route owner** is the only writer of `proxyConfigurations` (rule). A route is one `ProxyConfiguration(httpCONNECTProxy: 127.0.0.1:P)`, with `matchDomains` set to exact instance hosts (no wildcard, no suffix of a shared zone) and `allowFailover` as in section 8.
 
-## 7. Bridge and Web UI
+Rules:
 
-The contract is in [`ios-app.md`](ios-app.md) section 4: capability `direct`, the read-only call `direct.status()`, and the event `direct.transportChanged`. No call lets web content choose addresses, start a probe, or supply a rendezvous answer, because Show Pages are same-origin with the Workbench and can reach the bridge.
+- **A route points at the current port epoch's P.** It changes only when a host is added, or when R1 moves every route to a new epoch (section 9).
+- **A store's host list only grows while the store lives** (candidate; whether adding a host takes effect is cells Q2 and Q3). No host is removed and no route is cleared: clearing is unreliable (section 2). A host the user no longer uses is relayed only to its public origin (section 6), never on the direct backend. The host list lives and dies with the store and the process, and is bounded by the allowlist.
+- **A host is added before the first load of that host in that store.** The listener is bound and checked first. The App's own load waits for both, with a bound; past it, the load goes ahead without a route, on WebKit's normal path. The bound is a proposal, set from measurement.
+- **A failed or ignored write leaves that host on WebKit's normal path.** That path is the instance's public origin. Within one epoch, every route points at the same P. So a write that WebKit applies to some connections and not others sends each connection either to the listener or to the normal path, never to a third place.
 
-On the event the Web UI closes and reopens its SSE stream through the existing reconnect loop, whose handshake already triggers a catch-up read, and reconnects each terminal that can reattach without loss. It does not retry any request. Without the capability the Web UI behaves as it does today.
-
-## 8. Tests
-
-Automated, in `ios-shell` on the simulator:
-
-- the CONNECT refusal table above, one case per row, against the real listener over real loopback sockets;
-- relay, early data, backpressure, and half-close in both directions against a stand-in stream;
-- the tag rules: late reports, a replaced generation, instance switch, account switch, sign-out, store rotation, background and foreground;
-- that without a transport no listener is created and `proxyConfigurations` is never written, counted at the one place that does each, with a scan of the process's listening sockets as a second line;
-- the bridge: `direct.status()` and the event's payload, in an instance main frame only;
-- one WebKit-level test: a `WKWebView` on a real data store loads through the installed route into a stand-in instance. It proves that the simulator's WebKit sends its CONNECT for the matched host to the listener and that a document loads through the relay. The page is plain HTTP on port 443 of an unqualified host name, which needs no certificate and is outside App Transport Security, so the test proves nothing about TLS, certificates, or a real network. Subdomain refusal and route removal are tested at the listener and the controller, not through WebKit.
-
-On devices, in the Phase 1 matrix (A5): Local Network permission states, suspension and resume, Wi-Fi and cellular changes, a blackholed path, and whether WebKit on iOS applies a route change to new connections as promptly as on macOS.
-
-## 9. Open for the iOS owner
-
-1. **Where native fetches the rendezvous (D3).** It needs a native same-origin request to the instance on the account's data store. `MobileAuthTransport` cannot make it: it is pinned to the control-plane origin. Two ways fit the App's rules: a fixed script in the runtime primary WebView's `WKContentWorld.defaultClient`, which needs no new WebView and no new release barrier; or a second hidden transport on the instance origin. We would start with the first.
-2. **Local Network permission (D4)** and **the minimum iOS version (D5)**: unchanged from the Phase 1 plan. Neither is touched by the listener, the route, or the bridge.
-3. **Background policy.** Returning to the tunnel on every background is the conservative reading of TN2277. If a brief app switch should keep the route, that needs device evidence first.
-4. **The capability's name and payload**, before the Web UI half spreads to instances.
-5. **Admission while the coordinator is busy** (section 3). Reusing `isCurrentRuntime` unchanged means a route that is ready during a push management request is refused once. Admitting on the lease alone needs a coordinator check without the `phase` term, which is the iOS owner's to add or refuse.
-6. **A navigation in flight when the direct path fails.** A request in flight on the direct path fails with it and is not replayed (section 4). For the primary's main-frame navigation that means a failed load: the App shows its load-failure view, and Retry then loads over the tunnel. Nothing reloads by itself. Should the shell reload the primary once when the transport returns to the tunnel while its load has just failed? It matters only once a transport exists, and the listener, route, and bridge pull request does not do it.
-
-## 10. Pull requests
-
-| PR | Content | Needs |
+| When | What is written | Status |
 | --- | --- | --- |
-| #3530: this document and the bridge spec | Documentation only | Merged at the owner's request; the iOS owner's review after the fact |
-| #3532: Web UI half (I4) | `ui/` only; inert without the capability | Ours; lands after #3530 and #3537 |
-| #3537: listener, route, state, bridge (A3, A4) | Swift, inactive without a transport | An independent review on our side, then merged at the owner's request; the iOS owner's review after the fact |
-| Transport (A1, A2) | iroh, rendezvous fetch, probing | The published iroh binary; the first build that uses a transport goes to the owner |
-| Device validation (A5) | The Phase 1 matrix and a TestFlight build | The iOS owner or the owner |
+| Cold launch, signed in, with a stored instance selection | The account store's route with that host, before the store's first load of anything | Candidate, cell Q1. Measured analogue: a new named store, created in a running process and routed before its first load (section 2). |
+| Sign-in, sign-out, account switch (the store rotates) | Nothing on the new store until an instance is selected | Rule |
+| The first instance selected on a store that has already loaded the control plane | The host is added before the runtime's first load | Candidate, **open cell Q2** |
+| Instance switch to a host this store has not loaded | The host is added (union) before its first load | Candidate, **open cell Q3** |
+| Instance switch to a host already in the route | Nothing | As the cold case |
+
+The measured analogue is in a running process, so nothing here is limited to a process cold start. Q2 and Q3 decide whether a store that is already in use can take a new host.
+
+**A suspected bypass.** No new CONNECT can mean any of several things: the request was served from cache, a service worker answered it, the load failed, it reused a tunnel already open, or WebKit did not apply the route. A missing CONNECT is therefore evidence of a bypass only in one case, which the App makes itself. The App issues a native no-store request for a routed host on the current runtime, outside service-worker scope. It completes with a network response. During that request the listener had no relay open for that host and received no CONNECT for it.
+
+That case marks the store and host `suspected-bypass` for diagnostics, and direct is not preferred for it until a later CONNECT for that host arrives. Nothing else is inferred from silence.
+
+If Q2 or Q3 turn out negative, sign-in and newly used instances stay on the normal path for the rest of the process, and the shortfall is visible. Any workaround (a second store, a broader match) is outside this contract and needs a design review.
+
+## 6. Choosing a backend for each CONNECT
+
+**The direct backend is authorized per CONNECT, from live state only.** It may be chosen only while all of these hold:
+
+- the CONNECT host is the **current** selection's host;
+- the selection's store has a route listing that host;
+- every tag (section 7) is current, including the account lease;
+- the transport has reported the path `usable` for those tags, and nothing has suspended that since;
+- the host is not `suspected-bypass`.
+
+Otherwise the CONNECT goes to the public backend. Every condition is re-read when a CONNECT arrives. When a selection or an account lease ends, direct stops being chosen in the same main-actor turn. A host from an earlier selection, an earlier account, or an earlier store never gets the direct backend again. Its callers are relayed only to the public origin, which adds no credential and restores no authority: whatever the caller sends travels inside its own TLS session, and the instance's remote authentication judges it.
+
+**Before any byte is forwarded, a failure is not yet a failure of the tunnel.**
+
+1. **Early bytes are held.** Bytes WebKit sends after its CONNECT head (it may send its ClientHello before the answer) are held in a buffer of at most 16 KiB. Nothing is forwarded to any backend until one has been selected. A CONNECT whose early bytes exceed the buffer is closed.
+2. **Direct first, when it is authorized.** The listener opens a direct stream and writes the canonical head from the ingress contract, `CONNECT <host>:443 HTTP/1.1` with `Host: <host>:443` (not WebKit's bytes). It then reads the instance's status: 4 KiB at most, within a bound.
+3. **A hedge.** If the direct answer has not arrived after a hedge delay, the listener also starts the public dial. The first ready backend is selected: a direct `200`, or an established public connection. The other is cancelled and closed. A selected backend whose selection or path generation went stale before selection counts as not ready.
+4. **Fallback.** A direct stream that cannot open, a refusal, or a missed bound leaves the CONNECT to the public backend, and the transport is told (`pathDidFail`).
+5. **No backend ready** within its bound: WebKit gets `502`, or the instance's refusal status.
+
+**The bounds.** The hedge delay, the public connect bound, and the direct open and answer bounds are proposals, set from Q7 measurements. #3537's current values (2 s to open, 3 s for the answer) are a starting point, not a published guarantee.
+
+**After the first forwarded byte or the `200`, the tunnel belongs to its backend.** Selection happens before either. If that backend then fails, the relay is closed and WebKit sees a closed connection. The listener never redials, never moves a tunnel to another backend, and never replays a byte. A healthy relay is never closed to change backends, including when direct comes back: only new connections prefer it.
+
+**The public backend** is the instance's public origin, the same authority WebKit would reach without the route. In Avibe's deployment that is the instance's Cloudflare Tunnel hostname, but the backend does not assume a Cloudflare edge. It is a native TCP connection (`NWConnection`):
+
+- **Target:** exactly the CONNECT's host on port 443. That host must be an allowlisted instance host taken from the control plane's instance list, not the control plane's host, not any other host, and not an IP literal.
+- **Resolution:** the system resolver. Every resolved address is checked, and the connection is made only to an address that is not loopback, unspecified, link-local, multicast, or private. A local-network path is the direct backend's job, not this one's.
+- **Proxy settings:** no App proxy configuration on its parameters, so it cannot be routed back to the App's own listener. What the system's proxy settings do to it, and what happens on networks that allow only an HTTP proxy or block raw TCP, is qualified (cell Q6), not assumed from a parameter's name.
+- **Cancellation:** cancelled when the WebKit side closes, when the listener stops, when its path generation is fenced, and when the network changes before it is established.
+
+It carries WebKit's TLS bytes unchanged.
+
+**Diagnostics** count `direct` and `public` relays separately from `suspected-bypass`. Only relays are seen by the listener.
+
+## 7. Tags, path generations, and invalidation
+
+A **selection** is one opened runtime, between the App's `openRuntime` and `stopRuntime` (and the registration exit that returns to the picker). Its tags:
+
+- the selection number;
+- account and instance, and the account generation, from `MobileRuntimeContext`;
+- the data-store identifier;
+- the instance authority;
+- the rendezvous generation.
+
+A transport report counts only for the selection it was made for, and is dropped after that selection ends. Before direct is authorized, the controller checks the lease with `MobileSessionCoordinator.isCurrentRuntime`, as the App's own route and WebView registration do. Within a selection, a rendezvous generation that a newer one replaced is never accepted again.
+
+**Every relay records its backend, its selection, and the path generation it was opened on.** The path generation advances on each event below. A late report or callback that carries an older selection or generation changes nothing.
+
+| Event | New CONNECTs | Direct relays opened before the event | Public relays |
+| --- | --- | --- | --- |
+| The transport reports the path `lost` (its connection closed or failed) | Public | Closed | Kept |
+| A network change callback | Public, until the transport validates the path again | Kept | Kept |
+| Validation after a network change fails, or runs past its bound | Public | Closed | Kept |
+| Validation succeeds on the same transport connection | Direct again | Kept: healthy, and never reported as moved | Kept |
+| The rendezvous generation changes (a new instance endpoint key or addresses) | Public until `usable` on the new one | Closed | Kept |
+| The selection ends (instance switch, picker, registration exit) | Public for that host | Closed | Kept |
+| The App enters the background | Public | Closed, and the transport stops | Left to the system |
+| An account transition (sign-in, sign-out, switch, store rotation) | Public | Closed | **Closed**: nothing of the old account is kept |
+
+**A network callback alone is not proof of loss** (rule). It changes only what new connections prefer, until the transport validates the path. **Public relays** are closed when their own connection fails, or reports itself not viable for longer than a bound that is set from measurement. They are never closed for performance, nor because a better path appeared.
+
+Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one connection carries many requests, so every request on a lost direct connection fails with it. That is the cost of a lost path, not of the closing. Nothing replays them.
+
+**Detection is not a measured bound.** How fast "lost" arrives is the transport's (section 12). The 8 to 17 s measured with a desktop iroh client, against the instance's 6 s idle timeout and 1.5 s keep-alives, is not a device bound and not an end-to-end failover time (cell Q7).
+
+## 8. Failover by WebKit (candidate safety net)
+
+`allowFailover = true` is the candidate (it was `false` in the earlier design). It is a safety net under the native public backend, not a replacement for it and not a guarantee.
+
+- **When it can engage.** The listener never refuses an allowed host while it can dial the public origin itself. So WebKit's own failover can engage only when the listener cannot be reached (for example while the port is closed for a re-bind), or when both backends failed.
+- **What is measured:** only HTTP/1.1 fetch on the 26.5 simulator, with nothing listening or with a refusing proxy (section 2). A stalling proxy did not fail over within the window.
+- **What is not measured** (cell Q6): navigation, HTTP/2, WebSocket, iOS 17, networks that allow only an HTTP proxy, and networks that block raw TCP.
+- **Stickiness is measured, not assumed.** Q6 measures whether WebKit, after failing over, keeps bypassing the route, and for how long. In the field, only section 5's suspected-bypass check can see it. A bypass by WebKit is outside the listener's sight and is never counted as a `public` relay.
+- **Fallback position.** If Q6 shows failover is harmful or sticky, the value becomes `false`. A listener that cannot be reached then fails those loads until it is re-bound, and section 9 applies.
+
+## 9. Lifetime: launch, background, resume, and port loss
+
+**Cold launch.** With a transport registered and a stored selection, the App first binds and checks the listener, then writes the route for that host. Only then does it let the store's first load (the bootstrap) begin. The wait has a bound, set from measurement. On a bind or check failure, or past the bound, no route is written in this launch, everything uses WebKit's normal path, and diagnostics record it.
+
+**Background.** Two candidates, decided by device cell Q5:
+
+- **B1: keep P bound while suspended.** Apple's archived TN2277 advises against it: a suspended App's listening socket can keep accepting in the kernel with nobody serving it, and its resources can be reclaimed.
+- **B2: close the listener on background, and re-bind exactly P on `willEnterForeground`,** exclusively, with the ownership check. This is the default candidate, following TN2277. Q5 is still a device gate before it is relied on.
+  - While the port is closed, WebKit's connections to P are refused. With failover (section 8) they may take WebKit's normal path.
+  - App-owned navigation on resume, such as a push tap or the shell's own reload, waits for the re-bind and check, with a bound.
+  - WebKit's own resumed connections cannot be ordered.
+
+Either way, the background closes every direct relay and stops the transport (section 7). Public relays left open may be ended by the system.
+
+**Port loss is an error state, never a steady one** (rule). It covers three cases: P cannot be re-bound exclusively, the ownership check fails, or the listener's socket fails. A route that points at a port the App does not hold is never treated as an accepted state.
+
+**Recovery candidate R1**, in-process and without a relaunch:
+
+1. Close every relay the App holds.
+2. Bind a new port P2 with the same check. This starts a new port epoch.
+3. Rewrite every live route to P2, with the same hosts.
+4. Count recovery as confirmed only when a CONNECT for a routed host arrives on P2 within a bound.
+
+Closing the App's own relays does not prove that WebKit's pool to the old port is gone. If something else now holds P and accepts connections, WebKit may keep connections to it that the App cannot see or close.
+
+The nearest measured analogue is section 2's closed-pool rows, which are not a port change. Cell Q4 must cover the cooperative case, an occupied old port that accepts and stalls new connections, and a pool that survives on an occupied port.
+
+Until R1 is confirmed, the controller is in a **recovery-not-qualified** state:
+
+- direct is not authorized;
+- diagnostics record it;
+- the shell's load-failure view stays available to the user.
+
+If Q4 shows that R1 cannot recover the occupied-port case, there is no safe in-process fallback. Whether to show a visible recovery, or to find another mechanism, is then a product decision. It is not decided here, and a relaunch is not the accepted answer.
+
+**NetworkProcess restart.** With a constant route and a live listener, a restarted NetworkProcess receives the same route again (WebKit [24046](https://github.com/WebKit/WebKit/pull/24046)). On releases without that fix, the route can be lost, and the store then uses WebKit's normal path. Restarting the NetworkProcess is a test instrument only, never a shipping mechanism.
+
+## 10. Bridge
+
+The contract is in [`ios-app.md`](ios-app.md) section 4.
+
+- **`direct.status()`** answers `{preferred, sequence}`: the backend that new connections from the calling document will try first. It is never a claim about where an existing connection runs.
+- **`direct.transportChanged({preferred, sequence, closed})`** is emitted:
+  - when `preferred` changes, with `closed: false`;
+  - once for each path generation in which the listener closed at least one relay. It comes after the close, with `closed: true`.
+
+**The trade-off in `closed`.** `closed` is aggregate. Neither the shell nor the Web UI can tell which of the Web UI's streams ran on the lost path, because over HTTP/2 a stream does not know its connection and the listener does not know the Web UI's streams.
+
+So on `closed` the Web UI reconnects only what is safe to reconnect: the SSE stream, which catches up, and terminals that reattach without loss. They are reconnected at once, even if they were healthy on the public backend. That costs one catch-up read and one reattach, and loses nothing.
+
+It does not proactively touch anything that could lose state or repeat an action:
+
+- plain shells;
+- uploads;
+- requests in flight.
+
+These react only to their own connection's error. The event adds no retry of any request.
+
+A preference change alone triggers nothing. Old and new backends coexist.
+
+## 11. Tests and qualification
+
+**Automated, in `ios-shell` on the simulator, with stand-ins.** These are App-logic tests; they do not qualify WebKit:
+
+- the listener table in section 4, against real loopback sockets;
+- exclusive bind, the ownership check, and a stand-in that occupies P;
+- backend choice: the direct stand-in failing at open, refusing, or stalling before `200`; the hedge; early bytes held and never forwarded to the loser; the early-byte bound; a backend failing after `200` closes the relay with no redial;
+- path generations: each row of section 7 closes exactly the relays it should, and a late report for an older selection or generation changes nothing;
+- authorization: a host of an ended selection, an earlier account, or an earlier store never gets the direct backend; an account transition closes relays of both backends;
+- the route owner: written once per host and never cleared, counted at WebKit's real setter, and nothing without a transport;
+- the bridge: emission rules, `sequence`, duplicates, and origin filtering.
+
+**WebKit behaviour.** It is qualified by the measurement harness in `packaging/webkit-proxy-change/`, not by App tests. The cells this design needs:
+
+| Cell | Question | Where |
+| --- | --- | --- |
+| Q1 | A new named store, routed before any load, after a relaunch with the App's real store: HTTP/1.1, HTTP/2, navigation, `fetch`, SSE, WebSocket | Simulator 17.0 and newest; device |
+| Q2 | A store that has loaded the control plane: a route for the instance host added before its first load, used? | Simulator 17.0 and newest; device |
+| Q3 | Within that store, a second host added (union) before its first load, with the first host's pool alive: used, and the first host unaffected? | Same |
+| Q4 | A route changed from P to P2: do new connections go to P2? Two cases: every connection to P closed cooperatively, and P held by another process that accepts and stalls | Same |
+| Q5 | Suspension: B1 versus B2; does the kernel accept while suspended; is P free on resume; how often does re-binding P fail | Device |
+| Q6 | `allowFailover`: absent, refusing, and stalling listener for navigation, HTTP/2, and WebSocket; stickiness; proxy-only and raw-TCP-blocked networks | Simulator, then device |
+| Q7 | Loss detection and takeover by the public backend, end to end: Wi-Fi to cellular, cellular to Wi-Fi, blackhole, direct absent, refused, stalled. The 8–17 s detection measured with a desktop client against the instance's 6 s idle timeout and 1.5 s keep-alives is not a device bound. | Device |
+| Q8 | No replay: authoritative per-request IDs counted at the instance for POST, upload, and terminal input across a path loss, a refusal, and a stall. The App's own no-redial rule does not prove that WebKit never retries. | Device |
+
+**Device matrix (A5).** On an iPhone at the App's minimum, iOS 17.0 (or the lowest 17.x that can be held, recorded as such), and on one at the current release, against a real instance with a real certificate:
+
+- TLS over HTTP/1.1 and HTTP/2, SSE, WebSocket;
+- direct absent, refused, stalled, and blackholed;
+- Wi-Fi to cellular and back;
+- background and resume, with B1 and B2;
+- a stale or occupied port, and a NetworkProcess restart (test instrument);
+- no replay (Q8);
+- cookies, passkeys, and remote authentication unchanged on every path;
+- and the Phase 1 list (Local Network permission states, AP isolation, account and instance switch).
+
+The first build that uses a transport goes to the owner first; enabling it for any instance is the owner's decision.
+
+## 12. The direct transport (A1, A2)
+
+What the transport owes the listener:
+
+- `select(target, report:)`, `deselect()`, `pathDidFail(for:)`, and `openStream(for:)`, as in #3537;
+- reports of `usable(generation)`, `verifying` (after a network change, before its probe), and `lost`.
+
+Its rules:
+
+- **The binary.** Link only the gated `IrohLib` artifact whose pin in `packaging/iroh-apple/release.json` is `published`, with a matching checksum. Today the pin is `pending` (tag `iroh-apple-v1.2.0-1`, iroh 1.4.1, deployment target 17.0), so no App build links it. The pin belongs to the gate lane.
+- **Nothing exists before a `ready` rendezvous answer:** no endpoint, no UDP socket, and therefore no Local Network prompt. The endpoint uses the minimal preset: no relay, no discovery, a key generated per launch.
+- **Rendezvous.** Native code fetches it with a same-origin request on the account store (D3). The answer never crosses the bridge. The request is an ordinary instance request. It reaches the listener like any other, and goes to the public backend because direct is not authorized before the answer (rendezvous contract, section 5).
+- **Probe.** Open a stream and complete a CONNECT within a short bound (1 second proposed). It is used for the first `usable`, after a network change (`verifying`), and after `pathDidFail`.
+- **Loss.** `lost` at once when the transport's connection closes or a stream cannot open. A dead connection closes through the instance's 6 s idle timeout with 1.5 s keep-alives; how fast that is on a device is cell Q7. The App adds no traffic counter of its own.
+- **Cancellation.** `openStream` must honour cancellation promptly: the listener's open bound is cooperative. This is tested against the real transport, not only the stand-in.
+- **Interoperability.** It is tested against the published instance sidecar before either side's iroh pin changes.
+
+Open-source notices for iroh are shipped by the licenses work, a separate task, before any build that links it.
+
+## 13. Open for the iOS owner
+
+1. **D3, the rendezvous fetch.** A fixed script in the runtime primary's `WKContentWorld.defaultClient`, or a second hidden transport on the instance origin. We would start with the first.
+2. **D4, Local Network permission,** and **D5, the minimum iOS version:** unchanged from the Phase 1 plan.
+3. **The cold-launch wait** (sections 5 and 9). The store's first load waits, with a short bound, for the listener. Only builds with a registered transport do this.
+4. **Admission while the coordinator is busy.** `isCurrentRuntime` is false during a push-management request, so a `usable` report then is refused once, and the transport reports again.
+5. **A navigation in flight when the direct path is lost** ends as a failed load, and Retry loads over the public backend. Should the shell reload once by itself?
+
+## 14. Pull requests
+
+| PR | Content | Status |
+| --- | --- | --- |
+| #3530 | This document, the bridge contract, and the Phase 1 and parent-plan rows that describe the App | Draft until reviewed |
+| #3537 | Swift: listener, backends, routes, controller, bridge. Inactive without a transport. | Draft; reworked against this contract after #3530 lands |
+| #3532 | Web UI: reconnect on `closed` | Draft; reworked after #3530 lands |
+| Transport (A1, A2) | iroh, rendezvous, probe | After the iroh pin is `published` and the owner approves the first transport build |
+| Device validation (A5) | Section 11 | The iOS owner or the owner |

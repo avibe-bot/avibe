@@ -146,7 +146,7 @@ interface AvibeNative {
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
-| [`direct`](remote-direct-ios.md) | `direct.status()` → `{transport: "tunnel" \| "direct", sequence: number}`. Read-only, no parameters. | `direct.transportChanged({transport, sequence})` |
+| [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number}`. Read-only, no parameters. | `direct.transportChanged({preferred, sequence, closed})` |
 
 Phase 0a PR 2 implements this v1 subset:
 
@@ -230,34 +230,50 @@ Rules:
   call it but cannot extend it, which is what keeps the app within App Review
   2.5.2 (section 13).
 
-### `direct`: which path carries the instance origin
+### `direct`: which path new connections prefer
 
 Specified for remote direct paths ([the App side](remote-direct-ios.md)). A
-shell can carry the instance origin's connections over a direct path instead
-of Cloudflare Tunnel. The origin does not change, so the Web UI needs to know
-only one thing: connections it opened before a change stay on the path they
-were opened on.
+shell can carry the instance origin's connections through a local proxy that
+chooses, for each new connection, a direct path or Cloudflare. The origin does
+not change. Connections already open stay on the path they were opened on,
+and connections on both paths can exist at the same time, so the shell never
+reports a single path for "the instance". It reports two things: which path
+new connections prefer, and that it closed connections because their path was
+lost.
 
-- `transport` is `"tunnel"` (Cloudflare Tunnel, the default) or `"direct"`.
-  It describes the calling document's instance; a shell with no direct
-  transport always answers `"tunnel"` and never emits the event.
-- `sequence` is an integer that grows with every change while the shell
-  process lives. The call and the event carry the same shape, so the Web UI
-  keeps the answer with the highest `sequence` and ignores an older one that
-  arrives late.
-- The shell emits `direct.transportChanged` after the change has been applied
-  to the data store, to every instance-origin main frame it manages, the
-  primary and instance-origin child windows alike.
-- On the event the Web UI rebuilds its long-lived connections (the SSE stream
-  and terminal WebSockets) through their existing reconnect owners. It never
-  replays a request whose result is unknown. Without the capability, nothing
-  changes.
+- `preferred` is `"tunnel"` (Cloudflare, the default) or `"direct"`. It
+  describes only what the shell will try first for the calling document's
+  next connections, never where an existing connection runs. It is
+  `"direct"` only for the selected instance's origin; for every other caller,
+  and in a shell with no direct transport, it is always `"tunnel"`, and the
+  event never fires.
+- `sequence` is an integer that grows with every event while the shell
+  process lives. The call and the event carry it. The Web UI keeps the highest
+  `sequence` it has seen, ignores anything older that arrives late, and treats
+  a repeat of the same `sequence` as already handled.
+- The shell emits `direct.transportChanged({preferred, sequence, closed})`:
+  - when `preferred` changes, with `closed: false`;
+  - once for each lost path on which it closed at least one connection,
+    after closing them, with `closed: true`.
+- The shell delivers the event to the current runtime's instance-origin
+  documents only: the primary main frame and instance-origin child windows.
+  The script checks the origin of the document it runs in.
+- `closed: true` means some connections were closed because their path was
+  lost, not that all were. Healthy connections continue on either path. The
+  event is aggregate: it cannot say which of the Web UI's streams were on the
+  lost path. So on it the Web UI reconnects, at once and through their
+  existing reconnect owners, only what reconnects without loss: the SSE
+  stream (which catches up) and terminals that reattach without loss, even if
+  they were healthy. Plain shells, uploads, and requests in flight are not
+  touched by the event; they react only to their own connection's error. The
+  event adds no retry of any request. On a change of `preferred` alone the
+  Web UI does nothing.
 - `direct.status()` takes no parameters; any parameter is `invalid_argument`.
 - The surface is closed on purpose. No call lets web content choose an
-  address, start a probe, or supply a rendezvous answer, and the answer
-  carries no address, endpoint identity, or network name. Show Pages are
-  same-origin with the Workbench and can reach the bridge, so anything a call
-  accepted, an Agent-authored page could supply. Native code fetches the
+  address, start a probe, or supply a rendezvous answer, and nothing it
+  returns carries an address, endpoint identity, or network name. Show Pages
+  are same-origin with the Workbench and can reach the bridge, so anything a
+  call accepted, an Agent-authored page could supply. Native code fetches the
   rendezvous itself.
 
 ## 5. Composer and keyboard
