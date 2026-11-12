@@ -106,6 +106,9 @@ function AccountCard({ wallet, account, fresh, onChanged }: {
         return;
       }
       onChanged(result.secret);
+    } catch (err: unknown) {
+      // A dropped connection is a failure too: the change did not happen as far as this page knows.
+      setError(vaultErrorMessage(t, err, t('vaults.dialog.errors.updateFailed')));
     } finally {
       setBusy(false);
     }
@@ -194,6 +197,8 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
       }
       setFresh(next);
       onChanged(result.secret);
+    } catch (err: unknown) {
+      setError(vaultErrorMessage(t, err, t('vaults.dialog.errors.updateFailed')));
     } finally {
       setAdding(false);
     }

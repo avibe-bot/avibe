@@ -82,3 +82,13 @@ it('renames an account, and stops offering more at the limit', async () => {
   expect(screen.getByText(w.full.replace('{{limit}}', '20'))).toBeTruthy();
   expect(within(document.body).getAllByText(/^#\d+$/)).toHaveLength(20);
 });
+
+it('says so when a connection drops while adding an account or turning ask on', async () => {
+  api.enableVaultHdAccount.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+  api.updateVaultHdAccount.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+  open(wallet([account(0)]));
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: w.add.replace('{{account}}', '1') })); });
+  expect(screen.getAllByRole('alert').length).toBeGreaterThan(0);
+  await act(async () => { fireEvent.click(screen.getByRole('switch', { name: w.ask })); });
+  expect(screen.getAllByRole('alert').length).toBe(2);
+});

@@ -243,3 +243,20 @@ it('shows the avault authorization notice when saving a wallet needs it, keeping
   expect(await screen.findByText('avault-authorization')).toBeTruthy();
   expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe(OFFICIAL);
 });
+
+it('is not blocked by proxy settings left in Advanced before choosing a seed-phrase wallet', async () => {
+  render(<I18nextProvider i18n={i18n}><VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} /></I18nextProvider>);
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
+  fireEvent.change(screen.getByRole('textbox', { name: `${en.vaults.dialog.name} ${en.vaults.dialog.nameHint}` }), { target: { value: 'AGENT_WALLET' } });
+  // A header auth with no header name, which would block an ordinary key.
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.advanced }));
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.fetchAuthHeader }));
+  fireEvent.click(screen.getByRole('radio', { name: hd.chainMnemonic }));
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [storedFor(OFFICIAL.split(' '))] } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(screen.queryByText(en.vaults.dialog.errors.authNameRequired)).toBeNull();
+});

@@ -669,13 +669,14 @@ export const VaultSecretForm: React.FC<{
     // Don't silently drop a half-typed chip the user can still see. Tags sit in the main body
     // (always visible); allowed hosts live in the Advanced collapsible in BOTH modes, so a host
     // draft only blocks submit while Advanced is open (collapsing clears hostsPending).
-    const hostsVisible = advancedOpen;
+    // A seed-phrase wallet has no proxy policy and its form hides Advanced: nothing there may block it.
+    const hostsVisible = advancedOpen && !isHd;
     if (tagsPending || (hostsVisible && hostsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
     const normalizedFetchAuthName = fetchAuthName.trim();
-    if (fetchAuthMode === 'header') {
+    if (!isHd && fetchAuthMode === 'header') {
       if (!normalizedFetchAuthName) {
         setError(t('vaults.dialog.errors.authNameRequired'));
         return;
@@ -689,7 +690,7 @@ export const VaultSecretForm: React.FC<{
         return;
       }
     }
-    if (fetchAuthMode === 'query') {
+    if (!isHd && fetchAuthMode === 'query') {
       if (!normalizedFetchAuthName) {
         setError(t('vaults.dialog.errors.authNameRequired'));
         return;
