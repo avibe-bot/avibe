@@ -46,7 +46,9 @@ import {
   type SolanaKeyImportFormat,
 } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
-import { checkPhrase, deriveAccounts, newPhrase, wordsToSeed, type HdAccountAddresses, type PhraseCheck } from '@/lib/vaultHdWallet';
+import {
+  checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
+} from '@/lib/vaultHdWallet';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
@@ -73,7 +75,7 @@ import {
 import { HintLine, KeySourceTabs } from './vault-key-builder-parts';
 import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import {
-  HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdNotice, HdStepFooter, HdStepper, makeQuiz, quizPassed, type HdQuestion,
+  HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdNotice, HdStepFooter, HdStepper,
 } from './vault-hd-wallet-steps';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
@@ -1465,7 +1467,7 @@ export const VaultSecretForm: React.FC<{
         {hdMismatch ? (
           <>
             <HdNotice tone="error" icon={TriangleAlert}>
-              <span className="font-semibold text-destructive-ink">{t('vaults.hd.mismatch')}</span>{' '}
+              <span className="font-semibold text-destructive-ink">{t('vaults.hd.mismatch')}</span>
               {t('vaults.hd.mismatchHint')}
             </HdNotice>
             <div className="mt-1 flex justify-end">

@@ -10,6 +10,7 @@ import { useApi, type VaultHdAccount, type VaultSecret } from '@/context/ApiCont
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { cn } from '@/lib/utils';
+import { useAccountName } from '@/lib/vaultHdAccounts';
 import { Badge } from './badge';
 import { Button } from './button';
 import { CopyButton } from './copy-button';
@@ -18,21 +19,14 @@ import { InlineNameInput } from './inline-name-input';
 import { Switch } from './switch';
 import { HdAccountAddressList } from './vault-hd-wallet-steps';
 
-export const isHdWallet = (secret: Pick<VaultSecret, 'signer_kind'>) => secret.signer_kind === 'hd-seed';
-
 /** `#1`: an account's position, the number an Agent passes as --account. */
 export function AccountIndex({ index, className }: { index: number; className?: string }) {
+  const { t } = useTranslation();
   return (
     <span className={cn('inline-flex h-5 min-w-7 shrink-0 items-center justify-center rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] font-semibold text-violet-ink', className)}>
-      #{index}
+      {t('vaults.hd.accountIndex', { account: index })}
     </span>
   );
-}
-
-export function useAccountName() {
-  const { t } = useTranslation();
-  return (account: Pick<VaultHdAccount, 'account' | 'name'>) => account.name
-    || (account.account === 0 ? t('vaults.hd.mainAccount') : t('vaults.hd.accountFallback', { account: account.account }));
 }
 
 export function HdWalletBadges({ count }: { count: number }) {
@@ -74,7 +68,7 @@ function LastSigned({ account }: { account: VaultHdAccount }) {
       </span>
     );
   }
-  const when = formatRelativeTime(account.last_signer.at, t, Date.now(), { alwaysRelative: true });
+  const when = formatRelativeTime(account.last_signer.at, t, undefined, { alwaysRelative: true });
   const chain = account.last_signer.chain;
   return (
     <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted">
@@ -227,7 +221,7 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
               {t('vaults.hd.wallet.agentUsage')}
             </span>
             <div className="flex min-w-0 items-center gap-2">
-              <code className="block min-w-0 flex-1 break-words rounded-md bg-surface-2 px-2.5 py-1.5 font-mono text-[11.5px] text-foreground">{command} …</code>
+              <code className="block min-w-0 flex-1 break-words rounded-md bg-surface-2 px-2.5 py-1.5 font-mono text-[11.5px] text-foreground">{t('vaults.hd.signCommand', { name: secret.name, account: usage })}</code>
               <CopyButton value={command} label={null} variant="ghost" />
             </div>
           </div>

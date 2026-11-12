@@ -177,3 +177,28 @@ export function deriveAccounts(seed: Uint8Array, count = 1, from = 0): HdAccount
   }
   return out;
 }
+
+/** One question of the backup check: which word sits at this (1-based) position. */
+export type HdQuestion = { position: number; options: string[]; answer: string };
+
+/** Three positions, each with the right word and two others from the phrase, in random order. */
+export function makeQuiz(words: string[], random: () => number = Math.random): HdQuestion[] {
+  const positions = new Set<number>();
+  while (positions.size < 3) positions.add(1 + Math.floor(random() * words.length));
+  return [...positions].sort((a, b) => a - b).map((position) => {
+    const answer = words[position - 1];
+    const others = [...new Set(words.filter((w) => w !== answer))];
+    const decoys: string[] = [];
+    while (decoys.length < 2 && others.length > 0) decoys.push(others.splice(Math.floor(random() * others.length), 1)[0]);
+    const options = [answer, ...decoys];
+    for (let i = options.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(random() * (i + 1));
+      [options[i], options[j]] = [options[j], options[i]];
+    }
+    return { position, options, answer };
+  });
+}
+
+
+/** Whether every question has its answer picked. */
+export const quizPassed = (quiz: HdQuestion[], chosen: Record<number, string>) => quiz.every((q) => chosen[q.position] === q.answer);

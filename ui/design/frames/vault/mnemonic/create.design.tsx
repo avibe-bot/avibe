@@ -4,8 +4,9 @@
 // option of the signing key's chain selector, and the backup is checked by picking three words.
 import { VaultSecretDialog } from '@/components/ui/vault-secret-dialog';
 import {
-  HdBackupStep, HdCheckStep, HdDoneStep, HdStepFooter, HdStepper, type HdQuestion,
+  HdBackupStep, HdCheckStep, HdDoneStep, HdStepFooter, HdStepper,
 } from '@/components/ui/vault-hd-wallet-steps';
+import type { HdQuestion } from '@/lib/vaultHdWallet';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 
 import { CREATED_ADDRESSES, CREATED_WORDS } from '../../../kit/vault-mnemonic/data';

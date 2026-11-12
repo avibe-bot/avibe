@@ -8,7 +8,6 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 import { useDraft } from '../draft';
-import type { MnemonicChain } from './data';
 
 export const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
 
@@ -162,12 +161,6 @@ export function TierCards({ value }: { value: 'standard' | 'protected' }) {
 
 /** One short line with the longer explanation behind an ⓘ: the shipped Add dialog's own. */
 export { HintLine } from '@/components/ui/vault-key-builder-parts';
-
-/** A chain's short label, from the shipped address labels. */
-export function useChainLabel(): (chain: MnemonicChain) => string {
-  const { t } = useTranslation();
-  return (chain) => (chain === 'evm' ? t('vaults.addresses.eth') : chain === 'bitcoin' ? t('vaults.addresses.btcTaproot') : t('vaults.addresses.solana'));
-}
 
 /** `#1`: an account's position, the number an Agent passes as --account. */
 export function AccountIndex({ index, className }: { index: number; className?: string }) {

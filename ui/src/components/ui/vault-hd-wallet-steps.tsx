@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import type { HdAccountAddresses, PhraseCheck } from '@/lib/vaultHdWallet';
+import type { HdAccountAddresses, HdQuestion, PhraseCheck } from '@/lib/vaultHdWallet';
 import { cn } from '@/lib/utils';
 import { Button } from './button';
 import { Input } from './input';
@@ -26,7 +26,7 @@ export function HdNotice({ tone, icon: Icon, children }: {
   return (
     <div role={tone === 'error' ? 'alert' : 'note'} className={cn('flex items-start gap-2.5 rounded-[10px] border px-3 py-2.5 text-[12.5px] leading-snug text-foreground', box)}>
       <Icon className={cn('mt-0.5 size-4 shrink-0', ink)} />
-      <div className="min-w-0 flex-1">{children}</div>
+      <div className="flex min-w-0 flex-1 flex-wrap gap-x-1">{children}</div>
     </div>
   );
 }
@@ -78,7 +78,7 @@ export function WordGrid({ words, hidden, bad, onReveal }: { words: string[]; hi
           >
             <span className="w-4 shrink-0 text-right font-mono text-[10.5px] text-muted">{index + 1}</span>
             <span className={cn('truncate font-mono text-[13.5px] font-semibold', bad === index ? 'text-destructive-ink' : 'text-foreground')}>
-              {hidden ? '•••••' : word}
+              {hidden ? t('vaults.hd.hiddenWord') : word}
             </span>
           </li>
         ))}
@@ -133,26 +133,6 @@ export function HdBackupStep({ words }: { words: string[] }) {
   );
 }
 
-export type HdQuestion = { position: number; options: string[]; answer: string };
-
-/** Three positions, each with the right word and two others from the phrase, in random order. */
-export function makeQuiz(words: string[], random: () => number = Math.random): HdQuestion[] {
-  const positions = new Set<number>();
-  while (positions.size < 3) positions.add(1 + Math.floor(random() * words.length));
-  return [...positions].sort((a, b) => a - b).map((position) => {
-    const answer = words[position - 1];
-    const others = [...new Set(words.filter((w) => w !== answer))];
-    const decoys: string[] = [];
-    while (decoys.length < 2 && others.length > 0) decoys.push(others.splice(Math.floor(random() * others.length), 1)[0]);
-    const options = [answer, ...decoys];
-    for (let i = options.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(random() * (i + 1));
-      [options[i], options[j]] = [options[j], options[i]];
-    }
-    return { position, options, answer };
-  });
-}
-
 /** Step 3: three quick taps against the paper copy. */
 export function HdCheckStep({ quiz, chosen, onChoose }: {
   quiz: HdQuestion[];
@@ -201,7 +181,7 @@ export function HdCheckStep({ quiz, chosen, onChoose }: {
       </div>
       {wrong ? (
         <HdNotice tone="error" icon={X}>
-          <span className="font-semibold text-destructive-ink">{t('vaults.hd.check.wrong', { position: wrong.position })}</span>{' '}
+          <span className="font-semibold text-destructive-ink">{t('vaults.hd.check.wrong', { position: wrong.position })}</span>
           {t('vaults.hd.check.wrongHint', { position: wrong.position })}
         </HdNotice>
       ) : null}
@@ -209,7 +189,6 @@ export function HdCheckStep({ quiz, chosen, onChoose }: {
   );
 }
 
-export const quizPassed = (quiz: HdQuestion[], chosen: Record<number, string>) => quiz.every((q) => chosen[q.position] === q.answer);
 
 /** Account #0's three addresses, in the shipped address list. */
 export function HdAccountAddressList({ account }: { account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> }) {
@@ -230,7 +209,7 @@ export function HdDoneStep({ name, account }: { name: string; account: Pick<HdAc
       </div>
       <div className="flex flex-col gap-2 rounded-[10px] border border-edge bg-surface-2 p-3">
         <span className="flex items-center gap-2 text-[12.5px] font-semibold text-foreground">
-          <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">#0</span>
+          <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">{t('vaults.hd.accountIndex', { account: 0 })}</span>
           {t('vaults.hd.mainAccount')}
         </span>
         <HdAccountAddressList account={account} />
@@ -246,7 +225,7 @@ export function HdDoneStep({ name, account }: { name: string; account: Pick<HdAc
           {t('vaults.hd.done.howTitle')}
         </span>
         <code className="block min-w-0 break-words rounded-md bg-surface px-2.5 py-1.5 font-mono text-[11.5px] text-foreground">
-          vibe vault sign {name} --chain solana --account 0 …
+          {t('vaults.hd.signCommand', { name, account: 0 })}
         </code>
         <span className="text-[11px] text-muted">{t('vaults.hd.done.howHint')}</span>
       </div>
@@ -301,7 +280,7 @@ export function HdImportFields({
           <div className="flex flex-col gap-2">
             <span>
               <span className="font-semibold text-destructive-ink">{t('vaults.hd.import.unknown', { position: check.position, word: check.word })}</span>
-              {check.suggestions[0] ? <>{' '}{t('vaults.hd.import.didYouMean', { word: check.suggestions[0] })}</> : null}
+              {check.suggestions[0] ? <span className="ml-1">{t('vaults.hd.import.didYouMean', { word: check.suggestions[0] })}</span> : null}
             </span>
             {check.suggestions.length > 0 ? (
               <span className="flex flex-wrap gap-1.5">
@@ -322,7 +301,7 @@ export function HdImportFields({
         </HdNotice>
       ) : check.reason === 'checksum' ? (
         <HdNotice tone="error" icon={AlertTriangle}>
-          <span className="font-semibold text-destructive-ink">{t('vaults.hd.import.checksum', { count: words.length })}</span>{' '}
+          <span className="font-semibold text-destructive-ink">{t('vaults.hd.import.checksum', { count: words.length })}</span>
           {t('vaults.hd.import.checksumHint')}
         </HdNotice>
       ) : check.reason === 'count' ? (
@@ -358,7 +337,7 @@ export function HdImportFields({
       {check.ok && preview ? (
         <div className="flex flex-col gap-2 rounded-[10px] border border-mint/30 bg-mint/[0.06] p-3">
           <span className="flex items-center gap-2 text-[12.5px] font-semibold text-foreground">
-            <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">#0</span>
+            <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">{t('vaults.hd.accountIndex', { account: 0 })}</span>
             {t('vaults.hd.import.previewTitle')}
           </span>
           <HdAccountAddressList account={preview} />
@@ -376,7 +355,7 @@ export function HdAvaultOld({ version, installed, onOpenDependencies }: { versio
     <HdNotice tone="warning" icon={ArrowUpCircle}>
       <div className="flex flex-col gap-2">
         <span>
-          <span className="font-semibold text-gold-ink">{t('vaults.hd.avaultOld', { version, installed })}</span>{' '}
+          <span className="font-semibold text-gold-ink">{t('vaults.hd.avaultOld', { version, installed })}</span>
           {t('vaults.hd.avaultOldHint')}
         </span>
         {onOpenDependencies ? (

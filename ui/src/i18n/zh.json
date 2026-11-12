@@ -6603,7 +6603,10 @@
         "firstBody": "比如交易 Agent 用 #1、空投测试用 #2：资金互不影响，也能单独决定是否每次问你。",
         "open": "查看账户",
         "lastSignedShort": "最近签名 {{when}}"
-      }
+      },
+      "accountIndex": "#{{account}}",
+      "hiddenWord": "•••••",
+      "signCommand": "vibe vault sign {{name}} --chain solana --account {{account}} …"
     }
   },
   "permissions": {

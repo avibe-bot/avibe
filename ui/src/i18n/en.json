@@ -6603,7 +6603,10 @@
         "firstBody": "For example #1 for a trading Agent and #2 for airdrop tests: funds stay apart, and each can ask you or not.",
         "open": "Accounts",
         "lastSignedShort": "Last signed {{when}}"
-      }
+      },
+      "accountIndex": "#{{account}}",
+      "hiddenWord": "•••••",
+      "signCommand": "vibe vault sign {{name}} --chain solana --account {{account}} …"
     }
   },
   "permissions": {
