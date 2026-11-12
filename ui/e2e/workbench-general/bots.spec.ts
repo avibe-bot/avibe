@@ -454,9 +454,11 @@ for (const theme of ['light', 'dark'] as const) {
     const sent: string[] = [];
     await page.route(`**/api/sessions/${sessionId}/messages`, (route) => {
       if (route.request().method() !== 'POST') return route.fallback();
-      const { text } = route.request().postDataJSON() as { text: string };
+      const { text, metadata } = route.request().postDataJSON() as { text: string; metadata?: Record<string, unknown> };
       sent.push(text);
-      const row = { ...ask, id: `msg-${sent.length}`, text, created_at: ago(0), updated_at: ago(0) };
+      // As the server does, the Delivery it answers with keeps the send's metadata (its
+      // client_message_id), so the row it answers with takes the sent row's place, not a second one.
+      const row = { ...ask, id: `msg-${sent.length}`, text, metadata: metadata ?? {}, created_at: ago(0), updated_at: ago(0) };
       // The first message steers into the Turn; the Turn refuses the second, which waits.
       if (sent.length === 1) return route.fulfill({ status: 201, json: { ...row, state: 'accepted', delivery_state: 'accepted' } });
       queued = [{ ...row, type: 'queued', state: 'queued', priority: 'p3' }];
