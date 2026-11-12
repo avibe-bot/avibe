@@ -612,6 +612,17 @@ session_digests = Table(
     Column("now", Text, nullable=True),
 )
 
+# Optional cache comparison state, one latest full record per Session/provider/model.
+# Independent of transcript history; older writers need not know this table exists.
+session_cache_state = Table(
+    "session_cache_state",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column("provider", String, primary_key=True),
+    Column("model", String, primary_key=True),
+    Column("record_json", Text, nullable=False),
+)
+
 skill_usage_daily = Table(
     "skill_usage_daily",
     metadata,
