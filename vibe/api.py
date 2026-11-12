@@ -2483,6 +2483,7 @@ class VaultApiError(ValueError):
             "invalid_hd_wallet": "vault.hd.invalidWallet",
             "invalid_hd_account": "vault.hd.invalidAccount",
             "hd_signing_state_changed": "vault.hd.stateChanged",
+            "vault_policy_downgrade_unavailable": "vault.signing.policyDowngradeUnavailable",
         }.get(code)
 
 
@@ -3704,7 +3705,7 @@ def _reject_plaintext_value_fields(payload: object) -> None:
             _reject_plaintext_value_fields(item)
 
 
-_VAULT_METADATA_ALLOWED_FIELDS = {"description", "tags", "policy", "default_field"}
+_VAULT_METADATA_ALLOWED_FIELDS = {"description", "tags", "policy", "default_field", "always_ask"}
 _VAULT_METADATA_SECRET_FIELDS = {
     "value",
     "sealed",
@@ -4090,6 +4091,8 @@ def update_vault_hd_account(
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.SigningPolicyDowngradeUnavailableError as exc:
+        raise VaultApiError(str(exc), code="vault_policy_downgrade_unavailable", status=409) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_hd_account", status=409) from exc
     _publish_vaults_updated(scope="secret", secret_name=name)
@@ -4139,6 +4142,8 @@ def update_vault_secret(name: str, payload: dict, *, user_context: Any = None) -
         vault_service.SecretConflictError,
     ) as exc:
         raise _vault_field_service_error(exc) from exc
+    except vault_service.SigningPolicyDowngradeUnavailableError as exc:
+        raise VaultApiError(str(exc), code="vault_policy_downgrade_unavailable", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
     release_vault_agent_scopes(release_scopes, reason="update_vault_secret")

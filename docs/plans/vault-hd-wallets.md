@@ -14,7 +14,7 @@ Policy is checked when an operation captures its signing target. A toggle affect
 
 - `POST /api/vault/secrets`: `{name, kind:"keypair", protection:"standard", signer_kind:"hd-seed", keypair:{type:"hd-seed",source:"import",format:"raw-seed"}, blind_box, description?, tags?}`. Browser-generated and imported words share this call. Client-supplied account/public-key metadata is rejected.
 - `POST /api/vault/secrets/{name}/accounts` with `{}` enables the next account.
-- `PATCH /api/vault/secrets/{name}/accounts/{account}` accepts `name` (nonempty string, max 80 characters, or null to reset) and/or `always_ask` (boolean). Only enabled accounts are editable.
+- `PATCH /api/vault/secrets/{name}/accounts/{account}` accepts `name` (nonempty string, max 80 characters, or null to reset) and/or `always_ask` (boolean). Only enabled accounts are editable. Until the separate Passkey downgrade flow lands, confirmation can only be raised: true→false returns `vault_policy_downgrade_unavailable` (409), while same-value saves and name edits remain allowed. See [editable signing policy](vault-signing-policy.md).
 - Secret metadata returns `account_limit:20`, and enabled `accounts:[{account,name,eth,btc_taproot,solana,paths:{evm,bitcoin,solana},always_ask,last_signer:{session_id,at}|null}]`. Default `name` is null so the Web can localize its fallback. Raw public keys are not exposed by the list surface.
 - `vibe vault list` / `find` add `signer_kind` and `accounts:[{account,name,eth,btc_taproot,solana}]` for HD rows.
 - `vibe vault sign NAME --chain evm|bitcoin|solana [--account N]` uses `--digest` for EVM/Bitcoin and exact `--message-hex` for Solana. An explicitly supplied scheme must match the chain.

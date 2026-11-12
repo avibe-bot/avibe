@@ -228,6 +228,10 @@ class InvalidRequestError(VaultServiceError):
     pass
 
 
+class SigningPolicyDowngradeUnavailableError(InvalidRequestError):
+    """Lowering ask-before-signing awaits the owner Passkey authorization flow."""
+
+
 class InvalidSigningKeyError(InvalidRequestError):
     pass
 
@@ -2305,6 +2309,14 @@ def _secret_always_ask(row: dict[str, Any]) -> bool:
     return bool(_secret_policy(row).get("always_ask"))
 
 
+def _require_signing_policy_transition(current: bool, requested: Any) -> None:
+    """The staged editor may raise confirmation, never lower it through metadata."""
+    if type(requested) is not bool:
+        raise InvalidRequestError("always_ask must be a boolean")
+    if current and not requested:
+        raise SigningPolicyDowngradeUnavailableError("Turning off ask-before-signing is not available yet")
+
+
 def _secret_access_requestable(row: dict[str, Any]) -> bool:
     return row.get("kind") != "keypair"
 
@@ -3474,6 +3486,7 @@ def update_secret_metadata(
     description: Any = _UNSET,
     tags: Any = _UNSET,
     policy: Any = _UNSET,
+    always_ask: Any = _UNSET,
     default_field: Any = _UNSET,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     release_scopes: list[dict[str, str]] | None = None,
@@ -3552,6 +3565,17 @@ def update_secret_metadata(
         fields.append("policy")
         if normalized_policy != existing_visible_policy:
             policy_changed = True
+
+    if always_ask is not _UNSET:
+        if row.get("kind") != "keypair" or row.get("signer_kind") not in (None, "local"):
+            raise InvalidRequestError("row-level always_ask editing requires an ordinary keypair")
+        current_always_ask = _secret_always_ask(row)
+        _require_signing_policy_transition(current_always_ask, always_ask)
+        if always_ask != current_always_ask:
+            next_policy = (_loads(values["policy"]) or {}) if "policy" in values else _secret_policy(row)
+            next_policy["always_ask"] = always_ask
+            values["policy"] = json.dumps(next_policy)
+            fields.append("always_ask")
 
     if public_meta is not None:
         values["public_meta"] = json.dumps(public_meta) if public_meta else None
@@ -3696,6 +3720,8 @@ def update_hd_account(
             event = "account-enabled"
         else:
             vault_hd.selected_account(meta, vault_hd.derivation("evm", account))
+            if "always_ask" in changes:
+                _require_signing_policy_transition(accounts[account]["always_ask"], changes["always_ask"])
             accounts[account].update(changes)
             event = "account-updated"
     except ValueError as exc:

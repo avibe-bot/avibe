@@ -543,6 +543,35 @@ def test_cli_reports_the_approval_when_account_policy_changes_after_its_prefligh
     assert custody.calls == []
 
 
+def test_hd_policy_can_only_be_raised_and_rejected_edit_is_atomic(custody):
+    create(custody)
+    api.update_vault_hd_account("HD_TEST_WALLET", {})
+    api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": False, "name": "Before"}, account=0)
+    api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": True}, account=0)
+    before_rows, before_audit = rows(vault_secrets), rows(vault_audit)
+    with pytest.raises(api.VaultApiError) as error:
+        api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": False, "name": "Must not change"}, account=0)
+    assert error.value.code == "vault_policy_downgrade_unavailable"
+    assert error.value.status == 409
+    with pytest.raises(vault_service.SigningPolicyDowngradeUnavailableError):
+        with api._vault_engine().begin() as conn:
+            vault_service.update_hd_account(conn, "HD_TEST_WALLET", account=0, changes={"always_ask": False})
+    assert rows(vault_secrets) == before_rows and rows(vault_audit) == before_audit
+    with pytest.raises(api.VaultApiError) as error:
+        api.update_vault_secret("HD_TEST_WALLET", {"always_ask": True})
+    assert error.value.code == "invalid_metadata"  # HD settings are per shared account index.
+    assert rows(vault_secrets) == before_rows and rows(vault_audit) == before_audit
+    updated = api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": True, "name": "Still editable"}, account=0)
+    assert updated["secret"]["accounts"][0]["name"] == "Still editable"
+    assert updated["secret"]["accounts"][0]["always_ask"] is True
+    assert updated["secret"]["accounts"][1]["always_ask"] is False
+    assert custody.calls == []
+    for chain in ("evm", "bitcoin", "solana"):
+        response = api.vault_sign(sign_input(chain, 0))
+        assert response["code"] == "approval_required"
+    assert custody.calls == []
+
+
 def test_http_account_routes_use_real_storage_and_reject_nonobjects(custody):
     from vibe.ui_server import app
 
@@ -555,6 +584,10 @@ def test_http_account_routes_use_real_storage_and_reject_nonobjects(custody):
     response = client.patch("/api/vault/secrets/HD_TEST_WALLET/accounts/1", json={"name": "Daily", "always_ask": True}, headers=headers)
     assert response.status_code == 200
     assert response.get_json()["secret"]["accounts"][1]["name"] == "Daily"
+    response = client.patch("/api/vault/secrets/HD_TEST_WALLET/accounts/1", json={"always_ask": False}, headers=headers)
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "vault_policy_downgrade_unavailable"
+    assert meta()["accounts"][1]["always_ask"] is True
     response = client.post("/api/vault/secrets/HD_TEST_WALLET/accounts", json=[], headers=headers)
     assert response.status_code == 400
     assert len(meta()["accounts"]) == 2
