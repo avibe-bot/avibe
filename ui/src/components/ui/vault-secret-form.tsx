@@ -77,7 +77,7 @@ import {
 import { HintLine, KeySourceTabs } from './vault-key-builder-parts';
 import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import {
-  HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdNotice, HdStepFooter, HdStepper,
+  HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdMismatchBlock, HdNotice, HdStepFooter, HdStepper,
 } from './vault-hd-wallet-steps';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
@@ -1570,31 +1570,16 @@ export const VaultSecretForm: React.FC<{
     return (
       <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
         {hdMismatch ? (
-          <>
-            <HdNotice tone="error" icon={TriangleAlert}>
-              <span className="font-semibold text-destructive-ink">{t('vaults.hd.mismatch')}</span>
-              <span>{hdMismatchNotSaved ? t('vaults.hd.mismatchNotSaved') : hdMismatchDeleted ? t('vaults.hd.mismatchDeleted') : t('vaults.hd.mismatchHint')}</span>
-            </HdNotice>
-            {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
-            <div className="mt-1 flex justify-end gap-2">
-              {hdMismatchDeleted ? (
-                // Nothing was created: closing reports no success.
-                <Button type="button" onClick={onCancel}>{t('vaults.hd.close')}</Button>
-              ) : (
-                <Button
-                  type="button"
-                  variant="destructive"
-                  disabled={submitting}
-                  onClick={() => {
-                    setSubmitting(true);
-                    void deleteMismatched().finally(() => setSubmitting(false));
-                  }}
-                >
-                  {t('vaults.hd.deleteWallet')}
-                </Button>
-              )}
-            </div>
-          </>
+          <HdMismatchBlock
+            outcome={hdMismatchNotSaved ? 'not-saved' : hdMismatchDeleted ? 'deleted' : 'stored'}
+            error={error}
+            busy={submitting}
+            onClose={onCancel}
+            onDelete={() => {
+              setSubmitting(true);
+              void deleteMismatched().finally(() => setSubmitting(false));
+            }}
+          />
         ) : hdStep === 'done' && hdCreated ? (
           <>
             <HdDoneStep name={hdSavedName} account={hdCreated} />

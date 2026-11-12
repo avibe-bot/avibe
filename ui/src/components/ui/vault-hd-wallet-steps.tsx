@@ -393,3 +393,36 @@ export function HdStepFooter({ step, onBack, onNext, canCreate, submitting }: {
     </div>
   );
 }
+
+/**
+ * The address check failed: the wallet's shown #0 is not what avault would spend. `not-saved` means
+ * the server refused before saving; `deleted` means a saved one was removed; `stored` means it is
+ * still saved (blocked here) and must be deleted.
+ */
+export function HdMismatchBlock({ outcome, error, busy, onClose, onDelete }: {
+  outcome: 'not-saved' | 'deleted' | 'stored';
+  error?: string | null;
+  busy?: boolean;
+  onClose: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const detail = outcome === 'not-saved' ? t('vaults.hd.mismatchNotSaved') : outcome === 'deleted' ? t('vaults.hd.mismatchDeleted') : t('vaults.hd.mismatchHint');
+  return (
+    <>
+      <HdNotice tone="error" icon={AlertTriangle}>
+        <span className="font-semibold text-destructive-ink">{t('vaults.hd.mismatch')}</span>
+        <span>{detail}</span>
+      </HdNotice>
+      {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
+      <div className="mt-1 flex justify-end gap-2">
+        {outcome === 'stored' ? (
+          <Button type="button" variant="destructive" disabled={busy} onClick={onDelete}>{t('vaults.hd.deleteWallet')}</Button>
+        ) : (
+          // Nothing is kept: closing reports no success.
+          <Button type="button" onClick={onClose}>{t('vaults.hd.close')}</Button>
+        )}
+      </div>
+    </>
+  );
+}

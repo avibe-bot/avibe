@@ -3,9 +3,7 @@
 // (kit/vault-mnemonic/data.ts), never a wallet. Owner decisions 2026-11-12: the wallet is the third
 // option of the signing key's chain selector, and the backup is checked by picking three words.
 import { VaultSecretDialog } from '@/components/ui/vault-secret-dialog';
-import {
-  HdBackupStep, HdCheckStep, HdDoneStep, HdStepFooter, HdStepper,
-} from '@/components/ui/vault-hd-wallet-steps';
+import { HdBackupStep, HdCheckStep, HdDoneStep, HdMismatchBlock, HdStepFooter, HdStepper } from '@/components/ui/vault-hd-wallet-steps';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 
 import { CREATED_ADDRESSES, CREATED_WORDS } from '../../../kit/vault-mnemonic/data';
@@ -35,6 +33,13 @@ const check = (state: CheckFixture) => () => (
     <HdStepFooter step="check" onBack={noop} canCreate={state.canCreate} />
   </form>
 );
+// The address check refused the wallet: the server saved nothing, or a saved one must be deleted.
+const mismatch = (outcome: 'not-saved' | 'stored') => (
+  // pt-6 keeps the notice clear of the dialog's close button; the real dialog has its header there.
+  <form className="flex min-w-0 flex-col gap-4 pt-6">
+    <HdMismatchBlock outcome={outcome} onClose={noop} onDelete={noop} />
+  </form>
+);
 const done = () => (
   <div className="flex min-w-0 flex-col gap-4">
     <HdDoneStep name="AGENT_WALLET" account={CREATED_ADDRESSES[0]} />
@@ -51,6 +56,8 @@ const designFrames = frames([
   { name: 'check-quiz-correct', title: '新建 · ③ 核对 · 全部选对，可以创建', width: 800, height: 900, status: 'shipped', fixtures, render: alone(T, check(checkFixtures.correct)()) },
   { name: 'check-quiz-wrong', title: '新建 · ③ 核对 · 选错一个', width: 800, height: 960, status: 'shipped', fixtures, render: alone(T, check(checkFixtures.wrong)()) },
   { name: 'done', title: '新建 · 完成 · 账户 #0 的地址（已和这些词核对）', width: 800, height: 960, status: 'shipped', fixtures, render: alone(T, done()) },
+  { name: 'address-check-not-saved', title: '错误 · 地址核对失败，服务器什么都没保存（不要转账）', width: 800, height: 520, status: 'shipped', fixtures, render: alone(T, mismatch('not-saved')) },
+  { name: 'address-check-stored', title: '错误 · 保存后自检失败，钱包已标为不可用，需删除', width: 800, height: 560, status: 'shipped', fixtures, render: alone(T, mismatch('stored')) },
   { name: 'backup-phone', title: '新建 · ② 抄下助记词 · 手机', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: show, render: consolePage(<><VaultsPage />{alone(T, backup())()}</>) },
   { name: 'check-quiz-phone', title: '新建 · ③ 核对 · 手机', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, render: consolePage(<><VaultsPage />{alone(T, check(checkFixtures.correct)())()}</>) },
   { name: 'done-phone', title: '新建 · 完成 · 手机', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, render: consolePage(<><VaultsPage />{alone(T, done())()}</>) },

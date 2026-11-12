@@ -6581,7 +6581,7 @@
       "avaultOld": "Seed phrase wallets need avault {{version}} or later; {{installed}} is installed.",
       "avaultOldHint": "Update, then come back to save; what you entered stays. Your existing keys are unaffected.",
       "openDependencies": "Open Settings → Dependencies",
-      "mismatch": "Address check failed: the addresses avault stored don’t match the ones these words give.",
+      "mismatch": "Address check failed: the addresses avault derives don’t match the ones these words give.",
       "mismatchHint": "Don’t send funds to this wallet. It could not be deleted automatically; delete it again. Until then this browser keeps it blocked.",
       "askAccount0": "Ask before account #0 signs",
       "askAccount0Info": "By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser, and turning it off later needs your Passkey. Each account has its own setting in the wallet.",
