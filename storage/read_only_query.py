@@ -14,6 +14,7 @@ from config import paths
 from storage.cache_metrics import CACHE_VIEWS, cache_observation
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import MESSAGE_TURN_ID_SQL
+from storage.skill_catalogs import SKILL_EVENTS_VIEW, events_view, hydrate_content
 from storage.tool_calls_query import TOOL_CALLS_VIEW, TOOL_CALL_FUNCTIONS
 from storage.query_policy import SCHEMA_PRAGMAS
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
@@ -106,6 +107,7 @@ RECALL_VIEWS = {
 }
 RECALL_VIEWS.update(CACHE_VIEWS)
 RECALL_VIEWS["tool_calls"] = TOOL_CALLS_VIEW
+RECALL_VIEWS["skill_events"] = SKILL_EVENTS_VIEW
 
 EXCERPT_DEFAULT_WIDTH = 300
 
@@ -158,6 +160,7 @@ def _regexp(pattern: Any, value: Any) -> int | None:
 _FUNCTION_HINTS = {
     "excerpt": "Call excerpt(text, 'term') or excerpt(text, 'term', width).",
     "regexp": "REGEXP takes a Python regular expression; add (?i) to ignore case.",
+    "skill_catalog_content": "Query skill_events for hydrated Skill observations; a missing or damaged snapshot requires forward repair.",
     "cache_observation": "The cache diagnostic views own this function; query cache_requests rather than calling it directly.",
     "cache_valuation": "The cache diagnostic views own this function; query cache_requests rather than calling it directly.",
 }
@@ -217,6 +220,7 @@ def run_read_only_query(
         return 1 if steps > step_limit else 0
 
     try:
+        conn.create_function("skill_catalog_content", 4, reporting("skill_catalog_content", hydrate_content), deterministic=True)
         for name, arity, function in TOOL_CALL_FUNCTIONS:
             conn.create_function(name, arity, reporting(name, function), deterministic=True)
         conn.create_function("excerpt", -1, reporting("excerpt", _excerpt), deterministic=True)
@@ -236,13 +240,17 @@ def run_read_only_query(
         # TEMP objects live in this connection only, so a read-only database still
         # takes them; they must exist before query_only and the authorizer forbid it.
         for name, select in RECALL_VIEWS.items():
+            if name == "skill_events" and not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'skill_catalogs'"
+            ).fetchone():
+                select = events_view(catalogs_available=False)
             conn.execute(f"CREATE TEMP VIEW {name} AS {select}")
         conn.execute("PRAGMA query_only = ON")
         def authorize(action, arg1, arg2, db_name, source):
             # SQL has no resource-row filter. Raw Skill observations share
             # agent_events, so roles below Member cannot query that table wholesale.
             if (not allow_skill_statistics and action == sqlite3.SQLITE_READ
-                    and arg1 in {"skill_usage_daily", "agent_events"}):
+                    and arg1 in {"skill_usage_daily", "skill_catalogs", "agent_events"}):
                 verdict = sqlite3.SQLITE_DENY
             else:
                 verdict = _authorizer(action, arg1, arg2, db_name, source)
