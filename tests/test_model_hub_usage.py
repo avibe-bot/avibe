@@ -4270,7 +4270,7 @@ def test_the_write_queue_is_bounded_by_identities_not_by_arrival_rate(tmp_path: 
             ("src_b", "model-x"),
             ("src_b", "model-y"),
         )
-        fold = ledger.record_many
+        commit = ledger.commit_buffered_flush
         batches: list[int] = []
         holding = threading.Event()
         release = threading.Event()
@@ -4280,9 +4280,9 @@ def test_the_write_queue_is_bounded_by_identities_not_by_arrival_rate(tmp_path: 
             if len(batches) == 1:
                 holding.set()
                 assert release.wait(5)
-            fold(calls)
+            commit(calls)
 
-        ledger.record_many = counting
+        ledger.commit_buffered_flush = counting
 
         # One call opens a flush and holds it on the writing thread; everything
         # below therefore arrives while a write is out, which is the scenario.
@@ -4334,25 +4334,27 @@ def test_a_ledger_that_cannot_be_written_is_reported_once_per_outage(
     async def exercise() -> None:
         ledger = _ledger(tmp_path)
         writer = UsageWriter(ledger)
-        fold = ledger.record_many
+        fold = ledger._write
         broken = True
 
-        def refuse(calls) -> None:
+        def refuse(rows, *, measured) -> None:
             if broken:
                 raise OSError("read-only file system")
-            fold(calls)
+            fold(rows, measured=measured)
 
-        ledger.record_many = refuse
+        ledger._write = refuse
 
         with caplog.at_level(logging.WARNING, logger="core.handlers.model_hub.usage"):
             for attempt in range(3):
-                await writer.record(
+                receipt = writer.record(
                     source_id="src_a", model_id=f"model-{attempt}", usage=None, at=NOW
                 )
+                assert await writer.wait_recorded(receipt) is False
             outage = [record.getMessage() for record in caplog.records]
 
             broken = False
-            await writer.record(source_id="src_a", model_id="model-back", usage=None, at=NOW)
+            receipt = writer.record(source_id="src_a", model_id="model-back", usage=None, at=NOW)
+            assert await writer.wait_recorded(receipt) is True
             recovery = [record.getMessage() for record in caplog.records][len(outage) :]
 
         assert len(outage) == 1 and "dropping metered calls" in outage[0]
@@ -4422,13 +4424,13 @@ def test_usage_writer_coalesces_a_bounded_burst_without_weakening_ack(
         ledger = _ledger(tmp_path)
         writer = UsageWriter(ledger)
         batches: list[tuple[UsageCall, ...]] = []
-        record_many = ledger.record_many
+        commit = ledger.commit_buffered_flush
 
         def counted(calls) -> None:
             batches.append(tuple(calls))
-            record_many(calls)
+            commit(calls)
 
-        ledger.record_many = counted
+        ledger.commit_buffered_flush = counted
         writes = []
         for input_tokens in (1, 2, 3):
             writes.append(
@@ -4441,7 +4443,8 @@ def test_usage_writer_coalesces_a_bounded_burst_without_weakening_ack(
             )
             await asyncio.sleep(0.01)
 
-        assert await writer.wait_recorded(writes[-1]) is True
+        # Do not request an explicit durable wait: the timer itself must flush.
+        assert await asyncio.wait_for(asyncio.shield(writes[-1]), 1) is True
         assert len(batches) == 1
         assert batches[0][0].requests == 3
         assert writer.unpersisted == 0
@@ -4480,7 +4483,197 @@ def test_cancelled_usage_wait_keeps_the_shared_batch_owned(tmp_path: Path) -> No
         with pytest.raises(asyncio.CancelledError):
             await waiter
 
-        assert await writer.wait_recorded(second) is True
+        assert await writer.drain(timeout=1) == 0
+        assert second.result() is True
         assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 2
+
+    asyncio.run(exercise())
+
+
+def test_buffered_usage_is_visible_to_summary_and_daily_costs_before_disk_flush(tmp_path: Path) -> None:
+    """Acceptance is immediately readable while the durable document stays untouched."""
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+        writer = UsageWriter(ledger)
+        writer.record(
+            source_id="src_a",
+            model_id="model-x",
+            usage=ProtocolUsageReport(input_tokens=7),
+            at=NOW,
+        )
+
+        assert not ledger.path.exists()
+        summary = ledger.summary(days=1, now=NOW)
+        assert summary["totals"]["requests"] == 1
+        prices = PriceTable(catalog={}, vendor_map={}, overrides={}, price_table_date="2026-01-01")
+        costs = ledger.daily_costs(
+            days=1,
+            now=NOW,
+            identities=[SourceIdentity("src_a", "A", ["model-x"])],
+            prices=prices,
+        )
+        assert costs["src_a"][NOW.date().isoformat()].excluded_tokens == 7
+
+        assert await writer.drain(timeout=1) == 0
+        assert json.loads(ledger.path.read_text(encoding="utf-8"))[0]["requests"] == 1
+
+    asyncio.run(exercise())
+
+
+def test_inflight_and_pending_usage_merge_exactly_once_and_preserve_fresh_disk_rows(tmp_path: Path) -> None:
+    """Readers see an in-flight batch plus new pending calls once on both sides of commit."""
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+        writer = UsageWriter(ledger)
+        real_commit = ledger.commit_buffered_flush
+        started = threading.Event()
+        release = threading.Event()
+        committed = threading.Event()
+        acknowledged = threading.Event()
+
+        def paused_commit(calls) -> None:
+            if not started.is_set():
+                started.set()
+                assert release.wait(5)
+                real_commit(calls)
+                committed.set()
+                assert acknowledged.wait(5)
+            else:
+                real_commit(calls)
+
+        ledger.commit_buffered_flush = paused_commit
+        writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        drain = asyncio.create_task(writer.drain(timeout=5))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            writer.record(source_id="src_b", model_id="model-x", usage=None, at=NOW)
+            # An independent durable write after queueing must survive the fresh
+            # base merge. Neither the overlay nor the flush caches the document.
+            external = BoundedUsageLedger(ledger.path, now=lambda: NOW)
+            external.record(source_id="src_existing", model_id="model-x", usage=None, at=NOW)
+            during = ledger.summary(days=1, now=NOW)
+            assert during["totals"]["requests"] == 3
+            assert {row["source_id"] for row in during["sources"]} == {
+                "src_existing", "src_a", "src_b",
+            }
+
+            release.set()
+            assert await asyncio.to_thread(committed.wait, 5)
+            # The disk changed but the worker has not acknowledged yet. Its old
+            # batch is no longer in the overlay; the new pending call still is.
+            assert writer.unpersisted == 2
+            assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 3
+            assert external.summary(days=1, now=NOW)["totals"]["requests"] == 2
+        finally:
+            release.set()
+            acknowledged.set()
+        assert await drain == 0
+        final = ledger.summary(days=1, now=NOW)
+        reopened = BoundedUsageLedger(ledger.path, now=lambda: NOW).summary(days=1, now=NOW)
+        assert final["totals"]["requests"] == reopened["totals"]["requests"] == 3
+        assert {row["source_id"] for row in reopened["sources"]} == {
+            "src_existing", "src_a", "src_b",
+        }
+
+    asyncio.run(exercise())
+
+
+def test_failed_durable_receipt_is_false_and_clears_the_read_overlay(tmp_path: Path) -> None:
+    """A failed durable merge cannot leave a ghost row visible through the overlay."""
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+
+        def refuse(rows, *, measured) -> None:
+            raise OSError("read-only file system")
+
+        ledger._write = refuse
+        writer = UsageWriter(ledger)
+        receipt = writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+
+        assert await writer.wait_recorded(receipt) is False
+        assert writer.unpersisted == 0
+        assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 0
+        assert ledger._inflight is None
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("max_rows", [1, 3])
+def test_buffered_projection_uses_durable_retention_and_capacity(tmp_path: Path, max_rows: int) -> None:
+    """A flush cannot change which buffered usage fits the published report."""
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path, max_rows=max_rows)
+        writer = UsageWriter(ledger)
+        for source, at in (("src_old", NOW - timedelta(days=90)), ("src_a", NOW), ("src_b", NOW)):
+            writer.record(source_id=source, model_id="model-x", usage=None, at=at)
+        before = {window: ledger.report(window=window, now=NOW) for window in ("24h", "7d")}
+        assert not ledger.path.exists()
+        assert await writer.drain(timeout=1) == 0
+        reopened = BoundedUsageLedger(ledger.path, now=lambda: NOW, max_rows=max_rows)
+        for window, expected in before.items():
+            assert reopened.report(window=window, now=NOW) == expected
+
+    asyncio.run(exercise())
+
+
+def test_buffer_acceptance_and_overlapping_drains_do_not_wait_for_fsync(tmp_path: Path) -> None:
+    """Only durable readers/writers wait on fsync; acceptance and timed drains stay bounded."""
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+        writer = UsageWriter(ledger)
+        entered, release = threading.Event(), threading.Event()
+        write = ledger._write
+
+        def paused_write(rows, *, measured):
+            entered.set()
+            assert release.wait(5)
+            write(rows, measured=measured)
+
+        ledger._write = paused_write
+        first = writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        long_drain = asyncio.create_task(writer.drain(timeout=3))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            started = time.monotonic()
+            second = writer.record(source_id="src_b", model_id="model-x", usage=None, at=NOW)
+            assert time.monotonic() - started < 0.5
+            assert await writer.drain(timeout=0.01) == 2
+            assert not first.done() and not second.done()
+        finally:
+            release.set()
+        # The short drain ending must not reset the longer drain's bypass mode:
+        # it flushes the second batch without waiting the normal five seconds.
+        assert await long_drain == 0
+        assert first.result() is True and second.result() is True
+        assert BoundedUsageLedger(ledger.path, now=lambda: NOW).summary(days=1, now=NOW)["totals"]["requests"] == 2
+
+    asyncio.run(exercise())
+
+
+def test_price_refresh_failure_does_not_leave_buffered_usage_uncommitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing optional price factory must not bypass commit or strand an overlay."""
+
+    prices = PriceTable(catalog={}, vendor_map={}, overrides={}, price_table_date="2026-01-01")
+    writer = UsageWriter(_ledger(tmp_path), price_table=lambda: prices)
+
+    def fail_prices():
+        raise OSError("catalog unavailable")
+
+    monkeypatch.setattr(writer, "_price_table", fail_prices)
+    monkeypatch.setattr(usage_module, "_PRICE_TABLE_TTL_SECONDS", 0)
+
+    async def exercise() -> None:
+        receipt = writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        assert await writer.wait_recorded(receipt) is True
+        assert writer.unpersisted == 0
+        assert writer.ledger.summary(days=1, now=NOW)["totals"]["requests"] == 1
+        assert BoundedUsageLedger(writer.ledger.path, now=lambda: NOW).summary(days=1, now=NOW)["totals"]["requests"] == 1
 
     asyncio.run(exercise())

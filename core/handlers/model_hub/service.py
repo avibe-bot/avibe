@@ -11453,10 +11453,9 @@ class ModelHubService:
         change the outcome the caller sees.
 
         Which is also why the write is the writer's and not this call's: a resolve
-        cancelled downstream while its row sat queued would otherwise discard usage
-        the vendor had already billed. The writer's own bounded wait keeps the
-        ordinary path leaving the row on disk before the caller sees its outcome,
-        without putting an unresponsive disk in front of the next failover hop.
+        cancelled downstream cannot discard an accepted report. Acceptance is
+        synchronous and memory-visible; the five-second durable batch never holds
+        up the response or the next failover hop. Shutdown drains the writer.
 
         ``at`` is when the call ended, when its caller settles it later than that.
         """
@@ -11472,14 +11471,12 @@ class ModelHubService:
         ) or (observed is not None and observed.reached_model)
         if usage is None and not reached_model:
             return
-        await self.usage_writer.wait_recorded(
-            self.usage_writer.record(
-                source_id=source_id,
-                model_id=model_id,
-                usage=usage,
-                at=at or self.now(),
-                speed=tier,
-            )
+        self.usage_writer.record(
+            source_id=source_id,
+            model_id=model_id,
+            usage=usage,
+            at=at or self.now(),
+            speed=tier,
         )
 
     async def _classify_source_outcome(
