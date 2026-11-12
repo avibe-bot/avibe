@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -87,6 +88,22 @@ def import_accounts(value: Any) -> list[dict[str, Any]]:
             "last_signer": None,
         })
     return result
+
+
+def validate_expected_account0(value: Any) -> dict[str, str]:
+    """A browser's public consistency check, never a source of stored key material."""
+    patterns = {
+        "eth": r"0x[0-9a-fA-F]{40}",
+        "btc_taproot": r"bc1p[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}",
+        "solana": r"[1-9A-HJ-NP-Za-km-z]{32,44}",
+    }
+    if not isinstance(value, dict) or set(value) != set(patterns):
+        raise ValueError("expected_account0 must contain exactly eth, btc_taproot and solana")
+    for field, pattern in patterns.items():
+        address = value[field]
+        if not isinstance(address, str) or len(address) > 62 or re.fullmatch(pattern, address) is None:
+            raise ValueError(f"expected_account0.{field} must be a canonical public address")
+    return dict(value)
 
 
 def validate_envelope(sealed: Sealed) -> None:

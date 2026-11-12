@@ -85,7 +85,7 @@ def test_stale_constraints_fail_closed(tmp_path, damage):
         ('"anyio>=4.16.0",', ''),
         ("SQLAlchemy>=2.1.0; python_version >= '3.11'", "SQLAlchemy>=2.1.0; python_version >= '3.12'"),
         ('"httpx[http2,socks]>=0.27"', '"httpx[http2,socks,brotli]>=0.27"'),
-        ('requires-python = ">=3.10,<3.15"', 'requires-python = ">=3.11,<3.15"'),
+        ('requires-python = ">=3.10"', 'requires-python = ">=3.11"'),
     ],
     ids=["range", "new-runtime", "removed-runtime", "marker", "extras", "python-range"],
 )
@@ -131,6 +131,10 @@ def _assert_universal_contract(requirements):
         ("3.13", "win32", "AMD64", "2.1.0", "0.2.159", "50.0.2"),
         ("3.14", "darwin", "x86_64", "2.1.0", "0.2.162", "48.0.1"),
         ("3.14", "darwin", "arm64", "2.1.0", "0.2.162", "50.0.2"),
+        ("3.15", "linux", "x86_64", "2.1.0", "0.2.162", "50.0.2"),
+        ("3.15", "win32", "AMD64", "2.1.0", "0.2.159", "50.0.2"),
+        ("3.15", "darwin", "x86_64", "2.1.0", "0.2.162", "48.0.1"),
+        ("3.15", "darwin", "arm64", "2.1.0", "0.2.162", "50.0.2"),
     ]:
         environment = {
             "python_version": python,
@@ -230,7 +234,7 @@ def test_wheel_and_rebuilt_sdist_pin_graph_without_changing_source_or_editable(t
         assert any(canonicalize_name(Requirement(item).name) == name and Requirement(item).extras == extras
                    for item in wheel_requirements)
     supported_python = SpecifierSet(wheel_metadata["Requires-Python"])
-    assert "3.10" in supported_python and "3.14" in supported_python and "3.15" not in supported_python
+    assert all(version in supported_python for version in ("3.10", "3.14", "3.15"))
 
     sdist_path = next(SdistBuilder(str(root)).build(directory=str(tmp_path / "sdist"), versions=["standard"]))
     with tarfile.open(sdist_path) as archive:

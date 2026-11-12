@@ -877,14 +877,15 @@ jobs:
         run: npm pack --dry-run
 
   install-upgrade-shards:
-    name: install-upgrade-regression (${{ matrix.suite }})
-    runs-on: ubuntu-latest
+    name: install-upgrade-regression (${{ matrix.suite }}, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     needs: [changes, build-linux-artifacts]
     if: fromJSON(needs.changes.outputs.plan).jobs['install-upgrade-shards'] == 'run'
     strategy:
       fail-fast: false
       matrix:
         suite: [installer]
+        runner: [ubuntu-latest, macos-15]
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
@@ -925,12 +926,13 @@ jobs:
           uv pip install --system dist/*.whl pytest
 
       - name: Prepare Show Runtime manifest for fixture wheels
+        if: runner.os == 'Linux'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/prepare_local_show_runtime_manifest.py
 
       - name: Verify built distribution contracts
-        if: matrix.suite == 'installer'
+        if: matrix.suite == 'installer' && runner.os == 'Linux'
         env:
           AVIBE_PACKAGE_CONTRACT_VERSION: 3.0.99rc1
         run: |
@@ -945,7 +947,7 @@ jobs:
           fi
 
       - name: Run install and upgrade regressions
-        if: matrix.suite == 'installer'
+        if: matrix.suite == 'installer' && runner.os == 'Linux'
         run: |
           docker info
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/*.whl)"
@@ -955,6 +957,24 @@ jobs:
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             -v
+
+      # Every matrix member must leave real test evidence for scenario-evidence.
+      # Linux already runs the full installer suite; Mac owns the harness-safety
+      # tests as well as the live 3.15 acceptance below.
+      - name: Verify Python 3.15 acceptance harness isolation on macOS
+        if: runner.os == 'macOS'
+        run: python -m pytest -q tests/test_python315_install_regression.py
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        id: python315
+        with:
+          python-version: "3.15"
+
+      - name: Verify Python 3.15 locked install and public 3.2.5 upgrade
+        env:
+          PYTHON315: ${{ steps.python315.outputs.python-path }}
+        run: |
+          "$PYTHON315" scripts/python315_install_regression.py --wheel "$(ls dist/avibe_os-*.whl)"
 
       # Read by scenario-evidence, which proves each covered scenario row's
       # evidence ran (scripts/ci_scenario_evidence.py).
@@ -1057,6 +1077,34 @@ jobs:
           if ($platform -ne "win-amd64") {
             throw "The installed Python reports $platform, expected win-amd64"
           }
+
+      - name: Verify native vibe.exe deferred self-upgrade
+        shell: pwsh
+        run: |
+          $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+          $python = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations\*\uv\tools\avibe-os\Scripts\python.exe")[0].FullName
+          $wheel = (Get-ChildItem dist\avibe_os-*.whl | Select-Object -First 1).FullName
+          & $python -m scripts.windows_launcher_upgrade_regression --wheel $wheel
+          if ($LASTEXITCODE -ne 0) { throw "Native vibe.exe self-upgrade acceptance failed" }
+
+      # Windows on Arm deliberately remains on its x64 3.12 runtime policy.
+      # Verify the no-minor-pin 3.15 path on native x64, including the old client.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        if: matrix.runner == 'windows-latest'
+        id: windows_python315
+        with:
+          python-version: "3.15"
+          architecture: x64
+
+      - name: Verify Python 3.15 locked install and public 3.2.5 upgrade
+        if: matrix.runner == 'windows-latest'
+        shell: pwsh
+        env:
+          PYTHON315: ${{ steps.windows_python315.outputs.python-path }}
+        run: |
+          $wheel = (Get-ChildItem dist\avibe_os-*.whl | Select-Object -First 1).FullName
+          & $env:PYTHON315 scripts/python315_install_regression.py --wheel $wheel
+          if ($LASTEXITCODE -ne 0) { throw "Python 3.15 install/upgrade acceptance failed" }
 
       # The Model Hub engine needs no Python, so it stays native: arm64 on
       # Windows on Arm even though Avibe's Python there is x64.

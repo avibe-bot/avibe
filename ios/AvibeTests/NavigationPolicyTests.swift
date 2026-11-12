@@ -2928,12 +2928,7 @@ final class NavigationPolicyTests: XCTestCase {
         appModel: AppModel,
         storeCleanups: [NamedDataStoreCleanup]
     ) async throws {
-        try await waitUntil {
-            if case .onboarding(.instances) = appModel.route {
-                return true
-            }
-            return false
-        }
+        try await waitForSignedInInstances(appModel)
         _ = try appModel.mobileSessionCoordinator.selectInstance(id: "instance")
 
         guard case .browser(let runtime) = appModel.route else {
@@ -3191,13 +3186,40 @@ final class NavigationPolicyTests: XCTestCase {
             ),
             pushOpenedNow: pushOpenedNow
         )
-        try await waitUntil {
-            if case .onboarding(.instances) = appModel.route {
-                return true
-            }
-            return false
-        }
+        try await waitForSignedInInstances(appModel)
         return appModel
+    }
+
+    /// Waits for the App's launch to settle, then expects the signed-in
+    /// instance list. The launch reads the session through a WebView, so it
+    /// is bounded by the App's own deadlines for that read
+    /// (`WebKitReadiness.standardTransportOperation`), and a launch that
+    /// settles elsewhere fails with the route it reached.
+    @MainActor
+    private func waitForSignedInInstances(
+        _ appModel: AppModel,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        try await waitUntil(
+            "The App's launch",
+            timeout: WebKitReadiness.standardTransportOperation,
+            file: file,
+            line: line
+        ) {
+            if case .loading = appModel.route {
+                return false
+            }
+            return true
+        }
+        guard case .onboarding(.instances) = appModel.route else {
+            XCTFail(
+                "The App's launch settled on \(appModel.route), not the instance list.",
+                file: file,
+                line: line
+            )
+            throw TestWaitError.unexpectedRoute
+        }
     }
 
     @MainActor
@@ -3271,9 +3293,16 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     private func waitForTitle(
         _ title: String,
-        in webView: WKWebView
+        in webView: WKWebView,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
-        try await waitUntil {
+        try await WebKitReadiness.waitForDocument(
+            in: webView,
+            file: file,
+            line: line
+        )
+        try await waitUntil("The title \(title)", file: file, line: line) {
             let value = try? await webView.evaluateJavaScript("document.title")
             return value as? String == title
         }
@@ -3771,6 +3800,7 @@ private final class KeyboardViewportFixture {
 
 private enum TestWaitError: Error {
     case timedOut
+    case unexpectedRoute
 }
 
 @MainActor

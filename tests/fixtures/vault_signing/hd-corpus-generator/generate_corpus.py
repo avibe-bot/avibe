@@ -22,6 +22,7 @@ from bip_utils import (
     Bip39MnemonicDecoder, Bip39MnemonicGenerator, Bip39SeedGenerator,
     EthAddrEncoder, SolAddrEncoder,
 )
+from corpus_runtime import require_reproducible_python
 from Crypto.Hash import keccak
 from embit import base58, bech32, bip32, bip39, ec, script
 from embit.networks import NETWORKS
@@ -250,6 +251,7 @@ def main() -> None:
     parser.add_argument("--init-random", action="store_true", help="Create frozen OS-CSPRNG inputs, refusing to overwrite an existing file")
     parser.add_argument("--verify", action="store_true", help="Rebuild in memory and check existing JSON byte-for-byte; never overwrite")
     args = parser.parse_args()
+    require_reproducible_python(sys.version_info[:3])
     check(not (args.init_random and args.verify), "choose initialization or verification")
     if args.init_random:
         init_random_inputs()

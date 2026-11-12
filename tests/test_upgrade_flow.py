@@ -85,7 +85,7 @@ def test_build_upgrade_plan_stages_custom_legacy_uv_launcher(monkeypatch):
     )
 
     assert plan.method == "uv"
-    assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"]
+    assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--python", ">=3.10", "--upgrade"]
     assert plan.env is not None
     assert "UV_TOOL_DIR" in plan.env
     assert "UV_TOOL_BIN_DIR" in plan.env
@@ -107,7 +107,7 @@ def test_build_upgrade_plan_forces_legacy_uv_tool_install(monkeypatch):
     )
 
     assert plan.method == "uv"
-    assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade", "--force"]
+    assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--python", ">=3.10", "--upgrade", "--force"]
 
 
 def test_build_upgrade_plan_uses_pip_for_non_uv_install(monkeypatch):
@@ -247,7 +247,7 @@ def test_uv_upgrade_moves_only_a_uv_managed_interpreter_to_its_newest_patch(
     )
     # uv keeps choosing the staged interpreter, so a release that drops this
     # minor version can still move the install to a supported one.
-    assert "--python" not in plan.command
+    assert plan.command[plan.command.index("--python") + 1] == ">=3.10"
 
 
 @pytest.mark.parametrize("outcome", ["upgraded", "old-uv", "offline", "timeout", "uv-missing"])
@@ -703,30 +703,83 @@ def test_copy_marker_validation_reads_fresh_bytes_after_same_stat_replacement(
     assert upgrade._launcher_generation(launcher, root) is None
 
 
-def test_launcher_is_current_process_only_matches_windows_launcher(monkeypatch, tmp_path):
+@pytest.mark.parametrize("extensionless", [False, True])
+def test_launcher_is_current_process_only_matches_windows_launcher(monkeypatch, tmp_path, extensionless):
     from vibe import upgrade
 
     launcher = tmp_path / "bin" / "vibe.exe"
     launcher.parent.mkdir()
     launcher.write_text("launcher\n", encoding="utf-8")
     monkeypatch.setattr(upgrade.os, "name", "nt")
-    monkeypatch.setattr(upgrade.sys, "argv", [str(launcher)])
+    monkeypatch.setattr(upgrade.sys, "argv", [str(launcher.with_suffix("") if extensionless else launcher)])
 
     assert upgrade.launcher_is_current_process(launcher)
     assert not upgrade.launcher_is_current_process(tmp_path / "bin" / "other.exe")
 
 
-def test_launcher_is_current_process_ignores_inherited_launcher_hint(monkeypatch, tmp_path):
+@pytest.mark.parametrize("argv", [[], [""], ["service_main.py"], ["__main__.py"], ["python.exe"]])
+def test_launcher_is_current_process_ignores_inherited_launcher_hint(monkeypatch, tmp_path, argv):
     from vibe import upgrade
 
     launcher = tmp_path / "bin" / "vibe.exe"
     launcher.parent.mkdir()
     launcher.write_text("launcher\n", encoding="utf-8")
     monkeypatch.setattr(upgrade.os, "name", "nt")
-    monkeypatch.setattr(upgrade.sys, "argv", [str(tmp_path / "service_main.py")])
+    monkeypatch.setattr(upgrade.sys, "argv", argv)
     monkeypatch.setenv("VIBE_CURRENT_EXECUTABLE", str(launcher))
 
     assert not upgrade.launcher_is_current_process(launcher)
+
+
+def test_launcher_identity_resolves_executable_before_comparing_case_and_short_paths(monkeypatch):
+    from vibe import upgrade
+    import ntpath
+
+    target = r"C:\Users\Long User Name\bin\vibe.EXE"
+    short = r"C:\Users\LONGUS~1\bin\vibe"
+    calls = []
+
+    def realpath(path):
+        calls.append(path)
+        # Like Windows realpath, the short alias expands only for an existing
+        # file. A synthetic extensionless path is not the loaded executable.
+        return target if path == short + ".exe" else path
+
+    monkeypatch.setattr(upgrade, "os", SimpleNamespace(name="nt", path=SimpleNamespace(
+        expanduser=ntpath.expanduser, splitext=ntpath.splitext,
+        normcase=ntpath.normcase, realpath=realpath,
+    )))
+    monkeypatch.setattr(upgrade.sys, "argv", [short])
+    assert upgrade.launcher_is_current_process(target.lower())
+    assert calls == [target.lower(), short + ".exe"]
+
+
+def test_launcher_identity_is_windows_only(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    launcher = tmp_path / "vibe"
+    monkeypatch.setattr(upgrade, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(upgrade.sys, "argv", [str(launcher)])
+    assert not upgrade.launcher_is_current_process(launcher)
+
+
+@pytest.mark.parametrize("parent_kind", ["launcher", "python", "missing", "inaccessible"])
+def test_deferred_wait_owns_the_matching_console_trampoline_only(monkeypatch, tmp_path, parent_kind):
+    import psutil
+    from vibe import upgrade
+
+    launcher = tmp_path / "vibe.exe"
+    parent = SimpleNamespace(pid=123, exe=lambda: str(launcher if parent_kind == "launcher" else tmp_path / "python.exe"))
+
+    def process(pid):
+        assert pid == 456
+        if parent_kind == "inaccessible":
+            raise psutil.AccessDenied(pid)
+        return SimpleNamespace(parent=lambda: None if parent_kind == "missing" else parent)
+
+    monkeypatch.setattr(psutil, "Process", process)
+    monkeypatch.setattr(upgrade, "os", SimpleNamespace(name="nt", path=os.path))
+    assert upgrade._launcher_wait_pid(launcher, 456) == (123 if parent_kind == "launcher" else 456)
 
 
 def test_deferred_activation_dispatch_activates_then_schedules_restart(monkeypatch, tmp_path):
@@ -1426,6 +1479,8 @@ def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):
         "tool",
         "install",
         "/tmp/vibe_remote-9999.0.0-py3-none-any.whl",
+        "--python",
+        ">=3.10",
         "--upgrade",
         "--force",
     ]
@@ -1457,6 +1512,8 @@ def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
         "tool",
         "install",
         "avibe-os==3.0.10",
+        "--python",
+        ">=3.10",
         # Unconditional here: the version already installed is the newer one, so
         # without it uv reports the tool as satisfied and installs nothing.
         "--force",
@@ -2164,7 +2221,7 @@ def test_build_upgrade_plan_finds_uv_outside_current_path(monkeypatch):
     )
 
     assert plan.method == "uv"
-    assert plan.command == ["/home/test/.local/bin/uv", "tool", "install", "avibe-os", "--upgrade"]
+    assert plan.command == ["/home/test/.local/bin/uv", "tool", "install", "avibe-os", "--python", ">=3.10", "--upgrade"]
 
 
 def test_get_current_vibe_bin_dir_resolves_launcher_target(monkeypatch):
@@ -2749,6 +2806,8 @@ def test_an_exact_plan_installs_the_named_sources_instead_of_index_pins(monkeypa
         "tool",
         "install",
         PREVIEW_CORE_URL,
+        "--python",
+        ">=3.10",
         "--force",
     ]
     pip_plan = build_upgrade_plan(python_executable="/usr/bin/python3", uv_path=None, **shared)

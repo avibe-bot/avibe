@@ -293,11 +293,13 @@
   },
   "vault": {
     "hd": {
+      "addressCheckFailed": "The wallet was not saved because account #0 does not match the browser-derived addresses. Do not send funds; keep your backup and resolve the mismatch before retrying.",
       "invalidWallet": "This operation requires a standard-tier HD wallet with valid account metadata. To sign, select evm, bitcoin or solana and an enabled account (0–19); the signing scheme must match the chain. Create or import the wallet in Vault without sending words or seed bytes to the server.",
       "invalidAccount": "Could not update this wallet account. Enable accounts in order, up to 20. Only enabled accounts can be edited; use a name of 1–80 characters (or reset it) and a boolean ask-before-signing setting.",
       "stateChanged": "The wallet changed during signing, or its usage record could not be saved. No signature was delivered. Check the wallet and its audit history before trying again."
     },
     "signing": {
+      "policyDowngradeUnavailable": "Ask-before-signing can be turned on, but turning it off is not available yet. The setting was not changed.",
       "invalidProtectedSolanaRecord": "Protected Solana keys require a matching sandbox-generated keypair record and Ed25519 public metadata. Keypair specifications and blind-box imports are not accepted for this path. Keep the protected tier unchanged.",
       "invalidKey": "Signing requires a valid pinned public key that matches the scheme: a compressed secp256k1 key for secp256k1 schemes, or a Solana Ed25519 key for ed25519. No signature was delivered. Keep the existing key and its protection unchanged; repair the public-key metadata before retrying.",
       "protectedUnsupported": "Protected Bitcoin Taproot signing requires the typed transaction approval workflow and a compatible sandbox. Keep legacy and SegWit-v0 inputs unsupported.",
