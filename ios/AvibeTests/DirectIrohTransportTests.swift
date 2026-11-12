@@ -491,6 +491,31 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(harness.scheduler.pending, [60])
     }
 
+    func testAnAnswerForAnotherInstanceNeitherBringsAPathUpNorTakesOneDown() async throws {
+        let harness = Harness()
+        _ = try await harness.bringUp(generation: "boot:1")
+        let relay = try await harness.transport.openStream(for: harness.tag("boot:1"))
+
+        // "No direct path", said for another instance and for another host.
+        harness.rendezvous.answer(DirectIrohFixtures.unavailable(instanceID: "inst_2"))
+        XCTAssertTrue(harness.scheduler.fire(240))
+        try await eventually("the refresh counts as failed") {
+            harness.rendezvous.requests.count == 2 && harness.scheduler.pending.contains(15)
+        }
+        harness.rendezvous.answer(DirectIrohFixtures.unavailable(hostname: "bob-app.avibe.bot"))
+        XCTAssertTrue(harness.scheduler.fire(15))
+        try await eventually("the refresh counts as failed") {
+            harness.rendezvous.requests.count == 3 && harness.scheduler.pending.contains(15)
+        }
+
+        // The selected instance's path is untouched, and its deadline too.
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+        XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        XCTAssertEqual(harness.scheduler.pending.filter { $0 == 300 }, [300])
+        try await relay.write(Data("x".utf8))
+        _ = try await harness.transport.openStream(for: harness.tag("boot:1"))
+    }
+
     // MARK: The answer's lifetime
 
     func testAnAnswerIsNotUsedPastItsLifetimeAndOnlyANewAnswerRenewsIt() async throws {

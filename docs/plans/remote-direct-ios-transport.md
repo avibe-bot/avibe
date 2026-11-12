@@ -43,14 +43,18 @@ From `IrohLib.swift` of the gate artifact and the iroh-ffi source at the pinned 
   - If both halves are busy (a read waiting and a write blocked on flow control) on a live connection, the binding's calls stay until the instance makes progress. The App's side has already returned; one of the peer's 64 stream slots stays taken until then. Nothing in the stock binding can shorten this short of closing the connection, which would also close every healthy relay on it.
 - **A prompt return in Swift is not a cancellation in the binding.** After any abandoned call, a Rust future, its Swift task, and for a stream a slot at the peer, stay until one of the events above. The stand-ins show only the App's side. Whether those leftovers end, and how many can pile up under repeated cancellation, is shown only against the real binding (section 8) and is a condition of qualifying the transport, not something this document settles.
 - **An abandoned call poisons its stream** (rule). When a caller's task is cancelled during a read or a write, bytes are unaccounted for, so the stream cancels itself and is never used again.
-- **`cancel()` does not undo a clean end** (rule). After `closeWrite` returned, the sending half is not reset, so bytes already written are still delivered; after the instance's end of stream, the receiving half is not stopped. A stream released without `cancel()` is abandoned the same way, never finished as if complete.
+- **`cancel()` does not undo a clean end** (rule). From the step in which `closeWrite` hands `finish` to the binding, the sending half is never reset, so bytes already written are still delivered. That step and the call's registration are one, under the stream's lock: no `cancel()` can fall between a `finish` that completed and its record. A `closeWrite` that is cancelled still finishes. After the instance's end of stream, the receiving half is not stopped. A stream released without `cancel()` is abandoned the same way, never finished as if complete.
 
 ## 4. Before any socket
 
 Nothing exists until a rendezvous answer is `ready` and accepted (rule): no endpoint, no UDP socket, and so no Local Network prompt.
 
 - **The launch key** is made at the first selection, kept in memory, and never stored. Making it opens nothing. Its public half is the `client_endpoint_id` of every request in this launch.
-- **The request** is a `POST` to an absolute URL native code builds from the selected instance's origin. The script refuses to run unless its document's origin is that origin, and when a service worker controls the document. It copies the CSRF header from the `vibe_csrf_token` cookie, refuses redirects, checks the response's final URL, reads at most 16 KiB, and ends at its deadline (5 s, proposal). The answer returns through `callAsyncJavaScript`. No bridge method accepts an answer, and page script cannot reach the content world the script runs in.
+- **The request** is a `POST` to an absolute URL native code builds from the selected instance's origin. The script refuses to run unless its document's origin is that origin. It copies the CSRF header from the `vibe_csrf_token` cookie, refuses redirects, checks the response's final URL, reads at most 16 KiB, and ends at its deadline (5 s, proposal). The answer returns through `callAsyncJavaScript`. No bridge method accepts an answer, and page script cannot reach the content world the script runs in.
+- **A service worker is refused for the whole request** (rule). A content world does not keep a worker out, and neither does `cache: "no-store"`: a worker that controls the document answers its requests. The script listens for a change of controller before it first looks, and looks again before the request, after the response arrives, after each read of the body, and before it answers. Any controller at any of these moments, or any change in between, refuses the answer (`controlled`), which the transport treats as a failed request.
+  - **Why looking afterwards is enough** (read, from the Service Workers specification): a request is intercepted only by the document's controller, and a document that has a controller keeps one until it unloads. So an interception leaves a controller to find.
+  - **What is and is not shown.** The refusal at each moment is tested against a stand-in container placed in the script's own content world. It has never met a real worker, because this App's WebViews have none: `testThisAppsWebViewsHaveNoServiceWorkerContainer` holds that `navigator.serviceWorker` is undefined in both worlds, in a secure context. If that test ever fails, a real worker can exist, and the refusal must be qualified against one before any build uses the direct path. On devices and on iOS 17 this is still to be checked (section 7).
+- **Either answer speaks for one instance** (rule). `instance_id` and `hostname` are checked on `unavailable` as on `ready`. An answer for another instance, or for none, is a failed request: it brings no path up and takes none down.
 - **An answer is accepted only if** its `version` is 1; `instance_id` and `hostname` are the selection's; `alpn` is `avibe-direct/1`; `client.endpoint_id` is this launch's; `endpoint.id` is 64 lowercase hex and not this launch's own; `generation` is 1 to 128 bytes; and the answer's own span is positive.
 - **Lifetime** is the answer's own span, `min(expires_at - issued_at, client.admitted_until - issued_at, 300)` seconds, counted on a clock that never runs backwards **from the moment the request was sent** (rule; rendezvous contract, section 5). The instance issued the answer after that moment, so the App's deadline is never later than the instance's own, whatever the phone's wall clock says and however long the answer took. An answer that arrives with less than 30 s of its span left (proposal) is not accepted, so an instance that sends short-lived answers is asked no faster than the retry ladder.
 - **Only a newly accepted answer moves that deadline** (rule). A refresh that fails, arrives late, or belongs to another selection extends nothing. When the deadline passes, nothing is opened, dialled, or probed under the answer any more (section 5).
@@ -98,6 +102,25 @@ Every piece of work (a request, a dial, a probe, a session) carries a stamp, and
 
 A stream that opens after any of these stopped holding is abandoned and the call throws, even if the same path is usable again by then: each time a path stops being usable the controller advances its path generation, so the tag the stream was asked under is stale. Ending a session cancels every stream opened on it.
 
+**What owns each await, and what is checked after it.** Every state change happens on the main actor; each await below is the only place where state can move under an operation.
+
+| Await | Owner | Checked again after it | Ends with | What may be left running |
+| --- | --- | --- | --- | --- |
+| The rendezvous script | The transport's one request task | The request's stamp; the WebView still shows the origin; inside the script, the controller refusal | The answer, a refusal, the script's 5 s, the task's 8 s, or anything that starts or cancels a request | The script, until its own deadline |
+| `bind`, `connect` | The one dial task | The dial's stamp | A result, its bound, or the dial's cancellation (`deselect`, a network change, the answer running out, the background) | The binding's call, until its endpoint is closed, which the dial does. A late endpoint or connection is closed. |
+| A probe | The dial task, or the one probe task | The probe's stamp; a session that has not run out | A result, its bound, or its cancellation | Its stream is abandoned either way |
+| `closed()` | One watcher per session | The session's identifier | The connection closing, which ending the session causes | Nothing |
+| `openStream` | The caller | The session's identifier, its suspension count, and that it is usable | A stream, an error, or the caller's cancellation | The binding's open; a stream it still produces is abandoned |
+| A stream's `read` and `write` | The caller, one of each | Nothing: the bytes or an error | A result, `cancel()`, or the caller's cancellation, which cancels the stream | The binding's call (section 3) |
+| A stream's `closeWrite` | The caller | Nothing | The same | The binding's `finish`, which still completes |
+| Timers: the next request, the answer's deadline, the debounce, stability, probe spacing | The transport | Cancelled with the request, dial, or session they belong to | Firing or cancellation | Nothing |
+
+Terminal states:
+
+- **A binding call (`DirectIrohCall`):** waiting, then done. Exactly one outcome reaches the caller; a later success goes to `discard`, a later failure nowhere.
+- **A stream:** cancelled is final and idempotent. Its sending half is open, then either finishing (never reset afterwards) or reset. Its receiving half is open, then either ended by the instance or stopped.
+- **A session:** usable, or suspended (being verified after a network change, or its answer has run out), any number of times, then ended. Ended is final; a new path is a new session with a new endpoint.
+
 **Path generations.** The controller issues them and the transport cannot know the current one. It keeps the highest generation it has seen in a tag, and after each report that ends or suspends a path it refuses tags at or below that mark: the controller advances its generation on each such report, so those tags are stale. This catches only tags the transport has seen a successor of. The controller's own check at the commit point stays the authority.
 
 ## 7. Tests, and what they do not show
@@ -108,12 +131,14 @@ In `ios-shell`, on the simulator:
 | --- | --- |
 | Address classes, spellings, and every refused form | `DirectRendezvousTests.testOnlyPrivateIPv4UniqueLocalAndGlobalIPv6AddressesAreAdmitted` |
 | An answer is accepted only for the selected instance and this launch; every rejection | `testAReadyAnswerForTheSelectedInstanceIsAccepted`, `testAnAnswerThatDoesNotMatchTheSelectionIsRejected` |
+| An answer for another instance is no answer, `unavailable` included, and takes no path down | `testAnUnavailableAnswerForAnotherInstanceIsNoAnswer`, `DirectIrohTransportTests.testAnAnswerForAnotherInstanceNeitherBringsAPathUpNorTakesOneDown` |
 | Lifetime; at most eight addresses; unknown entries skipped; `unavailable` | `testTheLifetimeIsTheAnswersOwnSpanAndAtMostFiveMinutes`, `testAtMostEightCheckedAddressesAreKeptAndTheRestOfTheListIsSkipped`, `testAnUnavailableAnswerSaysWhenToAskAgain` |
 | The request is the instance's own (method, CSRF, cookie, Origin, body); refusals, redirects, size, and deadline; only on the instance's origin | `DirectRendezvousFetcherTests.testTheRequestIsTheInstancesOwnAndItsAnswerComesBackUnchanged`, `testNothingIsAskedBeforeTheInstancesDocumentAndItsCookieAreThere` |
+| A service worker in control before, at, during, or at the end of the request is refused; this App's WebViews have no container | `testAServiceWorkerThatControlsTheDocumentAtAnyMomentIsRefused`, `testThisAppsWebViewsHaveNoServiceWorkerContainer` |
 | A page cannot answer in the instance's place or move the request | `testAPageCannotAnswerInTheInstancesPlaceOrMoveTheRequest` |
 | A cancelled caller leaves at once; late values are discarded; nothing starts after cancellation; deadlines | `DirectIrohByteStreamTests`, first three tests |
 | Bytes, end of stream, backpressure, half-close | `testBytesPassBothWaysAndTheEndIsNil`, `testAWriteReturnsOnlyOnceTheTransportAcceptedIt` |
-| `cancel()` and task cancellation end calls in progress at once; the stream is over; only open halves are abandoned | `testCancelEndsAReadAndAWriteInProgressAtOnce`, `testACancelledCallerEndsItsReadAtOnceAndTheStreamWithIt`, `testCancelAbandonsOnlyTheHalvesThatHaveNotEnded`, `testAStreamReleasedWithoutCancelIsAbandonedNotFinished` |
+| `cancel()` and task cancellation end calls in progress at once; the stream is over; only open halves are abandoned | `testCancelEndsAReadAndAWriteInProgressAtOnce`, `testACancelledCallerEndsItsReadAtOnceAndTheStreamWithIt`, `testCancelAbandonsOnlyTheHalvesThatHaveNotEnded`, `testACancelDuringCloseWriteNeverResetsTheSendingHalf`, `testAStreamReleasedWithoutCancelIsAbandonedNotFinished` |
 | Nothing is bound before an accepted `ready` answer | `DirectIrohTransportTests.testNothingExistsBeforeAnAcceptedReadyAnswer`, `testAHostThatIsNotADNSNameIsNeverAskedFor` |
 | Dial, identity, probe, and only then `usable` | `testAReadyAnswerIsDialledProbedAndOnlyThenReportedUsable`, `testAnotherIdentityOrARefusedProbeIsClosedAndNeverUsable` |
 | Bounds, `deselect`, and late results | `testADialThatDoesNotAnswerEndsAtItsBoundAndALateConnectionIsClosed`, `testDeselectEndsADialAtOnceAndWhatArrivesLateIsClosed`, `testAnAnswerThatArrivesAfterDeselectChangesNothing` |
@@ -126,7 +151,8 @@ In `ios-shell`, on the simulator:
 
 - Anything about the real binding. The stand-ins copy the properties in section 2 from reading the source; no test here runs iroh. The engine over the generated types is compiled and tested for the first time with A1.
 - Interoperability with the instance's sidecar, and the dead-path timings, which only the real sidecar's idle timeout produces.
-- Devices: the Local Network prompt and its denial, real Wi-Fi, IPv6 and cellular, suspension, battery, and iOS 17.
+- Devices: the Local Network prompt and its denial, real Wi-Fi, IPv6 and cellular, suspension, battery, and iOS 17; and that a WebView there has no service worker container either.
+- A real service worker. The refusal is tested against a stand-in only (section 4).
 - Every bound in `DirectIrohTiming`. They are proposals.
 
 ## 8. Still to implement and qualify

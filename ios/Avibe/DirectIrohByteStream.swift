@@ -30,8 +30,11 @@ final class DirectIrohByteStream: @unchecked Sendable {
     private let receive: any DirectIrohReceiveHalf
     private let lock = NSLock()
     private var isCancelled = false
-    /// `finish` completed: what was written is still to be delivered, so
-    /// the sending half is not reset afterwards.
+    /// `closeWrite` was asked for and its `finish` handed to the binding.
+    /// From then on the sending half is never reset: what was written is
+    /// still to be delivered, and `finish` does not wait for that. It is
+    /// set in the same step that registers the call, so no `cancel()` can
+    /// fall between a `finish` that completed and its record.
     private var didFinishSending = false
     /// The instance finished sending: nothing is left to stop.
     private var didReceiveEnd = false
@@ -89,14 +92,34 @@ final class DirectIrohByteStream: @unchecked Sendable {
         }
     }
 
-    /// This side has finished sending. Reads continue.
+    /// This side has finished sending. Reads continue. Once this has
+    /// started, a `cancel()` no longer resets the sending half, even if it
+    /// ends this call first: the binding's `finish` still completes, and
+    /// the bytes written before it are delivered.
     func closeWrite() async throws {
         let send = send
-        try await perform {
-            try await send.finish()
-        }
-        lock.withLock {
-            didFinishSending = true
+        var handedOver = false
+        do {
+            try await perform(
+                marking: {
+                    self.didFinishSending = true
+                    handedOver = true
+                },
+                {
+                    try await send.finish()
+                }
+            )
+        } catch {
+            if handedOver, error is CancellationError || (error as? DirectIrohError) == .cancelled {
+                // The call was registered and then ended without its
+                // result, possibly before the binding's `finish` was
+                // started. Finishing again is harmless: on a half that is
+                // already finished it fails.
+                Task {
+                    try? await send.finish()
+                }
+            }
+            throw error
         }
     }
 
@@ -151,11 +174,23 @@ final class DirectIrohByteStream: @unchecked Sendable {
     private func perform<Value: Sendable>(
         _ operation: @escaping @Sendable () async throws -> Value
     ) async throws -> Value {
+        try await perform(marking: nil, operation)
+    }
+
+    /// Runs one binding call. `mark` runs under the stream's lock in the
+    /// step that registers the call, and only if the stream is not
+    /// cancelled: a state change it makes and the call's start are one
+    /// step for `cancel()`.
+    private func perform<Value: Sendable>(
+        marking mark: (() -> Void)?,
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
         let call = DirectIrohCall<Value>()
         let registered: Int? = lock.withLock {
             guard !isCancelled else {
                 return nil
             }
+            mark?()
             lastCall += 1
             calls[lastCall] = { error in
                 call.fail(error)

@@ -12,8 +12,11 @@ enum DirectRendezvousFetchError: Error, Equatable {
     /// The instance answered, and not with `200`: the session is missing or
     /// revoked, or the request was refused.
     case refused(status: Int)
-    /// The network, the deadline, a redirect, a controlling service worker,
-    /// or an answer that is too large or not text.
+    /// A service worker controls the document, or took control while the
+    /// request ran. Whatever came back is not known to be the instance's.
+    case controlled
+    /// The network, the deadline, a redirect, or an answer that is too
+    /// large or not text.
     case failed
 }
 
@@ -26,6 +29,18 @@ enum DirectRendezvousFetchError: Error, Equatable {
 /// not the page's JavaScript objects. The answer comes back through
 /// `callAsyncJavaScript` and never through the bridge, so no page, Show
 /// Pages included, can hand native code an answer of its own.
+///
+/// A content world does not keep a service worker out: a worker that
+/// controls the document answers its requests whichever world made them,
+/// and `cache: "no-store"` does not pass it. So the script refuses for the
+/// whole request: it listens for a change of controller before it looks,
+/// and looks again before the request, after each await, and before it
+/// answers. A fetch is intercepted only by the document's controller, and
+/// a document that has one keeps one until it unloads, so an interception
+/// leaves a controller to find. This App's WebViews have no service worker
+/// container today (`DirectRendezvousFetcherTests` holds that), so the
+/// refusal has never met a real worker: if a container appears, it must be
+/// qualified against one before the direct path is used.
 @MainActor
 enum DirectRendezvousFetcher {
     static let defaultDeadlineMilliseconds = 5_000
@@ -72,6 +87,8 @@ enum DirectRendezvousFetcher {
             switch object["failure"] as? String {
             case "origin", "csrf":
                 throw DirectRendezvousFetchError.pageNotReady
+            case "controlled":
+                throw DirectRendezvousFetchError.controlled
             default:
                 throw DirectRendezvousFetchError.failed
             }
@@ -104,30 +121,38 @@ enum DirectRendezvousFetcher {
     private static let script = """
     const fail = (failure) => JSON.stringify({ok: false, failure});
     if (window.location.origin !== origin) return fail("origin");
-    // A controlling service worker could answer in the instance's place.
+    // A service worker that controls this document, now or at any moment
+    // until the answer is read, could answer in the instance's place.
     const workers = navigator.serviceWorker;
-    if (workers && workers.controller) return fail("controlled");
-    const cookiePrefix = "vibe_csrf_token=";
-    let token = null;
-    for (const part of document.cookie.split(";")) {
-      const trimmed = part.trim();
-      if (trimmed.startsWith(cookiePrefix)) {
-        try {
-          token = decodeURIComponent(trimmed.slice(cookiePrefix.length));
-        } catch {
-          token = null;
-        }
-        break;
-      }
-    }
-    if (!token) return fail("csrf");
+    let taken = false;
+    const onControllerChange = () => {
+      taken = true;
+    };
+    if (workers) workers.addEventListener("controllerchange", onControllerChange);
+    const controlled = () => taken || Boolean(workers && workers.controller);
     const controller = new AbortController();
     let timedOut = false;
-    const timer = window.setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, Math.max(1, Number(deadlineMilliseconds) || 1));
+    let timer = null;
     try {
+      if (controlled()) return fail("controlled");
+      const cookiePrefix = "vibe_csrf_token=";
+      let token = null;
+      for (const part of document.cookie.split(";")) {
+        const trimmed = part.trim();
+        if (trimmed.startsWith(cookiePrefix)) {
+          try {
+            token = decodeURIComponent(trimmed.slice(cookiePrefix.length));
+          } catch {
+            token = null;
+          }
+          break;
+        }
+      }
+      if (!token) return fail("csrf");
+      timer = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, Math.max(1, Number(deadlineMilliseconds) || 1));
       const response = await fetch(url, {
         method: "POST",
         credentials: "same-origin",
@@ -140,6 +165,7 @@ enum DirectRendezvousFetcher {
         body,
         signal: controller.signal
       });
+      if (controlled()) return fail("controlled");
       if (response.redirected || response.url !== url || response.type !== "basic") {
         return fail("redirect");
       }
@@ -150,21 +176,23 @@ enum DirectRendezvousFetcher {
         let total = 0;
         for (;;) {
           const {done, value} = await reader.read();
+          if (controlled()) return fail("controlled");
           if (done) break;
           total += value.byteLength;
-          if (total > maxBytes) {
-            controller.abort();
-            return fail("oversize");
-          }
+          if (total > maxBytes) return fail("oversize");
           text += decoder.decode(value, {stream: true});
         }
         text += decoder.decode();
       }
+      if (controlled()) return fail("controlled");
       return JSON.stringify({ok: true, status: response.status, body: text});
     } catch (error) {
-      return fail(timedOut ? "timeout" : "network");
+      return fail(controlled() ? "controlled" : timedOut ? "timeout" : "network");
     } finally {
-      window.clearTimeout(timer);
+      if (timer !== null) window.clearTimeout(timer);
+      if (workers) workers.removeEventListener("controllerchange", onControllerChange);
+      // Ends a request whose answer was refused before it was read.
+      controller.abort();
     }
     """
 }

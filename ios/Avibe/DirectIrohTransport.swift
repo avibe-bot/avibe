@@ -897,6 +897,9 @@ final class DirectIrohTransport {
         debounceTimer = nil
         stableTimer?.cancel()
         stableTimer = nil
+        spacingTimer?.cancel()
+        spacingTimer = nil
+        isSpacingFailureProbes = false
         guard let session else {
             return
         }

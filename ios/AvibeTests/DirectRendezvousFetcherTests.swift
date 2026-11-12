@@ -88,6 +88,76 @@ final class DirectRendezvousFetcherTests: XCTestCase {
         XCTAssertEqual(forged, "function")
     }
 
+    func testAServiceWorkerThatControlsTheDocumentAtAnyMomentIsRefused() async throws {
+        let instance = try await InstanceFixture.start(self)
+        let webView = try await instance.loadedWebView(path: "/")
+        let answer = "{\"version\":1,\"status\":\"unavailable\"}"
+        instance.answer = .json(answer)
+
+        // This App's WebViews have no service worker container (the next
+        // test), so one is stood in, in the request's own content world:
+        // each case makes it take control at another moment of the request.
+
+        // A container nothing controls changes nothing.
+        try await standInServiceWorkers(in: webView, takingControl: "never")
+        let data = try await fetch(in: webView, origin: instance.origin).get()
+        XCTAssertEqual(data, Data(answer.utf8))
+        XCTAssertEqual(instance.rendezvousRequests.count, 1)
+
+        // In control before the request: nothing is sent.
+        try await standInServiceWorkers(in: webView, takingControl: "before")
+        await assertFetch(in: webView, instance, failsWith: .controlled)
+        XCTAssertEqual(instance.rendezvousRequests.count, 1)
+
+        // Takes control between the look and the request, and is gone
+        // again when it is looked for: the change itself is remembered.
+        try await standInServiceWorkers(in: webView, takingControl: "atFetch")
+        await assertFetch(in: webView, instance, failsWith: .controlled)
+
+        // Takes control while the request is under way.
+        try await standInServiceWorkers(in: webView, takingControl: "afterFetch")
+        await assertFetch(in: webView, instance, failsWith: .controlled)
+
+        // Takes control while the answer is read, at its very end.
+        try await standInServiceWorkers(in: webView, takingControl: "duringBody")
+        await assertFetch(in: webView, instance, failsWith: .controlled)
+
+        // And without any of it, the same WebView is answered again.
+        try await standInServiceWorkers(in: webView, takingControl: "never")
+        let again = try await fetch(in: webView, origin: instance.origin).get()
+        XCTAssertEqual(again, Data(answer.utf8))
+    }
+
+    func testThisAppsWebViewsHaveNoServiceWorkerContainer() async throws {
+        let instance = try await InstanceFixture.start(self)
+        let webView = try await instance.loadedWebView(path: "/")
+        let probe = "return {secure: window.isSecureContext === true, container: typeof navigator.serviceWorker};"
+        let page = try await webView.callAsyncJavaScript(
+            probe,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? [String: Any]
+        let client = try await webView.callAsyncJavaScript(
+            probe,
+            arguments: [:],
+            in: nil,
+            contentWorld: .defaultClient
+        ) as? [String: Any]
+
+        // Only a secure context could have a container at all. If this
+        // stand-in for the instance is not one, the test shows nothing.
+        guard page?["secure"] as? Bool == true else {
+            throw XCTSkip("The local stand-in is not a secure context: no conclusion about service workers.")
+        }
+        // With no container no worker can control a document, so the
+        // refusal above has never met a real one. If this fails, a real
+        // worker can exist here: qualify the refusal against one before
+        // any build uses the direct path.
+        XCTAssertEqual(page?["container"] as? String, "undefined")
+        XCTAssertEqual(client?["container"] as? String, "undefined")
+    }
+
     func testNothingIsAskedBeforeTheInstancesDocumentAndItsCookieAreThere() async throws {
         let instance = try await InstanceFixture.start(self)
 
@@ -122,6 +192,57 @@ final class DirectRendezvousFetcherTests: XCTestCase {
         case .failure(let error):
             XCTAssertEqual(error as? DirectRendezvousFetchError, expected, file: file, line: line)
         }
+    }
+
+    /// Stands a service worker container in, in the content world the
+    /// request runs in, and wraps that world's `fetch` so the container
+    /// takes control at the moment `takingControl` names. Page script
+    /// cannot do either: it has no access to that world.
+    private func standInServiceWorkers(in webView: WKWebView, takingControl moment: String) async throws {
+        _ = try await webView.callAsyncJavaScript(
+            """
+            const container = new EventTarget();
+            let current = moment === "before" ? {} : null;
+            Object.defineProperty(container, "controller", {get: () => current});
+            Object.defineProperty(navigator, "serviceWorker", {value: container, configurable: true});
+            const take = (announce) => {
+              current = {};
+              if (announce) container.dispatchEvent(new Event("controllerchange"));
+            };
+            const realFetch = window.__avibeTestRealFetch ??= window.fetch.bind(window);
+            window.fetch = async (input, init) => {
+              if (moment === "atFetch") {
+                take(true);
+                current = null;
+              }
+              const response = await realFetch(input, init);
+              if (moment === "afterFetch") take(false);
+              if (moment !== "duringBody") return response;
+              const bytes = new Uint8Array(await response.arrayBuffer());
+              let reads = 0;
+              return {
+                redirected: false,
+                url: response.url,
+                type: "basic",
+                status: response.status,
+                body: {
+                  getReader: () => ({
+                    read: async () => {
+                      reads += 1;
+                      if (reads === 1) return {done: false, value: bytes};
+                      take(false);
+                      return {done: true, value: undefined};
+                    }
+                  })
+                }
+              };
+            };
+            return true;
+            """,
+            arguments: ["moment": moment],
+            in: nil,
+            contentWorld: .defaultClient
+        )
     }
 
     /// One request, bounded as the transport bounds it: a script that never

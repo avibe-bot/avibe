@@ -361,6 +361,35 @@ final class DirectRendezvousTests: XCTestCase {
         XCTAssertEqual(try retry(86_400), .unavailable(retryAfterSeconds: 900))
     }
 
+    func testAnUnavailableAnswerForAnotherInstanceIsNoAnswer() {
+        func rejection(_ change: (inout [String: Any]) -> Void) -> DirectRendezvousRejection? {
+            var object: [String: Any] = [
+                "version": 1,
+                "status": "unavailable",
+                "reason": "not_running",
+                "instance_id": "inst_1",
+                "hostname": "alice-app.avibe.bot",
+                "retry_after_seconds": 60,
+            ]
+            change(&object)
+            do {
+                _ = try DirectRendezvous.answer(from: data(object), expecting: expectation)
+                return nil
+            } catch {
+                return error as? DirectRendezvousRejection
+            }
+        }
+
+        XCTAssertNil(rejection { _ in })
+        XCTAssertEqual(rejection { $0["instance_id"] = "inst_2" }, .wrongInstance)
+        XCTAssertEqual(rejection { $0["instance_id"] = "" }, .wrongInstance)
+        XCTAssertEqual(rejection { $0["instance_id"] = nil }, .malformed)
+        XCTAssertEqual(rejection { $0["instance_id"] = 7 }, .malformed)
+        XCTAssertEqual(rejection { $0["hostname"] = "bob-app.avibe.bot" }, .wrongHostname)
+        XCTAssertEqual(rejection { $0["hostname"] = nil }, .malformed)
+        XCTAssertEqual(rejection { $0["version"] = 2 }, .unsupportedVersion)
+    }
+
     // MARK: Fixtures
 
     private func assertRejected(

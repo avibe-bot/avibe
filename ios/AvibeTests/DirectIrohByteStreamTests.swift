@@ -228,6 +228,44 @@ final class DirectIrohByteStreamTests: XCTestCase {
         }
     }
 
+    func testACancelDuringCloseWriteNeverResetsTheSendingHalf() async throws {
+        let log = DirectIrohEventLog()
+        let fake = DirectIrohFakeStream(log: log)
+        let stream = DirectIrohByteStream(fake.halves)
+        try await stream.write(Data("abc".utf8))
+        let gate = fake.send.holdFinish()
+
+        let closing = Task<Void, Error> {
+            try await stream.closeWrite()
+        }
+        try await eventually("the finish reaches the binding") { log.count(of: "finish") == 1 }
+
+        // The binding's `finish` has not completed. From the moment it was
+        // handed over, the bytes written before it are to be delivered: a
+        // cancel ends the call and the receiving half, never the sending one.
+        stream.cancel()
+        let outcome = await directIrohOutcome(of: closing)
+        XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .cancelled)
+        try await eventually("the receiving half is stopped") { log.count(of: "stop") == 1 }
+        gate.resolve(())
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(log.count(of: "reset"), 0)
+        XCTAssertGreaterThanOrEqual(log.count(of: "finish"), 1)
+
+        // The same when the stream is cancelled the moment `closeWrite`
+        // returns, and when it is then released.
+        do {
+            let other = DirectIrohFakeStream(log: log)
+            let second = DirectIrohByteStream(other.halves)
+            try await second.write(Data("abc".utf8))
+            try await second.closeWrite()
+            second.cancel()
+        }
+        try await eventually("the second receiving half is stopped") { log.count(of: "stop") == 2 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(log.count(of: "reset"), 0)
+    }
+
     func testAStreamReleasedWithoutCancelIsAbandonedNotFinished() async throws {
         let log = DirectIrohEventLog()
         let fake = DirectIrohFakeStream(log: log)

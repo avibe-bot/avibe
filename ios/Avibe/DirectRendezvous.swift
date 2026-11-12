@@ -330,8 +330,9 @@ enum DirectRendezvous {
     }
 
     /// Reads the answer native code fetched for itself and checks it against
-    /// the selected instance. Unknown fields are ignored; unknown address
-    /// kinds and malformed address entries are skipped.
+    /// the selected instance, whichever its status. Unknown fields are
+    /// ignored; unknown address kinds and malformed address entries are
+    /// skipped.
     static func answer(
         from data: Data,
         expecting expectation: DirectRendezvousExpectation
@@ -345,35 +346,15 @@ enum DirectRendezvous {
         guard wire.version == version else {
             throw DirectRendezvousRejection.unsupportedVersion
         }
-        switch wire.status {
-        case "unavailable":
-            let requested = wire.retryAfterSeconds ?? defaultRetryAfterSeconds
-            return .unavailable(
-                retryAfterSeconds: min(
-                    max(requested, retryAfterSecondsRange.lowerBound),
-                    retryAfterSecondsRange.upperBound
-                )
-            )
-        case "ready":
-            return .ready(try offer(from: wire, expecting: expectation))
-        default:
+        guard wire.status == "ready" || wire.status == "unavailable" else {
             throw DirectRendezvousRejection.malformed
         }
-    }
-
-    private static func offer(
-        from wire: Wire,
-        expecting expectation: DirectRendezvousExpectation
-    ) throws -> DirectRendezvousOffer {
+        // Either answer speaks for one instance. An answer that names
+        // another one, or none, says nothing about the selected instance:
+        // it must not bring a path up, and it must not take one down.
         guard
             let instanceID = wire.instanceID,
-            let hostname = wire.hostname,
-            let generation = wire.generation,
-            let issuedAt = wire.issuedAt,
-            let expiresAt = wire.expiresAt,
-            let alpn = wire.alpn,
-            let endpoint = wire.endpoint,
-            let client = wire.client
+            let hostname = wire.hostname
         else {
             throw DirectRendezvousRejection.malformed
         }
@@ -382,6 +363,32 @@ enum DirectRendezvous {
         }
         guard hostname == expectation.hostname else {
             throw DirectRendezvousRejection.wrongHostname
+        }
+        guard wire.status == "ready" else {
+            let requested = wire.retryAfterSeconds ?? defaultRetryAfterSeconds
+            return .unavailable(
+                retryAfterSeconds: min(
+                    max(requested, retryAfterSecondsRange.lowerBound),
+                    retryAfterSecondsRange.upperBound
+                )
+            )
+        }
+        return .ready(try offer(from: wire, expecting: expectation))
+    }
+
+    private static func offer(
+        from wire: Wire,
+        expecting expectation: DirectRendezvousExpectation
+    ) throws -> DirectRendezvousOffer {
+        guard
+            let generation = wire.generation,
+            let issuedAt = wire.issuedAt,
+            let expiresAt = wire.expiresAt,
+            let alpn = wire.alpn,
+            let endpoint = wire.endpoint,
+            let client = wire.client
+        else {
+            throw DirectRendezvousRejection.malformed
         }
         guard alpn == Self.alpn else {
             throw DirectRendezvousRejection.wrongProtocol

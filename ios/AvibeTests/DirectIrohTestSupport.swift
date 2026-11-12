@@ -87,6 +87,7 @@ final class DirectIrohFakeSendHalf: DirectIrohSendHalf, @unchecked Sendable {
     private let lock = NSLock()
     private var storedWritten = Data()
     private var storedGate: DirectIrohPending<Void>?
+    private var storedFinishGate: DirectIrohPending<Void>?
 
     init(log: DirectIrohEventLog) {
         self.log = log
@@ -116,8 +117,21 @@ final class DirectIrohFakeSendHalf: DirectIrohSendHalf, @unchecked Sendable {
         }
     }
 
+    /// Makes `finish` wait, as a binding call that has not completed.
+    func holdFinish() -> DirectIrohPending<Void> {
+        let gate = DirectIrohPending<Void>()
+        lock.withLock {
+            storedFinishGate = gate
+        }
+        return gate
+    }
+
     func finish() async throws {
         log.add("finish")
+        let gate = lock.withLock { storedFinishGate }
+        if let gate {
+            try await gate.wait()
+        }
     }
 
     func reset() async {
@@ -512,13 +526,17 @@ enum DirectIrohFixtures {
         return try! JSONSerialization.data(withJSONObject: object)
     }
 
-    static func unavailable(retryAfterSeconds: Int = 60) -> Data {
+    static func unavailable(
+        retryAfterSeconds: Int = 60,
+        instanceID: String = DirectIrohFixtures.instanceID,
+        hostname: String = DirectIrohFixtures.host
+    ) -> Data {
         let object: [String: Any] = [
             "version": 1,
             "status": "unavailable",
             "reason": "not_running",
             "instance_id": instanceID,
-            "hostname": host,
+            "hostname": hostname,
             "retry_after_seconds": retryAfterSeconds,
         ]
         // swiftlint:disable:next force_try
