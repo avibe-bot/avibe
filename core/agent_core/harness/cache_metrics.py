@@ -58,18 +58,28 @@ def route_fingerprint(request: ModelRequest) -> str:
 
 
 def valid_record(value: Any) -> bool:
-    """Optional old/damaged metadata is absent, never a Turn failure."""
+    """Optional old/damaged metadata is absent, never a Turn failure.
+
+    A missing prefix is a valid historical observation, not a reusable baseline.
+    Keeping its clock prevents resurrection of an older inline prefix after a
+    representation switch, a historical fork, or an older writer's intervening work.
+    """
     try:
         return (
             isinstance(value, Mapping) and value.get("version") == 1
             and all(isinstance(value.get(key), str) for key in ("provider", "model", "route"))
             and type(value["started_at"]) in (float, int) and math.isfinite(value["started_at"])
             and value["started_at"] >= 0 and type(value["context_seq"]) is int and value["context_seq"] >= 0
-            and isinstance(value["prefix"], list) and bool(value["prefix"])
-            and all(isinstance(part, list) and len(part) == 3 and isinstance(part[0], str)
-                    and type(part[1]) is int and part[1] >= 0
-                    and type(part[2]) is int and part[2] >= 0 for part in value["prefix"])
-            and all(a[1] <= b[1] and a[2] < b[2] for a, b in zip(value["prefix"], value["prefix"][1:]))
+            and (
+                "prefix" not in value
+                or (
+                    isinstance(value["prefix"], list) and bool(value["prefix"])
+                    and all(isinstance(part, list) and len(part) == 3 and isinstance(part[0], str)
+                            and type(part[1]) is int and part[1] >= 0
+                            and type(part[2]) is int and part[2] >= 0 for part in value["prefix"])
+                    and all(a[1] <= b[1] and a[2] < b[2] for a, b in zip(value["prefix"], value["prefix"][1:]))
+                )
+            )
             and (value.get("input_tokens") is None or (type(value["input_tokens"]) is int and value["input_tokens"] >= 0))
         )
     except (KeyError, TypeError, ValueError, OverflowError):
@@ -92,6 +102,9 @@ class CacheTracker:
 
     def __init__(self) -> None:
         self.latest: dict[tuple[str, str], Mapping[str, Any]] = {}
+        # A runtime checkpoint may omit edits of discarded results. Their
+        # diagnostic sequence still matters when returning to an older route.
+        self.change_seqs: dict[str, int] = {}
 
     def restore(self, rows: Sequence[ContextEntry], attempts: Sequence[Mapping[str, Any]]) -> None:
         for raw in [*(row.payload.get("cache") for row in rows if row.kind == "response"), *attempts]:
@@ -99,7 +112,8 @@ class CacheTracker:
                 continue
             key = (raw["provider"], raw["model"])
             old = self.latest.get(key)
-            if old is None or raw["started_at"] >= old["started_at"]:
+            if (old is None or raw["started_at"] > old["started_at"]
+                    or (raw["started_at"] == old["started_at"] and ("prefix" in raw or "prefix" not in old))):
                 self.latest[key] = raw
 
     def begin(
@@ -129,10 +143,12 @@ class CacheTracker:
         if previous is not None:
             if record["route"] != previous["route"]:
                 record["causes"].append({"kind": "route_changed"})
-            if record["prefix"][0][0] != previous["prefix"][0][0]:
+            if previous.get("prefix") and record["prefix"][0][0] != previous["prefix"][0][0]:
                 record["causes"].append({"kind": "tools_changed"})
             for kind, cause in (("context_edit", "tool_results_cleared"), ("compaction", "checkpoint")):
-                if any(row.kind == kind and row.context_seq > previous["context_seq"] for row in rows):
+                if self.change_seqs.get(kind, 0) > previous["context_seq"] or any(
+                    row.kind == kind and row.context_seq > previous["context_seq"] for row in rows
+                ):
                     record["causes"].append({"kind": cause})
 
     def _expectation(self, record: dict[str, Any]) -> None:
@@ -141,6 +157,11 @@ class CacheTracker:
         record.update(idle_s=idle, expected_read=0, expected_read_basis="no_previous_request", reusable_tokens=0,
                       reusable_static_tokens=0, previous_input_tokens=old.get("input_tokens") if old else None)
         if old is None:
+            return
+        if not old.get("prefix"):
+            # A newer prefixless observation supersedes an older inline/state
+            # prefix. Historical forks must not borrow the parent's future state.
+            record["expected_read_basis"] = "missing_prefix"
             return
         shared = 0
         shared_static = 0

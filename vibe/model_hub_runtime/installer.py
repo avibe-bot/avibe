@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.resources as package_resources
 import json
 import logging
 import os
@@ -168,6 +170,11 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         on_resolved: Callable[[dict[str, str]], None] | None = None,
         validate_candidate: Callable[[Path], str | None] | None = None,
     ) -> dict[str, Any]:
+        if self.lifecycle_enabled:
+            return self.stage_required(
+                force=force, expected_target=expected_target, on_resolved=on_resolved,
+                validate_candidate=validate_candidate,
+            )
         if on_resolved is not None or expected_target is not None:
             return super().ensure(
                 force=force,
@@ -223,7 +230,285 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                 self._install_state_override = _INSTALL_STATE_UNSET
                 return True
 
+    @property
+    def lifecycle_enabled(self) -> bool:
+        return self.manifest_path is None and not self.manifest_url
+
+    def bundled_manifest_bytes(self) -> bytes:
+        return package_resources.files(self.spec.package).joinpath(self.spec.manifest_resource).read_bytes()
+
+    def bundled_manifest(self) -> ManagedRuntimeManifest | None:
+        if not self.lifecycle_enabled:
+            return super()._load_manifest(allow_network=False)
+        return self._parse_manifest(self.bundled_manifest_bytes(), loaded_from="package:bundled")
+
+    def package_identity(self) -> str:
+        from vibe import __version__
+
+        return hashlib.sha256(__version__.encode() + b"\n" + self.bundled_manifest_bytes()).hexdigest()
+
+    def required_generation(self):
+        from vibe.model_hub_runtime.lifecycle import EngineGeneration, EngineJournal
+
+        value = EngineJournal(self.runtime_dir).load()
+        if value is None:
+            return None
+        # Identity/inspection is not execution authorization. A blocked or
+        # package-stale C remains the required C, never an implicit bundled B.
+        if value["active"] is not None:
+            return EngineGeneration.read(value["active"], self.runtime_dir)
+        return None
+
+    def _load_manifest(self, *, allow_network: bool, persist_remote_cache: bool = True):
+        if not self.lifecycle_enabled:
+            return super()._load_manifest(allow_network=allow_network, persist_remote_cache=persist_remote_cache)
+        from vibe.model_hub_runtime.journal import JournalError
+        from vibe.model_hub_runtime.lifecycle import EngineJournal
+
+        try:
+            generation = self.required_generation()
+            if generation is None:
+                return self.bundled_manifest()
+            raw = EngineJournal(self.runtime_dir).provenance(generation.manifest_sha256, kind="manifest")
+            return self._parse_manifest(raw, loaded_from="lifecycle:committed")
+        except (JournalError, OSError):
+            self._install_reason = "engine_recovery_pending"
+            return None
+
+    def _manifest_install_candidates(self, manifest, archive):
+        if self.lifecycle_enabled:
+            generation = self.required_generation()
+            if generation is not None:
+                yield Path(generation.install_dir)
+                return
+        canonical = self._manifest_install_dir(manifest, archive)
+        yield canonical
+        # Forced repairs create immutable sibling generations, not in-place
+        # replacement of a binary a running process may still be using.
+        yield from sorted(canonical.parent.glob(f"{canonical.name}-*"))
+
+    def resolve_binary(self) -> Path | None:
+        if not self.lifecycle_enabled:
+            return super().resolve_binary()
+        manifest = self._load_manifest(allow_network=False)
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
+        if manifest is None or archive is None:
+            return None
+        for directory in self._manifest_install_candidates(manifest, archive):
+            binary = self._verified_manifest_binary(directory, manifest, archive)
+            if binary is not None:
+                return binary
+        return None
+
+    def stage_required(self, **kwargs) -> dict[str, Any]:
+        from vibe.model_hub_runtime.journal import JournalError
+        from vibe.model_hub_runtime.lifecycle import EngineJournal
+
+        try:
+            generation = self.required_generation()
+            raw = (
+                EngineJournal(self.runtime_dir).provenance(generation.manifest_sha256, kind="manifest")
+                if generation is not None else self.bundled_manifest_bytes()
+            )
+            return self.stage_manifest(raw, generation=generation, **kwargs)
+        except (JournalError, OSError) as exc:
+            return self._failure("engine_recovery_pending", message=str(exc))
+
+    def stage_manifest(
+        self, raw: bytes, *, generation=None, envelope: bytes | None = None,
+        minimum: str | None = None, force: bool = False, expected_target=None,
+        on_resolved=None, validate_candidate=None,
+    ) -> dict[str, Any]:
+        """Materialize exact verified files, not execution selection or its hint.
+
+        Candidate admission/signature authorization belongs to the owner. The
+        callback runs under the existing installer fence, closing cleanup races.
+        """
+        from vibe.model_hub_runtime.journal import JournalError, flush_directory, flush_file
+        from vibe.model_hub_runtime.lifecycle import EngineGeneration, EngineJournal
+
+        store = EngineJournal(self.runtime_dir)
+        stager = _EngineStager(runtime_dir=self.runtime_dir, offline=self.offline, raw=raw)
+        manifest = stager._load_manifest(allow_network=False)
+        archive = stager._manifest_archive_for_platform(manifest) if manifest else None
+        if manifest is None or archive is None:
+            return self._failure(stager._install_reason or "engine_manifest_invalid")
+        staged: EngineGeneration | None = None
+
+        def persist_stage(binary: Path) -> str | None:
+            nonlocal staged
+            reason = validate_candidate(binary) if validate_candidate else None
+            if reason:
+                return reason
+            value = store.load() or store.empty()
+            digest = store.retain_bytes(raw, kind="manifest")
+            envelope_digest = store.retain_bytes(envelope, kind="envelope") if envelope is not None else (
+                generation.envelope_sha256 if generation is not None else None
+            )
+            origin = "channel" if envelope_digest is not None else "bundled"
+            staged = EngineGeneration.read({
+                "asset_release_tag": str(manifest.payload.get("asset_release_tag") or manifest.runtime_version),
+                "runtime_version": manifest.runtime_version, "platform": archive.platform,
+                "archive_sha256": archive.sha256, "binary_sha256": archive.binary_sha256,
+                "manifest_sha256": digest, "install_dir": str(binary.parents[len(Path(archive.bin_path).parts) - 1]),
+                "bin_path": archive.bin_path, "origin": origin,
+                "min_avibe_version": minimum if minimum is not None else (
+                    generation.min_avibe_version if generation is not None else None
+                ), "envelope_sha256": envelope_digest,
+            }, self.runtime_dir)
+            if staged.document() in value["staged"] or staged.document() in (value["active"], value["previous"]):
+                # These immutable bytes were flushed BEFORE their durable role
+                # was published, and ensure has just reverified their integrity.
+                # Reopening a running Windows image for writes is forbidden.
+                return None
+            install_dir = Path(staged.install_dir)
+            # Flush both files and namespace entries before publishing the role.
+            for item in install_dir.rglob("*"):
+                if item.is_file():
+                    flush_file(item)
+            for directory in sorted((p for p in install_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                flush_directory(directory)
+            directory = install_dir
+            while directory != self.runtime_dir:
+                flush_directory(directory)
+                flush_directory(directory.parent)
+                directory = directory.parent
+            for cached in {
+                self.runtime_dir / "downloads" / stager._archive_cache_name(archive),
+                self.runtime_dir / "downloads" / archive.name,
+            }:
+                if managed_runtime._is_regular_file(cached) and stager._downloaded_archive_matches(cached, archive):
+                    flush_file(cached)
+                    flush_directory(cached.parent)
+            if staged.document() not in value["staged"] and staged.document() not in (value["active"], value["previous"]):
+                value["staged"].append(staged.document())
+            store.save(value)
+            return None
+
+        result = ManagedRuntimeManager.ensure(
+            stager, force=force, select=False, expected_target=expected_target,
+            on_resolved=on_resolved, validate_candidate=persist_stage,
+        )
+        if result.get("ok") and staged is not None:
+            result.update(state="staged", reason="waiting_for_controller", generation=staged.document())
+            # ensure(select=False) deliberately cannot clean through the bare
+            # stager. Its durable role now exists and the installer lock is
+            # released, so use this role-aware manager's normal retention.
+            try:
+                self._clean_after_successful_install()
+            except Exception:  # noqa: BLE001
+                logger.warning("Model Hub engine post-install retention cleanup failed", exc_info=True)
+        elif result.get("ok"):
+            raise JournalError("engine_stage_not_recorded")
+        return result
+
+    def _current_install_dir(self, versions_dir: Path) -> Path | None:
+        if not self.lifecycle_enabled:
+            return super()._current_install_dir(versions_dir)
+        generation = self.required_generation()
+        if generation is not None:
+            return Path(generation.install_dir)
+        manifest = self.bundled_manifest()
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
+        if manifest and archive:
+            for directory in self._manifest_install_candidates(manifest, archive):
+                if self._verified_manifest_binary(directory, manifest, archive) is not None:
+                    return directory
+        return None
+
+    def _current_archive_sha256(self) -> str:
+        if not self.lifecycle_enabled:
+            return super()._current_archive_sha256()
+        manifest = self._load_manifest(allow_network=False)
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
+        return archive.sha256 if archive else ""
+
+    def _clean_locked(self, *, keep_previous: int, dry_run: bool = False, removed=None):
+        if self.lifecycle_enabled:
+            from vibe.model_hub_runtime.lifecycle import EngineJournal
+
+            # Damage must fail the entire cleanup plan closed, not look empty.
+            EngineJournal(self.runtime_dir).load()
+        return super()._clean_locked(keep_previous=keep_previous, dry_run=dry_run, removed=removed)
+
+    def _existing_bundled_install(self, manifest, archive, *, prefer_hint: bool = False) -> Path | None:
+        """One verified copy; only compatibility/cleanup may prefer its hint."""
+        from vibe.model_hub_runtime.journal import JournalError, read_document
+
+        canonical = self._manifest_install_dir(manifest, archive)
+        candidates = [canonical, *sorted(canonical.parent.glob(f"{canonical.name}-*"))]
+        try:
+            hint = read_document(self.runtime_dir / "current.json") if prefer_hint else None
+        except JournalError:
+            hint = None  # non-authoritative hint; journal roles still fence cleanup
+        if isinstance(hint, dict) and all(hint.get(key) == expected for key, expected in {
+            "runtime_version": manifest.runtime_version, "platform": archive.platform,
+            "manifest_sha256": manifest.digest, "archive_sha256": archive.sha256, "bin_path": archive.bin_path,
+        }.items()):
+            preferred = next((p for p in candidates if str(p) == hint.get("install_dir")), None)
+            if preferred is not None:
+                candidates = [preferred, *(p for p in candidates if p != preferred)]
+        return next((p for p in candidates if self._verified_manifest_binary(p, manifest, archive) is not None), None)
+
+    def _install_dir_is_protected(self, install_dir: Path, protected: set[Path]) -> bool:
+        if self.lifecycle_enabled:
+            from vibe.model_hub_runtime.lifecycle import EngineJournal
+
+            value = EngineJournal(self.runtime_dir).load()
+            if value:
+                roles = [value["active"], value["previous"], *value["staged"]]
+                if value["pending"]:
+                    roles += [value["pending"]["old"], value["pending"]["candidate"]]
+                if value["launch"]:
+                    roles.append(value["launch"]["generation"])
+                if value["preflight"]:
+                    roles.append(value["preflight"]["generation"])
+                protected = protected | {Path(g["install_dir"]).resolve() for g in roles if g}
+            bundled = self.bundled_manifest()
+            archive = self._manifest_archive_for_platform(bundled) if bundled else None
+            if bundled and archive:
+                retained = self._existing_bundled_install(bundled, archive, prefer_hint=True)
+                if retained is not None:
+                    protected = protected | {retained.resolve()}
+        return super()._install_dir_is_protected(install_dir, protected)
+
+    def _clean_downloaded_archives(self, *, archive_provenance, protected_sha256s, dry_run):
+        # Released metadata names the upstream archive. New caches key it by
+        # digest too. Reuse the generic descriptor/hash-safe cleaner for BOTH
+        # names without teaching other managed runtimes this engine's layout.
+        aliases = {(name, digest): f"{digest}-{name}" for name, digest in archive_provenance}
+        report, terminal = super()._clean_downloaded_archives(
+            archive_provenance=archive_provenance | {(alias, digest) for (_name, digest), alias in aliases.items()},
+            protected_sha256s=protected_sha256s, dry_run=dry_run,
+        )
+        for (name, _digest), alias in aliases.items():
+            if alias not in terminal:
+                # Keep ownership after install removal while its content-
+                # addressed copy is young, retained, or failed removal.
+                terminal.discard(name)
+        return report, terminal
+
+    def _resolve_manifest_archive(self, archive: ManagedRuntimeArchive) -> Path | None:
+        # Keep released/preseeded offline caches usable without renaming or
+        # overwriting their bytes. New downloads remain digest-addressed.
+        cached = self.runtime_dir / "downloads" / self._archive_cache_name(archive)
+        if managed_runtime._is_regular_file(cached) and self._downloaded_archive_matches(cached, archive):
+            self._install_reason = None
+            return cached
+        legacy = self.runtime_dir / "downloads" / archive.name
+        if managed_runtime._is_regular_file(legacy) and self._downloaded_archive_matches(legacy, archive):
+            self._install_reason = None
+            return legacy
+        return super()._resolve_manifest_archive(archive)
+
+    def _archive_cache_name(self, archive: ManagedRuntimeArchive) -> str:
+        # The upstream name is reused between Avibe builds. Never overwrite a
+        # rollback archive with another digest that happens to share that name.
+        return f"{archive.sha256}-{archive.name}"
+
     def status(self) -> dict[str, Any]:
+        if self.lifecycle_enabled:
+            return self._lifecycle_install_status()
         managed = super().status()
         install_state = self.install_state()
         if install_state and install_state.get("state") == "not_installed":
@@ -232,6 +517,29 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                 managed["status"] = "error"
                 managed["reason"] = reason
         return managed
+
+    def _lifecycle_install_status(self) -> dict[str, Any]:
+        from vibe.model_hub_runtime.lifecycle import EngineLifecycleView
+
+        manifest = self._load_manifest(allow_network=False)
+        archive = self._manifest_archive_for_platform(manifest) if manifest else None
+        binary = self.resolve_binary() if archive else None
+        return {
+            "id": self.spec.runtime_id, "provider": self.spec.record_provider,
+            "engine_lifecycle": EngineLifecycleView.read(self.runtime_dir),
+            "platform": self.host_platform(), "installed": binary is not None,
+            "version": manifest.runtime_version if binary and manifest else None,
+            "selected_version": manifest.runtime_version if manifest else None,
+            "matches_manifest": True if binary else None,
+            "status": "ready" if binary else "error" if self._install_reason else "missing",
+            "path": str(binary) if binary else None,
+            "install_dir": str(binary.parents[len(Path(archive.bin_path).parts) - 1]) if binary and archive else None,
+            "manifest": self._manifest_status_payload(manifest),
+            "archive": self._archive_status_payload(archive),
+            "reason": None if binary else self._install_reason,
+            "os_errno": None if binary else self._install_failure.os_errno,
+            "download_error": self._download_error,
+        }
 
     @property
     def install_state_path(self) -> Path:
@@ -575,6 +883,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             "name": str(payload.get("name") or ""),
             "resolution": resolution.value,
             "version": manifest.runtime_version,
+            "asset_release_tag": payload.get("asset_release_tag"),
             "source_sha": str(payload.get("source_sha") or ""),
             "assets": [
                 {
@@ -626,6 +935,17 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             return ManifestResolution.UNSUPPORTED, None
         return ManifestResolution.RESOLVED, archive
 
+    def _binary_digest_matches_manifest(self, binary: Path, manifest: ManagedRuntimeManifest) -> bool:
+        archive = self._manifest_archive_for_platform(manifest)
+        return bool(archive and archive.binary_sha256 and managed_runtime.file_sha256(binary) == archive.binary_sha256)
+
+    def _binary_matches_manifest(self, binary: Path, manifest: ManagedRuntimeManifest) -> bool:
+        # Lifecycle inspection/staging authenticates bytes; only the owner may
+        # execute them in isolated preflight or a fenced real-config start.
+        if self.lifecycle_enabled:
+            return self._binary_digest_matches_manifest(binary, manifest)
+        return super()._binary_matches_manifest(binary, manifest)
+
     def _binary_version(self, binary: Path | None) -> str | None:
         if binary is None:
             return None
@@ -646,3 +966,39 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         if match is None:
             return None
         return f"v{match.group(1).lstrip('v')}"
+
+
+class _EngineStager(EngineRuntimeManager):
+    """An immutable exact-manifest byte installer; it has no selection authority."""
+
+    def __init__(self, *, runtime_dir: Path, offline: bool, raw: bytes) -> None:
+        self._raw = raw
+        super().__init__(runtime_dir=runtime_dir, offline=offline)
+
+    @property
+    def lifecycle_enabled(self) -> bool:
+        return False
+
+    def _load_manifest(self, *, allow_network: bool, persist_remote_cache: bool = True):
+        return self._parse_manifest(self._raw, loaded_from="lifecycle:staging")
+
+    def _publish_staged_directory(self, staging_dir: Path, install_dir: Path) -> None:
+        from vibe.model_hub_runtime.journal import publish_directory
+
+        publish_directory(staging_dir, install_dir)
+
+    def _write_manifest_install_metadata(self, install_dir, manifest, archive, *, binary_sha256):
+        from vibe.model_hub_runtime.journal import write_durable
+
+        super()._write_manifest_install_metadata(install_dir, manifest, archive, binary_sha256=binary_sha256)
+        metadata = install_dir / self.spec.metadata_filename
+        # The generic metadata writer is deliberately best-effort; the engine
+        # stage has a stronger completion boundary, including native rename.
+        write_durable(metadata, metadata.read_bytes())
+
+    def _binary_matches_manifest(self, binary: Path, manifest: ManagedRuntimeManifest) -> bool:
+        return self._binary_digest_matches_manifest(binary, manifest)
+
+    def _current_install_dir(self, versions_dir: Path) -> Path | None:
+        # A legacy pointer must never introduce a staging or retention root.
+        return None

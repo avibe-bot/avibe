@@ -11042,7 +11042,7 @@ def _published_running_version() -> str | None:
 
 
 def _model_hub_engine_dependency_status() -> dict:
-    """Project the pinned CPA runtime into the shared dependency contract."""
+    """Project lifecycle-required verified files, never a tentative candidate."""
 
     try:
         from vibe.model_hub_runtime.installer import EngineRuntimeManager
@@ -11070,9 +11070,14 @@ def _model_hub_engine_dependency_status() -> dict:
     selected_version = managed.get("selected_version")
     matches_manifest = managed.get("matches_manifest")
     reason = managed.get("reason")
+    lifecycle = managed.get("engine_lifecycle") or {}
     if not platform_supported:
         status = "unsupported"
         action_class = "none"
+    elif lifecycle.get("state") == "blocked":
+        status = "error"
+        action_class = "operator_only"
+        reason = reason or "model_hub_engine_install_inspection_failed"
     elif not selected_version:
         status = "error"
         action_class = "operator_only"
@@ -11100,6 +11105,7 @@ def _model_hub_engine_dependency_status() -> dict:
         "action_class": action_class,
         "reason": reason,
         "download_error": managed.get("download_error"),
+        "engine_lifecycle": lifecycle,
     }
 
 
@@ -11158,7 +11164,7 @@ def ensure_model_hub_engine_installed(
     force: bool = False,
     offline: bool | None = None,
 ) -> dict:
-    """Converge CPA to this Avibe release's pin without changing run intent."""
+    """Repair required files through the owner, or stage only if no owner exists."""
 
     from core.handlers.model_hub import ModelHubError
     from vibe.internal_client import default_socket_path
@@ -11207,6 +11213,7 @@ def ensure_model_hub_engine_installed(
         "version": status.get("installed_version"),
         "status": status,
         "reason": None if installed else status.get("error_key") or "model_hub_engine_install_failed",
+        **{key: runtime[key] for key in ("manifest", "committed_release", "running_release") if key in runtime},
     }
 
 

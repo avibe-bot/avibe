@@ -223,6 +223,7 @@ class ManagedRuntimeManager:
         self,
         *,
         force: bool = False,
+        select: bool = True,
         expected_target: Mapping[str, str] | None = None,
         on_resolved: Callable[[dict[str, str]], None] | None = None,
         validate_candidate: Callable[[Path], str | None] | None = None,
@@ -321,6 +322,8 @@ class ManagedRuntimeManager:
                         archive=archive,
                         error=validation_error,
                     )
+                if not select:
+                    return self._success_payload(existing, existing_install_dir, manifest, archive, changed=False)
                 return self._reuse_existing_install(
                     existing,
                     existing_install_dir,
@@ -331,6 +334,11 @@ class ManagedRuntimeManager:
             archive_path = self._resolve_manifest_archive(archive)
             if archive_path is None:
                 if existing is not None:
+                    if not select:
+                        validation_reason = validate_candidate(existing) if validate_candidate else None
+                        if validation_reason:
+                            return self._failure(validation_reason, manifest=manifest, archive=archive)
+                        return self._success_payload(existing, existing_install_dir, manifest, archive, changed=False)
                     return self._reuse_existing_install(
                         existing,
                         existing_install_dir,
@@ -407,7 +415,7 @@ class ManagedRuntimeManager:
                         )
                         replacement.rmdir()
                         install_dir = replacement
-                shutil.move(str(staging_dir), str(install_dir))
+                self._publish_staged_directory(staging_dir, install_dir)
                 candidate_install_dir = install_dir
                 installed_binary = (install_dir / archive.bin_path).resolve(strict=True)
                 if not replace_target and not self._binary_matches_manifest(installed_binary, manifest):
@@ -444,7 +452,8 @@ class ManagedRuntimeManager:
                         archive=archive,
                         error=validation_error,
                     )
-                self._write_current_pointer(install_dir, manifest, archive)
+                if select:
+                    self._write_current_pointer(install_dir, manifest, archive)
                 candidate_install_dir = None
                 self._install_reason = None
                 published_result = {
@@ -474,7 +483,7 @@ class ManagedRuntimeManager:
                     shutil.rmtree(staging_dir, ignore_errors=True)
         finally:
             self._release_mutation_lock(file_lock)
-            if published_result is not None and published_result.get("ok"):
+            if select and published_result is not None and published_result.get("ok"):
                 try:
                     self._clean_after_successful_install()
                 except Exception:  # noqa: BLE001
@@ -483,6 +492,10 @@ class ManagedRuntimeManager:
                         self.spec.runtime_id,
                         exc_info=True,
                     )
+
+    def _publish_staged_directory(self, staging_dir: Path, install_dir: Path) -> None:
+        """Hook for a runtime requiring stricter same-volume publication."""
+        shutil.move(str(staging_dir), str(install_dir))
 
     def _clean_after_successful_install(self) -> None:
         result = self.clean(keep_previous=1)

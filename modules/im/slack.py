@@ -2120,9 +2120,9 @@ class SlackBot(BaseIMClient):
                     if had_mention_only:
                         agent_text = ""
                     handled_bot_mention_in_message_event = True
-                    logger.info("Processing Slack Connect message event with bot mention: '%s'", event.get("text"))
+                    logger.info("Processing Slack Connect message event with bot mention")
                 else:
-                    logger.info(f"Skipping message event with bot mention: '{raw_text}'")
+                    logger.info("Skipping message event with bot mention")
                     return
 
             # Extract file attachments (slack_files already checked above)

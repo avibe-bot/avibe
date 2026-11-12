@@ -410,7 +410,7 @@ def _ledger_writes(tree: ast.AST) -> tuple[ast.Attribute, ...]:
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
-        and node.attr in {"record", "record_many"}
+        and node.attr in {"record", "record_many", "commit_buffered_flush"}
         and isinstance(node.value, ast.Attribute)
         and node.value.attr in {"usage", "ledger"}
     )
@@ -855,13 +855,11 @@ def test_a_metered_row_is_dated_by_the_call_and_not_by_what_followed_it() -> Non
     )
 
 
-def test_how_long_a_turn_waits_on_the_ledger_is_the_writers_to_bound() -> None:
-    # Reviews 4964754924 / 4964894667 / 4970...: the wait was spelled at each
-    # metering call site, which made the bound the one property a new site could
-    # omit by writing the obvious `await` — and one did, putting an unresponsive
-    # disk on a turn's critical path and in front of the next failover hop. Both
-    # halves, shield and bound, now sit behind one name. The scan keys on the usage
-    # write specifically, so an unrelated shielded task is not mistaken for one.
+def test_durable_usage_wait_is_not_on_producer_critical_paths() -> None:
+    # Metering is report-only: producers accept calls into the in-memory overlay,
+    # while the writer owns the durable future and shutdown drain. Keeping the
+    # durable wait in one place prevents a storage delay from consuming a turn or
+    # failover deadline.
     waited = {"shield", "wait_for"}
     usage_names = {"record", "usage_write", "wait_recorded", "usage_writer"}
 
@@ -878,17 +876,18 @@ def test_how_long_a_turn_waits_on_the_ledger_is_the_writers_to_bound() -> None:
             )
         ]
 
+    # The writer's explicit durable wait remains shielded and bounded for tests or
+    # callers that truly need disk completion; production producers must not wrap
+    # their metering write in it.
     usage_tree = _tree(USAGE)
     waiter = _functions(usage_tree)["wait_recorded"]
     assert {name for node in ast.walk(waiter) if (name := _call_name(node)) in waited} == waited
-    # Inside the writer the wait is spelled over its own parameter, so the name-keyed
-    # scan is aimed outward: at the modules that hold a `usage_write` and could wait
-    # on it themselves. Every one of them must go through the name above instead.
-    assert all(node in set(ast.walk(waiter)) for node in wraps_a_usage_write(usage_tree))
     for module in sorted((ROOT / "core/handlers/model_hub").glob("*.py")):
         if module == USAGE:
             continue
-        assert not wraps_a_usage_write(_tree(module)), module.name
+        tree = _tree(module)
+        assert not wraps_a_usage_write(tree), module.name
+        assert not any(_call_name(node) == "wait_recorded" for node in ast.walk(tree)), module.name
 
 
 def test_every_body_fact_the_turn_reads_can_come_from_the_engine_that_read_it() -> None:
@@ -1387,7 +1386,7 @@ def test_machine_error_family_product_is_complete_across_transports() -> None:
     # Each code is listed once; the set comparison below would collapse a duplicate.
     assert len(fixture_codes) == len(expected_codes)
     assert expected_codes == set(UPSTREAM_MACHINE_ERROR_CODES)
-    assert set(MACHINE_ERROR_CODES) - expected_codes == {"engine_down"}
+    assert set(MACHINE_ERROR_CODES) - expected_codes == {"engine_down", "engine_withdrawn"}
     observed: set[tuple[str, str, str]] = set()
     for family, codes in MACHINE_ERROR_FAMILY_FIXTURES.items():
         for code, transport in product(codes, ERROR_TRANSPORT_SHAPES):

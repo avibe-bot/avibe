@@ -28,12 +28,12 @@ FAST = {
 PR_TESTS = {"unit-test-shards", "ui-tests", "scenario-evidence", "model-hub-hosted-wire"}
 HEAVY = {
     "ui-browser-checks", "ios-shell", "desktop-shell", "install-upgrade-shards", "web-fetch-runtime",
-    "web-fetch-macos", "windows-install-smoke-runners", "windows-agent", "windows-model-hub", "windows-control-ipc",
+    "web-fetch-macos", "windows-install-smoke-runners", "windows-agent", "windows-model-hub", "windows-control-ipc", "model-hub-lifecycle-native",
 }
 GATES = {
     "unit-tests": {
         "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests", "ui-browser-checks",
-        "model-hub-hosted-wire", "manifest-consistency", "python-smoke", "ios-shell", "desktop-shell",
+        "model-hub-hosted-wire", "model-hub-lifecycle-native", "manifest-consistency", "python-smoke", "ios-shell", "desktop-shell",
         "ruff", "memory-insight-contract", "show-router-integration", "build-linux-artifacts",
         "migration-release-guard", "npm-wrapper",
     },
@@ -52,7 +52,7 @@ def scope(*paths):
 
 @pytest.mark.parametrize("paths,expected", [
     (("ui/src/App.tsx",), {"ui-browser-checks"}),
-    (("core/controller.py",), {"web-fetch-runtime", "windows-agent", "windows-model-hub", "windows-control-ipc"}),
+    (("core/controller.py",), {"web-fetch-runtime", "windows-agent", "windows-model-hub", "windows-control-ipc", "model-hub-lifecycle-native"}),
     (("ios/Avibe/NavigationPolicy.swift",), {"ui-browser-checks", "ios-shell", "web-fetch-runtime"}),
     (("desktop/src-tauri/src/main.rs",), {"desktop-shell", "install-upgrade-shards", "web-fetch-runtime", "web-fetch-macos", "windows-install-smoke-runners"}),
     (("pyproject.toml",), HEAVY),
@@ -320,3 +320,21 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
 def test_check_results_never_accepts_absent_results():
     plan = make_plan("MG_THIN")
     assert check_results(plan, {}, ("unit-test-shards", "ui-checks"))
+
+
+def test_native_lifecycle_harness_is_a_required_six_platform_pr_producer_not_qualification():
+    job = workflow()["jobs"]["model-hub-lifecycle-native"]
+    matrix = job["strategy"]["matrix"]["include"]
+    assert {item["engine_platform"] for item in matrix} == {
+        "linux-amd64", "linux-arm64", "darwin-arm64", "darwin-x64", "windows-amd64", "windows-arm64",
+    }
+    assert all(item["python_arch"] == "x64" for item in matrix if item["runner"].startswith("windows"))
+    assert job["needs"] == "changes" and not job.get("continue-on-error")
+    scripts = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "git fetch --no-tags --depth=1 origin ea402b8bc3ab5f7f29cc85b28f22aed17544cc2d" in scripts
+    for suffix in ("lifecycle", "admission", "consumers", "processes", "owner_crashes", "released_callers"):
+        assert f"tests/test_model_hub_engine_{suffix}.py" in scripts
+    assert "win-amd64" in scripts and "AVIBE_EXPECT_ENGINE_PLATFORM" in scripts
+    assert "qualification" not in scripts and "workflow_dispatch" not in scripts
+    for path in ("vibe/model_hub_runtime/lifecycle.py", "core/managed_runtime.py", "tests/model_hub_owner_crash_driver.py"):
+        assert make_plan("PR", scope(path))["jobs"]["model-hub-lifecycle-native"] == "run"

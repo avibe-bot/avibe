@@ -1,7 +1,7 @@
 # Offline Vault integrity and entry fixtures (AUTH-SETUP-136 / 137)
 
 `release/` is an exact copy of vault-sandbox's reviewed candidate
-`retained/v/eef0b4fe30cfb1cf35507b4aae5144dabfc0bfff66b49ef1d26b5016a52546c8/`.
+`retained/v/e7be380b75d1313ab07fcb013dbb60809916fe4dc47aca1e1af2020a9be70570/`.
 `source.json` lists source-input hashes; the sandbox commit containing this
 snapshot locates its source. It is reproduced twice using the owning repository's
 release tools, not fetched from a deployed host. The packaged authority is

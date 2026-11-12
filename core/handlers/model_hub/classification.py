@@ -111,6 +111,7 @@ class _MachineErrorRule:
 _MACHINE_ERROR_TAXONOMY: Final[Mapping[str, _MachineErrorRule]] = {
     "permission_error": _MachineErrorRule("terminal", True, 100, "surface", None, "request_incompatible", 0, 403),
     "engine_down": _MachineErrorRule("terminal", False, 100, "surface", None, "engine_down", 0, 502),
+    "engine_withdrawn": _MachineErrorRule("terminal", False, 100, "surface", None, "engine_withdrawn", 0, 503),
     "authentication_error": _MachineErrorRule("auth", True, 90, "refresh", None, None, 0, None),
     "invalid_api_key": _MachineErrorRule("auth", True, 90, "refresh", None, None, 0, None),
     "account_banned": _MachineErrorRule("auth", True, 90, "fallback", "account_banned", None, 0, None),

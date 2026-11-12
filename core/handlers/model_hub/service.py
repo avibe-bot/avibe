@@ -179,7 +179,7 @@ from .hosted_tools import (
     admitted_image,
     apply_hosted_tool_put,
     clear_request,
-    engine_stamp,
+    UNKNOWN_ENGINE_RELEASE,
     executor_candidate,
     executor_vendors,
     freeze_turn_tools,
@@ -1470,15 +1470,18 @@ def _oauth_payload(
 
 
 def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
-    # Import lazily to avoid the runtime adapter's dependency back on this service module.
-    from vibe.model_hub_runtime.installer import EngineRuntimeManager
-
-    manager = EngineRuntimeManager()
+    # The worker-produced status carries the effective manifest. This renderer
+    # performs no filesystem work and never substitutes a packaged identity.
     return {
         "contract_version": 23,
         "enabled": enabled,
-        "host_platform": status.host_platform or manager.host_platform(),
-        "manifest": manager.contract_manifest(),
+        "host_platform": status.host_platform or "unknown-platform",
+        "manifest": dict(status.manifest) if status.manifest is not None else {
+            "name": "cliproxyapi", "resolution": "unresolved", "assets": [],
+        },
+        "committed_release": status.committed_release,
+        "running_release": status.running_release,
+        "engine_lifecycle": dict(status.engine_lifecycle) if status.engine_lifecycle is not None else None,
         "status": {
             "installed_version": status.installed_version,
             "verified": status.verified,
@@ -1646,9 +1649,9 @@ class ModelHubService:
         # Opaque provider continuations are process-local by design. Unlike turn
         # provenance and capability evidence, this registry never touches disk.
         self.opaque_provenance = opaque_provenance or OpaqueProvenanceRegistry()
-        # Bundled state that never changes while this process runs, resolved once
-        # here at startup so that no request path reads a file on the loop.
-        self.engine_stamp = engine_stamp()
+        # Execution identity comes from the adapter/producing admission, never
+        # a packaged stamp. The static overlays below are still startup-cached.
+        self.engine_stamp = UNKNOWN_ENGINE_RELEASE
         from vibe import __version__ as avibe_release
 
         self.avibe_release = avibe_release
@@ -1885,7 +1888,8 @@ class ModelHubService:
         except RuntimePlatformUnsupportedError:
             raise ModelHubError("runtime_platform_unsupported", status=422) from None
         except EngineUnavailableError as exc:
-            raise ModelHubError("engine_down", status=503, local_error_detail=local_error_detail(exc)) from None
+            code = "engine_withdrawn" if getattr(exc, "reason", None) == "engine_withdrawn" else "engine_down"
+            raise ModelHubError(code, status=503, local_error_detail=local_error_detail(exc)) from None
         except NativeOAuthUnavailableError:
             raise ModelHubError("engine_down", status=503) from None
         except ModelHubError:
@@ -1901,7 +1905,10 @@ class ModelHubService:
             if flow_id is not None:
                 self.oauth_flows.forget(flow_id)
             raise ModelHubError("flow_not_found", status=404) from None
-        except (EngineUnavailableError, NativeOAuthUnavailableError):
+        except EngineUnavailableError as exc:
+            code = "engine_withdrawn" if getattr(exc, "reason", None) == "engine_withdrawn" else "engine_down"
+            raise ModelHubError(code, status=503) from None
+        except NativeOAuthUnavailableError:
             raise ModelHubError("engine_down", status=503) from None
         except BackendLoginInProgressError as error:
             raise ModelHubError(
@@ -7112,10 +7119,12 @@ class ModelHubService:
                 await self._refresh_backend_catalog(backend)
             return changed
 
-    def hosted_evidence(self) -> HostedEvidence:
-        """A reader over the evidence that applies the current wire stamp; memory only. Take one per resolution."""
-
-        return HostedEvidence(self.capability_evidence, self.engine_stamp, self.avibe_release)
+    def hosted_evidence(self, *, engine_release: str | None = None) -> HostedEvidence:
+        """Memory-only current reader, or the identity a producing admission carried."""
+        if engine_release is None:
+            reader = getattr(self.adapter, "engine_release", None)
+            engine_release = reader() if callable(reader) else self.engine_stamp
+        return HostedEvidence(self.capability_evidence, engine_release or UNKNOWN_ENGINE_RELEASE, self.avibe_release)
 
     def hosted_tools_status(self) -> dict:
         """Models → Tools: each tool's settings, saved and effective, and what real use showed."""
@@ -7220,14 +7229,15 @@ class ModelHubService:
 
     async def record_hosted_refusals(
         self, source: ModelHubSourceConfig, refusals: Iterable[tuple[str, EvidenceFeature, str]],
+        *, engine_release: str | None = None,
     ) -> None:
         """Record refusals no upstream narrow rule writes (an executor model, an image endpoint); memory first.
 
-        Each is ``(model_id, feature, detail)`` under the current wire stamp. One call writes the batch, so sibling
+        Each is ``(model_id, feature, detail)`` under the producing engine's wire stamp. One call writes the batch, so sibling
         image models of one endpoint land together. A failed file write is logged; memory keeps them.
         """
 
-        evidence = self.hosted_evidence()
+        evidence = self.hosted_evidence(engine_release=engine_release or UNKNOWN_ENGINE_RELEASE)
         records = [
             EvidenceRecord(
                 source_id=source.id,
@@ -7246,11 +7256,12 @@ class ModelHubService:
                 self.capability_evidence.write_refusals,
                 records,
                 live=lambda: self._evidence_sources(self.store.load()),
-                wire_for=evidence.wire_for,
+                wire_for=lambda source, model: self.hosted_evidence().wire_for(source, model),
             )
 
     async def record_hosted_success(
         self, source: ModelHubSourceConfig, model_id: str, tool: str, mode: str,
+        *, engine_release: str | None = None,
     ) -> None:
         """Record a real success of a hosted tool (display only): the latest projection at once, the file hourly."""
 
@@ -7260,7 +7271,7 @@ class ModelHubService:
             feature=EvidenceFeature.hosted(tool, "call"),
             status="verified",
             observed_at=self.now(),
-            wire=self.hosted_evidence().wire_for(source, model_id),
+            wire=self.hosted_evidence(engine_release=engine_release or UNKNOWN_ENGINE_RELEASE).wire_for(source, model_id),
             source_identity=identity_digest(source),
             mode=mode,  # type: ignore[arg-type]
         )
@@ -7381,7 +7392,7 @@ class ModelHubService:
         )
         if learned is None:
             return None
-        evidence = self.hosted_evidence()
+        evidence = self.hosted_evidence(engine_release=outcome.engine_release or UNKNOWN_ENGINE_RELEASE)
         # Routing state: memory takes it before the re-render that follows, even if the file write fails. The store
         # drops it if the Source or the model's rendering changed while the request ran.
         await asyncio.to_thread(
@@ -7397,7 +7408,7 @@ class ModelHubService:
                 detail=learned.detail,
             ),
             live=lambda: self._evidence_sources(self.store.load()),
-            wire_for=evidence.wire_for,
+            wire_for=lambda source, model: self.hosted_evidence().wire_for(source, model),
         )
         return learned
 
@@ -7686,7 +7697,9 @@ class ModelHubService:
                 failed_reason = Failure(result.record["error"], result.record.get("error_code"))
             answer = failed(failed_reason or failure(say, "modelHub.hostedTools.unreadable"))
             return {**answer, "execution": execution}
-        await self.record_hosted_success(source, call.model, IMAGE_TOOL, "direct")
+        await self.record_hosted_success(
+            source, call.model, IMAGE_TOOL, "direct", engine_release=outcome.engine_release if outcome else None,
+        )
         answer: dict[str, Any] = {"record": result.record, "execution": execution, "images": [
             {"data": data} for data in result.images
         ]}
@@ -7713,7 +7726,9 @@ class ModelHubService:
             refused = [spec.id for spec in image_models_of(source) if source.kind in spec.kinds] or [model_id]
         else:
             return
-        await self.record_hosted_refusals(source, [(refused_id, feature, detail) for refused_id in refused])
+        await self.record_hosted_refusals(
+            source, [(refused_id, feature, detail) for refused_id in refused], engine_release=outcome.engine_release,
+        )
 
     def _image_call_cost(
         self,
@@ -7798,7 +7813,7 @@ class ModelHubService:
         )
         if outcome is not None and tool in outcome.hosted_tools and result is not None and result.record["status"] == "completed":
             # A proxy call is a native call on the executor Source: the same positive evidence (§3.2).
-            await self.record_hosted_success(source, model_id, tool, "executor")
+            await self.record_hosted_success(source, model_id, tool, "executor", engine_release=outcome.engine_release)
         # A response that broke a bound reached nothing of Vibey's, so it is a failure before output here (§6
         # step 4): the next candidate is tried. A timeout spent the chain's one deadline.
         moves_on = called.refused is not None
@@ -10289,13 +10304,19 @@ class ModelHubService:
                 enabled=enabled,
             )
 
+    async def engine_status(self) -> dict:
+        return await self.adapter.engine_status()
+
+    async def engine_operation(self, *, update: bool = False) -> dict:
+        return await self.adapter.request_engine_operation(update=update)
+
     async def runtime_ensure_dependency(
         self,
         *,
         force: bool = False,
         offline: bool = False,
     ) -> dict:
-        """Converge the pinned engine without changing persisted run intent."""
+        """Repair the lifecycle-required engine without changing run intent or adopting a candidate."""
 
         async with self._runtime_lifecycle_lock:
             await self.reconcile_runtime_installation()
@@ -11008,7 +11029,7 @@ class ModelHubService:
         if source is None or identity_digest(source) != resolved.origin.identity:
             return
         for tool in sorted(proven):
-            await self.record_hosted_success(source, resolved.model_id, tool, "native")
+            await self.record_hosted_success(source, resolved.model_id, tool, "native", engine_release=outcome.engine_release)
 
     def _emit_switch(
         self,
@@ -11453,10 +11474,9 @@ class ModelHubService:
         change the outcome the caller sees.
 
         Which is also why the write is the writer's and not this call's: a resolve
-        cancelled downstream while its row sat queued would otherwise discard usage
-        the vendor had already billed. The writer's own bounded wait keeps the
-        ordinary path leaving the row on disk before the caller sees its outcome,
-        without putting an unresponsive disk in front of the next failover hop.
+        cancelled downstream cannot discard an accepted report. Acceptance is
+        synchronous and memory-visible; the five-second durable batch never holds
+        up the response or the next failover hop. Shutdown drains the writer.
 
         ``at`` is when the call ended, when its caller settles it later than that.
         """
@@ -11472,14 +11492,12 @@ class ModelHubService:
         ) or (observed is not None and observed.reached_model)
         if usage is None and not reached_model:
             return
-        await self.usage_writer.wait_recorded(
-            self.usage_writer.record(
-                source_id=source_id,
-                model_id=model_id,
-                usage=usage,
-                at=at or self.now(),
-                speed=tier,
-            )
+        self.usage_writer.record(
+            source_id=source_id,
+            model_id=model_id,
+            usage=usage,
+            at=at or self.now(),
+            speed=tier,
         )
 
     async def _classify_source_outcome(

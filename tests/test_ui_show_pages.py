@@ -224,6 +224,9 @@ class _FakeShowRuntimeManager:
         self.websocket_headers.append(headers)
         return ShowRuntimeWebSocketTarget(url=f"ws://127.0.0.1:1{path}", headers=headers)
 
+    async def invalidate_websocket_target(self, target):
+        pass
+
     def stop(self):
         self.stopped = True
 
@@ -9008,7 +9011,7 @@ class _FailingWebSocketSession:
         return self.handshake
 
 
-def test_websocket_transport_failure_invalidates_runtime_and_readmits(monkeypatch, tmp_path):
+def test_websocket_transport_failure_invalidates_runtime_until_http_readmission(monkeypatch, tmp_path):
     manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
     set_show_runtime_manager_for_tests(manager)
     handshake = _FailingWebSocketHandshake(ClientConnectionError("runtime connection refused"))
@@ -9034,6 +9037,14 @@ def test_websocket_transport_failure_invalidates_runtime_and_readmits(monkeypatc
 
     monkeypatch.setattr(manager, "ensure", admit)
 
+    with pytest.raises(ShowRuntimeUnavailableError):
+        asyncio.run(manager.websocket_target(
+            "/show/ses123/__vite_hmr",
+            envelope=ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE),
+        ))
+    assert admissions == []
+    # Navigation/prewarm, rather than an old tab's socket, owns readmission.
+    asyncio.run(manager.ensure())
     target = asyncio.run(
         manager.websocket_target(
             "/show/ses123/__vite_hmr",
@@ -12910,6 +12921,7 @@ def test_private_show_page_hmr_websocket_closes_when_authorization_is_unavailabl
     proxy_calls = []
 
     async def blocking_proxy(websocket, session_id):
+        await websocket.accept(subprotocol="vite-hmr")
         proxy_calls.append(("started", session_id))
         try:
             await asyncio.Event().wait()
@@ -12995,6 +13007,7 @@ def test_remote_org_show_page_hmr_ignores_resource_acl_changes(
     proxy_calls = []
 
     async def blocking_proxy(websocket, session_id):
+        await websocket.accept(subprotocol="vite-hmr")
         proxy_calls.append(("started", session_id))
         proxy_started.set()
         try:

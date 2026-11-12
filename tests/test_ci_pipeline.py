@@ -406,6 +406,12 @@ def test_unit_file_runner_rejects_invalid_deadline(tmp_path: Path, timeout: str)
     assert "must be a positive integer" in result.stderr
 
 
+def test_scenario_evidence_waits_for_every_declared_junit_producer() -> None:
+    jobs = _jobs()
+    producers = {name for name, job in jobs.items() if "AVIBE_CI_JUNIT_DIR" in job.get("env", {})}
+    assert set(jobs["scenario-evidence"]["needs"]) == {"changes", *producers}
+
+
 def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     jobs = _jobs()
     checks = jobs["ui-checks"]
@@ -414,7 +420,7 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert build.get("needs") == "changes"
     assert set(jobs["unit-tests"]["needs"]) == {
         "changes", "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests",
-        "ui-browser-checks", "model-hub-hosted-wire", "manifest-consistency", "python-smoke",
+        "ui-browser-checks", "model-hub-hosted-wire", "model-hub-lifecycle-native", "manifest-consistency", "python-smoke",
         "ios-shell", "desktop-shell", "ruff", "memory-insight-contract",
         "show-router-integration", "build-linux-artifacts", "migration-release-guard", "npm-wrapper",
     }

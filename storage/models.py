@@ -568,6 +568,12 @@ agent_events = Table(
     Column("updated_at", String, nullable=False),
     Index("ix_agent_events_session_created_id", "session_id", "created_at", "id"),
     Index("ix_agent_events_session_type_created_id", "session_id", "event_type", "created_at", "id"),
+    Index(
+        "ix_agent_events_session_type_context_seq",
+        "session_id",
+        "event_type",
+        "context_seq",
+    ),
     Index("ix_agent_events_scope_created_id", "scope_id", "created_at", "id"),
     Index("ix_agent_events_turn_sequence_id", "turn_id", "sequence", "id"),
     Index(
@@ -610,6 +616,17 @@ session_digests = Table(
     Column("mind", Text, nullable=True),
     Column("memo", Text, nullable=True),
     Column("now", Text, nullable=True),
+)
+
+# Optional cache comparison state, one latest full record per Session/provider/model.
+# Independent of transcript history; older writers need not know this table exists.
+session_cache_state = Table(
+    "session_cache_state",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column("provider", String, primary_key=True),
+    Column("model", String, primary_key=True),
+    Column("record_json", Text, nullable=False),
 )
 
 skill_usage_daily = Table(

@@ -1406,10 +1406,13 @@ class ShowRuntimeManager:
         *,
         envelope: ShowRuntimeProtocolEnvelope,
     ) -> ShowRuntimeWebSocketTarget:
-        ready = await self.ensure()
-        if not ready.available or not ready.base_url:
-            raise self._unavailable_error(ready)
-        base_url = ready.base_url
+        """Address the existing runtime; an old tab must never start one."""
+        base_url = self._base_url
+        if base_url is None:
+            evidence = ShowRuntimeFailureEvidence(ShowRuntimeFailureDimension.RUNTIME, "runtime_unavailable")
+            raise ShowRuntimeUnavailableError(
+                evidence.reason, classify_show_runtime_failure(evidence), show_runtime_recovery_action(evidence)
+            )
         process = self._process
         await self._negotiate_context_key_capability(base_url)
         url = f"{base_url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1)}{path}"
