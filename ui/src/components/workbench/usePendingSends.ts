@@ -40,8 +40,10 @@ const CLIENT_MESSAGE_ID = 'client_message_id';
 /** Where a pending send is drawn until the server's row replaces it. */
 export type PendingSendPlace = 'transcript' | 'queue' | 'undecided';
 
-/** A queue row the server is steering into the running turn. */
-const STEERING_STATES = new Set(['pending_steer', 'steering', 'reconciling_steer']);
+/** Delivery states of a message the server is steering into the running turn. A steer whose
+ *  receipt is unknown (`reconciling_steer`) stays in the queue strip, which says it could not be
+ *  confirmed: drawn in the transcript it would look accepted. */
+export const STEERING_STATES: ReadonlySet<string> = new Set(['pending_steer', 'steering']);
 const isUserSteering = (row: WorkbenchMessage) => (
   STEERING_STATES.has(String(row.state ?? '')) && (row.source ?? row.author) === 'user'
 );
@@ -115,8 +117,10 @@ export function usePendingSends(
 
   // A Bot conversation's user rows being steered in are drawn in the transcript, once: not where
   // the Message they become (same client id) is already shown.
-  const { messages, queue } = useMemo(() => {
-    if (!steeringInTranscript || !liveQueue.some(isUserSteering)) return { messages: liveMessages, queue: liveQueue };
+  const { messages, queue, steeringIds } = useMemo(() => {
+    if (!steeringInTranscript || !liveQueue.some(isUserSteering)) {
+      return { messages: liveMessages, queue: liveQueue, steeringIds: [] as string[] };
+    }
     const shownIds = new Set<string>();
     for (const row of liveMessages) shownIds.add(clientMessageIdOf(row) ?? row.id);
     const steering = liveQueue
@@ -126,6 +130,7 @@ export function usePendingSends(
     return {
       messages: steering.length > 0 ? [...liveMessages, ...steering] : liveMessages,
       queue: liveQueue.filter((row) => !isUserSteering(row)),
+      steeringIds: steering.map((row) => row.id),
     };
   }, [steeringInTranscript, liveMessages, liveQueue]);
   const confirmed = useMemo(() => {
@@ -141,18 +146,27 @@ export function usePendingSends(
     [pending, sessionId, confirmed],
   );
   const rows = useMemo(() => appendShown(messages, shown, 'transcript'), [messages, shown]);
-  const queueRows = useMemo(() => appendShown(queue, shown, 'queue'), [queue, shown]);
+  // The strip draws `stripRows`; its controls (the head, whether it is fenced, Send now) read the
+  // whole queue, steering rows included, which is what the server holds.
+  const queueRows = useMemo(() => appendShown(liveQueue, shown, 'queue'), [liveQueue, shown]);
+  const stripRows = useMemo(() => appendShown(queue, shown, 'queue'), [queue, shown]);
   const undecidedRows = useMemo(
     () => shown.filter((entry) => entry.place === 'undecided').map((entry) => entry.message),
     [shown],
   );
-  const pendingIds = useMemo(() => new Set(shown.map((entry) => entry.message.id)), [shown]);
+  // A steer drawn in the transcript is still on its way, so it is drawn as sending too.
+  const pendingIds = useMemo(
+    () => new Set([...shown.map((entry) => entry.message.id), ...steeringIds]),
+    [shown, steeringIds],
+  );
 
   return {
     /** The transcript as rendered: the live rows, then the sends still pending there. */
     rows,
-    /** The queue strip as rendered: the server's queue, then the sends still pending there. */
+    /** The queue as the server holds it, then the sends pending there: the strip's controls read it. */
     queueRows,
+    /** The queue strip's rows as drawn: `queueRows` without the steers drawn in the transcript. */
+    stripRows,
     /** Sends whose place the server has not answered yet, drawn as a neutral sending line. */
     undecidedRows,
     /** The rendered rows, in either place, that are pending sends. */

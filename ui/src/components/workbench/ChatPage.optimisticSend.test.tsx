@@ -966,26 +966,64 @@ describe("ChatPage send in a Bot's conversation", () => {
 
   // The user's message is P1 there: a working Bot takes it into its Turn. It goes to the transcript
   // at once, and the queue row the server holds while steering it is drawn there too, not in the strip.
-  it('draws a message sent while the Bot works in the transcript, through the steer, never in the queue strip', async () => {
+  it.each(['answer first', 'queue read first'] as const)(
+    'draws a message sent while the Bot works in the transcript, through the steer, never in the queue strip (%s)',
+    async (order) => {
+      await openBusyBot();
+      const queueRead = deferred<{ queued: WorkbenchMessage[] }>();
+      mocks.api.listSessionQueue.mockReturnValue(queueRead.promise);
+      const { post, result } = send('also check the tests');
+      const row = transcriptRowsOf('also check the tests')[0];
+      expect(row).toBeTruthy();
+      expect(queueRowsOf('also check the tests')).toHaveLength(0);
+
+      // The server answers a steer as queued (core/internal_server.py), in a steering state.
+      const steering = serverRow(post, 'q1', { type: 'queued', state: 'pending_steer', session_id: BOT_SESSION });
+      const answer = async () => {
+        await act(async () => post.reply.resolve(Response.json({ ...steering, queued: true }, { status: 201 })));
+        await act(async () => result);
+      };
+      const read = async () => {
+        await act(async () => queueRead.resolve({ queued: [steering] }));
+        await act(async () => mocks.events!.onQueueUpdated({ session_id: BOT_SESSION }));
+      };
+      mocks.api.listSessionQueue.mockResolvedValue({ queued: [steering] });
+      if (order === 'answer first') { await answer(); await read(); } else { await read(); await answer(); }
+      expect(transcriptRowsOf('also check the tests')).toEqual([row]);
+      expect(row.getAttribute('aria-busy')).toBe('true');
+      expect(queueRowsOf('also check the tests')).toHaveLength(0);
+
+      // The Turn took it: its Message keeps the Delivery's id.
+      act(() => mocks.events!.onMessageNew(serverRow(post, 'q1', { session_id: BOT_SESSION })));
+      mocks.api.listSessionQueue.mockResolvedValue({ queued: [] });
+      await act(async () => mocks.events!.onQueueUpdated({ session_id: BOT_SESSION }));
+      expect(transcriptRowsOf('also check the tests')).toHaveLength(1);
+      expect(queueRowsOf('also check the tests')).toHaveLength(0);
+    },
+  );
+
+  it('keeps a steer whose receipt is unknown in the queue strip, which says it could not be confirmed', async () => {
     await openBusyBot();
-    const { post, result } = send('also check the tests');
-    expect(transcriptRowsOf('also check the tests')).toHaveLength(1);
-    expect(queueRowsOf('also check the tests')).toHaveLength(0);
-
-    const steering = serverRow(post, 'q1', { type: 'queued', state: 'pending_steer', session_id: BOT_SESSION });
-    mocks.api.listSessionQueue.mockResolvedValue({ queued: [steering] });
+    const { post } = send('also check the tests');
+    const reconciling = serverRow(post, 'q1', { type: 'queued', state: 'reconciling_steer', session_id: BOT_SESSION });
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [reconciling] });
     await act(async () => mocks.events!.onQueueUpdated({ session_id: BOT_SESSION }));
-    expect(transcriptRowsOf('also check the tests')).toHaveLength(1);
-    expect(queueRowsOf('also check the tests')).toHaveLength(0);
+    expect(queueRowsOf('also check the tests')).toHaveLength(1);
+    expect(transcriptRowsOf('also check the tests')).toHaveLength(0);
+    expect(screen.getByText('chat.queue.sendReconciling')).toBeTruthy();
+  });
 
-    await act(async () => post.reply.resolve(Response.json({ ...steering }, { status: 201 })));
-    await act(async () => result);
-    // The Turn took it: its Message keeps the Delivery's id.
-    act(() => mocks.events!.onMessageNew(serverRow(post, 'q1', { session_id: BOT_SESSION })));
-    mocks.api.listSessionQueue.mockResolvedValue({ queued: [] });
+  it('keeps Send now off while the queue head is a steer drawn in the transcript', async () => {
+    await openBusyBot();
+    const { post } = send('also check the tests');
+    const steering = serverRow(post, 'q1', { type: 'queued', state: 'steering', session_id: BOT_SESSION });
+    const harness = message('q2', 'a later note', { type: 'queued', state: 'queued', author: 'user', source: 'user', session_id: BOT_SESSION });
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [steering, harness] });
     await act(async () => mocks.events!.onQueueUpdated({ session_id: BOT_SESSION }));
-    expect(transcriptRowsOf('also check the tests')).toHaveLength(1);
-    expect(queueRowsOf('also check the tests')).toHaveLength(0);
+    expect(queueRowsOf('a later note')).toHaveLength(1);
+    // The strip reads the real head: it is fenced, so there is nothing Send now could do.
+    const sendNow = screen.getByRole('button', { name: /chat\.queue\.(sendNow|sendingNow)/ }) as HTMLButtonElement;
+    expect(sendNow.disabled).toBe(true);
   });
 
 });

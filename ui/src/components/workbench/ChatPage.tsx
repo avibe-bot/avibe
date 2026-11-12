@@ -149,6 +149,7 @@ import { useSkeletonHandover } from '../ui/skeleton-handover';
 import {
   clientMessageMetadata,
   newClientMessageId,
+  STEERING_STATES,
   type PendingSendPlace,
   transcriptRowKey,
   usePendingSends,
@@ -1185,6 +1186,7 @@ export const ChatPage: React.FC = () => {
   const {
     rows: transcriptRows,
     queueRows,
+    stripRows,
     undecidedRows: undecidedSendRows,
     pendingIds: pendingRowIds,
     add: addPendingSend,
@@ -2543,8 +2545,13 @@ export const ChatPage: React.FC = () => {
           // (queue.updated, a reconnect), so the message is never in neither
           // place. The composer is free again at once.
           settledLater = true;
-          // An undecided row now knows its place.
-          movePendingSend(clientId, 'queue');
+          // An undecided row now knows its place. A Bot steer (P1, still being taken
+          // into the Turn) stays in the transcript; only a genuinely queued or held
+          // message goes to the strip.
+          movePendingSend(
+            clientId,
+            botConversation && STEERING_STATES.has(String(body.state ?? '')) ? 'transcript' : 'queue',
+          );
           queuedSendsRef.current.set(clientId, {
             sessionId,
             deliveryId: String(body.id ?? ''),
@@ -3482,8 +3489,8 @@ export const ChatPage: React.FC = () => {
   // what the user sent, and anything else, stays in the strip. Only the rows drawn
   // change: Send now still acts on the real queue head.
   const shownQueueRows = details.harnessMessages
-    ? undefined
-    : queueRows.filter((row) => chatRowKind(row).kind !== 'harness');
+    ? stripRows
+    : stripRows.filter((row) => chatRowKind(row).kind !== 'harness');
 
   return (
     // Fill the viewport so the transcript is the only scrolling region and
