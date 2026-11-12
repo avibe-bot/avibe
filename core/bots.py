@@ -310,6 +310,23 @@ def bot_from_agent(agent: VibeAgent) -> Optional[Bot]:
     )
 
 
+def bot_display_name(agent: VibeAgent, language: str) -> Optional[str]:
+    """The name the Workbench shows for the Bot an Agent is, or None when it is no Bot.
+
+    The main Bot's empty display name reads as its localized default (D5), as it does in the Web.
+    """
+    bot = bot_from_agent(agent)
+    if bot is None:
+        return None
+    if bot.display_name:
+        return bot.display_name
+    if not bot.builtin:
+        return None
+    from vibe.i18n import t
+
+    return t("error.bots.mainBotDefaultName", language)
+
+
 def _creation_order(bot: Bot) -> tuple[int, str, str]:
     return (0 if bot.builtin else 1, canonical_message_timestamp(bot.agent.created_at) or "", bot.handle)
 
