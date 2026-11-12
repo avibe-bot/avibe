@@ -114,7 +114,12 @@ def decode_user_handle(value: Any) -> bytes:
         raise WebAuthnVerificationError("invalid WebAuthn user handle length")
     canonical_standard = b64encode(decoded)
     canonical_urlsafe = base64.urlsafe_b64encode(decoded).decode("ascii")
-    if value not in {canonical_standard, canonical_urlsafe, canonical_urlsafe.rstrip("=")}:
+    if value not in {
+        canonical_standard,
+        canonical_standard.rstrip("="),
+        canonical_urlsafe,
+        canonical_urlsafe.rstrip("="),
+    }:
         raise WebAuthnVerificationError("invalid WebAuthn user handle")
     return decoded
 

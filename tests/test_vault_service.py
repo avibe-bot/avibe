@@ -1450,13 +1450,17 @@ def test_webauthn_registration_user_handle_rollback_and_invalid_state_fail_close
 
 
 
-@pytest.mark.parametrize("raw", (b"\x01", bytes(range(64))))
-def test_webauthn_user_handle_decoder_accepts_canonical_boundary_encodings(raw):
-    standard = vault_webauthn.b64encode(raw)
-    urlsafe = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+def test_webauthn_user_handle_decoder_accepts_all_canonical_boundary_encodings():
+    for length in (1, 2, 3, 32, 63, 64):
+        raw = b"\xff" if length == 1 else b"\xfb\xff" + bytes(range(length - 2))
+        standard = base64.b64encode(raw).decode("ascii")
+        urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
 
-    assert vault_webauthn.decode_user_handle(standard) == raw
-    assert vault_webauthn.decode_user_handle(urlsafe) == raw
+        assert "+" in standard or "/" in standard
+        assert vault_webauthn.decode_user_handle(standard) == raw
+        assert vault_webauthn.decode_user_handle(standard.rstrip("=")) == raw
+        assert vault_webauthn.decode_user_handle(urlsafe) == raw
+        assert vault_webauthn.decode_user_handle(urlsafe.rstrip("=")) == raw
 
 
 @pytest.mark.parametrize(
@@ -1469,6 +1473,9 @@ def test_webauthn_user_handle_decoder_accepts_canonical_boundary_encodings(raw):
         "YQ=",
         "YQ===",
         "YR==",
+        "YV",
+        "+_8=",
+        "YQ==\n",
         vault_webauthn.b64encode(b"a" * 65),
         vault_webauthn.b64encode(b"a" * 66),
     ),
