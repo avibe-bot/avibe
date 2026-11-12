@@ -21,6 +21,7 @@ from storage.compatibility import BRIDGE_REVISION
 PRE_PROJECTION_REVISION = "20261108_0082"
 from storage.models import agent_events, agent_sessions, messages
 from tests.agent_core.fakes import assistant
+from tests.migration_helpers import latest_migration_revision
 from tests.test_sqlite_migration_preflight import _snapshot
 from tests.test_tool_activity_projection import _mark, _store
 from tests.test_vibey_agent import SESSION, engine, session  # noqa: F401 -- isolated real-store fixtures
@@ -120,7 +121,7 @@ os._exit(72)
     with closing(sqlite3.connect(path)) as conn:
         epoch = conn.execute("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").fetchone()[0]
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert (epoch, stamp) == (("1", PRE_PROJECTION_REVISION) if crash == "before-commit" else ("2", "20261108_0083"))
+    assert (epoch, stamp) == (("1", PRE_PROJECTION_REVISION) if crash == "before-commit" else ("2", latest_migration_revision()))
     [backup] = list((tmp_path / "backups").glob("*/vibe.sqlite"))
     assert _snapshot(backup)["database.sql"] == before
     if crash == "before-commit":
@@ -145,7 +146,8 @@ def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_p
     graph = tmp_path / "alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     (graph / "versions" / "20990101_9999_additive.py").write_text(
-        "from alembic import op\nrevision='20990101_9999'\ndown_revision='20261108_0083'\n"
+        "from alembic import op\nrevision='20990101_9999'\n"
+        f"down_revision={latest_migration_revision()!r}\n"
         "MIGRATION_COMPATIBILITY='additive'\n"
         "def upgrade():\n    op.create_index('ix_epoch_two_next', 'agents', ['description'], unique=False)\n"
     )

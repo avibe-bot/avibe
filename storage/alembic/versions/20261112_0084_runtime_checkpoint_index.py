@@ -21,8 +21,9 @@ def upgrade() -> None:
         "ix_agent_events_session_type_context_seq",
         "agent_events",
         ["session_id", "event_type", "context_seq"],
+        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_agent_events_session_type_context_seq", table_name="agent_events")
+    op.drop_index("ix_agent_events_session_type_context_seq", table_name="agent_events", if_exists=True)
