@@ -29,7 +29,7 @@ interpreter and exercises the unmodified public 3.2.5 upgrader without new-clien
 Python flags. New installers and upgrades enforce a Python >=3.10 floor without
 pinning an upper bound or a minor; Windows on Arm retains its explicit x64
 Python policy. On Windows, the public 3.2.5 client is invoked through its unchanged
-`python -m vibe.cli upgrade` entry point: its `vibe.exe` path has a pre-existing
+`python -m vibe upgrade` entry point: its `vibe.exe` path has a pre-existing
 self-replacement defect and is **not** shown to pass by this acceptance. Windows
 3.2.5 users can rerun the official `install.ps1`, or invoke that module with the
 Python interpreter from their existing Avibe environment. A separate future-client

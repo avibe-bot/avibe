@@ -143,7 +143,7 @@ def legacy_upgrade_command(old_python: Path, old_launcher: Path) -> list[str]:
     # .exe from argv[0], then tries to replace the still-open executable.
     # Exercise the same unchanged old CLI without holding that executable.
     if os.name == "nt":
-        return [str(old_python), "-m", "vibe.cli", "upgrade"]
+        return [str(old_python), "-m", "vibe", "upgrade"]
     return [str(old_launcher), "upgrade"]
 
 
@@ -187,7 +187,7 @@ def acceptance(wheel: Path, root: Path) -> None:
     # On Windows this is module-entry recovery coverage, NOT proof that the
     # already-released 3.2.5 vibe.exe can replace itself (a separate known bug).
     if os.name == "nt":
-        print("Windows legacy coverage uses unchanged 3.2.5 python -m vibe.cli upgrade; normal vibe.exe self-upgrade is not validated", flush=True)
+        print("Windows legacy coverage uses unchanged 3.2.5 python -m vibe upgrade; normal vibe.exe self-upgrade is not validated", flush=True)
     output = run(legacy_upgrade_command(old_python, launcher(legacy)), env, legacy)
     print(output, flush=True)
     if "Using uv:" not in output or "Upgrade successful!" not in output:

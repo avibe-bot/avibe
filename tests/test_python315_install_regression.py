@@ -32,7 +32,7 @@ def test_windows_legacy_coverage_uses_the_unchanged_module_not_self_replacement(
     python = Path("old-runtime-python")
     launcher = Path("stable-launcher")
     monkeypatch.setattr(acceptance, "os", SimpleNamespace(name="nt"))
-    assert acceptance.legacy_upgrade_command(python, launcher) == [str(python), "-m", "vibe.cli", "upgrade"]
+    assert acceptance.legacy_upgrade_command(python, launcher) == [str(python), "-m", "vibe", "upgrade"]
     monkeypatch.setattr(acceptance, "os", SimpleNamespace(name="posix"))
     assert acceptance.legacy_upgrade_command(python, launcher) == [str(launcher), "upgrade"]
 
