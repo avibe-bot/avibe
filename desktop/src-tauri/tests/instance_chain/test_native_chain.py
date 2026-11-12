@@ -420,6 +420,7 @@ def test_recovered_account_window_and_delayed_event_keep_runtime_state_private(n
         f["wait"]("loaded", lambda event: event["url"].startswith(committed["canonical_origin"]))
         initial = f["js"]("window.fixtureStates=[]; window.addEventListener('avibe:desktop-client-state',e=>window.fixtureStates.push(e.detail)); return window.__AVIBE_DESKTOP_CLIENT_STATE__;")
         assert not {"catalog", "enrollment", "consent"}.intersection(initial)
+        assert initial["connection"]["committed"] == committed
         f["send"](action="release_account_event")
         f["wait"]("account_event_released")
         received = f["js"]("return window.fixtureStates;")
@@ -460,6 +461,7 @@ def test_local_replacement_completes_under_current_presentation_owner(local_held
         f["send"](action="escape")
     release.set()
     destination = "tauri://localhost/" if interruption == "disappear" else f["local"] + "/"
+    f["wait"]("loaded", lambda event: event["url"] == destination)
     f["ready"]("return location.href === " + json.dumps(destination) + ";")
     final = f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")
     deadline = time.monotonic() + 5

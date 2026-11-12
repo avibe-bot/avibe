@@ -560,10 +560,12 @@ impl NativeView {
                         .or(previous.remote.clone())
                         .unwrap_or(self.local_url()?)
                 };
+                let committed = self.app.state::<Client>().coordinator.state();
                 {
                     let mut state = self.presentation.lock().expect("presentation");
                     state.account = account;
                     state.pending_commit = None;
+                    state.state = committed;
                     state.remote = previous.remote.clone();
                     state.disposable = disposable;
                     state.route = previous.route.clone();
@@ -601,10 +603,12 @@ impl NativeView {
                             .is_some_and(|origin| origin.matches_url_origin(url))
                     })
                     .unwrap_or(self.local_url()?);
+                let committed = self.app.state::<Client>().coordinator.state();
                 {
                     let mut state = self.presentation.lock().expect("presentation");
                     state.account = false;
                     state.pending_commit = None;
+                    state.state = committed;
                     state.remote = None;
                     state.disposable = false;
                     state.route = None;
@@ -1027,7 +1031,10 @@ impl ClientView for NativeView {
         // A newer explicit escape owns its own queued restore. Lifecycle-only
         // changes keep this owner and re-evaluate the local destination.
         let restored = if self.presentation_epoch(owner).is_ok() {
-            self.restore_local(owner, None).await
+            match self.restore_local(owner, None).await {
+                Err(error) if error.code == "stale_generation" && self.presentation_epoch(owner).is_err() => Ok(()),
+                result => result,
+            }
         } else {
             Ok(())
         };

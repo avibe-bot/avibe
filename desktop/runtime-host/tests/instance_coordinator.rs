@@ -8,7 +8,7 @@ use avibe_runtime_host::instance_client::{
     storage::{ConnectionStore, Credentials},
     transport::{Epoch, Request, Response, Transport},
 };
-use reqwest::header::{HeaderMap, SET_COOKIE};
+use reqwest::header::{HeaderMap, LOCATION, SET_COOKIE};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
@@ -102,6 +102,8 @@ impl Credentials for Private {
 struct View {
     states: Mutex<Vec<ClientState>>,
     committed: Mutex<Vec<ClientTarget>>,
+    restored: Mutex<Vec<ClientTarget>>,
+    retirement_failure: AtomicBool,
 }
 #[async_trait]
 impl ClientView for View {
@@ -119,11 +121,16 @@ impl ClientView for View {
         self.committed.lock().unwrap().push(target);
         Ok(())
     }
-    async fn restore(&self, _: Epoch, _: ClientTarget) -> Result<(), ClientError> {
+    async fn restore(&self, _: Epoch, target: ClientTarget) -> Result<(), ClientError> {
+        self.restored.lock().unwrap().push(target);
         Ok(())
     }
     async fn signed_out(&self, _: Epoch, _: ClientTarget) -> Result<(), ClientError> {
-        Ok(())
+        if self.retirement_failure.load(Ordering::SeqCst) {
+            Err(ClientError::new("window_unavailable"))
+        } else {
+            Ok(())
+        }
     }
 }
 struct NoPasskeys;
@@ -530,6 +537,146 @@ async fn old_signout_cannot_erase_a_newer_generation() {
     assert_eq!(f.client.state().generation, 1);
 }
 
+// The actual-window cases interrupt navigation. This earlier boundary holds
+// credential IO: lifecycle must not discard an accepted local presentation
+// before it reaches the window owner, while a later explicit action must win.
+#[tokio::test]
+async fn local_escape_reaches_its_view_owner_after_lifecycle_during_credential_io() {
+    for superseded in [false, true] {
+        let mut replies = first_factor();
+        replies.push((
+            "/api/desktop/session",
+            Reply::Ready(response(
+                200,
+                signed_in(),
+                Some("avibe_session=private-account; Secure; HttpOnly; Path=/"),
+            )),
+        ));
+        let f = fixture(replies);
+        assert!(
+            action(
+                &f.client,
+                ClientAction::RequestOtp {
+                    email: "held@example.test".into()
+                }
+            )
+            .await
+            .ok
+        );
+        assert!(
+            action(&f.client, ClientAction::VerifyOtp { code: "123456".into() })
+                .await
+                .ok
+        );
+        let mut redirect = response(302, json!({}), None);
+        redirect.headers.insert(
+            LOCATION,
+            "https://avibe.bot/oauth/authorize?state=owned&redirect_uri=https%3A%2F%2Fstudio.avibe.bot%2Fauth%2Fcallback"
+                .parse()
+                .unwrap(),
+        );
+        f.http.replies.lock().unwrap().extend([
+            ("/api/mobile/session", ok(signed_in())),
+            ("/auth/login", Reply::Ready(redirect)),
+            (
+                "/api/desktop/instance-authorization",
+                ok(json!({
+                    "status":"authorized",
+                    "redirect_url":"https://studio.avibe.bot/auth/callback?code=fixture-code&state=owned"
+                })),
+            ),
+            (
+                "/auth/callback",
+                Reply::Ready(response(
+                    302,
+                    json!({}),
+                    Some("__Host-vibe_remote_session=instance-only; Secure; HttpOnly; Path=/"),
+                )),
+            ),
+            (
+                "/api/session",
+                ok(json!({
+                    "remote":true,"authenticated":true,"authorization_state":"current",
+                    "sub":"account-xiaoming","instance_id":"studio-1","capabilities":{"can_read_instance":true}
+                })),
+            ),
+            ("/api/mobile/session", ok(signed_in())),
+        ]);
+        assert!(
+            action(
+                &f.client,
+                ClientAction::SelectInstance {
+                    instance_id: "studio-1".into()
+                }
+            )
+            .await
+            .ok
+        );
+        let before = f.store.load("unused").unwrap();
+        assert!(matches!(before.last_committed, ClientTarget::Remote { .. }));
+        assert!(before.account_id.is_some());
+        let (entered, writing) = oneshot::channel();
+        let (release, receiver) = std::sync::mpsc::channel();
+        *f.private.1.lock().unwrap() = Some((entered, receiver));
+        let client = f.client.clone();
+        let verification = tokio::spawn(async move { action(&client, ClientAction::RefreshInstances).await });
+        writing.await.unwrap();
+        let generation = f.client.state().generation;
+        let client = f.client.clone();
+        let escape = tokio::spawn(async move {
+            action(
+                &client,
+                if superseded {
+                    ClientAction::Cancel
+                } else {
+                    ClientAction::ReturnLocal
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while f.client.state().generation == generation {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        f.client.local_origin(Some(
+            avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
+        ));
+        let later = if superseded {
+            let generation = f.client.state().generation;
+            let client = f.client.clone();
+            let later = tokio::spawn(async move { action(&client, ClientAction::ReturnLocal).await });
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while f.client.state().generation == generation {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            Some(later)
+        } else {
+            None
+        };
+        release.send(()).unwrap();
+        assert_eq!(verification.await.unwrap().error.unwrap().code, "stale_generation");
+        let result = escape.await.unwrap();
+        if let Some(later) = later {
+            assert_eq!(result.error.unwrap().code, "stale_generation");
+            assert!(later.await.unwrap().ok);
+        } else {
+            assert!(result.ok, "{:?}", result.error);
+        }
+        assert_eq!(f.view.restored.lock().unwrap().len(), 1);
+        assert!(f.view.restored.lock().unwrap()[0].is_local());
+        let after = f.store.load("unused").unwrap();
+        assert!(after.last_committed.is_local());
+        assert_eq!(after.account_id, before.account_id);
+        assert_eq!(after.last_committed, f.client.state().connection.committed);
+    }
+}
+
 // A first key write can finish after Cancel. An existing session refresh can
 // race the same way. Neither may leave credentials from an uncommitted epoch.
 #[tokio::test]
@@ -629,7 +776,14 @@ async fn cancellation_rolls_back_unpublished_credential_writes() {
 
 #[tokio::test]
 async fn restore_rejects_expired_or_different_account_and_erases_owned_credential() {
-    for (changed_account, erase_failure) in [(false, false), (true, false), (false, true)] {
+    // The native store owns its erase callback. A failure returned by that
+    // owner must block account work just like a credential-store failure.
+    for (changed_account, erase_failure, retirement_failure) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         let mut replies = first_factor();
         replies.push((
             "/api/desktop/session",
@@ -666,6 +820,7 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
             },
         ));
         f.private.2.store(erase_failure, Ordering::SeqCst);
+        f.view.retirement_failure.store(retirement_failure, Ordering::SeqCst);
         let restored = Coordinator::new(
             ClientState::new("小明的 Mac".into(), "0.1.0".into(), json!({})),
             f.store.load("unused").unwrap(),
@@ -680,6 +835,8 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
             error.code,
             if erase_failure {
                 "credentials_unavailable"
+            } else if retirement_failure {
+                "window_unavailable"
             } else if changed_account {
                 "account_changed"
             } else {
@@ -692,22 +849,29 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
             restored.state().enrollment.error_code.as_deref(),
             Some(error.code.as_str())
         );
-        if erase_failure {
-            assert!(!f.private.0.lock().unwrap().is_empty());
-            assert_eq!(
-                action(
-                    &restored,
-                    ClientAction::RequestOtp {
-                        email: "other@example.test".into()
-                    }
-                )
-                .await
-                .error
+        if erase_failure || retirement_failure {
+            assert_eq!(!f.private.0.lock().unwrap().is_empty(), erase_failure);
+            f.http
+                .replies
+                .lock()
                 .unwrap()
-                .code,
-                "credentials_unavailable"
+                .extend(first_factor().into_iter().take(2));
+            let calls = f.http.calls.lock().unwrap().len();
+            let blocked = action(
+                &restored,
+                ClientAction::RequestOtp {
+                    email: "other@example.test".into(),
+                },
+            )
+            .await;
+            assert_eq!(
+                f.http.calls.lock().unwrap().len(),
+                calls,
+                "an unfinished native erase must block new account requests"
             );
+            assert_eq!(blocked.error.unwrap().code, error.code);
             f.private.2.store(false, Ordering::SeqCst);
+            f.view.retirement_failure.store(false, Ordering::SeqCst);
             assert!(action(&restored, ClientAction::SignOut).await.ok);
             assert!(restored.state().enrollment.error_code.is_none());
         }

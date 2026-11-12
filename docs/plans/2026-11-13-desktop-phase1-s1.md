@@ -360,3 +360,21 @@ second lifecycle change during rollback. These consumers are awaiting their firs
 immutable repaired-candidate run. Local compilation, changed Python Ruff and nine
 existing coordinator consumers pass at this checkpoint; this is not a review or
 integration acceptance claim.
+
+The first repaired checkpoint exposed a different-instance rollback projection
+that still named the failed candidate. The strengthened actual consumer failed
+on the wrong instance ID/origin; rollback now resets its initialization projection
+to current committed state before building. A local-response consumer also sent
+its observer into a retired window; it now waits for the actual destination's
+load event before evaluating. Both failed runs are retained separately.
+
+A held-credential consumer additionally failed before the window owner was even
+called: ReturnLocal was discarded by a lifecycle-only epoch check. Presentation
+and its restoration-record write now share the accepted action owner; explicit
+later actions supersede it. The consumer starts from a selected remote and reads
+back the real ConnectionRecord after local return, including a late old Cancel
+and refresh around a newer ReturnLocal. Ten coordinator tests pass. The existing
+cleanup-failure case now covers the native store owner's retirement error: it
+first demonstrated a prohibited new account HTTP request, then passed after that
+error was retained by the existing cleanup owner. Successful sign-out retry clears
+the error; superseded presentation does not conceal an erasure failure.

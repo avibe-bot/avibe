@@ -53,12 +53,12 @@ struct Inner {
     record: ConnectionRecord,
     restore_allowed: bool,
     committed_view_generation: Option<u64>,
-    action_generation: u64,
 }
 
 pub struct Coordinator {
     inner: Mutex<Inner>,
     generation: Arc<AtomicU64>,
+    action_generation: Arc<AtomicU64>,
     operation: tokio::sync::Mutex<()>,
     credential_io: tokio::sync::Mutex<CredentialWrites>,
     signing_out: AtomicBool,
@@ -86,7 +86,7 @@ impl Coordinator {
         view: Arc<dyn ClientView>,
     ) -> Self {
         let generation = Arc::new(AtomicU64::new(state.generation));
-        let action_generation = state.generation;
+        let action_generation = Arc::new(AtomicU64::new(state.generation));
         let credential_ids = record.account_id.iter().cloned().collect();
         Self {
             inner: Mutex::new(Inner {
@@ -98,9 +98,9 @@ impl Coordinator {
                 record,
                 restore_allowed: true,
                 committed_view_generation: None,
-                action_generation,
             }),
             generation,
+            action_generation,
             operation: tokio::sync::Mutex::new(()),
             credential_io: tokio::sync::Mutex::new(CredentialWrites {
                 ids: credential_ids,
@@ -124,11 +124,11 @@ impl Coordinator {
     /// A local lifecycle change interrupts callbacks but does not replace an
     /// unfinished presentation. Accepted account/selection/escape actions do.
     pub fn presentation_owner(&self) -> u64 {
-        self.inner.lock().expect("client state").action_generation
+        self.action_generation.load(Ordering::SeqCst)
     }
     pub fn presentation_epoch(&self, owner: u64) -> Result<Epoch, ClientError> {
         let inner = self.inner.lock().expect("client state");
-        if inner.action_generation != owner {
+        if self.action_generation.load(Ordering::SeqCst) != owner {
             return Err(ClientError::new("stale_generation"));
         }
         Ok(Epoch::new(self.generation.clone(), inner.state.generation))
@@ -210,7 +210,7 @@ impl Coordinator {
         let value = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         inner.state.generation = value;
         inner.state.revision += 1;
-        inner.action_generation = value;
+        self.action_generation.store(value, Ordering::SeqCst);
         drop(inner);
         self.view.invalidate(value);
         Ok(Epoch::new(self.generation.clone(), value))
@@ -646,7 +646,9 @@ impl Coordinator {
         };
         let credentials = self.credentials.clone();
         let store = self.store.clone();
-        let write_epoch = epoch.clone();
+        // Lifecycle interrupts document callbacks, not this accepted escape's
+        // restoration record. A later explicit action still fences the write.
+        let write_epoch = Epoch::new(self.action_generation.clone(), epoch.value);
         let prior_error = owned.cleanup_error.clone();
         let cleanup = tokio::task::spawn_blocking(move || {
             // Clearing restoration metadata comes first: an erasure error must
@@ -684,7 +686,7 @@ impl Coordinator {
         let view_result = if signing_out {
             self.view.signed_out(epoch.clone(), target).await
         } else {
-            epoch.check()?;
+            self.presentation_epoch(epoch.value)?;
             self.view.restore(epoch.clone(), target).await
         };
         if signing_out {
@@ -695,6 +697,12 @@ impl Coordinator {
             });
         }
         let result = view_result.and(cleanup);
+        if signing_out {
+            // Native store retirement is part of the same cleanup obligation
+            // as credential erasure. Only a successful sign-out retry clears
+            // that obligation; no new account work can pass a failed owner.
+            self.credential_io.lock().await.cleanup_error = result.as_ref().err().cloned();
+        }
         let state = {
             let mut inner = self.inner.lock().expect("client state");
             if epoch.check().is_ok() {
