@@ -1289,6 +1289,16 @@ jobs:
           }
           & $env:AVIBE_CI_PYTHON -m pip install $wheel pytest
 
+      - name: Verify config snapshot publication with native Windows handles
+        shell: pwsh
+        run: |
+          & $env:AVIBE_CI_PYTHON -m pytest -v -ra tests/test_config_snapshots.py tests/test_config_write_transaction.py *>&1 |
+            Tee-Object -FilePath config-snapshots.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Select-String -Path config-snapshots.log -Pattern 'SKIPPED' -SimpleMatch -Quiet) {
+            throw "Native config snapshot checks must run on each supported Windows runner"
+          }
+
       - name: Verify Model Hub through the installed service
         shell: pwsh
         env:
