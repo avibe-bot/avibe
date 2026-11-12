@@ -6579,7 +6579,7 @@
       "avaultOldHint": "更新后回到这里即可保存，已填写的内容会保留。现有密钥不受影响。",
       "openDependencies": "前往设置 → 依赖",
       "mismatch": "地址核对失败：avault 保存的地址和这些词算出的地址不一致。",
-      "mismatchHint": "不要往这个钱包转账。请在列表里删除它，然后重新创建或导入。",
+      "mismatchHint": "不要往这个钱包转账。请删除它，然后重新创建或导入。",
       "askAccount0": "账户 #0 签名前问我",
       "askAccount0Info": "默认 Agent 可以直接签名。打开后，账户 #0 每次签名都要你在浏览器里批准；之后要关闭，需要你的 Passkey 确认。每个账户都能在钱包里单独设置。",
       "mainAccount": "主账户",
@@ -6606,7 +6606,10 @@
       },
       "accountIndex": "#{{account}}",
       "hiddenWord": "•••••",
-      "signCommand": "vibe vault sign {{name}} --chain solana --account {{account}} …"
+      "signCommand": "vibe vault sign {{name}} --chain solana --account {{account}} …",
+      "deleteWallet": "删除这个钱包",
+      "askFailed": "钱包已创建，但账户 #0 的「签名前问我」没有设置成功。",
+      "askRetry": "重新设置"
     }
   },
   "permissions": {

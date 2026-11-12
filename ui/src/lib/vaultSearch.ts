@@ -20,6 +20,8 @@ export function matchesVaultQuery(secret: VaultSecret, terms: readonly string[],
     ...(Array.isArray(secret.policy.allowed_hosts) ? secret.policy.allowed_hosts : []),
     auth?.type, auth?.name,
     ...Object.values(secret.signing_addresses ?? {}),
+    // A seed-phrase wallet is found by any enabled account's name or address.
+    ...(secret.accounts ?? []).flatMap((account) => [account.name, account.eth, account.btc_taproot, account.solana]),
   ].filter((value): value is string => typeof value === 'string').join(' ').toLowerCase();
   return terms.every((term) => text.includes(term));
 }

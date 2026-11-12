@@ -21,6 +21,7 @@ const api = vi.hoisted(() => ({
   listSkills: vi.fn(async () => ({ skills: [] })),
   createVaultSecret: vi.fn(),
   updateVaultHdAccount: vi.fn(async () => ({ ok: true })),
+  deleteVaultSecret: vi.fn(async () => ({ ok: true, removed: true })),
   getVaultPubkey: vi.fn(async () => ({ public_key: 'public', fingerprint: 'fingerprint' })),
   deriveSigningAddresses: vi.fn(async () => ({ ok: true, addresses: {} })),
   connectWorkbenchEvents: vi.fn(() => vi.fn()),
@@ -36,6 +37,7 @@ const sealBlindBox = vi.hoisted(() => vi.fn(async (plaintext: Uint8Array, _key: 
 vi.mock('@/context/ApiContext', async (original) => ({ ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api }));
 vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => ({ status: 'locked', refresh: vi.fn(), afterCreated: vi.fn(), sealValue: vi.fn() }) }));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
+vi.mock('./avault-authorization-notice', () => ({ AvaultAuthorizationNotice: () => <div role="note">avault-authorization</div> }));
 vi.mock('@/lib/vaultCrypto', async (original) => ({ ...await original<typeof import('@/lib/vaultCrypto')>(), sealBlindBox }));
 
 const i18n = createInstance();
@@ -156,6 +158,7 @@ it.each([
 });
 
 it('blocks a wallet whose stored #0 is not the address these words give: do not fund it', async () => {
+  const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
   await openWallet();
   fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
   fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
@@ -165,6 +168,10 @@ it('blocks a wallet whose stored #0 is not the address these words give: do not 
   expect(await screen.findByText(hd.mismatch)).toBeTruthy();
   expect(screen.queryByText(hd.done.verified)).toBeNull();
   expect(api.updateVaultHdAccount).not.toHaveBeenCalled();
+  // It is logged, by name only, and the wallet can be deleted from here.
+  expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('address check failed'), { name: 'AGENT_WALLET' });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.deleteWallet })); });
+  expect(api.deleteVaultSecret).toHaveBeenCalledWith('AGENT_WALLET');
 });
 
 it('names an unknown word and offers list words; refuses a bad checksum; never saves either', async () => {
@@ -199,4 +206,31 @@ it('sets #0 to ask before signing only after the wallet is created, never in the
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
   await waitFor(() => expect(api.updateVaultHdAccount).toHaveBeenCalledWith('AGENT_WALLET', 0, { always_ask: true }, { handleError: false }));
   expect(postedPayload()).not.toHaveProperty('policy');
+});
+
+it('does not report the wallet done while the requested ask-before-signing did not stick, and retries it in place', async () => {
+  await openWallet();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  fireEvent.click(screen.getByRole('switch', { name: hd.askAccount0 }));
+  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [storedFor(OFFICIAL.split(' '))] } });
+  api.updateVaultHdAccount.mockResolvedValueOnce({ ok: false, code: 'boom', message: 'nope' } as never);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  expect(await screen.findByText(hd.askFailed)).toBeTruthy();
+  expect((screen.getByRole('button', { name: hd.done.finish }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.askRetry })); });
+  expect(api.updateVaultHdAccount).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText(hd.askFailed)).toBeNull();
+  expect((screen.getByRole('button', { name: hd.done.finish }) as HTMLButtonElement).disabled).toBe(false);
+  expect(api.createVaultSecret).toHaveBeenCalledOnce();
+});
+
+it('shows the avault authorization notice when saving a wallet needs it, keeping the input', async () => {
+  await openWallet();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  api.createVaultSecret.mockRejectedValue(Object.assign(new Error('needs keychain'), { code: 'avault_authorization_required' }));
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  expect(await screen.findByText('avault-authorization')).toBeTruthy();
+  expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe(OFFICIAL);
 });

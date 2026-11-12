@@ -232,6 +232,8 @@ export const VaultSecretForm: React.FC<{
   const [hdAsk, setHdAsk] = useState(false);
   const [hdCreated, setHdCreated] = useState<VaultHdAccount | null>(null);
   const [hdMismatch, setHdMismatch] = useState(false);
+  // The wallet exists but #0's requested ask-before-signing did not stick: not done until it does.
+  const [hdAskFailed, setHdAskFailed] = useState(false);
   const [signingError, setSigningError] = useState<string | null>(null);
   const [signingAddresses, setSigningAddresses] = useState<SigningAddresses | null>(null);
   const [addressesLoading, setAddressesLoading] = useState(false);
@@ -610,15 +612,27 @@ export const VaultSecretForm: React.FC<{
     setHdChosen({});
     const stored = created.secret?.accounts?.find((account) => account.account === 0);
     if (!stored || !sameHdAddresses(stored, expected)) {
+      // Logged by name only: never the words, the seed or an address the user could be steered to.
+      console.error('[vault] seed-phrase wallet address check failed; the wallet is blocked', { name: secretName });
       setHdMismatch(true);
       return;
     }
-    if (hdAsk) {
-      const asked = await api.updateVaultHdAccount(secretName, 0, { always_ask: true }, { handleError: false });
-      if (!asked.ok) setError(vaultErrorMessage(t, asked, t('vaults.dialog.errors.updateFailed')));
-    }
     setHdCreated(stored);
     setHdStep('done');
+    if (hdAsk) await applyHdAsk();
+  };
+
+  // Account #0's ask-before-signing, set once the wallet exists (the create body may not carry it).
+  // A failure keeps the done screen from claiming completion, and can be retried in place.
+  const applyHdAsk = async () => {
+    const asked = await api.updateVaultHdAccount(secretName, 0, { always_ask: true }, { handleError: false });
+    if (asked.ok) {
+      setHdAskFailed(false);
+      setError(null);
+    } else {
+      setHdAskFailed(true);
+      setError(vaultErrorMessage(t, asked, t('vaults.dialog.errors.updateFailed')));
+    }
   };
 
   const switchChain = (next: KeyChain) => {
@@ -1470,15 +1484,49 @@ export const VaultSecretForm: React.FC<{
               <span className="font-semibold text-destructive-ink">{t('vaults.hd.mismatch')}</span>
               {t('vaults.hd.mismatchHint')}
             </HdNotice>
-            <div className="mt-1 flex justify-end">
-              <Button type="button" onClick={() => onCreated(secretName, 'created')}>{t('vaults.dialog.cancel')}</Button>
+            <div className="mt-1 flex justify-end gap-2">
+              <Button type="button" variant="ghost" disabled={submitting} onClick={() => onCreated(secretName, 'created')}>{t('vaults.dialog.cancel')}</Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={submitting}
+                onClick={() => {
+                  setSubmitting(true);
+                  void api.deleteVaultSecret(secretName)
+                    .then(() => onCreated(secretName, 'created'))
+                    .catch((err: unknown) => setError(vaultErrorMessage(t, err, t('vaults.request.saveFailed'))))
+                    .finally(() => setSubmitting(false));
+                }}
+              >
+                {t('vaults.hd.deleteWallet')}
+              </Button>
             </div>
+            {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
           </>
         ) : hdStep === 'done' && hdCreated ? (
           <>
             <HdDoneStep name={secretName} account={hdCreated} />
-            <div className="mt-1 flex justify-end">
-              <Button type="button" onClick={() => onCreated(secretName, 'created')}>{t('vaults.hd.done.finish')}</Button>
+            {hdAskFailed ? (
+              <HdNotice tone="error" icon={TriangleAlert}>
+                <span className="font-semibold text-destructive-ink">{t('vaults.hd.askFailed')}</span>
+                {error ? <span>{error}</span> : null}
+              </HdNotice>
+            ) : null}
+            <div className="mt-1 flex justify-end gap-2">
+              {hdAskFailed ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={submitting}
+                  onClick={() => {
+                    setSubmitting(true);
+                    void applyHdAsk().finally(() => setSubmitting(false));
+                  }}
+                >
+                  {t('vaults.hd.askRetry')}
+                </Button>
+              ) : null}
+              <Button type="button" disabled={hdAskFailed || submitting} onClick={() => onCreated(secretName, 'created')}>{t('vaults.hd.done.finish')}</Button>
             </div>
           </>
         ) : (
@@ -1488,6 +1536,7 @@ export const VaultSecretForm: React.FC<{
             {hdStep === 'check' ? (
               <HdCheckStep quiz={hdQuiz} chosen={hdChosen} onChoose={(position, word) => setHdChosen((prev) => ({ ...prev, [position]: word }))} />
             ) : null}
+            {needsAvaultAuthorization ? <AvaultAuthorizationNotice forceVisible /> : null}
             {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
             <HdStepFooter
               step={hdStep === 'check' ? 'check' : 'backup'}
@@ -1759,6 +1808,7 @@ export const VaultSecretForm: React.FC<{
       {!isHd && advancedSection}
 
       {!isHd && gatingNotices}
+      {isHd && needsAvaultAuthorization ? <AvaultAuthorizationNotice forceVisible /> : null}
       {isHd && error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
 
       <div className="mt-1 flex justify-end gap-2">

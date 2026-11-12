@@ -48,3 +48,16 @@ describe('Vault metadata search (literal, case-insensitive AND)', () => {
     expect(matchesVaultQuery(extended, vaultSearchTerms(query), [])).toBe(false);
   });
 });
+
+describe('seed-phrase wallets', () => {
+  it('finds a wallet by an enabled account name or any of its addresses', async () => {
+    const { matchesVaultQuery } = await import('./vaultSearch');
+    const wallet = {
+      name: 'AGENT_WALLET', tags: [], kind: 'keypair', protection: 'standard', signer_kind: 'hd-seed', source: 'user', policy: {},
+      last_used_at: null, use_count: 0, created_at: '', updated_at: '',
+      accounts: [{ account: 1, name: 'Trading', eth: '0xAbC', btc_taproot: 'bc1pxyz', solana: 'Sol9', paths: { evm: '', bitcoin: '', solana: '' }, always_ask: false, last_signer: null }],
+    } as unknown as Parameters<typeof matchesVaultQuery>[0];
+    for (const term of ['trading', '0xabc', 'bc1pxyz', 'sol9']) expect(matchesVaultQuery(wallet, [term], [])).toBe(true);
+    expect(matchesVaultQuery(wallet, ['nothing'], [])).toBe(false);
+  });
+});

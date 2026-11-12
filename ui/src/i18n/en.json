@@ -6579,7 +6579,7 @@
       "avaultOldHint": "Update, then come back to save; what you entered stays. Your existing keys are unaffected.",
       "openDependencies": "Open Settings → Dependencies",
       "mismatch": "Address check failed: the addresses avault stored don’t match the ones these words give.",
-      "mismatchHint": "Don’t send funds to this wallet. Delete it from the list, then create or import it again.",
+      "mismatchHint": "Don’t send funds to this wallet. Delete it, then create or import it again.",
       "askAccount0": "Ask before account #0 signs",
       "askAccount0Info": "By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser, and turning it off later needs your Passkey. Each account has its own setting in the wallet.",
       "mainAccount": "Main",
@@ -6606,7 +6606,10 @@
       },
       "accountIndex": "#{{account}}",
       "hiddenWord": "•••••",
-      "signCommand": "vibe vault sign {{name}} --chain solana --account {{account}} …"
+      "signCommand": "vibe vault sign {{name}} --chain solana --account {{account}} …",
+      "deleteWallet": "Delete this wallet",
+      "askFailed": "The wallet was created, but ask-before-signing for account #0 did not stick.",
+      "askRetry": "Try again"
     }
   },
   "permissions": {
