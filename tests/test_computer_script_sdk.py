@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Callable, Iterator
+from typing import Callable, Iterator, NoReturn
 from unittest.mock import patch
 
 import httpx
@@ -641,13 +641,21 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
-def _wait_for_pid_exit(pid: int, *, timeout: float = 3.0) -> None:
+def _wait_for_pid_exit(
+    pid: int,
+    *,
+    timeout: float = 3.0,
+    failure_details: str = "",
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not _pid_exists(pid):
             return
         time.sleep(0.02)
-    pytest.fail(f"process {pid} survived the script supervisor")
+    message = f"process {pid} survived the script supervisor"
+    if failure_details:
+        message += f"\n{failure_details}"
+    pytest.fail(message)
 
 
 def _wait_for_process_group_exit(pgid: int, *, timeout: float = 3.0) -> None:
@@ -767,13 +775,41 @@ def test_sigterm_to_the_supervisor_kills_the_node_process(tmp_path: Path) -> Non
     if os.name != "posix":
         pytest.skip("SIGTERM supervision is POSIX-only")
 
-    runner, pid_path = _blocking_node_runner(tmp_path)
+    runner, _pid_path = _blocking_node_runner(tmp_path)
     supervisor = tmp_path / "supervisor.py"
+    wait_started = tmp_path / "node-wait-started"
     supervisor.write_text(
         "\n".join(
             [
                 "from pathlib import Path",
+                "import subprocess",
                 "from vibe.computer_script_runner import _run_node_process",
+                f"wait_started = Path({str(wait_started)!r})",
+                "real_popen = subprocess.Popen",
+                "",
+                "class ProcessProxy:",
+                "    def __init__(self, process):",
+                "        self._process = process",
+                "        self.pid = process.pid",
+                "",
+                "    def wait(self, timeout=None):",
+                "        status = self._process.poll()",
+                "        wait_started.write_text(",
+                "            f'{self.pid} running' if status is None else f'{self.pid} exited:{status}',",
+                "            encoding='utf-8',",
+                "        )",
+                "        return self._process.wait(timeout=timeout)",
+                "",
+                "    def poll(self):",
+                "        return self._process.poll()",
+                "",
+                "    def kill(self):",
+                "        return self._process.kill()",
+                "",
+                "def launch(*args, **kwargs):",
+                "    return ProcessProxy(real_popen(*args, **kwargs))",
+                "",
+                "subprocess.Popen = launch",
                 (
                     f"_run_node_process(Path({str(NODE)!r}), "
                     f"Path({str(runner)!r}), "
@@ -792,24 +828,70 @@ def test_sigterm_to_the_supervisor_kills_the_node_process(tmp_path: Path) -> Non
         cwd=Path.cwd(),
         env=environment,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     node_pid: int | None = None
+
+    def supervisor_stderr() -> str:
+        if process.stderr is None:
+            return ""
+        return process.stderr.read()
+
+    def fail_with_supervisor_stderr(message: str) -> NoReturn:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        stderr = supervisor_stderr()
+        if stderr:
+            message += f"\nSupervisor stderr:\n{stderr}"
+        pytest.fail(message)
+
     try:
         deadline = time.monotonic() + 5
-        while not pid_path.exists() and time.monotonic() < deadline:
-            assert process.poll() is None
+        while not wait_started.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                fail_with_supervisor_stderr(
+                    "supervisor exited before waiting for the Node process"
+                )
             time.sleep(0.02)
-        assert pid_path.exists()
-        node_pid = int(pid_path.read_text(encoding="utf-8"))
+        if not wait_started.exists():
+            fail_with_supervisor_stderr(
+                "supervisor did not enter the Node wait"
+            )
+        node_pid_text, wait_status = wait_started.read_text(encoding="utf-8").split(
+            " ", 1
+        )
+        node_pid = int(node_pid_text)
+        if wait_status != "running":
+            fail_with_supervisor_stderr(
+                f"Node exited before SIGTERM reached the supervisor ({wait_status})"
+            )
 
         os.kill(process.pid, signal.SIGTERM)
-        assert process.wait(timeout=5) != 0
-        _wait_for_pid_exit(node_pid)
+        try:
+            returncode = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            fail_with_supervisor_stderr(
+                "supervisor did not exit after SIGTERM"
+            )
+        stderr = supervisor_stderr()
+        assert returncode != 0, (
+            "supervisor unexpectedly succeeded after SIGTERM"
+            + (f"\nSupervisor stderr:\n{stderr}" if stderr else "")
+        )
+        _wait_for_pid_exit(
+            node_pid,
+            failure_details=(
+                f"Supervisor stderr:\n{stderr}" if stderr else ""
+            ),
+        )
     finally:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=3)
+        if process.stderr is not None:
+            process.stderr.close()
         if node_pid is not None and _pid_exists(node_pid):
             os.kill(node_pid, signal.SIGKILL)
 
