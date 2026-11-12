@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils';
 
 import { useDraft } from '../draft';
 import { IMPORTED_ADDRESSES, IMPORTED_WORDS } from './data';
-import { ChainRow, SourceCards, WalletDialogHeading } from './create';
+import { ChainRow, MetadataFields, SourceCards, WalletDialogHeading } from './create';
 import { FIELD_LABEL, Notice, TierCards } from './parts';
 
 export type ImportState = 'empty' | 'valid' | 'unknown-word' | 'checksum' | 'avault-old';
@@ -135,10 +135,6 @@ export function ImportForm({ state, passphraseOpen = false, scrolled = false }: 
         <>
           <WalletDialogHeading />
           <ChainRow />
-          <label className="flex flex-col gap-1.5">
-            <span className={FIELD_LABEL}>{t('vaults.dialog.name')}</span>
-            <Input value="AGENT_WALLET" readOnly className="font-mono" />
-          </label>
           <SourceCards value="import" />
         </>
       )}
@@ -175,6 +171,7 @@ export function ImportForm({ state, passphraseOpen = false, scrolled = false }: 
       </div>
       {words.length ? <Passphrase open={passphraseOpen} /> : null}
       {state === 'valid' || state === 'avault-old' ? <Preview /> : null}
+      {scrolled ? null : <MetadataFields />}
       {scrolled ? null : <TierCards value="standard" />}
       {state === 'avault-old' ? (
         <Notice tone="warning" icon={ArrowUpCircle}>

@@ -1,13 +1,14 @@
 // Creating a seed-phrase wallet in the Add dialog (ui/design: vault/mnemonic/create/*): set up,
 // write the words down, check them, done. The words are shown once: on the standard tier avault
 // never returns them, so the check is the one chance to catch a copying mistake.
-import { ArrowLeft, Bot, Check, Copy, Download, EyeOff, KeyRound, Lock, Plus, ShieldCheck, Signature, Sparkles, WalletCards, X } from 'lucide-react';
+import { ArrowLeft, Bot, Check, Copy, EyeOff, KeyRound, Lock, Plus, ShieldCheck, Signature, Sparkles, WalletCards, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { InfoHint } from '@/components/ui/info-hint';
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
+import { KeySourceTabs } from '@/components/ui/vault-key-builder-parts';
 import { SigningAddressList } from '@/components/ui/signing-address-list';
 import { Switch } from '@/components/ui/switch';
 
@@ -21,7 +22,7 @@ export type Source = 'create' | 'import';
 
 /** The signing key's chain selector with the wallet as its third option (owner decision 11-12: 1 = B).
  *  The Kind row and the first two chains are the shipped ones, unchanged. */
-export function ChainRow() {
+export function ChainRow({ name = 'AGENT_WALLET' }: { name?: string }) {
   const { t } = useTranslation();
   const d = useDraft();
   return (
@@ -38,6 +39,8 @@ export function ChainRow() {
           ]}
         />
       </div>
+      {/* The shipped dialog's order: kind, name, chain. */}
+      <NameField value={name} />
       <div className="flex flex-col gap-1.5">
         <span className={FIELD_LABEL}>{t('vaults.dialog.chainLabel')}</span>
         <SegmentedRadio
@@ -47,7 +50,7 @@ export function ChainRow() {
           options={[
             { id: 'evm-bitcoin', label: t('vaults.dialog.chainEvmBitcoin') },
             { id: 'solana', label: t('vaults.dialog.chainSolana') },
-            { id: 'mnemonic', label: d('助记词 · 多链', 'Seed phrase') },
+            { id: 'mnemonic', label: d('助记词钱包', 'Seed phrase wallet') },
           ]}
         />
         <span className="text-[11px] text-muted">
@@ -58,24 +61,13 @@ export function ChainRow() {
   );
 }
 
-/** New words or words from another wallet: the 「密钥来源」 tabs of avibe#3626 (`KeySourceTabs`), with
- *  one line under them. Switch to the shipped component once that PR lands. */
+/** New words or words from another wallet: the shipped 「密钥来源」 tabs (`KeySourceTabs`), with one
+ *  line under them. */
 export function SourceCards({ value }: { value: Source }) {
-  const { t } = useTranslation();
   const d = useDraft();
   return (
-    <div className="flex flex-col gap-1.5">
-      <span className={FIELD_LABEL}>{d('密钥来源', 'Key source')}</span>
-      <SegmentedRadio<Source>
-        value={value}
-        onChange={() => {}}
-        tone="muted"
-        ariaLabel={d('密钥来源', 'Key source')}
-        options={[
-          { id: 'create', label: t('vaults.dialog.signingGenerate'), icon: Sparkles },
-          { id: 'import', label: t('vaults.dialog.signingImport'), icon: Download },
-        ]}
-      />
+    <div className="flex flex-col gap-2.5">
+      <KeySourceTabs value={value === 'create' ? 'generate' : 'import'} onChange={() => {}} />
       {value === 'create' ? (
         <HintLine
           text={d('下一步生成 12 个词，抄下来后点 3 个词核对。', 'Next you get 12 words; write them down, then tap 3 of them to check.')}
@@ -97,7 +89,26 @@ function NameField({ value }: { value: string }) {
     <label className="flex flex-col gap-1.5">
       <span className={FIELD_LABEL}>{t('vaults.dialog.name')}</span>
       <Input value={value} readOnly className="font-mono" />
+      <span className="text-[11.5px] text-muted">{t('vaults.dialog.nameHint')}</span>
     </label>
+  );
+}
+
+/** The shipped dialog's description and tags, between the key and the tier. */
+export function MetadataFields() {
+  const { t } = useTranslation();
+  return (
+    <>
+      <label className="flex flex-col gap-1.5">
+        <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
+        <Input value="" readOnly placeholder={t('vaults.dialog.descriptionPlaceholder')} />
+      </label>
+      <label className="flex flex-col gap-1.5">
+        <span className={FIELD_LABEL}>{t('vaults.dialog.tags')}</span>
+        <Input value="" readOnly placeholder={t('vaults.dialog.tagsPlaceholder')} />
+        <span className="text-[11px] text-muted">{t('vaults.dialog.tagsHelp')}</span>
+      </label>
+    </>
   );
 }
 
@@ -151,8 +162,8 @@ export function CreateSetup({ tier = 'standard' }: { tier?: 'standard' | 'protec
     <div className="flex min-w-0 flex-col gap-4">
       <WalletDialogHeading />
       <ChainRow />
-      <NameField value="AGENT_WALLET" />
       <SourceCards value="create" />
+      <MetadataFields />
       <TierCards value={tier} />
       {tier === 'standard' ? <AskToggle checked={false} /> : null}
       <Footer primary={d('生成助记词', 'Generate the words')} primaryIcon={<Sparkles className="size-4" />} />
