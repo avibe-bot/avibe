@@ -630,7 +630,7 @@ prepare_release_candidate() {
     # The embedded stdlib-only helper is generated from vibe/release_dependencies.py.
     # uv supplies Python on machines that have no system interpreter yet.
     env ${UV_INSTALL_PYTHON_MIRROR:+"UV_PYTHON_INSTALL_MIRROR=$UV_INSTALL_PYTHON_MIRROR"} \
-        uv run --no-project --no-config --python '>=3.10,<3.15' python - "$spec" "$destination" <<'AVIBE_RELEASE_DEPENDENCIES'
+        uv run --no-project --python '>=3.10,<3.15' python - "$spec" "$destination" <<'AVIBE_RELEASE_DEPENDENCIES'
 # BEGIN GENERATED RELEASE DEPENDENCIES
 """Resolve the *target* wheel and its release constraints before installation.
 
@@ -968,8 +968,12 @@ install_vibe() {
         fi
     fi
 
+    warn "If PyPI or its dependency downloads are unreachable (including in mainland China), set HTTPS_PROXY to your HTTPS proxy before retrying."
+    warn "Example (replace the address with your proxy): export HTTPS_PROXY=http://127.0.0.1:7890"
+    warn "Or explicitly choose an index you trust: export UV_DEFAULT_INDEX=https://your-trusted-index.example/simple"
+    warn "Then rerun this installer. The index receives your trust; exact version pins do not authenticate dependency bytes."
     if [ -n "$install_package_spec" ]; then
-        error "Failed to install avibe-os from custom package spec: $install_package_spec"
+        error "Failed to install avibe-os from custom package spec"
     fi
     error "Failed to install avibe-os from all sources"
 }
@@ -989,7 +993,6 @@ install_vibe_from_sources() {
     if install_package_candidate "$PACKAGE_NAME"; then
         success "avibe-os installed successfully (locked release)"
     else
-        warn "Use HTTPS_PROXY for PyPI access, or supply an explicit package source/index you trust."
         return 1
     fi
 }

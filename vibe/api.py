@@ -107,6 +107,7 @@ from vibe.upgrade import (
     launcher_is_current_process,
     restart_is_pending,
     should_skip_show_runtime_prepare,
+    upgrade_download_help,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
     verify_upgrade_candidate,
 )
@@ -7690,7 +7691,10 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             return {
                 "ok": False,
                 "message": "Upgrade failed",
-                "output": result.stderr or result.stdout,
+                "output": _append_upgrade_output(
+                    result.stderr or result.stdout,
+                    upgrade_download_help(plan.method, _configured_backend_language()),
+                ),
                 "activation_notice": None,
                 "restarting": False,
             }
@@ -7702,7 +7706,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         return {
             "ok": False,
             "message": "Upgrade timed out",
-            "output": None,
+            "output": upgrade_download_help(plan.method, _configured_backend_language()),
             "activation_notice": None,
             "restarting": False,
         }
@@ -7722,7 +7726,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         return {
             "ok": False,
             "message": str(e),
-            "output": None,
+            "output": upgrade_download_help(plan.method, _configured_backend_language()),
             "activation_notice": None,
             "restarting": restarting,
         }
