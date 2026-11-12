@@ -293,6 +293,7 @@
   },
   "vault": {
     "hd": {
+      "addressCheckFailed": "The wallet was not saved because account #0 does not match the browser-derived addresses. Do not send funds; keep your backup and resolve the mismatch before retrying.",
       "invalidWallet": "This operation requires a standard-tier HD wallet with valid account metadata. To sign, select evm, bitcoin or solana and an enabled account (0–19); the signing scheme must match the chain. Create or import the wallet in Vault without sending words or seed bytes to the server.",
       "invalidAccount": "Could not update this wallet account. Enable accounts in order, up to 20. Only enabled accounts can be edited; use a name of 1–80 characters (or reset it) and a boolean ask-before-signing setting.",
       "stateChanged": "The wallet changed during signing, or its usage record could not be saved. No signature was delivered. Check the wallet and its audit history before trying again."
