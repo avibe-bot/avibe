@@ -1,0 +1,119 @@
+name: direct-transport-release
+
+on:
+  pull_request:
+    paths:
+      - scripts/direct_transport_release.py
+      - tests/test_direct_transport_release.py
+      - direct-transport/scripts/package_artifact.py
+      - .github/workflows/direct-transport-release.yml
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact master commit (must equal this workflow revision)"
+        required: true
+        type: string
+      qualification_run_id:
+        description: "Successful five-platform master avibe-direct-transport run"
+        required: true
+        type: string
+      qualification_attempt:
+        description: "Exact complete producer attempt (no inherited jobs)"
+        required: true
+        type: string
+      release_tag:
+        description: "direct-transport-v<crate-version>-<positive-revision>"
+        required: true
+        type: string
+      publish:
+        description: "Publish only after Product exact source/tag/run go; false prepares only"
+        type: boolean
+        default: false
+      confirmation:
+        description: "For publication: publish <tag> <source_sha> <run_id>/<attempt>"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: direct-transport-release-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --only-binary=:all: --no-deps uv==0.13.7
+      - run: uv run --locked --group dev python -m pytest -q tests/test_direct_transport_release.py tests/test_release_workflow_artifacts.py tests/test_cargo_notices.py
+
+  prepare:
+    needs: contracts
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && github.repository == 'avibe-bot/avibe'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prove immutable source, full backstop and all qualified artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.release_tag }}
+          RUN_ID: ${{ inputs.qualification_run_id }}
+          ATTEMPT: ${{ inputs.qualification_attempt }}
+        run: |
+          python3 scripts/direct_transport_release.py prepare \
+            --source "$SOURCE" --tag "$TAG" --run-id "$RUN_ID" --attempt "$ATTEMPT" \
+            --output "$RUNNER_TEMP/prepared/assets"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: direct-transport-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prepared/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  publish:
+    needs: prepare
+    if: inputs.publish == true && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && github.repository == 'avibe-bot/avibe'
+    environment: direct-transport-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Re-prove, publish non-latest, and independently read public bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.release_tag }}
+          RUN_ID: ${{ inputs.qualification_run_id }}
+          ATTEMPT: ${{ inputs.qualification_attempt }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          python3 scripts/direct_transport_release.py publish \
+            --source "$SOURCE" --tag "$TAG" --run-id "$RUN_ID" --attempt "$ATTEMPT" \
+            --confirmation "$CONFIRMATION" --output "$RUNNER_TEMP/published/assets"
+      - name: Preserve public readback and proposal (never edit consumer pin)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: direct-transport-public-readback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/published/public-readback.json
+            ${{ runner.temp }}/published/direct_transport_runtime_manifest.proposal.json
+          if-no-files-found: error
+          retention-days: 90

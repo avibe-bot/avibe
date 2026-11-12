@@ -2,9 +2,18 @@ name: avibe-direct-transport
 
 on:
   workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - direct-transport/**
+      - scripts/cargo_notices.py
+      - packaging/iroh-apple/license-sources.json
+      - .github/workflows/direct-transport.yml
   pull_request:
     paths:
       - direct-transport/**
+      - scripts/cargo_notices.py
+      - packaging/iroh-apple/license-sources.json
       - .github/workflows/direct-transport.yml
 
 permissions:
@@ -154,6 +163,13 @@ jobs:
           printf '#include <stdio.h>\nint main(void) { puts("sendmsg_x"); return 0; }\n' > "$RUNNER_TEMP/scanner-control.c"
           cc "$RUNNER_TEMP/scanner-control.c" -o "$RUNNER_TEMP/scanner-control"
           "$checker" --expect-hit "$RUNNER_TEMP/scanner-control"
+
+      - name: Prepare checksum-verified sources and Rust redistribution notices
+        run: |
+          set -euo pipefail
+          rustup component add rust-docs --toolchain "$RUST_TOOLCHAIN"
+          mkdir -p .cargo
+          cargo vendor --locked "$RUNNER_TEMP/sidecar-vendor" > .cargo/config.toml
 
       - name: Assemble workflow artifact
         run: python3 scripts/package_artifact.py "${{ matrix.target }}"

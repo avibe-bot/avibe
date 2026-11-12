@@ -1,15 +1,45 @@
 #!/usr/bin/env python3
-"""Package a qualified binary as a workflow artifact, never a release."""
+"""Package a qualified binary and notices; publication is a separate guarded workflow."""
 
 import hashlib
 import json
 import os
 import platform
+import re
+import shutil
 import subprocess
 import sys
 import tarfile
 import tomllib
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.cargo_notices import collect_notices  # noqa: E402
+
+
+def collect_licenses(target, temp):
+    root = Path(__file__).resolve().parents[2]
+    licenses = temp / "direct-transport-licenses" / "LICENSES"
+    result = collect_notices(
+        Path("Cargo.lock"), [target], os.environ["RUST_TOOLCHAIN"],
+        "avibe-direct-transport", root / "packaging/iroh-apple/license-sources.json", licenses,
+    )
+    graph = (temp / "feature-graph.txt").read_text()
+    coordinates = set(re.findall(r"(?:^|[\s─├└│])([A-Za-z0-9_-]+) v([^\s]+)", graph, re.M))
+    if {(p["name"], p["version"]) for p in result["packages"]} != coordinates:
+        raise ValueError("notice inventory differs from qualified feature graph")
+    sysroot = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
+    rust = sysroot / "share/doc/rust"
+    for name in ("COPYRIGHT.html", "licenses/Apache-2.0.txt", "licenses/MIT.txt"):
+        if not (rust / name).is_file():
+            raise ValueError(f"missing Rust distribution notice: {name}")
+    dest = licenses / ("rust-" + os.environ["RUST_TOOLCHAIN"])
+    dest.mkdir()
+    shutil.copytree(rust / "licenses", dest / "licenses")
+    for name in ("COPYRIGHT.html", "COPYRIGHT-library.html"):
+        if (rust / name).is_file():
+            shutil.copyfile(rust / name, dest / name)
+    return licenses
 
 
 def sha(path):
@@ -24,9 +54,10 @@ def main():
     suffix = ".exe" if target.endswith("windows-msvc") else ""
     binary = Path("target") / target / "release" / ("avibe-direct-transport" + suffix)
     features = json.loads((temp / "feature-evidence.json").read_text())
+    licenses = collect_licenses(target, temp)
     manifest = {
         "name": "avibe-direct-transport",
-        "version": "0.1.0",
+        "version": tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"],
         "target": target,
         "source_sha": os.environ["GITHUB_SHA"],
         "pull_request_head_sha": os.environ["SOURCE_HEAD_SHA"],
@@ -40,7 +71,10 @@ def main():
         "cargo": subprocess.check_output(["cargo", "--version"], text=True).strip(),
         "runner": platform.platform(),
         "release_build_seconds": int(os.environ["BUILD_SECONDS"]),
-        "distribution": "workflow-artifact-only",
+        "distribution": "qualified-workflow-artifact",
+        "licenses_provenance_sha256": sha(licenses / "provenance.json"),
+        "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+        "workflow_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
         "patched_dependencies": False,
         "transport_liveness": {"idle_timeout_ms": 6000, "keep_alive_ms": 1500},
         "qualification": {
@@ -61,6 +95,7 @@ def main():
         tar.add(temp / "feature-graph.txt", arcname="feature-graph.txt")
         tar.add(temp / "feature-evidence.json", arcname="feature-evidence.json")
         tar.add("Cargo.lock", arcname="Cargo.lock")
+        tar.add(licenses, arcname="LICENSES")
     (out / (archive.name + ".sha256")).write_text(f"{sha(archive)}  {archive.name}\n")
     summary = f"{target}: binary {binary.stat().st_size} bytes; archive {archive.stat().st_size} bytes; release build {os.environ['BUILD_SECONDS']} s\n"
     print(summary, end="")
