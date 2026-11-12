@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+import core.handlers.model_hub.usage as usage_module
 from config.v2_config import ModelHubModelConfig
 from core.handlers.model_hub.identifiers import (
     USAGE_LEDGER_KEY_MAX_LENGTH,
@@ -4408,3 +4409,78 @@ def test_a_wedged_ledger_write_cannot_hold_the_process_open(tmp_path: Path) -> N
 
     assert result.stdout.split() == ["wedged"], result.stderr
     assert result.returncode == 0, result.stderr
+
+
+def test_usage_writer_coalesces_a_bounded_burst_without_weakening_ack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nearby calls share one full-file write, but acknowledgement stays durable."""
+
+    monkeypatch.setattr(usage_module, "_USAGE_WRITE_COALESCE_SECONDS", 0.05, raising=False)
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+        writer = UsageWriter(ledger)
+        batches: list[tuple[UsageCall, ...]] = []
+        record_many = ledger.record_many
+
+        def counted(calls) -> None:
+            batches.append(tuple(calls))
+            record_many(calls)
+
+        ledger.record_many = counted
+        writes = []
+        for input_tokens in (1, 2, 3):
+            writes.append(
+                writer.record(
+                    source_id="src_a",
+                    model_id="model-x",
+                    usage=ProtocolUsageReport(input_tokens=input_tokens),
+                    at=NOW,
+                )
+            )
+            await asyncio.sleep(0.01)
+
+        assert await writer.wait_recorded(writes[-1]) is True
+        assert len(batches) == 1
+        assert batches[0][0].requests == 3
+        assert writer.unpersisted == 0
+        assert ledger.summary(days=1, now=NOW)["totals"]["input_tokens"] == 6
+
+    asyncio.run(exercise())
+
+
+def test_usage_writer_drain_bypasses_coalescing_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shutdown drain flushes immediately instead of spending its timeout on debounce."""
+
+    monkeypatch.setattr(usage_module, "_USAGE_WRITE_COALESCE_SECONDS", 60.0, raising=False)
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+        writer = UsageWriter(ledger)
+        write = writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        assert await writer.drain(timeout=1) == 0
+        assert write.done()
+        assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 1
+
+    asyncio.run(exercise())
+
+
+def test_cancelled_usage_wait_keeps_the_shared_batch_owned(tmp_path: Path) -> None:
+    """Cancelling one acknowledgement wait cannot cancel the metering future."""
+
+    async def exercise() -> None:
+        ledger = _ledger(tmp_path)
+        writer = UsageWriter(ledger)
+        first = writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        second = writer.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+        waiter = asyncio.create_task(writer.wait_recorded(first))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        assert await writer.wait_recorded(second) is True
+        assert ledger.summary(days=1, now=NOW)["totals"]["requests"] == 2
+
+    asyncio.run(exercise())

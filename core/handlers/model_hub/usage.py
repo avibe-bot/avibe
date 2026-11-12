@@ -2416,6 +2416,11 @@ _LEDGER_EXECUTOR: Optional[_AbandonableWriter] = None
 # local read-modify-write and an fsync plus scheduling slack, which is orders of
 # magnitude under it, so nothing but a disk that has stopped answering gets here.
 _DURABILITY_WAIT_SECONDS: Final = 2.0
+# Give nearby metering calls one bounded event-loop window to share the full-file
+# read-modify-write. The acknowledgement future still completes only after the
+# resulting batch reaches the ledger; this only trades a small amount of latency
+# for fewer rewrites when calls arrive just apart.
+_USAGE_WRITE_COALESCE_SECONDS: Final = 0.1
 # How long a price table the writer read decides context tiers before a flush reads
 # it again. A read parses the whole models.dev copy, megabytes, so it happens on the
 # writer's thread rather than once per call; the override file is hand-edited, and
@@ -2697,6 +2702,10 @@ class UsageWriter:
         # can count it: in the executor is not the same as persisted.
         self._writing: tuple[_QueuedRow, ...] = ()
         self._flush: Optional[asyncio.Task[None]] = None
+        # A drain can bypass the normal coalescing window for shutdown. It is
+        # created when the writer first enters an event loop, not at construction,
+        # because writers are also built during synchronous service setup.
+        self._flush_now: Optional[asyncio.Event] = None
         # Whether the last flush lost its batch, so an outage is reported when it
         # starts and ends rather than once per failed write.
         self._dropping = False
@@ -2792,6 +2801,8 @@ class UsageWriter:
             self._pending[key] = queued
         else:
             queued.call = queued.call.folded_with(call)
+        if self._flush_now is None:
+            self._flush_now = asyncio.Event()
         if self._flush is None or self._flush.done():
             self._flush = asyncio.create_task(self._flush_pending())
         return queued.done
@@ -2846,37 +2857,57 @@ class UsageWriter:
 
         flush = self._flush
         if flush is not None and not flush.done():
+            if self._flush_now is not None:
+                self._flush_now.set()
             await asyncio.wait((flush,), timeout=timeout)
         return self.unpersisted
 
     async def _flush_pending(self) -> None:
-        """Write queued calls a batch at a time until nothing is left waiting.
+        """Write queued calls in a bounded coalescing window, then drain batches.
 
-        The loop ends only with the queue empty and without having awaited since
-        it saw that, which is what lets `record` treat a finished flush as proof
-        that it must start the next one.
+        The initial delay is fixed from the first queued call rather than
+        extended by later calls: a burst can share one full-file write, but a
+        quiet writer still begins within a known bound. Futures are completed
+        only after ``record_many`` returns, so this changes write timing, not the
+        acknowledgement or durability contract. ``drain`` sets ``_flush_now``
+        so shutdown does not spend its bounded timeout waiting for this window.
         """
 
-        loop = asyncio.get_running_loop()
-        while self._pending:
-            batch = tuple(self._pending.values())
-            self._pending = {}
-            self._writing = batch
-            try:
-                calls = tuple(queued.call for queued in batch)
-                if self._prices_due():
-                    # A refresh for the calls after this batch; these are already tiered.
-                    await loop.run_in_executor(_ledger_executor(), self._read_prices)
-                await loop.run_in_executor(_ledger_executor(), self.ledger.record_many, calls)
-            except (OSError, ValueError) as exc:
-                self._report_dropped(batch, exc)
+        wake = self._flush_now
+        try:
+            if wake is None:
+                await asyncio.sleep(_USAGE_WRITE_COALESCE_SECONDS)
             else:
-                self._report_recovered()
-            finally:
-                self._writing = ()
-            for queued in batch:
-                if not queued.done.done():
-                    queued.done.set_result(None)
+                try:
+                    await asyncio.wait_for(wake.wait(), _USAGE_WRITE_COALESCE_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    wake.clear()
+
+            loop = asyncio.get_running_loop()
+            while self._pending:
+                batch = tuple(self._pending.values())
+                self._pending = {}
+                self._writing = batch
+                try:
+                    calls = tuple(queued.call for queued in batch)
+                    if self._prices_due():
+                        # A refresh for the calls after this batch; these are already tiered.
+                        await loop.run_in_executor(_ledger_executor(), self._read_prices)
+                    await loop.run_in_executor(_ledger_executor(), self.ledger.record_many, calls)
+                except (OSError, ValueError) as exc:
+                    self._report_dropped(batch, exc)
+                else:
+                    self._report_recovered()
+                finally:
+                    self._writing = ()
+                for queued in batch:
+                    if not queued.done.done():
+                        queued.done.set_result(None)
+        finally:
+            if wake is not None:
+                wake.clear()
 
     def _context_tier(self, model_id: str, usage: Optional[ProtocolUsageReport], speed: Optional[str] = None) -> int:
         """The tier the held price table puts one call in; the base tier without usage or a table.
