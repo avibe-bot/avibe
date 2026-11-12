@@ -384,7 +384,15 @@ actor DirectConnectListener {
             host: "127.0.0.1",
             port: endpointPort
         )
-        let listener = try NWListener(using: parameters, on: endpointPort)
+        // An exact port is given once, in the required local endpoint:
+        // passing it to `NWListener` as well fails with EINVAL ("Local
+        // endpoint has port set, cannot override").
+        let listener: NWListener
+        if requested == nil {
+            listener = try NWListener(using: parameters, on: .any)
+        } else {
+            listener = try NWListener(using: parameters)
+        }
         self.listener = listener
         listener.newConnectionHandler = { [weak self, queue] connection in
             guard let self else {
