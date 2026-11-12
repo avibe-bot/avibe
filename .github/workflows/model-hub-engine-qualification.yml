@@ -1,19 +1,17 @@
 name: Qualify Model Hub engine candidate
 
-# Qualifies one reviewed engine candidate record for the signed engine channel
-# (docs/plans/model-hub-engine-channel.md, docs/release.md). It holds no secret
-# and publishes nothing: each job writes one evidence document about the exact
-# candidate bytes, and `receipt` joins them. The finalizer later re-reads this
-# run from GitHub before it promotes anything, so the job names below are part
-# of the contract (REQUIRED_JOBS in scripts/model_hub_engine_qualification.py).
+# Rehearses one reviewed engine candidate and publishes only untrusted source
+# data. The exact result name is `untrusted_rehearsal`: it is informational and
+# never authorizes release or promotion. The separate channel workflow uses a
+# fixed trusted checkout to validate the run, candidate, manifest and archive
+# digests without executing candidate or uploaded code, then the owner approves
+# each promotion through the existing protected environments.
 #
-# Two evidence classes have no producing job yet: backward-state round trips
-# and lifecycle/rollback, which arrive with the engine lifecycle work. `receipt`
-# requires them and accepts each class only from the artifact named for the
-# job that produces it (EVIDENCE_PRODUCERS), so this workflow cannot produce a
-# receipt until they exist, whatever any job uploads.
-# The released-Avibe E2E job needs the published stable wheel of the candidate's
-# minimum Avibe, which is 3.2.6 at the earliest.
+# Candidate jobs have no business secrets, repository-write token or OIDC
+# publication authority. Their artifact credential can upload only untrusted
+# reports/assets; it is not proof of which job wrote them. Missing and failed
+# jobs remain visible to the trusted finalizer instead of becoming an automatic gate
+# failure or a fabricated pass.
 
 on:
   workflow_dispatch:
@@ -42,6 +40,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Validate the reviewed candidate record
         id: candidate
@@ -63,6 +63,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: ${{ steps.candidate.outputs.go_version }}
+          cache: false
 
       # Strict mode: the rebuilt bytes must equal the digests the record pins.
       - name: Rebuild the pinned source and require the reviewed digests
@@ -81,7 +82,7 @@ jobs:
       - name: Upload the candidate assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: model-hub-engine-candidate-assets
+          name: model-hub-engine-untrusted-assets
           path: ${{ runner.temp }}/candidate-assets
           if-no-files-found: error
           retention-days: 30
@@ -90,7 +91,7 @@ jobs:
       - name: Upload build evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: qualification-evidence-build
+          name: untrusted-rehearsal-evidence-build
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
           retention-days: 30
@@ -122,6 +123,8 @@ jobs:
         run: git config --global core.autocrlf false
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Prepare hermetic UI asset placeholder
         shell: bash
@@ -176,7 +179,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
-          name: model-hub-engine-candidate-assets
+          name: model-hub-engine-untrusted-assets
           path: ${{ runner.temp }}/candidate-assets
 
       - name: Start the candidate and require Avibe's health check
@@ -201,7 +204,7 @@ jobs:
       - name: Upload smoke evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: qualification-evidence-platform-smoke-${{ matrix.platform }}
+          name: untrusted-rehearsal-evidence-platform-smoke-${{ matrix.platform }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
           retention-days: 30
@@ -226,6 +229,8 @@ jobs:
       ROLE: ${{ matrix.role }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
@@ -271,7 +276,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
-          name: model-hub-engine-candidate-assets
+          name: model-hub-engine-untrusted-assets
           path: ${{ runner.temp }}/candidate-assets
 
       - name: Point the released Avibe at the exact candidate bytes
@@ -320,6 +325,7 @@ jobs:
             --output "$RUNNER_TEMP/evidence/released-avibe-e2e-$ROLE.json"
 
       - name: Upload the released Avibe record
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: qualification-released-${{ matrix.role }}
@@ -330,7 +336,7 @@ jobs:
       - name: Upload E2E evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: qualification-evidence-released-avibe-e2e-${{ matrix.role }}
+          name: untrusted-rehearsal-evidence-released-avibe-e2e-${{ matrix.role }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: error
           retention-days: 30
@@ -341,10 +347,13 @@ jobs:
   hosted-wire:
     name: hosted-wire
     needs: [build, released-avibe-e2e]
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Prepare hermetic UI asset placeholder
         run: |
@@ -362,10 +371,11 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
-          name: model-hub-engine-candidate-assets
+          name: model-hub-engine-untrusted-assets
           path: ${{ runner.temp }}/candidate-assets
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        continue-on-error: true
         with:
           pattern: qualification-released-*
           path: ${{ runner.temp }}/released
@@ -380,11 +390,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/released" "$RUNNER_TEMP/baselines"
           args=(--output-dir "$RUNNER_TEMP/baselines")
           if [ "$(python scripts/model_hub_engine_channel.py commissioned)" = "true" ]; then
             avault="$(python scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
             args+=(--avault "$avault")
           fi
+          shopt -s nullglob
           for manifest in "$RUNNER_TEMP"/released/bundled-manifest-*.json; do
             args+=(--bundled "$manifest")
           done
@@ -411,6 +423,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/evidence"
 
       - name: Upload the baseline list
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: qualification-baselines
@@ -421,59 +434,66 @@ jobs:
       - name: Upload hosted-wire evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: qualification-evidence-hosted-wire
+          name: untrusted-rehearsal-evidence-hosted-wire
           path: ${{ runner.temp }}/evidence
           if-no-files-found: ignore
           retention-days: 30
 
-  # Joins the evidence. It fails unless every class is present for these exact
-  # bytes, including the classes that have no producing job yet.
-  receipt:
-    name: receipt
+  # This is a report assembler, not an authority. It never executes a
+  # candidate or treats a report as authenticated; it merely makes missing
+  # and failed source data easy for the trusted finalizer and owner to see.
+  untrusted-rehearsal:
+    name: untrusted_rehearsal
     needs: [build, platform-smoke, released-avibe-e2e, hosted-wire]
+    if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      # One directory per artifact, named after it. The receipt takes each
-      # evidence class only from the artifact named for the job that produces
-      # it, and stops on anything else. The name is all that ties an artifact
-      # to a job here: which job uploaded it is not authenticated.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          pattern: qualification-evidence-*
+          persist-credentials: false
+
+      - name: Collect untrusted reports when available
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        continue-on-error: true
+        with:
+          pattern: untrusted-rehearsal-evidence-*
           path: ${{ runner.temp }}/evidence
           merge-multiple: false
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+      - name: Collect released Avibe context when available
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        continue-on-error: true
         with:
           pattern: qualification-released-*
           path: ${{ runner.temp }}/released
           merge-multiple: true
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+      - name: Collect baseline context when available
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        continue-on-error: true
         with:
           name: qualification-baselines
           path: ${{ runner.temp }}/baselines
 
-      - name: Join the evidence into a receipt
+      - name: Write the untrusted rehearsal result
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          python3 scripts/model_hub_engine_qualification.py receipt \
+          mkdir -p "$RUNNER_TEMP/evidence" "$RUNNER_TEMP/released" "$RUNNER_TEMP/baselines"
+          test -f "$RUNNER_TEMP/baselines/baselines.json" || printf '{}\n' > "$RUNNER_TEMP/baselines/baselines.json"
+          python3 scripts/model_hub_engine_qualification.py untrusted-rehearsal \
             --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
             --evidence-dir "$RUNNER_TEMP/evidence" \
             --released-dir "$RUNNER_TEMP/released" \
             --baselines "$RUNNER_TEMP/baselines/baselines.json" \
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --head-sha "$GITHUB_SHA" \
-            --output "$RUNNER_TEMP/receipt/receipt.json"
+            --output "$RUNNER_TEMP/untrusted_rehearsal.json"
 
-      - name: Upload the receipt
+      - name: Upload the untrusted rehearsal result
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: model-hub-engine-qualification-receipt
-          path: ${{ runner.temp }}/receipt/receipt.json
+          name: model-hub-engine-untrusted-rehearsal
+          path: ${{ runner.temp }}/untrusted_rehearsal.json
           if-no-files-found: error
           retention-days: 90

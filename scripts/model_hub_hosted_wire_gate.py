@@ -10,11 +10,11 @@ both engines from their published releases. Before a candidate is published,
 ``--head-assets`` takes it from the local build output instead. See
 docs/plans/model-hub-cpa-dependency.md.
 
-Engine channel qualification compares a candidate with engines that are not
-the packaged pin: every release the channel lists and every engine a released
+Engine channel rehearsal compares a candidate with engines that are not the
+packaged pin: every release the channel lists and every engine a released
 Avibe bundles. ``--base-manifest`` and ``--head-manifest`` name both sides by
-manifest, and ``--evidence-output`` records the comparison for the
-qualification receipt, which decides whether a difference was reviewed. See
+manifest, and ``--evidence-output`` records concrete differences for the
+owner-facing ``untrusted_rehearsal``. It does not authorize publication. See
 docs/plans/model-hub-engine-channel.md.
 """
 
@@ -214,10 +214,10 @@ def hosted_wire_evidence(
     base_bytes: bytes, head_bytes: bytes, work: Path, head_assets: Path | None = None,
     *, loopback_only: bool = False,
 ) -> dict:
-    """Compare two explicit engines and describe the result for a qualification receipt.
+    """Compare two explicit engines and describe an untrusted rehearsal result.
 
     The head engine must pass every case. A difference is recorded, not
-    judged: whether it was reviewed is the receipt's question.
+    judged: the owner decides whether to approve the exact promotion.
     """
     try:
         base_tag = json.loads(base_bytes)["asset_release_tag"]
