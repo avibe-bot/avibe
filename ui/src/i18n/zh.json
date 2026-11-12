@@ -6491,7 +6491,10 @@
         "missingDigest": "该签名请求缺少摘要。",
         "missingMessage": "该签名请求缺少消息。",
         "missingMaterial": "无法获取用于签名的保护层密钥材料，请重新加载后重试。"
-      }
+      },
+      "account": "账户",
+      "path": "派生路径 {{path}}",
+      "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。"
     },
     "request": {
       "provide": "填写",
@@ -6511,6 +6514,110 @@
     "audit": {
       "title": "最近活动",
       "empty": "暂无活动。"
+    },
+    "hd": {
+      "chainMnemonic": "助记词钱包",
+      "chainMnemonicHint": "一组助记词覆盖 EVM、Bitcoin、Solana，可在里面添加多个账户。",
+      "generateHint": "下一步生成 12 个词，抄下来后点 3 个词核对。",
+      "generateInfo": "推荐给 Agent 用的新钱包。种子由这台电脑上的 avault 加密保存；保存后 Avibe 不会再显示这些词。",
+      "importHint": "粘贴后逐词检查，并显示账户 #0 的地址，可以先核对再创建。",
+      "importInfo": "从 MetaMask、Phantom 等钱包搬过来：12 或 24 个英文单词，可选 BIP39 密码。助记词只在这台电脑上处理，不会进入聊天或模型。",
+      "protectedUnsupported": "保护档的助记词钱包还在做，现在请选标准档。",
+      "generateCta": "生成助记词",
+      "importCta": "导入钱包",
+      "createCta": "创建钱包",
+      "steps": {
+        "label": "步骤",
+        "setup": "设置",
+        "backup": "抄下助记词",
+        "check": "核对"
+      },
+      "backup": {
+        "title": "按顺序抄下这 {{count}} 个词",
+        "body": "保存后 Avibe 不会再显示它们。这台电脑坏了或要换到别的钱包时，只能靠这份备份。",
+        "show": "显示 {{count}} 个词",
+        "screen": "先确认没人能看到你的屏幕",
+        "copy": "复制",
+        "copied": "已复制",
+        "hide": "隐藏",
+        "clipboard": "复制后其他应用可能读到剪贴板，写在纸上更安全。",
+        "agentNote": "Agent 签名不需要这些词，它们只用来恢复。不要发给任何 Agent 或聊天。",
+        "done": "我已抄好"
+      },
+      "check": {
+        "title": "看着你的纸，选出这 3 个词",
+        "body": "只用点 3 下，确认备份能用。",
+        "word": "第 {{position}} 个词",
+        "wrong": "第 {{position}} 个词对不上。",
+        "wrongHint": "点「再看一遍」，对照纸上的第 {{position}} 个词，可能抄错了。",
+        "again": "再看一遍"
+      },
+      "done": {
+        "title": "{{name}} 已创建",
+        "body": "账户 #0 在三条链上的地址如下。往这些地址充值后，Agent 就能用它签名。",
+        "verified": "已核对：avault 保存的地址和这些词算出的地址一致。",
+        "recovery": "这台电脑丢失时，只有这些词能找回资金（如果设置过 passphrase，还要一字不差的 passphrase）。只靠数据库备份无法恢复签名。",
+        "howTitle": "Agent 这样用它",
+        "howHint": "--chain 选 evm、bitcoin 或 solana；--account 选账户编号。",
+        "finish": "完成"
+      },
+      "import": {
+        "label": "粘贴助记词",
+        "placeholder": "12 或 24 个英文单词，用空格分开。粘贴后会逐个检查。",
+        "local": "助记词只在这台电脑上处理，不会进入聊天或模型。",
+        "ok": "{{count}} 个词 · 校验通过",
+        "unknown": "第 {{position}} 个词“{{word}}”不在助记词词表里。",
+        "didYouMean": "是不是“{{word}}”？",
+        "use": "改成 {{word}}",
+        "checksum": "{{count}} 个词都对得上词表，但合在一起校验不通过。",
+        "checksumHint": "通常是某个词抄成了另一个有效的词，或两个词顺序颠倒。请逐个对照原件。",
+        "count": "助记词应是 12、15、18、21 或 24 个词，现在是 {{count}} 个。",
+        "passphrase": "BIP39 密码（passphrase，可选）",
+        "passphraseFolded": "大多数钱包没有设置",
+        "passphraseHint": "只有原钱包设置过才填。填错不会报错，只会得到另一组地址，所以请对照下面的地址。",
+        "previewTitle": "和原钱包的第一个账户核对",
+        "previewHint": "MetaMask 的 Account 1、Phantom 的第一个账户应显示相同的 EVM 和 Solana 地址。Taproot 地址只在 Phantom 等支持 Taproot 的钱包里看得到。"
+      },
+      "avaultOld": "助记词钱包需要 avault {{version}} 或更新版本，当前是 {{installed}}。",
+      "avaultOldHint": "更新后回到这里即可保存，已填写的内容会保留。现有密钥不受影响。",
+      "openDependencies": "前往设置 → 依赖",
+      "mismatch": "地址核对失败：avault 算出的地址和这些词算出的地址不一致。",
+      "mismatchHint": "不要往这个钱包转账。自动删除没有成功，请再删一次；删除之前它在这个浏览器里一直标为不可用。",
+      "askAccount0": "账户 #0 签名前问我",
+      "askAccount0Info": "默认 Agent 可以直接签名。打开后，账户 #0 每次签名都要你在浏览器里批准；之后要关闭，需要你的 Passkey 确认。每个账户都能在钱包里单独设置。",
+      "mainAccount": "主账户",
+      "accountFallback": "账户 #{{account}}",
+      "back": "上一步",
+      "wallet": {
+        "badge": "助记词 · {{count}} 个账户",
+        "used": "已用 {{count}} / {{limit}} 个账户 · 账户编号与 MetaMask、Phantom 的账户顺序一致",
+        "agentUsage": "Agent 用 --chain 选链，--account 选账户",
+        "ask": "签名前问我",
+        "askLocked": "关闭需要 Passkey 确认，这一步还在做，暂时不能关闭。",
+        "rename": "重命名",
+        "namePlaceholder": "给这个账户起个名字",
+        "lastSigned": "最近签名：{{when}} · 会话「{{session}}」",
+        "lastSignedChain": "最近签名：{{chain}} · {{when}} · 会话「{{session}}」",
+        "neverSigned": "还没有签过名",
+        "add": "添加账户 #{{account}}",
+        "addHint": "不用再输入助记词；地址已经算好。",
+        "needsManager": "只有管理员能添加账户、改名或打开「签名前问我」。地址可以照常查看和复制。",
+        "full": "已用满 {{limit}} 个账户。",
+        "firstTitle": "给每个用途一个账户",
+        "firstBody": "比如交易 Agent 用 #1、空投测试用 #2：资金互不影响，也能单独决定是否每次问你。",
+        "open": "查看账户",
+        "lastSignedShort": "最近签名 {{when}}"
+      },
+      "accountIndex": "#{{account}}",
+      "hiddenWord": "•••••",
+      "signCommand": "vibe vault sign {{name}} --chain solana --account {{account}} …",
+      "deleteWallet": "删除这个钱包",
+      "askFailed": "钱包已创建，但账户 #0 的「签名前问我」没有设置成功。",
+      "askRetry": "重新设置",
+      "mismatchDeleted": "这个钱包已经删除，没有留下任何东西。请重新创建或导入。",
+      "mismatchNotSaved": "不要往这个钱包转账，也不要用这里显示过的地址。它没有保存，什么也没留下；请重新创建或导入。",
+      "close": "关闭",
+      "blocked": "地址核对失败：不要往这个钱包转账，请删除它。"
     }
   },
   "permissions": {

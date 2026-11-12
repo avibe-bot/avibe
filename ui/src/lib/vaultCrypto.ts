@@ -119,12 +119,10 @@ export type SolanaKeyImportFormat = 'solana-cli-json' | 'base58-secret';
  * A pasted Solana secret key, sealed for `avault keypair import`. The box opens only for this
  * name, curve and format, so it cannot be replayed as a static value or as another key.
  */
-export type KeypairImportBlindBoxContext = {
-  purpose: 'keypair-import';
-  name: string;
-  curve: 'ed25519';
-  format: SolanaKeyImportFormat;
-};
+export type KeypairImportBlindBoxContext =
+  | { purpose: 'keypair-import'; name: string; curve: 'ed25519'; format: SolanaKeyImportFormat }
+  /** A seed-phrase wallet's 64-byte BIP39 seed: AAD scheme `hd-seed:raw-seed` (avault DESIGN). */
+  | { purpose: 'keypair-import'; name: string; curve: 'hd-seed'; format: 'raw-seed' };
 
 export type ProtectedDekReleaseBlindBoxContext = AgentDeliverBlindBoxContext | AgentSignBlindBoxContext;
 export type ProtectedDekDeliveryBlindBoxContext = AgentDeliverBlindBoxContext;
@@ -800,7 +798,9 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
     case 'seal':
       return standardCreateBlindBoxContext(context.name);
     case 'keypair-import':
-      return keypairImportBlindBoxContext(context.name, context.format, context.curve);
+      return context.curve === 'hd-seed'
+        ? hdSeedImportBlindBoxContext(context.name)
+        : keypairImportBlindBoxContext(context.name, context.format, context.curve);
     case 'agent-deliver': {
       const approval = normalizeApproval({
         nonce: context.approvalNonce,
@@ -857,6 +857,12 @@ export function keypairImportBlindBoxContext(
   }
   // A signing key is one record: it has no fields, so the name is a bare secret name.
   return { purpose: 'keypair-import', name: validateSecretName(name), curve, format };
+}
+
+/** The box a seed-phrase wallet's seed travels in: it opens only as an HD seed import of this name,
+ *  so it cannot be replayed as a static value, a Solana key, or another wallet. */
+export function hdSeedImportBlindBoxContext(name: string): KeypairImportBlindBoxContext {
+  return { purpose: 'keypair-import', name: validateSecretName(name), curve: 'hd-seed', format: 'raw-seed' };
 }
 
 async function normalizeAndCheckOperationHash(

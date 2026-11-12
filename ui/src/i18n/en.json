@@ -6491,7 +6491,10 @@
         "missingDigest": "This sign request is missing its digest.",
         "missingMessage": "This sign request is missing its message.",
         "missingMaterial": "Protected key material wasn't available to sign. Reload and try again."
-      }
+      },
+      "account": "Account",
+      "path": "Derivation path {{path}}",
+      "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise."
     },
     "request": {
       "provide": "provide",
@@ -6511,6 +6514,110 @@
     "audit": {
       "title": "Recent activity",
       "empty": "No activity yet."
+    },
+    "hd": {
+      "chainMnemonic": "Seed phrase wallet",
+      "chainMnemonicHint": "One phrase covers EVM, Bitcoin and Solana, with as many accounts as you add.",
+      "generateHint": "Next you get 12 words; write them down, then tap 3 of them to check.",
+      "generateInfo": "Best for a new wallet your Agents use. avault on this computer keeps the seed encrypted; Avibe won’t show the words again after saving.",
+      "importHint": "Each word is checked as you paste, and account #0’s addresses show so you can compare before creating.",
+      "importInfo": "Bring one over from MetaMask, Phantom and others: 12 or 24 English words, with an optional BIP39 passphrase. The phrase stays on this computer and never reaches a chat or a model.",
+      "protectedUnsupported": "Protected seed phrase wallets are still to come; choose Standard for now.",
+      "generateCta": "Generate the words",
+      "importCta": "Import wallet",
+      "createCta": "Create wallet",
+      "steps": {
+        "label": "Steps",
+        "setup": "Set up",
+        "backup": "Write it down",
+        "check": "Check"
+      },
+      "backup": {
+        "title": "Write these {{count}} words down, in order",
+        "body": "Avibe won’t show them again after saving. If this computer fails or you move wallets, this backup is the only way back.",
+        "show": "Show the {{count}} words",
+        "screen": "Make sure no one can see your screen",
+        "copy": "Copy",
+        "copied": "Copied",
+        "hide": "Hide",
+        "clipboard": "Other apps can read the clipboard; paper is safer.",
+        "agentNote": "Agents never need these words to sign; they are only for recovery. Never send them to an Agent or a chat.",
+        "done": "I wrote them down"
+      },
+      "check": {
+        "title": "Using your paper, pick these 3 words",
+        "body": "Three taps to prove the backup works.",
+        "word": "Word #{{position}}",
+        "wrong": "Word #{{position}} doesn’t match.",
+        "wrongHint": "Tap “See the words” and compare word #{{position}} on your paper; it may be miscopied.",
+        "again": "See the words"
+      },
+      "done": {
+        "title": "{{name}} is ready",
+        "body": "Account #0 has these addresses on the three chains. Fund them and your Agents can sign with it.",
+        "verified": "Checked: the addresses avault stored match the ones these words give.",
+        "recovery": "If this computer is lost, only these words can recover the funds (plus the exact passphrase, if one was set). A database backup alone cannot restore signing.",
+        "howTitle": "How an Agent uses it",
+        "howHint": "--chain picks evm, bitcoin or solana; --account picks the account number.",
+        "finish": "Done"
+      },
+      "import": {
+        "label": "Paste the phrase",
+        "placeholder": "12 or 24 English words separated by spaces. Each word is checked as you paste.",
+        "local": "The phrase stays on this computer and never reaches a chat or a model.",
+        "ok": "{{count}} words · checksum OK",
+        "unknown": "Word #{{position}}, “{{word}}”, is not a seed phrase word.",
+        "didYouMean": "Did you mean “{{word}}”?",
+        "use": "Use {{word}}",
+        "checksum": "All {{count}} words are valid, but together they fail the checksum.",
+        "checksumHint": "Usually one word was copied as another valid word, or two are swapped. Compare each word with your original.",
+        "count": "A phrase has 12, 15, 18, 21 or 24 words; this one has {{count}}.",
+        "passphrase": "BIP39 passphrase (optional)",
+        "passphraseFolded": "Most wallets don’t use one",
+        "passphraseHint": "Only if your old wallet used one. A wrong passphrase gives no error, just different addresses, so check them below.",
+        "previewTitle": "Compare with your old wallet’s first account",
+        "previewHint": "MetaMask’s Account 1 and Phantom’s first account show the same EVM and Solana addresses. The Taproot address shows only in wallets that support Taproot, such as Phantom."
+      },
+      "avaultOld": "Seed phrase wallets need avault {{version}} or later; {{installed}} is installed.",
+      "avaultOldHint": "Update, then come back to save; what you entered stays. Your existing keys are unaffected.",
+      "openDependencies": "Open Settings → Dependencies",
+      "mismatch": "Address check failed: the addresses avault derives don’t match the ones these words give.",
+      "mismatchHint": "Don’t send funds to this wallet. It could not be deleted automatically; delete it again. Until then this browser keeps it blocked.",
+      "askAccount0": "Ask before account #0 signs",
+      "askAccount0Info": "By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser, and turning it off later needs your Passkey. Each account has its own setting in the wallet.",
+      "mainAccount": "Main",
+      "accountFallback": "Account #{{account}}",
+      "back": "Back",
+      "wallet": {
+        "badge": "Seed phrase · {{count}} accounts",
+        "used": "{{count}} of {{limit}} accounts · numbered as in MetaMask and Phantom",
+        "agentUsage": "Agents pick the chain with --chain and the account with --account",
+        "ask": "Ask before signing",
+        "askLocked": "Turning this off needs your Passkey. That step is still to come, so it can’t be turned off yet.",
+        "rename": "Rename",
+        "namePlaceholder": "Name this account",
+        "lastSigned": "Last signed {{when}} · “{{session}}”",
+        "lastSignedChain": "Last signed on {{chain}} {{when}} · “{{session}}”",
+        "neverSigned": "Not used to sign yet",
+        "add": "Add account #{{account}}",
+        "addHint": "No words needed; the addresses are already computed.",
+        "needsManager": "Only an admin can add accounts, rename them or turn on “Ask before signing”. You can still view and copy addresses.",
+        "full": "All {{limit}} accounts are in use.",
+        "firstTitle": "One account per job",
+        "firstBody": "For example #1 for a trading Agent and #2 for airdrop tests: funds stay apart, and each can ask you or not.",
+        "open": "Accounts",
+        "lastSignedShort": "Last signed {{when}}"
+      },
+      "accountIndex": "#{{account}}",
+      "hiddenWord": "•••••",
+      "signCommand": "vibe vault sign {{name}} --chain solana --account {{account}} …",
+      "deleteWallet": "Delete this wallet",
+      "askFailed": "The wallet was created, but ask-before-signing for account #0 did not stick.",
+      "askRetry": "Try again",
+      "mismatchDeleted": "The wallet was deleted; nothing was kept. Create or import it again.",
+      "mismatchNotSaved": "Don’t send funds to this wallet or to any address shown here. It was not saved, and nothing was kept; create or import it again.",
+      "close": "Close",
+      "blocked": "Address check failed: don’t send funds to this wallet. Delete it."
     }
   },
   "permissions": {
