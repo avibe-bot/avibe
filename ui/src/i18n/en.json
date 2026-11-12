@@ -6582,7 +6582,26 @@
       "askAccount0Info": "By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser, and turning it off later needs your Passkey. Each account has its own setting in the wallet.",
       "mainAccount": "Main",
       "accountFallback": "Account #{{account}}",
-      "back": "Back"
+      "back": "Back",
+      "wallet": {
+        "badge": "Seed phrase · {{count}} accounts",
+        "used": "{{count}} of {{limit}} accounts · numbered as in MetaMask and Phantom",
+        "agentUsage": "Agents pick the chain with --chain and the account with --account",
+        "ask": "Ask before signing",
+        "askLocked": "Turning this off needs your Passkey. That step is still to come, so it can’t be turned off yet.",
+        "rename": "Rename",
+        "namePlaceholder": "Name this account",
+        "lastSigned": "Last signed {{when}} · “{{session}}”",
+        "lastSignedChain": "Last signed on {{chain}} {{when}} · “{{session}}”",
+        "neverSigned": "Not used to sign yet",
+        "add": "Add account #{{account}}",
+        "addHint": "No words needed; the addresses are already computed.",
+        "full": "All {{limit}} accounts are in use.",
+        "firstTitle": "One account per job",
+        "firstBody": "For example #1 for a trading Agent and #2 for airdrop tests: funds stay apart, and each can ask you or not.",
+        "open": "Accounts",
+        "lastSignedShort": "Last signed {{when}}"
+      }
     }
   },
   "permissions": {

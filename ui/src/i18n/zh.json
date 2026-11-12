@@ -6582,7 +6582,26 @@
       "askAccount0Info": "默认 Agent 可以直接签名。打开后，账户 #0 每次签名都要你在浏览器里批准；之后要关闭，需要你的 Passkey 确认。每个账户都能在钱包里单独设置。",
       "mainAccount": "主账户",
       "accountFallback": "账户 #{{account}}",
-      "back": "上一步"
+      "back": "上一步",
+      "wallet": {
+        "badge": "助记词 · {{count}} 个账户",
+        "used": "已用 {{count}} / {{limit}} 个账户 · 账户编号与 MetaMask、Phantom 的账户顺序一致",
+        "agentUsage": "Agent 用 --chain 选链，--account 选账户",
+        "ask": "签名前问我",
+        "askLocked": "关闭需要 Passkey 确认，这一步还在做，暂时不能关闭。",
+        "rename": "重命名",
+        "namePlaceholder": "给这个账户起个名字",
+        "lastSigned": "最近签名：{{when}} · 会话「{{session}}」",
+        "lastSignedChain": "最近签名：{{chain}} · {{when}} · 会话「{{session}}」",
+        "neverSigned": "还没有签过名",
+        "add": "添加账户 #{{account}}",
+        "addHint": "不用再输入助记词；地址已经算好。",
+        "full": "已用满 {{limit}} 个账户。",
+        "firstTitle": "给每个用途一个账户",
+        "firstBody": "比如交易 Agent 用 #1、空投测试用 #2：资金互不影响，也能单独决定是否每次问你。",
+        "open": "查看账户",
+        "lastSignedShort": "最近签名 {{when}}"
+      }
     }
   },
   "permissions": {
