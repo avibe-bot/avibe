@@ -385,8 +385,8 @@ def test_model_selection_is_required_before_any_backend_dispatch(backend, model,
 @pytest.mark.parametrize(
     ("backend", "hub_switch", "gateway_enabled", "has_source", "refusal", "fixed_in_models"),
     [
-        ("vibey", "1", False, True, "The model gateway is off, so Vibey has no model to run on", True),
-        ("vibey", "1", True, False, "Vibey has no model source yet", True),
+        ("vibey", "1", False, True, "Model Hub is off, so Vibey has no model to run on", True),
+        ("vibey", "1", True, False, "Vibey has no model provider yet", True),
         # A source but no model: the built-in backend's models all come from its Model Hub list.
         ("vibey", "1", True, True, "Select a model for the Vibey Agent", True),
         ("vibey", "0", True, True, "Model Hub is disabled on this instance, so Vibey has no model to run on", False),

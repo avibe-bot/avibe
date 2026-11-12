@@ -344,7 +344,7 @@ def test_request_incompatible_copy_preserves_nonfallback_guidance(language):
         detail=detail,
     )
     assert (
-        "switching Sources will not help" in text
+        "switching providers will not help" in text
         if language == "en"
         else "切换模型供应商也无法解决" in text
     )
@@ -385,7 +385,7 @@ def test_http_200_sse_failure_is_presented_as_upstream_error(language):
     ) not in text
     assert "HTTP 200" not in text
     assert (
-        "switching Sources will not help" not in text
+        "switching providers will not help" not in text
         if language == "en"
         else "切换模型供应商也无法解决" not in text
     )
