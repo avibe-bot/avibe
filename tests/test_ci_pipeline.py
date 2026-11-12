@@ -876,11 +876,11 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     steps = {step["name"]: step for step in shards["steps"] if "name" in step}
     test_steps = [steps["Run install and upgrade regressions"]]
     for suite in suites:
-        selected = [step for step in test_steps if step["if"] == f"matrix.suite == '{suite}'"]
+        selected = [step for step in test_steps if step["if"] == f"matrix.suite == '{suite}' && runner.os == 'Linux'"]
         assert len(selected) == 1, f"Every suite must select exactly one regression command: {suite}"
     # The installer consumes the built core wheel.
     prepare = steps["Prepare Show Runtime manifest for fixture wheels"]
-    assert not prepare.get("if")
+    assert prepare.get("if") == "runner.os == 'Linux'"
     assert "python scripts/prepare_local_show_runtime_manifest.py" in prepare["run"]
     for test_file in (
         "tests/test_upgrade_flow.py", "tests/test_install_script.py",
@@ -888,6 +888,16 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     ):
         assert test_file in test_steps[0]["run"]
     assert "docker info" in test_steps[0]["run"]
+    assert shards["strategy"]["matrix"]["runner"] == ["ubuntu-latest", "macos-15"]
+    acceptance = steps["Verify Python 3.15 locked install and public 3.2.5 upgrade"]
+    assert not acceptance.get("if") and not acceptance.get("continue-on-error")
+    assert "scripts/python315_install_regression.py" in acceptance["run"]
+    assert any(step.get("with", {}).get("python-version") == "3.15" for step in shards["steps"])
+    windows = jobs["windows-install-smoke-runners"]
+    windows_acceptance = next(step for step in windows["steps"] if step.get("name") == acceptance["name"])
+    assert windows_acceptance["if"] == "matrix.os == 'windows-latest'"
+    assert "scripts/python315_install_regression.py" in windows_acceptance["run"]
+    assert "$LASTEXITCODE -ne 0" in windows_acceptance["run"]
     assert jobs["install-upgrade-regression"]["needs"] == ["changes", "install-upgrade-shards"]
 
 
@@ -921,7 +931,7 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
     ]
     (owner, contracts), = owners
     assert owner == "install-upgrade-shards"
-    assert contracts["if"] == "matrix.suite == 'installer'"
+    assert contracts["if"] == "matrix.suite == 'installer' && runner.os == 'Linux'"
     assert installers["strategy"]["matrix"]["suite"].count("installer") == 1
     assert installers["steps"].index(download) < installers["steps"].index(contracts)
     build_environment = next(step["env"] for step in build["steps"] if step.get("name") == "Build package artifact")
