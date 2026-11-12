@@ -15,14 +15,9 @@ so it is safe off the loop and decides the same way wherever it is asked.
 
 from __future__ import annotations
 
-import json
-import os
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
-from functools import lru_cache
-from importlib import resources
-from pathlib import Path
 from typing import Any, Callable, Final, Literal, Mapping, Optional
 
 from config.v2_config import (
@@ -100,35 +95,6 @@ def _serves(source: ModelHubSourceConfig, model_id: str) -> bool:
 
     listed = next((model for model in source.models if model.id == model_id), None)
     return not listed.retired if listed is not None else source.kind == "api_key"
-
-
-@lru_cache(maxsize=1)
-def _manifest_engine_release(path: Optional[str]) -> str:
-    if path:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    else:
-        resource = resources.files("vibe").joinpath("model_hub_runtime/cliproxyapi_manifest.json")
-        payload = json.loads(resource.read_text(encoding="utf-8"))
-    for key in ("asset_release_tag", "release_tag", "version"):
-        release = payload.get(key)
-        if isinstance(release, str) and release:
-            return release
-    raise ValueError("the engine manifest names no release")
-
-
-def engine_stamp() -> str:
-    """The engine release evidence is stamped with: the shipped manifest's asset release.
-
-    Engine upgrades ship as manifest changes, and a patched rebuild of the same
-    upstream version gets a new asset release. Read once, when Model Hub's
-    service is built; a manifest that cannot be read is the fixed unknown
-    engine, never raised on a request.
-    """
-
-    try:
-        return _manifest_engine_release(os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH") or None)
-    except (OSError, ValueError, TypeError, AttributeError):
-        return UNKNOWN_ENGINE_RELEASE
 
 
 def runs_on(source: ModelHubSourceConfig, model_id: str, tool: str, *, spec_for: SpecLookup) -> Optional[HostedToolSpec]:

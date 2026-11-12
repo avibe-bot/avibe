@@ -441,13 +441,34 @@ class EngineInvokeHandle:
         outcome: asyncio.Future[RawCallOutcome],
         stream_closer: Callable[[], Awaitable[None]] | None = None,
         observed: ProtocolSSEState | None = None,
+        model_id: str | None = None,
+        source_id: str | None = None,
     ) -> None:
+        self._model_id = model_id
+        self._source_id = source_id
         self._stream = stream
         self._outcome = outcome
         self._stream_closer = stream_closer
         self._observed = observed
         self._close_lock = asyncio.Lock()
         self._stream_closed = False
+        self.engine_release: str | None = None
+        self._withdrawn = False
+
+    def withdraw(self) -> Awaitable[None]:
+        """Publish the local terminal result BEFORE async stream cleanup.
+
+        A stuck close must not postpone the five-minute recall signal or make
+        settlement await an upstream response that will never arrive.
+        """
+        self._withdrawn = True
+        if not self._outcome.done():
+            self._outcome.set_result(_outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR, error_code="engine_withdrawn",
+                stream_started=bool(self._observed and self._observed.model_output_started),
+                model_id=self._model_id or "unknown", source=None, source_id=self._source_id,
+            ))
+        return self.close_stream()
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None:
@@ -475,7 +496,11 @@ class EngineInvokeHandle:
                 self._stream_closed = True
 
     async def outcome(self) -> RawCallOutcome:
-        return await asyncio.shield(self._outcome)
+        result = await asyncio.shield(self._outcome)
+        result = replace(result, engine_release=self.engine_release or result.engine_release)
+        if self._withdrawn:
+            return replace(result, kind=RawOutcomeKind.NETWORK_ERROR, error_code="engine_withdrawn")
+        return result
 
 
 class EngineClient:
@@ -981,6 +1006,8 @@ class EngineClient:
                 outcome=outcome_future,
                 stream_closer=close_response_stream,
                 observed=wire_state,
+                model_id=model_id,
+                source_id=source.source_id,
             )
             ownership_transferred = True
             transport_transferred = True
@@ -2253,10 +2280,10 @@ def _protocol_error_outcome(
     return outcome
 
 
-def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:
+def completed_handle(outcome: RawCallOutcome, *, observed: ProtocolSSEState | None = None) -> EngineInvokeHandle:
     future = asyncio.get_running_loop().create_future()
     future.set_result(outcome)
-    return EngineInvokeHandle(stream=None, outcome=future)
+    return EngineInvokeHandle(stream=None, outcome=future, observed=observed)
 
 
 def buffered_prelude_handle(
@@ -2287,8 +2314,9 @@ def buffered_prelude_handle(
 def _outcome(
     *,
     kind: RawOutcomeKind,
-    source: SourceRecord,
+    source: SourceRecord | None,
     model_id: str,
+    source_id: str | None = None,
     http_status: int | None = None,
     error_code: str | None = None,
     error_type: str | None = None,
@@ -2311,7 +2339,7 @@ def _outcome(
         redacted_message=message,
         stream_started=stream_started,
         model_id=model_id,
-        source_id=source.source_id,
+        source_id=source.source_id if source is not None else source_id or "unknown",
         error_type=error_type,
         error_candidates=error_candidates,
         usage=usage,

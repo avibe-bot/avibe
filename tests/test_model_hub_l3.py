@@ -6493,7 +6493,7 @@ def test_production_adapter_retargets_api_keys_without_exposing_or_mutating_them
         "codex-test.json",
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -6534,7 +6534,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         base_url=base_url,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
     unsupported = EngineClientError(
@@ -7278,7 +7278,7 @@ def test_source_observation_accepts_catalog_pin_and_custom_declaration_without_s
         base_url="https://api.deepseek.com",
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
     generic_request_accepted = _ProtocolEvidence(
@@ -7377,7 +7377,7 @@ def test_qwen_catalog_pin_validation_remains_unverified(
         base_url=None,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -7459,7 +7459,7 @@ def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
         base_url=None,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -7595,7 +7595,7 @@ def _run_catalog_pin_observation(
         base_url=None,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -7769,7 +7769,7 @@ def test_custom_auto_numeric_auth_failure_message_stays_authentication_failed(
 ) -> None:
     state_store = EngineStateStore(tmp_path / "engine-state-custom-auto")
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
 
@@ -7861,7 +7861,7 @@ def test_source_observation_catalog_pin_and_declaration_still_require_authentica
         base_url=base_url,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
     rejected = _ProtocolEvidence(
@@ -7921,7 +7921,7 @@ def test_custom_declared_observation_preserves_transport_authentication_verdict(
         base_url=base_url,
     )
     adapter = CLIProxyEngineAdapter(
-        supervisor=Mock(),
+        supervisor=Mock(lifecycle=None, _published_release=None),
         state_store=state_store,
     )
     parser_evidence = _ProtocolEvidence(
@@ -7984,7 +7984,7 @@ def test_declared_custom_anthropic_relay_verifies_from_its_models_listing(
 
     live_key = "relay-live-key"
     state_store = EngineStateStore(tmp_path / f"engine-state-relay-{stored_key}")
-    adapter = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    adapter = CLIProxyEngineAdapter(supervisor=Mock(lifecycle=None, _published_release=None), state_store=state_store)
 
     async def scenario() -> tuple[list[tuple[str, str, str]], list[dict], object]:
         requests: list[tuple[str, str, str]] = []
@@ -8169,7 +8169,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
         raise AssertionError((method, path))
 
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     adapter = CLIProxyEngineAdapter(
         supervisor=supervisor,
@@ -8250,7 +8250,7 @@ def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof
         raise AssertionError((method, path))
 
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     adapter = CLIProxyEngineAdapter(
         supervisor=supervisor,
@@ -8326,7 +8326,7 @@ def test_hub_subscription_observation_binds_on_the_engine_declared_protocol(
         raise AssertionError((method, path))
 
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     adapter = CLIProxyEngineAdapter(
         supervisor=supervisor,
