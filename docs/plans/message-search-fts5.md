@@ -14,6 +14,12 @@ The rollout must not synchronously scan or index historical Messages during
 startup, put FTS tokenization on a Message writer, duplicate the stored message
 text, or make older named-column writers depend on an optional SQLite module.
 A crash must leave a resumable committed cursor, never a falsely complete index.
+This is a background-indexing guarantee, not a blanket nonblocking-startup claim:
+the existing migration preflight still requires a synchronous rollback snapshot
+when importer completion cannot be proved. Fresh unpaired installations without
+legacy deferred snapshots intentionally have no deferred-resource receipt, so a
+later populated upgrade can take that conservative path and delay startup.
+Neither the backup policy nor authorization provenance is weakened here.
 
 ## Representation and rollout
 
@@ -154,13 +160,32 @@ Primary owner coverage is `tests/test_message_search_index.py`:
 Existing Message search, controller maintenance, migration policy, no-copy and
 compatibility-epoch suites are also run. Exact-head PR review/CI and a serialized
 local Incus synthetic large-database benchmark remain required before readiness.
-The shared fixture is capped at approximately 1.5 GB including its documented
-scale and actual file size; this does **not** empirically validate a 6 GB database.
-The benchmark must compare identical results before/after planner optimization
-and indexing, migration/backfill duration, database/WAL growth, peak disk use
-(including working copies) and normal writer latency. No linear extrapolation
-from the smaller fixture is a measured 6 GB result. No live user database copy or
-owner-machine load test is authorized.
+The shared fixture is capped at approximately 1.5 GB **total footprint**, including
+the database, index and WAL, with a pristine database target at or below 1 GB.
+Choose its final scale from a tiny sizing run and record actual file sizes; this
+does **not** empirically validate a 6 GB database. The contentless index has no
+aggregate disk-size cap: the per-Message text cap does not bound total index
+expansion. Sampling, headroom and stopping before the footprint limit are part
+of the measurement procedure, not a runtime storage guarantee.
+
+The approved single-database progression initializes an empty `0084` schema
+through the normal initializer **before** synthetic fill. Old baseline source
+then uses the same-epoch compatible-open path with FTS absent and journaling
+inactive, followed by P4 planner optimization, P5 comparison and P6 backfill.
+Preserve immutable result ids/order/hashes from each phase and the original
+`0083` smoke evidence; do not create parallel mutable copies, fabricate importer
+receipts or bypass migration backups. Final acceptance uses the landed P4 code.
+
+The original `0083` smoke was 68,079,616 bytes with no `sqlite_stat1`; candidate
+preflight classified `0084` as additive but returned `skip_snapshot=False`
+because importer receipts were incomplete. Migration and backfill were stopped
+before changing that smoke. The revised fixture measures search parity, query
+plans, background backfill duration, database/WAL growth, peak disk use and normal
+writer latency. **Populated-upgrade and no-copy migration walltime are not
+empirically measured** by this progression. Migration safety, replay and crash
+coverage remain separate focused tests; they do not establish large-database
+startup timing. No linear extrapolation from the smaller fixture is a measured
+6 GB result. No live user database copy or owner-machine load test is authorized.
 
 ## Intentional limits and follow-ups
 
