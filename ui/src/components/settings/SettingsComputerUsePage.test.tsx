@@ -162,6 +162,10 @@ describe('SettingsComputerUsePage', () => {
     ['needs_runtime', null, false, false],
     ['needs_permission', 'accessibility', false, false],
     ['needs_permission', 'screen_recording', true, false],
+    ['unavailable', 'invalid_state_file', false, false],
+    ['unavailable', 'snapshot_invalid', false, false],
+    ['unavailable', 'shell_not_running', false, false],
+    ['unavailable', 'controller_unavailable', false, false],
     ['ready', null, true, true],
   ])('offers native settings for every incomplete permission step in %s (%s)', async (
     status, reason, accessibilityComplete, screenRecordingComplete,
@@ -189,6 +193,25 @@ describe('SettingsComputerUsePage', () => {
         expect(invoke).toHaveBeenLastCalledWith('computer_use_open_permission', { pane });
       }
     }
+  });
+
+  it('waits for the first readable status before offering native actions', async () => {
+    enterActionableShell();
+    let finish!: (response: ReturnType<typeof statusResponse>) => void;
+    apiFetch.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    apiFetch.mockResolvedValue(statusResponse({ supported: true, status: 'error', reason: 'driver_not_ready' }));
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
+    // An unreadable response still provides no progress; keep waiting.
+    await act(async () => finish(statusResponse({})));
+    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
+
+    await user.click(screen.getByRole('button', { name: /settings\.computerUse\.recheck/ }));
+    expect(await screen.findByTestId('computer-use-action-accessibility')).toBeTruthy();
+    expect(screen.getByTestId('computer-use-action-screenRecording')).toBeTruthy();
+    expect(screen.queryByTestId('computer-use-action-enable')).toBeNull();
   });
 
   it('disables all permission actions until the running native action settles', async () => {

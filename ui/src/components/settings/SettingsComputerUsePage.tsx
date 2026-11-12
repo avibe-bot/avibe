@@ -274,7 +274,8 @@ export const SettingsComputerUsePage: FC = () => {
         <ol className="flex flex-col" data-testid="computer-use-steps">
           {COMPUTER_USE_GUIDE_STEPS.map((step, index) => {
             const state = progress?.[step] ?? 'pending';
-            const actionable = actions !== null && (step === 'enable' ? state === 'current' : state !== 'complete');
+            const actionable = actions !== null && progress !== null
+              && (step === 'enable' ? state === 'current' : state !== 'complete');
             const running = runningStep === step;
             return (
               <li
