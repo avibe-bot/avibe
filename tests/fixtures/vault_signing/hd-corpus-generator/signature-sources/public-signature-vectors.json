@@ -1,0 +1,144 @@
+{
+  "warning": "PUBLIC KNOWN SIGNATURE VECTORS ONLY; no private keys selected or used",
+  "provenance": [
+    {
+      "file": "coincurve-test_keys.py",
+      "url": "https://raw.githubusercontent.com/ofek/coincurve/2d11b1160c75ae8fd94fe8fe3f226aec176bf9bf/tests/test_keys.py",
+      "sha256": "4ca57c4f9f0da2f51d78aeeb3917bf3e9dc2915c55b952dabf46f3e62c1d30e1"
+    },
+    {
+      "file": "coincurve-conftest.py",
+      "url": "https://raw.githubusercontent.com/ofek/coincurve/2d11b1160c75ae8fd94fe8fe3f226aec176bf9bf/tests/conftest.py",
+      "sha256": "ba807a77ec8bb5e0a4a7d3f8e86ce88a6236d5ef2db3dc9f4eaf0df98406f1dd"
+    },
+    {
+      "file": "bip340-test-vectors.csv",
+      "url": "https://raw.githubusercontent.com/bitcoin/bips/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0340/test-vectors.csv",
+      "sha256": "34c9d1d9c3a88d524bc80778540dc43f8306ec249a7485293063c376db851c2d"
+    },
+    {
+      "file": "rfc8032.txt",
+      "url": "https://www.rfc-editor.org/rfc/rfc8032.txt",
+      "sha256": "ed63657ff389301282b169b0abde9b5dd2c7e4d524fdfa5da6ff3094fc93c4c3"
+    }
+  ],
+  "evm": {
+    "public_key": "043d5c2875c9bd116875a71a5db64cffcb13396b163d039b1d932782489180433476a4352a2add00ebb0d5c94c515b72eb10f1fd8f3f03b42f4a2b255bfc9aa9e3",
+    "digest": "9902e8fe012a92c68276dfb7584a339587f8ffa859357e5a26a96af33ee25346",
+    "signature": "ee241b0e406661d43c1729a70ad0d7ef90cd13ad60c1065be0823196e23980270d0213d2af3f92478026381c567a2532b08ad06c0b349c7e9318ade44a9c2d0a",
+    "recovery_id": 0
+  },
+  "bitcoin": [
+    {
+      "index": 0,
+      "public_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+      "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "signature": "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca821525f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0",
+      "valid": true
+    },
+    {
+      "index": 1,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "6896bd60eeae296db48a229ff71dfe071bde413e6d43f917dc8dcf8c78de33418906d11ac976abccb20b091292bff4ea897efcb639ea871cfa95f6de339e4b0a",
+      "valid": true
+    },
+    {
+      "index": 2,
+      "public_key": "dd308afec5777e13121fa72b9cc1b7cc0139715309b086c960e18fd969774eb8",
+      "digest": "7e2d58d8b3bcdf1abadec7829054f90dda9805aab56c77333024b9d0a508b75c",
+      "signature": "5831aaeed7b44bb74e5eab94ba9d4294c49bcf2a60728d8b4c200f50dd313c1bab745879a5ad954a72c45a91c3a51d3c7adea98d82f8481e0e1e03674a6f3fb7",
+      "valid": true
+    },
+    {
+      "index": 3,
+      "public_key": "25d1dff95105f5253c4022f628a996ad3a0d95fbf21d468a1b33f8c160d8f517",
+      "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "signature": "7eb0509757e246f19449885651611cb965ecc1a187dd51b64fda1edc9637d5ec97582b9cb13db3933705b32ba982af5af25fd78881ebb32771fc5922efc66ea3",
+      "valid": true
+    },
+    {
+      "index": 4,
+      "public_key": "d69c3509bb99e412e68b0fe8544e72837dfa30746d8be2aa65975f29d22dc7b9",
+      "digest": "4df3c3f68fcc83b27e9d42c90431a72499f17875c81a599b566c9889b9696703",
+      "signature": "00000000000000000000003b78ce563f89a0ed9414f5aa28ad0d96d6795f9c6376afb1548af603b3eb45c9f8207dee1060cb71c04e80f593060b07d28308d7f4",
+      "valid": true
+    },
+    {
+      "index": 5,
+      "public_key": "eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "6cff5c3ba86c69ea4b7376f31a9bcb4f74c1976089b2d9963da2e5543e17776969e89b4c5564d00349106b8497785dd7d1d713a8ae82b32fa79d5f7fc407d39b",
+      "valid": false
+    },
+    {
+      "index": 6,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a14602975563cc27944640ac607cd107ae10923d9ef7a73c643e166be5ebeafa34b1ac553e2",
+      "valid": false
+    },
+    {
+      "index": 7,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "1fa62e331edbc21c394792d2ab1100a7b432b013df3f6ff4f99fcb33e0e1515f28890b3edb6e7189b630448b515ce4f8622a954cfe545735aaea5134fccdb2bd",
+      "valid": false
+    },
+    {
+      "index": 8,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "6cff5c3ba86c69ea4b7376f31a9bcb4f74c1976089b2d9963da2e5543e177769961764b3aa9b2ffcb6ef947b6887a226e8d7c93e00c5ed0c1834ff0d0c2e6da6",
+      "valid": false
+    },
+    {
+      "index": 9,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "0000000000000000000000000000000000000000000000000000000000000000123dda8328af9c23a94c1feecfd123ba4fb73476f0d594dcb65c6425bd186051",
+      "valid": false
+    },
+    {
+      "index": 10,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "00000000000000000000000000000000000000000000000000000000000000017615fbaf5ae28864013c099742deadb4dba87f11ac6754f93780d5a1837cf197",
+      "valid": false
+    },
+    {
+      "index": 11,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "4a298dacae57395a15d0795ddbfd1dcb564da82b0f269bc70a74f8220429ba1d69e89b4c5564d00349106b8497785dd7d1d713a8ae82b32fa79d5f7fc407d39b",
+      "valid": false
+    },
+    {
+      "index": 12,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f69e89b4c5564d00349106b8497785dd7d1d713a8ae82b32fa79d5f7fc407d39b",
+      "valid": false
+    },
+    {
+      "index": 13,
+      "public_key": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "6cff5c3ba86c69ea4b7376f31a9bcb4f74c1976089b2d9963da2e5543e177769fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+      "valid": false
+    },
+    {
+      "index": 14,
+      "public_key": "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc30",
+      "digest": "243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89",
+      "signature": "6cff5c3ba86c69ea4b7376f31a9bcb4f74c1976089b2d9963da2e5543e17776969e89b4c5564d00349106b8497785dd7d1d713a8ae82b32fa79d5f7fc407d39b",
+      "valid": false
+    }
+  ],
+  "solana": {
+    "source": "RFC8032 section7.1 TEST1",
+    "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "message_hex": "",
+    "signature": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+  }
+}

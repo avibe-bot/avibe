@@ -31,3 +31,18 @@ NFKD is applied explicitly to mnemonic and passphrase before PBKDF2. Passphrase 
 Python bip_utils/embit expectations are independent of browser scure/noble and Rust avault. BIP32 public keys are compared across bip_utils/embit. Bitcoin even-y lift/TapTweak is expressed explicitly and cross-checked against embit p2tr, including both original parities. Solana SLIP-0010 is cross-checked with stdlib HMAC and PyNaCl. EVM payload is checked with Keccak-256. These do not claim every low-level dependency is an independent implementation.
 
 The generator verifies 24 English and 24 Japanese known BIP39 seeds/root keys and all three published BIP86 examples. `sources/manifest.json` pins upstream commits and content SHA-256 for the BIP39-linked Trezor/Japanese vectors and Bitcoin BIP39/86/350 specifications. Those snapshots are used offline. This corpus is an oracle, **not evidence that production custody or UI passed it**; actual imports, all-account signatures and rendered-address comparisons are separate acceptance runs.
+
+## Verify public signature evidence
+
+`verify_signatures.py` is a read-only verifier using only corpus public keys. It requires exactly one record per corpus ID × account 0..19 × chain, with strict JSON fields, deterministic signing input and no duplicate/missing tuples. For Bitcoin it uses the corpus's tweaked output key, never the internal key. EVM must recover the exact corpus key and be low-S; Solana verifies the exact message.
+
+Using the same pinned environment:
+
+```sh
+/tmp/hd-corpus-verify-venv/bin/python verify_signatures.py --corpus ../hd-seed-corpus.json --self-test
+/tmp/hd-corpus-verify-venv/bin/python verify_signatures.py --corpus ../hd-seed-corpus.json --evidence /path/to/public-signatures.jsonl
+```
+
+The self-test uses selected public ECDSA, BIP340 and RFC8032 vectors (upstream commit URLs/content hashes embedded in `signature-sources/public-signature-vectors.json`; referenced upstream filenames are provenance, not additional local dependencies). It checks 8 positive cases and 48 rejection cases without deriving or signing a private key. A successful real evidence check prints only counts and the evidence SHA-256; it never substitutes self-test success for custody evidence.
+
+Each JSONL record has exactly `id`, integer `account`, `chain`, `scheme`, `digest` (EVM/Bitcoin) or `message_hex` (Solana), and `signature: {signature, recovery_id}`. Signature bytes are 64-byte hex; recovery ID is an integer 0..3 for EVM and explicit null otherwise. Input preimage is UTF-8 `avibe:hd-acceptance:v1:{id}:{chain}:{account}`: sign its SHA-256 digest for EVM/Bitcoin, or its exact bytes for Solana. Evidence contains public results only; no seed, private child key or custody store is needed by the verifier.

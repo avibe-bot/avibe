@@ -6,12 +6,13 @@ these cases protect the new account routing, per-use binding and atomic import.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import os
 import sqlite3
 import subprocess
-from threading import Barrier
+from threading import Barrier, Lock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -200,10 +201,26 @@ def test_hd_create_lost_response_retry_preserves_committed_wallet(custody, monke
     assert len(rows(vault_audit)) == 1
 
 
-def test_hd_simultaneous_imports_have_one_complete_winner(custody):
-    """Both requests pass preflight before either persists; the loser cannot replace keys."""
+def test_hd_simultaneous_imports_have_one_complete_winner(custody, monkeypatch):
+    """Two different custody responses race; stored envelope/keys must belong to one winner."""
     barrier = Barrier(2)
-    custody.hook = lambda: barrier.wait(timeout=10)
+    lock = Lock()
+    replies = [copy.deepcopy(FIXTURE["import_response"]) for _ in range(2)]
+    # The storage owner treats custody envelopes as opaque. Distinct valid-shape
+    # ciphertext and account keys let this test detect a mixed or overwritten row.
+    replies[1]["envelope"]["ciphertext"] = base64.b64encode(b"\x01" * 80).decode()
+    for index, account in enumerate(replies[1]["accounts"]):
+        for chain in vault_hd.SCHEMES:
+            account[chain] = replies[0]["accounts"][(index + 1) % 20][chain]
+
+    def racing_custody(args, *, stdin=None, **_kwargs):
+        with lock:
+            index = len(custody.calls)
+            custody.calls.append((list(args), json.loads(stdin)))
+        barrier.wait(timeout=10)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(replies[index]), stderr="")
+
+    monkeypatch.setattr(api, "_run_avault", racing_custody)
 
     def attempt(_):
         try:
@@ -217,8 +234,13 @@ def test_hd_simultaneous_imports_have_one_complete_winner(custody):
     assert "secret_exists" in results
     assert len(custody.calls) == 2
     row, = rows(vault_secrets)
-    assert {key: row[key] for key in ("ciphertext", "nonce", "wrap_meta")} == FIXTURE["import_response"]["envelope"]
-    assert len(json.loads(row["public_meta"])["hd_accounts"]) == 20
+    stored_envelope = {key: row[key] for key in ("ciphertext", "nonce", "wrap_meta")}
+    stored_accounts = json.loads(row["public_meta"])["hd_accounts"]
+    assert len(stored_accounts) == 20
+    stored_keys = [{key: account[key] for key in ("account", *vault_hd.SCHEMES)} for account in stored_accounts]
+    assert sum(stored_envelope == reply["envelope"] and stored_keys == reply["accounts"] for reply in replies) == 1
+    winner, = [result for result in results if isinstance(result, dict)]
+    assert winner["secret"]["accounts"] == meta()["accounts"]
     assert len(rows(vault_audit)) == 1
 
 
