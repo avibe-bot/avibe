@@ -31,6 +31,8 @@ SQLite durability-setting changes.
 - `write_watch_runtime` terminalizes all active runtime rows and then performs
   full-column updates for every snapshot entry, even unchanged peers.
 - `core/watches.py` stamps all active entries with the same fresh snapshot time.
+  Persistence is dirty-gated, not an unconditional timer: one Watch's cycle or
+  process change currently amplifies writes across its unchanged peers.
 - Old background-run index names can survive the legacy table rename; current
   schema also has source-actor prefix overlap. Leave index deletion to a separate
   migration with old-schema fixtures and query-plan validation rather than make
@@ -43,6 +45,17 @@ SQLite durability-setting changes.
 - `storage.loop_writers` intentionally measures controller-loop blocking, not
   process-wide physical writes. Worker-thread write-volume attribution is a
   separate observability follow-up, not a change to this metric's meaning.
+
+## Usage writer invariants
+
+A fixed 100 ms window coalesces calls arriving across adjacent event-loop turns.
+Later arrivals do not extend the window. Completion futures still settle after
+ledger processing, with the existing failure reporting and bounded waiting;
+caller cancellation does not cancel a shared batch. Shutdown `drain()` wakes the
+writer immediately rather than spending its deadline on the coalescing timer.
+Unawaited reads can be up to that extra window behind. Isolated calls more than
+100 ms apart still each write: this does not trade away acknowledged freshness
+for multi-second batching or claim that all steady usage writes disappear.
 
 ## Validation
 
