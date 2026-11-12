@@ -19,7 +19,7 @@ import {
 import { IS_APPLE } from '../../lib/platform';
 import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { isComposingKey } from '@/lib/imeComposition';
-import { onNativeDirectTransportChanged } from '@/lib/native';
+import { nativeDirectBaseline, onNativeDirectClosure } from '@/lib/native';
 import { useLatestRef } from '@/lib/useLatestRef';
 import {
   REMOTE_AUTH_STATE_EVENT,
@@ -155,7 +155,7 @@ export const TerminalView: React.FC<{
   const busyRetriesRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
   const authorizationRecoveryPendingRef = useRef(false);
-  // What the current socket has reached, for the transport-change handler below. `attached`: it
+  // What the current socket has reached, for the direct-closure handler below. `attached`: it
   // got its 'ready' frame. `persistent`: that frame said the session survives its socket (tmux).
   // `settled`: the shell exited, the terminal is disabled, or an authorization recovery owns the
   // reconnect, so nothing else should reconnect it.
@@ -171,6 +171,10 @@ export const TerminalView: React.FC<{
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
+  // Inside a native shell with the `direct` capability, the first socket waits (bounded) for the
+  // document's direct baseline, so a closure from before it existed is not taken for one to act
+  // on. Without the capability, or once the baseline is taken, there is nothing to wait for.
+  const [directBaselineTaken, setDirectBaselineTaken] = useState(() => nativeDirectBaseline() === null);
   // Scrollback search (SearchAddon). Opened with ⌘F/Ctrl+F while the terminal has focus; results
   // carry {index,count} for the "3/12" match counter (index is -1 past the highlight threshold).
   const [searchOpen, setSearchOpen] = useState(false);
@@ -198,18 +202,31 @@ export const TerminalView: React.FC<{
     return () => window.removeEventListener(REMOTE_AUTH_STATE_EVENT, onAuthorizationState);
   }, []);
 
-  // The native shell moved this origin between Cloudflare Tunnel and a direct path. A socket
-  // stays on the path it was opened on, and a browser WebSocket never reconnects by itself, so
-  // reattach through the same reconnect the button uses, but only where that costs nothing:
-  // a persistent session reattaches as it was, and a socket that never attached has nothing to
-  // lose. A live plain shell dies with its socket, so it stays on the path it has; one that was
-  // already lost keeps the overlay, which is what tells the user its process is gone. Input typed
-  // while there is no open socket is dropped, never queued, so nothing is replayed.
+  useEffect(() => {
+    if (directBaselineTaken) return;
+    let current = true;
+    // Taken meanwhile (another consumer's read answered): resolve at once.
+    void (nativeDirectBaseline() ?? Promise.resolve()).then(() => {
+      if (current) setDirectBaselineTaken(true);
+    });
+    return () => {
+      current = false;
+    };
+  }, [directBaselineTaken]);
+
+  // The native shell closed connections for this origin because their path was lost (a new
+  // `closure`). It cannot say whether this socket was on that path, and a browser WebSocket never
+  // reconnects by itself, so a session the server keeps (tmux) reattaches through the same
+  // reconnect the button uses, even if its socket was healthy. Only the server-side session
+  // survives: the client view (scrollback, viewport, search, selection) starts over. A plain
+  // shell, or a socket that has not attached yet, is left alone: a live plain shell dies with its
+  // socket, and one already lost keeps the overlay that tells the user its process is gone. Input
+  // typed while there is no open socket is dropped, never queued, so nothing is replayed.
   useEffect(
     () =>
-      onNativeDirectTransportChanged(() => {
+      onNativeDirectClosure(() => {
         if (settledRef.current) return;
-        if (attachedRef.current && !persistentRef.current) return;
+        if (!attachedRef.current || !persistentRef.current) return;
         busyRetriesRef.current = 0;
         setReconnectKey((key) => key + 1);
       }),
@@ -217,6 +234,7 @@ export const TerminalView: React.FC<{
   );
 
   useEffect(() => {
+    if (!directBaselineTaken) return;
     const term = new Terminal({
       fontSize: getTerminalFontSize(), // shared, persisted preference — see terminalFontSize.ts
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
@@ -465,7 +483,7 @@ export const TerminalView: React.FC<{
       termRef.current = null;
       searchRef.current = null;
     };
-  }, [sessionId, cwd, reconnectKey]);
+  }, [sessionId, cwd, reconnectKey, directBaselineTaken]);
 
   // Clear the paste-hint auto-dismiss timer if the view unmounts before it fires.
   useEffect(

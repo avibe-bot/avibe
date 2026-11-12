@@ -12,7 +12,6 @@ import {
   nativePushUnsubscribeOutcome,
   nativeShowAccount,
   nativeVoicePermission,
-  onNativeDirectTransportChanged,
   onNativePushOpened,
   openNativeExternal,
   setNativeAccountActionAvailable,
@@ -271,37 +270,5 @@ describe('native shell bridge', () => {
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith('/chat/ses_1?from=push#latest');
-  });
-
-  it('delivers each transport change once, in order, and only with the direct capability', () => {
-    const on = vi.fn((event: string, deliver: (payload: unknown) => void) => {
-      if (event === 'direct.transportChanged') {
-        deliver({ transport: 'direct', sequence: 1 });
-        // A repeat and an older change are both stale by the time they arrive.
-        deliver({ transport: 'direct', sequence: 1 });
-        deliver({ transport: 'tunnel', sequence: 0 });
-        // Not the contract's shape: nothing to act on.
-        deliver({ transport: 'relay', sequence: 2 });
-        deliver({ transport: 'tunnel', sequence: '3' });
-        deliver({ transport: 'tunnel' });
-        deliver(null);
-        deliver({ transport: 'tunnel', sequence: 4 });
-      }
-      return () => undefined;
-    });
-
-    installBridge({ on });
-    const withoutCapability = vi.fn();
-    onNativeDirectTransportChanged(withoutCapability);
-    expect(on).not.toHaveBeenCalled();
-    expect(withoutCapability).not.toHaveBeenCalled();
-
-    installBridge({ capabilities: { direct: 1 }, on });
-    const handler = vi.fn();
-    onNativeDirectTransportChanged(handler);
-    expect(handler.mock.calls).toEqual([
-      [{ transport: 'direct', sequence: 1 }],
-      [{ transport: 'tunnel', sequence: 4 }],
-    ]);
   });
 });
