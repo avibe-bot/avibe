@@ -69,3 +69,20 @@ describe('phrase checks', () => {
     expect(hdPaths(3).solana).toBe("m/44'/501'/3'/0'");
   });
 });
+
+describe('the seed box', () => {
+  it('binds purpose keypair-import, the name and scheme hd-seed:raw-seed (avault DESIGN), nothing else', async () => {
+    const { blindBoxAad, hdSeedImportBlindBoxContext, keypairImportBlindBoxContext } = await import('./vaultCrypto');
+    const aad = blindBoxAad(hdSeedImportBlindBoxContext('AGENT_WALLET'));
+    const text = new TextDecoder().decode(aad);
+    expect(text).toContain('keypair-import');
+    expect(text).toContain('AGENT_WALLET');
+    // The scheme field, length-prefixed exactly as avault reads it.
+    const scheme = new TextEncoder().encode('hd-seed:raw-seed');
+    const prefixed = new Uint8Array([0, 0, 0, scheme.length, ...scheme]);
+    expect(bytesToHex(aad).includes(bytesToHex(prefixed))).toBe(true);
+    // Not substitutable for a Solana import box of the same name.
+    expect(bytesToHex(aad)).not.toBe(bytesToHex(blindBoxAad(keypairImportBlindBoxContext('AGENT_WALLET', 'base58-secret'))));
+    expect(() => hdSeedImportBlindBoxContext('bad name')).toThrow();
+  });
+});
