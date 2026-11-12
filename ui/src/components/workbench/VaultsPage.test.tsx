@@ -210,7 +210,7 @@ describe('PERMISSIONS-013 VaultsPage capability-gated management actions', () =>
     },
     {
       label: 'Member', context: member, canRevoke: true, hasSettings: true,
-      protectedMenu: ['Show value', 'Copy value', 'Edit secret', 'Delete'], standardMenu: ['Edit secret', 'Delete'],
+      protectedMenu: ['Show value', 'Copy value', 'Edit key', 'Delete'], standardMenu: ['Edit key', 'Delete'],
     },
   ] as const;
 
