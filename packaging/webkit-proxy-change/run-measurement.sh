@@ -11,12 +11,13 @@ stage_results="$out/stages.jsonl"
 : > "$stage_results"
 printf '{"status":"running","label":"%s"}\n' "$label" > "$out/summary.json"
 finalize_summary() {
+  python3 "$probe_dir/instance_evidence.py" "$out" "$probe_dir/instance-cases.json"
   python3 - "$out/summary.json" "$stage_results" "$1" <<'PY'
 import json, sys
 p, stages_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
 data = json.load(open(p))
 stages = [json.loads(line) for line in open(stages_path)]
-names = ("build-for-testing", "product-validation", "simulator-ready", "install", "test-launch", "lifecycle", "direct-minimal", "cold-minimal", "full-matrix")
+names = ("build-for-testing", "product-validation", "simulator-ready", "install", "test-launch", "lifecycle", "direct-minimal", "cold-minimal", "full-matrix", "instance-routes")
 if not stages:
     cause = data.get("reason", "setup failed before build")
     stages = [{"stage": name, "status": "skipped", "verdict": "unmeasured", "exit": None, "cause": cause} for name in names]
@@ -110,13 +111,16 @@ sudo -n ifconfig lo0 alias 127.0.0.2 255.0.0.0
 while read -r ip host; do
   [[ -z "$host" ]] && continue
   printf '%s %s %s\n' "$ip" "$host" "$marker" | sudo -n tee -a /etc/hosts >/dev/null
-done < <(python3 - "$probe_dir/matrix.json" <<'PY'
+done < <(python3 - "$probe_dir/matrix.json" "$probe_dir/instance-cases.json" <<'PY'
 import json, sys
 for row in json.load(open(sys.argv[1])):
     ip = "127.0.0.2" if row["origin"] == "h2" else "127.0.0.1"
     print(ip, f"{row['id']}.webkit-proxy.test")
 for case_id in ("lifecycle-reload", "lifecycle-recreate", "lifecycle-relaunch"):
     print("127.0.0.1", f"{case_id}.webkit-proxy.test")
+for row in json.load(open(sys.argv[2])):
+    for role in ("control", "a", "b"):
+        print("127.0.0.2" if row["protocol"] == "h2" else "127.0.0.1", f"{row['id']}-{role}.webkit-proxy.test")
 PY
 )
 
@@ -140,8 +144,8 @@ for _ in {1..100}; do
   sleep 0.1
 done
 curl --max-time 2 --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.json"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 27 and d["lifecycleCases"] == 3 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
-bounded 20 python3 - "$probe_dir/matrix.json" <<'PY'
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 27 and d["lifecycleCases"] == 3 and d["instanceCases"] == 10 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
+bounded 20 python3 - "$probe_dir/matrix.json" "$probe_dir/instance-cases.json" <<'PY'
 import json, socket, sys
 for row in json.load(open(sys.argv[1])):
     host = row["id"] + ".webkit-proxy.test"
@@ -152,6 +156,12 @@ for case_id in ("lifecycle-reload", "lifecycle-recreate", "lifecycle-relaunch"):
     host = case_id + ".webkit-proxy.test"
     actual = {r[4][0] for r in socket.getaddrinfo(host, 443, socket.AF_INET)}
     assert actual == {"127.0.0.1"}, (host, actual)
+for row in json.load(open(sys.argv[2])):
+    for role in ("control", "a", "b"):
+        host = f"{row['id']}-{role}.webkit-proxy.test"
+        expected = "127.0.0.2" if row["protocol"] == "h2" else "127.0.0.1"
+        actual = {r[4][0] for r in socket.getaddrinfo(host, 443, socket.AF_INET)}
+        assert actual == {expected}, (host, actual)
 print("Runner host mappings verified (simulator visibility still requires real requests)")
 PY
 
@@ -194,7 +204,7 @@ run_stage() {
   "$@" 2>&1 | tee "$out/$stage.log"
   local status=${PIPESTATUS[0]}
   set -e
-  if [[ "$stage" == "full-matrix" || ( "$status" -eq 0 && ( "$stage" == "test-launch" || "$stage" == *minimal ) ) ]]; then
+  if [[ "$stage" == "full-matrix" || "$stage" == "instance-routes" || ( "$status" -eq 0 && ( "$stage" == "test-launch" || "$stage" == *minimal ) ) ]]; then
     set +e
     python3 "$probe_dir/validate-stage.py" "$stage" "$out" "$probe_dir/matrix.json" 2>&1 | tee "$out/$stage-evidence.log"
     local evidence_status=${PIPESTATUS[0]}
@@ -222,14 +232,14 @@ validate_products() {
 }
 
 test_method() {
-  local stage=$1 method=$2 seconds=$3
+  local stage=$1 method=$2 seconds=$3 test_class=${4:-WebKitProxyChangeTests}
   python3 "$probe_dir/validate-stage.py" timeout "$seconds" \
     xcodebuild test-without-building -project "$project" -scheme WebKitProxyChange \
     -destination "platform=iOS Simulator,id=$device_id" \
     -derivedDataPath "$out/derived-data" \
     -resultBundlePath "$out/xcresult/$stage.xcresult" \
     -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
-    "-only-testing:WebKitProxyChangeTests/WebKitProxyChangeTests/$method" \
+    "-only-testing:WebKitProxyChangeTests/$test_class/$method" \
     CODE_SIGNING_ALLOWED=NO
 }
 
@@ -296,6 +306,7 @@ run_stage lifecycle run_lifecycle
 run_stage direct-minimal test_method direct-minimal testDirectTLSMinimal 120
 run_stage cold-minimal test_method cold-minimal testColdMinimal 120
 run_stage full-matrix test_method full-matrix testMatrix 900
+run_stage instance-routes test_method instance-routes testInstanceRoutes 2700 InstanceRouteTests
 
 python3 "$probe_dir/validate-stage.py" timeout 30 xcrun simctl spawn "$device_id" log show --style compact --last 30m \
   --predicate 'process == "com.apple.WebKit.Networking" OR process == "com.apple.WebKit.WebContent"' \

@@ -5,6 +5,8 @@ import http2 from 'node:http2';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import {instanceCases, instanceHosts, instanceFixture} from './instance-fixture.mjs';
+import {instanceScript} from './instance-script.mjs';
 
 // This fixture is intentionally independent of the product listener/controller.
 // All listeners are runner-loopback-only. No production hostname or credential.
@@ -17,6 +19,7 @@ const lifecycleCases = [
   {id: 'lifecycle-relaunch', origin: 'h1', proxy: 'h1'},
 ];
 const byHost = new Map([...cases, ...lifecycleCases].map(c => [`${c.id}.webkit-proxy.test`, c]));
+for (const c of instanceHosts) byHost.set(c.host, c);
 const key = fs.readFileSync(`${out}/key.pem`);
 const cert = fs.readFileSync(`${out}/cert.pem`);
 const events = [];
@@ -38,6 +41,8 @@ function log(event, fields = {}) {
   console.log(JSON.stringify(entry));
   return entry;
 }
+
+const extension = instanceFixture(log, upstreamConnections);
 
 const script = String.raw`
 window.probe = {
@@ -155,6 +160,14 @@ function makeOrigin(route, protocol, host, port) {
     res.on('close', () => log('response_closed', {...details, finished:res.writableFinished}));
     if (!details.case) { res.writeHead(403); res.end(); return; }
     res.setHeader('cache-control', 'no-store');
+    const fixture = byHost.get(details.host);
+    if (fixture?.role && req.headers.origin) {
+      const source = byHost.get(new URL(req.headers.origin).hostname);
+      if (source?.id === fixture.id) {
+        res.setHeader('access-control-allow-origin', req.headers.origin);
+        res.setHeader('vary', 'Origin');
+      }
+    }
     if (details.path === '/events') {
       res.setHeader('content-type', 'text/event-stream');
       res.writeHead(200);
@@ -182,7 +195,8 @@ function makeOrigin(route, protocol, host, port) {
     if (details.path === '/' || details.path === '/page') {
       res.setHeader('content-type', 'text/html');
       res.end('<!doctype html><title>proxy measurement</title><script>'
-        + script.replace('PAGE_PAYLOAD', JSON.stringify(details)) + '</script>');
+        + script.replace('PAGE_PAYLOAD', JSON.stringify(details))
+        + (fixture?.role ? instanceScript : '') + '</script>');
       return;
     }
     res.setHeader('content-type', 'application/json');
@@ -272,7 +286,10 @@ const control = http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url, 'http://127.0.0.1:18090');
     let result = {ok:true};
-    if (url.pathname === '/log') {
+    if (url.pathname.startsWith('/instance/')) {
+      let raw = ''; for await (const chunk of req) raw += chunk;
+      result = await extension.handle(url.pathname, JSON.parse(raw));
+    } else if (url.pathname === '/log') {
       let raw = ''; for await (const chunk of req) raw += chunk;
       result = log('client', JSON.parse(raw));
     } else if (url.pathname === '/seen') {
@@ -322,7 +339,7 @@ const control = http.createServer(async (req,res) => {
     } else if (url.pathname === '/health') {
       const ports = [443,18443,18444,18080,18082,18083,18090];
       result = {ok:servers.every(server => server.listening) && ports.every(port => listening.has(port)),
-        cases:cases.length, lifecycleCases:lifecycleCases.length,
+        cases:cases.length, lifecycleCases:lifecycleCases.length, instanceCases:instanceCases.length,
         listening:[...listening].sort(), originAddresses:['127.0.0.1:443','127.0.0.2:443']};
     } else { throw new Error('unknown control operation'); }
     res.setHeader('content-type','application/json'); res.end(JSON.stringify(result));
@@ -334,6 +351,7 @@ const control = http.createServer(async (req,res) => {
 control.listen(18090, '127.0.0.1', () => log('control_listening', {port:18090}));
 process.on('SIGTERM', () => {
   log('fixture_stopping', {recordedProcesses:[...recordedProcesses]});
+  extension.shutdown();
   for (const entry of proxyConnections.values()) { entry.client.destroy(); entry.upstream.destroy(); }
   for (const client of stalledClients) client.destroy();
   for (const server of [...servers,proxy,refuseProxy,stallProxy,control]) server.close();

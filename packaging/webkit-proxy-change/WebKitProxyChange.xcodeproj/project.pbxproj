@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E10000000000000000000001 /* InstanceRouteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002; };
+		E10000000000000000000003 /* instance-cases.json in Resources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000004; };
 		43FF04234A79D3ECB26CB12C /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CD48D745C845802F6B53B2E3 /* Foundation.framework */; };
 		7695C5C6A718EA22AEB12AAB /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CD48D745C845802F6B53B2E3 /* Foundation.framework */; };
 		813EBBE2129D602CB8D7E886 /* WebKitProxyChangeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60F3811FF4FCCD4755D75613 /* WebKitProxyChangeTests.swift */; };
@@ -26,6 +28,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E10000000000000000000002 /* InstanceRouteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstanceRouteTests.swift; sourceTree = "<group>"; };
+		E10000000000000000000004 /* instance-cases.json */ = {isa = PBXFileReference; path = "instance-cases.json"; sourceTree = "<group>"; };
 		396D3F2FB09C52E6D3CE946B /* ProbeHost-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "ProbeHost-Info.plist"; sourceTree = "<group>"; };
 		50113205D4FAD17EE8DED5E2 /* matrix.json */ = {isa = PBXFileReference; includeInIndex = 1; path = matrix.json; sourceTree = "<group>"; };
 		60F3811FF4FCCD4755D75613 /* WebKitProxyChangeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WebKitProxyChangeTests.swift; sourceTree = "<group>"; };
@@ -60,6 +64,8 @@
 			isa = PBXGroup;
 			children = (
 				60F3811FF4FCCD4755D75613 /* WebKitProxyChangeTests.swift */,
+				E10000000000000000000002 /* InstanceRouteTests.swift */,
+				E10000000000000000000004 /* instance-cases.json */,
 				50113205D4FAD17EE8DED5E2 /* matrix.json */,
 				CA286A5A0CFD53E336FD9E22 /* Anchor.der */,
 			);
@@ -193,6 +199,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ADE384377A65A5DB053C44F9 /* matrix.json in Resources */,
+				E10000000000000000000003 /* instance-cases.json in Resources */,
 				8DF737FC42AD01D2CEB1E688 /* Anchor.der in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -213,6 +220,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				813EBBE2129D602CB8D7E886 /* WebKitProxyChangeTests.swift in Sources */,
+				E10000000000000000000001 /* InstanceRouteTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

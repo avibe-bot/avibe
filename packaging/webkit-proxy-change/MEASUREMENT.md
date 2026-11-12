@@ -71,6 +71,58 @@ navigation attempt, not ten 20-second retries; JS evaluation has a 12-second
 bound; browser cleanup does not await an unbounded JS promise. The whole matrix
 has a 900-second ceiling. Timeouts remain explicit unmeasured/failed observations.
 
+## Pending Q2/Q3/Q4 extension (not executed)
+
+`instance-cases.json` adds ten separate cells after the unchanged matrix:
+Q2 (control-plane-used store, fresh instance host) and Q3 (warm A, exact host
+union adds fresh B), each H1/H2; Q4 port replacement on two live stores, each
+H1/H2, with cooperative closure, occupied old port/new sockets, and occupied
+old port/existing sockets. `InstanceRouteTests.testInstanceRoutes` is a separate
+one-test stage; `instance_evidence.py` writes `instance-observations.json` even
+when that stage is skipped or interrupted. This extension has no measured result.
+
+Each store is named and recorded by UUID/handle; config writes have per-store
+sequence, exact sorted hosts, port, start/end, and explicit `allowFailover=false`
+for isolation (not a shipping-default decision). P/P2 use epochs 1/2; stand-ins
+have no epoch. Each new-host/recovery probe is immediate uncached fetch, unique
+navigation, then fetch, without harness retry. Fresh-host fetch is a cross-origin
+GET from the established control/A document, allowed by cell-scoped fixture CORS;
+only correlated server/CONNECT evidence qualifies it. Q3 keeps A's WebView alive
+and reports A route and connection preservation separately from B admission.
+
+Every listener in these cells runs in a child process; stand-ins are independent
+of the recovery-owned relays. Recovery can stop only `listener(1)` workers. A
+stand-in first forwards (existing-pool case), then pauses without closing its
+sockets, or exclusively binds the released old port and stalls new CONNECTs.
+Test teardown happens after observation-end, not as part of recovery. A completed
+uncached origin request can prove bypass; absence of a new CONNECT cannot.
+H2 cross-host reuse is retained with request host, TLS SNI and CONNECT authority;
+it is not silently credited as a fresh intended-host CONNECT.
+
+GET failures and mixed routes are measured false; absent preconditions or
+unsettled/uncorrelated operations yield null/unmeasured, with partial operations
+preserved. Fetch aborts after 8 s and settles before proceeding; its native bridge
+has a 12 s watchdog plus 2 s cancellation grace. Navigation has 15 s plus 2 s
+cancellation grace; callbacks are identity-fenced. If cancellation cannot be
+acknowledged, the view is explicitly unmeasured, never reset to obtain success.
+Whole-cell work is capped at 240 s; the separate XCTest wrapper at 2700 s.
+These are fixture bounds, not product recovery latency promises.
+
+No App restart, private NetworkProcess restart, TLS termination, arbitrary target,
+POST replay, or old-stream-survival assertion is introduced. All targets are
+allowlisted runner-loopback TLS fixtures. The original 27-cell and lifecycle
+sources/outcomes remain separate and unchanged. Q4 cooperative success alone
+cannot qualify occupied-port recovery, and true failover/device behavior remains
+outside these ten isolation cells. No Actions round is authorized merely by
+adding this source.
+
+Pure additions (no listeners or child processes):
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging/webkit-proxy-change -p 'test_instance_evidence.py' -v
+node packaging/webkit-proxy-change/test-instance-pure.mjs
+```
+
 ## Cheap local checks (no Apple execution)
 
 ```sh

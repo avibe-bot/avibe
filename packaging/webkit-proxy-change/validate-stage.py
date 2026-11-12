@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from evidence import analyze_matrix, inventory, operation
+from instance_evidence import write_report
 
 
 def require(condition: bool, message: str) -> None:
@@ -41,7 +42,7 @@ def validate_bundle(app: Path, build_log: Path) -> None:
             require(isinstance(value, str) and bool(value) and "$" not in value,
                     f"{bundle.name}: missing/invalid {key}")
         if bundle == test:
-            for name in ("Anchor.der", "matrix.json"):
+            for name in ("Anchor.der", "matrix.json", "instance-cases.json"):
                 require((bundle / name).is_file(), f"{bundle.name}: missing {name}")
         else:
             require((bundle / "Anchor.der").is_file(), f"{bundle.name}: missing Anchor.der")
@@ -229,6 +230,17 @@ def validate_lifecycle(out: Path) -> None:
 
 
 def validate_evidence(stage: str, out: Path, matrix_path: Path) -> None:
+    if stage == "instance-routes":
+        report = write_report(out, matrix_path.with_name("instance-cases.json"))
+        require(report["measuredCases"] == report["expectedCases"] == 10,
+                "instance coverage incomplete; see instance-observations.json")
+        log = (out / "instance-routes.log").read_text()
+        counts = re.findall(r"Executed (\d+) tests?, with (\d+) failures?", log)
+        require(bool(counts) and all(n == "1" and f == "0" for n, f in counts), "instance XCTest execution missing")
+        require(any("Test Case" in line and "testInstanceRoutes" in line and "passed" in line for line in log.splitlines()),
+                "instance test method did not pass")
+        print(json.dumps({"stage":stage,"measuredCases":10,"transportQualified":False}))
+        return
     if stage == "lifecycle":
         validate_lifecycle(out)
         return
