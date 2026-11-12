@@ -2,7 +2,7 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or signing digests and Solana messages without exposing secret values to the agent.
-version: 0.8.1
+version: 0.9.0
 ---
 
 # Use Avibe Vault
@@ -13,6 +13,7 @@ Core concepts:
 - Static secret: a regular secret value, such as an API key, token, database password, or deployment credential. Use it with `vibe vault run` for environment injection or `vibe vault fetch` for authenticated HTTP egress.
 - A static secret can contain up to 32 named fields. `NAME` selects its default field (existing secrets call it `value`); `NAME.field` selects that field, including an explicit default label such as `GITHUB_LOGIN.password`. Field names match `^[a-z][a-z0-9_]{0,63}$`. The default label may be renamed; extra labels and the choice of default cannot change after creation.
 - Keypair secret: a signing key for digests or transactions, such as a wallet key or deployment signer. It cannot be exported as an environment variable and cannot be used with `run` / `fetch`; use `vibe vault sign`.
+- HD seed wallet: a standard-tier signing key whose row has `signer_kind: hd-seed` and an `accounts` list. One seed supplies EVM, Bitcoin Taproot and Solana addresses at each shared account index. It is signing-only, never a value to reveal/export/inject. Only the user creates/imports it, enables accounts, names them and changes ask-before-signing in the browser; never ask for words, a passphrase or a seed in chat.
 - Standard: for lower-risk routine automation. Agents can usually use it without interrupting the user unless it is configured to ask first.
 - Protected: for high-risk secrets, such as production databases or wallet/funds keys. Because protected secrets are end-to-end encrypted, use requires browser approval and passkey unlock.
 
@@ -20,6 +21,9 @@ Rules:
 - Vault approval auto-resume and Vault's `--no-callback` are unchanged by the retirement of Agent Run callbacks. Agent Run `--no-reply` does not disable Vault continuations.
 - Refer to secrets only by secret name, record ref (`NAME.field`), tag, or skill tag.
 - Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`. Keypairs do not accept field refs.
+- HD signing requires `--chain evm|bitcoin|solana`; `--account N` defaults to 0 and must appear in the listed enabled accounts (0–19). The chain fixes the scheme: EVM recoverable ECDSA, Bitcoin BIP341 key-path, Solana Ed25519. Omit `--scheme`, or supply the matching scheme. `--chain` and `--account` are errors on ordinary keypairs; keep their existing commands unchanged.
+- HD EVM/Bitcoin take the independently computed 32-byte `--digest`; HD Solana takes the exact serialized `--message-hex`, never its hash. Signing needs avault >=0.1.11; on `avault_upgrade_required`, stop and ask for the approved avault update rather than changing accounts, schemes or protection. If the managed version is still below 0.1.11, wait for the supported release; do not install an unofficial binary.
+- HD ask-before-signing is per account and applies across that account's three chains. A pending sign request is bound to its original account and input; do not rerun `sign` or switch accounts to bypass approval. On auto-resume, read the completed request's signature and derivation and continue once. Mnemonic words cannot be viewed again; do not attempt to extract them or reconstruct them from the seed.
 - Authorization is per secret: approving a protected secret unlocks **all its fields** for the grant's lifetime. The CLI cannot create, replace, or delete fields; the user does that in the browser.
 - `--env NAME.field` delivers one value to `NAME_FIELD` (only the field is uppercased); `--env LOCAL=NAME.field` chooses the variable. `--tag` and `--skill` deliver every field of each selected secret, using `NAME` for the default and `NAME_FIELD` for extras. Conflicting variable mappings fail before delivery.
 - `list` and `find` print the same value-free row: a static secret lists its `fields`, and a multi-field secret also names its `default_field`, the field `NAME` selects. If a ref fails with `field_not_found`, use the listed field names rather than guessing.
@@ -89,6 +93,11 @@ Sign a Solana transaction message with a standard Solana keypair secret. `$MESSA
 
 For a protected Solana key, add the matching context; the command returns a pending browser signing request:
 `vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX" --signing-context-json "{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"$MESSAGE_HEX\"}" --command "sign Solana transaction message"`
+
+Sign with an enabled HD wallet account. Account indices are shared across chains; the list identifies the receiving address for each chain. `$EVM_DIGEST_HEX` and `$BITCOIN_SIGHASH_HEX` are independently validated 32-byte transaction digests; `$MESSAGE_HEX` is the complete serialized Solana message:
+`vibe vault sign AGENT_WALLET --chain evm --account 0 --digest "$EVM_DIGEST_HEX"`
+`vibe vault sign AGENT_WALLET --chain bitcoin --account 1 --digest "$BITCOIN_SIGHASH_HEX"`
+`vibe vault sign AGENT_WALLET --chain solana --account 1 --message-hex "$MESSAGE_HEX"`
 
 Ask the user to delete a Vault secret. Every agent-initiated delete needs one-click user approval, including standard, protected, static, and keypair secrets:
 `vibe vault remove OLD_TOKEN --reason "Rotated credential"`

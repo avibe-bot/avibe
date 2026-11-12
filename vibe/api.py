@@ -2480,6 +2480,9 @@ class VaultApiError(ValueError):
             "invalid_digest": "vault.signing.invalidDigest",
             "invalid_sign_input": "vault.signing.invalidInput",
             "protected_solana_unsupported": "vault.signing.protectedSolanaUnsupported",
+            "invalid_hd_wallet": "vault.hd.invalidWallet",
+            "invalid_hd_account": "vault.hd.invalidAccount",
+            "hd_signing_state_changed": "vault.hd.stateChanged",
         }.get(code)
 
 
@@ -3089,6 +3092,9 @@ def _operation_context_display(
     if egress:
         display["egress"] = egress
     delivery = request_payload.get("delivery") if isinstance(request_payload.get("delivery"), dict) else {}
+    if isinstance(delivery.get("derivation"), dict) and isinstance(card.get("account"), dict):
+        display["derivation"] = delivery["derivation"]
+        display["account"] = card["account"]
     source = _display_source(card.get("source_selector") or delivery.get("source_selector"))
     if source:
         display["source"] = source
@@ -3578,6 +3584,14 @@ def _attach_signed_sign_operation_context(
             signing_context = delivery.get("signing_context")
             if isinstance(signing_context, dict):
                 release["signingContext"] = signing_context
+            if delivery.get("derivation") is not None:
+                vault_service.validate_sign_request(
+                    conn, request_id, name=persisted_name, scheme=persisted_scheme,
+                    digest=persisted_digest, message_hex=persisted_message, signing_context=signing_context,
+                    derivation=delivery["derivation"],
+                )
+                release["derivation"] = delivery["derivation"]
+                release["signingKey"] = delivery["signing_key"]
             if meta.get("protection") == "protected":
                 signing_key = vault_service.get_signing_public_key(conn, persisted_name)
                 if exact_message:
@@ -3618,7 +3632,7 @@ def _attach_signed_sign_operation_context(
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except (vault_service.InvalidSigningKeyError, vault_solana.SolanaSigningError) as exc:
-        raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
+        raise VaultApiError(str(exc), code=getattr(exc, "code", "invalid_signing_key"), status=409) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
 
@@ -3810,6 +3824,39 @@ def _vault_solana_keypair_spec(payload: dict, *, kind: str, protection: str, pub
     return {"source": "import", "format": spec["format"], "blind_box": blind_box}
 
 
+def _vault_hd_keypair_spec(payload: dict, *, kind: str, protection: str, public_meta: dict | None) -> dict | None:
+    from storage import vault_hd
+
+    spec = payload.get("keypair")
+    hd = payload.get("signer_kind") == vault_hd.SIGNER_KIND or isinstance(spec, dict) and spec.get("type") == vault_hd.SIGNER_KIND
+
+    def invalid(message: str) -> VaultApiError:
+        return VaultApiError(message, code="invalid_hd_wallet")
+
+    if not hd:
+        if "hd_accounts" in (public_meta or {}):
+            raise invalid("HD account public keys must come from avault")
+        return None
+    if kind != "keypair" or protection != "standard":
+        raise invalid("HD seed wallets support only standard-tier keypairs")
+    if payload.get("signer_kind") not in (None, vault_hd.SIGNER_KIND):
+        raise invalid("HD seed wallets require signer_kind hd-seed")
+    if spec != {"type": "hd-seed", "source": "import", "format": "raw-seed"}:
+        raise invalid("HD keypair requires type hd-seed, source import and format raw-seed")
+    if public_meta or set(payload) - {
+        "name", "kind", "protection", "signer_kind", "keypair", "blind_box", "description", "tags",
+        "policy", "links", "provision_request_id", "public_meta",
+    }:
+        raise invalid("HD create accepts a blind_box and display metadata only; no seed or client public keys")
+    policy = payload.get("policy")
+    if policy is not None and (not isinstance(policy, dict) or "always_ask" in policy):
+        raise invalid("HD ask-before-signing is configured per account")
+    box = payload.get("blind_box")
+    if not isinstance(box, dict):
+        raise VaultApiError("HD seed import requires a browser blind_box", code="blind_box_required")
+    return box
+
+
 def create_vault_secret(
     payload: dict,
     *,
@@ -3862,7 +3909,8 @@ def create_vault_secret(
         kind=kind,
         default_field=default_field,
     )
-    solana_keypair = _vault_solana_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
+    hd_keypair = _vault_hd_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
+    solana_keypair = None if hd_keypair is not None else _vault_solana_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
     atomic_protected_establishment = establishing_vmk and protection == "protected"
     try:
         user_context = vault_service.require_secret_create_access(user_context=user_context)
@@ -3908,7 +3956,15 @@ def create_vault_secret(
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
 
-    if solana_keypair is not None and solana_keypair["source"] != "protected-record":
+    if hd_keypair is not None:
+        try:
+            created = avault_hd_seed_import(name, hd_keypair)
+        except AvaultError as exc:
+            raise _vault_api_error_from_avault(exc, prefix="avault HD import failed") from exc
+        sealed = created["sealed"]
+        signer_kind = "hd-seed"
+        public_meta = {"hd_accounts": created["accounts"]}
+    elif solana_keypair is not None and solana_keypair["source"] != "protected-record":
         try:
             if solana_keypair["source"] == "generate":
                 created = avault_keypair_generate(name)
@@ -4005,7 +4061,8 @@ def create_vault_secret(
         raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidSigningKeyError as exc:
         raise VaultApiError(
-            str(exc), code="invalid_keypair", status=409, message_key="vault.signing.invalidProtectedSolanaRecord",
+            str(exc), code="invalid_keypair", status=409,
+            message_key="vault.signing.invalidKey" if hd_keypair is not None else "vault.signing.invalidProtectedSolanaRecord",
         ) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
@@ -4015,6 +4072,27 @@ def create_vault_secret(
         request_id=str(payload.get("provision_request_id") or "") or None,
         request_status="fulfilled" if payload.get("provision_request_id") else None,
     )
+    return {"ok": True, "secret": meta}
+
+
+def update_vault_hd_account(
+    name: str, payload: dict, *, account: int | None = None, user_context: Any = None,
+) -> dict:
+    from storage import vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    _reject_vault_metadata_secret_fields(payload)
+    try:
+        with _vault_engine().begin() as conn:
+            meta = vault_service.update_hd_account(conn, name, account=account, changes=payload, user_context=user_context)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_hd_account", status=409) from exc
+    _publish_vaults_updated(scope="secret", secret_name=name)
     return {"ok": True, "secret": meta}
 
 
@@ -4380,7 +4458,9 @@ def _vault_request_result(conn, request: dict) -> dict | None:
         delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
         signature = delivery.get("signature") if isinstance(delivery, dict) else None
         if isinstance(signature, dict):
-            return {"type": "signature", "signature": signature}
+            return {"type": "signature", "signature": signature, **(
+                {"derivation": delivery["derivation"]} if delivery.get("derivation") is not None else {}
+            )}
     return None
 
 
@@ -4424,9 +4504,11 @@ def _vault_requester_payload(payload: dict) -> dict:
     if payload.get("skill"):
         out["skill"] = str(payload["skill"])
     if isinstance(requester, dict):
-        for key in ("backend", "native_session_id"):
-            if requester.get(key):
+        for key in ("backend", "native_session_id", "skill", "run_id"):
+            if requester.get(key) and key not in out:
                 out[key] = str(requester[key])
+        if requester.get("callback_disabled") is True:
+            out["callback_disabled"] = True
     return out
 
 
@@ -4533,7 +4615,7 @@ def _validate_sign_parameters(payload: dict) -> None:
     allowed = {
         "name", "digest", "message_hex", "scheme", "request_id", "signature", "requester", "delivery",
         "signing_context", "signingContext", "session_id", "run_id", "skill", "command",
-        "egress", "mode", "request_ttl_seconds",
+        "egress", "mode", "request_ttl_seconds", "chain", "account",
     }
     extra = set(payload) - allowed
     delivery = payload.get("delivery")
@@ -4550,6 +4632,21 @@ def _validate_sign_parameters(payload: dict) -> None:
         )
 
 
+def _preflight_hd_signing(engine, name: str, derivation: dict | None, scheme: str, *, user_context: Any = None) -> None:
+    """Gate HD custody outside write transactions, after validating the selected row."""
+    from storage import vault_service
+
+    with engine.connect() as conn:
+        row = vault_service.require_secret_access(conn, name, user_context=user_context)
+        if row.get("signer_kind") != "hd-seed" and derivation is None:
+            return
+        vault_service.get_signing_public_key(conn, name, derivation=derivation, scheme=scheme, user_context=user_context)
+    try:
+        _require_avault_hd_seed_surface()
+    except AvaultError as exc:
+        raise _vault_api_error_from_avault(exc, prefix="HD signing unavailable") from exc
+
+
 def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
     from storage import vault_crypto, vault_service
 
@@ -4558,15 +4655,17 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
     _validate_sign_parameters(payload)
     name = str(payload.get("name") or "").strip()
     scheme, digest, message_hex = _sign_input_from_payload(payload)
+    derivation = _sign_derivation_from_payload(payload)
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     try:
+        _preflight_hd_signing(engine, name, derivation, scheme, user_context=user_context)
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name, user_context=user_context)
             if meta.get("kind") != "keypair":
                 raise VaultApiError(f"secret '{name}' is not a signing key", code="not_signing_key", status=409)
-            if (meta.get("signer_kind") or "local") != "local":
+            if (meta.get("signer_kind") or "local") not in {"local", "hd-seed"}:
                 raise VaultApiError(
                     f"secret '{name}' uses signer_kind '{meta.get('signer_kind')}', which is not locally signable",
                     code="unsupported_signer_kind",
@@ -4591,6 +4690,7 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
                 user_context=user_context,
+                derivation=derivation,
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
@@ -4599,7 +4699,7 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
     except vault_service.ProtectedSolanaUnsupportedError as exc:
         raise _protected_solana_unsupported(exc) from exc
     except vault_service.InvalidSigningKeyError as exc:
-        raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
+        raise VaultApiError(str(exc), code=getattr(exc, "code", "invalid_signing_key"), status=409) from exc
     except vault_service.InvalidSigningContextError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.contextSchemeMismatch") from exc
     except vault_service.InvalidRequestError as exc:
@@ -5306,15 +5406,32 @@ def _sign_digest_from_payload(value: object) -> str:
     return digest.lower()
 
 
+def _sign_derivation_from_payload(payload: dict) -> dict | None:
+    from storage import vault_hd
+
+    if "chain" not in payload and "account" not in payload:
+        return None
+    try:
+        return vault_hd.derivation(payload.get("chain"), payload.get("account", 0))
+    except ValueError as exc:
+        raise VaultApiError(str(exc), code="invalid_hd_wallet", status=409) from exc
+
+
 def _sign_input_from_payload(payload: dict) -> tuple[str, str | None, str | None]:
     """Return ``(scheme, digest, message_hex)``; exactly one of the two inputs is set.
 
     secp256k1 schemes sign a 32-byte ``digest``. ``ed25519`` signs the exact bytes
     in ``message_hex`` and refuses a digest, so neither can stand in for the other.
     """
-    from storage import vault_service, vault_solana
+    from storage import vault_hd, vault_service, vault_solana
 
+    derivation = _sign_derivation_from_payload(payload)
     scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
+    if derivation is not None:
+        expected = vault_hd.SCHEMES[derivation["chain"]]
+        if payload.get("scheme") is not None and payload["scheme"] != expected:
+            raise VaultApiError("signature scheme does not match the HD chain", code="invalid_hd_wallet", status=409)
+        scheme = expected
     if scheme != vault_solana.SCHEME and payload.get("message_hex") is None:
         digest = _sign_digest_from_payload(payload.get("digest"))
         if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
@@ -5797,7 +5914,7 @@ def _verify_standard_signature(
         try:
             vault_service.require_compressed_signing_public_key(signing_public_key)
         except vault_service.InvalidSigningKeyError as exc:
-            raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
+            raise VaultApiError(str(exc), code=getattr(exc, "code", "invalid_signing_key"), status=409) from exc
     if signing_public_key is None:
         return
     _verify_protected_browser_signature(
@@ -5851,6 +5968,7 @@ def vault_sign(payload: dict) -> dict:
     _validate_sign_parameters(payload)
     name = str(payload.get("name") or "").strip()
     scheme, digest, message_hex = _sign_input_from_payload(payload)
+    derivation = _sign_derivation_from_payload(payload)
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     signing_context = _verifiable_signing_context_from_payload(payload, digest=digest, message_hex=message_hex)
@@ -5859,8 +5977,10 @@ def vault_sign(payload: dict) -> dict:
     protected_response: dict | None = None
     protected_event: dict | None = None
     approval_required_request: dict | None = None
+    signing_binding: dict | None = None
     try:
-        if message_hex is not None:
+        _preflight_hd_signing(engine, name, derivation, scheme)
+        if message_hex is not None and derivation is None:
             # Probe only standard custody, outside the request write transaction.
             # Protected requests never call avault, including version discovery.
             with engine.connect() as conn:
@@ -5872,11 +5992,13 @@ def vault_sign(payload: dict) -> dict:
                     ed25519_unavailable = exc
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
-            signing_public_key = vault_service.get_signing_public_key(conn, name)
+            signing_public_key = vault_service.get_signing_public_key(conn, name, derivation=derivation, scheme=scheme)
+            if derivation is not None:
+                signing_binding = vault_service.hd_signing_binding(vault_service.require_secret_access(conn, name), derivation)
             if meta.get("kind") != "keypair":
                 raise VaultApiError(f"secret '{name}' is not a signing key", code="not_signing_key", status=409)
             signer_kind = meta.get("signer_kind") or "local"
-            if signer_kind != "local":
+            if signer_kind not in {"local", "hd-seed"}:
                 raise VaultApiError(
                     f"secret '{name}' uses signer_kind '{signer_kind}', which is not locally signable",
                     code="unsupported_signer_kind",
@@ -5978,9 +6100,10 @@ def vault_sign(payload: dict) -> dict:
                 if request_id:
                     vault_service.claim_sign_request(
                         conn, request_id, name=name, digest=digest, scheme=scheme, message_hex=message_hex,
+                        derivation=derivation, signing_context=signing_context,
                     )
                     key_envelope = vault_service.get_key_envelope(conn, name)
-                elif vault_service.sign_needs_approval(conn, name):
+                elif vault_service.sign_needs_approval(conn, name, derivation=derivation):
                     request = vault_service.create_sign_request(
                         conn,
                         name,
@@ -5991,6 +6114,7 @@ def vault_sign(payload: dict) -> dict:
                         requester=_vault_requester_payload(payload),
                         delivery=_vault_delivery_payload(payload),
                         expires_at=_expires_at_from_ttl(payload),
+                        derivation=derivation,
                     )
                     approval_required_request = request
                     protected_event = {
@@ -6011,7 +6135,7 @@ def vault_sign(payload: dict) -> dict:
     except vault_service.ProtectedSolanaUnsupportedError as exc:
         raise _protected_solana_unsupported(exc) from exc
     except vault_service.InvalidSigningKeyError as exc:
-        raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
+        raise VaultApiError(str(exc), code=getattr(exc, "code", "invalid_signing_key"), status=409) from exc
     except vault_service.InvalidSigningContextError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.contextSchemeMismatch") from exc
     except vault_service.InvalidRequestError as exc:
@@ -6055,7 +6179,11 @@ def vault_sign(payload: dict) -> dict:
         _settle_claimed_request(lambda conn, request_id: vault_service.fail_sign_request(conn, request_id, reason=reason))
 
     try:
-        if message_hex is None:
+        if derivation is not None:
+            signature = avault_sign_hd_seed(
+                key_envelope, name=name, derivation=derivation, scheme=scheme, digest=digest, message_hex=message_hex,
+            )
+        elif message_hex is None:
             signature = avault_sign(key_envelope, digest, scheme, name=name)
         else:
             signature = avault_sign_message(key_envelope, message_hex, name=name)
@@ -6091,6 +6219,8 @@ def vault_sign(payload: dict) -> dict:
                     scheme=scheme,
                     signature=signature,
                     requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                    derivation=derivation,
+                    signing_context=signing_context,
                 )
         except vault_service.RequestNotFoundError as exc:
             raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
@@ -6109,12 +6239,16 @@ def vault_sign(payload: dict) -> dict:
             vault_service.record_signing_use(
                 conn,
                 name,
-                requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                requester=_vault_requester_payload(payload) if derivation is not None else payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
                 delivery=vault_service.sign_audit_delivery(scheme, digest=digest, message_hex=message_hex),
+                derivation=derivation,
+                signing_binding=signing_binding,
             )
     except Exception as exc:  # noqa: BLE001
+        if derivation is not None:
+            raise VaultApiError("HD signing state changed or its audit could not be saved; signature was not delivered", code="hd_signing_state_changed", status=409) from exc
         logger.warning("vault_sign: signature produced but usage audit failed for %s: %s", name, exc)
-    return {"ok": True, "signature": signature}
+    return {"ok": True, "signature": signature, **({"derivation": derivation} if derivation is not None else {})}
 
 
 def store_vault_pubkey_pin(payload: dict) -> dict:
@@ -10343,6 +10477,45 @@ def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):
 # avault 0.1.10 adds Ed25519: ``keypair generate`` / ``keypair import`` for Solana
 # keys and exact-message ``sign`` through ``message_hex``.
 AVAULT_ED25519_MIN_VERSION = "0.1.10"
+AVAULT_HD_SEED_MIN_VERSION = "0.1.11"
+
+
+def _require_avault_hd_seed_surface() -> None:
+    _require_avault_min_version(
+        "HD seed wallet creation and signing", AVAULT_HD_SEED_MIN_VERSION,
+        managed_available=_version_at_least(AVAULT_VERSION, AVAULT_HD_SEED_MIN_VERSION),
+    )
+
+
+def avault_hd_seed_import(name: str, blind_box: dict) -> dict:
+    """Import browser-sealed seed bytes; retain only typed ciphertext and public keys."""
+    from storage import vault_hd
+    from storage.vault_crypto import Sealed
+
+    _require_avault_hd_seed_surface()
+    proc = _run_avault(
+        ["keypair", "import", "--name", name, "--type", "hd-seed", "--format", "raw-seed", "--blind-box"],
+        stdin=json.dumps(blind_box).encode("utf-8"),
+    )
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault HD seed import failed")
+    try:
+        result = json.loads(proc.stdout)
+        if result["type"] != "hd-seed":
+            raise ValueError("wrong type")
+        envelope = result["envelope"]
+        sealed = Sealed(ciphertext=envelope["ciphertext"], nonce=envelope["nonce"], wrap_meta=envelope["wrap_meta"])
+        vault_hd.validate_envelope(sealed)
+        accounts = vault_hd.import_accounts(result["accounts"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AvaultError("avault HD seed import returned malformed output") from exc
+    return {"sealed": sealed, "accounts": accounts}
+
+
+def avault_sign_hd_seed(key_envelope, *, name: str, derivation: dict, scheme: str, digest: str | None, message_hex: str | None) -> dict:
+    _require_avault_hd_seed_surface()
+    sign_input = {"digest": digest} if message_hex is None else {"message_hex": message_hex}
+    return _avault_sign({**sign_input, "scheme": scheme, "derivation": derivation}, key_envelope, name)
 
 
 def _require_avault_ed25519_surface(feature: str) -> None:
@@ -10413,7 +10586,7 @@ def avault_sign_message(key_envelope, message_hex: str, *, name: str | None = No
     return _avault_sign({"message_hex": message_hex, "scheme": "ed25519"}, key_envelope, name)
 
 
-def _avault_sign(sign_input: dict[str, str], key_envelope, name: str | None) -> dict:
+def _avault_sign(sign_input: dict[str, Any], key_envelope, name: str | None) -> dict:
     if not name:
         raise AvaultError("secret name is required for avault sign")
     _require_avault_p2_surface("vault signing")

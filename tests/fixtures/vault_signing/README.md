@@ -3,6 +3,18 @@
 All keys/seeds here are intentionally public synthetic test material. Never use
 these keys to receive funds or to authenticate a production instance.
 
+- `hd-seed-wallet.json`: public BIP39 `abandon` ×11 + `about`, no passphrase.
+  Imported by avault master `fcefea28a63016085ead3650f05c7b272bae1589`
+  (unreleased HD implementation, binary still honestly reports 0.1.10), built
+  with `cargo build --locked -p avault-cli -j 2`. The isolated file store supplied
+  only ciphertext, 20 × 3 public keys, and six account #0/#1 signatures (digest
+  `01` ×32 for EVM/Bitcoin; exact `deadbeef` message for Solana). Independently
+  checked with scure/noble BIP32, SLIP-0010, ECDSA recovery, BIP86 tweak and
+  Ed25519 verification, not the Avibe code under test. Bitcoin #0/#1 addresses
+  agree with BIP86's public receive vectors. No plaintext seed, child private
+  key, chain code or machine key is included. The envelope is AAD-bound to
+  `HD_TEST_WALLET` and is opaque test data; CI tests do not need its master key.
+
 - `bip340.csv`: bitcoin/bips `bip-0340/test-vectors.csv`, downloaded 2026-11-02.
   SHA256 `34c9d1d9c3a88d524bc80778540dc43f8306ec249a7485293063c376db851c2d`.
 - `bip341-wallet.json`: bitcoin/bips `bip-0341/wallet-test-vectors.json`.

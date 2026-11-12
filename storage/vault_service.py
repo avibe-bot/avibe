@@ -34,7 +34,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from storage import vault_crypto, vault_webauthn
-from storage import vault_bitcoin, vault_solana
+from storage import vault_bitcoin, vault_hd, vault_solana
 from storage.lock import LockHolderState, MigrationFileLock, probe_lock_holder, remove_unheld_lock
 from storage.models import (
     agent_sessions,
@@ -230,6 +230,10 @@ class InvalidRequestError(VaultServiceError):
 
 class InvalidSigningKeyError(InvalidRequestError):
     pass
+
+
+class InvalidHdWalletError(InvalidSigningKeyError):
+    code = "invalid_hd_wallet"
 
 
 class InvalidSigningContextError(InvalidRequestError):
@@ -1003,6 +1007,14 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
             for key, value in pubkey_pin.items()
             if key in {"public_key", "fingerprint", "attested_at", "attestation"}
         }
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        payload["account_limit"] = vault_hd.ACCOUNT_LIMIT
+        try:
+            payload["accounts"] = vault_hd.public_accounts(public_meta)
+        except ValueError:
+            # Corrupt/unknown metadata must not hide a row or prevent deletion.
+            payload["accounts"] = []
+            payload["per_use_sign"] = False
     signing_public_key = public_meta.get("signing_public_key")
     if isinstance(signing_public_key, dict):
         # Surface derived receive addresses instead of the raw public key: agents and the
@@ -2310,6 +2322,8 @@ def _secret_agent_access_grantable(row: dict[str, Any]) -> bool:
 
 
 def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
+    if row.get("kind") == "keypair" and row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        return row.get("protection") == "standard"
     if row.get("kind") != "keypair" or row.get("signer_kind") not in (None, "local"):
         return False
     if row.get("protection") != "protected":
@@ -2331,13 +2345,18 @@ def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
     return False
 
 
-def sign_headless_allowed(row: dict[str, Any]) -> bool:
+def sign_headless_allowed(row: dict[str, Any], *, derivation: dict[str, Any] | None = None) -> bool:
     """A standard local keypair with no ``always_ask`` policy signs per-use without approval.
 
     Mirrors the standard *access* headless fast path (``protection == "standard"`` and not
     always_ask). Protected keys always sign in the browser under approval; a standard key
     whose policy sets ``always_ask`` is opted back into per-use approval (the reserved toggle).
     """
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        _row_signing_public_key(row, derivation=derivation)
+        return not (_secret_always_ask(row) or vault_hd.selected_account(_public_meta(row.get("public_meta")), derivation)["always_ask"])
+    if derivation is not None:
+        raise InvalidRequestError("chain/account are only valid for an HD seed wallet")
     if row.get("kind") != "keypair" or (row.get("signer_kind") or "local") != "local":
         return False
     if row.get("protection") != "standard":
@@ -2345,9 +2364,31 @@ def sign_headless_allowed(row: dict[str, Any]) -> bool:
     return not _secret_always_ask(row)
 
 
-def sign_needs_approval(conn: Connection, name: str, *, user_context: Any = None) -> bool:
-    """True when `vibe vault sign` must create a pending approval request for `name`."""
-    return not sign_headless_allowed(require_secret_access(conn, name, user_context=user_context))
+def sign_needs_approval(
+    conn: Connection, name: str, *, derivation: dict[str, Any] | None = None, user_context: Any = None,
+) -> bool:
+    """True when the selected key/account needs a per-use approval."""
+    return not sign_headless_allowed(require_secret_access(conn, name, user_context=user_context), derivation=derivation)
+
+
+def _row_signing_public_key(
+    row: dict[str, Any], *, derivation: dict[str, Any] | None = None, scheme: str | None = None,
+) -> dict[str, Any] | None:
+    meta = _public_meta(row.get("public_meta"))
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        if row.get("kind") != "keypair" or row.get("protection") != "standard":
+            raise InvalidHdWalletError("HD seed wallets support only standard-tier keypairs")
+        try:
+            selection = vault_hd.validate_derivation(derivation)
+            if scheme is not None and scheme != vault_hd.SCHEMES[selection["chain"]]:
+                raise ValueError("signature scheme does not match the HD chain")
+            return vault_hd.signing_public_key(meta, selection)
+        except ValueError as exc:
+            raise InvalidHdWalletError(str(exc)) from exc
+    if derivation is not None:
+        raise InvalidRequestError("chain/account are only valid for an HD seed wallet")
+    key = meta.get("signing_public_key")
+    return key if isinstance(key, dict) else None
 
 
 def require_compressed_signing_public_key(signing_key: Any) -> str:
@@ -2481,12 +2522,16 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
     context = delivery.get("signing_context")
     scheme = delivery.get("scheme")
     row = _require_row(conn, name)
-    signing_key = _public_meta(row.get("public_meta")).get("signing_public_key")
+    selection = delivery.get("derivation")
+    signing_key = _row_signing_public_key(row, derivation=selection, scheme=scheme)
     protected = row.get("protection") == "protected"
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        if delivery.get("signing_key") != hd_signing_binding(row, selection):
+            raise InvalidRequestError("HD signing record does not match the sign request")
     validate_signing_pairing(
         context, scheme=scheme, message_hex=delivery.get("message_hex"), signing_key=signing_key, protected=protected,
     )
-    if scheme == vault_solana.SCHEME and (protected or "signing_key" in delivery):
+    if scheme == vault_solana.SCHEME and row.get("signer_kind") != vault_hd.SIGNER_KIND and (protected or "signing_key" in delivery):
         pinned = delivery.get("signing_key")
         if (
             not protected
@@ -2507,11 +2552,12 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
 
 def _require_matching_sign_request(
     delivery: dict[str, Any], *, scheme: str, digest: str | None, message_hex: str | None,
-    signing_context: dict[str, Any] | None = None,
+    signing_context: dict[str, Any] | None = None, derivation: dict[str, Any] | None = None,
 ) -> None:
     digest, message_hex = normalize_sign_input(scheme, digest=digest, message_hex=message_hex)
     if (
-        delivery.get("scheme") != scheme
+        delivery.get("derivation") != derivation
+        or delivery.get("scheme") != scheme
         or delivery.get("digest") != digest
         or delivery.get("message_hex") != message_hex
     ):
@@ -3265,6 +3311,24 @@ def create_secret(
     if description:
         public_meta["description"] = description
     signing_metadata = public_meta.get("signing_public_key")
+    if signer_kind == vault_hd.SIGNER_KIND:
+        if kind != "keypair" or protection != "standard" or signing_metadata is not None:
+            raise InvalidSigningKeyError("HD seed wallets require a standard-tier keypair and account public keys")
+        if policy and "always_ask" in policy:
+            raise InvalidRequestError("HD ask-before-signing is configured per account")
+        try:
+            vault_hd.validate_envelope(sealed)
+            accounts = vault_hd.stored_accounts(public_meta)
+            expected = vault_hd.import_accounts([
+                {"account": item["account"], **{chain: item.get(chain) for chain in vault_hd.SCHEMES}}
+                for item in accounts
+            ])
+            if accounts != expected:
+                raise ValueError("new HD wallets start with only account 0 enabled and default account settings")
+        except ValueError as exc:
+            raise InvalidSigningKeyError(str(exc)) from exc
+    elif "hd_accounts" in public_meta:
+        raise InvalidSigningKeyError("HD account metadata requires signer_kind hd-seed")
     if (
         protection == "protected"
         and (vault_solana.is_ed25519_key(signing_metadata) or vault_solana.declares_protected_solana_record(sealed))
@@ -3543,6 +3607,10 @@ def update_secret_classification(
         values["protection"] = normalized_protection
     if not values:
         return _meta_payload(row)
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND and (
+        values.get("kind", row.get("kind")) != "keypair" or values.get("protection", row.get("protection")) != "standard"
+    ):
+        raise InvalidRequestError("HD seed wallets cannot change kind or protection tier")
     if values.get("kind", row.get("kind")) != row.get("kind") or values.get("protection", row.get("protection")) != row.get("protection"):
         _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-classification-changed")
         _expire_active_grants_for_secret(conn, secret_name, cache=cache, reason="grant-expired-classification-changed")
@@ -3572,16 +3640,71 @@ def get_secret_resource_metadata(conn: Connection, resource_id: str) -> dict[str
     }
 
 
-def get_signing_public_key(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any] | None:
-    """Raw pinned signing public key ({curve, public_key}) from storage.
+def get_signing_public_key(
+    conn: Connection, name: str, *, derivation: dict[str, Any] | None = None,
+    scheme: str | None = None, user_context: Any = None,
+) -> dict[str, Any] | None:
+    """Read the selected pinned public key; never fall back for an HD wallet."""
+    return _row_signing_public_key(
+        require_secret_access(conn, name, user_context=user_context), derivation=derivation, scheme=scheme,
+    )
 
-    The masked meta payload exposes only derived addresses (not the raw key), so
-    server-side signature verification reads the pinned key from here instead.
-    Returns ``None`` when the secret has no pinned signing key.
-    """
-    public_meta = _public_meta(require_secret_access(conn, name, user_context=user_context).get("public_meta"))
-    signing_public_key = public_meta.get("signing_public_key")
-    return signing_public_key if isinstance(signing_public_key, dict) else None
+
+def hd_signing_binding(row: dict[str, Any], derivation: dict[str, Any]) -> dict[str, str]:
+    key = _row_signing_public_key(row, derivation=derivation)
+    if row.get("signer_kind") != vault_hd.SIGNER_KIND:
+        raise InvalidRequestError("HD binding requires an HD seed wallet")
+    envelope = json.dumps([row.get("ciphertext"), row.get("nonce"), row.get("wrap_meta")], separators=(",", ":"))
+    return {
+        "secret_id": row["id"], "public_key": key["public_key"],
+        "envelope_sha256": hashlib.sha256(envelope.encode()).hexdigest(),
+    }
+
+
+def update_hd_account(
+    conn: Connection, name: str, *, account: int | None = None,
+    changes: dict[str, Any] | None = None, user_context: Any = None,
+) -> dict[str, Any]:
+    """Enable the next account or edit its non-secret settings under a short writer reservation."""
+    changes = {} if changes is None else changes
+    if not isinstance(changes, dict) or set(changes) - {"name", "always_ask"}:
+        raise InvalidRequestError("account updates accept only name and always_ask")
+    if account is None and changes:
+        raise InvalidRequestError("enabling the next account takes no account settings")
+    if account is not None and not changes:
+        raise InvalidRequestError("no account settings were provided")
+    if "name" in changes and changes["name"] is not None:
+        value = changes["name"]
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 80:
+            raise InvalidRequestError("account name must be 1 to 80 characters, or null")
+        changes = {**changes, "name": value.strip()}
+    if "always_ask" in changes and type(changes["always_ask"]) is not bool:
+        raise InvalidRequestError("always_ask must be a boolean")
+    conn.execute(vault_secrets.update().where(vault_secrets.c.name == name).values(updated_at=vault_secrets.c.updated_at))
+    row = _require_secret_resource_management(conn, _require_row(conn, name), user_context)
+    if row.get("kind") != "keypair" or row.get("signer_kind") != vault_hd.SIGNER_KIND or row.get("protection") != "standard":
+        raise InvalidRequestError("account settings require a standard HD seed wallet")
+    meta = _public_meta(row.get("public_meta"))
+    try:
+        accounts = vault_hd.stored_accounts(meta)
+        if account is None:
+            enabled = sum(item["enabled"] for item in accounts)
+            if enabled == vault_hd.ACCOUNT_LIMIT:
+                raise ValueError("all 20 HD accounts are already enabled")
+            account = enabled
+            accounts[account]["enabled"] = True
+            event = "account-enabled"
+        else:
+            vault_hd.selected_account(meta, vault_hd.derivation("evm", account))
+            accounts[account].update(changes)
+            event = "account-updated"
+    except ValueError as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    conn.execute(vault_secrets.update().where(vault_secrets.c.id == row["id"]).values(
+        public_meta=json.dumps(meta), updated_at=_now(),
+    ))
+    audit(conn, event, secret_name=name, delivery={"account": account, **changes})
+    return _meta_payload(_require_row(conn, name))
 
 
 def store_pubkey_pin(
@@ -3656,6 +3779,8 @@ def _searchable_secret_text(secret: dict[str, Any]) -> str:
     addresses = secret.get("signing_addresses")
     if isinstance(addresses, dict):
         fields.append(addresses)
+    if secret.get("signer_kind") == vault_hd.SIGNER_KIND:
+        fields.extend({key: account.get(key) for key in ("account", "name", "eth", "btc_taproot", "solana")} for account in secret.get("accounts", []))
     return json.dumps(fields, sort_keys=True, default=str).lower()
 
 
@@ -3764,6 +3889,8 @@ def rotate_secret(
 ) -> dict[str, Any]:
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        raise InvalidRequestError("an HD seed wallet cannot be rotated as a value; create a new wallet instead")
     _extra_field_rows(row, strict=True)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
@@ -4030,14 +4157,26 @@ def record_signing_use(
     requester: Any = None,
     delivery: Any = None,
     request_id: str | None = None,
+    derivation: dict[str, Any] | None = None,
+    signing_binding: dict[str, Any] | None = None,
 ) -> None:
-    """Bump signing key usage + write a value-free ``signed`` audit row."""
-    _require_row(conn, name)
-    conn.execute(
-        vault_secrets.update()
-        .where(vault_secrets.c.name == name)
-        .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
-    )
+    """Bump signing usage and account provenance in the same transaction as its audit."""
+    # Serialize with metadata changes before reading the account object. Never hold
+    # this lock across avault; signing has already completed and verified.
+    conn.execute(vault_secrets.update().where(vault_secrets.c.name == name).values(use_count=vault_secrets.c.use_count))
+    row = _require_row(conn, name)
+    now = _now()
+    values: dict[str, Any] = {"last_used_at": now, "use_count": vault_secrets.c.use_count + 1}
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND or derivation is not None:
+        if signing_binding != hd_signing_binding(row, derivation):
+            raise InvalidRequestError("HD signing record changed during signing")
+        meta = _public_meta(row.get("public_meta"))
+        selected = vault_hd.selected_account(meta, derivation)
+        session_id = requester.get("session_id") if isinstance(requester, dict) else None
+        selected["last_signer"] = {"session_id": session_id, "at": now}
+        values["public_meta"] = json.dumps(meta)
+        delivery = {**(delivery or {}), "derivation": derivation, "signing_key": signing_binding}
+    conn.execute(vault_secrets.update().where(vault_secrets.c.id == row["id"]).values(**values))
     audit(conn, "signed", secret_name=name, requester=requester, delivery=delivery, request_id=request_id)
 
 
@@ -4101,12 +4240,15 @@ def get_key_envelope(conn: Connection, name: str, *, user_context: Any = None) -
     return _row_sealed(row)
 
 
-def get_signing_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
+def get_signing_envelope(
+    conn: Connection, name: str, *, derivation: dict[str, Any] | None = None, user_context: Any = None,
+) -> Sealed:
     row = require_secret_access(conn, name, user_context=user_context)
     if row.get("kind") != "keypair":
         raise InvalidRequestError(f"{name} is not a signing key")
-    if row.get("signer_kind") not in (None, "local"):
+    if row.get("signer_kind") not in (None, "local", vault_hd.SIGNER_KIND):
         raise InvalidRequestError(f"{name} is not locally signable")
+    _row_signing_public_key(row, derivation=derivation)
     return get_key_envelope(conn, name, user_context=user_context)
 
 
@@ -4680,15 +4822,16 @@ def create_sign_request(
     message_id: str | None = None,
     expires_at: str | None = None,
     user_context: Any = None,
+    derivation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     digest, message_hex = normalize_sign_input(scheme, digest=digest, message_hex=message_hex)
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_access(conn, _require_row(conn, name), context)
     if row.get("kind") != "keypair":
         raise InvalidRequestError(f"{name} is not a signing key")
-    if row.get("signer_kind") not in (None, "local"):
+    if row.get("signer_kind") not in (None, "local", vault_hd.SIGNER_KIND):
         raise InvalidRequestError(f"{name} is not locally signable")
-    signing_key = _public_meta(row.get("public_meta")).get("signing_public_key")
+    signing_key = _row_signing_public_key(row, derivation=derivation, scheme=scheme)
     # Before the generic refusals below, so a Solana key gets the reason that applies to it.
     validate_signing_pairing(
         signing_context, scheme=scheme, message_hex=message_hex, signing_key=signing_key,
@@ -4733,7 +4876,14 @@ def create_sign_request(
     delivery_payload.pop("signing_key", None)
     delivery_payload.pop("operation_context", None)
     delivery_payload.pop("signature", None)
+    delivery_payload.pop("derivation", None)
+    delivery_payload.pop("signing_context", None)
     delivery_payload.update({"scheme": scheme, "card": card})
+    if derivation is not None:
+        delivery_payload["derivation"] = dict(derivation)
+        delivery_payload["signing_key"] = hd_signing_binding(row, derivation)
+        account_meta = next(item for item in vault_hd.public_accounts(_public_meta(row.get("public_meta"))) if item["account"] == derivation["account"])
+        card.update({"derivation": dict(derivation), "account": account_meta})
     if row.get("protection") == "protected" and scheme == vault_solana.SCHEME:
         delivery_payload["signing_key"] = {
             "secret_id": row["id"], "public_key": vault_solana.require_public_key(signing_key),
@@ -4956,6 +5106,7 @@ def complete_sign_request(
     signing_context: dict[str, Any] | None = None,
     requester: Any = None,
     browser_signed: bool = False,
+    derivation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row_dict = _load_request_for_transition(
         conn,
@@ -4970,12 +5121,15 @@ def complete_sign_request(
         raise InvalidRequestError("signature secret does not match the sign request")
     _, delivery = _request_json_payloads(row_dict)
     delivery_payload = delivery if isinstance(delivery, dict) else {}
+    if derivation is not None and row_dict["status"] != "signing":
+        raise InvalidRequestError("HD signing must be claimed before completion")
     _require_matching_sign_request(
         delivery_payload,
         scheme=scheme,
         digest=digest,
         message_hex=message_hex,
         signing_context=signing_context,
+        derivation=derivation,
     )
     _validate_persisted_signing_context(conn, name, delivery_payload)
     _validate_signature_payload(scheme, signature)
@@ -5000,12 +5154,14 @@ def complete_sign_request(
     record_signing_use(
         conn,
         name,
-        requester=requester,
+        requester=_request_json_payloads(row_dict)[0] if derivation is not None else requester,
         delivery={
             **sign_audit_delivery(scheme, digest=digest, message_hex=message_hex),
             "browser_signed": bool(browser_signed),
         },
         request_id=request_id,
+        derivation=derivation,
+        signing_binding=delivery_payload.get("signing_key") if derivation is not None else None,
     )
     updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
     return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
@@ -5132,6 +5288,8 @@ def claim_sign_request(
     digest: str | None = None,
     scheme: str,
     message_hex: str | None = None,
+    derivation: dict[str, Any] | None = None,
+    signing_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row_dict = _load_request_for_transition(
         conn,
@@ -5146,7 +5304,10 @@ def claim_sign_request(
         raise InvalidRequestError("signature secret does not match the sign request")
     _, delivery = _request_json_payloads(row_dict)
     delivery_payload = delivery if isinstance(delivery, dict) else {}
-    _require_matching_sign_request(delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex)
+    _require_matching_sign_request(
+        delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex,
+        derivation=derivation, signing_context=signing_context,
+    )
     _validate_persisted_signing_context(conn, name, delivery_payload)
     claim = conn.execute(
         vault_requests.update()
@@ -5220,6 +5381,7 @@ def validate_sign_request(
     scheme: str,
     message_hex: str | None = None,
     signing_context: dict[str, Any] | None = None,
+    derivation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row_dict = _load_request_for_transition(
         conn,
@@ -5236,6 +5398,7 @@ def validate_sign_request(
     delivery_payload = delivery if isinstance(delivery, dict) else {}
     _require_matching_sign_request(
         delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex, signing_context=signing_context,
+        derivation=derivation,
     )
     _validate_persisted_signing_context(conn, name, delivery_payload)
     return _request_row_payload(row_dict, conn=conn, audience=REQUEST_AUDIENCE_AGENT)

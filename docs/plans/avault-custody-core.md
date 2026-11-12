@@ -7,6 +7,14 @@ Avibe side** — how the Python daemon integrates avault — and stays in sync w
 **Owners:** Vaults workstream
 **Related:** #631 (Vaults P0), #632 (the "base avibe on vt" proposal that prompted this), `docs/plans/vaults.md`, `docs/plans/vaults-grant-delivery-refactor.md`, `docs/plans/vaults-p2-signer.md`
 
+> Standard-tier HD wallets use the additive avault#49 import/sign contract:
+> `keypair import --type hd-seed --format raw-seed --blind-box`, a typed seed
+> envelope plus 20 public account sets, and signing `derivation:{chain,account}`.
+> See `vault-hd-wallets.md` for the Avibe model, per-account approval binding,
+> version floor (0.1.11), rollback behavior, and validation. Python receives
+> neither BIP39 words nor seed plaintext. Protected HD and release/pin changes
+> are separate work.
+
 > Current implementation note: grant and delivery work should follow
 > `vaults-grant-delivery-refactor.md`, which supersedes the older group /
 > scope-typed grant model with tag selectors, skill tags, first-class

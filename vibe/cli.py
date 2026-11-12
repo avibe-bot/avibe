@@ -9826,6 +9826,11 @@ def _vault_secret_row(secret: dict) -> dict:
             "tags": secret.get("tags"),
             "description": secret.get("description"),
             "policy": secret.get("policy"),
+            "signer_kind": secret.get("signer_kind") if secret.get("signer_kind") == "hd-seed" else None,
+            "accounts": [
+                {key: account.get(key) for key in ("account", "name", "eth", "btc_taproot", "solana")}
+                for account in secret.get("accounts", [])
+            ] if secret.get("signer_kind") == "hd-seed" else None,
             "signing_curve": secret.get("signing_curve"),
             "signing_addresses": secret.get("signing_addresses"),
             "solana_signing_note": (
@@ -11709,8 +11714,14 @@ def cmd_vault_sign(args):
     try:
         if not vault_crypto.is_valid_secret_name(name):
             raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
+        selection = {
+            key: value for key in ("chain", "account")
+            if (value := getattr(args, key, None)) is not None
+        }
+        derivation = api._sign_derivation_from_payload(selection)
         scheme, digest, message_hex = api._sign_input_from_payload(
             {
+                **selection,
                 "scheme": getattr(args, "scheme", None),
                 "digest": getattr(args, "digest", None),
                 "message_hex": getattr(args, "message_hex", None),
@@ -11720,17 +11731,18 @@ def cmd_vault_sign(args):
             args, digest=digest, message_hex=message_hex, help_command=help_command,
         )
         engine = _open_vault_engine()
+        api._preflight_hd_signing(engine, name, derivation, scheme)
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
             if meta.get("kind") != "keypair":
                 raise TaskCliError(f"secret '{name}' is not a signing key", code="not_signing_key", help_command=help_command)
-            if (meta.get("signer_kind") or "local") != "local":
+            if (meta.get("signer_kind") or "local") not in {"local", "hd-seed"}:
                 raise TaskCliError(
                     f"secret '{name}' is not locally signable",
                     code="unsupported_signer_kind",
                     help_command=help_command,
                 )
-            needs_approval = vault_service.sign_needs_approval(conn, name)
+            needs_approval = vault_service.sign_needs_approval(conn, name, derivation=derivation)
             if meta.get("protection") == "protected" and signing_context is None:
                 raise TaskCliError(
                     "protected signing requires --signing-context-json",
@@ -11747,26 +11759,38 @@ def cmd_vault_sign(args):
                     signing_context=signing_context,
                     requester=_vault_cli_requester(args),
                     delivery=_vault_cli_delivery(args, mode="sign"),
+                    derivation=derivation,
                 )
         if not needs_approval:
             sign_input = {"digest": digest} if message_hex is None else {"message_hex": message_hex}
             result = api.vault_sign(
                 {
                     "name": name,
+                    **selection,
                     **sign_input,
                     "scheme": scheme,
                     "signing_context": signing_context,
                     "requester": _vault_cli_requester(args),
+                    "delivery": _vault_cli_delivery(args, mode="sign"),
                 }
             )
-            _print_cli_payload(
-                "vault_signature",
-                name=name,
-                scheme=scheme,
-                **sign_input,
-                signature=result.get("signature"),
-            )
-            return 0
+            if result.get("ok") is True and isinstance(result.get("signature"), dict):
+                _print_cli_payload(
+                    "vault_signature",
+                    name=name,
+                    scheme=scheme,
+                    **sign_input,
+                    signature=result["signature"],
+                    **({"derivation": derivation} if derivation is not None else {}),
+                )
+                return 0
+            # The user may enable ask-before-signing after our initial read. The
+            # API's later policy check owns the handoff: never report a null
+            # signature or create a second request when it returns approval.
+            if result.get("code") in {"approval_required", "browser_signature_required"} and isinstance(result.get("request"), dict):
+                request = result["request"]
+            else:
+                raise TaskCliError("signing did not return a signature or an approval request", code="invalid_request", help_command=help_command)
         request = api._attach_signed_sign_operation_context(str(request["id"]))
         _publish_cli_vaults_updated(scope="request", request=request)
         _print_cli_payload(
@@ -11789,7 +11813,7 @@ def cmd_vault_sign(args):
         _print_task_error(TaskCliError(str(exc), code="protected_solana_unsupported", help_command=help_command))
         return 1
     except vault_service.InvalidSigningKeyError as exc:
-        _print_task_error(TaskCliError(str(exc), code="invalid_signing_key", help_command=help_command))
+        _print_task_error(TaskCliError(str(exc), code=getattr(exc, "code", "invalid_signing_key"), help_command=help_command))
         return 1
     except vault_service.InvalidRequestError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_request", help_command=help_command))
@@ -19976,13 +20000,10 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message with a keypair secret (standard signs inline; protected needs approval)",
         description=(
-            "Sign with a local keypair. secp256k1 schemes sign a 32-byte --digest. A Solana key signs "
-            "with --scheme ed25519 --message-hex: the exact serialized message bytes, not a digest, so "
-            "do not hash them first. Standard keys sign immediately via avault and return the public "
-            "signature inline. Protected keys — and standard keys marked always-ask — instead create a "
-            "pending per-use request you approve in the browser; then 'vibe vault await <request-id>' "
-            "returns the public signature. Protected keys also need --signing-context-json: a Solana key "
-            "uses {\"kind\":\"solana-transaction-v1\",\"messageHex\":<the same lowercase hex>}."
+            "Sign with a keypair or HD wallet (--chain required). Solana signs exact --message-hex "
+            "bytes, never a hash; secp256k1 uses --digest. Protected/ask-first keys need browser "
+            "approval; use 'vibe vault await REQUEST_ID'. Protected Solana needs "
+            "--signing-context-json: {\"kind\":\"solana-transaction-v1\",\"messageHex\":<same lowercase hex>}."
         ),
         epilog=(
             "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
@@ -19992,6 +20013,8 @@ def build_parser():
         error_help_command="vibe vault sign --help",
     )
     vault_sign_parser.add_argument("name", help="Keypair secret name")
+    vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="Required for HD seed wallets; fixes the signing scheme")
+    vault_sign_parser.add_argument("--account", type=int, help="Enabled HD account index, 0..19 (default: 0); not valid for plain keypairs")
     vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",
@@ -19999,7 +20022,7 @@ def build_parser():
     )
     vault_sign_parser.add_argument(
         "--scheme",
-        default="ecdsa-secp256k1-recoverable",
+        default=None,
         choices=[
             "ecdsa-secp256k1-recoverable",
             "ecdsa-secp256k1-der",
@@ -20007,7 +20030,7 @@ def build_parser():
             "schnorr-secp256k1-bip341-keypath",
             "ed25519",
         ],
-        help="Signature scheme; a Solana key uses ed25519",
+        help="Signature scheme (plain keypair default: ecdsa-secp256k1-recoverable); must match --chain for HD wallets",
     )
     vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")

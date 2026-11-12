@@ -1432,7 +1432,7 @@ vault_secrets = Table(
     Column("tags", Text, nullable=True),  # JSON array
     Column("kind", String, nullable=False, server_default="static"),  # static | keypair (P2)
     Column("protection", String, nullable=False, server_default="standard"),  # standard (P0) | protected (P1)
-    Column("signer_kind", String, nullable=True),  # local | external | mpc:<provider> (P2, keypair only)
+    Column("signer_kind", String, nullable=True),  # local | hd-seed | external | mpc:<provider> (keypair only)
     Column("source", String, nullable=False, server_default="manual"),  # manual | imported:1password | op-reference
     # Envelope: AES-256-GCM ciphertext/nonce (base64 text); ``wrap_meta`` JSON holds the
     # wrapped DEK + scheme. All null for external/mpc/op-reference (no local key/value).
