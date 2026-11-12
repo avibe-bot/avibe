@@ -15,15 +15,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.cargo_notices import collect_notices  # noqa: E402
+from scripts.direct_transport_notices import policy_bytes  # noqa: E402
 
 
 def collect_licenses(target, temp):
-    root = Path(__file__).resolve().parents[2]
     licenses = temp / "direct-transport-licenses" / "LICENSES"
+    policy = temp / "sidecar-license-policy.json"
+    policy.write_bytes(policy_bytes())
     result = collect_notices(
         Path("Cargo.lock"), [target], os.environ["RUST_TOOLCHAIN"],
-        "avibe-direct-transport", root / "packaging/iroh-apple/license-sources.json", licenses,
+        "avibe-direct-transport", policy, licenses,
     )
+    shutil.copyfile(policy, licenses / "policy.json")
     graph = (temp / "feature-graph.txt").read_text()
     coordinates = set(re.findall(r"(?:^|[\s─├└│])([A-Za-z0-9_-]+) v([^\s]+)", graph, re.M))
     if {(p["name"], p["version"]) for p in result["packages"]} != coordinates:

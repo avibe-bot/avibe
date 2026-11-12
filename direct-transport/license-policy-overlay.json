@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "expressions": {
+    "BSD-2-Clause OR Apache-2.0 OR MIT": "Apache-2.0"
+  },
+  "packages": {
+    "enum-assoc-1.4.2": {
+      "crate_sha256": "378cfad7ff892555026001b3bb6c2becb98f0aafcd7ddccd5dfa506977f17c8a",
+      "license": "MIT OR Apache-2.0",
+      "class": "standard",
+      "reason": "Checksum-verified published crate declares this expression but has no license text. Canonical standard text is not an upstream copyright notice.",
+      "files": [
+        {
+          "name": "STANDARD-Apache-2.0.txt",
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/text/Apache-2.0.txt",
+          "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
+        }
+      ]
+    },
+    "n0-error-macros-1.0.3": {
+      "crate_sha256": "6217fd5f567ce1e53f324744c14fab04899861e397539c5f3cc08bd7c1dcd2de",
+      "license": "MIT OR Apache-2.0",
+      "class": "upstream",
+      "reason": "Published crate omits workspace license texts. These are from the exact upstream commit in the checksum-verified crate's .cargo_vcs_info.json.",
+      "files": [
+        {
+          "name": "LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/n0-computer/n0-error/43c4be4c27ad4601b722ad2b97dc85b768756ac9/LICENSE-APACHE",
+          "sha256": "7953ad8cebf4e01199521a5faa221ef59bec5cee0a9856b179590613a8560cbc"
+        },
+        {
+          "name": "LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/n0-computer/n0-error/43c4be4c27ad4601b722ad2b97dc85b768756ac9/LICENSE-MIT",
+          "sha256": "339060c99d5c80c2742cae417f765980afe6b0149a78f959bbf2a79f19ab3af5"
+        }
+      ]
+    }
+  }
+}

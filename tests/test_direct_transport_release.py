@@ -7,6 +7,7 @@ which those generic helpers and the consumer installer cannot exercise.
 from __future__ import annotations
 
 import io
+import shutil
 import json
 import subprocess
 import tarfile
@@ -31,11 +32,11 @@ def archive_files(target):
     packages = [{"name": "fixture", "version": "1.0.0", "files": ["LICENSES/fixture/LICENSE"]}]
     provenance = {"packages": packages, "targets": [target], "root_package": "avibe-direct-transport",
                   "lockfile_sha256": release.digest(lock),
-                  "policy_sha256": release.file_hash(release.ROOT / "packaging/iroh-apple/license-sources.json")}
+                  "policy_sha256": release.digest(release.policy_bytes())}
     files = {binary: b"inert test bytes, never executed", "Cargo.lock": lock, "feature-graph.txt": b"fixture",
              "feature-evidence.json": b"{}", "LICENSES/NOTICE.md": b"fixture notice",
              "LICENSES/fixture/LICENSE": b"fixture license", "LICENSES/packages.json": json.dumps(packages).encode(),
-             "LICENSES/provenance.json": json.dumps(provenance).encode()}
+             "LICENSES/provenance.json": json.dumps(provenance).encode(), "LICENSES/policy.json": release.policy_bytes()}
     for name in ("COPYRIGHT.html", "licenses/Apache-2.0.txt", "licenses/MIT.txt"):
         files[f"LICENSES/rust-1.91.0/{name}"] = b"fixture rust notice"
     manifest = {"name": "avibe-direct-transport", "version": "0.1.0", "target": target,
@@ -226,6 +227,7 @@ def test_publish_uses_explicit_non_latest_flags_and_never_clobbers(packet, monke
     def reprove(tag, source, run_id, attempt, dest):
         import shutil
         shutil.copytree(directory, dest)
+        release.write_json(dest.parent / "backstop-proof.json", {"source_sha": SOURCE, "run_id": 321, "run_attempt": 2})
     monkeypatch.setattr(release, "prepare", reprove)
     monkeypatch.setattr(release, "release", lambda tag: None)
     calls = []
@@ -246,7 +248,8 @@ def test_publish_uses_explicit_non_latest_flags_and_never_clobbers(packet, monke
     monkeypatch.setattr(release.subprocess, "run", run)
     monkeypatch.setattr(release, "qualified_run", lambda *args: {})
     monkeypatch.setattr(release, "verify_public", lambda *args: {"verified": True})
-    assert release.publish(TAG, SOURCE, directory, f"publish {TAG} {SOURCE} {RUN}/1") == {"verified": True}
+    assert release.publish(TAG, SOURCE, directory, f"publish {TAG} {SOURCE} {RUN}/1") == {
+        "verified": True, "backstop": {"source_sha": SOURCE, "run_id": 321, "run_attempt": 2}}
     create = next(payload for path, payload in calls if path == "releases")
     assert create["draft"] is True and create["prerelease"] is False and create["make_latest"] == "false"
     final = next(json.loads(payload) for command, payload in calls if isinstance(command, list) and "PATCH" in command)
@@ -280,3 +283,117 @@ def test_public_url_readback_never_attaches_credentials(tmp_path, monkeypatch):
     assert not any(key.lower() == "authorization" for key, _ in requests[0].header_items())
     with pytest.raises(ValueError, match="size|exceeds"):
         release.public_download(url, path, 5)
+
+
+def test_actual_locked_five_target_notice_inventory_has_complete_policy():
+    # Metadata was read from 278 checksum-verified registry .crates selected by
+    # the real five-target qualification graphs, not invented license fixtures.
+    inventory = json.loads((release.ROOT / "tests/fixtures/direct_transport/notice-inventory.json").read_text())
+    lock_bytes = (release.ROOT / "direct-transport/Cargo.lock").read_bytes()
+    assert release.digest(lock_bytes) == inventory["lockfile_sha256"], "refresh the real graph audit after a lock change"
+    lock = {(p["name"], p["version"]): p for p in tomllib.loads(lock_bytes.decode())["package"]}
+    policy = json.loads(release.policy_bytes())
+    assert len(inventory["packages"]) == 278
+    for package in inventory["packages"]:
+        key = f"{package['name']}-{package['version']}"
+        assert package["crate_sha256"] == lock[(package["name"], package["version"])]["checksum"]
+        assert package["license"] in policy["expressions"], key
+        if not package["bundled_notices"] and not package["license_file"]:
+            assert policy["packages"][key]["crate_sha256"] == package["crate_sha256"], key
+            assert policy["packages"][key]["license"] == package["license"], key
+            assert policy["packages"][key]["files"], key
+    assert policy["composition"]["base_sha256"] == release.file_hash(release.ROOT / "packaging/iroh-apple/license-sources.json")
+
+
+def test_real_prepare_packet_is_stable_across_successful_backstop_rerun(packet, tmp_path, monkeypatch):
+    directory, _ = packet
+    proof = {"run_id": 1234, "run_attempt": 1}
+    monkeypatch.setattr(release.subprocess, "check_output", lambda *args, **kwargs: SOURCE + "\n")
+    monkeypatch.setattr(release.backstop, "_require_on_master", lambda *args: None)
+    monkeypatch.setattr(release.backstop, "prove_backstop_sha", lambda *args, **kwargs:
+                        release.backstop.BackstopProof(source_sha=SOURCE, event="push", **proof))
+    monkeypatch.setattr(release, "qualified_run", lambda *args: {"run_started_at": "2026-11-13T00:00:00Z"})
+    monkeypatch.setattr(release.artifacts, "successful_job", lambda *args, **kwargs: {"id": 42})
+    monkeypatch.setattr(release.artifacts, "artifact_for_job", lambda repo, run, sha, name, job:
+                        {"id": 99, "digest": "sha256:" + "f" * 64, "name": name})
+
+    def download(repo, artifact, output):
+        output.mkdir()
+        name = artifact["name"]
+        if name.startswith("avibe-direct-transport-"):
+            target = name.removeprefix("avibe-direct-transport-").removesuffix("-" + SOURCE)
+            filename = f"avibe-direct-transport-{target}.tar.gz"
+            for suffix in ("", ".sha256"):
+                shutil.copyfile(directory / (filename + suffix), output / (filename + suffix))
+            (output / "manifest.json").write_bytes(archive_files(target)["manifest.json"])
+        else:
+            report = {"failures": []} if name.startswith("network-") else {
+                "all_passed": True, "mode": "qualification", "results": [{"passed": True}] * 11}
+            release.write_json(output / "report.json", report)
+    monkeypatch.setattr(release.artifacts, "download_verified", download)
+    first, second = tmp_path / "first/assets", tmp_path / "second/assets"
+    release.prepare(TAG, SOURCE, RUN, 1, first)
+    proof.update(run_id=1235, run_attempt=2)
+    release.prepare(TAG, SOURCE, RUN, 1, second)
+    assert {p.name: p.read_bytes() for p in first.iterdir()} == {p.name: p.read_bytes() for p in second.iterdir()}
+    assert json.loads((first.parent / "backstop-proof.json").read_text())["run_attempt"] == 1
+    assert json.loads((second.parent / "backstop-proof.json").read_text())["run_attempt"] == 2
+    assert "backstop" not in json.loads((second / release.RECORD).read_text())
+
+
+def retry_context(directory, monkeypatch):
+    for key, value in {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REPOSITORY": release.REPO,
+                       "GITHUB_REF": "refs/heads/master", "GITHUB_SHA": SOURCE}.items():
+        monkeypatch.setenv(key, value)
+    def reprove(tag, source, run_id, attempt, dest):
+        shutil.copytree(directory, dest)
+        release.write_json(dest.parent / "backstop-proof.json", {"source_sha": SOURCE, "run_id": 999, "run_attempt": 2})
+    monkeypatch.setattr(release, "prepare", reprove)
+    monkeypatch.setattr(release, "qualified_run", lambda *args: {})
+
+
+@pytest.mark.parametrize("missing_tag", [True, False])
+def test_public_retry_never_mutates_even_when_public_tag_is_missing(packet, monkeypatch, missing_tag):
+    directory, state = packet
+    retry_context(directory, monkeypatch)
+    def read_only(path, payload=None, **kwargs):
+        assert payload is None, "public retry must not POST any state"
+        assert path.startswith("releases/555/assets?"), "must not enter tag-creation path"
+        return state["assets"]
+    monkeypatch.setattr(release, "api", read_only)
+    monkeypatch.setattr(release.subprocess, "run", lambda *args, **kwargs: pytest.fail("public retry must not mutate"))
+    if missing_tag:
+        def missing(*args):
+            raise ValueError("public tag missing")
+        monkeypatch.setattr(release.backstop, "resolve_tag_sha", missing)
+        with pytest.raises(ValueError, match="public tag missing"):
+            release.publish(TAG, SOURCE, directory, f"publish {TAG} {SOURCE} {RUN}/1")
+    else:
+        receipt = release.publish(TAG, SOURCE, directory, f"publish {TAG} {SOURCE} {RUN}/1")
+        assert receipt["manifest_proposal"]["release_state"] == "published"
+        assert receipt["backstop"]["run_attempt"] == 2
+
+
+def test_interrupted_draft_retry_after_backstop_rerun_does_not_replace_assets(packet, monkeypatch):
+    directory, state = packet
+    state["draft"] = True
+    retry_context(directory, monkeypatch)
+    mutations = []
+    def api(path, payload=None, **kwargs):
+        assert payload is None, "existing tag/draft must not be recreated"
+        if path.startswith("git/matching-refs/"):
+            return [{"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": SOURCE,
+                     "url": f"https://api.github.com/repos/{release.REPO}/git/commits/{SOURCE}"}}]
+        assert path.startswith("releases/555/assets?")
+        return state["assets"]
+    def finalize(command, **kwargs):
+        assert command[:2] == ["gh", "api"] and "PATCH" in command, "no upload/clobber on matching retry"
+        mutations.append(json.loads(kwargs["input"]))
+        state["draft"] = False
+        return subprocess.CompletedProcess(command, 0, "{}", "")
+    monkeypatch.setattr(release, "api", api)
+    monkeypatch.setattr(release.subprocess, "run", finalize)
+    receipt = release.publish(TAG, SOURCE, directory, f"publish {TAG} {SOURCE} {RUN}/1")
+    assert receipt["manifest_proposal"]["release_state"] == "published"
+    assert receipt["backstop"]["run_attempt"] == 2
+    assert mutations == [{"draft": False, "prerelease": False, "make_latest": "false"}]

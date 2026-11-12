@@ -33,9 +33,16 @@ Each archive retains its root binary, manifest, Cargo.lock and feature evidence.
 It additionally includes `LICENSES/`: target-resolved crate texts, package and
 source provenance, required supplemental notices, and Rust distribution notices.
 The shared `scripts/cargo_notices.py` collector uses the checksum-pinned policy
-in `packaging/iroh-apple/license-sources.json`; unreviewed expressions or missing
-texts fail packaging. Vendoring is only for source/notice verification, with no
-patch or dependency change. This collection does not claim a legal review.
+in `packaging/iroh-apple/license-sources.json` plus the sidecar-only
+`license-policy-overlay.json`. `scripts/direct_transport_notices.py` composes
+these deterministically without changing the Apple policy or allowing conflicting
+overrides; the archive carries the composed policy, both input digests, and its
+provenance digest. Unreviewed expressions or missing texts fail packaging. The
+actual-lock fixture inventories 278 checksum-verified registry crates from the
+five qualified target graphs; CI still runs collection on fresh real metadata.
+Vendoring is only for source/notice verification, with no patch or dependency
+change. This collection does not claim a legal review. Cargo.lock is checked out
+with LF on every platform so Windows autocrlf cannot change source-proof bytes.
 
 macOS signing/scanning and all native/Linux gates precede hashing. New packaging
 requires a fresh qualification; the old #3542 workflow-only archives do not meet
@@ -43,8 +50,11 @@ the notice/provenance contract and cannot be promoted by this publisher.
 
 The public set is exactly five archives, five `.sha256` files and
 `direct-transport-release.json`. The record retains target manifests, immutable
-Actions artifact IDs/digests, exact producer attempt/job IDs, full master
-backstop proof and both Linux idle/network reports. It contains a *pending
+Actions artifact IDs/digests, exact producer attempt/job IDs and both Linux
+idle/network reports. The selected successful master backstop's run/attempt is
+kept in separate `backstop-proof.json` gate evidence (and public-readback receipt),
+not immutable release bytes: a later successful backstop rerun at the same SHA
+must not change the already-uploaded record. The record contains a *pending
 candidate*, not a published consumer pin. Advisory/experimental binaries are
 never selected or uploaded. The NAT preparation/experiment remains separate.
 
@@ -120,7 +130,10 @@ A pre-publication failure leaves no published pin. An interrupted publication
 may leave a matching tag/draft or an already-published release. Inspect the
 failure and obtain authorization for the same exact tuple before retrying; do
 not delete or replace bytes. The workflow can fill only missing matching draft
-assets. An existing public release is read back, never edited. Public-readback
+assets. An existing public release is read back, never edited; a missing public
+tag fails proof without recreating the ref. A new successful backstop run/attempt
+is recorded only in fresh gate evidence; it does not regenerate public bytes.
+Public-readback
 failure can occur *after* publication; report that state plainly and withhold
 pin promotion. A later retry must re-prove all source/qualification/public gates.
 Concurrent official releases intentionally invalidate the captured Latest

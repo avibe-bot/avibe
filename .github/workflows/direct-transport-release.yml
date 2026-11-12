@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - scripts/direct_transport_release.py
+      - scripts/direct_transport_notices.py
+      - direct-transport/license-policy-overlay.json
+      - tests/fixtures/direct_transport/**
+      - tests/test_workflow_call_permissions.py
       - tests/test_direct_transport_release.py
       - direct-transport/scripts/package_artifact.py
       - .github/workflows/direct-transport-release.yml
@@ -51,7 +55,8 @@ jobs:
           python-version: '3.12'
       - run: |
           python -m pip install --only-binary=:all: --no-deps uv==0.13.7
-      - run: uv run --locked --group dev python -m pytest -q tests/test_direct_transport_release.py tests/test_release_workflow_artifacts.py tests/test_cargo_notices.py
+      - run: uv sync --locked --no-install-project
+      - run: .venv/bin/python -m pytest -q tests/test_direct_transport_release.py tests/test_release_workflow_artifacts.py tests/test_cargo_notices.py tests/test_workflow_call_permissions.py
 
   prepare:
     needs: contracts

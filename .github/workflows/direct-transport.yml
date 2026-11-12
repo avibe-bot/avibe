@@ -7,12 +7,16 @@ on:
     paths:
       - direct-transport/**
       - scripts/cargo_notices.py
+      - scripts/direct_transport_notices.py
+      - .gitattributes
       - packaging/iroh-apple/license-sources.json
       - .github/workflows/direct-transport.yml
   pull_request:
     paths:
       - direct-transport/**
       - scripts/cargo_notices.py
+      - scripts/direct_transport_notices.py
+      - .gitattributes
       - packaging/iroh-apple/license-sources.json
       - .github/workflows/direct-transport.yml
 

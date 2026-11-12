@@ -24,6 +24,7 @@ import urllib.request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import ci_release_backstop as backstop  # noqa: E402
 from scripts import release_workflow_artifacts as artifacts  # noqa: E402
+from scripts.direct_transport_notices import policy_bytes  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = "avibe-bot/avibe"
@@ -133,7 +134,7 @@ def verify_archive(path, target, source, run_id, attempt, external=None):
             if member.isfile():
                 files[member.name] = bundle.extractfile(member).read()
         required = {binary, "manifest.json", "Cargo.lock", "feature-graph.txt", "feature-evidence.json",
-                    "LICENSES/NOTICE.md", "LICENSES/packages.json", "LICENSES/provenance.json"}
+                    "LICENSES/NOTICE.md", "LICENSES/packages.json", "LICENSES/provenance.json", "LICENSES/policy.json"}
         rust = tomllib.loads((ROOT / "direct-transport/rust-toolchain.toml").read_text())["toolchain"]["channel"]
         required.update(f"LICENSES/rust-{rust}/{name}" for name in
                         ("COPYRIGHT.html", "licenses/Apache-2.0.txt", "licenses/MIT.txt"))
@@ -170,7 +171,8 @@ def verify_archive(path, target, source, run_id, attempt, external=None):
         require(digest(files["LICENSES/provenance.json"]) == manifest.get("licenses_provenance_sha256")
                 and provenance.get("lockfile_sha256") == manifest["cargo_lock_sha256"]
                 and provenance.get("targets") == [target] and provenance.get("root_package") == "avibe-direct-transport"
-                and provenance.get("policy_sha256") == file_hash(ROOT / "packaging/iroh-apple/license-sources.json"),
+                and files["LICENSES/policy.json"] == policy_bytes()
+                and provenance.get("policy_sha256") == digest(files["LICENSES/policy.json"]),
                 "notice provenance mismatch")
         packages = json.loads(files["LICENSES/packages.json"])
         require(packages and packages == provenance.get("packages"), "empty/mismatched notice inventory")
@@ -194,7 +196,7 @@ def prepare(tag, source, run_id, attempt, output):
                 "source": REPO, "source_url": f"https://github.com/{REPO}/releases/tag/{tag}",
                 "release_tag": tag, "archives": {}}
     record = {"schema_version": 1, "source_sha": source, "qualification_run_id": str(run_id),
-              "qualification_attempt": attempt, "backstop": asdict(full), "artifacts": {}, "qualification": {},
+              "qualification_attempt": attempt, "artifacts": {}, "qualification": {},
               "candidate_manifest": manifest}
     with tempfile.TemporaryDirectory(prefix="sidecar-qualified-") as temp:
         for platform, target in TARGETS.items():
@@ -234,6 +236,9 @@ def prepare(tag, source, run_id, attempt, output):
                     record["qualification"][target][kind] = {"artifact_id": evidence["id"], "digest": evidence["digest"], "report": report}
     qualified_run(source, run_id, attempt)  # Fail if the producer was rerun during transfer.
     write_json(output / RECORD, record)
+    # A fresh backstop may be a newer successful run/attempt at the SAME source.
+    # Its live gate proof must not change immutable release-record bytes on retry.
+    write_json(output.parent / "backstop-proof.json", asdict(full))
     return record
 
 
@@ -308,7 +313,15 @@ def publish(tag, source, directory, confirmation):
         prepare(tag, source, record["qualification_run_id"], record["qualification_attempt"], fresh)
         require({p.name for p in fresh.iterdir()} == {p.name for p in directory.iterdir()}
                 and all(file_hash(p) == file_hash(directory / p.name) for p in fresh.iterdir()), "candidate packet changed")
+        current_backstop = json.loads((fresh.parent / "backstop-proof.json").read_text())
     before = latest()
+    state = release(tag)
+    if state is not None and state.get("draft") is False:
+        # Published releases are read-only, including their tag. A missing tag
+        # is a failed proof, never implicit authority to recreate a public ref.
+        receipt = verify_public(tag, source, directory, before)
+        receipt["backstop"] = current_backstop
+        return receipt
     refs = api(f"git/matching-refs/tags/{tag}")
     matches = [ref for ref in refs if ref.get("ref") == f"refs/tags/{tag}"]
     if matches:
@@ -316,7 +329,6 @@ def publish(tag, source, directory, confirmation):
                 "url": f"https://api.github.com/repos/{REPO}/git/commits/{source}"}, "existing tag does not match immutable source")
     else:
         api("git/refs", {"ref": f"refs/tags/{tag}", "sha": source})
-    state = release(tag)
     if state is None:
         state = api("releases", {"tag_name": tag, "target_commitish": source,
                     "name": f"Avibe direct transport {tag}", "body": NOTES + f"\nSource: `{source}`\n",
@@ -340,7 +352,9 @@ def publish(tag, source, directory, confirmation):
         result = subprocess.run(["gh", "api", f"repos/{REPO}/releases/{state['id']}", "--method", "PATCH", "--input", "-"],
                                 input=json.dumps(payload), text=True, capture_output=True, timeout=120)
         require(result.returncode == 0, "release finalization failed; inspect state before retry")
-    return verify_public(tag, source, directory, before)
+    receipt = verify_public(tag, source, directory, before)
+    receipt["backstop"] = current_backstop
+    return receipt
 
 
 def main():
