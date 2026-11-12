@@ -6602,6 +6602,7 @@
         "neverSigned": "Not used to sign yet",
         "add": "Add account #{{account}}",
         "addHint": "No words needed; the addresses are already computed.",
+        "needsManager": "Only an admin can add accounts, rename them or turn on “Ask before signing”. You can still view and copy addresses.",
         "full": "All {{limit}} accounts are in use.",
         "firstTitle": "One account per job",
         "firstBody": "For example #1 for a trading Agent and #2 for airdrop tests: funds stay apart, and each can ask you or not.",

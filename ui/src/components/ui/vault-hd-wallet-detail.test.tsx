@@ -7,6 +7,8 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import en from '@/i18n/en.json';
 import type { VaultHdAccount, VaultSecret } from '@/context/ApiContext';
 import { VaultHdWalletDialog } from './vault-hd-wallet-detail';
+import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
+import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 const api = vi.hoisted(() => ({
   enableVaultHdAccount: vi.fn(),
@@ -30,8 +32,15 @@ const wallet = (accounts: VaultHdAccount[]): VaultSecret => ({
   name: 'AGENT_WALLET', tags: [], kind: 'keypair', protection: 'standard', signer_kind: 'hd-seed', source: 'user', policy: {},
   last_used_at: null, use_count: 0, created_at: '2026-11-12T00:00:00Z', updated_at: '2026-11-12T00:00:00Z', accounts, account_limit: 20,
 });
-const open = (secret: VaultSecret, onChanged = vi.fn()) => {
-  render(<I18nextProvider i18n={i18n}><VaultHdWalletDialog secret={secret} open onOpenChange={vi.fn()} onChanged={onChanged} /></I18nextProvider>);
+const open = (secret: VaultSecret, onChanged = vi.fn(), canManage = true) => {
+  const capabilities = { ...OWNER_INSTANCE_CAPABILITIES, can_manage_instance: canManage };
+  render(
+    <I18nextProvider i18n={i18n}>
+      <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: null, instanceRole: null, capabilities }}>
+        <VaultHdWalletDialog secret={secret} open onOpenChange={vi.fn()} onChanged={onChanged} />
+      </InstanceAuthorizationContext.Provider>
+    </I18nextProvider>,
+  );
   return onChanged;
 };
 
@@ -91,4 +100,13 @@ it('says so when a connection drops while adding an account or turning ask on', 
   expect(screen.getAllByRole('alert').length).toBeGreaterThan(0);
   await act(async () => { fireEvent.click(screen.getByRole('switch', { name: w.ask })); });
   expect(screen.getAllByRole('alert').length).toBe(2);
+});
+
+it('shows an Editor the addresses but no account-management actions, and says why', () => {
+  open(wallet([account(0), account(1)]), vi.fn(), false);
+  expect(screen.getAllByText(account(0).eth).length).toBeGreaterThan(0);
+  expect(screen.queryByRole('button', { name: en.vaults.hd.wallet.rename })).toBeNull();
+  expect(screen.queryByRole('button', { name: /\+|Add account/ })).toBeNull();
+  for (const sw of screen.getAllByRole('switch', { name: en.vaults.hd.wallet.ask })) expect((sw as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText(en.vaults.hd.wallet.needsManager)).toBeTruthy();
 });

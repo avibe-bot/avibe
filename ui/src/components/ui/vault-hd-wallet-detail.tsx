@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 // A seed-phrase wallet's accounts (ui/design: vault/mnemonic/wallet/*): one card per account with
 // its three addresses (owner decision 2026-11-12: 3 = A), a name, its own ask-before-signing, and
 // the Session that last signed. The addresses are the ones avault derived at import, shown as the
@@ -84,16 +85,18 @@ function LastSigned({ account }: { account: VaultHdAccount }) {
   );
 }
 
-function AccountCard({ wallet, account, fresh, onChanged }: {
+function AccountCard({ wallet, account, fresh, canManage, onChanged }: {
   wallet: string;
   account: VaultHdAccount;
   fresh?: boolean;
+  /** Renaming and ask-before-signing are a manager's actions (the account PATCH needs it). */
+  canManage: boolean;
   onChanged: (secret: VaultSecret) => void;
 }) {
   const { t } = useTranslation();
   const api = useApi();
   const nameOf = useAccountName();
-  const [renaming, setRenaming] = useState(Boolean(fresh));
+  const [renaming, setRenaming] = useState(Boolean(fresh) && canManage);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const patch = async (payload: { name?: string | null; always_ask?: boolean }) => {
@@ -133,16 +136,18 @@ function AccountCard({ wallet, account, fresh, onChanged }: {
         ) : (
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-[13.5px] font-semibold text-foreground">{nameOf(account)}</span>
-            <button
-              type="button"
-              aria-label={t('vaults.hd.wallet.rename')}
-              title={t('vaults.hd.wallet.rename')}
-              disabled={busy}
-              onClick={() => setRenaming(true)}
-              className="text-muted hover:text-foreground"
-            >
-              <Pencil className="size-3" />
-            </button>
+            {canManage ? (
+              <button
+                type="button"
+                aria-label={t('vaults.hd.wallet.rename')}
+                title={t('vaults.hd.wallet.rename')}
+                disabled={busy}
+                onClick={() => setRenaming(true)}
+                className="text-muted hover:text-foreground"
+              >
+                <Pencil className="size-3" />
+              </button>
+            ) : null}
           </span>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-2">
@@ -158,7 +163,7 @@ function AccountCard({ wallet, account, fresh, onChanged }: {
           <Switch
             size="sm"
             checked={account.always_ask}
-            disabled={busy || account.always_ask}
+            disabled={busy || account.always_ask || !canManage}
             onCheckedChange={(checked) => { if (checked) void patch({ always_ask: true }); }}
             label={t('vaults.hd.wallet.ask')}
           />
@@ -180,6 +185,8 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
 }) {
   const { t } = useTranslation();
   const api = useApi();
+  // Adding, renaming and ask-before-signing need instance management; others can read addresses.
+  const canManage = useInstanceAuthorization().capabilities.can_manage_instance;
   const accounts = [...(secret.accounts ?? [])].sort((a, b) => a.account - b.account);
   const limit = secret.account_limit ?? 20;
   const next = accounts.length;
@@ -234,10 +241,12 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
           </div>
           <div className="flex flex-col gap-2.5">
             {accounts.map((account) => (
-              <AccountCard key={account.account} wallet={secret.name} account={account} fresh={fresh === account.account} onChanged={onChanged} />
+              <AccountCard key={account.account} wallet={secret.name} account={account} fresh={fresh === account.account} canManage={canManage} onChanged={onChanged} />
             ))}
           </div>
-          {accounts.length === 1 ? (
+          {!canManage ? (
+            <span role="note" className="self-center text-center text-[11.5px] text-muted">{t('vaults.hd.wallet.needsManager')}</span>
+          ) : accounts.length === 1 ? (
             <div className="flex flex-col items-center gap-2 rounded-[10px] border border-dashed border-border-strong px-4 py-4 text-center">
               <span className="flex size-9 items-center justify-center rounded-xl bg-violet-soft text-violet-ink">
                 <Sparkles className="size-4" />
