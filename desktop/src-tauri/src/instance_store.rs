@@ -42,7 +42,7 @@ fn erase_completed(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-fn destroy_completed(window: &WebviewWindow) -> Result<(), String> {
+pub(crate) fn destroy_completed(window: &WebviewWindow) -> Result<(), String> {
     let label = window.label().to_owned();
     let app = window.app_handle().clone();
     window.destroy().map_err(|_| "instance window destruction failed")?;

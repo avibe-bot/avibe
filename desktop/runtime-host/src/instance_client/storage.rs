@@ -20,10 +20,16 @@ pub struct ConnectionRecord {
 #[derive(Clone)]
 pub struct ConnectionStore {
     path: PathBuf,
+    writable: bool,
 }
 impl ConnectionStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self { path, writable: true }
+    }
+    /// Preserve damaged/unsupported state while exposing local recovery.
+    pub fn read_only(mut self) -> Self {
+        self.writable = false;
+        self
     }
     pub fn load(&self, local_name: &str) -> Result<ConnectionRecord, ClientError> {
         match fs::read(&self.path) {
@@ -52,6 +58,9 @@ impl ConnectionStore {
         }
     }
     pub fn save(&self, record: &ConnectionRecord) -> Result<(), ClientError> {
+        if !self.writable {
+            return Err(ClientError::new("connection_record_unavailable"));
+        }
         self.write(record)
             .map_err(|_| ClientError::new("connection_record_unavailable"))
     }

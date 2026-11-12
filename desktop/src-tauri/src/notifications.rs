@@ -257,6 +257,10 @@ fn paint_badge(app: &AppHandle, total: u64) {
 }
 
 pub fn start(app: &AppHandle, origin: LoopbackOrigin) {
+    if !crate::instance_client::local_selected(app) {
+        stop(app);
+        return;
+    }
     app.state::<Notifications>().start(app, origin);
 }
 

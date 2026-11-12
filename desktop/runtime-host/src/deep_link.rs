@@ -90,6 +90,10 @@ pub struct DeepLinks {
 }
 
 impl DeepLinks {
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub fn receive(&mut self, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
         if self.failed {
             return;

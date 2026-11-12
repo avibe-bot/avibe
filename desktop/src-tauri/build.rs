@@ -9,6 +9,7 @@ fn main() {
     // Workbench `pet_bind` alone, and `main-computer-use.json` gives it the
     // two Computer Use guide actions on macOS.
     let manifest = tauri_build::AppManifest::new().commands(&[
+        "desktop_client_request",
         "bootstrap_status",
         "bootstrap_retry",
         "open_install_docs",

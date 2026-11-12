@@ -108,3 +108,65 @@ reached the held provider path. The corrected setup asserts the real Runtime
 origin before testing pending and all five cases passed. The failed log is
 retained. This is enrollment boundary evidence, not the full native/UI chain;
 rerun with the final coordinated candidate heads after peer reviews settle.
+
+## Actual native and bundled UI chain
+
+`desktop/src-tauri/examples/instance_client_probe.rs` assembles the production
+native coordinator, command, and disposable window owner with private in-memory
+credentials. It embeds the immutable U1 account bundle. The Python fixture under
+`desktop/src-tauri/tests/instance_chain/` runs one combined B1/B2 Next server and
+two separate real R1 Runtime data roots. Native HTTP retains the canonical
+protocol origins while mapping only approved sockets to loopback. WebKit uses a
+fixture CONNECT proxy and accepts only the exact ephemeral certificate hash;
+the fixture does not install a certificate or touch Keychain.
+
+The current prewire inputs are B1 `690445a02491a2aeb4f73b66eef5a23a45000b00`,
+B2 `b50add69a8429b94e1315b44884b0e5fdb4eaf1a`, R1
+`9fe7aa63fb15d52c35a65236fa77f1ec20f44e34`, and U1
+`f22da3cd5178529ca588e5ff8242ffaf88b4908a`. B2 still has review repairs pending.
+These are working-path evidence, not the final coordinated integration gate.
+The combined backend is a separate test-only checkout; no peer feature commits
+are included in this branch.
+
+Build the probe from this checkout after extracting U1's account artifact into
+the ignored `desktop/dist` directory:
+
+```sh
+cargo build --manifest-path desktop/Cargo.toml -p avibe-desktop \
+  --example instance_client_probe --locked --offline \
+  --features tauri/custom-protocol,tauri/macos-proxy
+```
+
+From the isolated R1 checkout, set `DESKTOP_COMBINED_CHECKOUT` and
+`DESKTOP_COMBINED_HEAD` to the built, immutable combined backend checkout;
+`DESKTOP_R1_HEAD` to its exact Runtime head; `DESKTOP_RUNTIME_UI` to the extracted
+U1 Runtime `ui/dist`; and `DESKTOP_NATIVE_PROBE` to the executable above.
+`PYTHONPATH` must include the R1 checkout and this checkout's
+`desktop/src-tauri/tests/instance_chain` directory. Run:
+
+```sh
+<R1-python> -m pytest -p tests.conftest --rootdir <R1-checkout> \
+  <S1-checkout>/desktop/src-tauri/tests/instance_chain/test_native_chain.py -q -s
+```
+
+The first complete window run passed account form submission, real session
+establishment, local prepare/ensure/pair, two-instance discovery, structured
+consent, real OIDC token/JWKS verification, native cookie projection, remote
+Workbench loading, remote IPC refusal, and the actual local row returning to
+the local Workbench. Device names include `小明的 Mac` and `工作室 Studio`.
+The external connector is unavailable by construction, but the actual first-pair
+start owner records durable remote-access intent. No tunnel is started.
+
+Earlier failed runs exposed last-window destruction requesting application exit,
+cookie readback representing absent boolean attributes as `false`, and opaque
+custom-scheme origins in page-load matching. Those product boundaries are fixed
+and covered by this actual path. Separate fixture failures (decompressed HTTP
+body with a stale gzip header, and clicking the refresh button instead of the
+local instance row) are retained with their original logs. The chain still needs
+logout, generation failure, and the real footer updater decision cases before
+the final integration claim.
+
+Runtime-host tests and native all-targets Clippy pass at this checkpoint.
+Cross-checking the Windows target locally stopped before application compilation
+because this macOS host lacks Windows C SDK headers required by `ring`.
+Windows CI remains required; this local limitation is not a platform pass.

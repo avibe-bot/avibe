@@ -24,7 +24,10 @@
         "resizable": true,
         "dragDropEnabled": false,
         "titleBarStyle": "Overlay",
-        "trafficLightPosition": { "x": 12, "y": 24 },
+        "trafficLightPosition": {
+          "x": 12,
+          "y": 24
+        },
         "hiddenTitle": true
       }
     ],
@@ -39,9 +42,10 @@
         "main-computer-use",
         "main-desktop-update",
         "main-app-windows",
-        "main-desktop-notifications"
+        "main-desktop-notifications",
+        "main-instance-client"
       ],
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
     }
   },
   "plugins": {
@@ -65,7 +69,10 @@
     "windows": {
       "nsis": {
         "installerHooks": "./windows/hooks.nsh",
-        "languages": ["English", "SimpChinese"]
+        "languages": [
+          "English",
+          "SimpChinese"
+        ]
       }
     },
     "macOS": {

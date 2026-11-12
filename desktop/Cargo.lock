@@ -233,6 +233,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "avibe-runtime-host",
+ "base64 0.23.1",
  "block2",
  "cookie",
  "dirs 7.0.0",
@@ -240,6 +241,7 @@ dependencies = [
  "keyring",
  "objc2",
  "objc2-app-kit",
+ "objc2-authentication-services",
  "objc2-foundation",
  "objc2-web-kit",
  "reqwest 0.12.28",
@@ -2467,6 +2469,18 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-quartz-core",
+]
+
+[[package]]
+name = "objc2-authentication-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee6d6f7dab884a28adaec1012eb3889257a49cc145724e35f93ece2d209f8b25"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
 ]
 
 [[package]]

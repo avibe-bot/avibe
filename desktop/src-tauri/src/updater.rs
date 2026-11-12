@@ -131,6 +131,7 @@ enum Phase {
 enum CheckPresentation {
     Native,
     Workbench,
+    TrustedDecision(u64),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -649,7 +650,12 @@ fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
     }
 }
 
+pub(crate) fn client_snapshot(app: &AppHandle) -> serde_json::Value {
+    serde_json::to_value(state_snapshot(app)).expect("updater state")
+}
+
 fn emit_state(app: &AppHandle) {
+    crate::instance_client::updated(app, client_snapshot(app));
     let _ = app.emit_to(super::MAIN_WINDOW, STATE_EVENT, state_snapshot(app));
 }
 
@@ -983,6 +989,20 @@ pub fn check(app: AppHandle, interactive: bool) {
     check_with_presentation(app, interactive, CheckPresentation::Native);
 }
 
+pub(crate) fn trusted_decision(app: AppHandle) {
+    if let Some(generation) = crate::instance_client::epoch(&app) {
+        check_with_presentation(app, true, CheckPresentation::TrustedDecision(generation));
+    }
+}
+fn decision_current(app: &AppHandle, presentation: CheckPresentation) -> bool {
+    match presentation {
+        CheckPresentation::TrustedDecision(generation) => crate::instance_client::epoch_matches(app, generation),
+        _ => true,
+    }
+}
+fn handoff_to_workbench(presentation: CheckPresentation, ready: bool) -> bool {
+    ready && !matches!(presentation, CheckPresentation::TrustedDecision(_))
+}
 fn check_with_presentation(app: AppHandle, interactive: bool, presentation: CheckPresentation) {
     // Install progress and outcomes stay in memory: a failed install keeps
     // the last `Available`, and the new app's startup check publishes
@@ -1028,7 +1048,11 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                     settle_update(&app, None, Settlement::Completed);
                     return;
                 }
-                if workbench_ready(&app) {
+                if !decision_current(&app, presentation) {
+                    settle_update(&app, None, Settlement::Completed);
+                    return;
+                }
+                if handoff_to_workbench(presentation, workbench_ready(&app)) {
                     // The Workbench owns the confirmation UI. Keep the signed
                     // manifest in native state, but release the check lock so
                     // closing the popover cannot strand the updater as busy.
@@ -1054,14 +1078,20 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                         c.skip.clone(),
                         c.cancel.clone(),
                     ))
-                    .show_with_result(move |result| match choice(&result, &c) {
-                        Choice::Install => install(confirmation, manifest),
-                        Choice::Skip => {
-                            skip_version(&confirmation, &manifest.version);
+                    .show_with_result(move |result| {
+                        if !decision_current(&confirmation, presentation) {
                             settle_update(&confirmation, None, Settlement::Completed);
+                            return;
                         }
-                        Choice::Later => {
-                            settle_update(&confirmation, None, Settlement::Completed);
+                        match choice(&result, &c) {
+                            Choice::Install => install(confirmation, manifest),
+                            Choice::Skip => {
+                                skip_version(&confirmation, &manifest.version);
+                                settle_update(&confirmation, None, Settlement::Completed);
+                            }
+                            Choice::Later => {
+                                settle_update(&confirmation, None, Settlement::Completed);
+                            }
                         }
                     });
             }
@@ -1147,6 +1177,10 @@ pub fn desktop_remote_install_set(window: WebviewWindow, app: AppHandle, enabled
 #[tauri::command]
 pub fn desktop_update_install(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
     ensure_workbench(&window)?;
+    if crate::instance_client::enabled(&app) {
+        trusted_decision(app);
+        return Ok(());
+    }
     let updater = app.state::<Updater>();
     let (manifest, remote) = {
         let state = updater
