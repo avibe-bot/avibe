@@ -95,6 +95,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "agent_events",
     "session_digests",
     "skill_usage_daily",
+    "skill_catalogs",
     "show_session_events",
     "media_objects",
     "media_object_references",

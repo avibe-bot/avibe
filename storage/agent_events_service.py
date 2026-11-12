@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
 from storage.models import agent_events
+from storage.skill_catalogs import read_content
 
 
 def _utc_now_iso() -> str:
@@ -33,9 +34,9 @@ def _new_event_id() -> str:
     return f"evt_{int(time.time() * 1_000_000):015x}{uuid.uuid4().hex[:8]}"
 
 
-def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+def _row_to_payload(conn: Connection, row: dict[str, Any]) -> dict[str, Any]:
     try:
-        content = json.loads(row.get("content_json") or "{}")
+        content = json.loads(read_content(conn, row))
     except json.JSONDecodeError:
         content = {}
     try:
@@ -115,7 +116,7 @@ def append(
         "updated_at": now,
     }
     conn.execute(agent_events.insert().values(**payload))
-    return _row_to_payload(payload)
+    return _row_to_payload(conn, payload)
 
 
 def list_session_events(
@@ -142,7 +143,7 @@ def list_session_events(
         stmt = stmt.order_by(agent_events.c.created_at, agent_events.c.id)
     if limit is not None:
         stmt = stmt.limit(limit)
-    rows = [_row_to_payload(dict(row)) for row in conn.execute(stmt).mappings().all()]
+    rows = [_row_to_payload(conn, dict(row)) for row in conn.execute(stmt).mappings().all()]
     if newest_first:
         rows.reverse()
     return rows
