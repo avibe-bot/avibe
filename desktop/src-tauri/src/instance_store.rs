@@ -7,9 +7,48 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use avibe_runtime_host::instance_client::{protocol::ClientError, transport::Epoch};
 use tauri::{Manager, WebviewWindow};
 
 const ERASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Project and verify the native cookie tuple before the destination can load.
+/// Wry's macOS adapter writes the string "FALSE" for Some(false); Foundation
+/// treats an explicit HttpOnly property as enabled. Omit disabled properties
+/// when round-tripping a native cookie so a readable CSRF cookie stays readable.
+pub fn project(window: &WebviewWindow, cookies: &[cookie::Cookie<'static>], epoch: &Epoch) -> Result<(), ClientError> {
+    for cookie in cookies {
+        epoch.check()?;
+        let mut projected = cookie.clone();
+        if projected.http_only() == Some(false) {
+            projected.set_http_only(None);
+        }
+        if projected.secure() == Some(false) {
+            projected.set_secure(None);
+        }
+        window
+            .set_cookie(projected)
+            .map_err(|_| ClientError::new("instance_cookie_projection_failed"))?;
+    }
+    let stored = window
+        .cookies()
+        .map_err(|_| ClientError::new("instance_cookie_projection_failed"))?;
+    for cookie in cookies {
+        if !stored.iter().any(|value| {
+            value.name() == cookie.name()
+                && value.value() == cookie.value()
+                && value.domain() == cookie.domain()
+                && value.path() == cookie.path()
+                && value.secure().unwrap_or(false) == cookie.secure().unwrap_or(false)
+                && value.http_only().unwrap_or(false) == cookie.http_only().unwrap_or(false)
+                && value.same_site().unwrap_or(cookie::SameSite::None)
+                    == cookie.same_site().unwrap_or(cookie::SameSite::None)
+        }) {
+            return Err(ClientError::new("instance_cookie_projection_failed"));
+        }
+    }
+    epoch.check()
+}
 
 pub fn retire(window: &WebviewWindow) -> Result<(), String> {
     #[cfg(target_os = "macos")]

@@ -585,26 +585,9 @@ impl NativeView {
         // the bundled page, with no instance request until projection completes.
         let projected = window.clone();
         let checked = epoch.clone();
-        tokio::task::spawn_blocking(move || {
-            for cookie in &cookies {
-                checked.check()?;
-                projected.set_cookie(cookie.clone()).map_err(failure)?;
-            }
-            let stored = projected.cookies().map_err(failure)?;
-            for cookie in cookies {
-                if !stored.iter().any(|value| {
-                    value.name() == cookie.name()
-                        && value.value() == cookie.value()
-                        && value.secure().unwrap_or(false) == cookie.secure().unwrap_or(false)
-                        && value.http_only().unwrap_or(false) == cookie.http_only().unwrap_or(false)
-                }) {
-                    return Err(ClientError::new("instance_cookie_projection_failed"));
-                }
-            }
-            checked.check()
-        })
-        .await
-        .map_err(failure)??;
+        tokio::task::spawn_blocking(move || crate::instance_store::project(&projected, &cookies, &checked))
+            .await
+            .map_err(failure)??;
         let (loaded, navigation) = tokio::sync::oneshot::channel();
         *self.navigation.lock().expect("navigation") = Some(Navigation {
             epoch: epoch.clone(),

@@ -204,11 +204,12 @@ fn signed_in() -> Value {
 #[tokio::test]
 async fn startup_restore_continues_only_after_local_lifecycle_invalidation() {
     for held_read in [true, false] {
-        for escape in [
-            None,
-            Some(ClientAction::Cancel),
-            Some(ClientAction::ReturnLocal),
-            Some(ClientAction::SignOut),
+        for (escape, erase_failure) in [
+            (None, false),
+            (Some(ClientAction::Cancel), false),
+            (Some(ClientAction::ReturnLocal), false),
+            (Some(ClientAction::SignOut), false),
+            (Some(ClientAction::SignOut), true),
         ] {
             let mut replies = first_factor();
             replies.push((
@@ -275,7 +276,13 @@ async fn startup_restore_continues_only_after_local_lifecycle_invalidation() {
                 avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
             ));
             if let Some(action_kind) = escape.clone() {
-                assert!(action(&restored, action_kind).await.ok);
+                f.private.2.store(erase_failure, Ordering::SeqCst);
+                let escaped = action(&restored, action_kind).await;
+                if erase_failure {
+                    assert_eq!(escaped.error.unwrap().code, "credentials_unavailable");
+                } else {
+                    assert!(escaped.ok);
+                }
             }
             if held_read {
                 read_release.send(()).unwrap();
@@ -289,6 +296,25 @@ async fn startup_restore_continues_only_after_local_lifecycle_invalidation() {
             } else {
                 assert_eq!(result.unwrap_err().code, "stale_generation");
                 assert_eq!(restored.state().account.status, AccountStatus::SignedOut);
+            }
+            if erase_failure {
+                assert!(f.store.load("unused").unwrap().account_id.is_none());
+                assert_eq!(
+                    action(
+                        &restored,
+                        ClientAction::RequestOtp {
+                            email: "next@example.test".into()
+                        }
+                    )
+                    .await
+                    .error
+                    .unwrap()
+                    .code,
+                    "credentials_unavailable"
+                );
+                f.private.2.store(false, Ordering::SeqCst);
+                assert!(action(&restored, ClientAction::SignOut).await.ok);
+                assert!(f.private.0.lock().unwrap().is_empty());
             }
             assert!(f.http.replies.lock().unwrap().is_empty());
         }

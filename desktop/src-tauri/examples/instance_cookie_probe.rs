@@ -123,6 +123,15 @@ fn main() {
                     assert!(first.cookies_for_url("https://child.studio.avibe.bot/".parse().unwrap()).unwrap().is_empty(),
                         "host-only cookie crossed into a child domain");
                     assert!(second.cookies().unwrap().is_empty());
+                    first.set_cookie(tauri::webview::Cookie::build(("vibe_csrf_token", "readable-fixture"))
+                        .domain("studio.avibe.bot").path("/").secure(true)
+                        .same_site(cookie::SameSite::Lax).build()).unwrap();
+                    let exported = first.cookies().unwrap();
+                    assert_eq!(exported.iter().find(|cookie|cookie.name()=="vibe_csrf_token").unwrap().http_only(),Some(false));
+                    let epoch = avibe_runtime_host::instance_client::transport::Epoch::new(
+                        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),1);
+                    avibe_desktop_lib::instance_store::project(&first,&exported,&epoch).unwrap();
+                    assert_eq!(first.cookies().unwrap().iter().find(|cookie|cookie.name()=="vibe_csrf_token").unwrap().http_only(),Some(false));
                     first.navigate(format!("http://{address}/first").parse().unwrap()).unwrap();
                     let text = results.recv_timeout(Duration::from_secs(20)).unwrap();
                     let (headers, body) = text.split_once("\r\n\r\n").unwrap();
