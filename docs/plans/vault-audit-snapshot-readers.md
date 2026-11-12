@@ -31,8 +31,12 @@ keyset batch (at most 200 rows), using a primary-key lookup. It evaluates the
 same historical snapshot policy as inline history. Later ACL edits, deletion
 and recreation of a secret name cannot replace that evidence. Missing IDs,
 malformed references, malformed payloads and reference chains fail closed;
-they never fall back to a current ACL. The deletion-tombstone reader uses the
-same decoder. Inline-only batches do not touch the new table.
+they never fall back to a current ACL. The snapshot envelope requires a JSON
+integer `version: 1` (not a boolean or floating-point value). A resolved target
+must not contain `ref`, even alongside an otherwise valid inline envelope.
+The deletion-tombstone reader uses the same decoder. Inline-only batches do not
+touch the new table. These checks do not rewrite valid inline history, change
+historical resource-policy evaluation, or alter the administrator fast path.
 
 The existing Owner and validated remote Editor fast path remains unchanged:
 it returns the complete event stream without using resource ACLs. Both paths
