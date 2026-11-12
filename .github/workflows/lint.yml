@@ -554,7 +554,9 @@ jobs:
         # Install the declared dev group instead of a hand-listed set so test
         # dependencies (pytest, pytest-asyncio for asyncio_mode="auto",
         # jsonschema) cannot drift from pyproject.
-        run: uv pip install --system -e . --group dev
+        # Release dependency tests build/rebuild tiny wheel/sdist fixtures;
+        # install their build frontends so those acceptance cases cannot skip.
+        run: uv pip install --system -e . --group dev hatchling hatch-vcs tomlkit editables
 
       # Only the tests run with loopback alone, so no process a test starts can
       # reach past it; installing dependencies above still needs the network.

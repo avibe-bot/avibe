@@ -369,6 +369,11 @@ jobs:
         with:
           release-tag: ${{ github.event.inputs.tag || github.ref_name }}
 
+      - name: Verify release dependency constraints
+        run: |
+          python scripts/release_dependency_constraints.py --check
+          python scripts/sync_install_dependencies.py --check
+
       - name: Build Python distributions
         run: python -m build
 
@@ -403,6 +408,7 @@ jobs:
           if [[ "$TAG" == gh-v* ]]; then
             cp runtime-artifacts/vibe-show-runtime-node-*.tgz dist/
             cp vibe/show_runtime_manifest.json dist/show-runtime-manifest.json
+            cp vibe/dependency_constraints.txt dist/dependency-constraints.txt
           else
             echo "Runtime release assets for $TAG are produced by the PyPI publish workflow."
           fi
@@ -823,6 +829,7 @@ jobs:
           asset_paths=(
             dist/vibe-show-runtime-node-*.tgz
             dist/show-runtime-manifest.json
+            dist/dependency-constraints.txt
             dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
           )
           # Validate every existing byte before uploading even a missing asset.

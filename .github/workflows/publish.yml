@@ -432,6 +432,12 @@ jobs:
         with:
           release-tag: ${{ needs.resolve-tag.outputs.tag }}
 
+      - name: Verify release dependency constraints
+        run: |
+          python scripts/release_dependency_constraints.py --check
+          python scripts/sync_install_dependencies.py --check
+          cp vibe/dependency_constraints.txt runtime-artifacts/dependency-constraints.txt
+
       - name: Build Python distributions
         run: |
           python -m build
@@ -512,6 +518,7 @@ jobs:
           for path in \
             runtime-artifacts/vibe-show-runtime-node-*.tgz \
             runtime-artifacts/show-runtime-manifest.json \
+            runtime-artifacts/dependency-constraints.txt \
             "${package_paths[@]}"; do
             if [ ! -s "$path" ]; then
               echo "::error::Missing or empty release asset: $path" >&2
