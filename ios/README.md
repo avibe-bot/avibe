@@ -302,11 +302,17 @@ With a transport:
   ready candidate whose plan is still current wins; the others are closed
   having received nothing. The commit point is the `200` to WebKit: before
   it a failure falls back, after it a connection is never redialled or
-  replayed. If WebKit closes its side, or sends more than the early bound,
-  before a backend is chosen, the race is cancelled. A plan fenced by a newer
-  path generation is planned once more, and only under the same selection and
-  account; a new selection or account ends uncommitted CONNECTs of the old
-  one. An event closes only relays committed under plans made before it.
+  replayed. The early bound is counted where WebKit's bytes are received,
+  including every receive issued before the `200`, so no cancelled watcher or
+  late receive lets more through; past it the CONNECT is closed. If WebKit
+  closes its side before a backend is chosen, the race is cancelled. Each
+  event of the path-generation table cancels races of plans made before it
+  at once, and the CONNECT is planned once more, only under the same
+  selection and account; a newer selection or account ends uncommitted
+  CONNECTs of older ones. These retirements carry the generation and scope
+  of their event, so one that runs late never touches newer work, and a plan
+  that arrives after its retirement is not raced. An event closes only relays
+  committed under plans made before it.
   Relays copy both directions with backpressure and half-close. At most 64
   connections; one more is closed at once.
 - `DirectPublicBackend.swift` resolves the host, keeps only public unicast

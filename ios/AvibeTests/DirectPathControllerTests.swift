@@ -521,6 +521,94 @@ final class DirectPathControllerTests: XCTestCase {
         try await eventually { try newListeners(since: listening).isEmpty }
     }
 
+    // MARK: Races with events
+
+    @MainActor
+    func testANetworkChangeCancelsAnOlderDirectRaceAndTheConnectGoesToThePublicOrigin() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: listening)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        // The direct stream never opens, and the hedge is a minute long.
+        harness.transport.streams.setMode(.hang)
+        let client = LoopbackClient(port: port)
+        try await client.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        try await eventually { harness.transport.openedTags.values.count == 1 }
+
+        // The network changes: the old race ends now and the CONNECT is
+        // planned again, for the public origin.
+        harness.transport.report(.verifying, for: target)
+        let stream = try await harness.publicOrigin.streams.waitForStream()
+        let answer = try await client.receive(count: established.utf8.count)
+
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertEqual(stream.written, Data())
+        XCTAssertEqual(harness.transport.openedTags.values.count, 1)
+        // Cancelled by the event: no failure reported to the transport.
+        XCTAssertEqual(harness.transport.failedTags, [])
+        client.close()
+    }
+
+    /// The listener fails at the last suspension point before the route is
+    /// published: after it accepted the host, before the route is written.
+    @MainActor
+    func testAListenerFailureJustBeforeTheFirstRouteIsPublishedWritesNoRoute() async throws {
+        let listening = try listeningSockets()
+        let routeWrites = try ProxyConfigurationWrites.count()
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        let controller = harness.controller
+        controller.willPublishRoute = { [controller] in
+            controller.willPublishRoute = nil
+            if let listener = controller.listener {
+                controller.listenerDidFail(listener)
+            }
+        }
+
+        try await harness.select("instance-1")
+
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertTrue(
+            controller.routeOwner.isExcluded(one, store: harness.websiteDataStore.identifier)
+        )
+        // No route existed, so this is no fault: the listener is gone and
+        // the host keeps WebKit's normal path.
+        XCTAssertFalse(controller.isFaulted)
+        XCTAssertEqual(harness.faults, 0)
+        XCTAssertEqual(controller.listenerState, .none)
+        XCTAssertNil(controller.listener)
+        XCTAssertEqual(harness.transport.selections.count, 0)
+        try await eventually { try newListeners(since: listening).isEmpty }
+    }
+
+    @MainActor
+    func testAListenerFailureJustBeforeALaterRouteIsPublishedIsTheFaultAndWritesNoRoute() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let routeWrites = try ProxyConfigurationWrites.count()
+        let controller = harness.controller
+        controller.willPublishRoute = { [controller] in
+            controller.willPublishRoute = nil
+            if let listener = controller.listener {
+                controller.listenerDidFail(listener)
+            }
+        }
+
+        try await harness.select("instance-2")
+
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one])
+        XCTAssertTrue(
+            controller.routeOwner.isExcluded(two, store: harness.websiteDataStore.identifier)
+        )
+        XCTAssertTrue(controller.isFaulted)
+        XCTAssertEqual(harness.faults, 1)
+    }
+
     // MARK: Helpers
 
     @MainActor

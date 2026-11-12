@@ -510,28 +510,242 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(fixture.publicOrigin.attempts, 0)
     }
 
-    func testUncommittedWorkOfAnotherScopeEndsAndThatOfTheCurrentScopeGoesOn() async throws {
+    func testARetiredScopeEndsOnlyUncommittedWorkOfOlderScopes() async throws {
         let fixture = try await makeListener()
+        fixture.plans.set(scope: DirectPlanScope(selection: 3, accountEpoch: 0))
         let client = LoopbackClient(port: fixture.port)
         try await client.send(canonicalHead)
         let stream = try await fixture.direct.waitForStream()
 
-        // The same scope: nothing ends.
-        await fixture.listener.cancelUncommitted(
-            outside: DirectPlanScope(selection: 0, accountEpoch: 0)
+        // A retirement for an older scope, running late: the CONNECT planned
+        // under a newer one is untouched.
+        await fixture.listener.retireUncommitted(
+            before: 0,
+            outside: DirectPlanScope(selection: 2, accountEpoch: 0)
+        )
+        await fixture.listener.retireUncommitted(
+            before: 0,
+            outside: DirectPlanScope(selection: 3, accountEpoch: 0)
         )
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertFalse(stream.isCancelled)
+        XCTAssertEqual(fixture.plans.planCount, 1)
 
-        // Another selection: the CONNECT ends before any answer, and its
+        // A newer selection: the CONNECT ends before any answer, and its
         // candidate is closed.
-        await fixture.listener.cancelUncommitted(
-            outside: DirectPlanScope(selection: 1, accountEpoch: 0)
+        await fixture.listener.retireUncommitted(
+            before: 0,
+            outside: DirectPlanScope(selection: 4, accountEpoch: 0)
         )
         let answer = try await client.receiveUntilClosed()
         XCTAssertEqual(answer, Data())
         try await eventually { stream.isCancelled }
         XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+        XCTAssertEqual(fixture.plans.directFailures, 0)
+    }
+
+    func testANewerPathGenerationCancelsAnOlderRaceAndTheConnectIsPlannedAgain() async throws {
+        let fixture = try await makeListener(direct: .hang)
+        fixture.plans.set(generation: 5)
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        try await eventually { fixture.direct.attempts == 1 }
+
+        // The path generation advances: the hanging candidate is cancelled
+        // now, not at its deadline, and the CONNECT gets a fresh plan.
+        fixture.direct.setMode(.open)
+        fixture.plans.set(generation: 6)
+        await fixture.listener.retireUncommitted(
+            before: 6,
+            outside: DirectPlanScope(selection: 0, accountEpoch: 0)
+        )
+        let stream = try await fixture.direct.waitForStream()
+        stream.instanceSends(Data(established.utf8))
+        let answer = try await client.receive(count: established.utf8.count)
+
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertEqual(fixture.plans.planCount, 2)
+        XCTAssertEqual(fixture.direct.attempts, 2)
+        // A cancelled candidate is no failure of the path.
+        XCTAssertEqual(fixture.plans.directFailures, 0)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+        client.close()
+    }
+
+    func testALateRetirementLeavesCommittedRelaysAndWorkPlannedAfterIt() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(generation: 5)
+        let committedClient = LoopbackClient(port: fixture.port)
+        let committed = try await establish(committedClient, fixture)
+        // A second CONNECT, planned after the event, still racing.
+        fixture.direct.setMode(.hang)
+        fixture.plans.set(generation: 6)
+        let racing = LoopbackClient(port: fixture.port)
+        try await racing.send(canonicalHead)
+        try await eventually { fixture.direct.attempts == 2 }
+
+        await fixture.listener.retireUncommitted(
+            before: 6,
+            outside: DirectPlanScope(selection: 0, accountEpoch: 0)
+        )
+        try await Task.sleep(for: .milliseconds(300))
+
+        // Neither is touched: the committed relay still carries bytes, and
+        // the newer race was not planned again.
+        XCTAssertFalse(committed.isCancelled)
+        try await committedClient.send("ping")
+        try await eventually {
+            String(decoding: committed.written, as: UTF8.self).hasSuffix("ping")
+        }
+        XCTAssertEqual(fixture.plans.planCount, 2)
+        XCTAssertEqual(fixture.direct.attempts, 2)
+        committedClient.close()
+        racing.close()
+    }
+
+    func testAPlanRegisteredAfterItsGenerationWasRetiredIsNeverRaced() async throws {
+        let fixture = try await makeListener()
+        // The event and its retirement come first; the CONNECT's plan was
+        // made under the generation before it.
+        await fixture.listener.retireUncommitted(
+            before: 6,
+            outside: DirectPlanScope(selection: 0, accountEpoch: 0)
+        )
+        fixture.plans.set(generation: 5)
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let answer = try await client.receiveUntilClosed()
+
+        XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 503 "))
+        XCTAssertEqual(fixture.plans.planCount, 2)
+        XCTAssertEqual(fixture.direct.attempts, 0)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+    }
+
+    func testAPlanOfARetiredScopeIsRefused() async throws {
+        let fixture = try await makeListener()
+        await fixture.listener.retireUncommitted(
+            before: 0,
+            outside: DirectPlanScope(selection: 2, accountEpoch: 0)
+        )
+        fixture.plans.set(scope: DirectPlanScope(selection: 1, accountEpoch: 0))
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let answer = try await client.receiveUntilClosed()
+
+        XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 503 "))
+        XCTAssertEqual(fixture.direct.attempts, 0)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+    }
+
+    func testBytesSentInTwoChunksPastTheEarlyLimitCloseTheConnectionBeforeTheAnswer() async throws {
+        let fixture = try await makeListener(limits: limits(earlyBytes: 10))
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead + "123456")
+        let stream = try await fixture.direct.waitForStream()
+        try await client.send("789012")
+        let answer = try await client.receiveUntilClosed()
+
+        XCTAssertEqual(answer, Data())
+        try await eventually { stream.isCancelled }
+        XCTAssertEqual(String(decoding: stream.written, as: UTF8.self), canonicalHead)
+    }
+
+    // MARK: The reader's early bound, with receives the test completes
+
+    func testAReceiveIssuedBeforeTheTunnelCountsAsEarlyWhenItCompletesAfter() async throws {
+        let receives = ManualReceives()
+        let reader = DirectClientReader(
+            maximumLength: 64 * 1024,
+            earlyLimit: 16,
+            initial: Data("ab".utf8),
+            receive: receives.receive
+        )
+        reader.start()
+        XCTAssertEqual(receives.pending, 1)
+        // The commit point passes while that receive is still in flight.
+        XCTAssertTrue(reader.startTunnel())
+
+        receives.complete(with: Data(repeating: 0x41, count: 20))
+
+        XCTAssertEqual(reader.earlyByteCount, 22)
+        do {
+            let data = try await reader.read()
+            XCTFail("Read \(String(describing: data)) past the early bound.")
+        } catch {
+            XCTAssertEqual(error as? DirectConnectError, .earlyOverflow)
+        }
+    }
+
+    func testLateEarlyBytesWithinTheBoundAreKeptInOrderAndLaterOnesAreTheTunnels() async throws {
+        let receives = ManualReceives()
+        let reader = DirectClientReader(
+            maximumLength: 64 * 1024,
+            earlyLimit: 16,
+            initial: Data("ab".utf8),
+            receive: receives.receive
+        )
+        reader.start()
+        XCTAssertTrue(reader.startTunnel())
+        receives.complete(with: Data("cd".utf8))
+        // After the tunnel nothing is received until someone reads.
+        XCTAssertEqual(receives.pending, 0)
+
+        let first = try await reader.read()
+        let second = try await reader.read()
+        XCTAssertEqual(first, Data("ab".utf8))
+        XCTAssertEqual(second, Data("cd".utf8))
+
+        let reading = Task { try await reader.read() }
+        try await eventually { receives.pending == 1 }
+        receives.complete(with: Data(repeating: 0x42, count: 100))
+        let tunnel = try await reading.value
+        XCTAssertEqual(tunnel?.count, 100)
+        XCTAssertEqual(reader.earlyByteCount, 4)
+    }
+
+    func testSplitChunksPastTheBoundFailClosedEvenWithTheWatcherCancelled() async throws {
+        let receives = ManualReceives()
+        let reader = DirectClientReader(
+            maximumLength: 64 * 1024,
+            earlyLimit: 10,
+            initial: Data(),
+            receive: receives.receive
+        )
+        reader.start()
+        // The watcher is cancelled with a receive in flight, as when a race
+        // ends; the reader keeps counting without it.
+        let watching = Task { try await reader.waitUntilGone() }
+        watching.cancel()
+        _ = await watching.result
+
+        receives.complete(with: Data(repeating: 0x43, count: 6))
+        XCTAssertEqual(receives.pending, 1)
+        receives.complete(with: Data(repeating: 0x43, count: 6))
+
+        XCTAssertEqual(reader.earlyByteCount, 12)
+        XCTAssertFalse(reader.startTunnel())
+        do {
+            _ = try await reader.read()
+            XCTFail("Read past the early bound.")
+        } catch {
+            XCTAssertEqual(error as? DirectConnectError, .earlyOverflow)
+        }
+        // The watcher of a later race sees it gone at once.
+        try await reader.waitUntilGone()
+    }
+
+    func testEarlyBytesBeyondTheBoundInTheHeadNeverStartATunnel() {
+        let receives = ManualReceives()
+        let reader = DirectClientReader(
+            maximumLength: 64 * 1024,
+            earlyLimit: 4,
+            initial: Data("12345".utf8),
+            receive: receives.receive
+        )
+        reader.start()
+        XCTAssertEqual(receives.pending, 0)
+        XCTAssertFalse(reader.startTunnel())
     }
 
     func testAClientThatClosesBeforeTheAnswerEndsTheRaceAndFreesItsSlot() async throws {
@@ -1916,5 +2130,29 @@ final class LoopbackClient: @unchecked Sendable {
                 }
             }
         }
+    }
+}
+
+/// Receives a test completes by hand, in order.
+final class ManualReceives: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completions: [@Sendable (Data?, Bool, Error?) -> Void] = []
+
+    var pending: Int {
+        lock.withLock { completions.count }
+    }
+
+    var receive: DirectClientReader.Receive {
+        { [self] _, completion in
+            lock.withLock {
+                completions.append(completion)
+            }
+        }
+    }
+
+    /// Completes the oldest pending receive.
+    func complete(with data: Data?, isComplete: Bool = false, error: Error? = nil) {
+        let completion = lock.withLock { completions.removeFirst() }
+        completion(data, isComplete, error)
     }
 }

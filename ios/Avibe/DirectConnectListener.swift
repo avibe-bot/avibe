@@ -242,6 +242,8 @@ enum DirectConnectError: Error, Equatable {
     case closedBeforeHead
     case refused(Int)
     case noAnswer
+    /// WebKit sent more bytes before the tunnel than the early bound.
+    case earlyOverflow
 }
 
 /// Runs `operation` with a deadline. The operation must honour cancellation
@@ -300,6 +302,12 @@ enum DirectRelayBackend: Equatable, Sendable {
 struct DirectPlanScope: Equatable, Sendable {
     let selection: Int
     let accountEpoch: Int
+
+    /// Both numbers only grow in a process, so a scope with either one
+    /// smaller is from before `other`.
+    func isOlder(than other: DirectPlanScope) -> Bool {
+        selection < other.selection || accountEpoch < other.accountEpoch
+    }
 }
 
 /// What the path controller decides for one CONNECT the listener accepted
@@ -333,10 +341,20 @@ typealias DirectConnectPlanner = @Sendable (DirectAuthority) async -> DirectConn
 actor DirectConnectListener {
     private struct Relay {
         let task: Task<Void, Never>
-        /// The scope of the relay's current plan, once it has one.
-        var scope: DirectPlanScope?
+        /// The relay's current plan, once it has one: its scope, its path
+        /// generation, and its race, which a newer generation retires.
+        var plan: (scope: DirectPlanScope, generation: Int, race: DirectRaceHandle)?
         /// Set at the commit point; until then the relay is a candidate.
         var committed: (host: String, backend: DirectRelayBackend, generation: Int)?
+    }
+
+    /// What `planned` decided for a relay's new plan.
+    enum PlanAdmission: Equatable {
+        case admitted
+        /// Made under a path generation already retired: it is not raced.
+        case obsolete
+        /// Made under a scope already retired, or the relay is gone.
+        case refused
     }
 
     private let limits: DirectConnectLimits
@@ -353,6 +371,9 @@ actor DirectConnectListener {
     private var isStopped = false
     /// The close of the previous listening socket, until it has finished.
     private var closing: Task<Void, Never>?
+    /// The highest path generation and the newest scope retired so far.
+    private var retiredGeneration = Int.min
+    private var retiredScope = DirectPlanScope(selection: .min, accountEpoch: .min)
     private var pendingBind: DirectOnceAnswer<UInt16>?
     /// Advances with every bind.
     private(set) var bindGeneration = 0
@@ -574,15 +595,29 @@ actor DirectConnectListener {
         return closed
     }
 
-    /// Ends every relay not yet committed whose plan was made under another
-    /// scope than `scope`: a new selection or account never takes over a
-    /// CONNECT planned for the old one. A relay still reading its head has
-    /// no scope yet and is kept.
-    func cancelUncommitted(outside scope: DirectPlanScope) {
-        for (id, relay) in relays
-        where relay.committed == nil && relay.scope != nil && relay.scope != scope {
-            relay.task.cancel()
-            relays.removeValue(forKey: id)
+    /// Retires uncommitted work made before an event: a relay whose plan's
+    /// scope is older than `scope` ends (a new selection or account never
+    /// takes over a CONNECT planned for the old one), and a relay whose plan's
+    /// path generation is before `generation` has its race cancelled and is
+    /// planned again. Committed relays, relays still reading their head, and
+    /// work planned at or after the event are untouched. The marks only grow,
+    /// so a retirement that runs late cannot touch newer work, and a plan
+    /// registered after it is checked against them (`planned`).
+    func retireUncommitted(before generation: Int, outside scope: DirectPlanScope) {
+        retiredGeneration = max(retiredGeneration, generation)
+        if retiredScope.isOlder(than: scope) {
+            retiredScope = scope
+        }
+        for (id, relay) in relays where relay.committed == nil {
+            guard let plan = relay.plan else {
+                continue
+            }
+            if plan.scope.isOlder(than: retiredScope) {
+                relay.task.cancel()
+                relays.removeValue(forKey: id)
+            } else if plan.generation < retiredGeneration {
+                plan.race.retire()
+            }
         }
     }
 
@@ -646,14 +681,19 @@ actor DirectConnectListener {
         relays.removeValue(forKey: id)
     }
 
-    /// Records the scope of a relay's plan. `false` when the relay was
-    /// closed meanwhile.
-    private func planned(_ id: UUID, scope: DirectPlanScope) -> Bool {
-        guard !isStopped, relays[id] != nil else {
-            return false
+    /// Records a relay's new plan, and checks it against what was retired
+    /// before it got here.
+    private func planned(
+        _ id: UUID,
+        scope: DirectPlanScope,
+        generation: Int,
+        race: DirectRaceHandle
+    ) -> PlanAdmission {
+        guard !isStopped, relays[id] != nil, !scope.isOlder(than: retiredScope) else {
+            return .refused
         }
-        relays[id]?.scope = scope
-        return true
+        relays[id]?.plan = (scope, generation, race)
+        return generation < retiredGeneration ? .obsolete : .admitted
     }
 
     /// Records the commit point. `false` when the relay was closed meanwhile
@@ -737,21 +777,26 @@ actor DirectConnectListener {
             return
         }
         // From here on every read of WebKit's side goes through the reader,
-        // so bytes read while the backends race are kept for the relay.
-        let reader = DirectClientReader(connection, maximumLength: limits.chunkBytes)
-        let held = DirectHeldBytes(earlyData)
+        // which keeps and bounds what WebKit sends before the tunnel.
+        let reader = DirectClientReader(
+            connection,
+            maximumLength: limits.chunkBytes,
+            earlyLimit: limits.earlyBytes,
+            initial: earlyData
+        )
+        reader.start()
 
         // One fresh plan if the first one is fenced before its commit point
         // (the path generation changed while it raced), within the same
         // selection and account only.
         var scope: DirectPlanScope?
         for _ in 0..<2 {
+            let race = DirectRaceHandle()
             guard
                 !Task.isCancelled,
                 let plan = await planner(authority),
                 scope == nil || plan.scope == scope,
-                let listener,
-                await listener.planned(id, scope: plan.scope)
+                let listener
             else {
                 if !Task.isCancelled {
                     await answerRefusal(connection, status: scope == nil ? 403 : 503)
@@ -759,19 +804,53 @@ actor DirectConnectListener {
                 }
                 return
             }
-            scope = plan.scope
-            guard
-                let outcome = await raceWatchingClient(
-                    plan,
-                    authority: authority,
-                    limits: limits,
-                    reader: reader,
-                    held: held
-                )
-            else {
-                // WebKit closed its side, or sent too much, before a backend
-                // was chosen: nothing was dialled for nothing.
+            let admission = await listener.planned(
+                id,
+                scope: plan.scope,
+                generation: plan.generation,
+                race: race
+            )
+            guard admission != .refused else {
+                if !Task.isCancelled {
+                    await answerRefusal(connection, status: 503)
+                    await awaitClose(reader, within: limits.headSeconds)
+                }
                 return
+            }
+            scope = plan.scope
+            let outcome: RaceOutcome
+            if admission == .obsolete {
+                outcome = .fenced
+            } else {
+                // The race runs as its own task, so a newer path generation
+                // can cancel it without ending the CONNECT.
+                let raceTask = Task {
+                    await raceWatchingClient(
+                        plan,
+                        authority: authority,
+                        limits: limits,
+                        reader: reader
+                    )
+                }
+                race.attach { raceTask.cancel() }
+                let watched = await withTaskCancellationHandler {
+                    await raceTask.value
+                } onCancel: {
+                    raceTask.cancel()
+                }
+                guard let watched else {
+                    // WebKit closed its side, or sent too much, before a
+                    // backend was chosen.
+                    return
+                }
+                if race.isRetired {
+                    if case .won(_, let stream, _) = watched {
+                        stream.cancel()
+                    }
+                    outcome = .fenced
+                } else {
+                    outcome = watched
+                }
             }
             switch outcome {
             case .fenced:
@@ -805,13 +884,17 @@ actor DirectConnectListener {
                 defer {
                     stream.cancel()
                 }
+                // WebKit's side must still be there and within the early
+                // bound; from here its bytes are the tunnel's.
+                guard reader.startTunnel() else {
+                    return
+                }
                 do {
                     try await connection.sendAll(DirectConnectWire.established)
                     try await relay(
                         reader,
                         to: connection,
                         stream,
-                        earlyData: held.bytes,
                         leftover: leftover,
                         limits: limits
                     )
@@ -837,30 +920,23 @@ actor DirectConnectListener {
     /// Races the plan's candidates while watching WebKit's side. If WebKit
     /// closes its side, or sends more than the early bound, before a backend
     /// is chosen, the race is cancelled and a stream it produced is closed:
-    /// `nil`. Bytes read meanwhile are added to `held`.
+    /// `nil`. The reader keeps what WebKit sends meanwhile.
     private static func raceWatchingClient(
         _ plan: DirectConnectPlan,
         authority: DirectAuthority,
         limits: DirectConnectLimits,
-        reader: DirectClientReader,
-        held: DirectHeldBytes
+        reader: DirectClientReader
     ) async -> RaceOutcome? {
         await withTaskGroup(of: WatchedRace.self) { group in
             group.addTask {
                 .race(await race(plan, authority: authority, limits: limits))
             }
             group.addTask {
-                while true {
-                    do {
-                        guard let data = try await reader.read() else {
-                            return .clientGone
-                        }
-                        guard held.append(data, limit: limits.earlyBytes) else {
-                            return .clientGone
-                        }
-                    } catch {
-                        return Task.isCancelled ? .stopped : .clientGone
-                    }
+                do {
+                    try await reader.waitUntilGone()
+                    return .clientGone
+                } catch {
+                    return .stopped
                 }
             }
             var outcome: RaceOutcome?
@@ -1080,7 +1156,6 @@ actor DirectConnectListener {
         _ reader: DirectClientReader,
         to connection: NWConnection,
         _ stream: any DirectByteStream,
-        earlyData: Data,
         leftover: Data,
         limits: DirectConnectLimits
     ) async throws {
@@ -1089,17 +1164,11 @@ actor DirectConnectListener {
                 group.cancelAll()
             }
             group.addTask {
-                var pending = earlyData
-                while true {
-                    if !pending.isEmpty {
-                        try await write(pending, to: stream)
-                    }
-                    guard let data = try await reader.read() else {
-                        try await closeWrite(of: stream)
-                        return
-                    }
-                    pending = data
+                // The reader holds WebKit's early bytes first, then the rest.
+                while let data = try await reader.read() {
+                    try await write(data, to: stream)
                 }
+                try await closeWrite(of: stream)
             }
             group.addTask {
                 var pending = leftover
@@ -1322,25 +1391,129 @@ extension NWConnection {
     }
 }
 
-/// Every read of WebKit's side of one connection after its request head.
-/// One receive is outstanding at most, and only while someone reads, so a
-/// slow consumer slows WebKit. A read that is cancelled leaves the
-/// connection open, and whatever its receive brings is kept for the next
-/// read: the pre-commit watch and the relay take turns without losing a
-/// byte.
+/// WebKit's side of one connection after its request head.
+///
+/// Before the tunnel starts, the reader receives on its own, whoever reads,
+/// and counts every byte against the early bound: the bytes after the head,
+/// and every byte a receive issued before the tunnel delivers, whenever that
+/// receive completes. Past the bound it fails closed: the bytes are
+/// dropped, every read throws `earlyOverflow`, and the tunnel cannot start.
+/// So no watcher being cancelled, and no receive completing late, lets more
+/// than the bound through. After the tunnel starts, it receives only while
+/// someone reads, so a slow consumer slows WebKit.
 final class DirectClientReader: @unchecked Sendable {
-    private let connection: NWConnection
+    /// One receive: up to `maximumLength` bytes, then the completion with
+    /// the bytes, whether the peer finished, and an error.
+    typealias Receive = @Sendable (
+        _ maximumLength: Int,
+        _ completion: @escaping @Sendable (Data?, Bool, Error?) -> Void
+    ) -> Void
+
+    private let receiveChunk: Receive
     private let maximumLength: Int
+    private let earlyLimit: Int
     private let lock = NSLock()
     private var chunks: [Data] = []
     private var ended = false
     private var failure: Error?
     private var receiving = false
     private var waiter: CheckedContinuation<Data?, Error>?
+    private var goneWaiter: CheckedContinuation<Void, Error>?
+    private var tunnelStarted = false
+    private(set) var earlyByteCount: Int
 
-    init(_ connection: NWConnection, maximumLength: Int) {
-        self.connection = connection
+    init(
+        maximumLength: Int,
+        earlyLimit: Int,
+        initial: Data,
+        receive: @escaping Receive
+    ) {
+        receiveChunk = receive
         self.maximumLength = maximumLength
+        self.earlyLimit = earlyLimit
+        earlyByteCount = initial.count
+        if initial.count > earlyLimit {
+            ended = true
+            failure = DirectConnectError.earlyOverflow
+        } else if !initial.isEmpty {
+            chunks = [initial]
+        }
+    }
+
+    convenience init(
+        _ connection: NWConnection,
+        maximumLength: Int,
+        earlyLimit: Int,
+        initial: Data
+    ) {
+        self.init(
+            maximumLength: maximumLength,
+            earlyLimit: earlyLimit,
+            initial: initial
+        ) { maximumLength, completion in
+            connection.receive(
+                minimumIncompleteLength: 1,
+                maximumLength: maximumLength
+            ) { data, _, isComplete, error in
+                completion(data, isComplete, error)
+            }
+        }
+    }
+
+    /// Starts receiving before the tunnel.
+    func start() {
+        let issue: Bool = lock.withLock {
+            guard !receiving, !ended, !tunnelStarted else {
+                return false
+            }
+            receiving = true
+            return true
+        }
+        if issue {
+            receive()
+        }
+    }
+
+    /// The commit point: from here on bytes are the tunnel's. `false` when
+    /// WebKit's side has already ended or overflowed: the tunnel must not
+    /// start. A receive issued before this still counts as early.
+    func startTunnel() -> Bool {
+        lock.withLock {
+            guard !ended else {
+                return false
+            }
+            tunnelStarted = true
+            return true
+        }
+    }
+
+    /// Returns once WebKit's side has ended or overflowed before the tunnel.
+    /// Throws `CancellationError` when cancelled.
+    func waitUntilGone() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let gone: Bool = lock.withLock {
+                    if ended {
+                        return true
+                    }
+                    goneWaiter = continuation
+                    return false
+                }
+                if gone {
+                    continuation.resume()
+                } else if Task.isCancelled {
+                    lock.withLock { goneWaiter = nil }
+                    continuation.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            let waiting = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+                let waiting = goneWaiter
+                goneWaiter = nil
+                return waiting
+            }
+            waiting?.resume(throwing: CancellationError())
+        }
     }
 
     /// The next bytes, or `nil` once WebKit has finished sending.
@@ -1385,70 +1558,103 @@ final class DirectClientReader: @unchecked Sendable {
     }
 
     private func receive() {
-        connection.receive(
-            minimumIncompleteLength: 1,
-            maximumLength: maximumLength
-        ) { [self] data, _, isComplete, error in
-            let action: () -> Void = lock.withLock {
+        // Whether this receive's bytes are early is decided when it is
+        // issued, not when it completes.
+        let early = lock.withLock { !tunnelStarted }
+        receiveChunk(maximumLength) { [self] data, isComplete, error in
+            var resumes: [() -> Void] = []
+            var again = false
+            lock.withLock {
                 receiving = false
+                guard !ended else {
+                    return
+                }
                 if let data, !data.isEmpty {
-                    chunks.append(data)
+                    if early {
+                        earlyByteCount += data.count
+                    }
+                    if early, earlyByteCount > earlyLimit {
+                        // Fail closed: nothing of WebKit's is kept.
+                        chunks.removeAll()
+                        ended = true
+                        failure = DirectConnectError.earlyOverflow
+                    } else {
+                        chunks.append(data)
+                    }
                 }
-                if isComplete {
-                    ended = true
-                } else if let error {
-                    ended = true
-                    failure = error
+                if !ended {
+                    if isComplete {
+                        ended = true
+                    } else if let error {
+                        ended = true
+                        failure = error
+                    }
                 }
-                guard let waiting = waiter else {
-                    return {}
+                if ended, let gone = goneWaiter {
+                    goneWaiter = nil
+                    resumes.append { gone.resume() }
                 }
-                if !chunks.isEmpty {
-                    waiter = nil
-                    let next = chunks.removeFirst()
-                    return { waiting.resume(returning: next) }
-                }
-                if ended {
-                    waiter = nil
-                    let failure = failure
-                    return {
-                        if let failure {
-                            waiting.resume(throwing: failure)
-                        } else {
-                            waiting.resume(returning: nil)
+                if let waiting = waiter {
+                    if !chunks.isEmpty {
+                        waiter = nil
+                        let next = chunks.removeFirst()
+                        resumes.append { waiting.resume(returning: next) }
+                    } else if ended {
+                        waiter = nil
+                        let failure = failure
+                        resumes.append {
+                            if let failure {
+                                waiting.resume(throwing: failure)
+                            } else {
+                                waiting.resume(returning: nil)
+                            }
                         }
                     }
                 }
-                // Nothing yet, and not finished: keep waiting.
-                receiving = true
-                return { self.receive() }
+                // Before the tunnel: keep receiving, bounded by the early
+                // limit. After it: only for a waiting read.
+                if !ended, !tunnelStarted || waiter != nil {
+                    receiving = true
+                    again = true
+                }
             }
-            action()
+            for resume in resumes {
+                resume()
+            }
+            if again {
+                receive()
+            }
         }
     }
 }
 
-/// Bytes WebKit sent after its head and before the commit point.
-final class DirectHeldBytes: @unchecked Sendable {
+/// One race of one plan. Retiring it cancels the race; the CONNECT is then
+/// planned again rather than ended.
+final class DirectRaceHandle: @unchecked Sendable {
     private let lock = NSLock()
-    private var data: Data
+    private var retired = false
+    private var cancel: (@Sendable () -> Void)?
 
-    init(_ initial: Data) {
-        data = initial
+    var isRetired: Bool {
+        lock.withLock { retired }
     }
 
-    var bytes: Data {
-        lock.withLock { data }
-    }
-
-    /// Adds `more`. `false`, and nothing added, past `limit` bytes in all.
-    func append(_ more: Data, limit: Int) -> Bool {
-        lock.withLock {
-            guard data.count + more.count <= limit else {
-                return false
-            }
-            data.append(more)
-            return true
+    /// What retiring cancels. Runs at once if already retired.
+    func attach(_ cancel: @escaping @Sendable () -> Void) {
+        let alreadyRetired: Bool = lock.withLock {
+            self.cancel = cancel
+            return retired
         }
+        if alreadyRetired {
+            cancel()
+        }
+    }
+
+    func retire() {
+        let cancel: (@Sendable () -> Void)? = lock.withLock {
+            retired = true
+            return self.cancel
+        }
+        cancel?()
     }
 }

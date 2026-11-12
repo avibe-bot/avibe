@@ -242,6 +242,10 @@ final class DirectPathController {
     private var isResuming = false
     /// Route preparations under way; the listener is kept while any is.
     private var preparations = 0
+    /// Runs in a route preparation after the listener has accepted the host
+    /// and before the route is published: the last suspension point before
+    /// it. A test seam; nil in the App.
+    var willPublishRoute: (@MainActor () -> Void)?
 
     init(
         websiteDataStore: AccountWebsiteDataStore,
@@ -430,6 +434,7 @@ final class DirectPathController {
         // The listener accepts the host before WebKit can be routed to it.
         // Its list only grows: `plan(for:)` refuses a host no route lists.
         await listener.allowHost(authority.host)
+        willPublishRoute?()
         guard stillWanted(), websiteDataStore.identifier == store else {
             return
         }
@@ -629,15 +634,24 @@ final class DirectPathController {
         DirectPlanScope(selection: selection, accountEpoch: accountEpoch)
     }
 
-    /// A CONNECT planned under another selection or account is not carried
+    /// A CONNECT planned under an older selection or account is not carried
     /// on: its uncommitted work ends, and it is never planned again.
     private func scopeDidChange() {
+        retireObsoleteWork()
+    }
+
+    /// Retires uncommitted work made before the current path generation and
+    /// scope (`DirectConnectListener.retireUncommitted`). Both are captured
+    /// now; they only grow, so this retirement running late never touches
+    /// work planned after it.
+    private func retireObsoleteWork() {
         guard let listener else {
             return
         }
+        let generation = pathGeneration
         let scope = scope
         Task {
-            await listener.cancelUncommitted(outside: scope)
+            await listener.retireUncommitted(before: generation, outside: scope)
         }
     }
 
@@ -690,8 +704,11 @@ final class DirectPathController {
 
     // MARK: Generations, relays, the bridge
 
+    /// Every event of the path-generation table: plans made before it are
+    /// fenced at their commit point, and their races are cancelled now.
     private func advanceGeneration() {
         pathGeneration += 1
+        retireObsoleteWork()
     }
 
     /// Closes committed relays on `backend` (`nil`: both). When the event
@@ -867,16 +884,22 @@ final class DirectPathController {
     }
 
     private func stopListener() async {
-        // A fault is never undone in its process.
+        await retireListener()?.stop()
+    }
+
+    /// Takes the listener out of service now: no route preparation or plan
+    /// sees it ready from here on. Returns it for its socket to be stopped.
+    /// A fault is never undone in its process.
+    private func retireListener() -> DirectConnectListener? {
         guard listenerState != .faulted else {
-            return
+            return nil
         }
         let listener = listener
         self.listener = nil
         listenerPort = nil
         listenerStart = nil
         listenerState = .none
-        await listener?.stop()
+        return listener
     }
 
     /// The listening socket of `failed` failed. Before any route exists this
@@ -887,8 +910,11 @@ final class DirectPathController {
             return
         }
         guard !routeOwner.allowedHosts.isEmpty else {
+            // Retired at once, so a route preparation waiting to publish
+            // sees it gone; only the socket's stop is asynchronous.
+            let retired = retireListener()
             Task {
-                await self.stopListener()
+                await retired?.stop()
             }
             return
         }
@@ -984,9 +1010,10 @@ final class DirectPathController {
                 } else if self.routeOwner.allowedHosts.isEmpty {
                     // No route points at the port: nothing is stranded, so
                     // the listener goes and hosts keep WebKit's normal path.
+                    let retired = self.retireListener()
                     self.finishResume()
                     Task {
-                        await self.stopListener()
+                        await retired?.stop()
                     }
                 } else {
                     Task {

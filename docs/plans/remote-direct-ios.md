@@ -137,7 +137,7 @@ Otherwise the CONNECT goes to the public backend. Every condition is re-read whe
 
 **Before any byte is forwarded, a failure is not yet a failure of the tunnel.**
 
-1. **Early bytes are held.** Bytes WebKit sends after its CONNECT head (it may send its ClientHello before the answer) are held in a buffer of at most 16 KiB. Nothing is forwarded to any backend until one has been selected. A CONNECT whose early bytes exceed the buffer is closed.
+1. **Early bytes are held.** Bytes WebKit sends after its CONNECT head (it may send its ClientHello before the answer) are held in a buffer of at most 16 KiB. Nothing is forwarded to any backend until one has been selected. A CONNECT whose early bytes exceed the buffer is closed. The bound counts every byte a receive issued before the `200` delivers, whenever it completes.
 2. **Direct first, when it is authorized.** The listener opens a direct stream and writes the canonical head from the ingress contract, `CONNECT <host>:443 HTTP/1.1` with `Host: <host>:443` (not WebKit's bytes). It then reads the instance's status: 4 KiB at most, within a bound.
 3. **A hedge.** If the direct answer has not arrived after a hedge delay, the listener also starts the public dial. The first ready backend is selected: a direct `200`, or an established public connection. The other is cancelled and closed. A candidate whose selection or path generation goes stale before it is selected is cancelled, and counts as not ready.
 4. **Fallback.** A direct stream that cannot open, a refusal, or a missed bound leaves the CONNECT to the public backend, and the transport is told (`pathDidFail`).
