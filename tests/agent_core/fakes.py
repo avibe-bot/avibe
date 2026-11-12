@@ -137,6 +137,11 @@ class InMemoryTranscriptStore:
             prefix = [row for row in await self.load(anchor.session_id) if row.context_seq <= anchor.context_seq]
         return deepcopy(prefix + self.rows.get(session_id, []))
 
+    async def load_for_run(self, session_id: str):
+        from core.agent_core.harness.runtime import compact_runtime
+
+        return compact_runtime(await self.load(session_id))
+
     async def load_cache_attempts(self, session_id: str) -> Sequence[Mapping]:
         from core.agent_core.harness.cache_metrics import CacheTracker
 

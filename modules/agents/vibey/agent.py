@@ -1226,7 +1226,10 @@ class VibeyAgent(BaseAgent):
         builtin_agent: bool, persist: bool = True, catalog: Optional[dict] = None,
     ) -> PromptState:
         """Read, compare and publish optional prefix state off the loop, once per Turn."""
-        entries = await self.store.load(agent.session_id)
+        # Request preview is strictly read-only, including optional derived
+        # checkpoint metadata. Historical reads remain the preview's contract.
+        runtime = await self.store.load_for_run(agent.session_id) if persist else None
+        entries = runtime.entries if runtime is not None else await self.store.load(agent.session_id)
         endpoint = router.preflight.endpoint
 
         def prepare():
@@ -1243,7 +1246,10 @@ class VibeyAgent(BaseAgent):
                 route=route_identity(endpoint, agent=request.vibe_agent_id or "", model=request.subagent_model or request.vibe_agent_model or "",
                                      effort=request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort or ""),
                 checkpoint_seq=max((entry.context_seq for entry in entries if entry.kind == "compaction"), default=0),
-                cold=cache_cold(probe, entries, now=now),
+                cold=cache_cold(
+                    probe, entries, now=now,
+                    last_model_at=runtime.response_clocks if runtime is not None else None,
+                ),
             )
             if persist and decision.state != previous:
                 if not self.prompt_snapshots.save(agent.session_id, decision.state, snapshot=decision.reason is not None):
@@ -1621,7 +1627,7 @@ class VibeyAgent(BaseAgent):
         is not yet settled is left to that Turn's owner and nothing is written: ``False``.
         """
         session_id = runtime.session_id
-        open_calls = open_tool_calls(await self.store.load(session_id))
+        open_calls = open_tool_calls((await self.store.load_for_run(session_id)).entries)
         if not open_calls:
             return True
         suite = self._tools()

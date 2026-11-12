@@ -568,6 +568,12 @@ agent_events = Table(
     Column("updated_at", String, nullable=False),
     Index("ix_agent_events_session_created_id", "session_id", "created_at", "id"),
     Index("ix_agent_events_session_type_created_id", "session_id", "event_type", "created_at", "id"),
+    Index(
+        "ix_agent_events_session_type_context_seq",
+        "session_id",
+        "event_type",
+        "context_seq",
+    ),
     Index("ix_agent_events_scope_created_id", "scope_id", "created_at", "id"),
     Index("ix_agent_events_turn_sequence_id", "turn_id", "sequence", "id"),
     Index(
