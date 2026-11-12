@@ -268,7 +268,7 @@ describe('BackendModelPickerDialog', () => {
     expect(screen.queryByRole('button', { name: /as a custom model/ })).toBeNull();
     // The full editor is still the footer's.
     await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
-    expect(onCustom).toHaveBeenLastCalledWith('');
+    expect(onCustom).toHaveBeenLastCalledWith('', []);
   });
 
   it('offers a catalog model no provider lists as a pick described by the catalog', async () => {

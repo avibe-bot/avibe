@@ -89,10 +89,11 @@ export const BackendModelPickerDialog: React.FC<{
   /** The picks, each carrying the projection its row displayed. */
   onAdd: (chosen: ChosenCandidate[]) => void;
   /** Hand off to the custom-model editor, seeding the id with the query when the
-   *  action the user pressed named it. A host with no editor to hand off to — setup
-   *  picking a built-in assistant's first model — omits it, and the action is not
-   *  offered. */
-  onCustom?: (seedId: string) => void;
+   *  action the user pressed named it, with the rows ticked so far: going on to
+   *  write one more model does not untick the others. A host with no editor to
+   *  hand off to — setup picking a built-in assistant's first model — omits it,
+   *  and the action is not offered. */
+  onCustom?: (seedId: string, picks: ChosenCandidate[]) => void;
   /** `one` asks for a single model — setup choosing a built-in assistant's model —
    *  so picking a row replaces the pick instead of adding to it. */
   choose?: 'many' | 'one';
@@ -360,7 +361,7 @@ export const BackendModelPickerDialog: React.FC<{
               variant="ghost"
               className="model-hub-catalog-control shrink-0 rounded-md px-2.5 text-[12.5px] font-semibold text-muted-foreground max-sm:w-full"
               disabled={busy}
-              onClick={() => onCustom('')}
+              onClick={() => onCustom('', picks)}
             >
               <Plus aria-hidden="true" />
               {t('settings.models.gateway.picker.custom')}

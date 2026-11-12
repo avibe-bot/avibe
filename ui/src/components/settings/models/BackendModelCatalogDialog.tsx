@@ -937,10 +937,10 @@ export const BackendModelCatalogDialog: React.FC<{
               // by it answers this picker's two standing questions in the same order
               // every other exit answers them, through the same call.
               //
-              // `addCandidates([])` first, for the same reason Cancel makes that
-              // call: walking out through the editor confirms none of a re-ask's
-              // seeded ids, and a seeded projection this dialog keeps is one the
-              // next Save would send as if it had been agreed.
+              // `addCandidates(picks)` first, the same call Add makes: the rows
+              // ticked so far join the draft, as they would have on Add, so going
+              // on to write one more model loses none of them. A re-ask's seeded id
+              // the user unticked is declined there, as on every other exit.
               //
               // Then the id, resolved BEFORE the row lookup and through the rule the
               // editor itself commits under (`backendModelId`, which `draftWithId`
@@ -951,8 +951,8 @@ export const BackendModelCatalogDialog: React.FC<{
               // a blank row onto it, dropping the limits, modalities, capabilities
               // and name they had described. The resolver is idempotent, so the
               // editor re-applying it to this seed changes nothing.
-              onCustom={(typed) => {
-                addCandidates([]);
+              onCustom={(typed, picks) => {
+                addCandidates(picks);
                 const seedId = backendModelId(typed);
                 const existing = heldRowFor(seedId, draftRef.current, baselineRef.current?.models ?? []);
                 setEditing(existing ? { model: existing } : { model: null, seedId });
