@@ -52,14 +52,14 @@ that binary without Alembic downgrade or restamping, per
 structural downgrade drops only the new table, but is not the supported product
 rollback procedure.
 
-The supported reader epochs and current compatibility epoch are unchanged.
-This individual reader must not claim support for the coordinated next epoch
-before the other representations' readers land. A later coordinated release
-owns activation of snapshot-reference writes and its compatibility boundary.
-That writer must store an immutable snapshot and its audit reference in one
-transaction, never overwrite/reuse an ID, and preserve all per-request facts.
-Do not enable references solely because the table exists: older supported
-readers reject reference-shaped snapshots for ACL-filtered callers.
+The supported reader epochs now include the coordinated future epoch 3, while
+the current compatibility epoch and all production writes remain unchanged.
+This reader bridge must not enable references solely because the table exists:
+the later coordinated release owns activation of snapshot-reference writes and
+its compatibility boundary. Older binaries that do not understand references
+must never be used on activated epoch-3 state. That writer must store an
+immutable snapshot and its audit reference in one transaction, never
+overwrite/reuse an ID, and preserve all per-request facts.
 
 ## Validation
 
