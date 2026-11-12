@@ -26,7 +26,7 @@ from storage.migration_policy import classify_migration, classify_migration_sour
 from storage.models import messages, scope_settings
 from tests.test_message_search import _insert_msg, _seed_scope, _seed_session
 
-MIGRATION = migrations.alembic_dir() / "versions/20261112_0088_message_search_journal.py"
+MIGRATION = migrations.alembic_dir() / "versions/20261112_0086_message_search_journal.py"
 
 
 @pytest.fixture
@@ -234,7 +234,7 @@ def test_upgrade_is_empty_additive_and_downgrade_preserves_old_writes(tmp_path):
         conn.execute("INSERT INTO messages (id,platform,author,type,content_text,content_json,metadata_json,created_at,updated_at) "
                      "VALUES ('old','avibe','user','user','watch','{}','{}','now','now')")
         original = conn.execute("SELECT * FROM messages").fetchall()
-    migrations.run_migrations(path, revision="20261112_0088")
+    migrations.run_migrations(path, revision="20261112_0086")
     assert classify_migration(MIGRATION).permitted == "additive"
     with closing(sqlite3.connect(path)) as conn, conn:
         assert conn.execute("SELECT * FROM messages").fetchall() == original
@@ -253,7 +253,7 @@ def test_upgrade_is_empty_additive_and_downgrade_preserves_old_writes(tmp_path):
     with closing(sqlite3.connect(path)) as conn:
         assert conn.execute("SELECT name FROM sqlite_schema WHERE name LIKE 'message_search_%'").fetchall() == []
         assert conn.execute("SELECT * FROM messages").fetchall() == []
-    migrations.run_migrations(path, revision="20261112_0088")
+    migrations.run_migrations(path, revision="20261112_0086")
 
 
 @pytest.mark.parametrize("old,new", [

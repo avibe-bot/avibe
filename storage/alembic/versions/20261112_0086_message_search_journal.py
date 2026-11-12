@@ -8,7 +8,7 @@ Old binaries keep writing through the journal without needing an FTS5 module.
 from alembic import op
 import sqlalchemy as sa
 
-revision = "20261112_0088"
+revision = "20261112_0086"
 down_revision = "20261112_0085"
 branch_labels = None
 depends_on = None
