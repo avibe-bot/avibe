@@ -828,6 +828,32 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
+    func testExternalURLAllowlistAddsOnlyTheBundledLicenseSources() throws {
+        let archive = "https://static.crates.io/crates/uniffi/uniffi-0.31.2.crate"
+        let upstream = "https://github.com/mozilla/uniffi-rs/tree/05b45b110f652d58d94c653992aeb3adc3a094f4"
+        let data = try JSONSerialization.data(withJSONObject: [
+            "sources": [
+                ["version": "0.31.2", "upstream": upstream, "crates": [["name": "uniffi", "registry": archive]]],
+                ["version": "1", "upstream": "http://github.com/x/y", "crates": [["name": "x", "registry": "https://example.com/x.crate"]]],
+            ],
+            "groups": [["title": "MIT", "text": "https://github.com/linked/in-a-text", "components": []]],
+        ])
+        let sources = MobileExternalURLPolicy.licenseSourceURLs(from: data)
+        XCTAssertEqual(sources, [archive, upstream])
+        XCTAssertTrue(MobileExternalURLPolicy.allows(URL(string: archive)!, licenseSources: sources))
+        XCTAssertTrue(MobileExternalURLPolicy.allows(URL(string: upstream)!, licenseSources: sources))
+        for url in [
+            "https://github.com/mozilla/uniffi-rs",
+            "https://github.com/linked/in-a-text",
+            "http://github.com/x/y",
+            "https://example.com/x.crate",
+            "\(archive)?download=1",
+        ] {
+            XCTAssertFalse(MobileExternalURLPolicy.allows(URL(string: url)!, licenseSources: sources), url)
+        }
+        XCTAssertEqual(MobileExternalURLPolicy.licenseSourceURLs(from: Data("not json".utf8)), [])
+    }
+
     func testDebugControlPlaneOverrideIsBuildBounded() {
         let override = URL(string: "http://127.0.0.1:43127")!
         let configuration = MobileControlPlaneConfiguration(
@@ -1838,6 +1864,54 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    func testARemovedStoreThatComesBackIsRemovedAgainAndForgottenOnlyOnceGone() async {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        let oldIdentifier = store.identifier
+        // WebKit reports the removal as done, and the store's directory comes
+        // back while its network session finishes closing (#3418).
+        registry.returningIdentifiers.insert(oldIdentifier)
+
+        await store.rotate()
+
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
+        XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
+        XCTAssertTrue(store.ownedIdentifiers.contains(oldIdentifier))
+
+        // The next launch removes it again, its session long closed.
+        registry.returningIdentifiers.remove(oldIdentifier)
+        let relaunched = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        await relaunched.sweepOrphans()
+
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier, oldIdentifier])
+        XCTAssertFalse(registry.identifiers.contains(oldIdentifier))
+        XCTAssertTrue(relaunched.ownedIdentifiers.contains(oldIdentifier))
+
+        // Gone now: the launch after forgets it, without removing it again.
+        let gone = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        await gone.sweepOrphans()
+
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier, oldIdentifier])
+        XCTAssertEqual(gone.ownedIdentifiers, [gone.identifier])
+        XCTAssertEqual(
+            AccountWebsiteDataStore(
+                defaults: defaults,
+                operations: registry.operations
+            ).ownedIdentifiers,
+            [gone.identifier]
+        )
+    }
+
     func testLaunchSweepIgnoresUnownedStoresAndPreservesTheCurrentStore() async {
         let defaults = makeDefaults()
         let registry = FakeNamedDataStoreRegistry()
@@ -2270,6 +2344,9 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
 private final class FakeNamedDataStoreRegistry {
     var identifiers = Set<UUID>()
     var failingIdentifiers = Set<UUID>()
+    /// Stores whose removal reports success while their directory stays (or
+    /// comes straight back), as WebKit's do while their session closes.
+    var returningIdentifiers = Set<UUID>()
     var removalAttempts: [UUID] = []
     var beforeRemoval: ((UUID) -> Void)?
 
@@ -2288,8 +2365,13 @@ private final class FakeNamedDataStoreRegistry {
                         code: 1
                     )
                 }
-                identifiers.remove(identifier)
+                if !returningIdentifiers.contains(identifier) {
+                    identifiers.remove(identifier)
+                }
                 return nil
+            },
+            listIdentifiers: { [self] in
+                identifiers
             }
         )
     }

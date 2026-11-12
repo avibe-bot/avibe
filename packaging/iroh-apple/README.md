@@ -28,15 +28,15 @@ entitlement.
 The gate excludes iroh's `portmapper` feature; the feature graph may still show
 that crate because `iroh-services` v1.0.0 uses it for its own diagnostics
 dependency, which is distinct from enabling iroh's unsolicited mapping feature.
-manifest (pulled by `iroh-services`) otherwise requests iroh's default
-features, so the build script vendors the upstream lockfile dependencies and
-patches only that manifest's iroh edge to `default-features = false`; the
-upstream `Cargo.lock` remains the lockfile and every Cargo command uses
+The published `irpc-iroh` manifest (pulled by `iroh-services`) otherwise requests
+iroh's default features, so the build script vendors the upstream lockfile
+dependencies and patches only that manifest's iroh edge to `default-features = false`;
+the upstream `Cargo.lock` remains the lockfile and every Cargo command uses
 `--locked`. Every iOS target's resolved feature graph is checked for
 `fast-apple-datapath` on iroh/noq/noq-udp, for iroh's `portmapper` feature, and
 for multicast/mDNS/local-network address-lookup features or crates. The
-manifest records both the declared iroh features and the complete resolved
-iroh feature set; in this pin, `unstable-net-report` is pulled transitively by
+manifest records both the declared iroh features and the complete resolved iroh
+feature set; in this pin, `unstable-net-report` is pulled transitively by
 `iroh-services`.
 
 ## What the gate proves
@@ -51,25 +51,38 @@ On GitHub Actions `macos-26` with the repository's pinned Xcode 26.6 path, it:
 
 1. verifies the exact upstream commit and applies the small feature patch;
 2. builds the Rust static library for `arm64` iOS and a universal `arm64 + x86_64`
-   iOS Simulator slice with `IPHONEOS_DEPLOYMENT_TARGET=17.5` and `--locked`;
+   iOS Simulator slice with `IPHONEOS_DEPLOYMENT_TARGET=17.0` and `--locked`;
 3. generates the UniFFI Swift/C bindings and assembles an iOS-only
    `Iroh.xcframework` using `xcodebuild -create-xcframework -library`;
 4. builds the upstream `IrohLib` Swift package for generic iOS device and
-   generic iOS Simulator destinations with signing disabled;
-5. scans every xcframework slice and every Mach-O/archive product produced by
+   generic iOS Simulator destinations with a 17.0 deployment target and signing
+   disabled;
+5. installs the lowest available iOS 17.x Simulator runtime below 17.5 and runs
+   the upstream `IrohLibTests` XCTest suite on that runtime;
+6. scans every xcframework slice and every Mach-O/archive product produced by
    those Swift builds for both `sendmsg_x` and `recvmsg_x` as symbols and as
    literal strings; and
-6. verifies the same checker **does** find the private names in the upstream
+7. verifies the same checker **does** find the private names in the upstream
    prebuilt `IrohLib.xcframework.zip` after checking its published SHA-256, and
    requires a hit in that archive's `ios-arm64` slice specifically.
 
-The positive control is important: a checker that never fires is not evidence
-that the patched artifact is clean.
+The runtime test proves that the built Swift package can load and execute the
+upstream XCTest suite on one installed iOS 17.x Simulator runtime below 17.5.
+It does not prove behavior on a physical device, every iOS 17.0 hardware
+configuration, or code paths that the upstream tests do not exercise. The gate
+also fails if xcodebuild emits a warning that an object was built for a newer
+iOS deployment target than the one being linked.
+
+A cheap static imported-symbol inventory against the current SDK can show which
+system symbols the device archive references, but it cannot establish their
+availability on iOS 17.0 without an iOS 17.0 SDK. The runtime test is therefore
+the authoritative compatibility check here; no separate availability checker is
+built in this phase.
 
 The artifact contains the iOS-only xcframework zip, its SHA-256, the generated
-`IrohLib.swift` binding, feature-graph captures, build logs, and `manifest.json`
-with pins, declared and resolved iroh features, toolchain versions, deployment
-target, and slice layout.
+`IrohLib.swift` binding, feature-graph captures, build logs, runtime-test logs,
+and `manifest.json` with pins, declared and resolved iroh features, toolchain
+versions, deployment target, tested runtime, and slice layout.
 
 ## What the gate does not prove
 
@@ -82,6 +95,134 @@ App Store, and TestFlight archives. The Phase 1 app archive must repeat the
 binary check on its final linked products (including any transitive/static-link
 result). Do not add that check to `ios/scripts/testflight.py` in this phase.
 
+## Optional publication and consumer pin
+
+`release.json` is the single repository pin. It starts in `pending` state with
+no zip checksum: **consumers must reject pending pins**. The separate build
+manifest describes a CI qualification; it is not proof that a release exists.
+The qualified 17.0 artifact serves iOS 17.0 and later; there is no parallel 17.5
+publication to select.
+
+A manual dispatch may supply `release_tag=iroh-apple-v1.2.0-1`, matching
+`IROH_FFI_TAG` and `IROH_APPLE_REVISION` in `versions.env`. `dry_run` defaults to
+true. The read-only manifest job runs after the full gate, verifies the
+same-run files, and records URLs, byte counts and SHA-256s. Regular PR runs keep
+the existing checks and the original qualified artifact; the additional
+support bundle and pending release-candidate manifest are separate artifacts.
+If the gate falls back to another runtime below 17.5, its qualification remains
+valid, but publication refuses unless the tested runtime equals the deployment
+target exactly. A no-tag PR dry run records that runtime without publishing it.
+
+Only an explicit non-dry-run dispatch in `avibe-bot/avibe` on `master` can enter
+the publication job. Only that job has `contents: write`; PRs and other branches
+cannot publish. It revalidates the same-run candidate and refuses mismatched
+pins, patch/build recipe hashes, missing evidence/licenses, checksum changes,
+failed tests, and existing tags or releases (including drafts). Collision/API
+lookup failures are not absence. Publication is serialized, targets the tested
+source SHA and never overwrites assets. A failure after creating a release is
+not automatically repaired: diagnose it and use a new reviewed revision.
+
+Both an explicitly tagged dry run and publication preflight require the
+repository's full master `lint.yml` backstop to have passed at the **exact
+source SHA**, including its successful `master-full-backstop` terminal job.
+They reuse `scripts/ci_release_backstop.py --source-sha` before creating any tag.
+Missing, running, failed, skipped/coalesced or unreadable proof blocks the
+release; a green run for another SHA or a PR is insufficient. Wait for or rerun
+the full backstop at that SHA, then dispatch again. The no-tag PR dry run does
+not require master certification of a PR commit. Proof queries have only
+`actions: read`, and the helper's verified run ID is recorded in the job log.
+
+**Owner approval is procedural, not a technical reviewer lock.** No protected
+environment is created here; a repository writer can dispatch with dry run off.
+Merging this mechanism does not approve its first use or publish anything.
+
+Release assets and layout:
+
+- `IrohLib.xcframework.zip` is byte-for-byte the checked zip from the same run.
+  Its top-level directory is `Iroh.xcframework/`, containing `Info.plist`,
+  `ios-arm64/libiroh_ffi.a` and
+  `ios-arm64_x86_64-simulator/libiroh_ffi-ios-simulator.a`; each slice has
+  `Headers/Export.h`, `Headers/iroh_ffiFFI.h` and `Headers/module.modulemap`.
+  Use SwiftPM `.binaryTarget(name: "Iroh", url: ..., checksum: ...)`, or download
+  and SHA-256-verify before extracting. This is a C/UniFFI binary, not the Swift
+  wrapper by itself.
+- `IrohLib-support.zip` contains the matching `IrohLib.swift`, upstream
+  `LICENSE-APACHE` and `LICENSE-MIT` under `LICENSES/iroh-ffi/`, and license/NOTICE
+  texts from the union of the resolved iOS target graphs, indexed by
+  `LICENSES/packages.json`, plus Rust distribution copyright notices and the
+  installed `licenses/` directory. All dependency kinds are retained, including
+  build/proc-macro and dev dependencies; unrelated platforms and workspace
+  roots are not collected. Consumers must obtain
+  and preserve this bundle's notices with the redistributed binary and wrapper.
+  The binding is also published as `IrohLib.swift`; both forms are checksummed.
+- `iroh-apple-release.json` records tag, binary URL/checksum, upstream commit,
+  **resolved iroh core version**, patch/build recipe hashes, target/runtime,
+  source commit/run and each asset's URL, size and SHA-256. Qualification logs,
+  feature graphs, runtime-test JSON and the build manifest accompany it.
+
+After an owner-approved publication, independently read the release back and
+**download every named asset**. The promotion PR copies the verified release
+manifest into this directory's `release.json` with `release_state: published`,
+and includes read-back asset names, byte counts and computed SHA-256s as review
+evidence. Never promote based only on a dispatch result or an anticipated URL.
+The publication workflow cannot push the pin to master.
+
+This tag family is not a product version. Publication explicitly sets
+`make_latest: false` and the silent update-notification marker. Product release
+selection and desktop updates accept only their canonical `v…`/`gh-v…` families.
+The existing hourly release mirror naturally retains this full release and its
+assets; its `latest/` installer selection requires product tags and desktop
+installers, so this release cannot replace those aliases. GitHub URLs remain
+the pin; no new mirror guard or backup infrastructure is added.
+
+## Notice collection policy
+
+`scripts/cargo_notices.py` accepts a `Cargo.lock`, repeated `--target` values,
+`--package`, `--toolchain`, `--policy` and an empty `--output` directory. It is
+shared tooling for binary packagers, not an Apple-only dependency scanner.
+Configure Cargo's locked vendor source first, as this gate does; it verifies
+vendor package checksums against the supplied lockfile. Membership comes from
+`cargo tree --locked --target … --package … --edges normal,build,dev`, the
+feature-aware root/target graph used by qualification. Cargo metadata supplies
+package identities, manifests and authors only: even its platform-filtered
+resolve graph can retain edges outside the qualified tree. Unrecognized tree
+output or ambiguous metadata identities fail closed; support packaging also
+requires exact package-set equality with the captured qualification graphs.
+
+`license-sources.json` owns the reviewed expression-to-selected-license allowlist
+and per-crate/version/checksum supplemental sources. Collection refuses unknown
+expressions, unknown missing texts, mismatched crate or notice checksums, API
+failures, and mutable upstream URLs. Each `OR` expression has an explicit option;
+none selects a GPL/LGPL license. Existing bundled notices are always retained,
+including third-party notices such as iroh's BSD text.
+
+Source preference is bundled text, then checksum-pinned text at the crate's
+exact upstream commit, then an individually reviewed canonical SPDX text where
+the upstream only declares or links the license. The last class is explicitly
+labeled `standard` in the inventory, retains Cargo.toml, declared expressions,
+authors and repository, and never invents a copyright holder. Canonical texts
+are references, not claimed upstream copyright notices. The current exceptions
+are block2 0.6.2, dispatch2 0.3.1, enum-assoc 1.4.1, objc2 0.6.5,
+objc2-core-foundation 0.3.2, objc2-encode 4.1.0, objc2-security 0.3.2 and
+objc2-system-configuration 0.3.2. Pin bumps must review this list again.
+
+`LICENSES/provenance.json` records targets, policy/lockfile hashes, classes,
+counts, selected expressions and source URLs/checksums. `LICENSES/NOTICE.md`
+tells recipients how to obtain every MPL-2.0 crate's covered source via its
+versioned registry archive and exact upstream commit, stating that the crate
+source is unmodified (checked against vendor file hashes). It also supplies
+those pointers for the unmodified UniFFI generator/templates used to generate
+`IrohLib.swift`; the generated file is not described as an unmodified upstream
+file. The iOS graph includes attohttpc 0.30.1 and nine uniffi-family 0.31.2 crates
+under MPL-2.0. This packaging evidence is **not legal clearance**; first
+publication remains an owner decision.
+
+The qualification's existing cargo-tree artifacts provide an independent graph
+cross-check. A local, build-free audit of those graphs and checksum-verified
+crate archives found 330 packages including iroh-ffi: 303 bundled, 19 upstream
+supplements and eight standard-text exceptions. The CI-produced provenance
+must confirm the actual graph and counts before publication.
+
 ## Bumping the pin
 
 1. Update `versions.env` with the new tag, exact commit, resolved versions,
@@ -93,8 +234,11 @@ result). Do not add that check to `ios/scripts/testflight.py` in this phase.
 3. Run the workflow manually and confirm that the positive control still
    contains both private API names. If it does not, stop and investigate
    rather than weakening the checker.
-4. Record the new artifact's manifest and checker output in the PR body before
-   handing the gate to Phase 1.
+4. Run the workflow manually and confirm that the positive control still
+   contains both private API names and that the iOS 17.x runtime test passes.
+   Record the runtime selected by CI in the artifact manifest and PR body. If
+   no runtime below 17.5 can be installed with the pinned Xcode, stop and
+   report the lowest runtime that was available instead of weakening the gate.
 
 The workflow intentionally runs only on `workflow_dispatch` and pull requests
 that touch this gate or its workflow; it is not part of the normal PR lint

@@ -182,6 +182,23 @@ export const mcpServers: McpServerSummary[] = [
   mcpServer('linear', { source: 'opencode', sourcePath: '/Users/demo/.config/opencode/opencode.json', url: 'https://mcp.linear.app/mcp', toolCount: 23 }),
 ];
 
+/** A server with more tools than the detail panel shows before folding the rest. */
+export const mcpServerManyTools = mcpServer('linear', {
+  source: 'opencode',
+  sourcePath: '/Users/demo/.config/opencode/opencode.json',
+  url: 'https://mcp.linear.app/mcp',
+  serverVersion: '1.4.0',
+  tools: [
+    { name: 'list_issues', description: '按团队、状态、负责人或标签列出 Issue，支持分页。' },
+    { name: 'get_issue', description: '读取单个 Issue 的标题、描述、状态、评论和关联项。' },
+    { name: 'create_issue', description: '在指定团队下新建 Issue，可设置负责人、优先级和标签。' },
+    { name: 'update_issue', description: '修改 Issue 的状态、负责人、优先级、截止日期或描述。' },
+    { name: 'create_comment', description: '在 Issue 下发表评论，支持 Markdown。' },
+    { name: 'list_projects', description: '列出工作区里的项目及其进度和负责人。' },
+    { name: 'search_documentation', description: '在 Linear 官方文档中搜索功能说明。' },
+  ],
+});
+
 export const mcpApi = (servers: McpServerSummary[]): Record<string, unknown> => ({
   '/api/mcp': { ok: true, servers, oauthMode: 'direct' },
 });

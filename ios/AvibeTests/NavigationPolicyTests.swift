@@ -2620,26 +2620,33 @@ final class NavigationPolicyTests: XCTestCase {
         )
         webView.navigationDelegate = controller
         let directoriesBeforeDownload = temporaryDownloadDirectories()
+        // The controller takes the download inside WebKit's start callback, as
+        // `beginDownload` does in production. WebKit asks for a destination in
+        // a later message; a delegate registered after an `await` can miss it,
+        // and a download with no delegate gets no destination and is cancelled.
         let download = await withCheckedContinuation { continuation in
             webView.startDownload(
                 using: URLRequest(
                     url: baseURL.appending(path: "account-export.txt")
                 )
-            ) {
-                continuation.resume(returning: $0)
+            ) { download in
+                controller.webView(
+                    webView,
+                    navigationResponse: navigationResponse,
+                    didBecome: download
+                )
+                continuation.resume(returning: download)
             }
         }
-        controller.webView(
-            webView,
-            navigationResponse: navigationResponse,
-            didBecome: download
-        )
         await fulfillment(
             of: [headersSent.expectation],
             timeout: 30
         )
         var createdDirectories: Set<URL> = []
-        try await waitUntil(timeout: .seconds(30)) {
+        try await waitUntil(
+            "A temporary download directory exists",
+            timeout: .seconds(30)
+        ) {
             createdDirectories =
                 self.temporaryDownloadDirectories().subtracting(
                     directoriesBeforeDownload
@@ -2649,7 +2656,10 @@ final class NavigationPolicyTests: XCTestCase {
 
         _ = controller.invalidateForAccountTransition()
         releaseBody.signal()
-        try await waitUntil(timeout: .seconds(30)) {
+        try await waitUntil(
+            "Every temporary download directory is removed",
+            timeout: .seconds(30)
+        ) {
             createdDirectories.allSatisfy {
                 !FileManager.default.fileExists(atPath: $0.path)
             }
@@ -3269,9 +3279,15 @@ final class NavigationPolicyTests: XCTestCase {
         }
     }
 
+    /// Polls `condition` until it holds. A timeout is reported at the caller's
+    /// line with `description`, so a failure names the wait that expired rather
+    /// than this helper.
     @MainActor
     private func waitUntil(
+        _ description: String = "Condition",
         timeout: Duration = .seconds(20),
+        file: StaticString = #filePath,
+        line: UInt = #line,
         condition: @escaping @MainActor () async -> Bool
     ) async throws {
         let clock = ContinuousClock()
@@ -3282,7 +3298,11 @@ final class NavigationPolicyTests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(50))
         }
-        XCTFail("Condition did not become true before the deadline.")
+        XCTFail(
+            "\(description) did not become true within \(timeout).",
+            file: file,
+            line: line
+        )
         throw TestWaitError.timedOut
     }
 

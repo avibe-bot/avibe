@@ -599,7 +599,9 @@ const PendingRequestsSection: React.FC<{
 };
 
 const QUICK_FILTERS = ['all', 'protected', 'signing', 'unused'] as const;
-const SORT_ORDERS = ['name', 'recent', 'added'] as const;
+// Most recent activity first is the default (owner decision, 2026-11-12): last used, or added when never used.
+const SORT_ORDERS = ['recent', 'name', 'added'] as const;
+const DEFAULT_SORT = 'recent';
 const timestamp = (value: string | null) => value ? Date.parse(value) || 0 : 0;
 
 export const VaultsPage: React.FC = () => {
@@ -626,7 +628,7 @@ export const VaultsPage: React.FC = () => {
   const activeTags = useMemo(() => [...new Set(searchParams.getAll('tag').filter(Boolean))], [searchParams]);
   const activeSkills = useMemo(() => [...new Set(searchParams.getAll('skill').filter(Boolean))], [searchParams]);
   const quick = QUICK_FILTERS.find((value) => value === searchParams.get('filter')) ?? 'all';
-  const sort = SORT_ORDERS.find((value) => value === searchParams.get('sort')) ?? 'name';
+  const sort = SORT_ORDERS.find((value) => value === searchParams.get('sort')) ?? DEFAULT_SORT;
   const searchRef = useRef<HTMLInputElement>(null);
   const updateView = (changes: Record<string, string[]>) => setSearchParams((prev) => {
     const next = new URLSearchParams(prev);
@@ -780,14 +782,14 @@ export const VaultsPage: React.FC = () => {
         t(secret.protection === 'protected' ? 'vaults.protected' : 'vaults.standard'),
         t(secret.kind === 'keypair' ? 'vaults.dialog.kindKeypair' : 'vaults.dialog.kindStatic'),
         ...(secret.kind === 'keypair' ? [t('vaults.signing')] : []),
+        // A Solana key is found by its chain as well as by its address.
+        ...(secret.signing_curve === 'ed25519' ? [t('vaults.dialog.chainSolana')] : []),
       ]);
     });
     return matches.sort((a, b) => {
       if (sort === 'recent') {
-        // Null means never used, independent of timestamp parsing or epoch.
-        const used = Number(Boolean(b.last_used_at)) - Number(Boolean(a.last_used_at));
-        if (used) return used;
-        const delta = timestamp(b.last_used_at) - timestamp(a.last_used_at);
+        // Last activity: when it was last used, or added when it never was.
+        const delta = timestamp(b.last_used_at ?? b.created_at) - timestamp(a.last_used_at ?? a.created_at);
         if (delta) return delta;
       }
       if (sort === 'added') {
@@ -1022,7 +1024,7 @@ export const VaultsPage: React.FC = () => {
               onKeyDown={(event) => { if (event.key === 'Escape') updateView({ q: [] }); }}
               aria-label={t('vaults.search.label')}
               placeholder={t('vaults.search.placeholder')}
-              className="h-9 pl-9 pr-16"
+              className="h-9 pl-9 pr-16 text-[13px]"
             />
             {query ? (
               <Button variant="ghost" size="icon" className="absolute right-8 top-0.5 size-8" aria-label={t('vaults.search.clear')} onClick={() => updateView({ q: [] })}>
@@ -1037,9 +1039,11 @@ export const VaultsPage: React.FC = () => {
             options={QUICK_FILTERS.map((id) => ({ id, label: t(`vaults.filter.${id}`) }))}
             ariaLabel={t('vaults.filter.quick')}
             onChange={(value) => updateView({ filter: value === 'all' ? [] : [value] })}
-            className="h-auto min-h-9 max-w-full flex-wrap"
+            // One text size across the toolbar row (13px, the Tags button's): the
+            // segmented items default to 12px.
+            className="h-auto min-h-9 max-w-full flex-wrap [&>button]:text-[13px]"
           />
-          <Select aria-label={t('vaults.sort.label')} value={sort} onChange={(event) => updateView({ sort: event.target.value === 'name' ? [] : [event.target.value] })} wrapperClassName="w-auto">
+          <Select aria-label={t('vaults.sort.label')} value={sort} onChange={(event) => updateView({ sort: event.target.value === DEFAULT_SORT ? [] : [event.target.value] })} wrapperClassName="w-auto" className="text-[13px]">
             {SORT_ORDERS.map((value) => <option key={value} value={value}>{t(`vaults.sort.${value}`)}</option>)}
           </Select>
         </div>

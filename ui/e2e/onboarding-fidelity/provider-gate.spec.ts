@@ -43,13 +43,8 @@ for (const [lang, copy, width] of [['en', en, 1440], ['zh', zh, 390]] as const) 
     await page.getByRole('dialog').getByRole('contentinfo').getByRole('button', {
       name: copy.onboarding.providers.addFooterSignInNamed.replace('{{name}}', vendor === 'anthropic' ? 'Claude' : 'ChatGPT'), exact: true,
     }).click();
-    const chooser = page.getByRole('dialog').filter({ has: page.getByRole('heading', {
-      name: copy.settings.models.addSub.title.replace('{{vendor}}', vendor === 'anthropic' ? 'Claude' : 'ChatGPT'), exact: true,
-    }) });
-    await expect(chooser.getByRole('radio')).toHaveCount(1);
-    await expect(chooser.getByRole('radio')).toContainText(copy.settings.models.addSub.opt.hub.label);
-    expect(starts).toEqual([]);
-    await chooser.getByRole('button', { name: copy.settings.models.addSub.signIn, exact: true }).click();
+    // The wizard's sign-in button is the explicit choice: no one-option chooser in between.
+    await expect(page.getByRole('radio')).toHaveCount(0);
     await expect(page.getByRole('dialog')).toHaveCount(0);
     expect(starts).toEqual([{ vendor, channel: 'hub' }]);
     await expect(page.locator(`.setup-provider-card[data-provider="${vendor}"]`)).toHaveAttribute('data-state', 'connected');

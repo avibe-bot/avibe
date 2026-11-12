@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -1082,6 +1083,105 @@ def test_managed_watch_service_stop_terminates_running_waiter(tmp_path: Path) ->
 
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+    saved = ManagedWatchStore(store.path).get_watch(watch.id)
+    assert saved is not None and saved.enabled
+    assert saved.retired_at is None
+    assert saved.last_exit_code is None
+    assert request_store.list_pending() == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX service/worker SIGTERM race")
+@pytest.mark.parametrize("mode", ["once", "forever"])
+@pytest.mark.parametrize("shutdown_requested", [True, False], ids=["service-shutdown", "waiter-failure"])
+def test_waiter_sigterm_during_controller_shutdown_preserves_watch(
+    tmp_path: Path, mode: str, shutdown_requested: bool,
+) -> None:
+    """A group stop can finish the waiter before WatchService.stop cancels it.
+
+    The ordinary stop test reaches cancellation first and misses this ordering.
+    Exercise the real supervisor/result path, then reload and start again: a
+    service interruption must not retire either mode or enqueue a failure hook.
+    The same signal without service shutdown must still report a real failure.
+    """
+    ready = tmp_path / "waiter-ready"
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Interrupted waiter",
+        session_key="slack::channel::C123",
+        command=[
+            sys.executable, "-c",
+            "import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(60)",
+            str(ready),
+        ],
+        shell_command=None,
+        prefix=None,
+        cwd=str(tmp_path),
+        mode=mode,
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    controller = SimpleNamespace(shutdown_requested=False)
+    service = ManagedWatchService(
+        controller=controller, store=store,
+        request_store=request_store, runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        try:
+            await _await_condition(ready.exists, "waiter never became ready")
+            task = service._active_tasks[watch.id]
+            pid = service._active_pids[watch.id]
+            # The controller retains its lease while draining other runtime owners.
+            # Deliver the waiter's SIGTERM before its service gets to stop().
+            controller.shutdown_requested = shutdown_requested
+            os.killpg(pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=10)
+            except asyncio.CancelledError:
+                # Reconciliation may notice the same shutdown first and cancel it.
+                assert shutdown_requested
+        finally:
+            await service.stop()
+
+        saved = ManagedWatchStore(store.path).get_watch(watch.id)
+        assert saved is not None
+        pending = request_store.list_pending()
+        if not shutdown_requested:
+            assert not saved.enabled
+            assert saved.retired_at is not None
+            assert saved.last_exit_code == -signal.SIGTERM
+            assert len(pending) == 1
+            assert pending[0].metadata[WATCH_HOOK_OUTCOME_METADATA_KEY] == WATCH_HOOK_OUTCOME_WAITER_FAILURE
+            return
+
+        assert saved.enabled, "service shutdown retired its own waiter"
+        assert saved.retired_at is None
+        assert saved.last_exit_code is None
+        assert saved.last_error is None
+        assert pending == []
+        ready.unlink()
+        restarted = ManagedWatchService(
+            controller=SimpleNamespace(shutdown_requested=False),
+            store=ManagedWatchStore(store.path), request_store=request_store,
+            runtime_store=runtime_store,
+        )
+        await _start_watch_service(restarted)
+        try:
+            await _await_condition(ready.exists, "preserved Watch did not re-arm on restart")
+            assert watch.id in restarted._active_pids
+        finally:
+            await restarted.stop()
+        assert ManagedWatchStore(store.path).get_watch(watch.id).enabled
+        assert request_store.list_pending() == []
+
+    asyncio.run(_run())
 
 
 def test_managed_watch_service_lease_loss_terminates_running_waiter(tmp_path: Path, monkeypatch) -> None:

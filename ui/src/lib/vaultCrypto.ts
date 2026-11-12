@@ -112,10 +112,27 @@ export type AgentSignBlindBoxContext = {
   operationHash: HexOrBytes;
 };
 
+/** The secret-key encodings avault imports a Solana key from. */
+export type SolanaKeyImportFormat = 'solana-cli-json' | 'base58-secret';
+
+/**
+ * A pasted Solana secret key, sealed for `avault keypair import`. The box opens only for this
+ * name, curve and format, so it cannot be replayed as a static value or as another key.
+ */
+export type KeypairImportBlindBoxContext = {
+  purpose: 'keypair-import';
+  name: string;
+  curve: 'ed25519';
+  format: SolanaKeyImportFormat;
+};
+
 export type ProtectedDekReleaseBlindBoxContext = AgentDeliverBlindBoxContext | AgentSignBlindBoxContext;
 export type ProtectedDekDeliveryBlindBoxContext = AgentDeliverBlindBoxContext;
 
-export type BlindBoxContext = StandardCreateBlindBoxContext | ProtectedDekReleaseBlindBoxContext;
+export type BlindBoxContext =
+  | StandardCreateBlindBoxContext
+  | KeypairImportBlindBoxContext
+  | ProtectedDekReleaseBlindBoxContext;
 
 export type ProtectedDekReleaseOperation =
   | {
@@ -782,6 +799,8 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
   switch (context.purpose) {
     case 'seal':
       return standardCreateBlindBoxContext(context.name);
+    case 'keypair-import':
+      return keypairImportBlindBoxContext(context.name, context.format, context.curve);
     case 'agent-deliver': {
       const approval = normalizeApproval({
         nonce: context.approvalNonce,
@@ -824,6 +843,20 @@ export function standardCreateBlindBoxContext(name: string): StandardCreateBlind
     purpose: 'seal',
     name: validateRecordName(name),
   };
+}
+
+/** The context `avault keypair import --blind-box` opens a pasted Solana secret key under. */
+export function keypairImportBlindBoxContext(
+  name: string,
+  format: SolanaKeyImportFormat,
+  curve: 'ed25519' = 'ed25519',
+): KeypairImportBlindBoxContext {
+  if (curve !== 'ed25519') throw new Error('keypair import supports only the ed25519 curve');
+  if (format !== 'solana-cli-json' && format !== 'base58-secret') {
+    throw new Error('unsupported Solana keypair import format');
+  }
+  // A signing key is one record: it has no fields, so the name is a bare secret name.
+  return { purpose: 'keypair-import', name: validateSecretName(name), curve, format };
 }
 
 async function normalizeAndCheckOperationHash(
@@ -931,41 +964,29 @@ export async function blindBoxAgentSignOperationHash(
 
 export function blindBoxAad(context: BlindBoxContext): Uint8Array {
   const normalized = normalizeBlindBoxContext(context);
+  // Only an approved release carries a grant, an approval and an operation hash.
+  const release = normalized.purpose === 'agent-deliver' || normalized.purpose === 'agent-sign' ? normalized : null;
+  const empty = new Uint8Array();
+  // One field names what the box is for: a signature scheme, or a key import's `curve:format`.
+  const scheme =
+    normalized.purpose === 'agent-sign'
+      ? utf8(normalized.signScheme)
+      : normalized.purpose === 'keypair-import'
+        ? utf8(`${normalized.curve}:${normalized.format}`)
+        : empty;
   const out: number[] = [...utf8(BLIND_BOX_AAD_DOMAIN)];
   pushLengthPrefixed(out, utf8(normalized.purpose));
   pushLengthPrefixed(out, utf8(normalized.name));
   pushLengthPrefixed(out, utf8(WRAP_SCHEME));
   pushLengthPrefixed(out, new Uint8Array([WRAP_META_VERSION]));
-  pushLengthPrefixed(
-    out,
-    normalized.purpose === 'agent-deliver' || normalized.purpose === 'agent-sign'
-      ? utf8(normalized.grantId)
-      : new Uint8Array(),
-  );
+  pushLengthPrefixed(out, release ? utf8(release.grantId) : empty);
   // Reserved empty field keeps the v1 AAD layout stable while grant_id is the only scope.
-  pushLengthPrefixed(out, new Uint8Array());
-  pushLengthPrefixed(
-    out,
-    normalized.purpose === 'agent-sign' ? utf8(normalized.signScheme) : new Uint8Array(),
-  );
-  pushLengthPrefixed(
-    out,
-    normalized.purpose === 'agent-sign' ? normalizeDigest(normalized.digest) : new Uint8Array(),
-  );
-  pushLengthPrefixed(
-    out,
-    normalized.purpose === 'seal' ? new Uint8Array() : toUint8Array(normalized.approvalNonce, 'approval nonce'),
-  );
-  pushLengthPrefixed(
-    out,
-    normalized.purpose === 'seal'
-      ? new Uint8Array()
-      : approvalExpiryBytes(normalized.approvalExpiresAtUnix),
-  );
-  pushLengthPrefixed(
-    out,
-    normalized.purpose === 'seal' ? new Uint8Array() : normalizeOperationHash(normalized.operationHash),
-  );
+  pushLengthPrefixed(out, empty);
+  pushLengthPrefixed(out, scheme);
+  pushLengthPrefixed(out, normalized.purpose === 'agent-sign' ? normalizeDigest(normalized.digest) : empty);
+  pushLengthPrefixed(out, release ? toUint8Array(release.approvalNonce, 'approval nonce') : empty);
+  pushLengthPrefixed(out, release ? approvalExpiryBytes(release.approvalExpiresAtUnix) : empty);
+  pushLengthPrefixed(out, release ? normalizeOperationHash(release.operationHash) : empty);
   return new Uint8Array(out);
 }
 

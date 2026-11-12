@@ -1,11 +1,58 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import threading
 import time
 
 from core.loop_watchdog import EventLoopWatchdog
+
+
+def test_gc_observation_is_thresholded_bounded_and_removed_on_stop(caplog, monkeypatch) -> None:
+    # Existing loop tests cannot see GC callbacks. This protects the diagnostic
+    # contract without a heap load or an actual slow collection on the host.
+    caplog.set_level(logging.WARNING, logger="core.loop_watchdog")
+    unrelated_callback = lambda phase, info: None
+    callbacks = [unrelated_callback]
+    monkeypatch.setattr(gc, "callbacks", callbacks)
+    now = [0.0]
+    loop = asyncio.new_event_loop()
+    watchdog = EventLoopWatchdog(loop, poll_seconds=60, monotonic=lambda: now[0])
+    info = {"generation": 2, "collected": 17, "uncollectable": 3}
+    try:
+        watchdog.start()
+        watchdog.start()
+        assert len(callbacks) == 2
+        callback = callbacks[1]
+        callback("stop", info)  # attached during a collection: no start to time
+        for duration in (0.1, 0.2):
+            now[0] = 0.0
+            callback("start", info)
+            now[0] = duration
+            callback("stop", info)
+        watchdog._report_gc()
+        assert not _messages(caplog, logging.WARNING)
+
+        callback("start", info)
+        now[0] = 0.45
+        callback("stop", info)
+        assert not _messages(caplog, logging.WARNING)  # no logging on collector thread
+        watchdog._report_gc()
+        (message,) = _messages(caplog, logging.WARNING)
+        assert "duration_ms=250.0 generation=2 collected=17 uncollectable=3" in message
+        assert f"thread_id={threading.get_ident()} ended_at_unix=" in message
+
+        for _ in range(100):
+            callback("start", info)
+            now[0] += 0.3
+            callback("stop", info)
+        assert len(watchdog._gc_reports) == 64
+    finally:
+        watchdog.stop()
+        watchdog.stop()
+        loop.close()
+    assert callbacks == [unrelated_callback]
 
 
 def _wait_for(condition, timeout: float = 5.0) -> None:

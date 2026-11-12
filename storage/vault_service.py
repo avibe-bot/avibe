@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from storage import vault_crypto, vault_webauthn
 from storage import vault_bitcoin, vault_solana
@@ -41,6 +41,7 @@ from storage.models import (
     scopes,
     state_meta,
     vault_audit,
+    vault_audit_access_snapshots,
     vault_auth_factors,
     vault_grants,
     vault_operation_challenges,
@@ -56,6 +57,8 @@ logger = logging.getLogger(__name__)
 SKILL_TAG_PREFIX = "skill:"
 VAULT_SETTINGS_META_KEY = "vault_settings"
 PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY = "vault_protected_establishment_lock"
+WEBAUTHN_USER_HANDLE_META_KEY = "vault.webauthn_user_handle.v1"
+WEBAUTHN_USER_HANDLE_BYTES = 32
 DEFAULT_UNLOCK_WINDOW_SECONDS = 600
 UNLOCK_WINDOW_OPTIONS_SECONDS = (300, 600, 1800)
 GRANT_DURATION_ONE_TIME = "one-time"
@@ -2312,12 +2315,20 @@ def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
     if row.get("protection") != "protected":
         return True
     signing_public_key = _public_meta(row.get("public_meta")).get("signing_public_key")
-    return (
-        isinstance(signing_public_key, dict)
-        and signing_public_key.get("curve") == "secp256k1"
-        and isinstance(signing_public_key.get("public_key"), str)
-        and bool(signing_public_key.get("public_key"))
-    )
+    if not isinstance(signing_public_key, dict):
+        return False
+    if signing_public_key.get("curve") == "secp256k1":
+        return (
+            isinstance(signing_public_key.get("public_key"), str)
+            and bool(signing_public_key.get("public_key"))
+        )
+    if signing_public_key.get("curve") == vault_solana.CURVE:
+        try:
+            vault_solana.require_public_key(signing_public_key)
+        except vault_solana.SolanaSigningError:
+            return False
+        return True
+    return False
 
 
 def sign_headless_allowed(row: dict[str, Any]) -> bool:
@@ -2415,8 +2426,8 @@ def validate_signing_pairing(
         vault_solana.require_public_key(signing_key)
     except vault_solana.SolanaSigningError as exc:
         raise InvalidSigningKeyError(str(exc)) from exc
-    if protected:
-        raise ProtectedSolanaUnsupportedError("protected Solana signing is not supported yet")
+    if protected and signing_context is None:
+        raise InvalidSigningContextError("protected Solana signing requires a verifiable signing_context")
     if signing_context is not None:
         try:
             vault_solana.validate_context(signing_context, message_hex=message_hex or "")
@@ -2475,6 +2486,16 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
     validate_signing_pairing(
         context, scheme=scheme, message_hex=delivery.get("message_hex"), signing_key=signing_key, protected=protected,
     )
+    if scheme == vault_solana.SCHEME and (protected or "signing_key" in delivery):
+        pinned = delivery.get("signing_key")
+        if (
+            not protected
+            or row.get("kind") != "keypair"
+            or row.get("signer_kind") not in (None, "local")
+            or not isinstance(pinned, dict)
+            or pinned != {"secret_id": row["id"], "public_key": vault_solana.require_public_key(signing_key)}
+        ):
+            raise InvalidRequestError("protected signing record does not match the sign request")
     if scheme != vault_bitcoin.BITCOIN_SCHEME and not (
         isinstance(context, dict) and context.get("kind") == vault_bitcoin.BITCOIN_CONTEXT_KIND
     ):
@@ -2486,6 +2507,7 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
 
 def _require_matching_sign_request(
     delivery: dict[str, Any], *, scheme: str, digest: str | None, message_hex: str | None,
+    signing_context: dict[str, Any] | None = None,
 ) -> None:
     digest, message_hex = normalize_sign_input(scheme, digest=digest, message_hex=message_hex)
     if (
@@ -2493,6 +2515,8 @@ def _require_matching_sign_request(
         or delivery.get("digest") != digest
         or delivery.get("message_hex") != message_hex
     ):
+        raise InvalidRequestError("signature payload does not match the sign request")
+    if (signing_context is not None or "signing_key" in delivery) and delivery.get("signing_context") != signing_context:
         raise InvalidRequestError("signature payload does not match the sign request")
 
 
@@ -2776,6 +2800,65 @@ def _usable_webauthn_factor_rows(conn: Connection, *, rp_id: str) -> list[dict[s
     ]
 
 
+def _parse_persisted_webauthn_user_handle(raw: object) -> bytes:
+    if not isinstance(raw, str):
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid")
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid") from exc
+    if not isinstance(value, str):
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid")
+    try:
+        decoded = vault_webauthn.decode_user_handle(value)
+    except vault_webauthn.WebAuthnVerificationError as exc:
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid") from exc
+    if len(decoded) != WEBAUTHN_USER_HANDLE_BYTES or vault_webauthn.b64encode(decoded) != value:
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid")
+    return decoded
+
+
+def _read_persisted_webauthn_user_handle(conn: Connection) -> bytes | None:
+    raw = conn.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == WEBAUTHN_USER_HANDLE_META_KEY)
+    ).scalar_one_or_none()
+    if raw is None:
+        return None
+    return _parse_persisted_webauthn_user_handle(raw)
+
+
+def _load_or_create_webauthn_user_handle(conn: Connection) -> bytes:
+    candidate = vault_webauthn.b64encode(secrets.token_bytes(WEBAUTHN_USER_HANDLE_BYTES))
+    statement = sqlite_insert(state_meta).values(
+        key=WEBAUTHN_USER_HANDLE_META_KEY,
+        value_json=json.dumps(candidate),
+        updated_at=_now(),
+    )
+    # This is deliberately the first database operation in registration-options creation:
+    # concurrent first callers must serialize on the state_meta key before any factor snapshot.
+    conn.execute(statement.on_conflict_do_nothing(index_elements=[state_meta.c.key]))
+    persisted = _read_persisted_webauthn_user_handle(conn)
+    if persisted is None:
+        raise InvalidProtectedAuthzError("WebAuthn user handle could not be initialized")
+    return persisted
+
+
+def _webauthn_assertion_user_handle_aliases(conn: Connection, payload: dict[str, Any]) -> tuple[bytes, ...]:
+    # Released sandbox clients serialized AuthenticatorAssertionResponse.userHandle with
+    # bytesToBase64; pre-3.2.6 registration options therefore used these legacy bytes.
+    aliases = [vault_webauthn.LEGACY_WEBAUTHN_USER_HANDLE]
+    assertion = payload.get("assertion")
+    response = assertion.get("response") if isinstance(assertion, dict) else None
+    if not isinstance(response, dict) or response.get("userHandle") is None:
+        # A pre-upgrade pending assertion may have no instance handle yet. Do not create one
+        # merely to verify the historical credential or a null userHandle response.
+        return tuple(aliases)
+    current = _read_persisted_webauthn_user_handle(conn)
+    if current is not None:
+        aliases.append(current)
+    return tuple(aliases)
+
+
 def _has_any_webauthn_factor(conn: Connection) -> bool:
     return (
         conn.execute(
@@ -2914,6 +2997,7 @@ def _verify_webauthn_operation_authz(
     if factor.get("rp_id") != challenge.get("rp_id"):
         raise InvalidProtectedAuthzError("protected operation authorization factor RP mismatch")
     assertion = payload.get("assertion")
+    expected_user_handles = _webauthn_assertion_user_handle_aliases(conn, payload)
     try:
         result = vault_webauthn.verify_assertion(
             assertion if isinstance(assertion, dict) else {},
@@ -2924,6 +3008,7 @@ def _verify_webauthn_operation_authz(
             expected_challenge_hash=str(challenge["challenge_hash"]),
             expected_origin=str(challenge["origin"]),
             rp_id=str(challenge["rp_id"]),
+            expected_user_handles=expected_user_handles,
         )
     except vault_webauthn.WebAuthnVerificationError as exc:
         raise InvalidProtectedAuthzError(str(exc)) from exc
@@ -2945,6 +3030,7 @@ def create_webauthn_registration_options(
     origin: str,
     ttl_seconds: int = DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS,
 ) -> dict[str, Any]:
+    webauthn_user_handle = _load_or_create_webauthn_user_handle(conn)
     challenge, challenge_digest = _new_challenge()
     challenge_id = _id("vop")
     expires_at = _challenge_expiry(ttl_seconds)
@@ -2974,7 +3060,7 @@ def create_webauthn_registration_options(
         "webauthn": {
             "rp": {"name": "Avibe Vault", "id": rp_id},
             "user": {
-                "id": vault_webauthn.b64encode(b"avibe-vault"),
+                "id": vault_webauthn.b64encode(webauthn_user_handle),
                 "name": "avibe-vault",
                 "displayName": "Avibe Vault",
             },
@@ -3178,6 +3264,17 @@ def create_secret(
     public_meta = dict(public_meta or {})
     if description:
         public_meta["description"] = description
+    signing_metadata = public_meta.get("signing_public_key")
+    if (
+        protection == "protected"
+        and (vault_solana.is_ed25519_key(signing_metadata) or vault_solana.declares_protected_solana_record(sealed))
+    ):
+        if kind != "keypair":
+            raise InvalidSigningKeyError("protected Solana records require kind 'keypair'")
+        try:
+            vault_solana.validate_protected_record_envelope(name, sealed, signing_metadata)
+        except vault_solana.SolanaSigningError as exc:
+            raise InvalidSigningKeyError(str(exc)) from exc
     if kind == "keypair" and (fields or default_field is not None or "default_field" in public_meta):
         raise FieldsNotSupportedError("keypair secrets do not support fields or default_field")
     normalized_default_field = _default_field_name(value=default_field or public_meta.get("default_field"))
@@ -4598,7 +4695,7 @@ def create_sign_request(
         protected=row.get("protection") == "protected",
     )
     _reject_unsignable_keypair(row, name)
-    if row.get("protection") == "protected" or scheme == vault_bitcoin.BITCOIN_SCHEME:
+    if (row.get("protection") == "protected" and scheme != vault_solana.SCHEME) or scheme == vault_bitcoin.BITCOIN_SCHEME:
         require_compressed_signing_public_key(signing_key)
     if signing_context is not None and not isinstance(signing_context, dict):
         raise InvalidSigningContextError("signing_context must be an object")
@@ -4633,7 +4730,14 @@ def create_sign_request(
     # A caller's delivery never supplies the signing input: only the validated one is stored.
     delivery_payload.pop("digest", None)
     delivery_payload.pop("message_hex", None)
+    delivery_payload.pop("signing_key", None)
+    delivery_payload.pop("operation_context", None)
+    delivery_payload.pop("signature", None)
     delivery_payload.update({"scheme": scheme, "card": card})
+    if row.get("protection") == "protected" and scheme == vault_solana.SCHEME:
+        delivery_payload["signing_key"] = {
+            "secret_id": row["id"], "public_key": vault_solana.require_public_key(signing_key),
+        }
     if message_hex is None:
         delivery_payload["digest"] = digest
     else:
@@ -4849,6 +4953,7 @@ def complete_sign_request(
     scheme: str,
     signature: dict[str, Any],
     message_hex: str | None = None,
+    signing_context: dict[str, Any] | None = None,
     requester: Any = None,
     browser_signed: bool = False,
 ) -> dict[str, Any]:
@@ -4865,9 +4970,24 @@ def complete_sign_request(
         raise InvalidRequestError("signature secret does not match the sign request")
     _, delivery = _request_json_payloads(row_dict)
     delivery_payload = delivery if isinstance(delivery, dict) else {}
-    _require_matching_sign_request(delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex)
+    _require_matching_sign_request(
+        delivery_payload,
+        scheme=scheme,
+        digest=digest,
+        message_hex=message_hex,
+        signing_context=signing_context,
+    )
     _validate_persisted_signing_context(conn, name, delivery_payload)
     _validate_signature_payload(scheme, signature)
+    if _require_row(conn, name).get("protection") == "protected" and scheme == vault_solana.SCHEME:
+        try:
+            vault_solana.verify_signature(
+                delivery_payload["signing_key"]["public_key"],
+                delivery_payload["message_hex"],
+                signature.get("signature"),
+            )
+        except vault_solana.SolanaSigningError as exc:
+            raise InvalidRequestError(str(exc)) from exc
     completed_delivery = dict(delivery_payload)
     completed_delivery["signature"] = signature
     claim = conn.execute(
@@ -5099,6 +5219,7 @@ def validate_sign_request(
     digest: str | None = None,
     scheme: str,
     message_hex: str | None = None,
+    signing_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row_dict = _load_request_for_transition(
         conn,
@@ -5113,7 +5234,9 @@ def validate_sign_request(
         raise InvalidRequestError("signature secret does not match the sign request")
     _, delivery = _request_json_payloads(row_dict)
     delivery_payload = delivery if isinstance(delivery, dict) else {}
-    _require_matching_sign_request(delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex)
+    _require_matching_sign_request(
+        delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex, signing_context=signing_context,
+    )
     _validate_persisted_signing_context(conn, name, delivery_payload)
     return _request_row_payload(row_dict, conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
@@ -6194,11 +6317,51 @@ def resolve_secret_access(
     return {"status": "approval_required", "secret": _meta_payload(row), "request": request_payload}
 
 
-def _audit_access_snapshot(row: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+def _audit_snapshot_ref(snapshot: Any) -> int | None:
+    if not isinstance(snapshot, dict) or set(snapshot) != {"ref"}:
+        return None
+    ref = snapshot["ref"]
+    # SQLite INTEGER PRIMARY KEY uses signed 64-bit integers. Reject bools and
+    # oversized JSON integers before binding, rather than failing the whole read.
+    return ref if type(ref) is int and 0 < ref <= 9223372036854775807 else None
+
+
+def _load_audit_access_snapshots(conn: Connection, rows: list[dict[str, Any]]) -> dict[int, Any]:
+    """Resolve one bounded audit batch; inline-only history needs no new table."""
+    refs: set[int] = set()
+    for row in rows:
+        delivery = _loads(row.get("delivery"))
+        ref = _audit_snapshot_ref(delivery.get(_AUDIT_ACCESS_SNAPSHOT_KEY)) if isinstance(delivery, dict) else None
+        if ref is not None:
+            refs.add(ref)
+    if not refs:
+        return {}
+    try:
+        return {
+            row.id: _loads(row.snapshot)
+            for row in conn.execute(
+                select(vault_audit_access_snapshots).where(vault_audit_access_snapshots.c.id.in_(refs))
+            )
+        }
+    except OperationalError as exc:
+        # A pre-0087 database has no reference table. References are never
+        # written by this reader-first release, but an accidental reference
+        # must fail closed rather than fall back to current ACL state.
+        if "no such table" in str(exc).lower() and "vault_audit_access_snapshots" in str(exc).lower():
+            return {}
+        raise
+
+
+def _audit_access_snapshot(
+    row: dict[str, Any], *, snapshots: dict[int, Any] | None = None,
+) -> tuple[bool, dict[str, Any] | None]:
     delivery = _loads(row.get("delivery"))
     if not isinstance(delivery, dict) or _AUDIT_ACCESS_SNAPSHOT_KEY not in delivery:
         return False, None
     snapshot = delivery.get(_AUDIT_ACCESS_SNAPSHOT_KEY)
+    if isinstance(snapshot, dict) and "ref" in snapshot:
+        ref = _audit_snapshot_ref(snapshot)
+        snapshot = snapshots.get(ref) if ref is not None and snapshots is not None else None
     if not isinstance(snapshot, dict) or snapshot.get("version") != 1 or not isinstance(snapshot.get("resources"), list):
         return True, None
     return True, snapshot
@@ -6274,7 +6437,8 @@ def _deleted_audit_policy_snapshot(
         .first()
     )
     if row is not None:
-        present, snapshot = _audit_access_snapshot(dict(row))
+        payload = dict(row)
+        present, snapshot = _audit_access_snapshot(payload, snapshots=_load_audit_access_snapshots(conn, [payload]))
         if present and snapshot is not None:
             for resource in snapshot["resources"]:
                 if isinstance(resource, dict) and resource.get("name") == name:
@@ -6331,12 +6495,13 @@ def _require_audit_row_access(
     grant_members: dict[str, list[str] | None] | None = None,
     access_by_name: dict[str, bool] | None = None,
     tombstone_policies: dict[str, tuple[bool, Any]] | None = None,
+    snapshots: dict[int, Any] | None = None,
 ) -> None:
     context = resolve_resource_access_context(user_context)
     if _audit_fast_path_allowed(context):
         return
 
-    snapshot_present, snapshot = _audit_access_snapshot(row)
+    snapshot_present, snapshot = _audit_access_snapshot(row, snapshots=snapshots)
     if snapshot_present:
         if snapshot is None or not _audit_snapshot_allows(context, snapshot):
             raise VaultSecretAccessError("Vault secret access is not permitted.")
@@ -6411,6 +6576,7 @@ def list_audit(
         if not batch:
             break
         cursor = (str(batch[-1]["ts"]), str(batch[-1]["id"]))
+        snapshots = _load_audit_access_snapshots(conn, batch)
         for row in batch:
             try:
                 _require_audit_row_access(
@@ -6421,6 +6587,7 @@ def list_audit(
                     grant_members=grant_members,
                     access_by_name=access_by_name,
                     tombstone_policies=tombstone_policies,
+                    snapshots=snapshots,
                 )
             except VaultSecretAccessError:
                 continue

@@ -791,11 +791,15 @@ class Agent:
                 # for the first request; later attempts resolve the route afresh.
                 selected = await self._scope.call(self.models.resolve)
                 self._check_model_route(selected)
-                self._rows = list(await self._scope.call(lambda: self.store.load(self.session_id)))
+                runtime = await self._scope.call(lambda: self.store.load_for_run(self.session_id))
+                self._rows = list(runtime.entries)
+                for route, used_at in runtime.response_clocks.items():
+                    self._last_model_at[route] = max(self._last_model_at.get(route, used_at), used_at)
                 if self.context is not None:
                     attempts = await self._scope.call(lambda: self.store.load_cache_attempts(self.session_id))
                     self._cache_tracker = CacheTracker()
-                    self._cache_tracker.restore(self._rows, attempts)
+                    self._cache_tracker.restore((), (*runtime.cache_records, *attempts))
+                    self._cache_tracker.change_seqs = dict(runtime.change_seqs)
                     self._cache_fork = bool(self._rows) and not any(row.session_id == self.session_id for row in self._rows)
                 projection = project(self._rows)
                 self._ctx.state = deepcopy(dict(projection.state))

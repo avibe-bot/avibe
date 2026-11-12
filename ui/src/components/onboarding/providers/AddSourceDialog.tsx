@@ -33,6 +33,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { DialogOverlay } from '@/components/ui/dialog';
+import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
 import { ApiKeySourceForm } from '@/components/settings/models/ApiKeySourceForm';
 import {
   apiKeySourceCreate,
@@ -52,6 +53,7 @@ import {
 } from '@/components/settings/models/mutationSettlement';
 import { modelsApi, type Adoption, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { OAuthConnectDialog } from '@/components/settings/models/OAuthConnectDialog';
+import { SubscriptionTermsNote } from '@/components/settings/models/SubscriptionTermsNote';
 import { reconcileUnknownWrite } from '@/components/settings/models/reconcileUnknownWrite';
 import { serverText } from '@/components/settings/models/serverCopy';
 import { subscriptionChooser } from '@/components/settings/models/subscriptionOptions';
@@ -204,9 +206,11 @@ export const AddSourceDialog: React.FC<{
   // Through `selectVendor`, so a named brand arrives with its published endpoint
   // already filled. Setting the field alone would be worse than not naming one:
   // re-selecting the vendor that is already selected is identity, so the
-  // prefill this brand publishes would be unreachable from inside the form.
+  // prefill this brand publishes would be unreachable from inside the form. A brand
+  // that opens on its sign-in is still the brand the person pressed: switching to
+  // API Key from there is asking for that brand's key, not a custom endpoint's.
   const [draft, setDraft] = React.useState<ApiKeySourceDraft>(
-    () => (vendor && !namedSubscription ? selectVendor(EMPTY_API_KEY_DRAFT, vendor) : EMPTY_API_KEY_DRAFT),
+    () => (vendor ? selectVendor(EMPTY_API_KEY_DRAFT, vendor) : EMPTY_API_KEY_DRAFT),
   );
   const [revealed, setRevealed] = React.useState(false);
   const [phase, setPhase] = React.useState<WritePhase>({ kind: 'idle' });
@@ -403,7 +407,7 @@ export const AddSourceDialog: React.FC<{
         <DialogPrimitive.Content
           className="setup-add-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col outline-none"
           onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-          onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          onPointerDownOutside={keepOpenOnOutsideClick}
         >
           <header className="setup-add-head">
             <div className="flex items-start justify-between gap-3">
@@ -426,7 +430,10 @@ export const AddSourceDialog: React.FC<{
               </Button>
             </div>
             <DialogPrimitive.Description className="setup-add-subtitle">
-              {t(more ? 'onboarding.providers.addDescriptionMore' : 'onboarding.providers.addDescription')}
+              {/* The line describes the method in view: the import note belongs to what was
+                  detected, not to a key the person is typing. */}
+              {t(active === 'apiKey' ? 'onboarding.providers.addDescriptionKey'
+                : active === 'detected' ? 'onboarding.providers.addDescriptionMore' : 'onboarding.providers.addDescription')}
             </DialogPrimitive.Description>
             {/* A segmented group rather than a tablist: these buttons state which
                 method is chosen, and what follows is a form rather than a tab
@@ -468,8 +475,8 @@ export const AddSourceDialog: React.FC<{
               <>
                 <p className="setup-add-note">{t('onboarding.providers.addSubscriptionNote')}</p>
                 {SUBSCRIPTION_CHOICES.map((item) => (
+                  <React.Fragment key={item}>
                   <button
-                    key={item}
                     type="button"
                     className="setup-add-row"
                     data-provider={item}
@@ -488,6 +495,10 @@ export const AddSourceDialog: React.FC<{
                       <Check className="setup-add-row-check" strokeWidth={2.2} aria-hidden="true" />
                     )}
                   </button>
+                  {/* Model Hub holds the subscription this signs in; what Anthropic's
+                      terms cover is one quiet line under its row, not a warning. */}
+                  {item === 'anthropic' && <SubscriptionTermsNote className="setup-add-terms" />}
+                  </React.Fragment>
                 ))}
               </>
             )}

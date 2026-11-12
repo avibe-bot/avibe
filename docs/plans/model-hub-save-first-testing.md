@@ -78,3 +78,24 @@ provider inventory entirely. The now-empty Advanced settings toggle is removed
 too. Saved capability metadata and compatibility APIs remain available to their
 other consumers; this UI change does not rewrite them. See
 [Reasoning intent](model-hub-reasoning-intent.md) for the forwarding boundary.
+
+## Background format detection amendment
+
+Owner decision: 2026-11-12. A custom endpoint's API format is detected in the
+background, inside the save-first contract above:
+
+- Once Base URL and key are filled (an absolute http(s) address, after a short
+  debounce), the dialog calls the existing non-persisting observation route
+  (`POST /api/models/sources/observe`, Auto detect for `custom`) from the
+  2026-09-03 detect-then-confirm design. It probes the three selectable formats
+  against the typed address with the typed key only; no third-party lookup.
+- A proved format is preselected with a short "Recognised as …" note. When
+  nothing proves one, OpenAI Chat Completions stays selected with a note saying
+  so (and that the key was refused, when the endpoint said that).
+- Detection never gates saving: Save sends the format the field shows at the
+  moment it is pressed, a pending probe included. A format the user picks is
+  never moved by a later result; editing Base URL or key re-detects, and a
+  catalog vendor, whose format is pinned, is never probed.
+- An unnamed custom Source is seeded with its Base URL host (`api.example.com`,
+  with a non-default port) instead of `custom`; the name field shows it as the
+  placeholder. Catalog vendors keep their label.

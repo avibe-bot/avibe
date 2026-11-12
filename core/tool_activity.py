@@ -98,7 +98,10 @@ def response_clock(row_id: str, created_at: str) -> int:
         return 0
 
 
-def project_response(row: Mapping[str, Any], results: list[dict], turn: Mapping[str, Any] | None = None) -> list[dict]:
+def project_response(
+    row: Mapping[str, Any], results: list[dict], turn: Mapping[str, Any] | None = None,
+    *, formatters: dict[str, Any] | None = None,
+) -> list[dict]:
     """Event-shaped steps, with explicit ordering and no assumed tool start.
 
     ``results`` contains only this Session's rows between this response and the
@@ -115,7 +118,13 @@ def project_response(row: Mapping[str, Any], results: list[dict], turn: Mapping[
         return []
     if not isinstance(message, AssistantMessage):
         return []
-    formatter = formatter_for(str(cap.get("platform") or row.get("platform") or "avibe"))
+    platform = str(cap.get("platform") or row.get("platform") or "avibe")
+    if formatters is None:
+        formatter = formatter_for(platform)
+    else:
+        if platform not in formatters:
+            formatters[platform] = formatter_for(platform)
+        formatter = formatters[platform]
     states = object_value(cap.get("calls"))
     settled = {}
     for result in results:

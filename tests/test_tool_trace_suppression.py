@@ -21,6 +21,7 @@ from storage.compatibility import BRIDGE_REVISION
 PRE_PROJECTION_REVISION = "20261108_0082"
 from storage.models import agent_events, agent_sessions, messages
 from tests.agent_core.fakes import assistant
+from tests.migration_helpers import latest_migration_revision
 from tests.test_sqlite_migration_preflight import _snapshot
 from tests.test_tool_activity_projection import _mark, _store
 from tests.test_vibey_agent import SESSION, engine, session  # noqa: F401 -- isolated real-store fixtures
@@ -113,7 +114,7 @@ def crash_before_commit(conn, cursor, statement, parameters, context, executeman
     if sys.argv[2] == 'before-commit' and statement.startswith('UPDATE alembic_version SET') and '20261108_0083' in statement:
         os._exit(71)
 event.listen(Engine, 'after_cursor_execute', crash_before_commit)
-migrations.run_migrations(Path(sys.argv[1]))
+migrations.run_migrations(Path(sys.argv[1]), revision='20261108_0083')
 os._exit(72)
 """, str(path), crash], check=False, capture_output=True, text=True)
     assert result.returncode == (71 if crash == "before-commit" else 72), result.stderr
@@ -145,7 +146,8 @@ def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_p
     graph = tmp_path / "alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     (graph / "versions" / "20990101_9999_additive.py").write_text(
-        "from alembic import op\nrevision='20990101_9999'\ndown_revision='20261108_0083'\n"
+        "from alembic import op\nrevision='20990101_9999'\n"
+        f"down_revision={latest_migration_revision()!r}\n"
         "MIGRATION_COMPATIBILITY='additive'\n"
         "def upgrade():\n    op.create_index('ix_epoch_two_next', 'agents', ['description'], unique=False)\n"
     )

@@ -997,7 +997,19 @@ class AgentAuthService:
         """
         from modules.agents.model_hub import hub_supply_refusal, models_next_step_text
 
-        refusal = await asyncio.to_thread(hub_supply_refusal, self.controller, backend, self._lang())
+        # It names the conversation's Bot when its Agent is one, as a Turn's refusal does.
+        resolve = getattr(self.controller, "resolve_vibe_agent_for_context", None)
+        try:
+            agent = resolve(context, required=False) if callable(resolve) else None
+        except Exception:  # noqa: BLE001 - the backend's name still answers
+            agent = None
+        refusal = await asyncio.to_thread(
+            hub_supply_refusal,
+            self.controller,
+            backend,
+            self._lang(),
+            agent_id=getattr(agent, "id", None),
+        )
         if refusal is not None:
             answer, fixed_in_models = f"❌ {refusal}", refusal.fixed_in_models
         else:

@@ -59,7 +59,7 @@ async def settle_open_calls(
     settlement, and no job is ever started here.
     """
     committed: list[ContextEntry] = []
-    rows = list(await store.load(session_id))
+    rows = list((await store.load_for_run(session_id)).entries)
     for owner, call in open_tool_calls(rows):
         job_id = job_ids.get(CallInstance(owner.session_id, owner.row_id, owner.context_seq, call.id))
         message = interrupted_result(call)

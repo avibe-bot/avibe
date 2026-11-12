@@ -217,3 +217,44 @@ describe('VaultSandboxClient interactive request surface', () => {
     expect(iframe.style.pointerEvents).toBe('none');
   });
 });
+
+// A sandbox release that cannot create Ed25519 keys ignores the curve and seals a secp256k1 key.
+// Saving that as a Solana key would pin a key that cannot sign what it claims, so the client
+// accepts only an Ed25519 record naming the key it reported, and asks for one only when told to.
+describe('VaultSandboxClient Solana keypair seal', () => {
+  const ed25519Key = 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+  const sealed = (recordMeta: Record<string, unknown>, publicKey: string) => ({
+    envelope: { ciphertext: 'c', nonce: 'n', wrap_meta: JSON.stringify({ v: 1, scheme: 'machine-aesgcm-v1', record_meta: recordMeta }) },
+    establishingVmk: false,
+    publicKey,
+    addresses: { solana: 'FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z' },
+  });
+  const client = (result: unknown) => {
+    const instance = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient;
+    const request = vi.spyOn(instance, 'request').mockResolvedValue(result as never);
+    return { instance: instance as unknown as VaultSandboxClient, request };
+  };
+
+  it('asks for an Ed25519 key and returns the record it names', async () => {
+    const result = sealed({ kind: 'keypair', curve: 'ed25519', public_key: ed25519Key }, ed25519Key);
+    const { instance, request } = client(result);
+    await expect(instance.seal({ name: 'SOL_KEY', kind: 'keypair', curve: 'ed25519', wrapMeta: 'vmk' })).resolves.toEqual(result);
+    expect(request.mock.calls[0][0]).toBe('seal');
+    expect(request.mock.calls[0][1]).toEqual({ name: 'SOL_KEY', kind: 'keypair', curve: 'ed25519', wrapMeta: 'vmk' });
+  });
+
+  it('sends a secp256k1 keypair request without a curve, as before', async () => {
+    const { instance, request } = client(sealed({ kind: 'keypair', public_key: `02${'11'.repeat(32)}` }, `02${'11'.repeat(32)}`));
+    await instance.seal({ name: 'ETH_KEY', kind: 'keypair', wrapMeta: 'vmk' });
+    expect(request.mock.calls[0][1]).toEqual({ name: 'ETH_KEY', kind: 'keypair', wrapMeta: 'vmk' });
+  });
+
+  it.each([
+    ['a secp256k1 record', { kind: 'keypair', public_key: `02${'11'.repeat(32)}` }, `02${'11'.repeat(32)}`],
+    ['an Ed25519 record for another key', { kind: 'keypair', curve: 'ed25519', public_key: '22'.repeat(32) }, ed25519Key],
+    ['an Ed25519 record with an uppercase key', { kind: 'keypair', curve: 'ed25519', public_key: ed25519Key.toUpperCase() }, ed25519Key.toUpperCase()],
+  ])('refuses %s when an Ed25519 key was asked for', async (_label, recordMeta, publicKey) => {
+    const { instance } = client(sealed(recordMeta, publicKey));
+    await expect(instance.seal({ name: 'SOL_KEY', kind: 'keypair', curve: 'ed25519' })).rejects.toMatchObject({ code: 'sandbox_curve_unsupported' });
+  });
+});

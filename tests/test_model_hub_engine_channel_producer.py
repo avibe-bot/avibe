@@ -3,9 +3,11 @@
 What this protects: desired state lives in the signer's ledger and nowhere
 else, so an old, missing or replaced published index cannot make the signer
 sign older state; one sequence is only ever spent on one payload, whatever
-fails; nothing is signed or written while the channel is uncommissioned or
-the run is not the approved, reviewed workflow; and a writer cannot replace a
-newer index or drop a withdrawal.
+fails; only a promotion or a withdrawal allocates a sequence, and what was
+allocated can be published again unchanged however much later; nothing is
+signed or written while the channel is uncommissioned or the run is not the
+approved, reviewed workflow; and a writer cannot replace a newer index or
+drop a withdrawal.
 """
 
 from __future__ import annotations
@@ -23,10 +25,10 @@ import yaml
 
 from core import model_hub_engine_channel as channel
 from scripts import model_hub_engine_channel as producer
-from scripts.model_hub_engine_channel import ProducerError, Promote, Renew, Revoke
+from scripts.model_hub_engine_channel import ProducerError, Promote, Revoke
 from tests.engine_channel_support import (
+    ISSUED,
     KEY_ID,
-    NOW,
     LocalVerifier,
     Signer,
     encode,
@@ -39,7 +41,14 @@ from tests.engine_channel_support import (
 
 V1, V2, V3 = (f"model-hub-engine-v8.0.63-{build}" for build in (1, 2, 3))
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/model-hub-engine-channel.yml"
-LATER = NOW + timedelta(hours=1)
+LATER = ISSUED + timedelta(hours=1)
+#: Long after anything here was allocated. Nothing a signer holds stops being current with time.
+YEARS_LATER = LATER + timedelta(days=4000)
+DIGESTS = {
+    f"model-hub-engine-v8.0.63-{build}": hashlib.sha256(manifest_bytes(build=build)).hexdigest() for build in range(1, 11)
+}
+#: The next real change to an index that lists builds 1 and 2.
+PROMOTE_3 = Promote(manifest_bytes(build=3), "3.2.6")
 needs_directory_flush = pytest.mark.skipif(
     not hasattr(os, "O_DIRECTORY"), reason="the ledger refuses a platform that cannot flush a directory"
 )
@@ -65,31 +74,32 @@ def test_the_first_allocation_promotes_one_release_at_the_sequence_it_is_given()
     assert [item.asset_release_tag for item in planned.releases] == [V1] and planned.revoked == ()
     # The index carries the reviewed manifest's exact bytes, not a reserialization.
     assert planned.releases[0].manifest_bytes == manifest_bytes(build=1)
-    assert planned.expires_at - planned.issued_at == channel.MAX_VALIDITY
+    # It says when it was allocated and nothing about when it ends.
+    assert planned.issued_at == LATER
+    assert set(json.loads(planned.raw)) == {"repository", "channel", "sequence", "issued_at", "releases", "revoked"}
 
 
 def test_every_change_copies_allocated_releases_and_withdrawals_byte_for_byte() -> None:
     current = _current(revoked=[tombstone(V2, V1)])
 
-    for operation in (Renew(), Promote(manifest_bytes(build=3), "3.2.7"), Revoke(V3, V1, "bundled engine crashes")):
+    for operation in (Promote(manifest_bytes(build=3), "3.2.7"), Revoke(V3, V1, "bundled engine crashes")):
         planned = _plan(current, operation, sequence=25)
 
         # Sequences only need to increase; a gap is fine.
         assert planned.sequence == 25
         assert [item.manifest_bytes for item in planned.releases][:2] == [item.manifest_bytes for item in current.releases]
+        assert [(item.asset_release_tag, item.min_avibe_version) for item in planned.releases][:2] == [
+            (V1, "3.2.6"), (V2, "3.2.6"),
+        ]
         assert planned.revoked[:1] == current.revoked
+        # Each change adds exactly one entry: there is no change that adds none.
+        assert len(planned.releases) + len(planned.revoked) == len(current.releases) + len(current.revoked) + 1
         channel.check_successor(producer._identities(current), current.revoked, planned)
-
-    renewed = _plan(current, Renew())
-    assert [(item.asset_release_tag, item.min_avibe_version) for item in renewed.releases] == [(V1, "3.2.6"), (V2, "3.2.6")]
-    assert renewed.revoked == current.revoked
-    assert renewed.issued_at == LATER
 
 
 @pytest.mark.parametrize(
     ("current", "operation", "message"),
     [
-        (None, Renew(), "no allocated index"),
         (None, Revoke(V2, V1, "x"), "no allocated index"),
         (_current(), Promote(manifest_bytes(build=2), "3.2.6"), "already promoted"),
         (_current(), Promote(manifest_bytes(build=2, salt="x"), "3.2.6"), "already promoted"),
@@ -121,12 +131,14 @@ def test_a_bundled_engine_that_was_never_listed_can_still_be_withdrawn() -> None
     assert planned.tombstone(V3).rollback_to == V2
 
 
-def test_a_clock_behind_or_a_sequence_that_does_not_increase_plans_nothing() -> None:
-    with pytest.raises(ProducerError, match="clock is behind"):
-        producer.plan_payload(_current(), Renew(), now=NOW - timedelta(minutes=1), sequence=11)
+def test_only_the_sequence_orders_one_index_after_another() -> None:
     for sequence in (10, 9):
         with pytest.raises(ProducerError, match="higher sequence"):
-            producer.plan_payload(_current(), Renew(), now=LATER, sequence=sequence)
+            producer.plan_payload(_current(), PROMOTE_3, now=YEARS_LATER, sequence=sequence)
+    # A host whose clock is behind the index it last allocated still plans the next one.
+    earlier = ISSUED - timedelta(days=4000)
+    planned = _plan(_current(), PROMOTE_3, now=earlier)
+    assert (planned.sequence, planned.issued_at) == (11, earlier) and planned.release(V3) is not None
 
 
 # ----- signing ---------------------------------------------------------------
@@ -152,7 +164,7 @@ def _sign(signer: Signer, payload: bytes, *, with_key: Signer | None = None, **o
 
 def test_signing_asks_avault_for_the_fixed_scheme_over_the_domain_digest_and_yields_a_client_valid_envelope() -> None:
     signer = Signer()
-    payload = producer.plan_payload(_current(), Renew(), now=LATER, sequence=11)
+    payload = producer.plan_payload(_current(), PROMOTE_3, now=LATER, sequence=11)
 
     envelope, requests = _sign(signer, payload)
 
@@ -170,7 +182,7 @@ def test_signing_asks_avault_for_the_fixed_scheme_over_the_domain_digest_and_yie
 
 def test_a_signer_holding_any_other_key_produces_nothing_publishable() -> None:
     signer = Signer()
-    payload = producer.plan_payload(_current(), Renew(), now=LATER, sequence=11)
+    payload = producer.plan_payload(_current(), PROMOTE_3, now=LATER, sequence=11)
 
     with pytest.raises(ProducerError, match="does not verify against the shipped root"):
         _sign(signer, payload, with_key=Signer())
@@ -218,11 +230,12 @@ def _recording_avault(tmp_path) -> Path:
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["authorize", "--environment", producer.SIGNER_ENVIRONMENT, "--operation", "renew"],
+        ["authorize", "--environment", producer.SIGNER_ENVIRONMENT, "--operation", "revoke"],
         ["authorize", "--environment", producer.WRITER_ENVIRONMENT, "--operation", "promote", "--require-approval"],
         ["initialize-ledger", "--ledger", "{ledger}", "--key-id", KEY_ID, "--first-sequence", "1"],
-        ["sign", "--operation", "renew", "--ledger", "{ledger}", "--key-name", "K", "--key-envelope", "{envelope}",
-         "--output", "{output}", "--avault", "{avault}"],
+        ["sign", "--operation", "revoke", "--tag", V2, "--rollback-to", V1, "--reason", "regression",
+         "--ledger", "{ledger}", "--key-name", "K", "--key-envelope", "{envelope}", "--output", "{output}",
+         "--avault", "{avault}"],
         ["sign", "--operation", "resume", "--ledger", "{ledger}", "--key-name", "K", "--key-envelope", "{envelope}",
          "--output", "{output}", "--avault", "{avault}"],
         ["publish", "--envelope", "{envelope}", "--bucket", "avibe", "--endpoint-url", "https://example.invalid",
@@ -442,7 +455,7 @@ def test_authorization_reads_protection_and_approval_from_github_for_this_run(tm
         asked.append(path)
         return answers.get(path)
 
-    producer.authorize(producer.SIGNER_ENVIRONMENT, operation="renew", environ=RUN, api=api, require_approval=False)
+    producer.authorize(producer.SIGNER_ENVIRONMENT, operation="resume", environ=RUN, api=api, require_approval=False)
     assert asked == [base, f"{base}/deployment-branch-policies"]
     for operation in producer.OPERATION_POLICY:
         producer.authorize(producer.SIGNER_ENVIRONMENT, operation=operation, environ=RUN, api=api, require_approval=True)
@@ -458,7 +471,7 @@ def test_authorization_reads_protection_and_approval_from_github_for_this_run(tm
             )
     with pytest.raises(ProducerError, match="refs/heads/master"):
         producer.authorize(
-            producer.SIGNER_ENVIRONMENT, operation="renew", environ={**RUN, "GITHUB_REF": "refs/heads/x"}, api=api,
+            producer.SIGNER_ENVIRONMENT, operation="promote", environ={**RUN, "GITHUB_REF": "refs/heads/x"}, api=api,
             require_approval=True,
         )
 
@@ -466,12 +479,13 @@ def test_authorization_reads_protection_and_approval_from_github_for_this_run(tm
 def test_every_operation_is_a_manual_dispatch_that_needs_approval_and_none_creates_a_ledger(tmp_path, monkeypatch) -> None:
     _commissioned(tmp_path, monkeypatch, Signer())
 
-    # Renewal included: a schedule, and any other event, starts nothing.
+    # A schedule, and any other event, starts nothing.
     assert producer.OPERATION_POLICY == {
         operation: (frozenset({"workflow_dispatch"}), True)
-        for operation in ("release", "promote", "renew", "revoke", "resume")
+        for operation in ("release", "promote", "revoke", "resume")
     }
-    for operation in ("initialize", "initialize-ledger", "restore", ""):
+    # An index is not renewed: there is no such operation to authorize, and none to ask the signer for.
+    for operation in ("renew", "initialize", "initialize-ledger", "restore", ""):
         with pytest.raises(ProducerError, match="not an operation"):
             producer.authorize(
                 producer.SIGNER_ENVIRONMENT, operation=operation, environ=RUN, api=lambda _path: None,
@@ -480,9 +494,13 @@ def test_every_operation_is_a_manual_dispatch_that_needs_approval_and_none_creat
     for event in ("schedule", "push", "pull_request"):
         with pytest.raises(ProducerError, match="was started by"):
             producer.authorize(
-                producer.SIGNER_ENVIRONMENT, operation="renew", environ={**RUN, "GITHUB_EVENT_NAME": event},
+                producer.SIGNER_ENVIRONMENT, operation="revoke", environ={**RUN, "GITHUB_EVENT_NAME": event},
                 api=lambda _path: None, require_approval=True,
             )
+    with pytest.raises(SystemExit):
+        producer.main(["sign", "--operation", "renew", "--ledger", str(tmp_path / "ledger"), "--avault", "avault",
+                       "--key-name", "K", "--key-envelope", str(tmp_path / "key.json"), "--output", str(tmp_path / "out")])
+    assert not (tmp_path / "ledger").exists() and not (tmp_path / "out").exists()
 
 
 # ----- the signer's ledger ---------------------------------------------------
@@ -523,8 +541,13 @@ class Signing:
         return producer.sign_from_ledger(
             self.ledger, operation, now=now, roots=roots or self.roots, verifier=LocalVerifier(), sign=self.avault,
             key_name="MODEL_HUB_ENGINE_CHANNEL_KEY", key_envelope=KEY_ENVELOPE, published=self.published,
-            qualified_baselines=baselines,
+            rehearsal_baselines=baselines,
         )
+
+    def promote(self, build: int, **options) -> bytes:
+        """Promote one more build, with the ledger's concrete baseline context."""
+
+        return self.sign(Promote(manifest_bytes(build=build), "3.2.6"), baselines=DIGESTS, **options)
 
     def payload(self, envelope: bytes) -> channel.ChannelPayload:
         return channel.authenticate(envelope, roots=self.roots, verifier=LocalVerifier())[1]
@@ -599,16 +622,17 @@ def test_each_change_is_allocated_from_the_ledger_signed_and_journaled(tmp_path)
     signing = _listed(Signing(tmp_path))
 
     withdrawn = signing.payload(signing.sign(REVOKE_2))
-    renewed_envelope = signing.sign(Renew(), now=LATER + timedelta(days=1))
-    renewed = signing.payload(renewed_envelope)
+    # The next change comes years later; the ledger it is planned from is as current as it was.
+    promoted_envelope = signing.promote(3, now=YEARS_LATER)
+    promoted = signing.payload(promoted_envelope)
 
-    assert (withdrawn.sequence, renewed.sequence) == (3, 4)
-    assert renewed.tombstone(V2) == withdrawn.tombstone(V2)
-    assert [item.manifest_bytes for item in renewed.releases] == [manifest_bytes(build=1), manifest_bytes(build=2)]
+    assert (withdrawn.sequence, promoted.sequence) == (3, 4)
+    assert promoted.tombstone(V2) == withdrawn.tombstone(V2)
+    assert [item.manifest_bytes for item in promoted.releases] == [manifest_bytes(build=build) for build in (1, 2, 3)]
     state = signing.state()
-    assert (state.next_sequence, state.allocation.sequence, state.allocation.envelope) == (5, 4, renewed_envelope)
+    assert (state.next_sequence, state.allocation.sequence, state.allocation.envelope) == (5, 4, promoted_envelope)
     assert sorted(signing.journal()) == [f"{sequence:012d}.json" for sequence in (1, 2, 3, 4)]
-    assert signing.journal()["000000000004.json"] == renewed_envelope
+    assert signing.journal()["000000000004.json"] == promoted_envelope
     # One request per allocation, each over that allocation's own payload.
     assert len(set(signing.avault.digests())) == len(signing.avault.digests()) == 4
 
@@ -631,10 +655,10 @@ def test_what_the_published_index_says_is_never_the_state_a_change_is_signed_fro
         "another key's index": envelope_bytes(Signer(), _current(99).raw),
     }[published]
 
-    renewed = signing.payload(signing.sign(Renew()))
+    promoted = signing.payload(signing.promote(3))
 
-    assert renewed.sequence == 4
-    assert renewed.tombstone(V2) is not None and len(renewed.releases) == 2
+    assert promoted.sequence == 4
+    assert promoted.tombstone(V2) is not None and [item.asset_release_tag for item in promoted.releases] == [V1, V2, V3]
 
 
 @needs_directory_flush
@@ -651,15 +675,15 @@ def test_a_published_index_this_ledger_never_allocated_stops_the_signer(tmp_path
     signing.published = envelope_bytes(signing.signer, foreign.raw)
     before, requests = signing.state_bytes(), len(signing.avault.requests)
 
-    for operation in (Renew(), None, PROMOTE_1):
+    for operation in (REVOKE_2, None, PROMOTE_1, PROMOTE_3):
         with pytest.raises(ProducerError, match="behind the published index"):
-            signing.sign(operation)
+            signing.sign(operation, baselines=DIGESTS)
 
     assert signing.state_bytes() == before and len(signing.avault.requests) == requests
     # The index the ledger itself allocated is, of course, not a conflict.
     if case != "a ledger with no allocation":
         signing.published = signing.state().allocation.envelope
-        assert signing.payload(signing.sign(Renew())).sequence == 3
+        assert signing.payload(signing.sign(REVOKE_2)).sequence == 3
 
 
 def _damage(mutate):
@@ -703,9 +727,9 @@ def test_a_missing_damaged_or_mismatched_ledger_stops_every_routine_operation(tm
     before = signing.state_bytes() if signing.ledger.state_path.exists() else None
     requests = len(signing.avault.requests)
 
-    for operation in (Renew(), None, Promote(manifest_bytes(build=3), "3.2.6")):
+    for operation in (Revoke(V3, V1, "bundled engine crashes"), None, PROMOTE_3):
         with pytest.raises(ProducerError):
-            signing.sign(operation)
+            signing.sign(operation, baselines=DIGESTS)
 
     assert len(signing.avault.requests) == requests
     assert (signing.state_bytes() if signing.ledger.state_path.exists() else None) == before
@@ -716,7 +740,7 @@ def test_a_ledger_directory_that_does_not_exist_is_not_created_by_a_routine_oper
     ledger = producer.PublisherLedger(tmp_path / "never-commissioned")
     avault = Avault(signer)
 
-    for operation in (PROMOTE_1, Renew(), None):
+    for operation in (PROMOTE_1, REVOKE_2, None):
         with pytest.raises(ProducerError, match="owner commissioning"):
             producer.sign_from_ledger(
                 ledger, operation, now=LATER, roots=signer.roots(), verifier=LocalVerifier(), sign=avault,
@@ -810,10 +834,12 @@ def test_a_sequence_is_only_ever_signed_over_the_payload_it_was_committed_with(t
             signing.sign(None)
     assert signing.state().allocation == committed
 
-    envelope = signing.sign(None)
+    # However long the allocation waited, it is completed as it was committed.
+    envelope = signing.sign(None, now=YEARS_LATER)
 
     assert channel.parse_envelope(envelope).payload == committed.payload
     assert signing.payload(envelope).sequence == 3 and signing.state().next_sequence == 4
+    assert signing.payload(envelope).issued_at == LATER
     # Three requests, all for the same sequence and the same payload digest.
     assert set(signing.avault.digests()[requests:]) == {channel.channel_digest(committed.payload)}
     assert len(signing.avault.digests()[requests:]) == 3
@@ -854,11 +880,13 @@ def test_resuming_publishes_the_same_envelope_again_byte_for_byte(tmp_path) -> N
     for published in (None, signing.journal()["000000000002.json"], envelope):
         signing.published = published
         assert signing.sign(None) == envelope
+    # A retry a week or years later is the same retry: an allocated index does not stop being current.
+    for now in (LATER + timedelta(days=8), YEARS_LATER):
+        assert signing.sign(None, now=now) == envelope
 
+    # No second signature and no second sequence, at any of those times.
     assert len(signing.avault.requests) == requests and signing.state().next_sequence == 4
-    with pytest.raises(ProducerError, match="expired; renew"):
-        signing.sign(None, now=LATER + timedelta(days=8))
-    assert signing.payload(signing.sign(Renew(), now=LATER + timedelta(days=8))).tombstone(V2) is not None
+    assert sorted(signing.journal()) == [f"{sequence:012d}.json" for sequence in (1, 2, 3)]
 
 
 @needs_directory_flush
@@ -887,16 +915,17 @@ def test_a_raised_shipped_floor_moves_the_next_sequence_up_and_never_down(tmp_pa
     signing = _listed(Signing(tmp_path))
 
     raised = signing.signer.roots(floor=100)
-    jumped = signing.payload(signing.sign(Renew(), roots=raised))
-    following = signing.payload(signing.sign(Renew(), roots=raised))
-    lowered = signing.payload(signing.sign(Renew(), roots=signing.signer.roots(floor=5)))
+    jumped = signing.payload(signing.sign(REVOKE_2, roots=raised))
+    following = signing.payload(signing.promote(3, roots=raised))
+    lowered = signing.payload(signing.promote(4, roots=signing.signer.roots(floor=5)))
 
     assert (jumped.sequence, following.sequence, lowered.sequence) == (100, 101, 102)
-    assert len(lowered.releases) == 2
+    # Every change made on the way is still there.
+    assert len(lowered.releases) == 4 and lowered.tombstone(V2) == jumped.tombstone(V2)
 
 
 @needs_directory_flush
-def test_a_candidate_is_promoted_only_if_it_was_qualified_against_every_release_the_ledger_lists(tmp_path) -> None:
+def test_a_promotion_requires_current_concrete_baseline_context_for_every_live_ledger_release(tmp_path) -> None:
     signing = _listed(Signing(tmp_path))
     signing.sign(Promote(manifest_bytes(build=3), "3.2.6"),
                  baselines={V1: hashlib.sha256(manifest_bytes(build=1)).hexdigest(),
@@ -908,7 +937,7 @@ def test_a_candidate_is_promoted_only_if_it_was_qualified_against_every_release_
 
     # The published index the qualification read was older, or was replaced: a listed release is missing.
     for baselines in (None, {}, {V1: digests[V1]}, {**digests, V2: "0" * 64}):
-        with pytest.raises(ProducerError, match="not qualified against every release"):
+        with pytest.raises(ProducerError, match="rehearsal context does not cover every release"):
             signing.sign(candidate, baselines=baselines)
     assert signing.state_bytes() == before and len(signing.avault.requests) == requests
 
@@ -925,20 +954,23 @@ def test_concurrent_signers_are_serialized_into_distinct_increasing_sequences(tm
     start = threading.Barrier(8)
     envelopes: list[bytes] = []
 
-    def renew() -> None:
+    def promote(build: int) -> None:
         start.wait()
-        envelopes.append(signing.sign(Renew()))
+        envelopes.append(signing.promote(build))
 
-    threads = [threading.Thread(target=renew) for _ in range(8)]
+    # Eight approved promotions at once, of builds 3 to 10.
+    threads = [threading.Thread(target=promote, args=(build,)) for build in range(3, 11)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    sequences = sorted(signing.payload(envelope).sequence for envelope in envelopes)
-    assert sequences == list(range(3, 11)) and signing.state().next_sequence == 11
+    payloads = sorted((signing.payload(envelope) for envelope in envelopes), key=lambda payload: payload.sequence)
+    assert [payload.sequence for payload in payloads] == list(range(3, 11)) and signing.state().next_sequence == 11
     assert sorted(signing.journal()) == [f"{sequence:012d}.json" for sequence in range(1, 11)]
-    assert all(len(signing.payload(envelope).releases) == 2 for envelope in envelopes)
+    # Each was planned from the one before it, so none lost a promotion made beside it.
+    assert [len(payload.releases) for payload in payloads] == list(range(3, 11))
+    assert sorted(item.asset_release_tag for item in payloads[-1].releases) == sorted(DIGESTS)
 
 
 @needs_directory_flush
@@ -1058,7 +1090,7 @@ def test_an_object_that_is_missing_unreadable_or_older_is_put_back_from_the_sign
 
     signer = Signer()
     withdrawn = _plan(_current(), REVOKE_2)
-    envelope = _envelope(signer, withdrawn, Renew(), sequence=20)
+    envelope = _envelope(signer, withdrawn, PROMOTE_3, sequence=20)
     bucket = FakeBucket(
         {
             "deleted": None,
@@ -1077,7 +1109,7 @@ def test_an_object_that_is_missing_unreadable_or_older_is_put_back_from_the_sign
 
 def test_publishing_the_same_envelope_again_writes_nothing() -> None:
     signer = Signer()
-    envelope = _envelope(signer, _current(), Renew())
+    envelope = _envelope(signer, _current(), PROMOTE_3)
     bucket = FakeBucket(envelope)
 
     published = _publish(signer, bucket, envelope)
@@ -1092,7 +1124,7 @@ def test_a_writer_that_lost_a_race_does_not_overwrite_the_winner() -> None:
     current = _current()
     bucket = FakeBucket(_stored(signer, current))
     winner = _envelope(signer, current, REVOKE_2, sequence=12)
-    loser = _envelope(signer, current, Renew(), sequence=11)
+    loser = _envelope(signer, current, PROMOTE_3, sequence=11)
 
     def another_writer_publishes(target: FakeBucket) -> None:
         target.stored, target.version = winner, target.version + 1
@@ -1125,8 +1157,8 @@ def test_a_stale_writer_cannot_undo_a_newer_index_or_drop_its_withdrawal(publish
     bucket = FakeBucket(stored)
     listed = [release_entry(manifest_bytes(build=1)), release_entry(manifest_bytes(build=2))]
     envelope = {
-        "a higher sequence": _envelope(signer, old, Renew(), sequence=11),
-        "the same sequence, another payload": _envelope(signer, old, Renew(), sequence=12),
+        "a higher sequence": _envelope(signer, old, PROMOTE_3, sequence=11),
+        "the same sequence, another payload": _envelope(signer, old, PROMOTE_3, sequence=12),
         "a newer sequence without the withdrawal": envelope_bytes(signer, encode(payload_document(13, releases=listed))),
         "a newer sequence with other release bytes": envelope_bytes(
             signer,
@@ -1147,14 +1179,14 @@ def test_an_index_no_shipped_key_signed_is_never_written() -> None:
     bucket = FakeBucket(_stored(signer, _current()))
 
     with pytest.raises(ProducerError, match="does not verify"):
-        _publish(signer, bucket, _envelope(Signer(), _current(), Renew()))
+        _publish(signer, bucket, _envelope(Signer(), _current(), PROMOTE_3))
     assert bucket.writes == []
 
 
 def test_a_change_is_published_only_when_clients_are_served_the_exact_envelope() -> None:
     signer = Signer()
     current = _current()
-    envelope = _envelope(signer, current, Renew())
+    envelope = _envelope(signer, current, PROMOTE_3)
     # The same payload and sequence under a second signature is still not the envelope that was written.
     resigned = envelope_bytes(signer, channel.parse_envelope(envelope).payload)
     assert resigned != envelope
@@ -1184,9 +1216,9 @@ def test_a_change_survives_a_failed_publication_and_a_rolled_back_mirror_end_to_
     assert resumed == withdrawal
     assert _publish(signing.signer, bucket, resumed).tombstone(V2) is not None
     signing.published = bucket.stored
-    renewed = _publish(signing.signer, bucket, signing.sign(Renew()))
+    promoted = _publish(signing.signer, bucket, signing.promote(3))
 
-    assert renewed.sequence == 4 and renewed.tombstone(V2) is not None and bucket.stored != withdrawal
+    assert promoted.sequence == 4 and promoted.tombstone(V2) is not None and bucket.stored != withdrawal
 
 
 # ----- evidence read from the published index --------------------------------
@@ -1231,14 +1263,14 @@ def _jobs() -> dict:
 def test_the_finalizer_is_dispatch_only_serialized_and_starts_with_no_token_scope() -> None:
     workflow = _jobs()
 
-    # No schedule: how renewals are approved is an open commissioning decision.
+    # No schedule: an index is not renewed, and every change is a dispatch someone approved.
     assert set(workflow[True]) == {"workflow_dispatch"}
     assert workflow["permissions"] == {}
     assert workflow["concurrency"] == {"group": "model-hub-engine-channel", "cancel-in-progress": False}
     assert workflow["jobs"]["authorize"]["if"] == (
         "github.repository == 'avibe-bot/avibe' && github.ref == 'refs/heads/master'"
     )
-    assert "environment" not in workflow["jobs"]["authorize"] and "environment" not in workflow["jobs"]["qualify"]
+    assert "environment" not in workflow["jobs"]["authorize"] and "environment" not in workflow["jobs"]["prepare"]
 
 
 def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_touches_the_ledgers_existence() -> None:
@@ -1246,7 +1278,7 @@ def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_
     inputs = workflow[True]["workflow_dispatch"]["inputs"]
 
     assert inputs["operation"]["options"] == list(producer.OPERATION_POLICY)
-    assert set(inputs) == {"operation", "asset_release_tag", "qualification_run_id", "rollback_to", "reason"}
+    assert set(inputs) == {"operation", "asset_release_tag", "rehearsal_run_id", "rollback_to", "reason"}
     # Creating a ledger is owner commissioning, run by hand; no step of this workflow reaches it.
     scripts = "\n".join(step.get("run", "") for job in workflow["jobs"].values() for step in job["steps"])
     for forbidden in ("initialize", "--first-sequence", "first_publication", "recover"):
@@ -1299,7 +1331,7 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
     }
     assert not mentions("sign", "secrets.") and not mentions("sign", "AWS_")
     assert mentions("sign", "MODEL_HUB_ENGINE_CHANNEL_LEDGER") and mentions("sign", "--ledger")
-    for name in ("authorize", "qualify", "release", "publish"):
+    for name in ("authorize", "prepare", "release", "publish"):
         assert not mentions(name, "LEDGER") and not mentions(name, "KEY_ENVELOPE")
         assert not mentions(name, "model_hub_engine_channel.py sign") and jobs[name]["runs-on"] == "ubuntu-latest"
     # The channel's bucket credential is not the release mirror's.
@@ -1310,9 +1342,8 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
                       "contents\": \"write"):
         assert forbidden not in sign_text
     assert all(job.get("permissions", {}).get("contents") != "write" for name, job in jobs.items() if name != "release")
-    # What the hosted qualification read from the published index reaches the signer as data, to check against its ledger.
-    assert jobs["qualify"]["outputs"] == {"baselines": "${{ steps.receipt.outputs.baselines }}"}
-    assert mentions("sign", "needs.qualify.outputs.baselines") and mentions("sign", "--qualified-baselines")
+    assert jobs["prepare"]["outputs"] == {"baselines": "${{ steps.context.outputs.baselines }}"}
+    assert mentions("sign", "needs.prepare.outputs.baselines") and mentions("sign", "--rehearsal-baselines")
 
 
 def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -> None:
@@ -1320,6 +1351,9 @@ def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -
 
     produced = (WORKFLOW.parent / "model-hub-engine-qualification.yml").read_text(encoding="utf-8")
 
-    for artifact in (qualification.RECEIPT_ARTIFACT, qualification.ASSETS_ARTIFACT, "qualification-released-"):
-        assert f"name: {artifact}" in produced
-        assert artifact in json.dumps(_jobs()["jobs"]["qualify"])
+    for artifact in (qualification.UNTRUSTED_REHEARSAL_ARTIFACT, qualification.UNTRUSTED_ASSETS_ARTIFACT):
+        assert artifact in produced
+        assert artifact in json.dumps(_jobs()["jobs"]["prepare"])
+    assert "qualification-released-" in produced
+    assert qualification.TRUSTED_ASSETS_ARTIFACT in json.dumps(_jobs()["jobs"]["prepare"])
+    assert "verify-untrusted-rehearsal" in json.dumps(_jobs()["jobs"]["prepare"])

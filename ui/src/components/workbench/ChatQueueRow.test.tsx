@@ -4,6 +4,9 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { createInstance } from 'i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
+import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ``ChatPage`` reaches the composer's mention editor at import time, which reads
@@ -202,6 +205,44 @@ describe('QueueStrip — compatible queued messages read as one batch', () => {
     expect(screen.getByText('Retry needed · 1')).toBeTruthy();
     expect(screen.getByText(/The Agent can't run/)).toBeTruthy();
     expect(screen.queryByText(/Automatic startup retries stopped/)).toBeNull();
+  });
+
+  it.each([true, false])('says an input held for want of a model waits for one, and offers Models to a manager (%s)', (manages) => {
+    render(
+      <MemoryRouter>
+        <InstanceAuthorizationContext.Provider value={{
+          remote: false, instanceKind: 'personal', instanceRole: manages ? 'owner' : 'member',
+          capabilities: { ...OWNER_INSTANCE_CAPABILITIES, can_manage_instance: manages },
+        }}>
+          <I18nextProvider i18n={i18n}>
+            <QueueStrip
+              queue={[queued({ requires_explicit_retry: true, retry_reason: 'model_supply_refusal' })]}
+              onRemove={vi.fn()} onRecall={vi.fn()} onSendNow={vi.fn()}
+            />
+          </I18nextProvider>
+        </InstanceAuthorizationContext.Provider>
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(en.chat.queue.retryHintNoModel)).toBeTruthy();
+    expect(screen.getByText('Waiting for a model · 1')).toBeTruthy();
+    expect(screen.queryByText(/Automatic startup retries stopped/)).toBeNull();
+    expect(Boolean(screen.queryByRole('button', { name: en.chat.queue.openModels }))).toBe(manages);
+    expect(screen.getByRole('button', { name: 'Send now' })).toBeTruthy();
+  });
+
+  it('does not offer Models when the Model Hub is switched off, which takes Models away', () => {
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}>
+          <QueueStrip
+            queue={[queued({ requires_explicit_retry: true, retry_reason: 'model_hub_disabled' })]}
+            onRemove={vi.fn()} onRecall={vi.fn()} onSendNow={vi.fn()}
+          />
+        </I18nextProvider>
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(en.chat.queue.retryHintNoModel)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.chat.queue.openModels })).toBeNull();
   });
 
   it('keeps the general hint while another hold needs a different fix', () => {

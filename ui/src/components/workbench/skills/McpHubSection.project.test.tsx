@@ -66,6 +66,7 @@ const servers: McpServerSummary[] = [
   row('tokened', 'needs_config', { missingVariables: ['API_TOKEN'], placeholders: ['API_TOKEN', 'REGION'] }),
   row('docs', 'needs_login'),
   row('ready', 'ok', { toolCount: 1, tools: [{ name: 'search' }] }),
+  row('other-ready', 'ok', { toolCount: 1, tools: [{ name: 'fetch' }] }),
   row('stale', 'not_generated'),
   { name: 'echo', source: 'avibe', scope: 'global', state: 'needs_login', auth: 'needs_login', transport: 'stdio', command: 'echo-mcp', toolCount: 1 },
 ];
@@ -129,6 +130,46 @@ describe('McpHubSection project view', () => {
     expect(actions('echo')).toEqual([]);
     expect(within(rowButton('echo')).queryByRole('link')).toBeNull();
     expect(within(detail()).queryByRole('link')).toBeNull();
+  });
+
+  it('shows the first five tools and folds the rest until asked, per opened server', async () => {
+    const tools = (count: number, prefix: string) => Array.from({ length: count }, (_, i) => ({ name: `${prefix}-${i + 1}` }));
+    api.listMcpServers.mockResolvedValue({
+      ok: true,
+      oauthMode: 'direct',
+      servers: [
+        row('seven', 'ok', { toolCount: 7, tools: tools(7, 'seven') }),
+        row('also-seven', 'ok', { toolCount: 7, tools: tools(7, 'also') }),
+        row('three', 'ok', { toolCount: 3, tools: tools(3, 'three') }),
+      ],
+    });
+    renderHub();
+    await screen.findByText('seven');
+    const shown = (panel: HTMLElement, prefix: string) =>
+      within(panel).queryAllByText(new RegExp(`^${prefix}-\\d$`)).map((node) => node.textContent);
+    const showMore = (count: number) => en.mcpHub.toolsShowMore.replace('{{count}}', String(count));
+
+    fireEvent.click(rowButton('seven'));
+    const panel = detail();
+    expect(within(panel).getByText(en.mcpHub.toolsHeader.replace('{{count}}', '7'))).toBeTruthy();
+    expect(shown(panel, 'seven')).toEqual(['seven-1', 'seven-2', 'seven-3', 'seven-4', 'seven-5']);
+    const more = within(panel).getByRole('button', { name: showMore(2) });
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(more);
+    expect(shown(panel, 'seven')).toHaveLength(7);
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    expect(more.textContent).toBe(en.mcpHub.toolsShowLess);
+
+    fireEvent.click(rowButton('also-seven'));
+    const otherPanel = detail();
+    expect(shown(otherPanel, 'also')).toHaveLength(5);
+    expect(within(otherPanel).getByRole('button', { name: showMore(2) }).getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(rowButton('three'));
+    const smallPanel = detail();
+    expect(shown(smallPanel, 'three')).toEqual(['three-1', 'three-2', 'three-3']);
+    expect(within(smallPanel).queryByRole('button', { expanded: false })).toBeNull();
   });
 
   it.each(['project', 'global'])('configures changed or cleared maps in %s without showing stored values', async (scope) => {

@@ -9,13 +9,18 @@ Fetch `origin/master` and record the candidate's exact SHA for all release-only
 validation and tag creation; do not switch it silently while checks run. New PRs
 may continue to merge: there is no routine release-time merge freeze.
 
-Require a successful **full master backstop at the exact candidate SHA** for
-every release, stable included. `lint.yml` runs that full pass after master
-pushes, including iOS, desktop, browser, installer, web-fetch and Windows
-checks. A running pass finishes; only the newest pending master pass waits.
-`release_ai.yml`, `publish.yml`, and `desktop-release.yml` enforce the full
-master backstop before their respective build, signing, or publication paths.
-See [CI scope and routing](plans/ci-affected-routing.md). The PR-only iOS
+`release_ai.yml`, `publish.yml`, and `desktop-release.yml` each start with the
+release gate, `scripts/ci_release_backstop.py`, before any build, signing, or
+publication path. It resolves the tag to its exact source SHA and requires
+proof about that SHA. The proof depends on the tag.
+
+### Stable and every other tag: the full master backstop
+
+Require a successful **full master backstop at the exact candidate SHA**.
+`lint.yml` runs that full pass after master pushes, including iOS, desktop,
+browser, installer, web-fetch and Windows checks. A running pass finishes; only
+the newest pending master pass waits. See
+[CI scope and routing](plans/ci-affected-routing.md). The PR-only iOS
 NavigationPolicyTests quarantine (#3418) does not relax this release gate:
 iOS must pass in the exact full master run, even while its PR check is advisory.
 
@@ -25,9 +30,52 @@ its existing master backstop. Manual full validation is available on master.
 Historical runs with no explicit full-backstop certificate are not assumed
 equivalent.
 
-Before pushing a tag, fetch master again. If the release is required to include
-newly landed work, select the new tip and repeat candidate-specific gates; otherwise
-retain the recorded, validated candidate. Require the owner's release authorization
+This is the gate for a stable `v*` tag in Stage 1, `Publish to PyPI` and
+Stage 2, and for every tag that is not a canonical `gh-vX.Y.ZrcN`. `Publish to
+PyPI` applies it to any tag it is given.
+
+### GitHub-only RC tags: the merged pull request
+
+A `gh-vX.Y.ZrcN` tag does not wait for the full backstop. Stage 1 and Stage 2
+require instead that:
+
+1. the tag's SHA is on `master` and is the merge commit of a pull request
+   merged into `master`; and
+2. on that pull request's head, every check `master`'s ruleset requires
+   concluded `success` or `skipped`. Where a check ran more than once on the
+   head, its newest run counts, as it did for the merge.
+
+The gate fails closed. It refuses an RC whose SHA resolves to no such pull
+request, such as a direct push or a commit that is not the merge commit; one
+with a required check that failed, was cancelled, is still running or is
+absent; and one it cannot prove because GitHub could not be read or `master`
+has no required checks. Nothing after the gate changes for an RC: the exact
+tag/source binding, the predecessor contract, immutability, signing,
+notarization and the mirror apply as before.
+
+The full backstop still runs on `master`, and a red one still gets its
+fix-forward owner. For an RC the gate only reports the state at the RC's SHA:
+`success`, `pending`, `failed`, or `missing` when no full pass finished there
+because it was coalesced away, cancelled or never started. A `failed` state is
+a warning on the release run, not a refusal.
+
+**The release Session owns the follow-up.** After publishing an RC it follows
+the full pass at the RC's SHA to its conclusion, or the next full pass on
+`master` when that one was coalesced away. If it ends red, the Session reports
+the RC tag, the SHA and the failed jobs to the product Bot (`product`). The RC
+stays published, and no stable is cut from a SHA without its own green
+backstop. To read the state again:
+
+```bash
+GH_TOKEN="$(gh auth token)" python3 scripts/ci_release_backstop.py \
+  --repository avibe-bot/avibe --tag <rc-tag> --rc-pull-request-gate
+```
+
+### Before pushing the tag
+
+Fetch master again. If the release is required to include newly landed work,
+select the new tip and repeat candidate-specific gates; otherwise retain the
+recorded, validated candidate. Require the owner's release authorization
 in either case. The stable-release E2E below and asset-complete publication gates
 remain mandatory.
 
@@ -51,6 +99,32 @@ remain mandatory.
 
 ## Workflow ownership and artifacts
 
+The desktop packaging cache is intentionally separate from release correctness.
+`desktop-package.yml` has one writer: the unsigned `master` warm-up. It builds
+all three targets, caches only third-party Cargo output, and keys Rust entries
+by `Cargo.lock` checksums, rustc, Apple SDK, and target. First-party crates,
+version stamping, the private Runtime, final packaging, signing, notarization,
+and verification are rebuilt; release jobs restore only an exact key and visibly
+warn before rebuilding on a miss. The Cua Driver cache remains provenance- and
+input-verified. PR desktop-shell jobs are restore-only, and maintenance keeps
+one newest release entry per target, removes superseded entries and retired PR
+caches, reports total usage/headroom against the 10 GB repository budget, and
+retries a failed master warm-up once. The existing master warm-up remains the
+cache writer for changed desktop inputs and its existing schedule; no additional
+five-day warm-up was added. Instead, `desktop-cache-keepalive.yml` is the
+retention mechanism and runs lookup-only on master pushes and every five days.
+A missing, unreadable, or unrefreshed entry emits an explicit instruction to run
+the next warm-up; it never silently dispatches one.
+
+A TEST RC deliberately builds Apple silicon macOS and Windows only. Stable
+still requires Apple silicon, Intel macOS, and Windows with the complete signed
+set. The unsigned master warm-up is the early Intel signal for desktop source,
+locked dependency, and release-helper changes plus its existing schedule; it
+catches Intel compile/SDK/smoke/DMG failures before stable. Intel-specific
+Developer ID signing, notarization, stapling, Gatekeeper, and updater-signature
+failures still first appear on the stable path. The keepalive's lookup-only
+behavior is an observation with warnings, not a release correctness gate.
+
 The official workflows stage notes and release assets in one immutable tag/release.
 `Release (AI Notes)` generates notes and publishes the core/runtime assets for
 GitHub-only pre-releases; for official stable tags it leaves a Draft for
@@ -69,10 +143,67 @@ new canonical set. This applies only to the unsigned Show Runtime archives and
 router; release-versioned wheels, desktop-private wheels, and signed assets are
 never reused.
 
+For GitHub-only RCs, canonical discovery inspects the newest successful runs
+first and stops at the newest complete set. Only same-repository `push` and
+`workflow_dispatch` producers are trusted; a PR/fork run cannot supply release
+bytes even if it uploads matching names and identity records. One Linux job downloads and verifies
+all six platforms against the pinned native Node/npm versions; it does not run
+foreign binaries. Any missing or invalid member sends all platforms through the
+native build matrix. Stable `publish.yml` retains its native matrix path.
+
+Core packaging may reuse `ui-dist-linux` only when the gate already supplied a
+successful full master backstop proof for this exact source. The consumer binds
+the artifact to that run/attempt's successful build job and verifies the ZIP's
+GitHub SHA256 digest before extraction. No proof means no artifact-discovery
+request; missing, expired or mismatched bytes use the normal local UI build.
+A partial CI rerun that inherits an earlier attempt's successful UI build or
+certificate also falls back: the producer job must have actually started in the
+proven attempt, not merely carry its relabelled attempt number.
+This optional optimization never makes the full backstop an RC gate again.
+
+The final wheel/sdist are still built with the release version and activated
+predecessor compatibility. All distribution assertions remain: the three fresh
+full-dependency installation checks run concurrently in separate processes,
+temporary homes and virtual environments, not shared installed environments.
+
+The RC publisher prepares notes after the gate while packaging runs, then
+waits for `build-assets` in the **same workflow run and attempt** to succeed.
+It verifies and downloads that attempt's immutable artifact and rechecks the
+remote tag before publication. Failure, cancellation, stale artifacts, or a
+30-minute wait timeout cannot publish. To retry this path, rerun all jobs;
+reusing a previous attempt's successful build is intentionally rejected. Only
+the publisher has write permissions. Preparing it early consumes runner time
+while it waits; desktop signing and Stage 2 are unchanged.
+
 GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 `gh-v2.2.8rc2`, so they remain distinct from PyPI-triggering `v*` tags. They
 must include an installable wheel containing `ui/dist` and
 `vibe/show_runtime/*.tgz`, plus the source distribution.
+
+## Python dependency artifacts
+
+Every new release ships `dependency-constraints.txt` as a GitHub asset and the
+same content as `vibe/dependency_constraints.txt` inside its wheel and sdist.
+Regenerate it after updating `uv.lock` with
+`python scripts/release_dependency_constraints.py`; `--check` verifies freshness.
+Release builds retain exact transitive pins in distribution metadata, including
+platform/Python markers, so older installers such as 3.2.5 also obey the release
+graph. Source/editable development keeps its declared ranges.
+
+The shell installer and `vibe upgrade` inspect the target wheel before installing
+and pass its own constraints, not those of the running release. The shell's
+stdlib resolver is generated from `vibe/release_dependencies.py`; after changing
+it run `python scripts/sync_install_dependencies.py` (`--check` detects drift).
+Explicit old stable artifacts through 3.2.5 remain installable without a lock.
+
+Exported hashes are provided for verification, but uv tool installation does
+**not** enforce dependency hashes from constraints. Exact versions do not remove
+trust in the selected package index or pin source-build dependencies. The default
+installer no longer silently retries a third-party Python index or Git HEAD.
+Avibe's release mirror can provide the core wheel; it does not mirror the full
+Python dependency graph. Where PyPI is unreachable, configure a trusted HTTPS
+proxy or explicitly select an index whose artifacts you trust. See the change
+contract in [release dependency locks](plans/release-dependency-locks.md).
 
 ## Activate a release on a machine
 
@@ -134,6 +265,10 @@ around an exact payload; each release entry carries the minimum Avibe version
 and the exact bytes of that release's manifest. Clients trust it only through
 a key shipped inside Avibe, never because of where it was downloaded.
 
+There is one current index. It has no expiry and is never renewed: a client
+follows the highest sequence it has accepted for as long as that is the
+highest it has, and only a promotion or a withdrawal produces a new one.
+
 What the index should say is recorded in a **ledger on the signer host**: the
 next sequence, the exact payload last allocated, and every release identity
 and withdrawal ever allocated. `Publish Model Hub engine channel` is the
@@ -160,85 +295,67 @@ Nothing regenerates the index from the list of GitHub releases, and
    `patches/model-hub-engine-candidates/` (format in its `README.md`): the exact
    six-asset manifest and the minimum Avibe version. The record is separate
    from the packaged engine, so merging it changes nothing users install.
-2. **Qualify.** Dispatch `Qualify Model Hub engine candidate` on `master` with
-   the record's tag. It holds no secret. It rebuilds the pinned source and
-   requires the reviewed digests, then gathers evidence about those exact
-   bytes. The run produces a receipt only when every class below is present.
-3. **Publish the assets.** Dispatch the channel workflow with
-   `operation: release` and the qualification run id. It re-checks the receipt
-   and publishes the qualified bytes as an immutable, non-latest release. It
-   never rebuilds them. Publication alone makes no engine adoptable.
+2. **Rehearse.** Dispatch `Qualify Model Hub engine candidate` on `master` with
+   the record's tag. It holds no business secret, repository-write token or
+   OIDC publication authority. Its disposable jobs rebuild and exercise the
+   exact candidate and publish only the informational result named
+   `untrusted_rehearsal`, with source, manifest/archive digests, run identity,
+   and missing/failed observations. It does not authorize anything.
+3. **Prepare and publish.** Dispatch the channel workflow with
+   `operation: release` and the rehearsal run id. Its trusted prepare job uses
+   a fixed checkout, checks the exact run and current candidate/source/manifest/
+   archive digests, parses the result as bounded untrusted data, and places
+   only byte-checked assets in a separate trusted artifact namespace. The
+   existing protected writer environment then requires explicit owner approval
+   for this run and digest before publishing immutable, non-latest assets.
 4. **Promote.** After the mirror holds the release, dispatch
-   `operation: promote` with the same run id. It re-checks the receipt, requires
-   every asset from both the release and the mirror byte for byte, and only
-   then allocates, signs and publishes an index that lists the release.
+   `operation: promote` with the same rehearsal run id. Trusted prepare checks
+   the same exact context and availability. The existing protected signer and
+   writer approvals then authorize allocation, signing and publication of the
+   index. Owner authorization is the promotion authority, not a rehearsal
+   receipt.
 
-A receipt is not taken on trust. Before publishing or promoting, the workflow
-reads the qualification run from GitHub: the workflow file, a commit on
-`master`, the run attempt, and a successful conclusion for every job. It then
-requires the receipt to name the reviewed record, the qualification harness as
-it is on `master` now, the Avibe wheels as GitHub serves them now, and every
-baseline engine the published index lists now. Those baselines are handed to
-the signer, which refuses to promote unless they cover every release its own
-ledger lists. A newer stable Avibe, a changed harness, or a newly listed
-engine means qualifying again.
+The trusted prepare job verifies the workflow run is the intended dispatch on
+`master`, the run attempt and commit, the current reviewed candidate, the
+upstream source reference, exact manifest/archive digests, minimum Avibe and
+the concrete baseline context. It independently resolves the current minimum
+and stable Avibe releases, verifies immutable wheel sizes and SHA-256 digests,
+and reads their packaged manifests as ZIP data; it does not trust released-role
+or bundled-manifest files from the rehearsal artifact. It never executes
+candidate code, imports uploaded modules or wheels, or accepts an uploaded
+executable as trusted input. Runtime pass/fail assertions remain explicitly
+untrusted. The job split protects the
+trusted workflow and privileged credentials; it does not prove that a
+malicious candidate reported honestly. A future stronger receipt or
+malicious-candidate-resistant provenance requires a new product/owner decision.
 
-| Evidence | What it shows | Producer today |
+| Observation | What it shows | Current producer |
 | --- | --- | --- |
-| `build` | The pinned source rebuilds to the reviewed manifest and six assets. | Yes |
-| `platform_smoke` | Each archive starts on its own platform and passes Avibe's health check. | Yes; the producer runs in PR CI against the packaged engine |
-| `hosted_wire` | The hosted passthrough compared with every baseline engine. A difference needs a reviewed reason in the record. | Yes; not yet run |
-| `released_avibe_e2e` | The full hermetic Model Hub E2E, driven through the released wheel of the minimum Avibe and of the current stable Avibe. | Yes; rehearsed against a release candidate, not run for qualification |
-| `backward_state` | State written by the candidate, read back by every baseline engine. | No. Arrives with the engine lifecycle work. |
-| `lifecycle` | Activation, rollback and recovery of the candidate. | No. Arrives with the engine lifecycle work. |
+| `build` | The pinned source reports a rebuild matching the reviewed manifest and six assets. | Yes; independently rechecked by trusted prepare |
+| `platform_smoke` | Each archive reports startup and Avibe health on its own platform. | Yes; untrusted runtime data |
+| `hosted_wire` | The hosted passthrough comparison with each baseline engine. Reviewed differences remain visible. | Yes when a candidate has baselines |
+| `released_avibe_e2e` | The hermetic E2E through the minimum and current-stable released wheels. | Yes when immutable wheels are available |
+| `backward_state` | Candidate state read back by baseline engines. | Future lifecycle work; missing is reported, not fabricated |
+| `lifecycle` | Activation, rollback and recovery observations. | Future lifecycle work; missing is reported, not fabricated |
 
-The last two are required like the others, so no receipt can be produced, and
-no engine promoted, until their producing jobs exist. No engine may declare a
-minimum below 3.2.6, the first Avibe that reads the channel, so the first
-promotion also waits for the stable 3.2.6 artifacts.
-
-Evidence counts only under the job that produces its class. The receipt job
-reads each class from the artifact named for its job, refuses any document
-that job does not produce and any artifact named for no job, and records the
-job on what it accepts. A class with no producing job is accepted from
-nowhere, whatever a job uploads. The finalizer applies the same rule, so a
-receipt that carries all six classes is refused when it is made and when it
-is checked, until both missing producers exist.
-
-That rule is an allowlist by artifact name and document shape. It does not
-authenticate which job uploaded an artifact.
-
-**Containing the candidate is unfinished.** The smoke, hosted-wire and
-released-Avibe jobs execute the candidate as the user that writes their
-evidence, beside the run's artifact credential. A candidate that attacks its
-runner can make such a job report anything about itself and could replace an
-artifact another job uploaded. What stands against that today is the review
-of the candidate's record and of the pinned source, which the `build` job
-compiles without running it and must reproduce to the reviewed digests.
-
-This is qualification engineering owed in this repository, not an
-owner-held step, and there is no switch that waives it. The change that
-gives the last evidence class a producer does not merge before the
-containment is implemented, reviewed independently and exercised. The first
-usable receipt, the first promotion and commissioning all wait for it. What
-the containment must show is in `docs/plans/model-hub-engine-channel.md`.
+All concrete integrity, manifest, minimum-version, availability, health and
+rollback checks remain useful data or trusted checks at their owning boundary.
+No universal failure is caused solely by absent backward-state or lifecycle
+producers. Full candidate containment is rejected for this scope, not deferred
+as a prerequisite. PR4 must not restore the removed producer/receipt gate under
+another name.
 
 The released-Avibe job installs the published stable wheel into its own
 environment and runs **that release tag's own tests** from a directory that
 holds no product package. The service starts from the wheel's own entry
 script. Every Python process in that environment logs where it imported each
 Avibe module from, and the run is refused if any module, in the test runner,
-the service or a helper, came from anywhere else. A module is imported only
-once its process's log accounts for it, and a run is also refused if any
-process's log is marked as not holding every import.
+the service or a helper, came from anywhere else.
 
 `Rehearse the released-wheel Model Hub E2E` runs the same shared steps against
 one pinned release candidate, so the harness is exercised before the stable
-tag freezes its tests. It has two legs. One runs the candidate's own tagged
-tests and only reports what fails, since a tag cannot be fixed. The other runs
-the current tests against the same wheel and must pass. A rehearsal qualifies
-nothing: it does not use the stable-only resolver, and its record is of a
-kind no receipt reads.
+tag freezes its tests. A rehearsal qualifies nothing; its result is separate
+from `untrusted_rehearsal` and no owner approval can be inferred from it.
 
 ### Operations
 
@@ -247,25 +364,35 @@ dispatch on `master` and this run's approval.
 
 | Operation | What it does |
 | --- | --- |
-| `release` | Publishes a qualified candidate's assets. Does not touch the index. |
-| `promote` | Lists a qualified, published, mirrored release in the index. |
-| `renew` | Re-signs what the ledger holds with the next sequence and new dates. Takes no input and changes nothing else. |
-| `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. |
-| `resume` | Publishes again, byte for byte, the index the ledger last allocated. No new sequence. |
+| `release` | Publishes trusted-checked candidate assets after owner approval. Does not touch the index. |
+| `promote` | Lists an owner-approved, published, mirrored release in the index. Allocates the next sequence. |
+| `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. Allocates the next sequence. |
+| `resume` | Publishes again, byte for byte, the index the ledger last allocated. No new sequence and no new signature, however long ago it was allocated. |
 
-The index is valid for seven days, so it has to be renewed within that time.
-No schedule does this: an unattended renewal and per-run approval cannot both
-hold, and which one applies is an open commissioning decision. An index that
-expires stops new adoption on clients. It does not stop a working engine, and
-withdrawals a client already recorded stay in force.
+Nothing else allocates a sequence, and nothing runs on a schedule. An index
+does not expire, so there is no renewal to perform or to miss, and no
+operation re-signs an unchanged list. The signer host only has to be up for a
+run that was approved; between runs it can be off, as long as its ledger
+survives.
+
+**What a client without the newest index does.** It keeps following the index
+it has. If that index lists a release that a later index withdrew, the client
+may still install it, a month later as well as a minute later, for as long as
+it cannot fetch the later index and the release's pinned archive can still be
+downloaded. A signature shows an index was authorized, and the sequence rule
+stops a client going back from one it has seen; neither shows that a newer
+one was received. A client that has the later index refuses the earlier one.
+This is the chosen behaviour, not a gap to close with a time limit
+(`docs/plans/model-hub-engine-channel.md`, section 2). A withdrawal reaches a
+machine when that machine next reaches the index.
 
 A withdrawal is permanent. Later indexes carry it unchanged, clients refuse
 an index that drops it, and the writer refuses to publish one. The release's
 assets and its index entry stay. The fallback must be a listed release that
 was not withdrawn and that does not need a newer Avibe than the withdrawn
 one. An engine that only a packaged Avibe bundles can be withdrawn too.
-Clients learn of a withdrawal at their next check; a machine that is offline
-learns of it when it reconnects.
+Clients learn of a withdrawal at their next check; a machine that cannot
+reach the index learns of it when it can.
 
 **When a run fails part way.** The signer commits the exact payload to the
 ledger before it asks avault to sign, and commits the envelope before it
@@ -323,8 +450,9 @@ seconds, so the workflow waits for the public URL instead of purging it.
 
 ### Commissioning (owner-held, not done)
 
-Commissioning also waits for the containment of candidate execution
-described under qualification above. That is engineering in this repository.
+Commissioning does not turn `untrusted_rehearsal` into an authority. It remains
+an owner-held action that requires the signer, ledger, protected environments and
+custody boundaries below; this follow-up neither commissions nor verifies them.
 
 Nothing below exists yet, and this repository creates none of it:
 
@@ -342,7 +470,8 @@ Nothing below exists yet, and this repository creates none of it:
   workflow at `refs/heads/master`. Whether this organization's plan can
   enforce that restriction is **not verified**. Without it, any workflow run
   in the repository could reach the signer host, and the signer must not be
-  commissioned.
+  commissioned. The host is needed only while an approved run signs. It does
+  not have to stay up between runs; the ledger directory has to outlast them.
 - **The ledger.** Created once, by hand on the signer host, with
   `scripts/model_hub_engine_channel.py initialize-ledger`, for a channel whose
   key has never signed an index. An empty directory is not proof of that; the
@@ -354,9 +483,6 @@ Nothing below exists yet, and this repository creates none of it:
   policy of exactly `master`, and the repository variables and Environment
   secrets the workflow names. The writer's bucket credential is separate from
   the release mirror's.
-- **How renewals are approved.** Manual renewal with per-run approval, or a
-  standing authorization limited to `renew`. Until that is decided there is no
-  schedule.
 
 ## Managed-runtime manifests
 

@@ -1379,7 +1379,7 @@ def test_launch_failure_reports_retired_exact_hop():
     assert copy is not None
     assert copy.key == "modelHub.launch.interrupted"
     assert facts.blockers == (
-        TurnSupplyBlocker(source.display_name, "model_unsupported"),
+        TurnSupplyBlocker(source.display_name, "model_unsupported", source_id=source.id),
     )
 
 

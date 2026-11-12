@@ -1075,22 +1075,33 @@ def test_runtime_status_observes_engine_without_starting_it(tmp_path):
     assert runtime["status"]["verified"] is True
 
 
-def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
-    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+@pytest.mark.parametrize("known", [False, True])
+def test_runtime_status_carries_effective_manifest_without_packaged_fallback(tmp_path, known):
+    # A standalone renderer cannot discover the engine that served this status.
+    # The production adapter carries its worker snapshot; unknown stays unknown.
+    from dataclasses import replace
 
-    service, _store, _adapter = _service(tmp_path)
+    service, _store, adapter = _service(tmp_path)
+    effective = {
+        "name": "cliproxyapi", "resolution": "resolved", "version": "v8.0.64",
+        "asset_release_tag": "model-hub-engine-v8.0.64-7", "source_sha": "f" * 40,
+        "assets": [],
+    }
+    original = adapter.status
 
+    async def status():
+        return replace(
+            await original(), manifest=effective if known else None,
+            committed_release=effective["asset_release_tag"] if known else None,
+            running_release=effective["asset_release_tag"] if known else None,
+        )
+
+    adapter.status = status
     runtime = asyncio.run(service.runtime_status())
-
-    assert runtime["manifest"] == EngineRuntimeManager(offline=True).contract_manifest()
-    assert [asset["platform"] for asset in runtime["manifest"]["assets"]] == [
-        "darwin-arm64",
-        "darwin-x64",
-        "linux-amd64",
-        "linux-arm64",
-        "windows-amd64",
-        "windows-arm64",
-    ]
+    assert runtime["manifest"] == (effective if known else {"name": "cliproxyapi", "resolution": "unresolved", "assets": []})
+    assert runtime["committed_release"] == (effective["asset_release_tag"] if known else None)
+    assert runtime["running_release"] == (effective["asset_release_tag"] if known else None)
+    _assert_valid("runtime-dependency.schema.json", runtime)
 
 
 def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
@@ -7403,6 +7414,48 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         body = response.get_json()
         _assert_envelope(body, ok=False)
         assert body["error"] == error
+
+
+@pytest.mark.parametrize(("upstream_status", "detail"), (
+    (401, "modelHub.errors.authentication_failed"),
+    (403, "modelHub.errors.authentication_failed"),
+    (503, "modelHub.errors.discovery_failed"),
+    (None, "modelHub.errors.discovery_failed"),
+))
+def test_refresh_names_a_rejected_key_and_its_status(monkeypatch, tmp_path, upstream_status, detail):
+    """The refresh API preserves upstream status/detail independently of its HTTP 502 envelope."""
+
+    service, store, adapter = _service(tmp_path)
+    store.config.sources.append(ModelHubSourceConfig(
+        id="src_wrongkey01", kind="api_key", vendor="anthropic", display_name="Anthropic",
+        protocol="anthropic", supply_channel="hub", billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"), models=[],
+        credential_ref="cred_wrongkey01",
+    ))
+
+    async def refuse(*_args, **_kwargs):
+        raise ModelDiscoveryError(
+            "refused", rejected_status=upstream_status if upstream_status in {401, 403} else None,
+            upstream_status=upstream_status, upstream_detail="Provider declined the model listing.",
+        )
+
+    adapter.discover_models = refuse
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    response = client.post(
+        "/api/models/sources/src_wrongkey01/refresh", json={},
+        headers=csrf_headers(client, base_url), base_url=base_url,
+    )
+
+    assert response.status_code == 502
+    body = response.get_json()
+    _assert_envelope(body, ok=False)
+    assert body["error"] == "discovery_failed"
+    assert body["detail"] == detail
+    assert body.get("upstream_status") == upstream_status
+    assert body.get("upstream_detail") == "Provider declined the model listing."
+    assert store.config.sources[0].state.status == "error"
 
 
 @pytest.mark.parametrize("mode", ["hub", "direct"])

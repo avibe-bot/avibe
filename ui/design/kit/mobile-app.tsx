@@ -7,6 +7,8 @@ import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
 import { MoreAccountSection } from '@/components/workbench/MorePage';
 import { MobileAppHeader } from '@/components/apps/MobileAppHeader';
+import type { AppLicenses } from '@/mobile/appLicenses';
+import { LicensesContent, LicensesEntry } from '@/mobile/LicensesPage';
 import logo from '@/assets/logo.png';
 import mailMascot from '@/assets/pet/vibey-message.png';
 import heroMascot from '../../../assets/mascot/cloud-tuanzi-v2.png';
@@ -157,9 +159,14 @@ export function EmptyInstancesPage({ cli = false }: { cli?: boolean }) {
     <div className="mt-auto pt-7 pb-3"><Button variant="outline" size="lg" className="w-full whitespace-normal rounded-full"><RotateCw className="size-4 shrink-0" />{t('我已完成配对，刷新', 'I have paired · Refresh')}</Button></div>
   </CloudScreen>;
 }
-export function AccountPage({ instance }: { instance?: MobileInstance }) {
+export function AccountPage({ instance, licenses = false }: { instance?: MobileInstance; licenses?: boolean }) {
   const t = useCopy();
-  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section><div className="mt-auto pt-9 pb-3"><Button variant="link" className="px-0 text-destructive-ink">{t('删除账号', 'Delete account')}<ExternalLink className="size-4" /></Button><p className="mt-2 text-xs leading-6 text-muted">{t('前往 avibe.bot，查看影响并确认删除。', 'Continue to avibe.bot to review the impact and confirm deletion.')}</p></div></CloudScreen>;
+  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section>{licenses && <LicensesEntry />}<div className="mt-auto pt-9 pb-3"><Button variant="link" className="px-0 text-destructive-ink">{t('删除账号', 'Delete account')}<ExternalLink className="size-4" /></Button><p className="mt-2 text-xs leading-6 text-muted">{t('前往 avibe.bot，查看影响并确认删除。', 'Continue to avibe.bot to review the impact and confirm deletion.')}</p></div></CloudScreen>;
+}
+/** The shipped Open-source licenses page (`LicensesContent`) in the A screen. */
+export function LicensesScreen({ licenses, openGroup }: { licenses: AppLicenses; openGroup?: number }) {
+  const t = useCopy();
+  return <CloudScreen><Brand back /><PageTitle title={t('开源许可', 'Open-source licenses')} subtitle={t('Avibe App 包含以下开源组件。感谢它们的作者。', 'The Avibe app includes the open-source components below. Thanks to their authors.')} /><LicensesContent licenses={licenses} openGroup={openGroup} /></CloudScreen>;
 }
 export function NativeInstanceError({ instance }: { instance: MobileInstance }) {
   const t = useCopy();

@@ -70,13 +70,16 @@ the main agent; there is no Follow up on cards.
   in the window. Near the top of the display it opens **downward** instead
   (owner decision, 2026-10-23, §9.1): Vibey and the dock sit at the top of the
   window and the whole column is mirrored below them.
-- **Column width:** `min(440px, 94vw)`. Every card, the marquee and the input
+- **Column width:** `min(440px, 94vw)`. Activity cards, the marquee and the input
   bubble are **the same width**: the column minus 18px on each side.
   - Expanded: 6px panel padding plus 12px scroll padding.
   - Collapsed: 18px stack padding.
 - A card's width never depends on its content or on the number of cards.
-  Vibey's reply bubble is the one exception, and only while it shows a status
-  word alone (§4.2); the activity cards always keep the column width.
+  Vibey's main reply bubble and other-session activity card outer borders are
+  capped at **280 CSS px** (Owner, 2026-11-11 15:35 Asia/Shanghai), or the
+  available slot width when narrower. Their edges align in the collapsed and
+  expanded stack. Text and avatar do not scale. A status word alone can remain
+  compact (§4.2); the composer retains its existing width.
 - **Long text never widens anything.** Every flex/grid item on the path from
   the list to a text node needs `min-width: 0`, and grid rows need
   `grid-template-columns: minmax(0, 1fr)`. (A grid column sized by a long
@@ -175,7 +178,7 @@ It remains available with either the collapsed or expanded stack.
 
 **When it shows.** While Vibey's conversation is active: the turn is running
 or thinking, or a send is pending; Vibey needs the user (a failure notice,
-an uncertain-send notice, a queued notice, or an actionable quick reply); or
+an uncertain-send notice or a queued notice); or
 the history is open. Pending Vault requests use the existing needs-input pet
 pose and history authorization entry, and do not hold an old reply open. Composing and dictating take the slot as before (§5.2).
 Then, when Vibey's turn ends, the bubble shows the reply summary for
@@ -231,10 +234,34 @@ transition (instant under reduced motion), taking no space and no clicks.
 
 After expiry an unread reply leaves the existing unread dot, which clears
 when another window marks it read. Pending Vault requests cannot hold a
-reply after expiry, even if the reply mentions that request. Actionable quick
-replies are an explicit exception: their existing history entry remains
-available while they still require an answer. Failure, uncertain-send, and
-queued notices keep their existing intervention behavior.
+reply after expiry, even if the reply mentions that request. Failure,
+uncertain-send, and queued notices keep their existing intervention behavior.
+
+**Owner decision (2026-11-11, 15:13 Asia/Shanghai).** The main reply is
+280 CSS px wide and ordinary quick replies also fold after 30 seconds. This
+supersedes the previous indefinite quick-reply exception: suggestions use the
+reply's existing read/unread budget and interaction pauses, including at least
+three seconds on resume. Expiry neither clears suggestions nor marks a reply
+read; clicking Vibey opens history where suggestions remain usable. Updates
+to suggestions, rerenders, and reconnecting the event stream do not restart
+the budget of the same reply identity or revive it after expiry. Running and
+actual authorization/activity surfaces retain their existing rules. The
+three-line collapsed summary and bounded, internally scrolling history retain
+their height limits; buttons wrap within the narrower bubble.
+
+**Owner addition (2026-11-11, 15:35 Asia/Shanghai).** Other-session Mini activity
+cards (running, authorization, and replied) also use a 280 CSS px outer border,
+aligned with the main reply. This changes geometry only: exposure timers,
+persisted expiry, sorting, authorization, stop, close, and reference behavior
+remain unchanged. Composer and non-Mini Workbench cards keep their widths.
+
+**Remaining diagnosis boundary (2026-11-11).** An isolated WKWebView proves
+that unanswered suggestions hold a collapsed reply after its budget expires.
+The original screenshot's message metadata was not recovered, so this is not
+claimed as its exact cause. Injecting a missed pointer-leave also reproduces
+a stale hover pause, but physical shell pointer exit/focus behavior remains
+unverified. This change does not add native pointer events or a speculative
+focus correction, and does not claim to eliminate every persistence cause.
 
 **Diagnosis boundary (2026-11-06).** An isolated WKWebView reproduced a
 pending Vault request retaining an old reply after its timer had expired:

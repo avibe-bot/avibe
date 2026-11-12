@@ -7,6 +7,7 @@ import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { useSheetDrag } from '@/lib/sheetDrag';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { useLatestRef } from '@/lib/useLatestRef';
+import { keepOpenOnOutsideClick } from './dialogOutsideClick';
 
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
@@ -38,12 +39,16 @@ type DialogContentProps = React.ComponentPropsWithoutRef<typeof DialogPrimitive.
    *  down to dismiss it; a `card` the caller places itself (away from the bottom edge) grows in place,
    *  as a desktop dialog does (docs/plans/web-ui-motion.md M6). */
   mobilePresentation?: 'sheet' | 'card';
+  /** A form the user types or pastes into: a click outside does not close it, so a
+   *  trip to another window for a key or a missed click back keeps what was typed.
+   *  The close button, Cancel and Escape still close it. */
+  keepOnOutsideClick?: boolean;
 };
 
 export const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   DialogContentProps
->(({ className, children, mobileSheetHeight = 'content', closeLabel = 'Close', mobilePresentation = 'sheet', onCloseAutoFocus, ...props }, ref) => {
+>(({ className, children, mobileSheetHeight = 'content', closeLabel = 'Close', mobilePresentation = 'sheet', keepOnOutsideClick = false, onCloseAutoFocus, onPointerDownOutside, ...props }, ref) => {
   const active = useRouteSurfaceActive();
   const activeRef = useLatestRef(active);
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
@@ -83,6 +88,10 @@ export const DialogContent = React.forwardRef<
           className
         )}
         {...props}
+        onPointerDownOutside={(event) => {
+          if (keepOnOutsideClick) keepOpenOnOutsideClick(event);
+          onPointerDownOutside?.(event);
+        }}
         onOpenAutoFocus={(event) => {
           previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
           props.onOpenAutoFocus?.(event);

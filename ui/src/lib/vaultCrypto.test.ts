@@ -20,6 +20,7 @@ import {
   derivePasskeyKek,
   generateSigningKey,
   importSigningKey,
+  keypairImportBlindBoxContext,
   newVmk,
   passkeyPrfSaltEntries,
   passkeyPrfSalts,
@@ -44,6 +45,7 @@ import {
   webAuthnPrfExtensionInput,
   type SignatureScheme,
   type BlindBoxContext,
+  type SolanaKeyImportFormat,
 } from './vaultCrypto';
 
 type P2Vectors = typeof vectors;
@@ -150,6 +152,10 @@ async function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_exampl
   switch (vector.purpose) {
     case 'seal':
       return standardCreateBlindBoxContext(vector.name);
+    case 'keypair-import': {
+      const [curve, format] = vector.sign_scheme.split(':');
+      return keypairImportBlindBoxContext(vector.name, format as SolanaKeyImportFormat, curve as 'ed25519');
+    }
     case 'agent-deliver':
       return await protectedDekReleaseBlindBoxContext(vector.name, {
         kind: 'agent-deliver',
@@ -278,6 +284,29 @@ describe('vaultCrypto blind boxes', () => {
         agentSign.ttl_secs,
       ).then(bytesToHexString),
     ).resolves.toBe(agentSign.operation_hash_hex);
+  });
+
+  // avault opens a pasted Solana secret key only under the name, curve and format it was sealed
+  // for. The shared vector is a box avault itself sealed: opening it proves the two sides build
+  // the same AAD, which a wrong layout here would break for every import.
+  it('opens the shared avault keypair-import box and binds a new one to its name and format', async () => {
+    const vector = p2.keypair_import_blind_box;
+    const context = keypairImportBlindBoxContext(vector.context.name, vector.context.format as SolanaKeyImportFormat);
+    expect(blindBoxAadHex(context)).toBe(vector.aad_hex);
+    await expect(openBlindBox(vector.box, blindBoxAad(context))).resolves.toEqual(bytesFromHex(vector.plaintext_hex));
+
+    const secret = encoder.encode('not a real key');
+    const box = await sealBlindBox(new Uint8Array(secret), { public_key: vector.public_key, fingerprint: vector.fingerprint }, context);
+    await expect(openBlindBox(box, blindBoxAad(context))).resolves.toEqual(secret);
+    for (const other of [
+      keypairImportBlindBoxContext(vector.context.name, 'solana-cli-json'),
+      keypairImportBlindBoxContext('OTHER_KEY', 'base58-secret'),
+      standardCreateBlindBoxContext(vector.context.name),
+    ]) {
+      await expect(openBlindBox(box, blindBoxAad(other))).rejects.toThrow();
+    }
+    expect(() => keypairImportBlindBoxContext('KEY.field', 'base58-secret')).toThrow('secret name');
+    expect(() => keypairImportBlindBoxContext('KEY', 'mnemonic' as SolanaKeyImportFormat)).toThrow('import format');
   });
 
   it('opens the shared avault blind-box vector with the recorded operation-context AAD', async () => {

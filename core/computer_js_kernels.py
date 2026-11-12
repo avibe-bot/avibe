@@ -50,7 +50,8 @@ MAX_TIMEOUT_MS = 300_000
 MAX_CODE_BYTES = 1024 * 1024
 IDLE_SECONDS = 15 * 60
 KILL_GRACE_SECONDS = 2.0
-SPAWN_TIMEOUT_SECONDS = 10.0
+# Loaded CI cold starts exceeded 10s (first-call scenarios took 10.8–13.5s).
+SPAWN_TIMEOUT_SECONDS = 60.0
 STATUS_POLL_SECONDS = 15.0
 # Each call's connection is leased for the script-connection maximum; it is
 # closed as soon as the call ends, and its Turn ending invalidates it at once.
@@ -385,17 +386,22 @@ class ComputerJsKernelManager:
                         "The JavaScript kernel is unavailable on this platform.",
                     )
                 )
+            self._ensure_status_watch()
             try:
-                kernel = await self._spawn()
+                kernel = await self._spawn(call.cancel)
                 if slot.invalidated is not None:
                     # Invalidated while starting: never hand this slot a kernel.
                     self._kill(kernel, slot.invalidated)
                     return self._cancelled(call, kernel_fresh=True)
             except _KernelGone as exc:
+                if call.cancel.done():
+                    return self._cancelled(call)
                 return _failed(
                     _envelope(
                         "js_kernel_unavailable",
-                        "The JavaScript kernel could not be started.",
+                        "The JavaScript kernel did not become ready before its startup deadline."
+                        if exc.reason == "startup_timeout"
+                        else "The JavaScript kernel could not be started.",
                         params={"reason": exc.reason},
                     )
                 )
@@ -505,7 +511,7 @@ class ComputerJsKernelManager:
 
     # Kernel process -----------------------------------------------------
 
-    async def _spawn(self) -> _Kernel:
+    async def _spawn(self, cancel: asyncio.Future[str]) -> _Kernel:
         node = self._node_resolver()
         kernel_script = _sdk_directory() / "kernel.mjs"
         if node is None or not kernel_script.is_file():
@@ -562,11 +568,24 @@ class ComputerJsKernelManager:
                     "artifact_directory": str(artifact_directory),
                 },
             )
-            await asyncio.wait_for(asyncio.shield(kernel.ready), SPAWN_TIMEOUT_SECONDS)
-        except (asyncio.TimeoutError, _KernelGone) as exc:
-            self._kill(kernel, "spawn_failed")
-            raise _KernelGone("spawn_failed") from exc
-        self._ensure_status_watch()
+            # Readiness owns the startup budget; execution has not begun. A
+            # Turn ending or slot invalidation must not wait out that budget.
+            done, _ = await asyncio.wait(
+                {kernel.ready, cancel},
+                timeout=SPAWN_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel in done:
+                raise _KernelGone("startup_cancelled")
+            if kernel.ready not in done:
+                raise _KernelGone("startup_timeout")
+            kernel.ready.result()
+        except _KernelGone as exc:
+            self._kill(kernel, exc.reason)
+            raise
+        except asyncio.CancelledError:
+            self._kill(kernel, "startup_cancelled")
+            raise
         return kernel
 
     async def _read(self, kernel: _Kernel, reader: asyncio.StreamReader) -> None:
@@ -679,7 +698,7 @@ class ComputerJsKernelManager:
 
     async def _watch_status(self) -> None:
         while any(
-            slot.kernel is not None and slot.kernel.alive
+            slot.calls or (slot.kernel is not None and slot.kernel.alive)
             for slot in self._slots.values()
         ):
             await asyncio.sleep(self._status_poll_seconds)

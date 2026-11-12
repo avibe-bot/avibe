@@ -243,7 +243,11 @@ def _owner(operation: str, payload: dict[str, Any]) -> int:
         failed = response.get("failed") or []
         unchanged = response.get("unchanged") or []
         for item in added:
-            print(f"{item['name']}: added ({item.get('toolCount', 0)} tools)")
+            warning = item.get("warning")
+            if warning:
+                print(f"{item['name']}: added, but discovery failed — {warning.get('message') or warning.get('type') or 'unknown'}; run `vibe mcp {item['name']} --refresh`")
+            else:
+                print(f"{item['name']}: added ({item.get('toolCount', 0)} tools)")
         for item in unchanged:
             print(f"{item['name']}: unchanged")
         for item in failed:

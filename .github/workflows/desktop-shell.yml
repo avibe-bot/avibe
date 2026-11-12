@@ -59,9 +59,10 @@ jobs:
           cache: "npm"
           cache-dependency-path: desktop/package-lock.json
 
-      # Paths here are workspace-relative; `defaults.run.working-directory`
-      # applies to `run` steps only.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      # PR shell jobs may read an existing entry but never write one. Release
+      # warm-ups own the desktop cache namespace so PR traffic cannot evict
+      # release inputs from the repository's shared cache budget.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -69,7 +70,6 @@ jobs:
             ~/.cargo/git/db
             desktop/target
           key: ${{ runner.os }}-${{ matrix.cache_scope }}desktop-cargo-${{ hashFiles('desktop/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.cache_scope }}desktop-cargo-
 
       - name: Report toolchain
         run: |

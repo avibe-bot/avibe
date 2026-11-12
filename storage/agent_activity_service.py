@@ -44,7 +44,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, func, select, text
 
 from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import AssistantMessage, message_from_dict
@@ -52,7 +52,7 @@ from core.hosted_activity import native_activities
 from core.backend_failure import is_backend_failure_notification
 from core.tool_activity import ACTIVITY_FIELDS, SOURCE_KEY, linked_step
 from storage import agent_events_service, messages_service, tool_activity_service
-from storage.models import message_deliveries, messages, session_turns
+from storage.models import messages, session_turns
 from vibe.message_types import (
     PROMOTED_FROM_KEY,
     PROMOTED_FROM_TYPES,
@@ -358,24 +358,26 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     )
     accepted_roles: dict[str, dict[str, Any]] = {}
     if message_ids:
+        # This is a retained-message lookup, not a recovery-state lookup. Even
+        # with ANALYZE, SQLite can choose recovery_owner(state=?) for a 500-id IN
+        # list and walk every accepted Delivery in the database. Pin the keyed
+        # seek to the existing 0067 index; the IN predicate implies its partial
+        # message_id IS NOT NULL condition. Schema-compatible readers retain it.
         rows = conn.execute(
-            select(
-                message_deliveries.c.message_id,
-                message_deliveries.c.id.label("delivery_id"),
-                message_deliveries.c.materialized_at,
-                session_turns.c.id.label("turn_id"),
-                session_turns.c.initial_delivery_id,
-                session_turns.c.started_at,
-                session_turns.c.created_at.label("turn_created_at"),
-            )
-            .select_from(
-                message_deliveries.join(
-                    session_turns,
-                    session_turns.c.id == message_deliveries.c.turn_id,
-                )
-            )
-            .where(message_deliveries.c.state == "accepted")
-            .where(message_deliveries.c.message_id.in_(message_ids))
+            text("""
+                SELECT message_deliveries.message_id,
+                       message_deliveries.id AS delivery_id,
+                       message_deliveries.materialized_at,
+                       session_turns.id AS turn_id,
+                       session_turns.initial_delivery_id,
+                       session_turns.started_at,
+                       session_turns.created_at AS turn_created_at
+                FROM message_deliveries INDEXED BY ix_message_deliveries_message
+                JOIN session_turns ON session_turns.id = message_deliveries.turn_id
+                WHERE message_deliveries.state = 'accepted'
+                  AND message_deliveries.message_id IN :message_ids
+            """).bindparams(bindparam("message_ids", expanding=True)),
+            {"message_ids": message_ids},
         ).mappings()
         for row in rows:
             if row["message_id"] is None:

@@ -14,7 +14,9 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,39 +38,46 @@ def gh_json(arguments: list[str]) -> Any:
     return json.loads(result.stdout)
 
 
+def trusted_producer(repository: str, workflow: str, run: dict[str, Any]) -> bool:
+    # Artifact digests authenticate transport, not the code that produced them.
+    # Fork/PR workflows can use the same path and self-write identity JSON.
+    head_repository = run.get("head_repository") or {}
+    return (
+        run.get("event") in {"push", "workflow_dispatch"}
+        and head_repository.get("full_name", "").casefold() == repository.casefold()
+        and run.get("path") == workflow
+        and run.get("status") == "completed"
+        and run.get("conclusion") == "success"
+    )
+
+
 def find_run(repository: str, workflows: list[str], runtime_ref: str, platforms: list[str]) -> tuple[str, str, str, int] | None:
     expected = {f"canonical-show-runtime-{runtime_ref}-{platform}" for platform in platforms}
-    candidates: list[tuple[str, str, str, str, int]] = []
+    # Merge both workflow histories before inspecting artifacts. Scanning each
+    # history to the end after finding a candidate spent ~70s on every RC.
+    runs: list[tuple[str, str, dict[str, Any]]] = []
     for workflow in workflows:
         payload = gh_json([
             "api",
             f"repos/{repository}/actions/workflows/{Path(workflow).name}/runs?status=success&per_page=100",
         ])
         for run in payload.get("workflow_runs", []):
-            run_id = str(run.get("id", ""))
-            if not run_id or run.get("conclusion") != "success":
-                continue
-            artifacts = gh_json([
-                "api",
-                f"repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100",
-            ]).get("artifacts", [])
-            names = {
-                str(artifact.get("name"))
-                for artifact in artifacts
-                if not artifact.get("expired") and not artifact.get("archive_download_url") is None
-            }
-            if expected <= names:
-                candidates.append((
-                    str(run.get("created_at", "")),
-                    run_id,
-                    workflow,
-                    str(run.get("name", "")),
-                    int(run.get("run_attempt", 1)),
-                ))
-    if not candidates:
-        return None
-    _, run_id, workflow, workflow_name, run_attempt = max(candidates)
-    return run_id, workflow, workflow_name, run_attempt
+            if run.get("id") and trusted_producer(repository, workflow, run):
+                runs.append((str(run.get("created_at", "")), workflow, run))
+    for _, workflow, run in sorted(runs, key=lambda item: (item[0], int(item[2]["id"])), reverse=True):
+        run_id = str(run["id"])
+        artifacts = gh_json([
+            "api",
+            f"repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100",
+        ]).get("artifacts", [])
+        names = {
+            str(artifact.get("name"))
+            for artifact in artifacts
+            if not artifact.get("expired") and artifact.get("archive_download_url") is not None
+        }
+        if expected <= names:
+            return run_id, workflow, str(run.get("name", "")), int(run.get("run_attempt", 1))
+    return None
 
 
 def identity_path(directory: Path, artifact: str) -> Path:
@@ -154,6 +163,59 @@ def verify(args: argparse.Namespace) -> None:
             raise ValueError(f"Show Runtime {field} provenance mismatch")
 
 
+def reuse_set(args: argparse.Namespace) -> bool:
+    # No native toolchain is installed or executed here. These are the explicit
+    # versions shipped by the pinned Node release on all six native builders.
+    from release_workflow_artifacts import (
+        ArtifactError, check_run, download_verified, listed,
+    )
+
+    if not args.producer_run_id:
+        return False
+    allowed = {
+        ".github/workflows/release_ai.yml": "Release (AI Notes)",
+        ".github/workflows/publish.yml": "Publish to PyPI",
+    }
+    if allowed.get(args.producer_workflow_file) != args.producer_workflow_name:
+        raise ArtifactError("Untrusted canonical producer workflow")
+    run = gh_json(["api", f"repos/{args.repository}/actions/runs/{args.producer_run_id}"])
+    if not trusted_producer(args.repository, args.producer_workflow_file, run):
+        raise ArtifactError("Untrusted canonical producer event or repository")
+    source_sha = run["head_sha"]
+    check_run(args.repository, args.producer_run_id, args.producer_run_attempt,
+              source_sha, args.producer_workflow_file, completed=True)
+    artifacts = listed(args.repository, f"actions/runs/{args.producer_run_id}/artifacts", "artifacts")
+    with tempfile.TemporaryDirectory(prefix="show-runtime-reuse-") as temporary:
+        staging = Path(temporary)
+        for platform in args.platforms:
+            name = f"canonical-show-runtime-{args.runtime_ref}-{platform}"
+            matches = [artifact for artifact in artifacts if artifact.get("name") == name and not artifact.get("expired")]
+            if len(matches) != 1:
+                raise ArtifactError("Canonical set is missing a platform")
+            artifact = matches[0]
+            producer = artifact.get("workflow_run") or {}
+            if str(producer.get("id")) != args.producer_run_id or producer.get("head_sha") != source_sha:
+                raise ArtifactError("Canonical archive belongs to another producer")
+            directory = staging / platform
+            download_verified(args.repository, artifact, directory)
+            values = vars(args) | {"artifact": platform, "directory": str(directory), "producer_source_sha": None}
+            # Identity binds the recorded producing attempt, platform and
+            # complete toolchain, in addition to the downloaded ZIP digest.
+            verify(argparse.Namespace(**values))
+        check_run(args.repository, args.producer_run_id, args.producer_run_attempt,
+                  source_sha, args.producer_workflow_file, completed=True)
+        destination = Path(args.directory)
+        if destination.exists():
+            raise ArtifactError("Runtime reuse destination already exists")
+        destination.mkdir(parents=True)
+        for platform in args.platforms:
+            directory = staging / platform
+            for path in (archive_path(directory, platform), router_path(directory, platform),
+                         ref_path(directory, platform), identity_path(directory, platform)):
+                shutil.copy2(path, destination / path.name)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -165,10 +227,15 @@ def main() -> int:
     find_parser.add_argument("--platform", action="append", dest="platforms", required=True)
     find_parser.add_argument("--output", required=True)
 
-    for command in ("record", "verify"):
+    for command in ("record", "verify", "reuse-set"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("--directory", required=True)
-        command_parser.add_argument("--artifact", required=True)
+        if command == "reuse-set":
+            command_parser.add_argument("--repository", required=True)
+            command_parser.add_argument("--platform", action="append", dest="platforms", required=True)
+            command_parser.add_argument("--output", required=True)
+        else:
+            command_parser.add_argument("--artifact", required=True)
         command_parser.add_argument("--runtime-ref", required=True)
         command_parser.add_argument("--lock-sha", required=True)
         command_parser.add_argument("--producer-workflow-name", required=True)
@@ -188,6 +255,18 @@ def main() -> int:
             stream.write(f"workflow_file={result[1] if result else ''}\n")
             stream.write(f"workflow_name={result[2] if result else ''}\n")
             stream.write(f"run_attempt={result[3] if result else ''}\n")
+        return 0
+    if args.command == "reuse-set":
+        try:
+            reused = reuse_set(args)
+        except Exception as error:
+            # This is an optional optimization; no partial set may be promoted.
+            # Native jobs rebuild all platforms after any proof/transport miss.
+            print(f"Canonical reuse unavailable ({type(error).__name__}); building natively.")
+            shutil.rmtree(args.directory, ignore_errors=True)
+            reused = False
+        with Path(args.output).open("a", encoding="utf-8") as stream:
+            stream.write(f"reused={str(reused).lower()}\n")
         return 0
     if args.command == "record":
         record(args)

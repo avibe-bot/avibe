@@ -35,7 +35,9 @@ from fastapi.exception_handlers import http_exception_handler
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.requests import ClientDisconnect
 from starlette.routing import Match
+from starlette.websockets import WebSocketState
 
 from vibe.ui_compat import (
     CompatApp,
@@ -91,6 +93,7 @@ from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
     APPLICATION_LOG_FORMAT,
     APPLICATION_LOG_MAX_BYTES,
+    RedactingFormatter,
     application_log_paths,
 )
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -144,7 +147,7 @@ def _configure_ui_logging(level: str = "INFO") -> None:
     configure_service_logging(
         build_handlers,
         log_level,
-        logging.Formatter(APPLICATION_LOG_FORMAT),
+        RedactingFormatter(APPLICATION_LOG_FORMAT),
     )
 
 
@@ -719,9 +722,20 @@ def _is_mutation_guard_exempt() -> bool:
         or _is_cli_session_activity_request()
     ):
         return True
+    if _is_cli_direct_suspend_request():
+        return True
     return (
         request.path == "/e2e/simulate-interaction"
         and os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes")
+    )
+
+
+def _is_cli_direct_suspend_request() -> bool:
+    return (
+        request.path == "/api/remote-access/direct/suspend"
+        and _is_direct_loopback_connection()
+        and not _is_direct_ingress_request()
+        and _cli_local_event_token_ok()
     )
 
 
@@ -1561,6 +1575,7 @@ _REMOTE_ACCESS_STATUS_PUBLIC_FIELDS = (
     "pid_state",
     "transport_protocol",
     "settings",
+    "direct",
     "tunnel_quality",
     "network_path",
 )
@@ -3508,14 +3523,27 @@ def handle_exception(e):
 
     if isinstance(e, InstanceAuthorizationError):
         return jsonify({"ok": False, "error": e.code, "required_role": e.minimum_role}), 403
+    if isinstance(e, ClientDisconnect):
+        # Navigation/abort can close a request before the dispatcher reads its
+        # body, even for GETs. No endpoint work remains to do and no client is
+        # listening; classify this as client cancellation, not a server fault.
+        logger.debug("UI client disconnected method=%s path=%s", request.method, request.path)
+        return Response(status=499)
     # Preserve HTTP status codes for client errors (4xx)
     status_code = getattr(e, "status_code", None)
     detail = getattr(e, "detail", None)
     if isinstance(status_code, int) and 400 <= status_code < 500:
         return jsonify({"error": detail or str(e)}), status_code
 
-    # Log and return 500 for unexpected server errors
-    logger.exception("Unhandled exception in UI server")
+    # The compatibility dispatcher runs this handler in a worker without the
+    # endpoint's active exception context. Preserve the supplied traceback and
+    # log only method/path, not query strings, headers, cookies, or bodies.
+    logger.exception(
+        "Unhandled exception in UI server method=%s path=%s",
+        request.method,
+        request.path,
+        exc_info=(type(e), e, e.__traceback__),
+    )
     return jsonify({"error": str(e)}), 500
 
 
@@ -3758,6 +3786,10 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     finally:
         store.close()
 
+    if not await asyncio.to_thread(paths.get_show_page_dir(session_id).is_dir):
+        await websocket.close(code=1008)
+        return
+
     access_sub_id = None
     access_queue = None
     if authorization_context is not None:
@@ -3769,7 +3801,6 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
             await websocket.close(code=1008)
             return
 
-    await websocket.accept(subprotocol="vite-hmr")
     proxy_task = asyncio.create_task(_proxy_show_runtime_websocket(websocket, session_id))
     revocation_task = (
         asyncio.create_task(
@@ -3852,7 +3883,10 @@ async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str)
     finally:
         store.close()
 
-    await websocket.accept(subprotocol="vite-hmr")
+    if not await asyncio.to_thread(paths.get_show_page_dir(session_id).is_dir):
+        await websocket.close(code=1008)
+        return
+
     try:
         await _proxy_show_runtime_websocket(
             websocket,
@@ -4767,6 +4801,14 @@ async def _proxy_show_runtime_websocket(
     runtime_path = f"{external_prefix.rstrip('/')}/__vite_hmr"
     if websocket.url.query:
         runtime_path = f"{runtime_path}?{websocket.url.query}"
+    requested_protocols = {
+        part.strip()
+        for part in getattr(websocket, "headers", {}).get("sec-websocket-protocol", "").split(",")
+        if part.strip()
+    }
+    # Vite's restart probe offers vite-ping, not vite-hmr. Selecting a protocol
+    # the browser did not offer makes even a healthy runtime look unavailable.
+    protocol = "vite-ping" if "vite-ping" in requested_protocols else "vite-hmr"
     manager = get_show_runtime_manager()
     target = await manager.websocket_target(
         runtime_path,
@@ -4774,29 +4816,37 @@ async def _proxy_show_runtime_websocket(
     )
     async with ClientSession() as session:
         try:
-            upstream = await session.ws_connect(
-                target.url,
-                headers=target.headers,
-                protocols=["vite-hmr"],
-                autoping=True,
+            upstream = await asyncio.wait_for(
+                session.ws_connect(
+                    target.url,
+                    headers=target.headers,
+                    protocols=[protocol],
+                    autoping=True,
+                ),
+                timeout=5.0,
             )
         except (asyncio.TimeoutError, ClientConnectionError):
             await manager.invalidate_websocket_target(target)
             raise
         async with upstream:
+            # Refuse absent/evicted contexts and upstream errors before Upgrade.
+            # Do not retire the shared process for an HTTP handshake rejection.
+            if upstream.protocol != protocol:
+                raise RuntimeError("Show Runtime did not negotiate the requested WebSocket protocol")
+            await websocket.accept(subprotocol=protocol)
+
             async def client_to_upstream():
                 try:
                     while True:
                         message = await websocket.receive()
                         if message["type"] == "websocket.disconnect":
-                            await upstream.close()
                             return
                         if "text" in message:
                             await upstream.send_str(message["text"])
                         elif "bytes" in message:
                             await upstream.send_bytes(message["bytes"])
                 except WebSocketDisconnect:
-                    await upstream.close()
+                    return
 
             async def upstream_to_client():
                 async for message in upstream:
@@ -4805,10 +4855,23 @@ async def _proxy_show_runtime_websocket(
                     elif message.type == WSMsgType.BINARY:
                         await websocket.send_bytes(message.data)
                     elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
-                        await websocket.close()
                         return
 
-            await asyncio.gather(client_to_upstream(), upstream_to_client())
+            tasks = (asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client()))
+            try:
+                done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    await task
+                if websocket.client_state is WebSocketState.CONNECTED and websocket.application_state is WebSocketState.CONNECTED:
+                    code = upstream.close_code
+                    await websocket.close(code=code if code and code not in {1005, 1006, 1015} else 1011)
+            finally:
+                # gather() alone waits forever for the browser receive after the
+                # upstream iterator ends, and leaks pumps on route revocation.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @app.route("/api/doctor", methods=["GET"])
@@ -7347,8 +7410,8 @@ def web_push_unsubscribe():
 
 @app.route("/api/web-push/test", methods=["POST"])
 def web_push_test():
+    from core import web_push_notifications
     from core.web_push import send_web_push
-    from core.web_push_notifications import _badge_count_for_user_key
     from storage import web_push_service
 
     payload = request.json or {}
@@ -7359,47 +7422,55 @@ def web_push_test():
     engine = _projects_engine()
     sent = 0
     failed = 0
-    with engine.connect() as conn:
-        subscription = web_push_service.get_enabled_by_endpoint(
-            conn,
-            endpoint=endpoint,
-            user_key=user_key,
-        )
-        context = _request_authorization_context()
-        contexts = (
-            {user_key: context}
-            if user_key != "local" and context is not None
-            else {}
-        )
-        badge_count = _badge_count_for_user_key(
-            conn,
-            user_key=user_key,
-            contexts=contexts,
-        )
-    if not subscription:
-        return jsonify({"ok": False, "error": "no_subscription"}), 404
-    notification = {
-        "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
-        "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
-        "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
-        "tag": "web-push-test",
-        "badge_count": badge_count,
-    }
-    try:
-        send_web_push(subscription=subscription, payload=notification)
-        with engine.begin() as conn:
-            web_push_service.mark_send_success(conn, endpoint=subscription["endpoint"])
-        sent += 1
-    except Exception as exc:
-        logger.warning("web push: test send failed", exc_info=True)
-        status_code = getattr(getattr(exc, "response", None), "status_code", None)
-        with engine.begin() as conn:
-            web_push_service.mark_send_failure(
+    context = _request_authorization_context()
+    contexts = (
+        {user_key: context}
+        if user_key != "local" and context is not None
+        else {}
+    )
+    with web_push_notifications._owner_delivery_lock(user_key):
+        with engine.connect() as conn:
+            subscription = web_push_service.get_enabled_by_endpoint(
                 conn,
-                endpoint=subscription["endpoint"],
-                disable=status_code in {404, 410},
+                endpoint=endpoint,
+                user_key=user_key,
             )
-        failed += 1
+            if subscription:
+                badge_count = web_push_notifications._badge_count_for_user_key(
+                    conn,
+                    user_key=user_key,
+                    contexts=contexts,
+                )
+        if not subscription:
+            return jsonify({"ok": False, "error": "no_subscription"}), 404
+        notification = {
+            "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
+            "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
+            "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
+            # The iOS App shows a notification while it is in front only for this
+            # tag (AvibeAppDelegate.testNotificationThread).
+            "tag": "web-push-test",
+            "badge_count": badge_count,
+        }
+        try:
+            send_web_push(subscription=subscription, payload=notification)
+            with engine.begin() as conn:
+                web_push_service.mark_send_success(
+                    conn,
+                    endpoint=subscription["endpoint"],
+                    badge_count=badge_count,
+                )
+            sent += 1
+        except Exception as exc:
+            logger.warning("web push: test send failed", exc_info=True)
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            with engine.begin() as conn:
+                web_push_service.mark_send_failure(
+                    conn,
+                    endpoint=subscription["endpoint"],
+                    disable=status_code in {404, 410},
+                )
+            failed += 1
     return jsonify(
         {
             "ok": failed == 0,
@@ -7832,6 +7903,12 @@ async def config_post():
     if should_reconcile_remote_access:
         remote_access_runtime = await asyncio.to_thread(remote_access.reconcile)
     await asyncio.to_thread(_ensure_remote_access_monitoring, config)
+    try:
+        from vibe import direct_lifecycle
+
+        direct_lifecycle.notify_config_changed(config)
+    except Exception:
+        logger.debug("Direct lifecycle config handoff failed")
     activity_streaming_runtime = None
     if should_reconcile_activity_streaming:
         try:
@@ -7928,6 +8005,19 @@ async def config_post():
     if agent_backend_runtime is not None:
         response_payload["agent_backend_runtime"] = agent_backend_runtime
     return jsonify(response_payload)
+
+
+@app.route("/api/remote-access/direct/suspend", methods=["POST"])
+def remote_access_direct_suspend():
+    """Stop the UI-owned direct path before another process discards its certs."""
+
+    if not _is_cli_direct_suspend_request():
+        return jsonify({"ok": False, "error": "direct_suspend_forbidden"}), 403
+    from vibe import direct_lifecycle
+
+    if direct_lifecycle.stop_for_pairing_change(timeout_seconds=10.0):
+        return jsonify({"ok": True, "stopped": True})
+    return jsonify({"ok": False, "error": "direct_suspend_unavailable"}), 503
 
 
 @app.route("/api/remote-access/status", methods=["GET"])
@@ -13834,6 +13924,7 @@ def sessions_mark_read(session_id: str):
         get_notification_preferences,
     )
     from core.services import sessions as workbench_sessions_service
+    from core import web_push_notifications
     from storage import messages_service
     from vibe.sse_broker import broker
 
@@ -13844,16 +13935,32 @@ def sessions_mark_read(session_id: str):
     try:
         with engine.begin() as conn:
             authorization_context = getattr(g, "authorization_context", None)
+            user_key = _web_push_user_key()
+            preferences = get_notification_preferences(user_key)
             session = workbench_sessions_service.get_session(
                 conn,
                 session_id,
                 authorization_context=authorization_context,
             )
+            accessible_scope_ids = _request_accessible_project_scope_ids(conn)
+            hidden_session_ids = _hidden_bot_session_ids(conn, authorization_context)
+            previous_unread_by_session = messages_service.unread_counts_by_session(
+                conn,
+                platform="avibe",
+                scope_ids=accessible_scope_ids,
+                hidden_session_ids=hidden_session_ids,
+            )
+            previous_unread_by_category = split_unread_counts(
+                previous_unread_by_session,
+                bot_session_ids=current_bot_session_ids(conn),
+            )
+            previous_badge_total = notification_badge_total(
+                previous_unread_by_category,
+                preferences,
+            )
             updated = messages_service.mark_session_read(
                 conn, session_id, until_message_id=until_message_id
             )
-            accessible_scope_ids = _request_accessible_project_scope_ids(conn)
-            hidden_session_ids = _hidden_bot_session_ids(conn, authorization_context)
             unread_counts = messages_service.unread_counts(
                 conn,
                 platform="avibe",
@@ -13872,7 +13979,7 @@ def sessions_mark_read(session_id: str):
             )
             current_badge_total = notification_badge_total(
                 unread_by_category,
-                get_notification_preferences(_web_push_user_key()),
+                preferences,
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
@@ -13889,6 +13996,17 @@ def sessions_mark_read(session_id: str):
                 "badge_total": current_badge_total,
             },
         )
+        if previous_badge_total != current_badge_total:
+            try:
+                web_push_notifications.schedule_badge_reconciliation(
+                    user_key,
+                    authorization_context,
+                )
+            except Exception:
+                logger.warning(
+                    "web push badge: could not schedule post-read reconciliation",
+                    exc_info=True,
+                )
     return jsonify(
         {
             "updated": updated,
@@ -16344,10 +16462,9 @@ async def _run_show_event_dispatch(
     body = result.get("body") or {}
     if status != 202:
         logger.warning(
-            "show event dispatch failed for session %s: status=%s body=%s",
+            "show event dispatch failed for session %s: status=%s",
             session_id,
             status,
-            body,
         )
         _retire_show_event_reservation(
             event_payload,
@@ -18726,6 +18843,29 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
 _inbox_bridge_task: "asyncio.Task | None" = None
 _startup_dependency_reconcile_task: "asyncio.Task | None" = None
 _terminal_service: TerminalService | None = None
+_direct_lifecycle: Any | None = None
+
+
+async def _start_direct_lifecycle() -> None:
+    global _direct_lifecycle
+    from vibe.direct_lifecycle import DirectAccessLifecycle, register_active_lifecycle
+
+    if _direct_lifecycle is None:
+        try:
+            lifecycle = DirectAccessLifecycle(app)
+            await lifecycle.start()
+            _direct_lifecycle = lifecycle
+            register_active_lifecycle(lifecycle)
+        except Exception:
+            # Optional direct access never prevents the ordinary Web UI/tunnel.
+            logger.warning("Direct access lifecycle startup failed")
+
+
+async def _stop_direct_lifecycle() -> None:
+    global _direct_lifecycle
+    lifecycle, _direct_lifecycle = _direct_lifecycle, None
+    if lifecycle is not None:
+        await lifecycle.stop()
 
 
 async def _start_inbox_bridge() -> None:
@@ -18749,6 +18889,8 @@ async def _stop_inbox_bridge() -> None:
             logger.debug("inbox bridge shutdown raised", exc_info=True)
 
 
+app.add_event_handler("startup", _start_direct_lifecycle)
+app.add_event_handler("shutdown", _stop_direct_lifecycle)
 app.add_event_handler("startup", _start_inbox_bridge)
 app.add_event_handler("shutdown", _stop_inbox_bridge)
 

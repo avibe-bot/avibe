@@ -617,10 +617,8 @@ class _StateStore:
 def _adapter(response, metadata, by_url=None):
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 
-    adapter = CLIProxyEngineAdapter.__new__(CLIProxyEngineAdapter)
     client = _EngineClient(response, by_url)
-    adapter.supervisor = _Supervisor(client)
-    adapter.state_store = _StateStore(metadata)
+    adapter = CLIProxyEngineAdapter(supervisor=_Supervisor(client), state_store=_StateStore(metadata))
     return adapter, client
 
 

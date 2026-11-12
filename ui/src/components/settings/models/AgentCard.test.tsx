@@ -21,10 +21,10 @@ const runtime: RuntimeDependency = {
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },
   status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
 };
-type AgentCardProps = Omit<ComponentProps<typeof RuntimeAgentCard>, 'runtime' | 'onOpenModels'>
-  & Partial<Pick<ComponentProps<typeof RuntimeAgentCard>, 'onOpenModels'>>;
-const AgentCard = ({ onOpenModels = vi.fn(), ...props }: AgentCardProps) =>
-  <RuntimeAgentCard {...props} onOpenModels={onOpenModels} runtime={freshRuntimeProjection(readyRegion(runtime))} />;
+type AgentCardProps = Omit<ComponentProps<typeof RuntimeAgentCard>, 'runtime' | 'onOpenModels' | 'onAddModels'>
+  & Partial<Pick<ComponentProps<typeof RuntimeAgentCard>, 'onOpenModels' | 'onAddModels'>>;
+const AgentCard = ({ onOpenModels = vi.fn(), onAddModels = vi.fn(), ...props }: AgentCardProps) =>
+  <RuntimeAgentCard {...props} onOpenModels={onOpenModels} onAddModels={onAddModels} runtime={freshRuntimeProjection(readyRegion(runtime))} />;
 
 const localeInstance = (lng: 'en' | 'zh') => {
   const instance = createInstance();
@@ -269,7 +269,7 @@ describe('AgentCard', () => {
     };
     render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[agentWithRetainedRoute]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
-    expect(screen.getByText('网关 · 未配置模型')).toBeTruthy();
+    expect(screen.getByText('托管 · 未配置模型')).toBeTruthy();
     expect(screen.getByText('0 个模型')).toBeTruthy();
     // The card offers the catalog instead of reporting missing supply: an empty
     // list is something the user can fix from here, not a broken backend.
@@ -332,8 +332,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Unavailable'],
-    ['zh', '网关 · 路由不可用'],
+    ['en', 'Managed · Unavailable'],
+    ['zh', '托管 · 路由不可用'],
   ] as const)('summarizes unavailable model routes in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, model_supply: hubAgent.model_supply!.map((row) => ({ ...row, has_runnable_hop: false })), named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'waiting' }] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
@@ -341,8 +341,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Ready'],
-    ['zh', '网关 · 路由可用'],
+    ['en', 'Managed · Ready'],
+    ['zh', '托管 · 路由可用'],
   ] as const)('summarizes catalog routes without requiring a selected Agent model in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{
       ...hubAgent,
@@ -356,8 +356,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Ready'],
-    ['zh', '网关 · 路由可用'],
+    ['en', 'Managed · Ready'],
+    ['zh', '托管 · 路由可用'],
   ] as const)('keeps available routes independent of Agent usage in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, named_agents: [] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
@@ -423,8 +423,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway', 'Backup source → routed-opus', 'Open claude-opus-4-6 route chain · Backup source → routed-opus'],
-    ['zh', '网关', 'Backup source → routed-opus', '打开 claude-opus-4-6 的路由 · Backup source → routed-opus'],
+    ['en', 'Managed', 'Backup source → routed-opus', 'Open claude-opus-4-6 route chain · Backup source → routed-opus'],
+    ['zh', '模型网关管理', 'Backup source → routed-opus', '打开 claude-opus-4-6 的路由 · Backup source → routed-opus'],
   ] as const)('renders and announces the %s source-to-model mapping', (lng, modeCopy, mappingCopy, accessibleName) => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     render(
@@ -475,7 +475,7 @@ describe('AgentCard', () => {
   it('hides current and takeover projections while the runtime is stopped', () => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     const stopped = { ...runtime, status: { ...runtime.status, health: 'down' as const } };
-    render(<I18nextProvider i18n={i18n}><RuntimeAgentCard runtime={freshRuntimeProjection(readyRegion(stopped))} agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 23, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><RuntimeAgentCard onAddModels={vi.fn()} runtime={freshRuntimeProjection(readyRegion(stopped))} agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 23, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
@@ -493,14 +493,14 @@ describe('AgentCard', () => {
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
 
-    expect(screen.getByRole('button', { name: 'Switch to gateway' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Let Model Hub manage' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Manage models' })).toBeNull();
     expect(onOpenModels).not.toHaveBeenCalled();
   });
 
   it.each([
-    ['en', 'Default routing', 'Switch to direct', 'Switch to gateway'],
-    ['zh', '默认路由', '切到直连', '切换到模型网关'],
+    ['en', 'Default routing', 'Use own login', 'Let Model Hub manage'],
+    ['zh', '默认路由', '改为 Agent 管理', '交给模型网关管理'],
   ] as const)('uses explicit gateway action labels and icons in %s', async (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,
@@ -573,6 +573,27 @@ describe('AgentCard', () => {
     expect(onProbeSettled).toHaveBeenCalledTimes(2);
     expect(onProbeSettled).toHaveBeenNthCalledWith(1, expect.objectContaining({ backend: 'claude' }));
     expect(onProbeSettled).toHaveBeenNthCalledWith(2, expect.objectContaining({ backend: 'claude' }));
+  });
+
+  it('ends each model list in Add model, below the fold toggle, and offers it for an empty list too', async () => {
+    const onAddModels = vi.fn();
+    const onOpenModels = vi.fn();
+    const models = Array.from({ length: COLLAPSED_MODEL_LIMIT + 2 }, (_, index) => `model-${index + 1}`);
+    const folded = { ...hubAgent, builtin_models: models, routes: {},
+      model_supply: models.map((modelId) => ({ route_origin: 'manual' as const, model_id: modelId, chain_length: 1, has_runnable_hop: true })) };
+    const empty = { ...hubAgent, backend: 'codex' as const, builtin_models: [], model_supply: [], routes: {}, named_agents: [] };
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[folded, empty]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onAddModels={onAddModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    const [claudeAdd, codexAdd] = screen.getAllByRole('button', { name: 'Add model' });
+    const fold = screen.getByRole('button', { name: /more model/i });
+    expect(fold.compareDocumentPosition(claudeAdd) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(claudeAdd);
+    expect(onAddModels).toHaveBeenLastCalledWith(folded);
+    // The empty list's one action is adding; Manage models stays in the header.
+    await userEvent.click(codexAdd);
+    expect(onAddModels).toHaveBeenLastCalledWith(empty);
+    expect(screen.getAllByRole('button', { name: 'Manage models' })).toHaveLength(2);
+    expect(onOpenModels).not.toHaveBeenCalled();
   });
 
   it('folds a paused route beyond the six-row limit until the group is expanded', async () => {

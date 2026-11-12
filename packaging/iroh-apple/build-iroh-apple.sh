@@ -124,6 +124,23 @@ PY
 
 echo "resolved iroh features: $RESOLVED_IROH_FEATURES_JSON"
 
+[[ -n "${IROH_IOS_RUNTIME_VERSION:-}" ]] || {
+  echo "IROH_IOS_RUNTIME_VERSION must be set by CI before building the qualified artifact" >&2
+  exit 1
+}
+
+# The runtime test is intentionally below the previous 17.5 packaging floor. Keep this
+# guard here so a future CI edit cannot silently run the test on a newer runtime.
+python3 - "$IROH_IOS_RUNTIME_VERSION" <<'PY'
+import sys
+
+parts = tuple(int(part) for part in sys.argv[1].split('.'))
+if parts < (17, 0) or parts >= (17, 5):
+    raise SystemExit(
+        f"runtime {sys.argv[1]} is outside the required iOS 17.0..<17.5 range"
+    )
+PY
+
 echo '==> host build for UniFFI metadata'
 cargo +"$RUST_VERSION" build --locked --lib
 
@@ -173,18 +190,25 @@ xcodebuild -create-xcframework \
   -output "$XCFRAMEWORK"
 
 # Package.swift normally keys local-source use on its macOS slice. For this
-# gate the intentionally iOS-only xcframework is the local binary target.
-python3 - "$SOURCE_DIR/Package.swift" <<'PY'
+# gate the intentionally iOS-only xcframework is the local binary target, and
+# the package's iOS platform declaration must match this qualification floor.
+python3 - "$SOURCE_DIR/Package.swift" "$IOS_DEPLOYMENT_TARGET" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
+target = sys.argv[2]
 text = path.read_text()
-old = 'Iroh.xcframework/macos-arm64/libiroh_ffi.a'
-new = 'Iroh.xcframework/ios-arm64/libiroh_ffi.a'
-if text.count(old) != 1:
-    raise SystemExit(f"expected one local xcframework probe, found {text.count(old)}")
-path.write_text(text.replace(old, new))
+old_binary = 'Iroh.xcframework/macos-arm64/libiroh_ffi.a'
+new_binary = 'Iroh.xcframework/ios-arm64/libiroh_ffi.a'
+if text.count(old_binary) != 1:
+    raise SystemExit(f"expected one local xcframework probe, found {text.count(old_binary)}")
+text = text.replace(old_binary, new_binary)
+old_platform = '.iOS("17.5")'
+new_platform = f'.iOS("{target}")'
+if text.count(old_platform) != 1:
+    raise SystemExit(f"expected one iOS package platform declaration, found {text.count(old_platform)}")
+path.write_text(text.replace(old_platform, new_platform))
 PY
 rm -rf "$SOURCE_DIR/Iroh.xcframework"
 cp -R "$XCFRAMEWORK" "$SOURCE_DIR/Iroh.xcframework"
@@ -211,12 +235,22 @@ build_swift_for() {
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO \
     DEVELOPMENT_TEAM= \
-    | tee "$OUTPUT_DIR/xcodebuild-${sdk}.log"
+    2>&1 | tee "$OUTPUT_DIR/xcodebuild-${sdk}.log"
+}
+
+assert_no_newer_deployment_warning() {
+  local log_path=$1
+  if grep -Eiq "was built for (a )?newer .*version .*than .*being linked|deployment target.{0,40}(higher|newer)" "$log_path"; then
+    echo "deployment-target qualification failed: newer-than-target warning in $log_path" >&2
+    exit 1
+  fi
 }
 
 cd "$SOURCE_DIR"
 build_swift_for 'generic/platform=iOS' iphoneos "$OUTPUT_DIR/derived-ios"
 build_swift_for 'generic/platform=iOS Simulator' iphonesimulator "$OUTPUT_DIR/derived-ios-simulator"
+assert_no_newer_deployment_warning "$OUTPUT_DIR/xcodebuild-iphoneos.log"
+assert_no_newer_deployment_warning "$OUTPUT_DIR/xcodebuild-iphonesimulator.log"
 
 bash "$SCRIPT_DIR/check-private-apple-datapath.sh" \
   "$XCFRAMEWORK" \
@@ -250,6 +284,7 @@ cat > "$OUTPUT_DIR/manifest.json" <<EOF
   "iphoneos_sdk": "$IOS_SDK_VERSION",
   "iphonesimulator_sdk": "$SIMULATOR_SDK_VERSION",
   "ios_deployment_target": "$IOS_DEPLOYMENT_TARGET",
+  "ios_runtime_tested": "$IROH_IOS_RUNTIME_VERSION",
   "slices": ["ios-arm64", "ios-arm64_x86_64-simulator"],
   "swift_builds": ["generic/platform=iOS", "generic/platform=iOS Simulator"]
 }

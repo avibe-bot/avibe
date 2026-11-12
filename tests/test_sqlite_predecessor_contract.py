@@ -14,6 +14,7 @@ import sys
 import pytest
 
 from scripts import sqlite_predecessor_contract as contract
+from tests.migration_helpers import latest_migration_revision
 
 pytestmark = pytest.mark.no_sqlite_template
 
@@ -134,7 +135,7 @@ def test_source_fixture_proves_trace_only_reader_refusal_is_not_a_capability_pas
     def unsupported_reader(python, action, home, *, current=False):
         if not current and action == "open":
             with sqlite3.connect(home / "state/vibe.sqlite") as conn:
-                assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261108_0083",)
+                assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (latest_migration_revision(),)
             return {"refused": True}
         result = real_probe(Path(sys.executable), action, home, current=True)
         if action == "identity":

@@ -16,6 +16,8 @@ from collections.abc import Callable
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from queue import Full, Queue
 
+from vibe.logging_config import configure_library_logging
+
 QUEUE_CAPACITY = 8192
 REPORT_INTERVAL_SECONDS = 30.0
 
@@ -200,6 +202,7 @@ def configure_service_logging(
             if not isinstance(level, int):
                 raise ValueError("Service log level must be an integer")
             shutdown_service_logging()
+            configure_library_logging()
             handlers = build_handlers()
             for handler in handlers:
                 handler.setFormatter(formatter)

@@ -824,10 +824,9 @@ const PetSurface: React.FC = () => {
   // A history the user asked for but the shell has not confirmed yet holds the
   // bubble too: it neither folds nor spends the linger while it waits.
   const historyPending = detailOpen && !expanded;
-  // Quick replies are an actionable part of this reply, so keep their entry
-  // point available. A Vault request belongs to the existing needs-input
-  // surface and does not keep the old reply bubble alive.
-  const held = Boolean(data.running || optimisticTitle || needsYou || quickReplies || historyOpen || historyPending);
+  // Ordinary suggestions share the reply budget; they remain usable in
+  // history after expiry. Authorization keeps its existing needs-input entry.
+  const held = Boolean(data.running || optimisticTitle || needsYou || historyOpen || historyPending);
   // A turn that ends while this epoch watches is what lingers: the moment the
   // server's turn state goes from running to done, derived during render from
   // the last value seen, so the render that ends the turn is the render that
@@ -1145,7 +1144,7 @@ const PetSurface: React.FC = () => {
       )}
       <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px`, '--pet-input-space': bubbleDrawn && inputShown ? `calc(${inputHeight}px + var(--pet-input-gap))` : '0px' } as CSSProperties}>
         <div
-          className={clsx('pet-mini-cards', voice.busy && 'is-hidden')}
+          className={clsx('pet-mini-cards max-w-79', voice.busy && 'is-hidden')}
           inert={voice.busy || undefined}
           aria-label={cardsExpanded ? t('pet.panel') : undefined}
           style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}
@@ -1538,7 +1537,7 @@ const MiniDock: React.FC<{ enabled: boolean; listening: boolean; finishing?: boo
 
 // The layers peek out toward Vibey: below the front card, or above it when the
 // column opens downward.
-const CollapsedCards: React.FC<{ cards: PetCard[]; edge: PetLayout['panel_edge']; onOpen: () => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, edge, onOpen, t }) => {
+export const CollapsedCards: React.FC<{ cards: PetCard[]; edge: PetLayout['panel_edge']; onOpen: () => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, edge, onOpen, t }) => {
   const [front, ...remainingCards] = cards;
   if (!front) return null;
   const layers = remainingCards.slice(0, MAX_COLLAPSED_LAYERS);
@@ -1601,7 +1600,7 @@ function useScrollEdgeFade(contentKey: unknown, profile: FadeProfile) {
 
 /** The full card list. `natural` sizes it to its content instead of the 292px
  *  scroll box, for the lone card that is always drawn in full. */
-const ExpandedCards: React.FC<{ natural?: boolean; cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (card: PetCard) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ natural = false, cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
+export const ExpandedCards: React.FC<{ natural?: boolean; cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (card: PetCard) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ natural = false, cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
   const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(cards.length, CARD_FADE);
   return (
     <div className={clsx('pet-mini-panel', natural && 'is-natural')}>
@@ -1752,7 +1751,7 @@ function useWidthMorph(key: unknown, reducedMotion: boolean) {
   return ref;
 }
 
-const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void; pinnedReply?: WorkbenchMessage | null; reducedMotion: boolean }> = ({ open, onToggle, pinnedReply, reducedMotion, ...props }) => {
+export const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void; pinnedReply?: WorkbenchMessage | null; reducedMotion: boolean }> = ({ open, onToggle, pinnedReply, reducedMotion, ...props }) => {
   const { t } = useTranslation();
   // The bubble speaks as the main Bot, by the name the user gave it (docs/plans/
   // bots.md D5); the mascot art stays Vibey's. Until the Bot list answers, and
@@ -1777,7 +1776,7 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
   // bubble lays out bottom-up: the toggle keeps its place at the bottom and
   // the history opens above it, so expanding never moves what was clicked.
   return (
-    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main', compact && 'is-compact')} data-pet-hit>
+    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main max-w-70', compact && 'is-compact')} data-pet-hit>
       <button type="button" className="pet-mini-reply-toggle" onClick={onToggle} aria-expanded={open} aria-controls={detailId}>
         <span className="pet-mini-bubble-speaker">{speaker}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronUp size={11} /></span></span>
         <p title={summary}>{props.running && <span className="pet-mini-running-dot" aria-hidden />}<span className="pet-mini-reply-summary">{summary}</span></p>
@@ -1867,7 +1866,7 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
       )}
       {/* The pinned Open in Avibe button is where the rest of the tail lives. */}
       {!props.exchange.unreadComplete && <p className="pet-mini-detail-muted">{t('pet.moreInAvibe')}</p>}
-      {props.vaultRequestIds.map((id) => <Button key={id} variant="outline" size="sm" className="justify-start gap-2" onClick={() => void petBridge.open(vaultRequestLink(id))}><KeyRound className="size-3.5" />{t('pet.vaultRequest')}</Button>)}
+      {props.vaultRequestIds.map((id) => <Button key={id} variant="outline" size="sm" className="h-auto max-w-full justify-start gap-2 whitespace-normal text-left" onClick={() => void petBridge.open(vaultRequestLink(id))}><KeyRound className="size-3.5" />{t('pet.vaultRequest')}</Button>)}
       {props.canChat && !props.uncertain && props.quickReplies && <QuickReplies key={props.quickReplies.message.id} options={props.quickReplies.options} chosen={null} onChoose={(choice) => props.onChoose(props.quickReplies!.message, choice)} />}
       {props.uncertain && <div className="pet-mini-detail-notice" role="status"><p>{t('newSession.sendUncertain')}</p><Button variant="link" size="sm" className="px-0" onClick={props.onInspect}>{t('pet.openInAvibe')}</Button></div>}
     </div>

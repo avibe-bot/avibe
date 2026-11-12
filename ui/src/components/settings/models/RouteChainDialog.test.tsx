@@ -741,7 +741,7 @@ describe("RouteChainDialog", () => {
     // The pair is folded away until asked for; the picker opens on the list.
     expect(screen.queryByLabelText('Exact model ID')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Enter a model ID manually' }));
-    expect(screen.getByLabelText('Source').querySelectorAll('option')).toHaveLength(1);
+    expect(screen.getByLabelText('Provider').querySelectorAll('option')).toHaveLength(1);
     await user.type(screen.getByLabelText('Exact model ID'), 'unlisted-model');
     await user.click(screen.getByRole('button', { name: 'Add' }));
     expect([...document.querySelectorAll('.model-hub-route-hop-model')].at(-1)?.textContent).toBe('unlisted-model');
@@ -838,7 +838,7 @@ describe("RouteChainDialog", () => {
       "sonnet-5",
     ]);
     await user.type(
-      screen.getByPlaceholderText("Search sources or models"),
+      screen.getByPlaceholderText("Search providers or models"),
       "claude-sonnet-5",
     );
     await user.click(screen.getByRole("button", { name: "Replace" }));
@@ -916,9 +916,9 @@ describe("RouteChainDialog", () => {
     expect(guard.getByText("1 hop")).toBeTruthy();
     // The hop names the supplier it went through, in the page's own mapping copy.
     expect(guard.getByText("API key → claude-opus-5 · Order #1")).toBeTruthy();
-    expect(guard.getByText("Models that will be left with no source")).toBeTruthy();
+    expect(guard.getByText("Models that will be left with no provider")).toBeTruthy();
     expect(guard.getByText("Agents pinned to it: writer")).toBeTruthy();
-    expect(guard.getByText("Some models will be left with no usable source.")).toBeTruthy();
+    expect(guard.getByText("Some models will be left with no usable provider.")).toBeTruthy();
 
     // Cancel returns to the chain exactly as it was left, still saveable.
     await user.click(guard.getAllByRole("button", { name: "Cancel" }).at(-1)!);
@@ -1161,7 +1161,7 @@ describe("RouteChainDialog", () => {
 
     await user.click(screen.getByRole("button", { name: "Add a hop" }));
 
-    expect(screen.getAllByText("Source").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Provider").length).toBeGreaterThan(0);
     expect(screen.getByText("Model")).toBeTruthy();
     // Both halves of a candidate are legible: the model id AND which source
     // supplies it. The source column is what a sizing rework once dropped, so
@@ -1192,7 +1192,7 @@ describe("RouteChainDialog", () => {
     await user.click(screen.getByRole("button", { name: "Add a hop" }));
 
     await user.type(
-      screen.getByPlaceholderText("Search sources or models"),
+      screen.getByPlaceholderText("Search providers or models"),
       "subscription",
     );
 
@@ -1202,13 +1202,13 @@ describe("RouteChainDialog", () => {
       ),
     ).toEqual(["sonnet-5"]);
 
-    await user.clear(screen.getByPlaceholderText("Search sources or models"));
+    await user.clear(screen.getByPlaceholderText("Search providers or models"));
     await user.type(
-      screen.getByPlaceholderText("Search sources or models"),
+      screen.getByPlaceholderText("Search providers or models"),
       "gpt",
     );
 
-    expect(screen.getByText("No source or model matches that")).toBeTruthy();
+    expect(screen.getByText("No provider or model matches that")).toBeTruthy();
     expect(
       (screen.getByRole("button", { name: "Add" }) as HTMLButtonElement)
         .disabled,

@@ -16,7 +16,13 @@ bytes into a decision, in this order, and stops at the first step that fails:
 
 Nothing here downloads, installs, or starts an engine, and nothing the index
 says can choose the key, the algorithm, or a digest that was not signed.
-Design: docs/plans/model-hub-engine-channel.md.
+
+An index has no expiry. A machine follows the highest sequence it has
+accepted for as long as that is the highest it has, and no clock is read
+anywhere in acceptance or selection. So a machine that never receives a newer
+index keeps acting on the one it has, withdrawals it has not seen included.
+That is an intended limit of the design, not something to close with a time
+gate. Design: docs/plans/model-hub-engine-channel.md.
 
 Standard library only at import time. The release scripts load this module on
 a runner that has no Avibe dependencies installed.
@@ -28,13 +34,14 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -68,10 +75,6 @@ MAX_PAYLOAD_BYTES = 1536 * 1024
 MAX_ENVELOPE_BYTES = 2 * 1024 * 1024 + 4096
 MAX_TRUST_ROOTS = 4
 MAX_SEQUENCE = 2**53 - 1
-#: A payload may not claim to be valid for longer than this.
-MAX_VALIDITY = timedelta(days=7)
-#: How far ahead of this machine's clock a payload's issue time may be.
-CLOCK_SKEW = timedelta(minutes=10)
 
 _VERIFY_REQUEST_LIMIT = 4096
 _VERIFY_OUTPUT_LIMIT = 256
@@ -83,6 +86,8 @@ _TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _AVAULT_VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)([-+].+)?")
 _STATE_SCHEMA_VERSION = 1
+
+logger = logging.getLogger(__name__)
 
 
 class ChannelError(Exception):
@@ -264,9 +269,11 @@ class Tombstone:
 
 @dataclass(frozen=True)
 class ChannelPayload:
+    #: The only thing that orders one payload against another.
     sequence: int
+    #: When the signer allocated this payload. A record for people: it is
+    #: checked for format and decides nothing, neither acceptance nor order.
     issued_at: datetime
-    expires_at: datetime
     releases: tuple[ChannelRelease, ...]
     revoked: tuple[Tombstone, ...]
     raw: bytes
@@ -278,9 +285,6 @@ class ChannelPayload:
 
     def tombstone(self, asset_release_tag: str) -> Tombstone | None:
         return next((item for item in self.revoked if item.asset_release_tag == asset_release_tag), None)
-
-    def is_fresh(self, now: datetime) -> bool:
-        return self.issued_at - CLOCK_SKEW <= now < self.expires_at
 
 
 def channel_digest(payload: bytes) -> str:
@@ -374,7 +378,7 @@ def parse_payload(raw: bytes) -> ChannelPayload:
     try:
         document = _object(
             strict_json(raw),
-            frozenset({"repository", "channel", "sequence", "issued_at", "expires_at", "releases", "revoked"}),
+            frozenset({"repository", "channel", "sequence", "issued_at", "releases", "revoked"}),
             "payload",
         )
         if document["repository"] != CHANNEL_REPOSITORY:
@@ -383,9 +387,6 @@ def parse_payload(raw: bytes) -> ChannelPayload:
             raise ValueError(f"channel must be {CHANNEL_NAME}")
         sequence = _integer(document["sequence"], "sequence", minimum=1)
         issued_at = _timestamp(document["issued_at"], "issued_at")
-        expires_at = _timestamp(document["expires_at"], "expires_at")
-        if not issued_at < expires_at <= issued_at + MAX_VALIDITY:
-            raise ValueError("expires_at must follow issued_at by at most seven days")
 
         raw_releases, raw_revoked = document["releases"], document["revoked"]
         if not isinstance(raw_releases, list) or len(raw_releases) > MAX_RELEASES:
@@ -409,7 +410,6 @@ def parse_payload(raw: bytes) -> ChannelPayload:
     return ChannelPayload(
         sequence=sequence,
         issued_at=issued_at,
-        expires_at=expires_at,
         releases=releases,
         revoked=revoked,
         raw=bytes(raw),
@@ -657,11 +657,13 @@ class ChannelState:
 
 @dataclass(frozen=True)
 class ChannelSnapshot:
-    """An authenticated payload and whether it may still authorize adoption."""
+    """The recorded payload, authenticated again, and how it stands against the shipped floor."""
 
     envelope: Envelope
     payload: ChannelPayload
-    fresh: bool
+    #: False when the recorded index is below the sequence floor this Avibe
+    #: release ships. Its withdrawals still apply; it brings in nothing new.
+    meets_floor: bool
 
 
 class ChannelStateStore:
@@ -674,10 +676,20 @@ class ChannelStateStore:
     the file's current contents, so concurrent refreshes cannot move it back,
     and a rejected payload never changes the file.
 
-    The file is replaced atomically, with a best-effort directory flush. That
-    suits a record nothing acts on yet; it is not proof that an accepted
-    sequence survives power loss, which a consumer that activates engines
-    must have first (docs/plans/model-hub-engine-channel.md).
+    Nothing recorded here ages. While this file is readable, the sequence
+    alone decides what replaces it: the same payload offered again is
+    accepted at any later time, and lower sequences cannot replace it.
+
+    This is the only local history file. If it is missing or unreadable, a
+    newly authenticated fetch may establish a lower local floor and reopen a
+    lost withdrawal. Until that fetch, readers authorize no channel change;
+    they do not invent history or declare the installed engine fit to start.
+
+    Publication uses the shared atomic writer: a distinct same-directory
+    temporary file, file flush, replacement, and best-effort directory flush.
+    That protects whole-document readers, not history after state loss or
+    physical power-loss persistence beyond the helper's platform contract.
+    There is no replica, backup or recovery marker.
 
     This is not a defense against whoever controls the OS account.
     """
@@ -725,27 +737,37 @@ class ChannelStateStore:
             sequence=sequence, payload_sha256=digest, envelope=envelope, releases=releases, revoked=revoked
         )
 
-    def accept(self, envelope: Envelope, payload: ChannelPayload, *, floor: int, now: datetime) -> bool:
+    def accept(self, envelope: Envelope, payload: ChannelPayload, *, floor: int) -> bool:
         """Record an authenticated payload. Return whether it is new to this machine.
 
         Raises ``ChannelError`` and leaves the stored state untouched when the
-        payload is not fresh, is older than what was accepted, differs from the
-        accepted payload at the same sequence, or rewrites earlier history.
+        payload is below the shipped floor, is older than what was accepted,
+        differs from the accepted payload at the same sequence, or rewrites
+        earlier readable history. When it was issued plays no part. If the
+        file is missing or unreadable, the authenticated payload instead
+        becomes the new local history, subject to the shipped floor; the
+        lost sequence and withdrawals cannot be reconstructed.
         """
 
         from config.atomic_io import write_atomic
         from storage.lock import MigrationFileLock
 
-        if now >= payload.expires_at:
-            raise ChannelError("expired", "the index has expired")
-        if not payload.is_fresh(now):
-            raise ChannelError("not_yet_valid", "the index is dated ahead of this machine's clock")
         if payload.sequence < floor:
             raise ChannelError("replayed", "the index is older than this Avibe release accepts")
 
         self.directory.mkdir(parents=True, exist_ok=True)
         with MigrationFileLock(self.lock_path):
-            state = self.load()
+            try:
+                state = self.load()
+            except ChannelError as exc:
+                if exc.reason != "state_unreadable":
+                    raise
+                logger.warning(
+                    "Model Hub channel history is unreadable; attempting to record a signed fetch as the new local floor. "
+                    "Prior replay protection and withdrawals may be lost (%s)",
+                    exc.reason,
+                )
+                state = None
             if state is not None:
                 if payload.sequence < state.sequence:
                     raise ChannelError("replayed", "the index is older than one this machine already accepted")
@@ -776,15 +798,17 @@ class ChannelStateStore:
             write_atomic(self.state_path, json.dumps(document, sort_keys=True) + "\n")
             return True
 
-    def cached(self, *, roots: TrustRoots, verifier: SignatureVerifier, now: datetime) -> ChannelSnapshot | None:
-        """Re-authenticate the stored envelope. ``None`` when nothing was accepted yet.
+    def cached(self, *, roots: TrustRoots, verifier: SignatureVerifier) -> ChannelSnapshot | None:
+        """Re-authenticate the stored envelope. ``None`` when local history is missing.
 
-        A snapshot that has expired, or that is older than the sequence floor
-        this Avibe release ships, is still returned, marked not fresh: it can
-        show where a retained engine came from and which releases were
-        withdrawn, but it cannot authorize adopting anything new. The floor
-        is checked here as well as on acceptance, because an index recorded
-        by an earlier Avibe release may predate the floor a later one ships.
+        Missing history is not proof this installation never saw an index.
+
+        A snapshot below the sequence floor this Avibe release ships is still
+        returned, marked as not meeting it: it can show where a retained
+        engine came from and which releases were withdrawn, but it brings in
+        nothing new. The floor is checked here as well as on acceptance,
+        because an index recorded by an earlier Avibe release may predate the
+        floor a later one ships.
         """
 
         state = self.load()
@@ -793,11 +817,17 @@ class ChannelStateStore:
         envelope, payload = authenticate(state.envelope, roots=roots, verifier=verifier)
         if payload.sequence != state.sequence or payload.sha256 != state.payload_sha256:
             raise ChannelError("state_unreadable", "the stored index does not match the recorded sequence")
-        fresh = payload.is_fresh(now) and payload.sequence >= roots.sequence_floor
-        return ChannelSnapshot(envelope=envelope, payload=payload, fresh=fresh)
+        return ChannelSnapshot(envelope=envelope, payload=payload, meets_floor=payload.sequence >= roots.sequence_floor)
 
 
 # ----- selection -------------------------------------------------------------
+
+#: Why an index may bring nothing new onto a machine although it is the
+#: machine's index. Neither is about time: an index does not age.
+#: The caller was told to stay off the network.
+HOLD_OFFLINE = "offline"
+#: The recorded index is below the sequence floor this Avibe release ships.
+HOLD_BELOW_FLOOR = "index_below_floor"
 
 
 class ResolutionAction(str, Enum):
@@ -818,8 +848,8 @@ class Resolution:
     target: ChannelRelease | None = None
     #: The withdrawal that applies to the installed engine, if any.
     tombstone: Tombstone | None = None
-    #: False when the index is stale or the caller is offline: ``target`` may
-    #: then only be activated from an engine already verified on this machine.
+    #: False under a hold: ``target`` may then only be activated from an
+    #: engine already verified on this machine.
     download_authorized: bool = False
 
 
@@ -844,7 +874,7 @@ def avibe_version_qualifies(avibe_version: str) -> Any | None:
 def resolve(
     payload: ChannelPayload,
     *,
-    fresh: bool,
+    hold: str | None,
     avibe_version: str,
     host_platform: str,
     bundled: str | None,
@@ -859,9 +889,14 @@ def resolve(
     failed here and wait for an explicit retry. ``allow_adoption`` is false
     when routine updates are switched off.
 
+    ``hold`` is ``None``, or the reason this index may bring nothing new onto
+    the machine: ``HOLD_OFFLINE`` or ``HOLD_BELOW_FLOOR``. Under a hold nothing
+    is adopted and no download is authorized. How old the index is is never a
+    reason: it is the machine's index until a higher sequence replaces it.
+
     A withdrawal of the engine in effect is decided first and by itself. It
-    does not depend on the index being fresh, on routine updates being on, on
-    the bundled identity, or on this being a released Avibe build. The engine
+    does not depend on a hold, on routine updates being on, on the bundled
+    identity, or on this being a released Avibe build. The engine
     moves to the one fallback its tombstone names, and only if that release is
     listed, not withdrawn, not quarantined, has an asset for this host, and its
     minimum Avibe is provably met. Otherwise Model Hub is blocked: a withdrawn
@@ -890,7 +925,7 @@ def resolve(
         fallback = payload.release(tombstone.rollback_to)
         if fallback is not None and usable(fallback):
             return Resolution(
-                ResolutionAction.WITHDRAW, "engine_withdrawn", fallback, tombstone, download_authorized=fresh
+                ResolutionAction.WITHDRAW, "engine_withdrawn", fallback, tombstone, download_authorized=hold is None
             )
         return Resolution(ResolutionAction.BLOCKED, "engine_withdrawn_without_fallback", None, tombstone)
 
@@ -901,8 +936,8 @@ def resolve(
         bundled_revision = release_revision(bundled)
     except EngineManifestError:
         return Resolution(ResolutionAction.KEEP, "engine_identity_unrecognized")
-    if not fresh:
-        return Resolution(ResolutionAction.KEEP, "index_stale")
+    if hold is not None:
+        return Resolution(ResolutionAction.KEEP, hold)
     if not allow_adoption:
         return Resolution(ResolutionAction.KEEP, "adoption_disabled")
     candidates = [

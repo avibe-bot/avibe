@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import math
+import random
 import re
 import secrets
 import threading
@@ -29,6 +30,7 @@ from core.handlers.model_hub.adapter import (
     EngineEnsureResult,
     EngineHealth,
     EngineStatus,
+    InvokeCancelledError,
     ObservationDiscovery,
     ObservationOutcome,
     OAuthFlowState,
@@ -57,6 +59,7 @@ from core.handlers.model_hub.quota import (
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.os_errors import local_os_errno
+from vibe.model_hub_runtime.admission import EngineAdmission, engine_operation
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
     EngineClient,
@@ -93,6 +96,8 @@ from vibe.model_hub_runtime.supervisor import (
 
 
 _T = TypeVar("_T")
+_ENGINE_ROUTINE_DRAIN_SECONDS = 30.0
+_ENGINE_WITHDRAWAL_DRAIN_SECONDS = 300.0
 
 # The subscription vendors the engine can start an OAuth flow for, and the three
 # names each one answers to on the way through it:
@@ -897,7 +902,7 @@ async def _probe_protocol_response(
     if taxonomy is None:
         raise EngineClientError("unsupported source protocol")
     try:
-        url = upstream_api_url(root, taxonomy.request_path)
+        url = upstream_api_url(root, taxonomy.request_path, protocol)
         credential = anthropic_api_key_header(root, secret) if protocol == "anthropic" else {
             "Authorization": f"Bearer {secret}",
         }
@@ -1470,6 +1475,8 @@ class _OAuthFlow:
     error_detail: str | None = None
     grant_write_possible: bool = False
     retained_material_decided: bool = False
+    lease: Any = field(default=None, repr=False)
+    engine_release: str | None = None
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def snapshot(self) -> OAuthFlowState:
@@ -1489,6 +1496,7 @@ class _OAuthFlow:
             retained_material_disposition=self.retained_material_disposition,
             retained_credential_ref=self.retained_credential_ref,
             error_detail=self.error_detail,
+            engine_release=self.engine_release,
         )
 
 
@@ -1500,9 +1508,24 @@ class CLIProxyEngineAdapter:
         *,
         supervisor: EngineSupervisor | None = None,
         state_store: EngineStateStore | None = None,
+        routine_adoption: Callable[[], bool] | None = None,
     ) -> None:
         self.supervisor = supervisor or get_engine_supervisor()
         self.state_store = state_store or self.supervisor.state_store
+        self.lifecycle = getattr(self.supervisor, "lifecycle", None)
+        # PR4 can supply the policy through this shared internal provider; no
+        # new persisted switch or UI/CLI policy surface belongs to this change.
+        self._routine_adoption = routine_adoption or (lambda: True)
+        self._engine_admission = EngineAdmission()
+        self._lifecycle_recovery_lock = asyncio.Lock()
+        self._engine_update_lock = asyncio.Lock()
+        self._lifecycle_stop = asyncio.Event()
+        self._lifecycle_task: asyncio.Task | None = None
+        self._engine_operation_task: asyncio.Task | None = None
+        self._engine_operation_id: str | None = None
+        self._withdrawal_deadline: float | None = None
+        self._withdrawal_timer: asyncio.TimerHandle | None = None
+        self._withdrawal_interrupt_task: asyncio.Task | None = None
         self._routing_lock = asyncio.Lock()
         self._active_transports = 0
         self._transports_idle = asyncio.Event()
@@ -1520,6 +1543,264 @@ class CLIProxyEngineAdapter:
         self._active_oauth_providers: set[str] = set()
         self._oauth_lock = threading.RLock()
         self._keyless_clients: dict[str, KeylessMcpClient] = {}
+
+    def _gate_known_withdrawal(self) -> None:
+        """Loop-only gate/deadline, independent of worker I/O completion."""
+        if self.lifecycle is None or not getattr(self.lifecycle, "withdrawn_current", False):
+            return
+        self._engine_admission.close("engine_withdrawn")
+        if self._withdrawal_deadline is None:
+            loop = asyncio.get_running_loop()
+            self._withdrawal_deadline = loop.time() + _ENGINE_WITHDRAWAL_DRAIN_SECONDS
+            if self._withdrawal_timer is not None:
+                self._withdrawal_timer.cancel()
+            self._withdrawal_timer = loop.call_at(
+                self._withdrawal_deadline, self._expire_withdrawal, self._withdrawal_deadline,
+            )
+
+    def _expire_withdrawal(self, deadline: float) -> None:
+        if self._withdrawal_deadline == deadline and self._engine_admission.reason == "engine_withdrawn":
+            self._withdrawal_interrupt_task = asyncio.create_task(self._engine_admission.interrupt())
+
+    def _reopen_routine_admission_if_ready(self) -> bool:
+        """Restore routine admission without erasing a learned recall gate."""
+        if (
+            self.lifecycle is None
+            or not self.lifecycle.recovered
+            or not self.lifecycle._ready
+            or self.lifecycle.withdrawn_current
+            or self._withdrawal_deadline is not None
+            or self._engine_admission.reason == "engine_withdrawn"
+        ):
+            return False
+        self._engine_admission.reopen()
+        return True
+
+    async def recover_lifecycle(self) -> None:
+        if self.lifecycle is not None:
+            loop = asyncio.get_running_loop()
+            self.lifecycle.on_withdrawal = lambda: loop.call_soon_threadsafe(self._gate_known_withdrawal)
+            self._gate_known_withdrawal()
+        if self.lifecycle is None or self.lifecycle.recovered:
+            return
+        async with self._lifecycle_recovery_lock:
+            try:
+                if not self.lifecycle.recovered:
+                    if not await self._drain_engine():
+                        raise EngineUnavailableError("models.engine.install_failed", reason="engine_recovery_waiting_for_idle")
+                    await run_owned_in_thread(self.lifecycle.recover)
+                    if self.lifecycle._ready and self._withdrawal_deadline is None:
+                        self._engine_admission.reopen()
+                        self._withdrawal_deadline = None
+            except asyncio.CancelledError:
+                self._reopen_routine_admission_if_ready()
+                raise
+
+    def start_lifecycle_scheduler(self) -> None:
+        if self.lifecycle is not None and self._lifecycle_task is None:
+            self._lifecycle_task = asyncio.create_task(self._run_lifecycle_scheduler(), name="model-hub-engine-channel")
+
+    async def _run_lifecycle_scheduler(self) -> None:
+        delay = 0.0
+        while not self._lifecycle_stop.is_set():
+            if delay:
+                try:
+                    await asyncio.wait_for(self._lifecycle_stop.wait(), timeout=delay)
+                    return
+                except TimeoutError:
+                    pass
+            try:
+                await self.recover_lifecycle()
+                await self._reconcile_engine(explicit=False)
+                delay = random.uniform(720, 1080)
+                if self.lifecycle._status.get("state") == "deferred":
+                    delay = 300
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Model Hub engine lifecycle check failed; retrying without changing other backends")
+                delay = min(900, max(30, delay * 2))
+
+    async def engine_status(self) -> dict[str, Any]:
+        if self.lifecycle is None:
+            return {"state": "opted_out", "reason": "manifest_override"}
+        status = await run_owned_in_thread(self.lifecycle.status)
+        status["operation_id"] = self._engine_operation_id
+        return status
+
+    async def request_engine_operation(self, *, update: bool = False) -> dict[str, Any]:
+        if self.lifecycle is None:
+            return await self.engine_status()
+        if self._engine_operation_task is None or self._engine_operation_task.done():
+            self._engine_operation_id = uuid.uuid4().hex
+
+            async def operation():
+                try:
+                    await self.recover_lifecycle()
+                    if update:
+                        await self._reconcile_engine(explicit=True)
+                    else:
+                        async with self._engine_update_lock:
+                            decision = await run_owned_in_thread(self.lifecycle.check)
+                        if self.lifecycle.withdrawn_current:
+                            await self._reconcile_engine(explicit=False, decision=decision)
+                except Exception as exc:
+                    logger.exception("Model Hub engine operation failed")
+                    # An operation failure is not proof that execution failed:
+                    # preserve a healthy rollback and its truthful last result.
+                    self.lifecycle._status["operation_error"] = type(exc).__name__
+                    if not self.lifecycle.recovered or not self.lifecycle._ready:
+                        self.lifecycle._status["state"] = "blocked"
+                    await run_owned_in_thread(self.lifecycle.publish_status)
+
+            self._engine_operation_task = asyncio.create_task(operation(), name="model-hub-engine-operation")
+        return await self.engine_status()
+
+    async def _drain_engine(self, *, withdrawal: bool = False) -> bool:
+        # Recovery/routine callers cannot downgrade an existing recall gate or
+        # restart its single budget while admitted workers finish cancelling.
+        self._gate_known_withdrawal()
+        withdrawal = withdrawal or self._withdrawal_deadline is not None or self._engine_admission.reason == "engine_withdrawn"
+        self._engine_admission.close("engine_withdrawn" if withdrawal else "engine_updating")
+        if withdrawal and self._withdrawal_deadline is None:
+            self._withdrawal_deadline = asyncio.get_running_loop().time() + _ENGINE_WITHDRAWAL_DRAIN_SECONDS
+        deadline = self._withdrawal_deadline if withdrawal else asyncio.get_running_loop().time() + _ENGINE_ROUTINE_DRAIN_SECONDS
+        while not self._engine_admission.idle.is_set():
+            self._expire_oauth_flows_locked()
+            # A routine drain can learn a recall while it waits. Upgrade this
+            # operation to the existing one-shot withdrawal deadline and never
+            # let the routine timeout reopen that gate.
+            self._gate_known_withdrawal()
+            if self._withdrawal_deadline is not None or self._engine_admission.reason == "engine_withdrawn":
+                if not withdrawal:
+                    withdrawal = True
+                    if self._withdrawal_deadline is None:
+                        self._withdrawal_deadline = asyncio.get_running_loop().time() + _ENGINE_WITHDRAWAL_DRAIN_SECONDS
+                deadline = self._withdrawal_deadline
+                self._engine_admission.close("engine_withdrawn")
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                if withdrawal:
+                    await self._engine_admission.interrupt()
+                else:
+                    self._engine_admission.reopen()
+                return False
+            try:
+                await asyncio.wait_for(self._engine_admission.idle.wait(), min(1, remaining))
+            except TimeoutError:
+                pass
+        return True
+
+    async def _select_staged(self, generation, *, withdrawal: bool = False, reason: str = "required") -> bool:
+        activated = False
+        try:
+            await run_owned_in_thread(self.lifecycle.prepare_candidate, generation)
+            if not await self._drain_engine(withdrawal=withdrawal):
+                if withdrawal:
+                    await run_owned_in_thread(self.lifecycle.block, "engine_withdrawn")
+                else:
+                    self.lifecycle._status.update(state="deferred", reason="waiting_for_idle")
+                return False
+            async with self._routing_lock:
+                await run_owned_in_thread(self.lifecycle.activate, generation, reason=reason)
+            activated = True
+            return True
+        except asyncio.CancelledError:
+            # Cancelling a routine swap must not leave a healthy committed
+            # owner behind an engine_updating gate. A recall learned while the
+            # drain was waiting remains terminal and is never reopened here.
+            if not withdrawal:
+                self._reopen_routine_admission_if_ready()
+            raise
+        except Exception:
+            # Activation can fail after rolling back to a healthy previous
+            # generation. Restore routine admission on that exceptional path;
+            # the helper still refuses to erase a withdrawal fence.
+            if not withdrawal:
+                self._reopen_routine_admission_if_ready()
+            raise
+        finally:
+            if activated and self.lifecycle.recovered and self.lifecycle._ready:
+                if not self.lifecycle.withdrawn_current:
+                    self._engine_admission.reopen()
+                    self._withdrawal_deadline = None
+
+    async def _ensure_installed_lifecycle(self, *, force=False, offline=False, expected_target=None, on_resolved=None):
+        from vibe.model_hub_runtime.lifecycle import EngineGeneration
+
+        installer = self.supervisor.installer
+        if force:
+            await run_owned_in_thread(self.lifecycle.retry_required)
+        install = await run_owned_in_thread(
+            self.lifecycle.stage_required, offline=offline, force=force, expected_target=expected_target, on_resolved=on_resolved,
+        )
+        if not install.get("ok"):
+            raise self._install_failure(str(install.get("reason") or "engine_install_failed"))
+        generation = EngineGeneration.read(install["generation"], installer.runtime_dir)
+        current = await run_owned_in_thread(self.lifecycle.journal.load)
+        changed = current is None or current["active"] != generation.document()
+        if changed or (current is not None and current["blocked"] is not None):
+            changed = await self._select_staged(generation)
+        return EngineEnsureResult(status=await self.status(), changed=changed)
+
+    async def _reconcile_engine(self, *, explicit: bool, decision=None) -> None:
+        from core.model_hub_engine_channel import ResolutionAction
+
+        async with self._engine_update_lock:
+            # A decision supplied by an earlier caller may have waited behind
+            # the scheduler. Revalidate it under the lock before any drain,
+            # stop, or fallback action; the committed generation is the
+            # snapshot that makes the decision current.
+            decision = await run_owned_in_thread(
+                self.lifecycle.check, retry=explicit, allow_adoption=explicit or self._routine_adoption(),
+            )
+            self._gate_known_withdrawal()
+            withdrawn = decision.action in {ResolutionAction.WITHDRAW, ResolutionAction.BLOCKED}
+            if withdrawn:
+                self._engine_admission.close("engine_withdrawn")
+                if self._withdrawal_deadline is None:
+                    self._withdrawal_deadline = asyncio.get_running_loop().time() + _ENGINE_WITHDRAWAL_DRAIN_SECONDS
+            if withdrawn:
+                # Do not let fallback network/staging/preflight consume the
+                # recall deadline. First drain/signal existing work and durably
+                # stop the old real-auth process; only then prepare a fallback.
+                await self._drain_engine(withdrawal=True)
+                await run_owned_in_thread(self.lifecycle.pause_withdrawn)
+                if not self._engine_admission.idle.is_set():
+                    return  # mutable cancelled workers must join before start
+            elif self._withdrawal_deadline is not None:
+                # Simple state loss may reopen an old withdrawal. The current
+                # authenticated history, never the pause journal, decides that.
+                if not await self._drain_engine(withdrawal=True):
+                    return
+                await run_owned_in_thread(self.lifecycle.recover)
+                if self.lifecycle._ready:
+                    self._engine_admission.reopen()
+                    self._withdrawal_deadline = None
+            if decision.action is ResolutionAction.BLOCKED:
+                return
+            if decision.target is not None:
+                try:
+                    generation = await run_owned_in_thread(self.lifecycle.stage_decision, decision)
+                    await self._select_staged(generation, withdrawal=withdrawn, reason="withdrawal" if withdrawn else "update")
+                except Exception:
+                    if withdrawn:
+                        await self._drain_engine(withdrawal=True)
+                        await run_owned_in_thread(self.lifecycle.block, "engine_withdrawn")
+                    raise
+            elif await run_owned_in_thread(self.lifecycle.package_transition_required):
+                generation = await run_owned_in_thread(self.lifecycle.stage_package_baseline)
+                await self._select_staged(generation, reason="package")
+            else:
+                await self._ensure_installed_lifecycle()
+            value = await run_owned_in_thread(self.lifecycle.journal.load)
+            await run_owned_in_thread(self.lifecycle.project_legacy, value)
+
+    def engine_release(self) -> str:
+        from core.handlers.model_hub.hosted_tools import UNKNOWN_ENGINE_RELEASE
+
+        release = self.lifecycle.running_release if self.lifecycle is not None else getattr(self.supervisor, "_published_release", None)
+        return release or UNKNOWN_ENGINE_RELEASE
 
     async def install(self) -> EngineStatus:
         await self.recover_installation()
@@ -1555,11 +1836,11 @@ class CLIProxyEngineAdapter:
             install_task = self._install_task
             if install_task is not None and not install_task.done():
                 return await self.status()
-            install_state = await asyncio.to_thread(self.supervisor.installer.install_state)
+            install_state = await run_owned_in_thread(self.supervisor.installer.install_state)
             if not install_state or install_state.get("state") != "installing":
                 return await self.status()
             generation = uuid.uuid4().hex
-            claimed = await asyncio.to_thread(
+            claimed = await run_owned_in_thread(
                 self.supervisor.installer.transition_install_claim,
                 InstallClaimTransition.RESUME,
                 generation=generation,
@@ -1717,12 +1998,12 @@ class CLIProxyEngineAdapter:
                         recovery_delay * 2,
                         _INSTALL_RECOVERY_MAX_DELAY_SECONDS,
                     )
-            installed = await asyncio.to_thread(
+            installed = await run_owned_in_thread(
                 self.supervisor.installer.resolve_engine_path,
             )
             if installed is None:
                 raise EngineUnavailableError("models.engine.install_failed")
-            settled = await asyncio.to_thread(
+            settled = await run_owned_in_thread(
                 self.supervisor.installer.transition_install_claim,
                 InstallClaimTransition.SETTLE_SUCCESS,
                 generation=generation,
@@ -1730,7 +2011,7 @@ class CLIProxyEngineAdapter:
             )
             self._install_owner_active = False
             if settled:
-                await asyncio.to_thread(self.supervisor.note_installation_settled)
+                await run_owned_in_thread(self.supervisor.note_installation_settled)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1738,7 +2019,7 @@ class CLIProxyEngineAdapter:
             reason = self._install_failure_reason(exc)
             if claim_owned:
                 try:
-                    await asyncio.to_thread(
+                    await run_owned_in_thread(
                         self.supervisor.installer.transition_install_claim,
                         InstallClaimTransition.SETTLE_FAILURE,
                         generation=generation,
@@ -1749,7 +2030,7 @@ class CLIProxyEngineAdapter:
                     logger.exception("Failed to persist Model Hub runtime install failure")
             elif admission is not None and reason != INSTALL_PLATFORM_UNSUPPORTED_REASON:
                 try:
-                    await asyncio.to_thread(
+                    await run_owned_in_thread(
                         self.supervisor.installer.transition_install_claim,
                         InstallClaimTransition.ADMISSION_FAILURE,
                         generation=generation,
@@ -1769,7 +2050,7 @@ class CLIProxyEngineAdapter:
     ) -> None:
         self._install_owner_active = False
         try:
-            await asyncio.to_thread(
+            await run_owned_in_thread(
                 self.supervisor.installer.transition_install_claim,
                 InstallClaimTransition.ABANDON,
                 generation=generation,
@@ -1817,16 +2098,22 @@ class CLIProxyEngineAdapter:
         expected_target: Mapping[str, str] | None = None,
         on_resolved: Callable[[dict[str, str]], None] | None = None,
     ) -> EngineEnsureResult:
+        if self.lifecycle is not None:
+            await self.recover_lifecycle()
+            async with self._engine_update_lock:
+                return await self._ensure_installed_lifecycle(
+                    force=force, offline=offline, expected_target=expected_target, on_resolved=on_resolved,
+                )
         async with self._routing_lock:
             installer = self.supervisor.installer.offline_copy() if offline else self.supervisor.installer
             if expected_target is None and on_resolved is None:
                 if force:
-                    install = await asyncio.to_thread(
+                    install = await run_owned_in_thread(
                         installer.ensure,
                         force=True,
                     )
                 else:
-                    install = await asyncio.to_thread(installer.ensure)
+                    install = await run_owned_in_thread(installer.ensure)
             else:
                 ensure_kwargs: dict[str, Any] = {
                     "expected_target": expected_target,
@@ -1834,7 +2121,7 @@ class CLIProxyEngineAdapter:
                 }
                 if force:
                     ensure_kwargs["force"] = True
-                install = await asyncio.to_thread(
+                install = await run_owned_in_thread(
                     installer.ensure,
                     **ensure_kwargs,
                 )
@@ -1868,21 +2155,36 @@ class CLIProxyEngineAdapter:
             return await self.status()
 
     async def stop_runtime(self) -> EngineStatus:
-        async with self._installation_lock:
-            status = await self.status()
-            if status.health is EngineHealth.INSTALLING:
-                return status
-            start_after_install_task = self._start_after_install_task
-            if start_after_install_task is not None and not start_after_install_task.done():
-                start_after_install_task.cancel()
-            await asyncio.to_thread(self.supervisor.disable)
-            return await self.status()
+        async with self._engine_update_lock:
+            async with self._installation_lock:
+                status = await self.status()
+                if status.health is EngineHealth.INSTALLING:
+                    return status
+                start_after_install_task = self._start_after_install_task
+                if start_after_install_task is not None and not start_after_install_task.done():
+                    start_after_install_task.cancel()
+                disable = self.lifecycle.disable if self.lifecycle is not None else self.supervisor.disable
+                await run_owned_in_thread(disable)
+                return await self.status()
 
     async def stop(self) -> None:
         async with self._installation_lock:
             self._installation_stopping = True
             install_task = self._install_task
             start_after_install_task = self._start_after_install_task
+        self._lifecycle_stop.set()
+        if self._withdrawal_timer is not None:
+            self._withdrawal_timer.cancel()
+        lifecycle_tasks = [task for task in (
+            self._lifecycle_task, self._engine_operation_task, self._withdrawal_interrupt_task,
+        ) if task is not None]
+        for task in lifecycle_tasks:
+            task.cancel()
+        for task in lifecycle_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if install_task is not None:
             try:
                 await asyncio.shield(install_task)
@@ -1902,10 +2204,11 @@ class CLIProxyEngineAdapter:
         for client in self._keyless_clients.values():
             await client.close()
         self._keyless_clients.clear()
-        await asyncio.to_thread(self.supervisor.stop)
+        await run_owned_in_thread(self.supervisor.stop)
+        await self._engine_admission.join_interruptions()
 
     async def status(self) -> EngineStatus:
-        raw = await asyncio.to_thread(self.supervisor.status)
+        raw = await run_owned_in_thread(self.supervisor.status)
         status = raw["status"]
         listening = status.get("listening") or {}
         projected = EngineStatus(
@@ -1917,6 +2220,10 @@ class CLIProxyEngineAdapter:
             last_check_iso=status.get("last_check"),
             host_platform=raw.get("host_platform"),
             error_key=status.get("error_key"),
+            manifest=raw.get("manifest"),
+            committed_release=raw.get("committed_release"),
+            running_release=raw.get("running_release"),
+            engine_lifecycle=raw.get("engine_lifecycle"),
         )
         if self._install_owner_active:
             return replace(
@@ -1929,10 +2236,12 @@ class CLIProxyEngineAdapter:
             )
         return projected
 
+    @engine_operation
     async def gateway_token(self) -> str:
         connection = await self._engine_call(self.supervisor.ensure_running)
         return connection.gateway_token
 
+    @engine_operation
     async def sync_sources(self, bindings: Sequence[SourceBinding]) -> None:
         async with self._routing_lock:
             # The routing lock orders the projection against new admissions.
@@ -1991,7 +2300,8 @@ class CLIProxyEngineAdapter:
 
         return release
 
-    def _acquire_transport(self) -> Callable[[], None]:
+    def _acquire_transport(self, lease=None) -> Callable[[], None]:
+        lease = lease or self._engine_admission.retain()
         self._active_transports += 1
         self._transports_idle.clear()
         released = False
@@ -2001,6 +2311,7 @@ class CLIProxyEngineAdapter:
             if released:
                 return
             released = True
+            self._engine_admission.release(lease)
             self._active_transports -= 1
             if self._active_transports == 0:
                 self._transports_idle.set()
@@ -2020,19 +2331,19 @@ class CLIProxyEngineAdapter:
     async def _locked_engine_call(self, call: Callable[[], _T]) -> _T:
         """Run a supervisor call that may start the engine, under the routing lock the caller holds."""
         try:
-            return await asyncio.to_thread(call)
+            return await run_owned_in_thread(call)
         except EngineConfigLostError:
             await self._restart_lost_engine()
-            return await asyncio.to_thread(call)
+            return await run_owned_in_thread(call)
 
     async def _engine_call(self, call: Callable[[], _T]) -> _T:
         """Run a supervisor call that may start the engine, restoring one that lost its configuration."""
         try:
-            return await asyncio.to_thread(call)
+            return await run_owned_in_thread(call)
         except EngineConfigLostError:
             async with self._routing_lock:
                 await self._restart_lost_engine()
-            return await asyncio.to_thread(call)
+            return await run_owned_in_thread(call)
 
     async def provision_credential(
         self,
@@ -2044,15 +2355,19 @@ class CLIProxyEngineAdapter:
         auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
-        return await run_owned_in_thread(
-            self.state_store.store_api_key,
-            secret,
-            vendor=vendor,
-            protocol=protocol,
-            base_url=base_url,
+        metadata = {
+            "vendor": vendor, "protocol": protocol, "base_url": base_url,
             **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
-            on_reserved=on_reserved,
-        )
+            "on_reserved": on_reserved,
+        }
+        if protocol == "search":
+            # Tool-only keys have no CPA projection or execution dependency.
+            return await run_owned_in_thread(self.state_store.store_api_key, secret, **metadata)
+        return await self._provision_engine_credential(secret, **metadata)
+
+    @engine_operation
+    async def _provision_engine_credential(self, secret: str, **metadata: Any) -> str:
+        return await run_owned_in_thread(self.state_store.store_api_key, secret, **metadata)
 
     @staticmethod
     def _search_catalog_parts(catalog: Mapping[str, Any]) -> tuple[str | None, Mapping[str, Any] | None]:
@@ -2103,8 +2418,8 @@ class CLIProxyEngineAdapter:
                 key = None
                 metadata = {}
             else:
-                key = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
-                metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
+                key = await run_owned_in_thread(self.state_store.read_api_key, credential_ref)
+                metadata = await run_owned_in_thread(self.state_store.credential_metadata, credential_ref)
         except Exception:
             return SearchResponse(None, {}, None, "connection")
         if vendor is None or (credential_ref is not None and metadata.get("vendor") != vendor):
@@ -2264,7 +2579,7 @@ class CLIProxyEngineAdapter:
                 return SearchCredentialCheck("pass")
             return SearchCredentialCheck("unknown")
 
-        return await asyncio.to_thread(decode)
+        return await run_owned_in_thread(decode)
 
     def _keyless_client(self, service: Mapping[str, Any]) -> KeylessMcpClient:
         service_id = service["service_id"]
@@ -2304,7 +2619,7 @@ class CLIProxyEngineAdapter:
         )
 
     async def revoke_search_credential(self, credential_ref: str) -> None:
-        await asyncio.to_thread(self.state_store.revoke_search_credential, credential_ref)
+        await run_owned_in_thread(self.state_store.revoke_search_credential, credential_ref)
 
     async def fetch(
         self,
@@ -2380,6 +2695,7 @@ class CLIProxyEngineAdapter:
             on_sent=on_sent,
         )
 
+    @engine_operation
     async def provision_oauth_credential(
         self,
         source_id: str,
@@ -2406,6 +2722,7 @@ class CLIProxyEngineAdapter:
             on_reserved=on_reserved,
         )
 
+    @engine_operation
     async def activate_oauth_credential(self, credential_ref: str) -> None:
         """Publish a staged grant without replacing a live auth file."""
 
@@ -2457,7 +2774,7 @@ class CLIProxyEngineAdapter:
             except Exception as exc:
                 raise EngineStateError("OAuth activation could not reconcile engine") from exc
 
-            client = await asyncio.to_thread(self.supervisor.client_if_running)
+            client = await run_owned_in_thread(self.supervisor.client_if_running)
             if client is None:
                 raise EngineStateError("OAuth activation could not reconcile engine")
             try:
@@ -2478,12 +2795,13 @@ class CLIProxyEngineAdapter:
 
             return
 
+    @engine_operation
     async def validate_oauth_credential(self, credential_ref: str) -> None:
         """Require an upstream authentication witness without inference."""
 
         async with self._routing_lock:
             await self._transports_idle.wait()
-            metadata = await asyncio.to_thread(
+            metadata = await run_owned_in_thread(
                 self.state_store.credential_metadata,
                 credential_ref,
             )
@@ -2531,6 +2849,7 @@ class CLIProxyEngineAdapter:
             except (EngineClientError, OSError) as exc:
                 raise EngineStateError("OAuth credential validation failed") from exc
 
+    @engine_operation
     async def matches_api_key_credential(
         self,
         credential_ref: str,
@@ -2541,7 +2860,7 @@ class CLIProxyEngineAdapter:
         *,
         auth_scheme: str | None = None,
     ) -> bool:
-        return await asyncio.to_thread(
+        return await run_owned_in_thread(
             self.state_store.matches_api_key_credential,
             credential_ref,
             vendor,
@@ -2551,11 +2870,13 @@ class CLIProxyEngineAdapter:
             **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
         )
 
+    @engine_operation
     async def credential_auth_scheme(self, credential_ref: str) -> str | None:
-        return await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
+        return await run_owned_in_thread(self.state_store.credential_auth_scheme, credential_ref)
 
+    @engine_operation
     async def credential_address(self, credential_ref: str) -> str | None:
-        return await asyncio.to_thread(self._credential_address, credential_ref)
+        return await run_owned_in_thread(self._credential_address, credential_ref)
 
     def _credential_address(self, credential_ref: str) -> str | None:
         """Settle the address the same way ``bind_source`` settles it.
@@ -2578,6 +2899,7 @@ class CLIProxyEngineAdapter:
         )
         return record.prefix if record is not None and record.prefix else None
 
+    @engine_operation
     async def retarget_api_key_credential(
         self,
         credential_ref: str,
@@ -2585,7 +2907,7 @@ class CLIProxyEngineAdapter:
         protocol: str,
         base_url: str | None,
     ) -> str:
-        metadata = await asyncio.to_thread(
+        metadata = await run_owned_in_thread(
             self.state_store.credential_metadata,
             credential_ref,
         )
@@ -2596,11 +2918,11 @@ class CLIProxyEngineAdapter:
             or metadata.get("protocol") != protocol
         ):
             raise EngineStateError("credential does not match retarget request")
-        secret = await asyncio.to_thread(
+        secret = await run_owned_in_thread(
             self.state_store.read_api_key,
             credential_ref,
         )
-        return await asyncio.to_thread(
+        return await run_owned_in_thread(
             self.state_store.store_api_key,
             secret,
             vendor=normalized_vendor,
@@ -2609,13 +2931,15 @@ class CLIProxyEngineAdapter:
             **({"auth_scheme": metadata["auth_scheme"]} if metadata.get("auth_scheme") is not None else {}),
         )
 
+    @engine_operation
     async def credential_supports_refresh(self, credential_ref: str) -> bool:
-        metadata = await asyncio.to_thread(
+        metadata = await run_owned_in_thread(
             self.state_store.credential_metadata,
             credential_ref,
         )
         return metadata.get("kind") == "oauth"
 
+    @engine_operation
     async def provision_transient_credential(
         self,
         vendor: str,
@@ -2645,21 +2969,36 @@ class CLIProxyEngineAdapter:
         )
 
     async def revoke_api_key_credential(self, credential_ref: str) -> None:
-        await asyncio.to_thread(self.state_store.assert_credential_unbound, credential_ref)
-        is_search = await asyncio.to_thread(
+        if await run_owned_in_thread(self.state_store.api_key_credential_is_search, credential_ref):
+            await self.revoke_search_credential(credential_ref)
+            return
+        await self._revoke_engine_api_key_credential(credential_ref)
+
+    @engine_operation
+    async def _revoke_engine_api_key_credential(self, credential_ref: str) -> None:
+        await run_owned_in_thread(self.state_store.assert_credential_unbound, credential_ref)
+        is_search = await run_owned_in_thread(
             self.state_store.api_key_credential_is_search,
             credential_ref,
         )
         if not is_search:
-            await asyncio.to_thread(self.supervisor.invalidate_configs)
-        await asyncio.to_thread(self.state_store.revoke_api_key_credential, credential_ref)
+            await run_owned_in_thread(self.supervisor.invalidate_configs)
+        await run_owned_in_thread(self.state_store.revoke_api_key_credential, credential_ref)
 
     async def revoke_credential(self, credential_ref: str) -> None:
-        await asyncio.to_thread(
+        metadata = await run_owned_in_thread(self.state_store.credential_metadata_if_present, credential_ref)
+        if metadata is not None and metadata.get("kind") == "api_key" and metadata.get("protocol") == "search":
+            await self.revoke_search_credential(credential_ref)
+            return
+        await self._revoke_engine_credential(credential_ref)
+
+    @engine_operation
+    async def _revoke_engine_credential(self, credential_ref: str) -> None:
+        await run_owned_in_thread(
             self.state_store.assert_credential_unbound,
             credential_ref,
         )
-        metadata = await asyncio.to_thread(
+        metadata = await run_owned_in_thread(
             self.state_store.credential_metadata_if_present,
             credential_ref,
         )
@@ -2686,21 +3025,22 @@ class CLIProxyEngineAdapter:
                 # One supervisor operation: an engine left running by a previous
                 # service is reaped first, and none can start and load the grant
                 # before its file is gone.
-                await asyncio.to_thread(self.supervisor.with_engine_excluded, remove_grant)
-                await asyncio.to_thread(
+                await run_owned_in_thread(self.supervisor.with_engine_excluded, remove_grant)
+                await run_owned_in_thread(
                     self.state_store.audit_auth_permissions,
                     enforce=True,
                 )
-        await asyncio.to_thread(self.supervisor.invalidate_configs)
-        await asyncio.to_thread(self.state_store.revoke_credential, credential_ref)
+        await run_owned_in_thread(self.supervisor.invalidate_configs)
+        await run_owned_in_thread(self.state_store.revoke_credential, credential_ref)
 
+    @engine_operation
     async def cleanup_orphaned_oauth_material(self, credential_ref: str) -> bool:
         try:
-            await asyncio.to_thread(
+            await run_owned_in_thread(
                 self.state_store.assert_credential_unbound,
                 credential_ref,
             )
-            metadata = await asyncio.to_thread(
+            metadata = await run_owned_in_thread(
                 self.state_store.credential_metadata_if_present,
                 credential_ref,
             )
@@ -2711,7 +3051,7 @@ class CLIProxyEngineAdapter:
         # refs whose postcondition held vacuously.
         if metadata is None:
             try:
-                await asyncio.to_thread(
+                await run_owned_in_thread(
                     self.state_store.revoke_credential,
                     credential_ref,
                 )
@@ -2722,7 +3062,7 @@ class CLIProxyEngineAdapter:
             return False
         if metadata.get("activation_state") == "staged":
             try:
-                await asyncio.to_thread(
+                await run_owned_in_thread(
                     self.state_store.revoke_credential,
                     credential_ref,
                 )
@@ -2734,6 +3074,7 @@ class CLIProxyEngineAdapter:
             return False
         return await self._cleanup_oauth_material(auth_name, credential_ref)
 
+    @engine_operation
     async def discover_models(
         self,
         vendor: str,
@@ -2743,7 +3084,7 @@ class CLIProxyEngineAdapter:
         *,
         start_engine: bool = True,
     ) -> Sequence[DiscoveredModel]:
-        metadata = await asyncio.to_thread(
+        metadata = await run_owned_in_thread(
             self.state_store.credential_metadata,
             credential_ref,
         )
@@ -2772,14 +3113,14 @@ class CLIProxyEngineAdapter:
                 payload,
                 str(prefix) if isinstance(prefix, str) and prefix else None,
             )
-        normalized_base_url = await asyncio.to_thread(
+        normalized_base_url = await run_owned_in_thread(
             self.state_store.validate_api_key_target,
             credential_ref,
             vendor=normalized_vendor,
             protocol=protocol,
             base_url=base_url,
         )
-        secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+        secret = await run_owned_in_thread(self.state_store.read_api_key, credential_ref)
         try:
             return await probe_models(
                 vendor=normalized_vendor,
@@ -2789,8 +3130,18 @@ class CLIProxyEngineAdapter:
                 **({"auth_scheme": metadata["auth_scheme"]} if metadata.get("auth_scheme") is not None else {}),
             )
         except EngineClientError as exc:
-            raise ModelDiscoveryError("model discovery failed") from exc
+            raise ModelDiscoveryError(
+                "model discovery failed",
+                rejected_status=(
+                    exc.status_code
+                    if exc.status_code in _AUTHENTICATION_ERROR_STATUSES
+                    else None
+                ),
+                upstream_status=exc.status_code,
+                upstream_detail=exc.upstream_detail,
+            ) from exc
 
+    @engine_operation
     async def observe_source(
         self,
         vendor: str,
@@ -2817,7 +3168,7 @@ class CLIProxyEngineAdapter:
         proof, and exhausting that path without one remains ambiguous.
         """
 
-        metadata = await asyncio.to_thread(
+        metadata = await run_owned_in_thread(
             self.state_store.credential_metadata,
             credential_ref,
         )
@@ -2836,7 +3187,7 @@ class CLIProxyEngineAdapter:
         if credential_kind == "api_key":
             if metadata.get("base_url") != normalized_base_url:
                 raise EngineStateError("credential does not match observation target")
-            secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+            secret = await run_owned_in_thread(self.state_store.read_api_key, credential_ref)
             if auth_scheme is not None:
                 for protocol in protocol_order:
                     validate_api_key_auth_scheme(
@@ -2850,7 +3201,7 @@ class CLIProxyEngineAdapter:
             if normalized_base_url is not None:
                 raise EngineStateError("credential does not match observation target")
             client = await self._engine_call(self.supervisor.client)
-            inventory = await asyncio.to_thread(_auth_inventory, client)
+            inventory = await run_owned_in_thread(_auth_inventory, client)
             auth_name = str(metadata.get("auth_name") or "")
             matches = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
             if len(matches) != 1 or not matches[0].auth_index:
@@ -2904,7 +3255,7 @@ class CLIProxyEngineAdapter:
                     evidence = _ENGINE_SERVED_SUBSCRIPTION_EVIDENCE
                 else:
                     assert oauth_auth is not None
-                    evidence = await asyncio.to_thread(
+                    evidence = await run_owned_in_thread(
                         _probe_oauth_protocol_response,
                         client=client,
                         auth=oauth_auth,
@@ -3103,8 +3454,9 @@ class CLIProxyEngineAdapter:
             models=(),
         )
 
+    @engine_operation
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
-        await asyncio.to_thread(self.state_store.validate_source_id, source_id)
+        await run_owned_in_thread(self.state_store.validate_source_id, source_id)
         normalized_vendor = vendor.strip().lower()
         endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
         if endpoint is None:
@@ -3117,8 +3469,8 @@ class CLIProxyEngineAdapter:
             self._active_oauth_providers.add(auth_provider)
         try:
             client = await self._engine_call(self.supervisor.client)
-            before = await asyncio.to_thread(_auth_inventory, client)
-            payload = await asyncio.to_thread(
+            before = await run_owned_in_thread(_auth_inventory, client)
+            payload = await run_owned_in_thread(
                 client.management_request,
                 "GET",
                 engine_endpoint,
@@ -3150,12 +3502,18 @@ class CLIProxyEngineAdapter:
                 before_auth_fingerprints={identity: record.fingerprint for identity, record in before.items()},
                 grant_write_possible=expects == "none",
             )
-        except Exception:
+            with self._oauth_lock:
+                flow.engine_release = self.engine_release()
+                flow.lease = self._engine_admission.retain()
+                flow.lease.abort = lambda: self._fail_flow(flow, "models.engine.withdrawn")
+                self._oauth_flows[flow.flow_id] = flow
+        except BaseException:
+            # The provider is reserved before the first startup await. A
+            # withdrawal/user cancellation must release it just like a failed
+            # request; no registered flow exists to expire the reservation.
             with self._oauth_lock:
                 self._active_oauth_providers.discard(auth_provider)
             raise
-        with self._oauth_lock:
-            self._oauth_flows[flow.flow_id] = flow
         return flow.snapshot()
 
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
@@ -3166,6 +3524,7 @@ class CLIProxyEngineAdapter:
             credential_ref, source_id=source_id, vendor=vendor, auth_provider=endpoint[2],
         )
 
+    @engine_operation
     async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
         """Read the bound grant's rate-limit windows without starting the engine."""
 
@@ -3174,7 +3533,7 @@ class CLIProxyEngineAdapter:
         if endpoint is None or normalized_vendor not in _SUBSCRIPTION_QUOTA_URLS:
             raise SubscriptionQuotaError("unsupported")
         try:
-            metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
+            metadata = await run_owned_in_thread(self.state_store.credential_metadata, credential_ref)
         except (EngineStateError, OSError, ValueError):
             raise SubscriptionQuotaError("unavailable") from None
         if (
@@ -3185,7 +3544,7 @@ class CLIProxyEngineAdapter:
         ):
             raise SubscriptionQuotaError("unavailable")
         # A presentation read never starts, repairs, or restarts the engine.
-        client = await asyncio.to_thread(self.supervisor.client_if_running)
+        client = await run_owned_in_thread(self.supervisor.client_if_running)
         if client is None:
             raise SubscriptionQuotaError("unavailable")
         try:
@@ -3212,6 +3571,7 @@ class CLIProxyEngineAdapter:
         except (EngineClientError, OSError):
             raise SubscriptionQuotaError("unavailable") from None
 
+    @engine_operation
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
@@ -3220,7 +3580,7 @@ class CLIProxyEngineAdapter:
                 return flow.snapshot()
             try:
                 client = await self._engine_call(self.supervisor.client)
-                payload = await asyncio.to_thread(
+                payload = await run_owned_in_thread(
                     client.management_request,
                     "GET",
                     "/get-auth-status",
@@ -3238,6 +3598,7 @@ class CLIProxyEngineAdapter:
                 self._fail_flow(flow, "models.oauth.engine_unavailable", detail=str(error))
             return flow.snapshot()
 
+    @engine_operation
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
@@ -3289,7 +3650,7 @@ class CLIProxyEngineAdapter:
                 payload["code"] = submitted
             try:
                 client = await self._engine_call(self.supervisor.client)
-                await asyncio.to_thread(
+                await run_owned_in_thread(
                     client.management_request,
                     "POST",
                     "/oauth-callback",
@@ -3301,6 +3662,7 @@ class CLIProxyEngineAdapter:
             flow.state = "verifying"
             return flow.snapshot()
 
+    @engine_operation
     async def cancel_oauth(self, flow_id: str) -> None:
         flow = self._get_flow(flow_id)
         async with flow.operation_lock:
@@ -3309,7 +3671,7 @@ class CLIProxyEngineAdapter:
                 return
             try:
                 client = await self._engine_call(self.supervisor.client)
-                await asyncio.to_thread(
+                await run_owned_in_thread(
                     client.management_request,
                     "DELETE",
                     "/oauth-session",
@@ -3321,6 +3683,7 @@ class CLIProxyEngineAdapter:
             flow.state = "cancelled"
             self._release_provider(flow)
 
+    @engine_operation
     async def invoke(
         self,
         source_id: str,
@@ -3332,7 +3695,7 @@ class CLIProxyEngineAdapter:
         on_admitted: Callable[[], None] | None = None,
     ) -> EngineInvokeHandle:
         async with self._routing_lock:
-            source = await asyncio.to_thread(self.state_store.get_source, source_id)
+            source = await run_owned_in_thread(self.state_store.get_source, source_id)
             if source is None:
                 raise EngineStateError("source is not registered")
             if source.allowed_origins and origin not in source.allowed_origins:
@@ -3352,7 +3715,9 @@ class CLIProxyEngineAdapter:
                         os_errno=local_os_errno(exc),
                     )
                 )
-            release = self._acquire_transport()
+            admitted_engine_release = await run_owned_in_thread(self.engine_release)
+            transport_lease = self._engine_admission.retain()
+            release = self._acquire_transport(transport_lease)
             request_sent = self._hold_unsent_request()
             try:
                 if on_admitted is not None:
@@ -3380,11 +3745,30 @@ class CLIProxyEngineAdapter:
                 # the first response byte arrives.
                 silence_bound_s=PROVIDER_SILENCE_TIMEOUT_S if origin == "vibey" else None,
             )
+            handle.engine_release = admitted_engine_release
+            transport_lease.abort = getattr(handle, "withdraw", handle.close_stream)
             if handle.outcome_available and engine_disowned_call(await handle.outcome()):
                 # The engine's last health check vouches for it no longer: the
                 # next admission checks it, finds the lost configuration, and
                 # restores it once the open streams end (#2753, #2755).
-                await asyncio.to_thread(self.supervisor.recheck_engine)
+                await run_owned_in_thread(self.supervisor.recheck_engine)
+            return handle
+        except InvokeCancelledError as exc:
+            release()
+            if not transport_lease.interrupted:
+                raise
+            # The transport already joined its cancellation cleanup. Publish a
+            # terminal withdrawal handle rather than erasing pre-handle wire
+            # facts in the generic admission cancellation translation. All
+            # service consumers meter this outcome exactly as a returned one.
+            handle = completed_handle(RawCallOutcome(
+                kind=RawOutcomeKind.NETWORK_ERROR, http_status=None,
+                error_code="engine_withdrawn", redacted_message=None,
+                stream_started=exc.observed.model_output_started,
+                model_id=model_id, source_id=source_id, usage=exc.observed.usage,
+                served_tier=exc.observed.served_tier,
+            ), observed=exc.observed)
+            handle.engine_release = admitted_engine_release
             return handle
         except BaseException:
             release()
@@ -3394,10 +3778,10 @@ class CLIProxyEngineAdapter:
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         flow.grant_write_possible = True
-        inventory = await asyncio.to_thread(_auth_inventory, client)
+        inventory = await run_owned_in_thread(_auth_inventory, client)
         provider_records = [record for record in inventory.values() if record.provider == flow.auth_provider]
         try:
-            foreign = await asyncio.to_thread(self._foreign_bound_identities, provider_records, flow.source_id)
+            foreign = await run_owned_in_thread(self._foreign_bound_identities, provider_records, flow.source_id)
         except EngineStateError:
             self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
             self._fail_flow(flow, "models.oauth.binding_failed")
@@ -3434,8 +3818,8 @@ class CLIProxyEngineAdapter:
             try:
                 # CPA only migrates Claude names while saving a new login.
                 # Restore the existing ref before ownership or cleanup decisions.
-                await asyncio.to_thread(self.state_store.reconcile_claude_login, auth.name)
-                foreign = await asyncio.to_thread(
+                await run_owned_in_thread(self.state_store.reconcile_claude_login, auth.name)
+                foreign = await run_owned_in_thread(
                     self._foreign_bound_identities, provider_records, flow.source_id,
                 )
             except (EngineStateError, OSError):
@@ -3458,7 +3842,7 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.account_already_added")
             return
         try:
-            existing_credential_ref = await asyncio.to_thread(
+            existing_credential_ref = await run_owned_in_thread(
                 self.state_store.oauth_credential_ref,
                 auth.name,
             )
@@ -3472,7 +3856,7 @@ class CLIProxyEngineAdapter:
         existing_source_id: str | None = None
         if existing_credential_ref is not None:
             try:
-                existing_credential = await asyncio.to_thread(
+                existing_credential = await run_owned_in_thread(
                     self.state_store.credential_metadata,
                     existing_credential_ref,
                 )
@@ -3484,7 +3868,7 @@ class CLIProxyEngineAdapter:
             existing_source_id = str(value) if value else None
 
         try:
-            credential_ref = await asyncio.to_thread(
+            credential_ref = await run_owned_in_thread(
                 self.state_store.bind_oauth_credential,
                 flow.source_id,
                 flow.vendor,
@@ -3510,7 +3894,7 @@ class CLIProxyEngineAdapter:
             return
 
         try:
-            credential = await asyncio.to_thread(
+            credential = await run_owned_in_thread(
                 self.state_store.credential_metadata,
                 credential_ref,
             )
@@ -3523,13 +3907,13 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.binding_failed")
             return
         try:
-            await asyncio.to_thread(
+            await run_owned_in_thread(
                 client.management_request,
                 "PATCH",
                 "/auth-files/fields",
                 payload={"name": auth.name, "prefix": credential["prefix"]},
             )
-            await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
+            await run_owned_in_thread(self.state_store.audit_auth_permissions, enforce=True)
         except (EngineClientError, EngineStateError):
             if existing_credential_ref is not None:
                 self._set_retained_material(
@@ -3590,7 +3974,7 @@ class CLIProxyEngineAdapter:
 
         # Atomic with the engine lifecycle, like ``_cleanup_oauth_material``.
         try:
-            return await asyncio.to_thread(self.supervisor.with_engine_excluded, remove)
+            return await run_owned_in_thread(self.supervisor.with_engine_excluded, remove)
         except EngineUnavailableError:
             return False
 
@@ -3610,13 +3994,13 @@ class CLIProxyEngineAdapter:
 
         # Atomic with the engine lifecycle: see ``revoke_credential``.
         try:
-            removed = await asyncio.to_thread(self.supervisor.with_engine_excluded, remove_grant)
+            removed = await run_owned_in_thread(self.supervisor.with_engine_excluded, remove_grant)
         except EngineUnavailableError:
             return False
         if not removed:
             return False
         try:
-            await asyncio.to_thread(
+            await run_owned_in_thread(
                 self.state_store.revoke_credential,
                 credential_ref,
             )
@@ -3669,6 +4053,8 @@ class CLIProxyEngineAdapter:
             cls._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
 
     def _release_provider(self, flow: _OAuthFlow) -> None:
+        if flow.lease is not None:
+            self._engine_admission.release(flow.lease)
         with self._oauth_lock:
             self._active_oauth_providers.discard(flow.auth_provider)
 
@@ -3696,7 +4082,7 @@ class CLIProxyEngineAdapter:
             self._mark_retention_unknown_if_needed(flow)
             flow.state = "failed"
             flow.error_key = "models.oauth.expired"
-            self._active_oauth_providers.discard(flow.auth_provider)
+            self._release_provider(flow)
 
 
 # A browser that cannot load the loopback callback page often copies its address

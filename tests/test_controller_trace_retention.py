@@ -230,8 +230,9 @@ def test_retention_pass_never_vacuums(monkeypatch) -> None:
     assert captured["days"] == 45
 
 
-def test_retention_loop_checks_before_first_sleep(monkeypatch) -> None:
-    """The first pass runs immediately, not after a full sleep interval."""
+@pytest.mark.parametrize("index_status, interval", [("pending", 1), ("idle", 60), ("unsupported", 60)])
+def test_retention_loop_checks_before_first_sleep(monkeypatch, index_status, interval) -> None:
+    """First retention pass is immediate; indexing alone controls the next check."""
     controller = Controller.__new__(Controller)
     calls: list[str] = []
 
@@ -240,8 +241,11 @@ def test_retention_loop_checks_before_first_sleep(monkeypatch) -> None:
         return {"status": "not_due"}
 
     monkeypatch.setattr(Controller, "_run_agent_events_retention_pass", _pass)
+    monkeypatch.setattr("storage.message_search_index.run_pass", lambda *args, **kwargs: index_status)
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: object())
 
     async def _sleep_once_then_cancel(seconds: float) -> None:
+        assert seconds == interval
         # First sleep (after the first pass) stops the loop immediately.
         raise asyncio.CancelledError
 
@@ -255,6 +259,41 @@ def test_retention_loop_checks_before_first_sleep(monkeypatch) -> None:
 
     asyncio.run(_run())
     assert calls == ["pass"]  # ran before any sleep
+
+
+def test_index_maintenance_failure_log_omits_message_and_sql_parameters(monkeypatch, caplog) -> None:
+    import sqlite3
+    from sqlalchemy.exc import DatabaseError
+
+    controller = Controller.__new__(Controller)
+    private_text = "private-message-body-9271"
+
+    def fail(*args, **kwargs):
+        raise DatabaseError("INSERT INTO message_search_fts VALUES (?)", (private_text,), sqlite3.DatabaseError(private_text))
+
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: object())
+    monkeypatch.setattr("storage.message_search_index.run_pass", fail)
+    monkeypatch.setattr(Controller, "_run_agent_events_retention_pass", lambda *args: {"status": "disabled"})
+    assert controller._run_background_storage_pass() == {"status": "disabled"}
+    assert "Message search index maintenance failed (DatabaseError" in caplog.text
+    assert private_text not in caplog.text
+    assert "INSERT INTO" not in caplog.text
+
+
+def test_index_checks_do_not_accelerate_hourly_retention_or_depend_on_opt_in(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    checks = []
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: object())
+    monkeypatch.setattr("storage.message_search_index.run_pass", lambda *args, **kwargs: checks.append("index") or "pending")
+    monkeypatch.setattr(Controller, "_run_agent_events_retention_pass", lambda *args: checks.append("retention") or {"status": "disabled"})
+    assert controller._run_background_storage_pass() == {"status": "disabled"}
+    now[0] = 10.0
+    assert controller._run_background_storage_pass() == {"status": "not_due"}
+    now[0] = 3601.0
+    assert controller._run_background_storage_pass() == {"status": "disabled"}
+    assert checks == ["index", "retention", "index", "index", "retention"]
 
 
 def test_retention_loop_cancellation_reaches_worker(monkeypatch) -> None:

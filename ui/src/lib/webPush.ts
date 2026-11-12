@@ -159,12 +159,19 @@ export function webPushSubscriptionUsesVapidKey(
   }
 }
 
+/**
+ * `registering`: the native shell holds a subscription the instance has not
+ * accepted yet, and the last attempt to register it failed for a reason that can
+ * pass (offline, a 5xx). It is not `enabled`: a test or a notification has no
+ * instance row to reach this device through until a later reconcile posts it.
+ */
 export type WebPushReconcileStatus =
   | 'unsupported'
   | 'needs_install'
   | 'disabled'
   | 'disable_pending'
   | 'disable_failed'
+  | 'registering'
   | 'enabled';
 
 export type WebPushReconcileResult = {
@@ -1404,8 +1411,13 @@ async function reconcileWebPushOnce(
         return { support, status: 'enabled' };
       }
       return { support, status: 'disabled' };
-    } catch {
-      return { support, status: 'disabled' };
+    } catch (error) {
+      return {
+        support,
+        status: nativeRegistrationAwaitsInstance(pendingRegistrationStore, error)
+          ? 'registering'
+          : 'disabled',
+      };
     }
   }
 
@@ -1472,6 +1484,43 @@ async function reconcileWebPushOnce(
     };
   } catch {
     return { support, status: 'disabled' };
+  }
+}
+
+/** Refusals: no later attempt with the same subscription and intent can succeed. */
+const NATIVE_PUSH_REFUSALS = new Set([
+  'native_push_disabled',
+  'native_push_stale_intent',
+  'native_push_registration_not_accepted',
+  'recovery_not_authorized',
+]);
+
+/**
+ * Whether a failed native reconcile left a subscription waiting for the instance
+ * that a retry can still register: the pending registration is written before
+ * its POST and cleared once the instance accepts it (or refuses it for good), so
+ * it is there exactly while the instance has yet to store this device. A refusal,
+ * or a 4xx other than a timeout or rate limit, will not pass on its own.
+ */
+function nativeRegistrationAwaitsInstance(
+  store: NativePushPendingRegistrationStore,
+  error: unknown,
+): boolean {
+  if (error instanceof Error && NATIVE_PUSH_REFUSALS.has(error.message)) return false;
+  const status = (error as { status?: unknown } | null)?.status;
+  if (
+    typeof status === 'number'
+    && status >= 400
+    && status < 500
+    && status !== 408
+    && status !== 429
+  ) {
+    return false;
+  }
+  try {
+    return store.read() !== null;
+  } catch {
+    return false;
   }
 }
 

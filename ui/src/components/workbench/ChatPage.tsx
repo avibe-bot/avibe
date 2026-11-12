@@ -79,6 +79,8 @@ import { AnnotationMessage } from './AnnotationMessage';
 import { FailureDetails } from './FailureDetails';
 import { FailureRetry, type FailureRetryOptions } from './FailureRetry';
 import { FailureNextStep } from './FailureNextStep';
+import { settingsOverlayContinuationState } from '../../lib/settingsOverlay';
+import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
 import { HARNESS_GROUP_RAIL, HarnessGroup, HarnessGroupCollapse } from './HarnessGroup';
@@ -4147,6 +4149,31 @@ const ActivityStrip: React.FC<{
   );
 };
 
+/** Opens Models from the queue strip, for those who manage the instance; nothing for anyone else,
+ *  whose failure notice already says who can fix it. */
+const QueueOpenModels: React.FC = () => {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { capabilities } = useInstanceAuthorization();
+  if (!capabilities.can_manage_instance) return null;
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      onClick={() => navigate(MODEL_HUB_SETTINGS_PATH, { state: settingsOverlayContinuationState(location) })}
+      className="h-6 justify-center px-2 text-[11px] text-cyan-ink"
+    >
+      {t('chat.queue.openModels')}
+      <ArrowRight className="size-3" aria-hidden="true" />
+    </Button>
+  );
+};
+
+/** Hold reasons that mean "no model to run on" (modules/agents/model_hub.py), not a failed start. */
+const NO_MODEL_RETRY_REASONS: ReadonlySet<string> = new Set(['model_supply_refusal', 'model_hub_disabled']);
+
 export const QueueStrip: React.FC<{
   queue: WorkbenchMessage[];
   onRemove: (id: string) => void;
@@ -4174,6 +4201,11 @@ export const QueueStrip: React.FC<{
   // Any other hold keeps the general guidance, so the special copy needs every hold to
   // share the reason.
   const agentUnavailable = retryRequired && held.every((item) => item.retry_reason === 'agent_unavailable');
+  // An input held because there is no model to run it on (``model_supply_refusal``, or the
+  // operator switched the Model Hub off) did not crash: it waits for a model. Where Models is
+  // the fix, the strip offers it beside Send now to a reader who can open it.
+  const noModel = retryRequired && held.every((item) => NO_MODEL_RETRY_REASONS.has(String(item.retry_reason)));
+  const offerModels = noModel && held.every((item) => item.retry_reason === 'model_supply_refusal');
   const headFenced = isQueueDeliveryFenced(queue[0]);
   const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;
@@ -4183,7 +4215,7 @@ export const QueueStrip: React.FC<{
   const buttonBusy = sendingNow || (headFenced && !reconciling);
   const waiting = rows.some((item) => !isQueueDeliveryFenced(item));
   const title = retryRequired
-    ? t('chat.queue.retryRequired', { count: rows.length })
+    ? t(noModel ? 'chat.queue.waitingForModel' : 'chat.queue.retryRequired', { count: rows.length })
     : botName
       ? t(waiting ? 'bots.conversation.notDelivered' : 'bots.conversation.delivering', { count: rows.length })
       : t('chat.queue.title', { count: rows.length });
@@ -4195,6 +4227,8 @@ export const QueueStrip: React.FC<{
             <Clock className="size-3" />
             {title}
           </span>
+          <span className="inline-flex items-center gap-1">
+          {offerModels && <QueueOpenModels />}
           <Button
             type="button"
             variant="ghost"
@@ -4217,13 +4251,16 @@ export const QueueStrip: React.FC<{
               t('chat.queue.sendNow')
             )}
           </Button>
+          </span>
         </div>
         {reconciling && (
           <p role="status" className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.sendReconciling')}</p>
         )}
         {retryRequired && (
           <p className="px-1 pb-1.5 text-[11px] text-muted">
-            {t(agentUnavailable ? 'chat.queue.retryHintAgentUnavailable' : 'chat.queue.retryHint')}
+            {t(agentUnavailable
+              ? 'chat.queue.retryHintAgentUnavailable'
+              : noModel ? 'chat.queue.retryHintNoModel' : 'chat.queue.retryHint')}
           </p>
         )}
         {/* Why the user's own message is still here: the Bot's Turn refused it. A

@@ -53,10 +53,30 @@ is held during HTTP. Publication rechecks both the live pairing and persisted
 request fence, so a late reply after unpair cannot recreate credentials.
 
 The caller supplies `allowed=True` only for owner opt-in plus fresh effective
-backend permission. Ordinary polls cannot override `direct_access_not_allowed`;
-`resume=True` is an explicit notification that fresh permission allows the
-instance again. `retry=True` retries a terminal failed order, while
-`rotate_key=True` requests a rotation; these are one-shot commands, not settings.
+backend permission and an installed transport. I3 always supplies both optional
+`expected_pairing_fingerprint` and `permission_deadline` arguments. The latter
+is a finite process-local monotonic deadline (receipt plus at most 15 minutes),
+never persisted or reused across a process/reboot. The initial config lock
+checks the expected pairing, persisted opt-in and deadline before any key or
+state allocation. After crypto/preparation, a short second config lock re-reads
+pairing/opt-in and checks the deadline immediately before admitting HTTP. The
+lock is released for the request. Publication checks them again as well as the
+persisted request fence; the lifecycle independently checks its generation and
+fresh permission before using a result.
+
+This prevents a worker waiting for the lock or preparing crypto from ordering
+under obsolete authority. It does not make an external request atomic with a
+future config write: a request admitted at final preflight can race a subsequent
+opt-out and is already authorized/in flight. Cancelling an asyncio waiter does
+not cancel its synchronous request. Local serving still stops without waiting
+for that request, and the explicit false runtime report independently informs
+the backend. Existing callers that omit both optional fences retain their
+previous contract; all I3 calls supply them.
+
+Ordinary polls cannot override `direct_access_not_allowed`; `resume=True` is an
+explicit notification that fresh permission allows the instance again.
+`retry=True` retries a terminal failed order, while `rotate_key=True` requests
+a rotation; these are one-shot commands, not settings.
 
 - First issuance and explicit rotation POST the locally persisted CSR with one
   exact DNS SAN: the host of the pairing's `public_url`. Lost replies/restarts

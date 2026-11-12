@@ -2174,6 +2174,13 @@ class ManagedWatchService:
         self._write_runtime_state()
 
     def _owns_service_instance(self) -> bool:
+        # Shutdown keeps the service lease while other runtime owners drain, before
+        # stop() cancels our tasks. A service-wide SIGTERM can already have ended a
+        # waiter in that gap. Quiesce now: that result is an interrupted cycle, not
+        # a waiter failure that may retire the durable Watch or queue a hook.
+        if getattr(self.controller, "shutdown_requested", False):
+            self._begin_stop()
+            return False
         if not self._requires_service_lease:
             return True
         if runtime.current_process_owns_service_instance():

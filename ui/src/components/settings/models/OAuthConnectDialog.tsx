@@ -21,10 +21,13 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { CopyButton } from '@/components/ui/copy-button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import type { TranslationKey } from '@/i18n/types';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
+import { SubscriptionTermsNote } from './SubscriptionTermsNote';
+import { callbackRedirect, pageOnAvibeMachine } from './oauthCallback';
 import {
   classifyOAuthFailure,
   createFlowAuthority,
@@ -54,7 +57,6 @@ import {
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
-  recommendedSubscriptionChannel,
   subscriptionChooser,
   subscriptionOptionOrder,
 } from './subscriptionOptions';
@@ -67,6 +69,9 @@ const DEADLINE_MS = 16 * 60 * 1000;
 
 type ConnectPhase = 'choose' | 'flow';
 
+
+/** How long step 2 stays folded after the person returns, before it offers the paste. */
+const CALLBACK_WAIT_MS = 10_000;
 
 const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = ({ n, label, children }) => (
   <div className="flex flex-col gap-2.5 rounded-lg border border-edge bg-surface-2/40 px-4 py-3 shadow-elevation-0">
@@ -228,7 +233,9 @@ export const OAuthConnectDialog: React.FC<{
     // A vendor with no chooser copy has no channel choice to put in front of the
     // user, so it opens straight into its flow — the same entry the re-auth
     // journey takes above.
-    setPhase(chooser === null ? 'flow' : 'choose');
+    // Nor does a choice with one option: it would ask the person to confirm the only
+    // thing there is (owner decision, 2026-11-11, item 2).
+    setPhase(chooser === null || hubOnly || subscriptionOptionOrder(vendor).length === 1 ? 'flow' : 'choose');
   }, [chooser, hubOnly, isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
 
   /**
@@ -621,6 +628,13 @@ export const OAuthConnectDialog: React.FC<{
     };
   }, [open, phase, startAttempt, vendor, channel, reauthId, t, showToast, isReauth, rowsBehindAreStale, resolvedAfterAttempt, journey, createClientNonce]);
 
+  // Step 2 of a loopback-redirect sign-in starts folded: a browser on this machine hands
+  // the callback to the gateway's local listener and the flow continues by itself.
+  // `used` is how the person last used step 1's link, and `pasteOpen` whether step 2
+  // shows its field. A new flow starts both over.
+  const [linkUse, setLinkUse] = React.useState<{ flowId: string; how: 'open' | 'copy' } | null>(null);
+  const [pasteOpenFor, setPasteOpenFor] = React.useState<string | null>(null);
+
   // 1-second ticker so the paste-flow countdown updates.
   React.useEffect(() => {
     if (!open) return;
@@ -715,6 +729,14 @@ export const OAuthConnectDialog: React.FC<{
   const { flow, errorKey, failureClass } = view;
   const presentation = flow?.presentation;
   const expects = presentation?.expects;
+  const callback = expects === 'paste_callback_url' ? callbackRedirect(presentation?.auth_url) : null;
+  // Folded only where the redirect can arrive by itself: a loopback address the
+  // gateway listens on. Anywhere else the paste is the only way back.
+  // ...and only on a page opened on the Avibe machine itself; one reached remotely
+  // signs in on another device, so the paste is the way back from the start.
+  const foldable = callback?.loopback === true && pageOnAvibeMachine();
+  const flowId = flow?.flow_id ?? null;
+  const pasteOpen = !foldable || (flowId !== null && pasteOpenFor === flowId);
   const isDevice = expects === 'none';
   const state = flow?.state;
   // A `success` state now means the Source exists: the server materializes it in
@@ -722,6 +744,32 @@ export const OAuthConnectDialog: React.FC<{
   // rendered state comes from the authority's landed view.
   const success = view.settled && flow?.state === 'success';
   const active = !view.settled;
+
+  // Nothing arrived ~10 s after the person came back with the link used: the browser is
+  // elsewhere, or the redirect could not reach this machine, so step 2 opens. The wait
+  // only runs while this page is on screen — opening the sign-in page hides it — so it
+  // measures time since they returned, not the time spent signing in.
+  const awaitingCallback = foldable && !pasteOpen && !!linkUse && linkUse.flowId === flowId
+    && flow?.state === 'awaiting_action' && !view.settled;
+  React.useEffect(() => {
+    if (!awaitingCallback || flowId === null) return;
+    let timer: number | null = null;
+    const arm = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      if (document.visibilityState === 'visible') {
+        timer = window.setTimeout(() => setPasteOpenFor(flowId), CALLBACK_WAIT_MS);
+      }
+    };
+    arm();
+    document.addEventListener('visibilitychange', arm);
+    window.addEventListener('focus', arm);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', arm);
+      window.removeEventListener('focus', arm);
+    };
+  }, [awaitingCallback, flowId]);
 
   const remainingMs = flow?.expires_at ? Math.max(0, new Date(flow.expires_at).getTime() - Date.now()) : null;
   const mmss =
@@ -746,7 +794,6 @@ export const OAuthConnectDialog: React.FC<{
   // interpolate i18n keys at the user. Narrowing on `chooser` here rather than on
   // a bare phase check is what makes that a type error, not a runtime one.
   const choosing = !isReauth && phase === 'choose' && chooser !== null;
-  const recommended = hubOnly ? 'hub' : recommendedSubscriptionChannel(vendor);
   const optionOrder: SupplyChannel[] = hubOnly ? ['hub'] : subscriptionOptionOrder(vendor);
   const optionRefs = React.useRef<Partial<Record<SupplyChannel, HTMLButtonElement | null>>>({});
   const selectableChannels = optionOrder.filter((candidate) => candidate !== 'native_cli' || !nativeSlotTaken);
@@ -768,6 +815,7 @@ export const OAuthConnectDialog: React.FC<{
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-add-sub-overlay fixed inset-0 z-50" />
           <DialogPrimitive.Content
+            onPointerDownOutside={keepOpenOnOutsideClick}
             className="model-hub-add-sub-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-y-auto border border-edge bg-popover p-0 shadow-elevation-3 outline-none"
             onOpenAutoFocus={(event) => {
               event.preventDefault();
@@ -798,11 +846,6 @@ export const OAuthConnectDialog: React.FC<{
                 const isNative = candidate === 'native_cli';
                 const disabled = isNative && nativeSlotTaken;
                 const selected = channel === candidate;
-                const badgeKey = disabled
-                  ? 'settings.models.addSub.opt.added'
-                  : candidate === recommended
-                    ? 'settings.models.addSub.badge.recommended'
-                    : 'settings.models.addSub.badge.secondary';
                 const optionKey = isNative ? 'native' : 'hub';
                 return (
                   <button
@@ -849,21 +892,15 @@ export const OAuthConnectDialog: React.FC<{
                         <span className="model-hub-add-sub-option-label font-semibold text-foreground">
                           {t(`settings.models.addSub.opt.${optionKey}.label`)}
                         </span>
-                        {(optionOrder.length > 1 || disabled) && (
+                        {disabled && (
                           <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
-                            {t(badgeKey)}
+                            {t('settings.models.addSub.opt.added')}
                           </span>
                         )}
                       </span>
                       <span className="model-hub-add-sub-description block text-muted">
                         {t(isNative ? 'settings.models.addSub.opt.native.desc.claude' : `settings.models.addSub.opt.hub.desc.${vendorCopy}`)}
                       </span>
-                      {vendorCopy === 'claude' && candidate === 'hub' && (
-                        <span className="model-hub-add-sub-risk flex items-start gap-2 border border-gold/30 bg-gold/10">
-                          <TriangleAlert className="mt-0.5 size-3 shrink-0" />
-                          <span>{t('settings.models.addSub.tos.claude')}</span>
-                        </span>
-                      )}
                     </span>
                   </button>
                 );
@@ -875,6 +912,7 @@ export const OAuthConnectDialog: React.FC<{
                 <span>{t('settings.models.addSub.hint.claude')}</span>
               </p>
             )}
+            {vendorCopy === 'claude' && channel === 'hub' && <SubscriptionTermsNote />}
           </div>
 
           <div className="model-hub-add-sub-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">
@@ -900,7 +938,7 @@ export const OAuthConnectDialog: React.FC<{
   return (
     <>
       <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-        <DialogContent className="max-w-[520px] gap-5">
+        <DialogContent keepOnOutsideClick className="max-w-[520px] gap-5">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2.5 text-[17px] font-bold">
               <span className={cn('grid size-8 shrink-0 place-items-center rounded-lg', ACCENT_TILE[accent])}>
@@ -979,16 +1017,33 @@ export const OAuthConnectDialog: React.FC<{
                   }
                 >
                   {presentation?.auth_url ? (
-                    <OAuthLinkRow url={presentation.auth_url} />
+                    <OAuthLinkRow
+                      url={presentation.auth_url}
+                      onUse={(how) => { if (flowId) setLinkUse({ flowId, how }); }}
+                    />
                   ) : (
                     <p className="text-[12px] text-muted">{t('settings.models.oauth.starting')}</p>
                   )}
                 </Step>
 
-                <Step n={2} label={step2Label}>
+                <Step n={2} label={pasteOpen ? step2Label : (t('settings.models.oauth.callback.auto') as string)}>
                   {isDevice ? (
                     <OAuthDeviceCodeRow code={presentation?.device_code ?? ''} />
+                  ) : !pasteOpen ? (
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="xs"
+                      className="h-auto self-start p-0"
+                      onClick={() => setPasteOpenFor(flowId)}
+                    >
+                      {t('settings.models.oauth.callback.pasteInstead')}
+                    </Button>
                   ) : (
+                    <>
+                    {callback && (
+                      <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.oauth.callback.cantConnect')}</p>
+                    )}
                     <OAuthSubmitRow
                       value={code}
                       onChange={(next) => {
@@ -999,11 +1054,16 @@ export const OAuthConnectDialog: React.FC<{
                       onSubmit={() => void submit()}
                       submitting={submitting || state === 'verifying'}
                       placeholder={
-                        expects === 'paste_callback_url' ? 'http://127.0.0.1:.../callback?code=…' : 'ac_…#st_…'
+                        expects === 'paste_callback_url'
+                          // The address the provider will send the browser to, as the
+                          // sign-in link itself names it.
+                          ? `${callback?.address ?? 'http://localhost:…/callback'}?code=…`
+                          : 'ac_…#st_…'
                       }
                       submitLabel={t('common.submit') as string}
                       submittingLabel={t('common.submitting') as string}
                     />
+                    </>
                   )}
                 </Step>
 

@@ -24,6 +24,64 @@ from tests.ui_server_test_helpers import csrf_headers
 from vibe import model_hub_client, ui_server
 
 
+@pytest.mark.parametrize('language', ['en', 'zh'])
+@pytest.mark.parametrize('listed', [True, False])
+@pytest.mark.parametrize('status', [400, 503])
+@pytest.mark.parametrize('has_detail', [True, False])
+def test_failed_passthrough_names_inventory_and_preserves_failure_outcome(tmp_path, language, listed, status, has_detail):
+    """Unlisted 503 keeps the failure copy without cooling the provider; listed 503 still does."""
+    source = _source('src_hint0001', (MODEL,) if listed else ())
+    config = _loaded_catalog_config('claude', MODEL, source)
+    service, store, adapter = _service(tmp_path, config)
+    adapter.outcomes.append(RawCallOutcome(
+        kind=RawOutcomeKind.HTTP_ERROR, http_status=status,
+        error_code='model_not_found' if status == 400 else None,
+        redacted_message=None, stream_started=False, model_id=MODEL, source_id=source.id,
+        upstream_detail=('No available accounts' if status == 503 else 'Model does not exist') if has_detail else None,
+    ))
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.resolve(backend='claude', model_id=MODEL, request={}))
+    projection = raised.value.turn_outcome
+    text = render_turn_outcome_copy(projection, language)
+    hint = "The provider doesn't list" if language == 'en' else '供应商的模型列表里没有'
+    assert (hint in text) is not listed
+    detail = ('No available accounts' if status == 503 else 'Model does not exist') if has_detail else ''
+    if not listed:
+        assert text == (
+            f"The provider doesn't list {MODEL}; try another model."
+            if language == 'en' else f'供应商的模型列表里没有 {MODEL}，换一个模型试试。'
+        )
+    else:
+        assert (('No available accounts' if status == 503 else 'Model does not exist') in text) is has_detail
+    # Shortening the summary must not discard the diagnostic projection.
+    if status == 503:
+        assert projection.last_upstream_failure.http_status == status
+        assert projection.last_upstream_failure.detail == detail
+    else:
+        assert (projection.upstream_detail or '') == detail
+    assert 'None' not in text
+    assert store.config.sources[0].state.status == ('cooldown' if status == 503 and listed else 'standby')
+    assert projection.outcome == ('exhausted' if status == 503 else 'failed_terminal')
+
+
+@pytest.mark.parametrize('language, phrase', [
+    ('en', 'credential invalid or lacks permission'), ('zh', '凭据无效或无权限'),
+])
+@pytest.mark.parametrize('status', [401, 403])
+def test_provider_auth_refusal_copy_does_not_assert_revocation(tmp_path, language, phrase, status):
+    source = _source('src_auth0001', (MODEL,))
+    service, _store, adapter = _service(tmp_path, _loaded_catalog_config('claude', MODEL, source))
+    adapter.outcomes.append(RawCallOutcome(
+        kind=RawOutcomeKind.HTTP_ERROR, http_status=status, error_code=None,
+        redacted_message=None, stream_started=False, model_id=MODEL, source_id=source.id,
+    ))
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.resolve(backend='claude', model_id=MODEL, request={}))
+    text = render_turn_outcome_copy(raised.value.turn_outcome, language)
+    assert phrase in text
+    assert 'revoked' not in text and '撤销' not in text and '吊销' not in text
+
+
 def _live_registry(tmp_path, callback=None):
     registry = TurnCorrelationRegistry(
         BoundedProvenanceStore(tmp_path / "records.json"), on_recovery_changed=callback,

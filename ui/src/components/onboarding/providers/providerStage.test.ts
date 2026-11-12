@@ -22,6 +22,7 @@ import {
   defaultSelection,
   gatewayEvidenceSettled,
   gatewayIntent,
+  nothingPassed,
   offeredImportKeys,
   pendingImportRows,
   providerAction,
@@ -30,9 +31,11 @@ import {
   providerSummary,
   reconcileSelection,
   slotSelected,
+  sourceCheckKey,
   toggleSlotSelection,
   unlistedDetected,
   usableSource,
+  type SourceCheck,
 } from './providerStage';
 
 const row = (over: Partial<MigrationItem>): MigrationItem => ({
@@ -1102,5 +1105,27 @@ describe('providerSetupAction', () => {
         expect(resolves(bundle, key), `${key} in ${locale}`).toBe(true);
       }
     }
+  });
+});
+
+describe('nothingPassed', () => {
+  const saved = source({ id: 'src_saved', vendor: 'anthropic', state: { status: 'standby' }, verification_pending: 'vp' });
+  const proven = source({ id: 'src_proven', vendor: 'openai', state: { status: 'active' } });
+  const checks = (check: SourceCheck) => new Map([[sourceCheckKey(saved), check]]);
+
+  it.each<[string, readonly Source[], ReadonlyMap<string, SourceCheck>, boolean]>([
+    ['nothing on the stage is no verdict', [], new Map(), false],
+    ['a check still out is no verdict yet', [saved], checks({ kind: 'checking' }), false],
+    ['a check not started is no verdict yet', [saved], new Map(), false],
+    ['a rejected key passes nothing', [saved], checks({ kind: 'rejected', status: 401 }), true],
+    ['an unanswered check passes nothing', [saved], checks({ kind: 'failed' }), true],
+    ['a listing with no models passes nothing', [saved], checks({ kind: 'connected', models: 0 }), true],
+    ['a listing with models passes', [saved], checks({ kind: 'connected', models: 3 }), false],
+    ['a source proven before this visit passes without a check', [saved, proven], checks({ kind: 'rejected', status: 401 }), false],
+    ['a working key whose list changed still passes', [{ ...saved, models: [{ id: 'm', origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null }] }], checks({ kind: 'changed', plan: { hops: [], gaps: [] } }), false],
+    ['a list change on a key that supplies nothing passes nothing', [saved], checks({ kind: 'changed', plan: { hops: [], gaps: [] } }), true],
+    ['a recovered source whose listing was empty still passes nothing', [{ ...saved, verification_pending: null }], checks({ kind: 'connected', models: 0 }), true],
+  ])('%s', (_name, sources, held, expected) => {
+    expect(nothingPassed(sources, held)).toBe(expected);
   });
 });

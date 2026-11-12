@@ -352,6 +352,27 @@
     },
     "errors": {
       "network": "暂时连不上 avibe.bot。检查网络后重试。"
+    },
+    "licenses": {
+      "about": "关于",
+      "title": "开源许可",
+      "intro": "Avibe App 包含以下开源组件。感谢它们的作者。",
+      "sourceTitle": "MPL-2.0 组件的源代码",
+      "sourceBody": "以下组件按 Mozilla Public License 2.0 分发，未作修改。可从 crates.io 归档或上游源代码获取它们的源代码。",
+      "family": "{{name}} 及 {{related}} 个相关组件，{{version}}",
+      "archives": "crates.io 归档：",
+      "archive": "crates.io 归档",
+      "archiveFor": "{{name}} 的 crates.io 归档",
+      "sourceCode": "源代码",
+      "sourceFor": "{{name}} 的源代码",
+      "texts": "许可文本",
+      "covers": "覆盖的组件",
+      "generated": "此列表随 App 构建时生成。",
+      "components_one": "{{count}} 个组件",
+      "components_other": "{{count}} 个组件",
+      "crate": "{{name}} {{version}}",
+      "withAuthors": "{{crate}}（{{authors}}）",
+      "separator": "、"
     }
   },
   "common": {
@@ -863,8 +884,8 @@
       "gatewayOff": "模型网关已关闭，{{name}} 没有可用的模型。",
       "hubDisabled": "模型网关已停用",
       "hubDisabledNotice": "本实例已停用模型网关，{{name}} 没有可用的模型。",
-      "noModelSource": "无模型来源",
-      "noModelSourceNotice": "{{name}} 通过模型网关获取模型，请在「模型」页添加来源。",
+      "noModelSource": "无供应商",
+      "noModelSourceNotice": "{{name}} 通过模型网关获取模型，请在「模型」页添加供应商。",
       "builtinBadge": "内置",
       "openProviderPage": "配置 Provider",
       "providerOauth": "OAuth(默认)",
@@ -1167,8 +1188,8 @@
         "unread": "模型网关状态不可用",
         "notStarted": "模型网关尚未就绪",
         "notInstalled": "模型网关组件未安装",
-        "allDirect_one": "{{count}} 个后端都在直连",
-        "allDirect_other": "{{count}} 个后端都在直连",
+        "allDirect_one": "{{count}} 个后端都由 Agent 管理",
+        "allDirect_other": "{{count}} 个后端都由 Agent 管理",
         "starting": "正在启动…",
         "unsupported": "当前平台不支持模型网关",
         "closed": {
@@ -1219,11 +1240,11 @@
       },
       "direct": {
         "card": {
-          "current": "当前：直连",
+          "current": "当前：Agent 管理",
           "current.sub": "每个 Agent 后端使用自己的登录，直接连接模型供应商。"
         },
         "pill": {
-          "direct": "直连"
+          "direct": "Agent 管理"
         },
         "backend": {
           "claude": {
@@ -1237,7 +1258,7 @@
           }
         },
         "action": {
-          "switchToGateway": "切换到模型网关",
+          "switchToGateway": "交给模型网关管理",
           "refreshAgents": "重新检测 Agent 后端"
         },
         "benefits": {
@@ -1250,7 +1271,7 @@
           "3.detail": "哪个后端使用哪个供应商的哪个模型，都可以任意搭配。"
         },
         "note": {
-          "perBackend": "逐个后端切换，互不影响——其余后端保持直连。切换后随时可以切换回直连。"
+          "perBackend": "逐个后端切换，互不影响——其余后端仍由 Agent 管理。切换后随时可以切换回来。"
         },
         "empty": {
           "title": "这台机器上没有找到 Agent 后端",
@@ -1264,17 +1285,18 @@
         "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用匹配的供应商；未匹配时向符合条件的 API Key 供应商透传。",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
-        "switchToGateway": "切换到模型网关",
-        "switchToDirect": "切到直连",
+        "addModel": "添加模型",
+        "switchToGateway": "交给模型网关管理",
+        "switchToDirect": "改为 Agent 管理",
         "modeMenu": {
           "title": "运行模式",
-          "gatewayCurrent": "网关（当前）",
+          "gatewayCurrent": "托管（当前）",
           "gatewayDescription": "按路由与优先级分配到模型供应商",
           "directDescription": "改用 {{backend}} 自带的模型与凭据，路由与优先级不再生效"
         },
         "fail": {
-          "switchToDirect": "没能切回直连",
-          "switchToGateway": "没能切换到模型网关"
+          "switchToDirect": "没能改为 Agent 管理",
+          "switchToGateway": "没能交给模型网关管理"
         },
         "modelCount_one": "{{count}} 个模型",
         "modelCount_other": "{{count}} 个模型",
@@ -1313,8 +1335,8 @@
             "gateway": "{{mode}} · {{health}}"
           },
           "mode": {
-            "direct": "直连",
-            "gateway": "网关"
+            "direct": "Agent 管理",
+            "gateway": "托管"
           },
           "status": {
             "ok": "正常",
@@ -1345,6 +1367,7 @@
           "guardSubtitleInUse": "仍有 Agent 在使用这些模型。移除后，需要为这些 Agent 改选其他模型才能继续运行。",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
+          "searchAdd": "在供应商和模型目录里搜索「{{query}}」",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
           "baselineUnavailable": "没能读取这个后端的模型列表。",
           "save": "保存",
@@ -1367,7 +1390,9 @@
           "moved_other": "已把 {{model}} 移到第 {{position}} / {{count}} 位。",
           "dropped_one": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
           "dropped_other": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
-          "grabCancelled": "已取消移动 {{model}}，位置已还原。"
+          "grabCancelled": "已取消移动 {{model}}，位置已还原。",
+          "added_one": "已添加 {{model}}",
+          "added_other": "已添加 {{count}} 个模型"
         },
         "picker": {
           "title": "添加 {{backend}} 模型",
@@ -1379,12 +1404,17 @@
           "groupBuiltin": "{{backend}} 内置",
           "groupProviders": "来自你的供应商",
           "groupListed": "已在列表中",
-          "noMatch": "没有匹配的模型。",
+          "noMatch": "你的供应商和模型目录里都没有这个模型。",
           "unavailable": "没能读取可添加的模型。",
-          "customFromQuery": "把「{{query}}」添加为自定义模型…",
+          "customFromQuery": "把「{{query}}」添加为自定义模型",
           "custom": "添加自定义模型…",
           "confirm_one": "添加 {{count}} 个模型",
-          "confirm_other": "添加 {{count}} 个模型"
+          "confirm_other": "添加 {{count}} 个模型",
+          "groupCatalog": "模型目录",
+          "catalogNote": "你的供应商没有列出这些模型。添加后按原 ID 发给供应商；供应商不支持时，对话里会告诉你。",
+          "notListed": "供应商未列出",
+          "customFromQueryNote": "模型 ID 按你输入的原样使用，参数取默认值，以后可以在「管理模型」里改。",
+          "searchingCatalog": "正在搜索模型目录"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · 模型列表",
@@ -1485,7 +1515,7 @@
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
-          "native": "Agent 管理",
+          "native": "Agent 管理 · 本机",
           "hub": "模型网关管理"
         },
         "kind": {
@@ -1520,10 +1550,6 @@
           "gemini": "Gemini",
           "kimi": "Kimi",
           "xai": "xAI"
-        },
-        "recommendation": {
-          "native": "推荐由 Agent 管理",
-          "gateway": "推荐由模型网关管理"
         }
       },
       "sources": {
@@ -1532,7 +1558,7 @@
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
-          "native": "Agent 管理",
+          "native": "Agent 管理 · 本机",
           "hub": "模型网关管理"
         },
         "subtitle": "管理全局共用的供应商和模型；供应商优先级在各 Agent 卡片中调整",
@@ -1873,10 +1899,8 @@
         "filters": {
           "source": "供应商",
           "model": "模型",
-          "all": "全部{{label}}",
           "selected_one": "{{label}} · 已选 {{count}} 个",
           "selected_other": "{{label}} · 已选 {{count}} 个",
-          "search": "搜索{{label}}",
           "noMatch": "没有匹配项",
           "hint": "多选会同步更新整份报表",
           "reset": "重置筛选",
@@ -1885,7 +1909,9 @@
           "sourceCount_one": "{{count}} 个供应商",
           "sourceCount_other": "{{count}} 个供应商",
           "modelCount_one": "{{count}} 个模型",
-          "modelCount_other": "{{count}} 个模型"
+          "modelCount_other": "{{count}} 个模型",
+          "searchSources": "搜索供应商",
+          "searchModels": "搜索模型"
         },
         "stats": {
           "tokens": "全部 Tokens",
@@ -2014,8 +2040,8 @@
         "label": "使用："
       },
       "mode": {
-        "hub": "模型网关",
-        "direct": "直连 Direct"
+        "hub": "模型网关管理",
+        "direct": "Agent 管理"
       },
       "errors": {
         "engineDown": "模型网关未就绪，请稍后重试",
@@ -2031,7 +2057,7 @@
         "title": "Agent",
         "subtitle": "各自选择供应商和优先级；失败时自动切换",
         "backendSettings": "后端设置",
-        "connectHub": "切换到模型网关",
+        "connectHub": "交给模型网关管理",
         "modelCount_one": "{{count}} 个模型",
         "modelCount_other": "{{count}} 个模型",
         "hubNoSupply": "已使用模型网关 · 没有启用任何供应商，下一个回合会失败",
@@ -2057,7 +2083,7 @@
         "cooldown": "等待重试（自动恢复）",
         "needsAction": "需要处理",
         "checking": "正在确认",
-        "direct": "直连",
+        "direct": "Agent 管理",
         "noSource": "没有可用供应商",
         "blocked": "当前供应商不可用",
         "currentSwitched": "已自动切换到 {{source}}",
@@ -2144,17 +2170,16 @@
         "deletedSource": "已删除"
       },
       "addKey": {
-        "saveFirstHint": "保存供应商时会尝试拉取模型列表。测试是可选的，可在添加后进行。",
         "title": "添加 API Key",
         "subtitle": "API Key 与模型接口",
         "field": {
-          "vendor": "服务商",
-          "vendor.custom": "自定义 · 兼容端点",
-          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，预填官方地址并钉死接口",
-          "vendor.search": "搜索服务商",
-          "vendor.empty": "没有同名的服务商",
+          "vendor": "供应商",
+          "vendor.custom": "其他供应商 · 自己填写地址",
+          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址和 API 格式",
+          "vendor.search": "搜索供应商",
+          "vendor.empty": "没有同名的供应商",
           "name": "名称(可选)",
-          "protocol": "接口类型",
+          "protocol": "API 格式",
           "protocol.hint": "指定接口不代表凭证有效，也不代表实际模型调用兼容",
           "baseUrl": "Base URL",
           "baseUrl.hint": "填写 API 根地址，例如 https://api.example.com/v1；只填域名时使用标准 /v1 路径",
@@ -2176,7 +2201,7 @@
         "fail": {
           "subtitle": "实际模型调用仍未验证",
           "auth": "供应商拒绝了这个凭据",
-          "auth.detail": "检查 API Key、接口类型和 Base URL 的 API 根路径",
+          "auth.detail": "检查 API Key、API 格式和 Base URL 的 API 根路径",
           "address": "地址不对:404 Not Found",
           "network": "无法连接到该地址(不可达或超时)",
           "undetermined": "已连接，但无法确认这是哪种模型接口",
@@ -2198,12 +2223,15 @@
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
           "search": "搜索服务",
-          "idleHint": "填好 Base URL 和 API Key 后自动识别",
-          "detecting": "识别接口中…",
-          "manual": "手动指定接口类型",
+          "idleHint": "填好 Base URL 和 API Key 后自动识别，不影响保存。",
+          "detecting": "正在识别 API 格式…不用等它也能保存。",
+          "manual": "手动选择 API 格式",
           "catalogPinned": "内置目录",
           "catalogPinned.hint": "接口由内置目录指定；凭证是否有效仍需单独验证",
-          "declared": "手动指定"
+          "declared": "手动指定",
+          "detected": "已识别为 {{format}}",
+          "unrecognised": "没能识别 API 格式，先用 {{format}}；不对的话可以换一个。",
+          "unrecognisedRejected": "这个地址拒绝了这个 Key，没能识别 API 格式；先用 {{format}}。"
         },
         "inventory": {
           "title": "接口已经识别，但这次没有拿到模型清单"
@@ -2237,17 +2265,14 @@
           "hub": {
             "label": "添加为模型供应商",
             "desc": {
-              "claude": "由模型网关管理这个订阅，让 Codex、OpenCode 等其他 Agent 使用。",
+              "claude": "由模型网关管理这个订阅，Vibey、Codex、OpenCode 等都能用。",
               "chatgpt": "由模型网关管理这个订阅，让 Codex 和其他 Agent 使用；用量、额度和自动切换都能看到。"
             }
           }
         },
-        "badge": {
-          "recommended": "推荐",
-          "secondary": "次选"
-        },
         "tos": {
-          "claude": "订阅条款只授权你本人在 Claude 官方客户端里使用。转供其他 Agent 属于超范围使用，账号可能被限制。"
+          "claude": "Anthropic 的订阅条款只覆盖它自己的应用。",
+          "learnMore": "了解更多"
         },
         "hint": {
           "claude": "两条都要也可以，分两次添加。"
@@ -2285,7 +2310,10 @@
         "callback": {
           "hint": "登录后，把浏览器最终停留的回调地址粘贴回来",
           "rejected": "这不是授权完成后的回调地址。请粘贴登录同意后浏览器地址栏里的完整网址（包含 code=），改好后重新提交。",
-          "otherAttempt": "这个地址来自之前的登录链接，在这里用不了。请用上面第 1 步里当前的链接重新登录，再粘贴登录后的完整网址。"
+          "otherAttempt": "这个地址来自之前的登录链接，在这里用不了。请用上面第 1 步里当前的链接重新登录，再粘贴登录后的完整网址。",
+          "cantConnect": "登录后页面可能显示无法连接，这是正常的：复制地址栏里的完整地址，粘贴到这里。",
+          "auto": "在运行 Avibe 的这台电脑上登录？登录后这里会自动继续。",
+          "pasteInstead": "改为粘贴地址"
         },
         "deviceCode": {
           "hint": "在那个页面输入设备码，这里会自动继续"
@@ -2307,7 +2335,9 @@
             "show": "查看详情",
             "hide": "收起详情"
           }
-        }
+        },
+        "openSignIn": "打开登录页面",
+        "copyLink": "复制链接"
       },
       "toast": {
         "reorderFailed": "顺序保存失败",
@@ -2324,21 +2354,21 @@
       },
       "supplyMode": {
         "title": "模型管理方式",
-        "currentHub": "当前：模型网关",
-        "currentDirect": "当前：直连 Direct",
-        "switchedHub": "已切换到模型网关",
-        "switchedDirect": "已切换到直连 Direct",
+        "currentHub": "当前：模型网关管理",
+        "currentDirect": "当前：Agent 管理",
+        "switchedHub": "已交给模型网关管理",
+        "switchedDirect": "已改为 Agent 管理",
         "switchFailed": "切换失败，请重试",
         "hub": {
-          "title": "模型网关 · Gateway",
+          "title": "模型网关管理",
           "recommended": "推荐 · 默认",
           "openModels": "打开模型页",
           "description": "登录、API Key 和模型路由都在「设置 → 模型」中管理。"
         },
         "direct": {
-          "title": "直连模式 · Direct",
+          "title": "Agent 管理",
           "description": "{{backend}} 使用自己的配置，Avibe 不接管认证和模型路由。",
-          "detected": "检测到现有直连配置：{{detail}}，可一键导入模型网关",
+          "detected": "检测到现有配置：{{detail}}，可一键导入模型网关",
           "import": "导入模型网关…"
         },
         "fixHint": "去「模型」页添加或启用供应商即可恢复。",
@@ -2365,7 +2395,7 @@
           "helper": "密钥由脚本生成，无法读取。",
           "token": "不支持这种登录令牌。",
           "headers": "不支持自定义请求头。",
-          "transport": "网关无法按这种方式发送密钥。",
+          "transport": "模型网关无法按这种方式发送密钥。",
           "fallback": "暂不支持迁移，请手动添加。"
         },
         "applying": "迁移中…",
@@ -2434,7 +2464,7 @@
           "needsAction": {
             "oauthExpired": "需要重新登录",
             "balanceExhausted": "余额用完",
-            "credentialRevoked": "凭据被吊销",
+            "credentialRevoked": "无效或无权限",
             "accountBanned": "账号被限制",
             "planExcludesProduct": "套餐不含 Codex",
             "spendLimitReached": "已达用量上限"
@@ -2451,7 +2481,7 @@
         "summary_other": "{{host}} · {{count}} 个模型",
         "action": {
           "refetch": "重新拉取",
-          "addModel": "添加模型"
+          "addModel": "补充模型 ID"
         },
         "manage": {
           "label": "管理 {{source}}",
@@ -2494,7 +2524,9 @@
           "edit": "编辑 {{model}} 的推理强度"
         },
         "fail": {
-          "refetch": "拉取没有回来，下面是这一页最后一次真的读到的列表",
+          "refetch": "模型拉取失败，下面保留上次的模型列表。",
+          "upstreamStatus": "HTTP {{status}}",
+          "upstreamError": "HTTP {{status}} · {{detail}}",
           "tier": "档位没保存上",
           "tierManaged": "这个模型的档位是自动确定的，这次改动没有保存",
           "addModel": "这个模型没有添加",
@@ -2534,7 +2566,7 @@
         },
         "empty": "这个供应商没有返回模型。可以手动添加，或重新拉取。",
         "emptyNeverFetched": "还没有成功拉取过这个供应商的模型列表。先处理上面的状态，再拉一次，或者手动添加一个模型。",
-        "footnote": "这里只管理这个供应商提供哪些模型。模型使用哪条路由，在路由模块中调整。供应商或内置目录声明的档位不能改；其余由你填写。接口类型在添加时确认并固定，页面会显示但不能修改。"
+        "footnote": "这里只管理这个供应商提供哪些模型。模型使用哪条路由，在路由模块中调整。供应商或内置目录声明的档位不能改；其余由你填写。API 格式在添加时确认并固定，页面会显示但不能修改。"
       },
       "guard": {
         "label": "会被移除的路由项",
@@ -2783,7 +2815,7 @@
         "viewOrder": "查看读取顺序",
         "price": "${{usd}} / 千页",
         "egress": "本机读取直接从此 Avibe 运行时访问网页，网站会看到它的出口 IP 和浏览器式请求；交给服务读取时，服务会收到网址。",
-        "custody": "已配置服务的密钥由网关保管；本机、Exa（免费）和 Jina Reader（免费）都不需要密钥。",
+        "custody": "已配置服务的密钥由模型网关保管；本机、Exa（免费）和 Jina Reader（免费）都不需要密钥。",
         "vendorName": {
           "local": "本机",
           "exa-mcp": "Exa（免费）",
@@ -2841,9 +2873,9 @@
         "priceDate": "API 标价 · {{date}}",
         "builtInPrice": "内置 · 无需密钥或设置",
         "priceNote": "价格为目录标注日期的 API 标价，免费额度、套餐与实际账单可能不同。",
-        "custody": "搜索服务的密钥和其他供应商一样由网关保管，不会交给模型或 Agent。",
+        "custody": "搜索服务的密钥和其他供应商一样由模型网关保管，不会交给模型或 Agent。",
         "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 {{endpoint}}，该服务可看到该连接的 IP。",
-        "keylessCustody": "已添加服务的密钥由网关保管；免费内置服务无需密钥，也不会把密钥交给模型或 Agent。",
+        "keylessCustody": "已添加服务的密钥由模型网关保管；免费内置服务无需密钥，也不会把密钥交给模型或 Agent。",
         "queryDestination": "搜索词会发送给执行搜索的服务。",
         "queryVendor": "搜索词会发送给 {{vendor}}。",
         "placement": "新增搜索服务会排在模型代搜之前，已保存的顺序也一样；可在 工具 › 网页搜索 中调整顺序。",
@@ -2896,7 +2928,7 @@
         },
         "noKey": "无需密钥",
         "priceFootnote": "价格为 API 标价；模型代搜另计模型 token，实际以账单为准。",
-        "custodyShort": "密钥只保存在网关，不会交给模型",
+        "custodyShort": "密钥只保存在模型网关，不会交给模型",
         "orderAbout": "关于搜索顺序"
       },
       "capability": {
@@ -3102,7 +3134,7 @@
       "needs_action": {
         "oauth_expired": "需要重新登录",
         "balance_exhausted": "余额不足，需要充值",
-        "credential_revoked": "凭据已失效，需要重新填写",
+        "credential_revoked": "凭据无效或无权限，请检查或更换",
         "account_banned": "账号被限制使用",
         "plan_excludes_product": "套餐不含 Codex，需要升级套餐或改用其他供应商",
         "spend_limit_reached": "已达用量上限，需要提高上限或改用其他供应商"
@@ -3272,11 +3304,13 @@
     "provider_rerank_response_invalid": "重排序提供商返回了无效响应。",
     "provider_unavailable": "提供商不可用。",
     "provider_error": "提供商拒绝了请求。",
-    "endpoint_not_configured": "尚未配置提供商端点。"
+    "endpoint_not_configured": "尚未配置提供商端点。",
+    "avault_upgrade_required": "这需要更新的 avault。请先在「设置 → 依赖」中更新。",
+    "sandbox_curve_unsupported": "当前 Avibe 的安全沙箱还不能创建 Solana 密钥，没有保存任何内容。请更新 Avibe 后重试。"
   },
   "modelHub": {
     "errors": {
-      "authentication_failed": "API Key 无效，请检查后重试。",
+      "authentication_failed": "API Key 无效或无权限，请检查或更换。",
       "credential_replacement_unverified": "暂时无法验证新密钥，原密钥未改动，请稍后重试",
       "source_model_tiers_managed": "这个模型的档位是自动确定的，这次改动没有保存"
     }
@@ -3831,6 +3865,7 @@
         "enable": "开启通知",
         "enabled": "通知已开启",
         "enabledPwa": "PWA 通知已开启",
+        "registering": "正在登记这台设备…",
         "disable": "关闭",
         "disablePending": "通知已关闭，设备清理仍在等待完成。",
         "disableFailed": "通知已关闭，但无法确认清理结果，请稍后重试。",
@@ -3840,6 +3875,7 @@
         "testBody": "通知已经准备好了。",
         "testSent": "测试通知已发送",
         "testFailed": "测试通知发送失败",
+        "testRegistering": "还在登记这台设备，稍等一下再试",
         "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
       },
       "navUnread": "收件箱，{{count}} 条未读",
@@ -5638,6 +5674,10 @@
       "sheetTitle": "Agent 与模型",
       "model": "模型",
       "effort": "思考强度",
+      "effortDefault": "默认",
+      "effortDefaultHint": "使用模型自己的设置",
+      "effortDefaultNamed": "默认（{{effort}}）",
+      "effortDefaultAgentHint": "使用 Agent 的设置",
       "effortNotOn": "{{sources}} 不支持",
       "effortNotOnSome": "部分供应商不支持",
       "effortRefused": "当前没有供应商支持 · 可在模型 → 供应商中清除",
@@ -5893,9 +5933,9 @@
         "nativeInterrupted": "自带搜索中断，已改用 {{provider}}。",
         "interruption": {
           "message": "模型回复中断：{{reason}}",
-          "overloaded": "上游服务过载",
+          "overloaded": "供应商服务过载",
           "disconnected": "连接中断",
-          "upstream": "上游服务异常",
+          "upstream": "供应商服务异常",
           "retried": "已自动重试",
           "retriedLabel": "· 已自动重试"
         },
@@ -5976,6 +6016,9 @@
       "retryRequired": "等待手动重试 · {{count}}",
       "retryHint": "启动失败，自动重试已停止，原输入已保留。排查错误后，点击“立即发送”或失败提示上的“重试”。",
       "retryHintAgentUnavailable": "Agent 无法运行，原输入已保留。可以点失败提示上的“切换到 Vibey 继续”，或在 Agent 恢复后点“立即发送”。",
+      "waitingForModel": "等待接上模型 · {{count}}",
+      "retryHintNoModel": "接上模型后再发送。",
+      "openModels": "去接模型",
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
       "sendingNow": "发送中…",
@@ -6027,7 +6070,7 @@
         "recovery": "恢复中",
         "manual": "手动切换",
         "credential_expired": "凭据已过期",
-        "credential_revoked": "凭据已吊销",
+        "credential_revoked": "凭据无效或无权限",
         "balance_exhausted": "余额不足",
         "account_banned": "账号被封禁",
         "plan_excludes_product": "套餐不含此产品",
@@ -6121,7 +6164,7 @@
     "sort": {
       "label": "排序",
       "name": "名称",
-      "recent": "最近使用",
+      "recent": "最近活跃",
       "added": "最近添加"
     },
     "grants": {
@@ -6307,6 +6350,15 @@
       "signingAddressesUnavailable": "无法为该密钥推导地址。",
       "signingAddressesHint": "由密钥推导得到。标准档 Bitcoin Taproot 使用 schnorr-secp256k1-bip341-keypath，需要另行安装支持该方案的 avault；较旧的 avault 会安全失败，绝不会回退到原始 BIP340。保护档 Bitcoin 仅支持兼容沙箱中的类型化、受限 Taproot 密钥路径审批；网络标签只是请求方选择，不是链上证明。",
       "signingNeedsAvault": "签名密钥需要安装 avault {{version}} 或更新版本。",
+      "chainLabel": "链",
+      "chainEvmBitcoin": "EVM / Bitcoin",
+      "chainSolana": "Solana",
+      "solanaGenerateHelp": "Solana 密钥由本机 avault 生成并就地封存，Avibe 和浏览器只会看到它的地址。",
+      "solanaGenerateHint": "保存时生成新密钥，保存后会显示地址。",
+      "solanaImportPlaceholder": "粘贴 Solana CLI 密钥对（64 个数字的 JSON 数组）或 base58 私钥",
+      "solanaImportHelp": "私钥在浏览器中加密后交给 avault 校验，保存后会显示地址。不支持助记词。",
+      "solanaProtectedHelp": "在沙箱内新生成一把 Solana 密钥并就地封存。只有密文和这把密钥的公钥（即它的地址）会到达 Avibe，私钥绝不离开沙箱。",
+      "solanaProtectedBornHint": "私钥在沙箱内生成，从未进入本应用。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。请先安装兼容的 avault 发布版，再保存标准密钥。",
       "browserSealingPending": "浏览器侧封箱需要兼容的 avault 发布版。这个 UI 永远不会把明文值发送给 Python。",
@@ -6352,7 +6404,8 @@
         "fileReadFailed": "读取文件失败。",
         "secretExists": "同名密钥已存在。",
         "secretNameCaseConflict": "已有密钥使用了仅大小写不同的名称。",
-        "updateFailed": "保存失败,请重试。"
+        "updateFailed": "保存失败,请重试。",
+        "solanaImportFailed": "导入失败。请确认粘贴的是 Solana CLI 密钥对或 base58 私钥，然后重试。"
       }
     },
     "requests": {
@@ -6394,6 +6447,11 @@
       "message": "待签名消息",
       "copyMessage": "复制待签名消息",
       "emptyMessage": "空消息（0 字节）",
+      "messageBytes_one": "{{count}} 字节",
+      "messageBytes_other": "{{count}} 字节",
+      "details": "详情",
+      "detailsAddress": "签名地址（Solana）",
+      "detailsMessage": "完整的待签名字节（十六进制）",
       "source": "来源",
       "sourceTag": "标签 · {{name}}",
       "sourceSkill": "技能 · {{name}}",
@@ -6661,9 +6719,9 @@
       "subscriptionConnectedHint": "订阅已保存，进入工作台即可使用",
       "api_keyConnectedHint": "API Key 已保存，进入工作台即可使用",
       "forNamed": "用于 {{name}}",
-      "configureRoute": "配置模型路由",
+      "configureRoute": "选择模型",
       "defaultModel": "默认模型",
-      "defaultModelNamed": "{{name}} 的模型路由，查看并调整顺序",
+      "defaultModelNamed": "{{name}} 的默认模型，点击更换",
       "noteEnabled": "使用模型网关路由",
       "notEnabled": "未启用",
       "installAndEnable": "安装并启用",
@@ -6682,9 +6740,10 @@
       "noteBuiltinUnset": "还没有模型，选一个即可开始",
       "noteGatewayOff": "模型网关已关闭，{{name}} 需要它才能运行",
       "noteHubDisabled": "本实例已停用模型网关，{{name}} 需要它才能运行",
-      "noteNoSource": "还没有模型来源供给 {{name}}。",
+      "noteNoSource": "还没有供应商为 {{name}} 提供模型。",
       "pickModelNamed": "为 {{name}} 选择模型",
       "allModels": "全部模型…",
+      "recommended": "推荐",
       "modelsUnreadable": "未能读取模型",
       "noModelsToPick": "还没有供应商提供模型",
       "suppliersChanged": "该模型的供应商已变化，请重新选择",
@@ -6753,7 +6812,7 @@
       "enter": "进入工作台",
       "entryHint": "添加任意一个订阅或 API Key，即可进入工作台",
       "sourceRequired": "请先添加订阅或 API Key，再选择 AI 助手。",
-      "addSource": "添加模型来源",
+      "addSource": "添加供应商",
       "entryFailed": "无法确认可用助手，请刷新后重试",
       "addSubscription": "添加订阅 / 登录",
       "addKey": "添加 API Key",
@@ -6796,11 +6855,40 @@
       "gatewayNotReady": "模型网关未就绪，请重试",
       "cardKeyDetected": "检测到 API Key {{mask}}",
       "cardKeyAdded": "API Key {{mask}}",
-      "cardImported": "已接入网关",
+      "cardImported": "已接入模型网关",
       "cardNotAdded": "待添加",
       "cardSelected": "已选中",
       "cardUseExistingNamed": "使用 {{name}} 的已有配置",
       "cardAddSubscriptionNamed": "添加 {{name}} 的订阅或 API Key",
+      "cardChecking": "检查中…",
+      "cardConnected_one": "已连接 · {{count}} 个模型",
+      "cardConnected_other": "已连接 · {{count}} 个模型",
+      "cardRejectedStatus": "Key 被拒绝（{{status}}）· 重新填写",
+      "cardRejected": "Key 被拒绝 · 重新填写",
+      "cardCheckFailed": "无法检查这个 Key · 再试一次",
+      "cardListChanged": "模型列表有变化 · 查看",
+      "cardEditNamed": "修改或移除 {{name}}",
+      "nothingPassed": "还没有供应商通过检查，助手暂时没有可用的模型",
+      "editKeyTitleNamed": "{{name}} API Key",
+      "editSubscriptionTitleNamed": "{{name}} 订阅",
+      "editStatus": "{{key}} · {{check}}",
+      "editKeyLabel": "新的 API Key",
+      "editKeyNote": "保存时会向 {{name}} 检查新 Key；如果被拒绝，当前的 Key 保持不变",
+      "editSubscriptionNote": "要换一个账号，请先移除这个，再重新登录",
+      "editSave": "保存并检查",
+      "editSaving": "正在检查新 Key…",
+      "editRejectedStatus": "API Key 无效或无权限（{{status}}），请检查或更换。",
+      "editRejected": "API Key 无效或无权限，请检查或更换。",
+      "editSaveFailed": "无法保存这个 Key，请重试",
+      "editReplaceImpact": "新 Key 提供的模型更少，部分助手将没有可用的模型。仍要保存？",
+      "editRecheck": "重新检查",
+      "editListChanged": "Key 可用，但供应商不再提供部分助手正在使用的模型。更新列表会移除这些模型，相关助手需要改用其他模型",
+      "editUpdateList": "更新列表",
+      "editRemove": "移除",
+      "editRemoveConfirm": "从模型网关移除这个 Key？",
+      "editRemoveImpact": "使用这个 Key 的助手将没有可用的模型，直到你添加新的供应商。仍要移除？",
+      "editRemoving": "正在移除…",
+      "editRemoveFailed": "无法移除这个 Key，请重试",
       "addMoreTitle": "添加更多",
       "addMoreSubtitle": "订阅 / API Key",
       "addMoreAction": "添加新的订阅或 API Key",
@@ -6819,12 +6907,14 @@
       "actionRetryImport_other": "查看 {{count}} 项迁移状态",
       "actionContinue": "继续，选择 AI 助手",
       "actionAdd": "添加订阅或 API Key",
+      "later": "稍后再配",
       "actionConnecting": "正在连接…",
       "actionChecking": "正在检查连接…",
       "addTitle": "添加订阅或 API Key",
       "addTitleMore": "添加更多模型供应商",
-      "addDescription": "添加一个来源即可开始，由模型网关统一路由",
+      "addDescription": "添加一个供应商即可开始，由模型网关统一路由",
       "addDescriptionMore": "查看检测到的配置，确认后迁移，无需重新填写",
+      "addDescriptionKey": "填写供应商的地址和 API Key",
       "addMethodsLabel": "添加方式",
       "addMethodDetected": "已检测到",
       "addMethodSubscription": "订阅",
@@ -7082,7 +7172,9 @@
     "transportStdio": "stdio",
     "transportHttp": "http",
     "toolMeta": "{{count}} 个工具 · {{transport}}",
-    "tools": "工具",
+    "toolsHeader": "工具 · {{count}}",
+    "toolsShowMore": "展开其余 {{count}} 个",
+    "toolsShowLess": "收起",
     "generatedAt": "最近刷新 {{time}}",
     "generatedAtWithVersion": "最近刷新 {{time}} · 服务端 v{{version}}",
     "serverVersion": "服务端 v{{version}}",
@@ -7115,6 +7207,7 @@
     "addSubtitle": "添加成功后，所有 Agent 都可调用",
     "unchangedCount": "{{count}} 个已存在。",
     "succeededCount": "成功 {{count}} 个",
+    "savedNotConnected": "已保存，但无法连接：{{reason}}。你可以在列表中刷新、配置或删除它。",
     "failedCount": "失败 {{count}} 个：",
     "failedLine": "{{name}} — {{error}}",
     "callHint": "vibe mcp {{name}} <tool>",
@@ -7145,6 +7238,7 @@
       "cwd": "工作目录",
       "issues": {
         "invalidUrl": "URL 无效。",
+        "missingScheme": "这看起来是网址，请在开头加上 https://。",
         "unclosedQuote": "有未闭合的引号。",
         "shellOperator": "不支持 | && ; > 等 shell 操作符，请使用「粘贴 JSON 导入」。",
         "windowsPath": "这里无法可靠解析 Windows 路径，请使用「粘贴 JSON 导入」。"

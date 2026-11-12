@@ -45,6 +45,9 @@ Old readers ignore them. Only usage-bearing records restore the request-start cl
 lookups recover the per-route state without scanning history. Each persisted prefix holds at most 32 sampled
 128-bit hash boundaries (including tools, system, and the exact final boundary), not copied prompt content.
 Partial-prefix counts are estimates/lower bounds; a fully retained request uses its reported input count.
+The [cache prefix reader bridge](../cache-prefix-state.md) also understands optional per-Session/provider/model
+state and prefixless historical observations. Its writers remain unchanged until the coordinated activation;
+a missing full baseline is explicit, never replaced with a parent's future prefix or an older inline record.
 
 - Every store implements the whole `TranscriptStore` protocol (`harness/store.py`) with the same behavior: an append
   returns exactly the entry `load` reads back, `created_at` (epoch seconds) included; a response keeps C-9's request
@@ -82,6 +85,18 @@ Partial-prefix counts are estimates/lower bounds; a fully retained request uses 
   ([`recovery.md`](recovery.md) §Delivery).
 
 ## 3. Projection
+
+`load()` remains the full canonical history API. Live execution instead uses
+`load_for_run() -> RunTranscript`: original rows in a projection-valid checkpoint
+dependency closure, plus response-end route clocks and response-only cache facts.
+The SQLite implementation certifies a released prefix once in optional checkpoint
+`metadata_json.vibey_runtime`, then resolves original row references and reads the
+new suffix. This metadata never enters model messages or replaces canonical
+content; old readers ignore it. Current messages, budget anchors, memo/skill
+inputs, state/refusals, and open-call recovery must match full history, including
+capped fork ancestry. Historical cuts and read-only previews continue using
+`load()`. See [runtime loading](../vibey-runtime-transcript-loading.md) for the
+closure, compatibility costs, metadata publication and validation contract.
 
 `project(session_id, fork_point=None) -> list[Message]`, a pure function of the rows:
 
