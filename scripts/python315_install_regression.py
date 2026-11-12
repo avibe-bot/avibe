@@ -109,6 +109,25 @@ print(json.dumps({'python': sys.version, 'version': metadata.version('avibe-os')
 '''
 
 
+def wait_for_activation(root: Path, *, timeout: float = 60) -> None:
+    # The owner atomically writes this marker *after* replacing the launcher.
+    # Never execute (or repeatedly open) vibe.exe while its replacement is
+    # pending: Windows would deny the helper's one-shot os.replace.
+    stable = launcher(root)
+    marker = stable.parent / f".{stable.name}.avibe-generation"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            generation = Path(marker.read_text(encoding="utf-8-sig").strip())
+            if generation.is_relative_to(root) and generation.is_dir():
+                return
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            raise RuntimeError("The old client's activation helper did not publish its generation marker")
+        time.sleep(0.25)
+
+
 def verify(root: Path, env: dict[str, str], constraints: Path, version: str) -> None:
     python = active_python(root)
     print(run([str(python), "-I", "-c", VERIFY, str(constraints), version], env, root), flush=True)
@@ -160,15 +179,8 @@ def acceptance(wheel: Path, root: Path) -> None:
         raise RuntimeError("Public 3.2.5 did not perform its real uv upgrade")
     command = next(line for line in output.splitlines() if line.startswith('Using uv:'))
     assert '--python' not in command and '--constraints' not in command, command
-    # On Windows, the running launcher cannot be replaced until it exits.
-    deadline = time.monotonic() + 60
-    while True:
-        current = run([str(launcher(legacy)), "version"], env, legacy)
-        if version in current:
-            break
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"Old client did not activate {version}: {current}")
-        time.sleep(0.25)
+    if "launcher activation will complete after this command exits" in output:
+        wait_for_activation(legacy)
     verify(legacy, env, constraints, version)
 
 

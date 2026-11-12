@@ -1075,14 +1075,14 @@ jobs:
       # Windows on Arm deliberately remains on its x64 3.12 runtime policy.
       # Verify the no-minor-pin 3.15 path on native x64, including the old client.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        if: matrix.os == 'windows-latest'
+        if: matrix.runner == 'windows-latest'
         id: windows_python315
         with:
           python-version: "3.15"
           architecture: x64
 
       - name: Verify Python 3.15 locked install and public 3.2.5 upgrade
-        if: matrix.os == 'windows-latest'
+        if: matrix.runner == 'windows-latest'
         shell: pwsh
         env:
           PYTHON315: ${{ steps.windows_python315.outputs.python-path }}

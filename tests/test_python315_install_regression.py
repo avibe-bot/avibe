@@ -43,3 +43,27 @@ def test_active_interpreter_follows_current_launcher_not_retained_old_tool(tmp_p
         (bin_dir / name).write_bytes(payload)
         (bin_dir / python_name).write_bytes(b"interpreter fixture")
     assert acceptance.active_python(tmp_path) == tmp_path / "new" / "bin" / python_name
+
+
+def test_deferred_wait_does_not_execute_or_open_the_busy_launcher(tmp_path, monkeypatch):
+    stable = acceptance.launcher(tmp_path)
+    stable.parent.mkdir()
+    marker = stable.parent / f".{stable.name}.avibe-generation"
+    generation = tmp_path / "generation"
+    generation.mkdir()
+    original_read = Path.read_text
+
+    def read_marker(path, *args, **kwargs):
+        assert path == marker  # Reading the destination itself can block replace on Windows.
+        return original_read(path, *args, **kwargs)
+
+    def publish(_):
+        marker.write_text(str(generation), encoding="utf-8")
+
+    def no_execution(*args, **kwargs):
+        raise AssertionError("Must not start the destination executable before activation")
+
+    monkeypatch.setattr(Path, "read_text", read_marker)
+    monkeypatch.setattr(acceptance.time, "sleep", publish)
+    monkeypatch.setattr(acceptance, "run", no_execution)
+    acceptance.wait_for_activation(tmp_path)

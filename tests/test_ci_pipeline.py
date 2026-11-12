@@ -895,7 +895,14 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     assert any(step.get("with", {}).get("python-version") == "3.15" for step in shards["steps"])
     windows = jobs["windows-install-smoke-runners"]
     windows_acceptance = next(step for step in windows["steps"] if step.get("name") == acceptance["name"])
-    assert windows_acceptance["if"] == "matrix.os == 'windows-latest'"
+    matrix = windows["strategy"]["matrix"]
+    assert matrix["runner"] == ["windows-latest", "windows-11-arm"]
+    assert windows_acceptance["if"] == "matrix.runner == 'windows-latest'"
+    # Tie every referenced matrix key to the actual job, not a copied string.
+    for step in windows["steps"]:
+        if step.get("id") == "windows_python315" or step is windows_acceptance:
+            key = step["if"].split("matrix.", 1)[1].split()[0]
+            assert key in matrix
     assert "scripts/python315_install_regression.py" in windows_acceptance["run"]
     assert "$LASTEXITCODE -ne 0" in windows_acceptance["run"]
     assert jobs["install-upgrade-regression"]["needs"] == ["changes", "install-upgrade-shards"]
