@@ -543,7 +543,10 @@ final class DirectIrohTransport {
         switch answer {
         case .unavailable(let retryAfterSeconds):
             Self.logger.info("Direct transport: the instance offers no direct path")
+            // The newest accepted answer speaks for the instance: whatever
+            // an earlier one started, a dial under way included, ends.
             let hadSession = session != nil
+            cancelDial()
             endSession()
             scheduleFetch(after: TimeInterval(retryAfterSeconds))
             if hadSession {
@@ -687,10 +690,11 @@ final class DirectIrohTransport {
                 "Direct transport: rendezvous answer not accepted: \(String(describing: rejection), privacy: .public)"
             )
         }
-        if session != nil {
-            // A refresh failed. It extends nothing: the path stays until its
-            // answer runs out or its connection ends, and the admission is
-            // asked for again soon.
+        if session != nil || dialStamp != nil {
+            // A refresh failed while an accepted answer is in force, for a
+            // path or for a dial under way. It extends nothing and ends
+            // nothing: the lease runs as it was going to, and the
+            // rendezvous is asked again soon.
             scheduleFetch(after: timing.refreshRetrySeconds)
             return
         }
