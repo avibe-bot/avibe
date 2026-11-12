@@ -3,7 +3,7 @@
 // groups them; the user names it, sees which Session last signed with it, and decides per account
 // whether an Agent may sign without asking. Adding an account takes no words: all 20 accounts'
 // public keys were computed when the wallet was saved.
-import { Bot, ChevronRight, Clock3, Layers, MoreHorizontal, Pencil, Plus, Sparkles, WalletCards } from 'lucide-react';
+import { Bot, ChevronRight, Clock3, Layers, Lock, MoreHorizontal, Pencil, Plus, Sparkles, WalletCards } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -82,7 +82,6 @@ export type AccountEditing = { index: number; kind: 'rename' | 'new' };
 
 function AccountCard({ account, editing, fresh = false }: { account: WalletAccount; editing?: AccountEditing['kind']; fresh?: boolean }) {
   const d = useDraft();
-  const chainLabel = useChainLabel();
   const name = d(account.name, account.nameEn);
   return (
     <div className={cn(
@@ -110,7 +109,15 @@ function AccountCard({ account, editing, fresh = false }: { account: WalletAccou
         )}
         {fresh ? <Badge variant="success">{d('新添加', 'New')}</Badge> : null}
         <span className="ml-auto flex shrink-0 items-center gap-2">
-          <span className="text-[11.5px] text-muted">{d('签名前问我', 'Ask before signing')}</span>
+          <span className="flex items-center gap-1 text-[11.5px] text-muted">
+            {/* Turning it off needs a Passkey (owner, 2026-11-12): said where the switch is. */}
+            {account.ask ? (
+              <span title={d('关闭需要 Passkey 确认', 'Turning this off needs your Passkey')} className="inline-flex">
+                <Lock className="size-3" aria-label={d('关闭需要 Passkey 确认', 'Turning this off needs your Passkey')} />
+              </span>
+            ) : null}
+            {d('签名前问我', 'Ask before signing')}
+          </span>
           <Switch size="sm" checked={!!account.ask} onCheckedChange={() => {}} label={d('签名前问我', 'Ask before signing')} />
           <Button type="button" variant="ghost" size="icon" className="size-7" aria-label={d('更多操作', 'More actions')}>
             <MoreHorizontal className="size-3.5" />
@@ -121,7 +128,7 @@ function AccountCard({ account, editing, fresh = false }: { account: WalletAccou
         <Clock3 className="size-3 shrink-0" />
         <span className="truncate">
           {account.last
-            ? d(`最近签名：${chainLabel(account.last.chain)} · ${ago(account.last.minutes, d)} · 会话「${account.last.session}」`, `Last signed: ${chainLabel(account.last.chain)} · ${ago(account.last.minutes, d)} · “${account.last.sessionEn}”`)
+            ? d(`最近签名：${ago(account.last.minutes, d)} · 会话「${account.last.session}」`, `Last signed ${ago(account.last.minutes, d)} · “${account.last.sessionEn}”`)
             : d('还没有签过名', 'No signatures yet')}
         </span>
       </span>

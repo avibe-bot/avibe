@@ -121,7 +121,7 @@ function AskToggle({ checked }: { checked: boolean }) {
         <InfoHint
           hover
           label={d('说明', 'More info')}
-          content={d('默认 Agent 可以直接签名。打开后，账户 #0 每次签名都要你在浏览器里批准。每个账户都能在钱包里单独设置。', 'By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser. Each account has its own setting in the wallet.')}
+          content={d('默认 Agent 可以直接签名。打开后，账户 #0 每次签名都要你在浏览器里批准；之后要关闭，需要你的 Passkey 确认。每个账户都能在钱包里单独设置。', 'By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser, and turning it off later needs your Passkey. Each account has its own setting in the wallet.')}
         />
       </span>
       <Switch checked={checked} onCheckedChange={() => {}} label={d('账户 #0 签名前问我', 'Ask before account #0 signs')} />
