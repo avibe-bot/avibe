@@ -3,9 +3,10 @@
 ## Goal and boundaries
 
 Make recurring Watch runtime snapshots proportional to real process-state
-changes, and coalesce adjacent Model Hub usage submissions without changing
-persist-before-acknowledgement. No schema, release, credential, deployment, or
-SQLite durability-setting changes.
+changes, and batch Model Hub usage persistence over five seconds while making
+accepted counts immediately visible to in-process readers. Product explicitly
+accepts losing up to that window of usage counts on an abrupt crash. No schema,
+release, credential, deployment, or SQLite durability-setting changes.
 
 ## Watch runtime invariants
 
@@ -48,14 +49,23 @@ SQLite durability-setting changes.
 
 ## Usage writer invariants
 
-A fixed 100 ms window coalesces calls arriving across adjacent event-loop turns.
-Later arrivals do not extend the window. Completion futures still settle after
-ledger processing, with the existing failure reporting and bounded waiting;
-caller cancellation does not cancel a shared batch. Shutdown `drain()` wakes the
-writer immediately rather than spending its deadline on the coalescing timer.
-Unawaited reads can be up to that extra window behind. Isolated calls more than
-100 ms apart still each write: this does not trade away acknowledged freshness
-for multi-second batching or claim that all steady usage writes disappear.
+A fixed five-second window batches accepted counts before persistence; later
+arrivals do not indefinitely postpone a flush. Counts enter a bounded in-memory
+buffer immediately and usage summaries / quota valuation include that buffer.
+Use the same accounting rules for read projection and persistence, and coordinate
+the commit boundary so pending or in-flight calls are counted exactly once.
+
+Model/search/fetch response and fallback paths do not wait for disk persistence.
+This is important even for small delays: a metering wait between search attempts
+can consume the shared fallback deadline. Explicit durable waits remain distinct
+from acceptance, and failed writes must not report durable success. Shutdown
+`drain()` bypasses the batching timer and waits within its existing deadline.
+
+Readers continue using the existing off-loop ledger read boundary; this does not
+promise bounded reads from a wedged filesystem or introduce a separate cache of
+the durable file. Direct ledger writes retain their durable contract and the
+released JSON format is unchanged. The deliberate crash-loss window applies only
+to buffered usage counts, never Watch runtime state or other product data.
 
 ## Validation
 
