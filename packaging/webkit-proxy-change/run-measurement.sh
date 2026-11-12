@@ -10,26 +10,10 @@ exec > >(tee "$out/runner.log") 2>&1
 stage_results="$out/stages.jsonl"
 : > "$stage_results"
 printf '{"status":"running","label":"%s"}\n' "$label" > "$out/summary.json"
-finalize_summary() {
-  python3 "$probe_dir/instance_evidence.py" "$out" "$probe_dir/instance-cases.json"
-  python3 - "$out/summary.json" "$stage_results" "$1" <<'PY'
-import json, sys
-p, stages_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
-data = json.load(open(p))
-stages = [json.loads(line) for line in open(stages_path)]
-names = ("build-for-testing", "product-validation", "simulator-ready", "install", "test-launch", "lifecycle", "direct-minimal", "cold-minimal", "full-matrix", "instance-routes")
-if not stages:
-    cause = data.get("reason", "setup failed before build")
-    stages = [{"stage": name, "status": "skipped", "verdict": "unmeasured", "exit": None, "cause": cause} for name in names]
-    if data.get("status") != "unavailable":
-        stages.insert(0, {"stage": "setup", "status": "failed", "exit": status, "cause": "see runner.log"})
-data.update({"status": "unavailable" if data.get("status") == "unavailable" else "passed" if status == 0 else "failed",
-             "exit": status, "stages": stages})
-json.dump(data, open(p, "w"), sort_keys=True)
-print(json.dumps(data, sort_keys=True))
-PY
-}
-trap 'finalize_summary "$?"' EXIT
+# Inert definitions shared with pure control-flow tests; runtime setup stays here.
+source "$probe_dir/measurement-stages.sh"
+test_status=0
+trap 'finish_measurement "$?"' EXIT
 bounded() { python3 "$probe_dir/validate-stage.py" timeout "$@"; }
 git -C "$repo_root" rev-parse HEAD > "$out/commit.txt"
 
@@ -106,7 +90,6 @@ cleanup_hosts() {
   bounded 10 sudo -n sed -i '' "\\|$marker|d" /etc/hosts || true
   bounded 10 sudo -n ifconfig lo0 -alias 127.0.0.2 || true
 }
-trap 'finalize_summary "$?"; cleanup_hosts' EXIT
 sudo -n ifconfig lo0 alias 127.0.0.2 255.0.0.0
 while read -r ip host; do
   [[ -z "$host" ]] && continue
@@ -134,7 +117,6 @@ cleanup_fixture() {
     bounded 5 sudo -n kill -KILL "$fixture_pid" 2>/dev/null || true
   fi
 }
-trap 'finalize_summary "$?"; cleanup_fixture; cleanup_hosts' EXIT
 sudo -n env PATH="$PATH" node "$probe_dir/fixture.mjs" "$out/cert" >"$out/fixture.stdout" 2>&1 &
 fixture_pid=$!
 echo "$fixture_pid" > "$out/fixture.pid"
@@ -181,7 +163,6 @@ cleanup_device() {
   bounded 20 xcrun simctl shutdown "$device_id" >/dev/null 2>&1 || true
   bounded 20 xcrun simctl delete "$device_id" >/dev/null 2>&1 || true
 }
-trap 'finalize_summary "$?"; cleanup_device; cleanup_fixture; cleanup_hosts' EXIT
 bounded 120 xcrun simctl boot "$device_id"
 # Migrate while compiling; readiness remains a strict gate before installation.
 boot_timeout=180
@@ -189,44 +170,6 @@ boot_timeout=180
 
 project="$probe_dir/WebKitProxyChange.xcodeproj"
 app="$out/derived-data/Build/Products/Debug-iphonesimulator/ProbeHost.app"
-blocked_by=""
-test_status=0
-
-# Each stage records its own exit, or an explicit unmeasured dependency skip.
-run_stage() {
-  local stage=$1
-  shift
-  if [[ -n "$blocked_by" ]]; then
-    printf '{"stage":"%s","status":"skipped","verdict":"unmeasured","exit":null,"cause":"%s failed"}\n' "$stage" "$blocked_by" >> "$stage_results"
-    return 0
-  fi
-  set +e
-  "$@" 2>&1 | tee "$out/$stage.log"
-  local status=${PIPESTATUS[0]}
-  set -e
-  if [[ "$stage" == "full-matrix" || "$stage" == "instance-routes" || ( "$status" -eq 0 && ( "$stage" == "test-launch" || "$stage" == *minimal ) ) ]]; then
-    set +e
-    python3 "$probe_dir/validate-stage.py" "$stage" "$out" "$probe_dir/matrix.json" 2>&1 | tee "$out/$stage-evidence.log"
-    local evidence_status=${PIPESTATUS[0]}
-    set -e
-    if [[ "$status" -eq 0 ]]; then status=$evidence_status; fi
-  fi
-  if [[ "$stage" == "lifecycle" && "$status" -eq 0 ]]; then
-    set +e
-    python3 "$probe_dir/validate-stage.py" lifecycle "$out" "$probe_dir/matrix.json" 2>&1 | tee "$out/$stage-evidence.log"
-    local evidence_status=${PIPESTATUS[0]}
-    set -e
-    status=$evidence_status
-  fi
-  if [[ "$status" -ne 0 ]]; then
-    blocked_by=$stage
-    test_status=$status
-    printf '{"stage":"%s","status":"failed","exit":%s,"cause":"see %s.log and evidence log"}\n' "$stage" "$status" "$stage" >> "$stage_results"
-  else
-    printf '{"stage":"%s","status":"passed","exit":0}\n' "$stage" >> "$stage_results"
-  fi
-}
-
 validate_products() {
   python3 "$probe_dir/validate-stage.py" bundle "$app" "$out/build-for-testing.log"
 }
@@ -243,70 +186,7 @@ test_method() {
     CODE_SIGNING_ALLOWED=NO
 }
 
-wait_lifecycle_event() {
-  local case_id=$1 step=$2
-  for _ in {1..160}; do
-    if python3 - "$out/cert/fixture.jsonl" "$case_id" "$step" <<'PY'
-import json, sys
-path, case_id, step = sys.argv[1:]
-try:
-    events = [json.loads(line) for line in open(path) if line.strip()]
-except FileNotFoundError:
-    raise SystemExit(1)
-raise SystemExit(0 if any(
-    event.get("event") == "client" and event.get("case") == case_id and event.get("step") == step
-    for event in events
-) else 1)
-PY
-    then return 0; fi
-    sleep 0.25
-  done
-  echo "lifecycle event timeout: $case_id/$step" >&2
-  return 124
-}
-
-run_lifecycle() {
-  local process_log="$out/lifecycle-process.log"
-  : > "$process_log"
-  for case_id in lifecycle-reload lifecycle-recreate lifecycle-relaunch; do
-    local store_id
-    store_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-    bounded 30 xcrun simctl terminate "$device_id" com.avibe.webkit-probe >>"$process_log" 2>&1 || true
-    if [[ "$case_id" == "lifecycle-relaunch" ]]; then
-      bounded 30 xcrun simctl launch "$device_id" com.avibe.webkit-probe \
-        --lifecycle-case "$case_id" --lifecycle-phase prepare \
-        --lifecycle-store-id "$store_id" --lifecycle-control-url http://127.0.0.1:18090 \
-        | tee -a "$process_log"
-      wait_lifecycle_event "$case_id" lifecycle_ready
-      bounded 30 xcrun simctl terminate "$device_id" com.avibe.webkit-probe | tee -a "$process_log"
-      bounded 30 xcrun simctl launch "$device_id" com.avibe.webkit-probe \
-        --lifecycle-case "$case_id" --lifecycle-phase resume \
-        --lifecycle-store-id "$store_id" --lifecycle-control-url http://127.0.0.1:18090 \
-        | tee -a "$process_log"
-    else
-      bounded 30 xcrun simctl launch "$device_id" com.avibe.webkit-probe \
-        --lifecycle-case "$case_id" --lifecycle-phase single \
-        --lifecycle-store-id "$store_id" --lifecycle-control-url http://127.0.0.1:18090 \
-        | tee -a "$process_log"
-    fi
-    wait_lifecycle_event "$case_id" lifecycle_done
-    bounded 30 xcrun simctl terminate "$device_id" com.avibe.webkit-probe >>"$process_log" 2>&1 || true
-  done
-}
-
-run_stage build-for-testing python3 "$probe_dir/validate-stage.py" timeout 600 \
-  xcodebuild build-for-testing -project "$project" -scheme WebKitProxyChange \
-  -destination "platform=iOS Simulator,id=$device_id" \
-  -derivedDataPath "$out/derived-data" CODE_SIGNING_ALLOWED=NO
-run_stage product-validation validate_products
-run_stage simulator-ready python3 "$probe_dir/validate-stage.py" timeout "$boot_timeout" xcrun simctl bootstatus "$device_id" -b
-run_stage install python3 "$probe_dir/validate-stage.py" timeout 60 xcrun simctl install "$device_id" "$app"
-run_stage test-launch test_method test-launch testHostLaunch 150
-run_stage lifecycle run_lifecycle
-run_stage direct-minimal test_method direct-minimal testDirectTLSMinimal 120
-run_stage cold-minimal test_method cold-minimal testColdMinimal 120
-run_stage full-matrix test_method full-matrix testMatrix 900
-run_stage instance-routes test_method instance-routes testInstanceRoutes 2700 InstanceRouteTests
+run_measurement_stages
 
 python3 "$probe_dir/validate-stage.py" timeout 30 xcrun simctl spawn "$device_id" log show --style compact --last 30m \
   --predicate 'process == "com.apple.WebKit.Networking" OR process == "com.apple.WebKit.WebContent"' \
