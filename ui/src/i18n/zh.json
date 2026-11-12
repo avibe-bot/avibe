@@ -6221,11 +6221,11 @@
       }
     },
     "saved": "已更新 {{name}}",
-    "editSecret": "编辑 Secret",
+    "editSecret": "编辑密钥",
     "rowActions": "更多操作",
     "edit": {
-      "title": "编辑 Secret",
-      "subtitle": "值或 Fetch 策略变化后需要重新审批",
+      "title": "编辑密钥",
+      "subtitle": "修改值或访问规则后，需要重新批准",
       "lockedHint": "名称、类型、保护级别不可修改"
     },
     "fields": {
@@ -6376,8 +6376,8 @@
       "standardHelp": "AI 可以自行使用。适合 API Key、环境变量和大多数密钥。",
       "alwaysAskSign": "每次签名都要我确认",
       "alwaysAskSignHelp": "标准档密钥默认可以自己签名。打开后，每次签名都要你在浏览器里亲自批准。它防的是误操作；大额资金请放保护档。",
-      "alwaysAskSignLocked": "已打开。关闭需要 Passkey 确认，这一步还在做，暂时不能关闭。",
-      "alwaysAskSignOneWay": "保存后暂时不能关闭：关闭需要 Passkey 确认，这一步还在做。",
+      "alwaysAskSignLocked": "已打开。目前不能在这里关闭；如需关闭，请删除后重建。",
+      "alwaysAskSignOneWay": "保存后暂时不能在这里关闭。",
       "protectedCreatePending": "当前构建尚不支持保护档的 Web 创建。需要 Agent 自动取用的密钥请选标准档。",
       "save": "保存",
       "createSecret": "创建密钥",

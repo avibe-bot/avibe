@@ -6221,11 +6221,11 @@
       }
     },
     "saved": "Updated {{name}}",
-    "editSecret": "Edit secret",
+    "editSecret": "Edit key",
     "rowActions": "More actions",
     "edit": {
-      "title": "Edit secret",
-      "subtitle": "Value or fetch policy changes require new approval",
+      "title": "Edit key",
+      "subtitle": "Changing the value or access rules needs approval again",
       "lockedHint": "Name, kind and protection can't be changed"
     },
     "fields": {
@@ -6376,8 +6376,8 @@
       "standardHelp": "The agent can use it on its own. Good for API keys, environment variables, and most secrets.",
       "alwaysAskSign": "Ask me before every signature",
       "alwaysAskSignHelp": "Standard keys can sign on their own. With this on, every signature needs your approval in the browser. It guards against mistakes; keep large funds on the Protected tier.",
-      "alwaysAskSignLocked": "On. Turning it off will need a Passkey confirmation, which isn’t available yet.",
-      "alwaysAskSignOneWay": "Once saved, this can’t be turned off for now: turning it off will need a Passkey confirmation, which isn’t available yet.",
+      "alwaysAskSignLocked": "On. It can’t be turned off here for now; to turn it off, delete the key and create it again.",
+      "alwaysAskSignOneWay": "Once saved, this can’t be turned off here for now.",
       "protectedCreatePending": "Protected web create is not available in this build yet. Choose Standard only for secrets the agent may need to use on its own.",
       "save": "Save",
       "createSecret": "Create secret",
