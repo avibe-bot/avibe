@@ -56,6 +56,15 @@ the bounded integer delay (1–60 seconds), and
 Other status/error combinations are not pending advice. Retry retains the
 same operation, recovery identifier, and entire request.
 
+Only backend HTTP 400 `pairing_key_expired` on the request-bound path proves
+safe grant renewal: the producer must establish expired, unconsumed and no
+receipt/claim under its operation lock. Legacy `invalid_pairing_key` and
+`pairing_key_used` are not Desktop proof. HTTP 409
+`registration_indeterminate` retains the exact request through the existing
+local indeterminate wrapper. Every asynchronous journal mutation, including
+success, failure and retirement, compares the exact saved request identity;
+operation identity alone cannot fence a grant renewal.
+
 ## Runnable evidence
 
 Create a worktree-only environment with
@@ -93,3 +102,12 @@ native Desktop/iOS, install-upgrade, macOS fetch, and native Model Hub lifecycle
 producers are explicitly skipped by the current scope classifier. The aggregate
 unit-tests, install-upgrade-regression, and windows-install-smoke gates must
 still pass. Review and integration gates remain pending.
+
+The request-renewal regression runs two old-grant requests concurrently, permits
+replacement only after the first proven rejection, loses the new response, then
+delivers the second old outcome. Expiry, successful and malformed successful old
+outcomes all leave the replacement replay bytes intact. All three cases fail at
+the original implementation head and pass after exact-request fencing. The
+refreshed Runtime/recovery/scenario selection passes 131 tests. Real B2/R1
+expired-unconsumed, missing-receipt, digest-mismatch and delayed-old-response
+producer-consumer checks remain required in the native integration harness.

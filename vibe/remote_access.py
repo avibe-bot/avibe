@@ -5384,8 +5384,15 @@ def _retire_pending_pairing(*, operation_id: str) -> bool:
         return False
 
 
+def _same_pairing_claim_request(record: Mapping[str, Any], claim: Mapping[str, Any]) -> bool:
+    """A grant renewal keeps its operation, but never its request identity."""
+    return all(record.get(key) == claim.get(key) for key in (
+        "operation_id", "request_fingerprint", "redeem_request", "desktop_enrollment",
+    ))
+
+
 def _retire_prepared_pairing_claim(
-    *, operation_id: str, cause: str,
+    *, claim: Mapping[str, Any], cause: str,
 ) -> tuple[bool, bool]:
     """Return (retired, terminal_marker_persisted) for this failed operation."""
 
@@ -5396,7 +5403,7 @@ def _retire_prepared_pairing_claim(
                 return False, False
             if (
                 record is None
-                or record.get("operation_id") != operation_id
+                or not _same_pairing_claim_request(record, claim)
                 or record.get("phase") != "prepared"
             ):
                 return True, False
@@ -5412,40 +5419,45 @@ def _retire_prepared_pairing_claim(
                     },
                 }
             )
-            return _retire_pending_pairing(operation_id=operation_id), True
+            return _retire_pending_pairing(operation_id=claim["operation_id"]), True
     except Exception:
         logger.warning("Recording definitive pairing failure failed", exc_info=True)
         return False, False
 
 
 def _pairing_failure_after_claim(
-    operation_id: str,
+    claim: Mapping[str, Any],
     result: dict[str, Any],
 ) -> dict[str, Any]:
     """Return a definitive failure after retiring its prepared claim."""
 
     # Desktop's installation reservation survives a failed grant. A later grant
     # for this same operation must not cause another cloud instance to be made.
-    candidate, _ = _read_pending_pairing_record()
-    if candidate and candidate.get("desktop_enrollment"):
+    if claim.get("desktop_enrollment"):
         try:
             with _pairing_persist_lock():
                 record, error = _read_pending_pairing_record()
                 if (
-                    not error and record and record["operation_id"] == operation_id
+                    not error and record and _same_pairing_claim_request(record, claim)
                     and record.get("desktop_enrollment") and record["phase"] == "prepared"
                 ):
                     _write_pending_pairing_record({
                         **record, "desktop_failure": str(result.get("error") or "pairing_failed"),
                     })
                     return result
+                # Never fall through to retirement after a stale Desktop result,
+                # including when the replacement request is still prepared.
+                return {
+                    "ok": False, "error": "pairing_superseded_after_redeem",
+                    "pairing": {"ok": False, "recoverable": False},
+                }
         except (OSError, _PairingLockUnavailable):
             return {
                 "ok": False, "error": "pairing_retirement_failed",
                 "pairing": {"ok": False, "recoverable": True},
             }
     retired, marker_persisted = _retire_prepared_pairing_claim(
-        operation_id=operation_id,
+        claim=claim,
         cause=str(result.get("error") or "pairing_failed"),
     )
     if retired:
@@ -5989,8 +6001,15 @@ def _redeem_pairing_claim(
                 "retry_after_seconds": retry_after,
                 "pairing": {"ok": False, "recoverable": True, "cause": "pairing_redeem_pending"},
             }
-        if _is_definitive_pairing_redeem_failure(exc):
-            return _pairing_failure_after_claim(claim["operation_id"], failure)
+        # Legacy "invalid"/"used" errors collapse several histories. Only the
+        # request-bound expired/unconsumed proof permits Desktop grant renewal.
+        definitive = (
+            exc.status == 400 and exc.payload.get("error") == "pairing_key_expired"
+            if claim.get("redeem_request")
+            else _is_definitive_pairing_redeem_failure(exc)
+        )
+        if definitive:
+            return _pairing_failure_after_claim(claim, failure)
         return {
             **failure,
             "error": "pairing_redeem_indeterminate",
@@ -6005,7 +6024,7 @@ def _redeem_pairing_claim(
         }
     normalized_result, response_error = _validate_pairing_response(result)
     if response_error:
-        return _pairing_failure_after_claim(claim["operation_id"], {
+        return _pairing_failure_after_claim(claim, {
             "ok": False,
             "error": "invalid_pairing_response",
             "detail": response_error,
@@ -6014,7 +6033,7 @@ def _redeem_pairing_claim(
     instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     origin_update = result.get("tunnel_origin_update")
     if isinstance(origin_update, dict) and origin_update.get("ok") is False:
-        return _pairing_failure_after_claim(claim["operation_id"], {
+        return _pairing_failure_after_claim(claim, {
             "ok": False,
             "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
@@ -6028,6 +6047,7 @@ def _redeem_pairing_claim(
         pairing_result,
         device_name=claim["device_name"],
         operation_id=claim["operation_id"],
+        expected_claim=claim,
     )
 
 
@@ -6036,6 +6056,7 @@ def _persist_pairing_impl(
     *,
     device_name: str,
     operation_id: str | None = None,
+    expected_claim: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Claim, apply, and retire one pending pairing under the config lock."""
     from storage.importer import ensure_sqlite_state
@@ -6108,6 +6129,7 @@ def _persist_pairing_impl(
                 operation_id is None
                 or record.get("operation_id") != operation_id
                 or record.get("phase") != "prepared"
+                or (expected_claim is not None and not _same_pairing_claim_request(record, expected_claim))
             ):
                 return {
                     "ok": False,
@@ -6298,12 +6320,14 @@ def _persist_pairing(
     *,
     device_name: str,
     operation_id: str | None = None,
+    expected_claim: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         return _persist_pairing_impl(
             result,
             device_name=device_name,
             operation_id=operation_id,
+            expected_claim=expected_claim,
         )
     except _PairingLockUnavailable as exc:
         if result is not None:

@@ -162,6 +162,11 @@ def test_definitely_expired_grant_can_renew_only_the_same_operation(desktop_host
     (503, "pairing_redeem_pending", 1),
     (409, "pairing_redeem_pending", 0),
     (409, "pairing_redeem_pending", True),
+    (409, "registration_indeterminate", None),
+    (400, "invalid_pairing_key", None),
+    (400, "pairing_key_used", None),
+    (409, "pairing_key_expired", None),
+    (503, "pairing_key_expired", None),
 ])
 def test_only_explicit_bounded_pending_is_retry_advice(desktop_host, monkeypatch, status, error, delay):
     body = _pair_body(_prepare(desktop_host).get_json())
@@ -177,7 +182,14 @@ def test_only_explicit_bounded_pending_is_retry_advice(desktop_host, monkeypatch
     pending = remote_access._read_pending_pairing_record()[0]
     assert pending["operation_id"] == body["desktop_enrollment"]["operation_id"]
     assert pending["phase"] == "prepared" and pending.get("redeem_request")
+    assert "desktop_failure" not in pending
     assert not V2Config.load().remote_access.vibe_cloud.instance_id
+    body["pairing_key"] = "cannot-replace-an-uncertain-request"
+    refused = desktop_host.post("/api/remote-access/vibe-cloud/pair", json=body,
+                                headers=csrf_headers(desktop_host))
+    assert refused.status_code == 409
+    assert refused.get_json()["error"] == "local_instance_conflict"
+    assert remote_access._read_pending_pairing_record()[0] == pending
 
 
 @pytest.mark.parametrize("damaged", ["identity", "pending"])
@@ -246,3 +258,60 @@ def test_remote_owner_cannot_use_guarded_local_pair(desktop_host, monkeypatch, t
                                  base_url="https://alex.avibe.bot")
     assert response.status_code == 403
     assert response.get_json()["error"] == "direct_loopback_required"
+
+@pytest.mark.parametrize("late_outcome", ["expired", "success", "malformed_success"])
+def test_late_old_grant_outcome_cannot_change_replacement_request(desktop_host, monkeypatch, late_outcome):
+    """AUTH-SETUP-172/173: renewal fences every old request outcome, not just its operation.
+
+    Serial expiry coverage misses a second in-flight old response arriving after
+    a replacement has redeemed and lost its response. That response must neither
+    fail, publish nor retire the newer replay record.
+    """
+    body = _pair_body(_prepare(desktop_host).get_json())
+    entered, release = threading.Event(), threading.Event()
+    calls, results = [], []
+    calls_lock = threading.Lock()
+
+    def redeem(_url, payload, **_kwargs):
+        with calls_lock:
+            calls.append(dict(payload))
+            call_number = len(calls)
+        if call_number == 1:
+            entered.set()
+            assert release.wait(10)
+            if late_outcome == "success":
+                return _response("stale-device")
+            if late_outcome == "malformed_success":
+                return {"ok": True}
+            raise remote_access.BackendRequestError(400, {"error": "pairing_key_expired"})
+        if call_number == 2:
+            raise remote_access.BackendRequestError(400, {"error": "pairing_key_expired"})
+        if call_number == 3:
+            raise ConnectionError("fixture: replacement response lost")
+        return _response("replacement-device")
+
+    monkeypatch.setattr(remote_access, "_json_request", redeem)
+
+    def pair(key):
+        return remote_access.pair(key, body["backend_url"], body["device_name"],
+                                  desktop_enrollment=body["desktop_enrollment"])
+
+    worker = threading.Thread(daemon=True, target=lambda: results.append(pair(body["pairing_key"])))
+    worker.start()
+    try:
+        assert entered.wait(10)
+        assert pair(body["pairing_key"])["error"] == "pairing_key_expired"
+        assert pair("replacement-key")["error"] == "pairing_redeem_indeterminate"
+        replacement = remote_access._read_pending_pairing_record()[0]
+    finally:
+        release.set()
+        hang_guard.join(worker, "old grant response after renewal")
+    assert results[0]["error"] == "pairing_superseded_after_redeem"
+    assert remote_access._read_pending_pairing_record()[0] == replacement
+    assert pair("third-key")["error"] == "local_instance_conflict"
+    assert not V2Config.load().remote_access.vibe_cloud.instance_id
+    assert remote_access.pair("", body["backend_url"])["ok"]
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == "replacement-device"
+    assert calls[0] == calls[1]
+    assert calls[2] == calls[3]
+    assert calls[0]["redeem_request_id"] != calls[2]["redeem_request_id"]
