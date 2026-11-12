@@ -289,7 +289,12 @@ The contract is in [`ios-app.md`](ios-app.md) section 4. Two kinds of informatio
 
 `direct.status()` answers `{preferred, sequence, closure}` for the calling document's origin. `direct.transportChanged({preferred, sequence, closure})` carries the same three fields. It is emitted after the change, whenever `preferred` changes or `closure` grows, to the current runtime's instance-origin documents.
 
-**Events missed while suspended.** A suspended document may miss an event. After the foreground listener is ready, the shell emits the current state once more. A document that misses that too catches up at its next status read: the higher `closure` is acted on once, whichever arrives first.
+**Resume reconciliation, independent of events.** A suspended document may miss every event, including the state the shell emits once more after the foreground listener is ready. So reconciliation does not depend on any event:
+
+- **Native side.** From the return to the foreground until the listener is ready again, and the pending background closure is published, the shell holds every `direct.status()` answer. If section 9's recovery path takes over instead, it holds the answers until that path has published its state. A status answer received after a resume therefore already reflects the published closure.
+- **Web UI side.** Each document reads `direct.status()` once whenever it becomes visible again (`visibilitychange` to `visible`, and `pageshow` when restored from the back-forward cache). It applies the answer to its existing values: a higher `sequence` updates the preference, and a higher `closure` runs the reconnect action once. It never takes a new baseline on resume; the baseline is taken only once per document, before its first SSE stream or terminal.
+
+This is one read per resume, not polling.
 
 **What the Web UI keeps, per document:**
 
@@ -318,7 +323,9 @@ It does not touch anything that could lose server-side state or repeat an action
 - duplicate and late events;
 - a status read that shows a closure before its event arrives;
 - a closure during page load, runtime creation, or a new child window, before and after the document's baseline read;
-- background, then resume on the same port: the pending closure is published only after the listener is ready, a surviving document reconnects once (from the event or from a status read), and a document that was destroyed does nothing.
+- background, then resume on the same port: the pending closure is published only after the listener is ready, and a document that was destroyed does nothing;
+- the same with both closure emissions dropped (the one at publication and the re-emitted state). The document's own resume lifecycle, `visibilitychange` to `visible`, must issue the status read; the test does not call `direct.status()` itself. The read is held until readiness and then shows the higher `closure`. The document reconnects once, keeps its earlier baseline and watermark, and does not reconnect again when a dropped event is later delivered;
+- a status read during the resume window is answered only after readiness, or after the recovery path has published its state;
 
 **WebKit behaviour.** It is qualified by the measurement harness in `packaging/webkit-proxy-change/`, not by App tests. The cells this design needs:
 

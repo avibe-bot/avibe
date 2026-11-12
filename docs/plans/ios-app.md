@@ -246,12 +246,15 @@ A shell can carry the instance origin's connections through a local proxy that c
   - Each increase asks the Web UI to act once.
 - **`sequence`** grows with every change of either value while the shell process lives, and orders `preferred` only.
 
-The shell emits `direct.transportChanged({preferred, sequence, closure})` after any change of `preferred` or increase of `closure`, and once more with the current state when it returns to the foreground and its local proxy is ready. A shell with no direct transport never emits it. A document that misses an event catches up at its next status read. It goes to the current runtime's instance-origin documents only, the primary main frame and instance-origin child windows, and its script checks the origin of the document it runs in.
+The shell emits `direct.transportChanged({preferred, sequence, closure})` after any change of `preferred` or increase of `closure`, and once more with the current state when it returns to the foreground and its local proxy is ready. A shell with no direct transport never emits it.
+
+From the return to the foreground until its local proxy is ready again, the shell holds `direct.status()` answers. An answer received after a resume therefore already includes the closure published on return. It goes to the current runtime's instance-origin documents only, the primary main frame and instance-origin child windows, and its script checks the origin of the document it runs in.
 
 The Web UI keeps two values per document, separately:
 
 - **Latest preference.** Apply `preferred` from a status or event only if its `sequence` is higher than the highest seen.
 - **Last handled closure.** Read `direct.status()` before opening the SSE stream or a terminal, and take its `closure` as the baseline. After that, whenever a status or event shows a higher `closure`, run the reconnect action once and record the new value.
+- **Resume.** Whenever the document becomes visible again (`visibilitychange` to `visible`, or `pageshow` from the back-forward cache), read `direct.status()` once and apply it to the two values above. This keeps working when every event was missed while the App was suspended. It never takes a new baseline; that happens only once per document. It is one read per resume, not polling.
 
 Closure is compared only with closure, never with `sequence`. So it is acted on once even when its event arrives after a newer preference, arrives twice, or is first seen in a status read.
 
