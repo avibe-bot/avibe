@@ -32,6 +32,7 @@ from vibe.restart_state import RestartState
 from vibe.package_shape import CORE_PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME
 
 from config import paths as config_paths
+from config.atomic_io import read_snapshot
 from core.caller_context import environment_without_caller_context
 from core.install_integrity import (
     IntegrityResult,
@@ -1512,7 +1513,7 @@ def prerelease_updates_enabled() -> bool:
     """
 
     try:
-        data = json.loads(config_paths.get_config_path().read_text(encoding="utf-8"))
+        data = json.loads(read_snapshot(config_paths.get_config_path(), encoding="utf-8"))
     except (OSError, ValueError):
         return False
     update = data.get("update") if isinstance(data, dict) else None

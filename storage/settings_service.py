@@ -78,12 +78,13 @@ def _require_preserved_access_policy(current: SettingsState, candidate: Settings
     # Read the atomic config file directly: V2Config.load can itself migrate and
     # acquire the config lock, inverting the config -> SQLite writer lock order.
     from config import paths
+    from config.atomic_io import read_snapshot
     from config.v2_config import V2Config, _migrate_config_payload_on_load
 
     legacy_guilds = None
     if "discord" not in current.guild_scope_platforms or "discord" not in candidate.guild_scope_platforms:
         try:
-            config_payload = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
+            config_payload = json.loads(read_snapshot(paths.get_config_path(), encoding="utf-8"))
         except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
             config_payload = {}
         if isinstance(config_payload, dict):
