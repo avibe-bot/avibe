@@ -1,0 +1,37 @@
+[
+  {
+    "repo": "trezor/python-mnemonic",
+    "revision": "b57a5ad77a981e743f4167ab2f7927a55c1e82a8",
+    "path": "vectors.json",
+    "url": "https://raw.githubusercontent.com/trezor/python-mnemonic/b57a5ad77a981e743f4167ab2f7927a55c1e82a8/vectors.json",
+    "sha256": "fa3b937b7cff9c9b8ecd3aa011faeb8d6dd67993174b72326e83f4de8fdb30f8"
+  },
+  {
+    "repo": "bitcoin/bips",
+    "revision": "b34d9f751791d4feb22feff4f2ed00bcac83961b",
+    "path": "bip-0039.mediawiki",
+    "url": "https://raw.githubusercontent.com/bitcoin/bips/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0039.mediawiki",
+    "sha256": "afcbcbed36fe9eb734bd607398a8c124683ded2a75c3830e1b16c47b043a9134"
+  },
+  {
+    "repo": "bitcoin/bips",
+    "revision": "b34d9f751791d4feb22feff4f2ed00bcac83961b",
+    "path": "bip-0086.mediawiki",
+    "url": "https://raw.githubusercontent.com/bitcoin/bips/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0086.mediawiki",
+    "sha256": "d8d01dee331da07c2562615bc1f064c1868ec3fce61184973da76d1196c7f5b0"
+  },
+  {
+    "repo": "bitcoin/bips",
+    "revision": "b34d9f751791d4feb22feff4f2ed00bcac83961b",
+    "path": "bip-0350.mediawiki",
+    "url": "https://raw.githubusercontent.com/bitcoin/bips/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0350.mediawiki",
+    "sha256": "63634b06aa8bae88b31929674736e74964c4598684269ac2b0b140c43a7a0dec"
+  },
+  {
+    "repo": "bip32JP/bip32JP.github.io",
+    "revision": "5a43706289c55473c120e552244f6de348d0035b",
+    "path": "test_JP_BIP39.json",
+    "url": "https://raw.githubusercontent.com/bip32JP/bip32JP.github.io/5a43706289c55473c120e552244f6de348d0035b/test_JP_BIP39.json",
+    "sha256": "780d6a5f21827e5b455fdad35703e2c60ed9dfd47c625daaf50c01600dc4c9e2"
+  }
+]
