@@ -165,7 +165,7 @@ A public endpoint can serve many hostnames on the same addresses; a Cloudflare e
 - **WebKit always presents the allowed host,** so this concerns other local callers.
 - **The direct backend is not affected:** the strict ingress refuses any SNI or `Host` but the instance's.
 - **What this is not:** it is not a demonstrated arbitrary internet proxy, nor an authentication bypass for the instance, and it has not been probed against production.
-- **The decision is open.** Whether it is acceptable is an explicit product and security decision. Shipping or enabling a build that uses a transport waits for it.
+- **Product decision, 2026-11-12:** this is accepted as a documented limitation of the public backend. It is not an Avibe authentication boundary: no proxy authentication, credential, outer TLS, or TLS parsing or termination is added for it. Normal remote authentication and the strict direct ingress stay required. The decision covers only this exposure: the listener still does not attest its caller or the data store, and the resource limits (section 4) and the stale-caller limits (section 7) stay as documented. It does not clear the first build that uses a transport, which remains the owner's to approve.
 - **Rejected as fixes:** terminating or parsing TLS, adding credentials, or changing authentication, each of which would change the design.
 
 **Diagnostics** count `direct` and `public` relays, and CONNECTs per host. A connection WebKit makes around the listener is not seen, and is reported as unobserved, not as zero.
@@ -349,7 +349,6 @@ It does not touch anything that could lose server-side state or repeat an action
 - a stale or occupied port, and a NetworkProcess restart (test instrument);
 - no replay (Q8);
 - cookies, passkeys, and remote authentication unchanged on every path;
-- the public backend's shared-endpoint exposure (section 6), only as the product and security decision requires;
 - and the Phase 1 list (Local Network permission states, AP isolation, account and instance switch).
 
 The first build that uses a transport goes to the owner first; enabling it for any instance is the owner's decision.
