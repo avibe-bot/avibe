@@ -573,7 +573,6 @@ agent_events = Table(
         "session_id",
         "event_type",
         "context_seq",
-        sqlite_where=text("context_seq is not null"),
     ),
     Index("ix_agent_events_scope_created_id", "scope_id", "created_at", "id"),
     Index("ix_agent_events_turn_sequence_id", "turn_id", "sequence", "id"),

@@ -69,8 +69,9 @@ preview avoids publishing even optional metadata.
 
 ## Compatibility and validation
 
-Revision `20261112_0084` adds only a partial index; the compatibility epoch stays
-at 2. Older readers ignore the new metadata and retain the canonical transcript.
+Revision `20261112_0084` adds only a non-unique composite index; the compatibility epoch stays
+at 2. The index deliberately uses the migration policy's proven additive operation
+subset, rather than expanding its allowlist for a partial-index optimization. Older readers ignore the new metadata and retain the canonical transcript.
 The migration test covers additive upgrade, structural index rollback in a
 hermetic fixture, re-upgrade, and unchanged stored rows. Product rollback remains
 selection of a compatible older binary, not an Alembic downgrade.
@@ -87,5 +88,41 @@ Performance acceptance uses a fresh local Incus environment and synthetic large
 Session, never the owner's live desktop. Report first certification separately
 from warm loads, compare serialized model-context hashes, and distinguish probe
 RSS from service RSS. Record load/projection times, resident memory and heartbeat
-stalls over two seconds. Measurements are pending; functional test results are
-not a substitute for the before/after performance run.
+stalls over two seconds. Functional test results are not a substitute for the
+before/after performance run.
+
+### Measured acceptance (2026-11-12)
+
+Fresh local Incus worktree, 2 CPUs / 3 GiB, Python 3.12, no credentials or copied
+user data. One streaming-generated Session has 14,153 context rows containing
+165,638,858 bytes of canonical JSON. The model sees 152 messages (887,659 serialized
+bytes). Three separate processes per baseline/warm group; medians below. Schema
+migration is outside the timed load; first prefix certification is reported
+separately. These are **probe-process**, not controller-service, RSS figures.
+
+| Metric | Full historical loader | Warm runtime loader |
+| --- | ---: | ---: |
+| Decoded/returned context rows | 14,153 | 152 |
+| Load latency | 479.7 ms (447.3–676.1) | 25.2 ms (24.2–26.6) |
+| Subsequent projection latency | 21.4 ms | 3.5 ms |
+| RSS after load | 224.1 MB | 72.0 MB |
+| RSS added by load | 168.4 MB | 5.2 MB |
+| Process peak RSS | 227.3 MB | 74.0 MB |
+| Heartbeat stalls >=2 seconds | 0 / 3 probes | 0 / 3 probes |
+
+First certification took 897.1 ms and reached 239.2 MB peak RSS; it is a real
+one-time compatibility cost, not included in the warm result. Every successful
+baseline, first-certification and warm probe produced the same model-context
+SHA-256: `27311216ce6c395b95f579b0964cdb51d488251904e2467d1dba2f9b5570972b`.
+
+Baseline runtime was `4f5538d19`, candidate runtime `62010eae1`. The subsequent
+migration-only fix uses the proven additive `create_index` operation and a
+non-unique composite index instead of raw partial-index SQL; it changes neither
+the loader nor this context-only fixture's indexed entries. Focused migration
+and query-plan tests verify the final index.
+
+These short probes establish the load/RSS improvement and context equivalence,
+not disappearance of production controller stalls. Neither baseline nor candidate
+reproduced a two-second stall; the separate P2 GC observation under normal
+workload remains necessary. No owner-desktop synthetic load or service restart
+was performed.
