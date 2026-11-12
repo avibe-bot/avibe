@@ -27,17 +27,35 @@ pytestmark = pytest.mark.no_sqlite_template
 
 @pytest.fixture(autouse=True)
 def bridge_graph(tmp_path, monkeypatch):
-    """Keep these historical bridge/next-epoch fault cases on their original graph.
+    """Keep epoch-transition fault cases on the bridge's epoch-1 graph.
 
-    The production epoch-2 transition is exercised in test_tool_trace_suppression.
+    Backport additive reader prerequisites into this source fixture without the
+    real epoch-2 transition (covered in test_tool_trace_suppression). This is not
+    evidence about a published historical binary.
     """
     graph = tmp_path / "bridge-alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     script = ScriptDirectory.from_config(migrations.alembic_config(tmp_path / "historical.sqlite"))
     retained = {Path(revision.path).name for revision in script.iterate_revisions("20261108_0082", "base")}
+    # Current metadata includes additive tables/indexes introduced after the
+    # epoch-2 marker. Backport those reader prerequisites into this synthetic
+    # epoch-1 graph, never the real epoch transition or an opaque migration.
+    from storage.migration_policy import classify_migration
+
+    successors = list(script.iterate_revisions("head", "20261108_0083"))
+    for revision in successors:
+        assert classify_migration(Path(revision.path)).permitted == "additive"
+        retained.add(Path(revision.path).name)
     for path in (graph / "versions").glob("*.py"):
         if path.name != "__init__.py" and path.name not in retained:
             path.unlink()
+    for revision in successors:
+        if revision.down_revision == "20261108_0083":
+            successor = graph / "versions" / Path(revision.path).name
+            source = successor.read_text()
+            old = 'down_revision = "20261108_0083"'
+            assert old in source
+            successor.write_text(source.replace(old, 'down_revision = "20261108_0082"'))
     monkeypatch.setattr(migrations, "alembic_dir", lambda: graph)
     importer._installed_schema_revision.cache_clear()
     importer._installed_schema_epoch.cache_clear()

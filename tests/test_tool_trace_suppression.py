@@ -21,6 +21,7 @@ from storage.compatibility import BRIDGE_REVISION
 PRE_PROJECTION_REVISION = "20261108_0082"
 from storage.models import agent_events, agent_sessions, messages
 from tests.agent_core.fakes import assistant
+from tests.migration_helpers import latest_migration_revision
 from tests.test_sqlite_migration_preflight import _snapshot
 from tests.test_tool_activity_projection import _mark, _store
 from tests.test_vibey_agent import SESSION, engine, session  # noqa: F401 -- isolated real-store fixtures
@@ -133,7 +134,6 @@ os._exit(72)
 
 @pytest.mark.no_sqlite_template
 def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_path, monkeypatch):
-    from alembic.script import ScriptDirectory
     from storage import importer
     from tests.test_sqlite_readiness import COMPLETED, DATA_MARKER
 
@@ -145,9 +145,9 @@ def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_p
                      (DATA_MARKER, json.dumps(COMPLETED), COMPLETED["updated_at"]))
     graph = tmp_path / "alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
-    previous = ScriptDirectory.from_config(migrations.alembic_config(path)).get_current_head()
     (graph / "versions" / "20990101_9999_additive.py").write_text(
-        f"from alembic import op\nrevision='20990101_9999'\ndown_revision={previous!r}\n"
+        "from alembic import op\nrevision='20990101_9999'\n"
+        f"down_revision={latest_migration_revision()!r}\n"
         "MIGRATION_COMPATIBILITY='additive'\n"
         "def upgrade():\n    op.create_index('ix_epoch_two_next', 'agents', ['description'], unique=False)\n"
     )

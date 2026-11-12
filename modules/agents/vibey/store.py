@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from core.agent_core.harness.projection import context_view
+from core.agent_core.harness.runtime import RunTranscript
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import AssistantMessage, HostedImage, ToolResultMessage, UserMessage
 from core.agent_core.tools.paths import to_thread_joined
@@ -119,6 +120,9 @@ class AdapterTranscriptStore:
     async def load(self, session_id: str) -> Sequence[ContextEntry]:
         return await self._store.load(session_id)
 
+    async def load_for_run(self, session_id: str) -> RunTranscript:
+        return await self._store.load_for_run(session_id)
+
     async def load_turn(self, session_id: str, turn_id: str) -> Sequence[ContextEntry]:
         return await self._store.load_turn(session_id, turn_id)
 
@@ -137,7 +141,7 @@ class AdapterTranscriptStore:
         if previous is None:
             # What the model still sees: the inputs the projected context keeps. After a checkpoint the
             # summarized inputs are gone, so the next input carries every field the context no longer shows.
-            entries = await self._store.load(session_id)
+            entries = (await self._store.load_for_run(session_id)).entries
             view = context_view(entries)
             previous = environment_state([unit.lead for unit in view.units if unit.lead.kind == "input"])
             if not any(entry.session_id == session_id for entry in entries):

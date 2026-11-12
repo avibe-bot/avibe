@@ -15,6 +15,9 @@ NONCE = "scn_searchcleanup0001"
 
 
 class _NoModelEngine:
+    lifecycle = None
+    _published_release = None
+
     def __getattr__(self, name):
         pytest.fail(f"search custody reached the model engine: {name}")
 
@@ -88,20 +91,85 @@ def test_search_create_waits_for_durable_cleanup_before_new_custody(tmp_path, mo
     assert adapter.ensure_calls == []
 
 
-def test_search_retry_removes_the_real_local_orphan_without_an_engine(tmp_path, monkeypatch):
+@pytest.mark.parametrize("blocked", [None, "create", "replace"])
+@pytest.mark.parametrize("cleanup", ["revoke_api_key_credential", "revoke_search_credential"])
+def test_search_retry_removes_the_real_local_orphan_without_an_engine(tmp_path, monkeypatch, blocked, cleanup):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
     custody = EngineStateStore(tmp_path / "custody")
     real = CLIProxyEngineAdapter(supervisor=_NoModelEngine(), state_store=custody)
     old_ref = asyncio.run(real.provision_credential("tavily", "search", "test-old-key", None))
+    def block_cpa():
+        real._engine_admission.close("engine_withdrawn")
+        real.lifecycle = SimpleNamespace(recovered=False)
+        real.recover_lifecycle = AsyncMock(side_effect=AssertionError("search custody attempted CPA recovery"))
+
+    if blocked == "create":
+        block_cpa()
     service, store, adapter = _service(tmp_path)
-    service.revocations.add("src_oldsearch01", old_ref, operation="revoke_api_key_credential")
-    monkeypatch.setattr(adapter, "provision_credential", real.provision_credential)
-    monkeypatch.setattr(adapter, "revoke_api_key_credential", real.revoke_api_key_credential)
+    adapter.search_check_outcome = "pass"
+    service.revocations.add("src_oldsearch01", old_ref, operation=cleanup)
+    for method in ("provision_credential", "revoke_api_key_credential", "revoke_search_credential"):
+        monkeypatch.setattr(adapter, method, getattr(real, method), raising=False)
     created = asyncio.run(service.create_source(_draft()))["source"]
     assert custody.credential_metadata_if_present(old_ref) is None
     assert custody.credential_metadata_if_present(created["credential_ref"]) is not None
     assert service.revocations.list() == []
     assert store.load().sources[0].credential_ref == created["credential_ref"]
+    if blocked == "replace":
+        block_cpa()
+    replaced = asyncio.run(service.replace_credential(created["id"], {"key": "test-new-search-key"}))["source"]
+    assert replaced["credential_ref"] != created["credential_ref"]
+    assert custody.credential_metadata_if_present(created["credential_ref"]) is None
+    assert custody.credential_metadata_if_present(replaced["credential_ref"]) is not None
+    assert store.load().sources[0].credential_ref == replaced["credential_ref"]
+    asyncio.run(service.delete_source(created["id"]))
+    assert custody.credential_metadata_if_present(replaced["credential_ref"]) is None
+    assert not store.load().sources and service.revocations.list() == []
     assert adapter.synced == []
+    if blocked:
+        real.recover_lifecycle.assert_not_awaited()
+        assert real._engine_admission.reason == "engine_withdrawn"
+        assert real._engine_admission.idle.is_set()
+
+
+@pytest.mark.parametrize("operation", ["revoke_api_key_credential", "revoke_credential"])
+def test_readable_search_retirement_bypasses_cpa_recovery(tmp_path, operation):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    custody = EngineStateStore(tmp_path / "custody")
+    adapter = CLIProxyEngineAdapter(supervisor=_NoModelEngine(), state_store=custody)
+    ref = asyncio.run(adapter.provision_credential("tavily", "search", "test-search-key", None))
+    adapter._engine_admission.close("engine_withdrawn")
+    adapter.lifecycle = SimpleNamespace(recovered=False)
+    adapter.recover_lifecycle = AsyncMock(side_effect=AssertionError("search retirement attempted CPA recovery"))
+    asyncio.run(getattr(adapter, operation)(ref))
+    assert custody.credential_metadata_if_present(ref) is None
+    adapter.recover_lifecycle.assert_not_awaited()
+    assert adapter._engine_admission.reason == "engine_withdrawn"
+
+
+@pytest.mark.parametrize("operation", ["provision", "revoke_api_key_credential", "revoke_credential"])
+def test_model_credential_custody_still_requires_cpa_admission(tmp_path, operation):
+    from vibe.model_hub_runtime.supervisor import EngineUnavailableError
+
+    custody = EngineStateStore(tmp_path / "custody")
+    adapter = CLIProxyEngineAdapter(supervisor=_NoModelEngine(), state_store=custody)
+    ref = asyncio.run(adapter.provision_credential("anthropic", "anthropic", "test-model-key", None))
+    adapter._engine_admission.close("engine_withdrawn")
+    reserved = []
+    with pytest.raises(EngineUnavailableError):
+        if operation == "provision":
+            asyncio.run(adapter.provision_credential(
+                "anthropic", "anthropic", "test-model-replacement", None, on_reserved=reserved.append,
+            ))
+        else:
+            asyncio.run(getattr(adapter, operation)(ref))
+    assert custody.read_api_key(ref) == "test-model-key"
+    assert len(list((custody.root / "credentials").glob("*.json"))) == 1
+    assert reserved == [] and adapter._engine_admission.idle.is_set()
 
 
 @pytest.mark.parametrize("restart", [False, True])

@@ -5228,6 +5228,7 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
 
         manager = EngineRuntimeManager(
             runtime_dir=tmp_path / "model-hub-runtime",
+            manifest_path=tmp_path / "fixture-manifest-override.json",
             offline=True,
         )
     elif consumer == "tmux":

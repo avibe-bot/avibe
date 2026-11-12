@@ -23,7 +23,8 @@ Neither the backup policy nor authorization provenance is weakened here.
 
 ## Representation and rollout
 
-Migration `20261112_0084` adds three initially empty ordinary tables and three
+Migration `20261112_0088` (currently following the landed runtime-checkpoint
+revision `20261112_0084`) adds three initially empty ordinary tables and three
 journal-only triggers, without changing the compatibility epoch:
 
 - `message_search_state`: singleton activation row, backfill cursor and readiness.
@@ -168,16 +169,21 @@ aggregate disk-size cap: the per-Message text cap does not bound total index
 expansion. Sampling, headroom and stopping before the footprint limit are part
 of the measurement procedure, not a runtime storage guarantee.
 
-The approved single-database progression initializes an empty `0084` schema
+The approved single-database progression initializes an empty P6 `0088` schema
 through the normal initializer **before** synthetic fill. Old baseline source
 then uses the same-epoch compatible-open path with FTS absent and journaling
 inactive, followed by P4 planner optimization, P5 comparison and P6 backfill.
 Preserve immutable result ids/order/hashes from each phase and the original
 `0083` smoke evidence; do not create parallel mutable copies, fabricate importer
 receipts or bypass migration backups. Final acceptance uses the landed P4 code.
+The original smoke's P6-only `0084` stamp predates the unrelated landed `0084`
+runtime-checkpoint revision; it is evidence only and must not be opened or
+migrated under the corrected graph. Export the corrected schema for the final
+fixture and reparent `0088` to the actual landed predecessor before delivery.
 
-The original `0083` smoke was 68,079,616 bytes with no `sqlite_stat1`; candidate
-preflight classified `0084` as additive but returned `skip_snapshot=False`
+The original `0083` smoke was 68,079,616 bytes with no `sqlite_stat1`; pre-renumber
+candidate `20f149d` preflight classified its then-P6 `0084` as additive but
+returned `skip_snapshot=False`
 because importer receipts were incomplete. Migration and backfill were stopped
 before changing that smoke. The revised fixture measures search parity, query
 plans, background backfill duration, database/WAL growth, peak disk use and normal

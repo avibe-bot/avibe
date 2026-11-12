@@ -541,6 +541,7 @@ def _compatible_schema_problem(conn: sqlite3.Connection) -> str | None:
     for table, index in (
         ("messages", "ix_messages_turn_id"),
         ("agent_events", "ix_agent_events_turn_sequence_id"),
+        ("agent_events", "ix_agent_events_session_type_context_seq"),
         ("message_deliveries", "ix_message_deliveries_turn"),
         ("message_deliveries", "ix_message_deliveries_recovery_owner"),
     ):
