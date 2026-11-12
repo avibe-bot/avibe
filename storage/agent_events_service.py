@@ -143,7 +143,11 @@ def list_session_events(
         stmt = stmt.order_by(agent_events.c.created_at, agent_events.c.id)
     if limit is not None:
         stmt = stmt.limit(limit)
-    rows = [_row_to_payload(conn, dict(row)) for row in conn.execute(stmt).mappings().all()]
+    # sqlite3's legacy transaction mode does not BEGIN for SELECT. A savepoint
+    # pins event rows and their catalogs to one snapshot even when the caller
+    # only used engine.connect(); releasing it never commits caller-owned work.
+    with conn.begin_nested():
+        rows = [_row_to_payload(conn, dict(row)) for row in conn.execute(stmt).mappings().all()]
     if newest_first:
         rows.reverse()
     return rows

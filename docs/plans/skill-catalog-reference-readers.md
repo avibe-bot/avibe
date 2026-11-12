@@ -37,7 +37,9 @@ live-state operation.
   and digest mismatches fail visibly rather than producing an empty catalog.
 - Hydration removes the storage-only `entries_ref` and restores `entries` in the
   returned content. It never updates stored rows. The catalog lookup is by
-  primary key, on the event reader's transaction snapshot.
+  primary key. Session reads use a savepoint to keep events and catalogs in one
+  SQLite snapshot even under sqlite3's legacy SELECT transaction behavior;
+  releasing it does not commit caller-owned writes.
 
 ## Readers and permissions
 
@@ -95,6 +97,8 @@ premature garbage collection. No full historical rewrite or VACUUM is required.
 - missing/corrupt references fail visibly in both readers;
 - inline precedence, unrelated event isolation and existing authorization floor;
 - shared snapshots survive another event's retention and Session deletion;
+- concurrent deletion of an event and its last catalog cannot tear an in-flight
+  session read (the regression fails with a missing snapshot without the fix);
 - query plans use event/session and catalog primary-key searches, with no
   history-wide scan or temporary sort for bounded session reads.
 

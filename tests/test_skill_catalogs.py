@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event as sqlalchemy_event, select, text
 
 from core import skill_observability as runtime
 from storage import agent_events_service, migrations, skill_observability as store
@@ -133,6 +133,27 @@ def test_inline_retry_of_reference_is_duplicate_without_rewriting_it(engine):
     with engine.connect() as conn:
         assert conn.execute(select(agent_events.c.content_json)).scalar_one() == before
         assert conn.exec_driver_sql("SELECT sum(catalog_offer_count) FROM skill_usage_daily").scalar_one() == offers
+
+
+def test_event_and_catalog_read_share_snapshot_across_concurrent_pruning(engine):
+    session = seed_session(engine)
+    observation = catalog(session_id=session)
+    write(engine, observation)
+    with engine.begin() as conn:
+        compact(conn, observation)
+
+    def prune_after_event_select(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT agent_events."):
+            with engine.begin() as writer:
+                writer.execute(agent_events.delete())
+                writer.execute(skill_catalogs.delete())
+
+    with engine.connect() as reader:
+        sqlalchemy_event.listen(reader, "after_cursor_execute", prune_after_event_select)
+        payloads = agent_events_service.list_session_events(reader, session_id=session)
+        assert [payload["content"] for payload in payloads] == [observation["content"]]
+    with engine.connect() as conn:
+        assert conn.execute(select(skill_catalogs)).first() is None
 
 
 @pytest.mark.parametrize("damage", ["missing", "bad-reference", "invalid-json", "wrong-digest", "not-list"])
