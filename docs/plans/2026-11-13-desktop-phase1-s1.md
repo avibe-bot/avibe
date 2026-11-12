@@ -42,3 +42,29 @@ The bridge's outer command argument is `request`. Compatible bundles expose
 The existing updater remains owner. A trusted Phase 1 `avibe://updates`
 presentation must reach its native confirmation directly, without redispatching
 to the same Workbench footer. Cancellation and stale generations cannot install.
+
+## Native cookie probe
+
+Build and run from the checkout root:
+
+```sh
+cargo build --manifest-path desktop/Cargo.toml -p avibe-desktop --example instance_cookie_probe
+python3 desktop/src-tauri/tests/run_cookie_probe.py \
+  desktop/target/debug/examples/instance_cookie_probe --log /tmp/instance-cookie-probe.log
+```
+
+The runner creates empty HOME/XDG directories and passes only an explicit
+environment allowlist. The executable builds two hidden, disposable real Tauri
+WebViews, starts only its own loopback HTTP fixture, and never starts Runtime or
+calls Keychain. It projects the actual `__Host-vibe_remote_session` cookie name
+for an HTTPS host without making a network request to that host. Checks cover
+Secure/HttpOnly/SameSite, exact host (including rejecting a child domain),
+separate WebView stores, JavaScript HttpOnly exclusion through actual HTTP, and
+erasure. macOS debug execution passed; Windows and signed-package behavior are
+separate acceptance tiers. Failed runs and test homes are retained as evidence.
+
+Native HTTP uses the existing reqwest client with redirects/proxies disabled.
+The standard `cookie` and `cookie_store` crates retain cookie semantics rather
+than using a custom parser; `keyring` supplies platform credential storage.
+`uuid` identifies the native profile and `tempfile` atomically writes only the
+nonsecret connection record. Their dependencies are explicit in Cargo manifests.
