@@ -165,8 +165,17 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-computer-use",
             "main-desktop-update",
             "main-app-windows",
-            "main-desktop-notifications"
+            "main-desktop-notifications",
+            "main-instance-client"
         ])
+    );
+    let account = read_json(crate_dir().join("capabilities/main-instance-client.json"));
+    assert_eq!(account["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(account["local"], true);
+    assert!(account.get("remote").is_none());
+    assert_eq!(
+        account["permissions"],
+        serde_json::json!(["allow-desktop-client-request"])
     );
 }
 
@@ -596,6 +605,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "desktop_update_install",
         "desktop_update_skip",
         "desktop_update_prereleases_set",
+        "desktop_client_request",
         "pet_settings",
         "pet_set_enabled",
         "pet_set_shortcut",
@@ -837,7 +847,7 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
     );
     let source = shipping_source("src/lib.rs");
     let builder = source
-        .split("fn ensure_main_window(")
+        .split("fn build_main_window(")
         .nth(1)
         .expect("main window builder")
         .split("\n}\n")
@@ -849,6 +859,8 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
     );
     let setup = &source[source.find(".setup(|app|").expect("shell setup")..];
     assert!(setup.contains("ensure_main_window(app.handle())"));
+    assert!(source.contains("build_main_window(app, None, false, None)"));
+    assert!(shipping_source("src/instance_client.rs").contains("crate::build_main_window("));
     let handler = source
         .split("fn handle_new_window_request(")
         .nth(1)
@@ -901,7 +913,7 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     let source = shipping_source("src/lib.rs");
     let pet_source = shipping_source("src/pet.rs");
     let builder = source
-        .split("fn ensure_main_window(")
+        .split("fn build_main_window(")
         .nth(1)
         .expect("main window builder")
         .split("\n}\n")

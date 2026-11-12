@@ -1061,7 +1061,8 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                 }
                 let c = catalog();
                 let confirmation = app.clone();
-                app.dialog()
+                let dialog = app
+                    .dialog()
                     .message(format!(
                         "{}: {}\n{}: {}\n\n{}",
                         c.current,
@@ -1077,23 +1078,35 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                         c.install.clone(),
                         c.skip.clone(),
                         c.cancel.clone(),
-                    ))
-                    .show_with_result(move |result| {
-                        if !decision_current(&confirmation, presentation) {
+                    ));
+                let dialog = if matches!(presentation, CheckPresentation::TrustedDecision(_)) {
+                    // Keep the account client's confirmation owned by its
+                    // current window. Replacing/closing that window dismisses
+                    // the sheet; the generation check still fences its result.
+                    let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else {
+                        settle_update(&app, None, Settlement::Completed);
+                        return;
+                    };
+                    dialog.parent(&window)
+                } else {
+                    dialog
+                };
+                dialog.show_with_result(move |result| {
+                    if !decision_current(&confirmation, presentation) {
+                        settle_update(&confirmation, None, Settlement::Completed);
+                        return;
+                    }
+                    match choice(&result, &c) {
+                        Choice::Install => install(confirmation, manifest, presentation),
+                        Choice::Skip => {
+                            skip_version(&confirmation, &manifest.version);
                             settle_update(&confirmation, None, Settlement::Completed);
-                            return;
                         }
-                        match choice(&result, &c) {
-                            Choice::Install => install(confirmation, manifest, presentation),
-                            Choice::Skip => {
-                                skip_version(&confirmation, &manifest.version);
-                                settle_update(&confirmation, None, Settlement::Completed);
-                            }
-                            Choice::Later => {
-                                settle_update(&confirmation, None, Settlement::Completed);
-                            }
+                        Choice::Later => {
+                            settle_update(&confirmation, None, Settlement::Completed);
                         }
-                    });
+                    }
+                });
             }
             Ok(None) => {
                 set_state(&app, Phase::Current, None);

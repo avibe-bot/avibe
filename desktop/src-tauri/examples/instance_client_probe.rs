@@ -246,6 +246,10 @@ fn main() {
                                 emit(json!({"event":"escaped","ok":reply.ok}));
                             });
                         },
+                        "local_unavailable"=> {
+                            coordinator.local_origin(None);
+                            emit(json!({"event":"local_unavailable","generation":coordinator.state().generation}));
+                        },
                         "eval"=> { let window=handle.get_webview_window("main").expect("main"); window.eval(command["script"].as_str().unwrap()).unwrap(); },
                         "present"=>instance_client::present(&handle, match command["view"].as_str().unwrap() {
                             "instances"=>"instances","sign-out"=>"sign-out","account"=>"account",_=>panic!("unsupported view"),

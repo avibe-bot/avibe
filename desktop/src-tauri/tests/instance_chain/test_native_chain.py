@@ -342,7 +342,9 @@ def test_actual_remote_footer_opens_native_confirmation_and_fences_download_comp
         f["ready"]("return Boolean(document.querySelector('[data-version-trigger]'));")
         f["js"]("document.querySelector('[data-version-trigger]').click(); return true;")
         f["ready"]("return Boolean(document.querySelector('[data-update-menu] button'));")
-        f["js"]("document.querySelector('[data-update-menu] button').click(); return true;")
+        # This click navigates to the native presentation scheme. Sending the
+        # observation scheme in the same turn would replace that navigation.
+        f["send"](action="eval", script="document.querySelector('[data-update-menu] button').click();")
 
     def dialog():
         deadline = time.monotonic() + 15
@@ -367,8 +369,8 @@ def test_actual_remote_footer_opens_native_confirmation_and_fences_download_comp
     # A confirmation that survives a generation change cannot start download.
     footer()
     buttons = dialog()
-    f["send"](action="escape")
-    assert f["wait"]("escaped")["ok"] is True
+    f["send"](action="local_unavailable")
+    f["wait"]("local_unavailable")
     f["send"](action="dialog", choice=buttons.index("Download and Install"))
     f["wait"]("dialog")
     f["wait"]("update", lambda event: event["state"]["phase"] == "available")
@@ -376,7 +378,6 @@ def test_actual_remote_footer_opens_native_confirmation_and_fences_download_comp
 
     # The same real owner must fence an already accepted download whose bytes
     # arrive after local escape. The inert signed fixture is never installed.
-    select_studio(f)
     footer()
     buttons = dialog()
     f["send"](action="dialog", choice=buttons.index("Download and Install"))

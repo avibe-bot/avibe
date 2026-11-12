@@ -250,3 +250,15 @@ cleanup failure, retains cleanup ownership and refuses a new account operation
 until erasure succeeds. Eight coordinator tests pass after the fix; the
 before/after logs are `s1-auto-signout-before.log` and
 `s1-auto-signout-after.log` in the lane evidence directory.
+
+The full native suite found four existing inventory assertions still describing
+the pre-client shell. They now enumerate the added local-only account capability
+and command, and inspect the shared window builder used by both startup and
+selection. The original popup, marker and capability restrictions remain checked.
+The real footer probe also exposed its own observation navigation cancelling the
+CTA's scheme navigation; the driver now observes native events after that click.
+Pinned rfd uses a system-level CFUserNotification for an unparented macOS dialog.
+Phase 1 trusted confirmation now attaches the existing three-choice dialog to
+its current main window, so window retirement also owns its presentation. Legacy
+startup/menu presentation is unchanged; the callback and download retain the
+same generation fence. The fixture inspects only this process's modal/sheet.

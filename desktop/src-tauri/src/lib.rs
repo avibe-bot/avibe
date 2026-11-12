@@ -1775,9 +1775,9 @@ fn rediscover_after_runtime_rebind(app: AppHandle, origin: LoopbackOrigin) {
     });
 }
 
-/// Returns the shell's window, building it when there is none. This is the only
-/// place the window is built: its `tauri.conf.json` entry is `create: false`, so
-/// the window at startup and every recreated one carry the same new-window rule.
+/// Returns the shell's window, building it when there is none. Its
+/// `tauri.conf.json` entry is `create: false`; startup and client selection share
+/// the builder below so every replacement keeps the same native boundaries.
 fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         return Some(window);

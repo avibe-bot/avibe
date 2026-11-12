@@ -18,7 +18,10 @@ unsafe fn buttons(view: &NSView, found: &mut Vec<Retained<AnyObject>>) {
 pub fn inspect(choice: Option<usize>) -> Value {
     let main = MainThreadMarker::new().expect("fixture dialog must run on main thread");
     let app = NSApplication::sharedApplication(main);
-    let Some(window) = app.modalWindow() else {
+    let Some(window) = app
+        .modalWindow()
+        .or_else(|| app.windows().iter().find_map(|window| window.attachedSheet()))
+    else {
         return json!({"event":"dialog","buttons":[]});
     };
     let mut found = vec![];
