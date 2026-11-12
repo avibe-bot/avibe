@@ -56,6 +56,12 @@ try {
               };
             }),
             menus: [...document.querySelectorAll('[data-update-menu],[data-instance-menu]')].map(rect),
+            shellMetrics: [...document.querySelectorAll('[data-placement-sidebar]')].filter(sidebar => sidebar.querySelector('[data-compact="false"]')).map(sidebar => {
+              const tools = sidebar.querySelector('[data-sidebar-footer]').firstElementChild;
+              const icon = tools.querySelector('svg.lucide-settings');
+              return { paddingTop: getComputedStyle(sidebar).paddingTop, toolsHeight: tools.getBoundingClientRect().height, iconWidth: icon.getBoundingClientRect().width, iconHeight: icon.getBoundingClientRect().height };
+            }),
+            layers: [...document.querySelectorAll('[data-native-safe-strip],[data-update-menu],[data-instance-menu]')].map(element => getComputedStyle(element).zIndex),
             footerRows: [...document.querySelectorAll('[data-sidebar-footer]')].map(footer => footer.children.length),
             overflow: document.documentElement.scrollWidth > innerWidth,
             unfixtured: window.__DESIGN__.unfixtured(),
@@ -75,6 +81,10 @@ try {
         for (const box of actual.menus) {
           assert.ok(box.left >= 16 && box.top >= 0 && box.right <= frame.width && box.bottom <= frame.height, `${key}: popup within viewport`);
         }
+        for (const metric of actual.shellMetrics) {
+          assert.deepEqual(metric, { paddingTop: '10px', toolsHeight: 39, iconWidth: 18, iconHeight: 18 }, `${key}: spacing utilities preserve mirrored metrics`);
+        }
+        assert.ok(actual.layers.every(layer => layer === '60'), `${key}: standard stacking utility preserves layers`);
         assert.ok(actual.footerRows.every(rows => rows === 2), `${key}: two-row Workbench footer`);
         assert.equal(actual.overflow, false, `${key}: no horizontal overflow`);
         assert.deepEqual(actual.unfixtured, [], `${key}: fixture-only API reads`);

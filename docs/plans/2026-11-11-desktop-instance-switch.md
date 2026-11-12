@@ -270,6 +270,20 @@ The proposed shell in `ui/design/kit/desktop-instances.tsx` composes the real Wo
 
 Scope ruling (main, 2026-11-13 01:44:41): this PR stays docs + design only. Phase 1 contract §5 assigns AppShell/Wizard/VersionBadge adapters to frontend U1; that lane will extract the real footer/view slot. After U1 merges, the design owner will open a small follow-up PR to consume that slot and remove the duplicate shell composition. Do not hide or replace shipped DOM with CSS/portals as a substitute. Frames remain proposed until the owner approves the PR, and static geometry is not evidence of shipped shell parity.
 
+### Mirrored product literals — scoped U1 deferral
+
+Main's token audit ruling on 2026-11-13 at 02:19:06 applies to both draft kit files. The audit covers arbitrary dimension, spacing, typography, color and stacking classes; it does not infer full shipped-shell parity from equal metrics.
+
+| Original class | Audit disposition | Product reference / owner |
+|---|---|---|
+| `h-[39px]` | Retained with an inline source comment; the only remaining arbitrary numeric class. No existing named footer-height token is available, and changing it to 40px would change the reference metric. | `ui/src/components/AppShell.tsx:505` at base `366b89ce13`. U1 extracts the real tools/footer slot and may introduce a shared height token; the subsequent frame-consumer PR deletes this copied row and literal. |
+| `size-[18px]` | Replaced by existing spacing utility `size-4.5`, with rendered 18×18px verified. | Mirrored Settings icons in `AppShell.tsx:530` and `:543`; the copied Settings control disappears on U1-slot adoption. |
+| `pt-[0.625rem]` | Replaced by equivalent `pt-2.5` (10px at the frame root size). | Existing spacing scale imported through `ui/src/index.css`. |
+| `z-[60]` (three uses) | Replaced by the equivalent standard `z-60` utility. | Existing Tailwind stacking utility, no new product token. |
+| `bg-[var(--sidebar-background)]` | Uses the equivalent `bg-(--sidebar-background)` shorthand. | Existing product color token; no literal color introduced. |
+
+The remaining bracketed selector is a structural variant for the inactive rejected-A branch, not a numeric/color value. `desktop-instance-placement.tsx` contains no arbitrary-value classes. Typography already uses product scale tokens. No `index.css` or AppShell edit is included here. A new token-class finding on the next reviewed head requires another main diagnosis before edits or push.
+
 The reproducible design check is `node design/checks/desktop-instances.mjs` from `ui/`. It enumerates all instance frame/theme combinations and checks update visibility against the independent availability fixture, compares update DOM across connection states and connection-indicator DOM across update states, requires the signed-out/switching/offline + update combinations in both languages/themes, and checks avatar x=16, adjacent gaps ≤8px, two-row footers, viewport-contained menus and fixture-only network reads. It does not certify native updater behavior.
 
 Known preview limit: Show annotation injection can log the documented `react/jsx-runtime` resolution warning inside canvas iframes (`docs/plans/design-frames.md`, Known by design). Direct design capture is the static verification surface; this lane does not modify the Show runtime.
