@@ -5,6 +5,7 @@ import { Check, Eye, Server, ShieldCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { InfoHint } from '@/components/ui/info-hint';
 import { cn } from '@/lib/utils';
 
 import { useDraft } from '../draft';
@@ -122,17 +123,24 @@ export function Notice({ tone = 'neutral', icon: Icon, children, className }: {
   );
 }
 
-/** The two tier cards of the Add dialog, as the shipped form draws them (ui/design: vault/secret-dialog/create). */
+/** The two tier cards as avibe#3626 draws them: one short line each, the explanation behind an ⓘ. */
 export function TierCards({ value }: { value: 'standard' | 'protected' }) {
   const { t } = useTranslation();
   const d = useDraft();
   const cards = [
-    { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: d('Agent 可以直接签名，适合给 Agent 用的小额热钱包。', 'Agents can sign on their own. For a small hot wallet your Agents use.') },
-    { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: d('助记词只在安全沙箱里出现；每次签名都要你用通行密钥批准。', 'The words exist only in the secure sandbox; every signature needs your passkey.') },
+    { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: d('Agent 可以自己签名', 'Agents can sign on their own') },
+    { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: d('只有你的 passkey 能打开', 'Only your passkey can open it') },
   ] as const;
   return (
     <div className="flex flex-col gap-1.5">
-      <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
+      <span className="flex items-center gap-1.5">
+        <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
+        <InfoHint
+          hover
+          label={d('两种档位的区别', 'How the two levels differ')}
+          content={d('标准档：种子由这台电脑上的 avault 加密保存，Agent 可直接签名，适合小额热钱包。保护档：助记词只在安全沙箱里出现，每次签名都要你用 passkey 批准。', 'Standard: avault on this computer keeps the seed encrypted and Agents can sign on their own; for a small hot wallet. Protected: the words exist only in the secure sandbox and every signature needs your passkey.')}
+        />
+      </span>
       <div className="grid grid-cols-2 gap-2.5">
         {cards.map(({ key, icon: Icon, title, desc }) => {
           const selected = value === key;
@@ -157,6 +165,18 @@ export function TierCards({ value }: { value: 'standard' | 'protected' }) {
         })}
       </div>
     </div>
+  );
+}
+
+/** One short line with the longer explanation behind an ⓘ: mirrors `HintLine` of avibe#3626
+ *  (ui/src/components/ui/vault-key-builder-parts.tsx); switch to it once that PR lands. */
+export function HintLine({ text, info }: { text: ReactNode; info?: ReactNode }) {
+  const d = useDraft();
+  return (
+    <span className="flex items-start gap-1.5 text-xs leading-snug text-muted">
+      <span className="min-w-0">{text}</span>
+      {info ? <InfoHint content={info} label={d('说明', 'More info')} hover className="mt-px" /> : null}
+    </span>
   );
 }
 

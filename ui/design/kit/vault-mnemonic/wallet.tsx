@@ -10,13 +10,12 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { CopyButton } from '@/components/ui/copy-button';
 import { InlineNameInput } from '@/components/ui/inline-name-input';
-import { SegmentedRadio } from '@/components/ui/segmented';
-import { SigningAddressList, SigningAddressRow } from '@/components/ui/signing-address-list';
+import { SigningAddressList } from '@/components/ui/signing-address-list';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 
 import { useDraft } from '../draft';
-import { IMPORTED_ADDRESSES, WALLET_ACCOUNTS, addressOf, type MnemonicChain, type WalletAccount } from './data';
+import { IMPORTED_ADDRESSES, WALLET_ACCOUNTS, type MnemonicChain, type WalletAccount } from './data';
 import { AccountIndex, CommandLine, useChainLabel } from './parts';
 
 const ago = (minutes: number, d: (zh: string, en: string) => string) =>
@@ -180,7 +179,7 @@ function AddAccount({ next }: { next: number }) {
   );
 }
 
-/** Version A (recommended): one card per account, its three addresses inside. */
+/** One card per account, its three addresses inside (owner decision 11-12: 3 = A). */
 export function WalletDetailAccounts({ accounts = WALLET_ACCOUNTS, editing }: { accounts?: WalletAccount[]; editing?: AccountEditing }) {
   const shown = editing?.kind === 'new'
     ? [...accounts, { index: accounts.length, name: '', nameEn: '', addresses: IMPORTED_ADDRESSES[accounts.length] }]
@@ -200,37 +199,6 @@ export function WalletDetailAccounts({ accounts = WALLET_ACCOUNTS, editing }: { 
         ))}
       </div>
       <AddAccount next={shown.length} />
-    </div>
-  );
-}
-
-/** Version B: one chain at a time, every account's address for it in a compact list. */
-export function WalletDetailChains({ accounts = WALLET_ACCOUNTS, chain = 'solana' }: { accounts?: WalletAccount[]; chain?: MnemonicChain }) {
-  const d = useDraft();
-  const chainLabel = useChainLabel();
-  return (
-    <div className="flex min-w-0 flex-col gap-4">
-      <DetailHeader accounts={accounts.length} />
-      <AgentUsage />
-      <SegmentedRadio<MnemonicChain>
-        value={chain}
-        onChange={() => {}}
-        ariaLabel={d('链', 'Chain')}
-        options={(['evm', 'bitcoin', 'solana'] as MnemonicChain[]).map((id) => ({ id, label: chainLabel(id) }))}
-      />
-      <ul className="flex flex-col divide-y divide-border rounded-[10px] border border-edge bg-surface shadow-elevation-0">
-        {accounts.map((account) => (
-          <li key={account.index} className="flex min-w-0 flex-col gap-1 px-3 py-2.5">
-            <span className="flex min-w-0 items-center gap-2">
-              <AccountIndex index={account.index} />
-              <span className="truncate text-[13px] font-semibold text-foreground">{d(account.name, account.nameEn)}</span>
-              {account.ask ? <Badge variant="secondary" className="ml-auto">{d('签名前问我', 'Asks first')}</Badge> : null}
-            </span>
-            <SigningAddressRow label={chainLabel(chain)} value={addressOf(account.addresses, chain)} />
-          </li>
-        ))}
-      </ul>
-      <AddAccount next={accounts.length} />
     </div>
   );
 }
