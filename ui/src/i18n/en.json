@@ -6583,6 +6583,7 @@
       "mismatchHint": "Don’t send funds to this wallet. It could not be deleted automatically; delete it again. Until then this browser keeps it blocked.",
       "askAccount0": "Ask before account #0 signs",
       "askAccount0Info": "By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser, and turning it off later needs your Passkey. Each account has its own setting in the wallet.",
+      "askNeedsManager": "Only an admin can set “Ask before signing”. You can create the wallet now and ask an admin to turn it on in Accounts.",
       "mainAccount": "Main",
       "accountFallback": "Account #{{account}}",
       "back": "Back",

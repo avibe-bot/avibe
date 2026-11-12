@@ -12,7 +12,7 @@ import { CREATED_ADDRESSES, CREATED_WORDS } from '../../../kit/vault-mnemonic/da
 import { ProtectedHandoff } from '../../../kit/vault-mnemonic/create';
 import { frames } from '../../../frame';
 import { consolePage } from '../../workbench/fixtures';
-import { alone, avaultFixtures, checkFixtures, type CheckFixture } from './fixtures';
+import { alone, avaultFixtures, checkFixtures, editorCapabilities, type CheckFixture } from './fixtures';
 
 const fixtures = avaultFixtures('0.1.11');
 const T = '添加密钥';
@@ -43,6 +43,7 @@ const done = () => (
 
 const designFrames = frames([
   { name: 'setup', title: '新建 · ① 设置 · 签名密钥的链里第三项「助记词钱包」', width: 800, height: 1320, status: 'shipped', fixtures, click: setup, render: add },
+  { name: 'setup-editor', title: '新建 · ① 设置 · 编辑者：「签名前问我」只有管理员能设', width: 800, height: 1380, status: 'shipped', fixtures: avaultFixtures('0.1.11', { capabilities: editorCapabilities }), click: setup, render: add },
   { name: 'setup-phone', title: '新建 · ① 设置 · 手机（三个链选项的宽度）', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: setup, render: consolePage(<><VaultsPage />{add()}</>) },
   { name: 'backup-hidden', title: '新建 · ② 抄下助记词 · 点击后才显示', width: 800, height: 900, status: 'shipped', fixtures, render: alone(T, backup()) },
   { name: 'backup', title: '新建 · ② 抄下助记词 · 已显示', width: 800, height: 900, status: 'shipped', fixtures, click: show, render: alone(T, backup()) },

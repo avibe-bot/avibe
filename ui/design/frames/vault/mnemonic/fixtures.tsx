@@ -1,3 +1,4 @@
+import { DENIED_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 // Shared scaffolding for the seed-phrase wallet frames (proposal: _tmp/vault-mnemonic/design-v2.md).
 // A dialog is drawn open over nothing (as vault/secret-dialog does) or over the shipped Vaults page;
 // the wallet itself is listed among the page's other secrets as the keypair the shipped page would
@@ -56,10 +57,13 @@ export const walletFixtures = vaultFixtures({
 });
 
 /** An avault new enough for the wallet (0.1.11), or the one before it. */
-export const avaultFixtures = (version: string) => vaultFixtures({
+export const avaultFixtures = (version: string, overrides?: Parameters<typeof vaultFixtures>[1]) => vaultFixtures({
   ...vaultApi({ grants: [], requests: [] }),
   '/api/dependencies': { deps: [{ id: 'avault', kind: 'tool', required: true, installed: true, version, status: 'ready' }] },
-});
+}, overrides);
+
+/** A member who can create secrets but not manage the instance (account settings need a manager). */
+export const editorCapabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_read_instance: true, can_chat: true, can_use_agents: true, can_use_vault_secrets: true };
 
 const dialog = (title: string, body: ReactNode, wide: boolean) => (
   <Dialog open onOpenChange={noop}>

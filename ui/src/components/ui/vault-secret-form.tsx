@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
@@ -231,6 +232,10 @@ export const VaultSecretForm: React.FC<{
   const [hdImport, setHdImport] = useState('');
   const [hdPassphrase, setHdPassphrase] = useState('');
   const [hdAsk, setHdAsk] = useState(false);
+  // Account settings are a manager's action (the account PATCH needs instance management), so an
+  // Editor can create a wallet but not turn on ask-before-signing here.
+  const { capabilities } = useInstanceAuthorization();
+  const canSetHdAsk = capabilities.can_manage_instance;
   const [hdCreated, setHdCreated] = useState<VaultHdAccount | null>(null);
   const [hdMismatch, setHdMismatch] = useState(false);
   // The wallet exists but #0's requested ask-before-signing did not stick: not done until it does.
@@ -630,7 +635,7 @@ export const VaultSecretForm: React.FC<{
     }
     setHdCreated(stored);
     setHdStep('done');
-    if (hdAsk) await applyHdAsk();
+    if (hdAsk && canSetHdAsk) await applyHdAsk();
   };
 
   const [hdMismatchDeleted, setHdMismatchDeleted] = useState(false);
@@ -1832,8 +1837,11 @@ export const VaultSecretForm: React.FC<{
             <span className="text-[13px] font-semibold text-foreground">{t('vaults.hd.askAccount0')}</span>
             <InfoHint hover content={t('vaults.hd.askAccount0Info')} label={t('vaults.dialog.moreInfo')} />
           </span>
-          <Switch checked={hdAsk} onCheckedChange={setHdAsk} disabled={submitting} label={t('vaults.hd.askAccount0')} />
+          <Switch checked={hdAsk && canSetHdAsk} onCheckedChange={setHdAsk} disabled={submitting || !canSetHdAsk} label={t('vaults.hd.askAccount0')} />
         </div>
+      ) : null}
+      {isHd && protection === 'standard' && !canSetHdAsk ? (
+        <span role="note" className="text-xs text-muted">{t('vaults.hd.askNeedsManager')}</span>
       ) : null}
       {isHd && protection === 'protected' ? (
         <span role="note" className="text-xs text-muted">{t('vaults.hd.protectedUnsupported')}</span>

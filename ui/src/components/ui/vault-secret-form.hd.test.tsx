@@ -14,6 +14,15 @@ import en from '@/i18n/en.json';
 import type { VaultHdAccount } from '@/context/ApiContext';
 import { deriveAccounts, wordsToSeed } from '@/lib/vaultHdWallet';
 import { VaultSecretForm } from './vault-secret-form';
+import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
+import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
+import type { ReactNode } from 'react';
+
+let canManage = true;
+const AsRole = ({ children }: { children: ReactNode }) => (
+  <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: null, instanceRole: null, capabilities: canManage ? OWNER_INSTANCE_CAPABILITIES : { ...OWNER_INSTANCE_CAPABILITIES, can_manage_instance: false } }}>{children}</InstanceAuthorizationContext.Provider>
+);
+
 
 const api = vi.hoisted(() => ({
   listDependencies: vi.fn(),
@@ -61,7 +70,7 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
 const openWallet = async (name = 'AGENT_WALLET') => {
   const onCreated = vi.fn();
-  render(<I18nextProvider i18n={i18n}><VaultSecretForm onCancel={vi.fn()} onCreated={onCreated} /></I18nextProvider>);
+  render(<I18nextProvider i18n={i18n}><AsRole><VaultSecretForm onCancel={vi.fn()} onCreated={onCreated} /></AsRole></I18nextProvider>);
   await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
   fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
   fireEvent.change(screen.getByRole('textbox', { name: `${en.vaults.dialog.name} ${en.vaults.dialog.nameHint}` }), { target: { value: name } });
@@ -281,7 +290,7 @@ it('shows the avault authorization notice when saving a wallet needs it, keeping
 });
 
 it('is not blocked by proxy settings left in Advanced before choosing a seed-phrase wallet', async () => {
-  render(<I18nextProvider i18n={i18n}><VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} /></I18nextProvider>);
+  render(<I18nextProvider i18n={i18n}><AsRole><VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} /></AsRole></I18nextProvider>);
   await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
   fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
   fireEvent.change(screen.getByRole('textbox', { name: `${en.vaults.dialog.name} ${en.vaults.dialog.nameHint}` }), { target: { value: 'AGENT_WALLET' } });
@@ -314,4 +323,16 @@ it('keeps acting on the wallet it created even if the name field changes', async
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.askRetry })); });
   expect(api.updateVaultHdAccount.mock.calls.every((call) => call[0] === 'WALLET_A')).toBe(true);
   expect(screen.getByText(hd.done.title.replace('{{name}}', 'WALLET_A'))).toBeTruthy();
+});
+
+it('tells an Editor that only an admin can set ask-before-signing, and never PATCHes it', async () => {
+  canManage = false;
+  try {
+    await openWallet('WALLET_E');
+    const sw = screen.getByRole('switch', { name: hd.askAccount0 }) as HTMLButtonElement;
+    expect(sw.disabled).toBe(true);
+    expect(screen.getByText(hd.askNeedsManager)).toBeTruthy();
+  } finally {
+    canManage = true;
+  }
 });

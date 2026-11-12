@@ -6583,6 +6583,7 @@
       "mismatchHint": "不要往这个钱包转账。自动删除没有成功，请再删一次；删除之前它在这个浏览器里一直标为不可用。",
       "askAccount0": "账户 #0 签名前问我",
       "askAccount0Info": "默认 Agent 可以直接签名。打开后，账户 #0 每次签名都要你在浏览器里批准；之后要关闭，需要你的 Passkey 确认。每个账户都能在钱包里单独设置。",
+      "askNeedsManager": "只有管理员能设置「签名前问我」。可以先创建钱包，之后请管理员在账户里打开。",
       "mainAccount": "主账户",
       "accountFallback": "账户 #{{account}}",
       "back": "上一步",
