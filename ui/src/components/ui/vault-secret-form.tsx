@@ -235,6 +235,9 @@ export const VaultSecretForm: React.FC<{
   const [hdMismatch, setHdMismatch] = useState(false);
   // The wallet exists but #0's requested ask-before-signing did not stick: not done until it does.
   const [hdAskFailed, setHdAskFailed] = useState(false);
+  // The name the wallet was created under: every later action (retry, delete, done) uses it, never
+  // whatever the name field says now.
+  const hdSavedNameRef = useRef('');
   const [signingError, setSigningError] = useState<string | null>(null);
   const [signingAddresses, setSigningAddresses] = useState<SigningAddresses | null>(null);
   const [addressesLoading, setAddressesLoading] = useState(false);
@@ -567,13 +570,15 @@ export const VaultSecretForm: React.FC<{
     const generated = signingSource === 'generate';
     const words = generated ? hdWords : hdCheck.ok ? hdCheck.words : null;
     if (!words) return;
+    const name = secretName;
+    hdSavedNameRef.current = name;
     const seed = wordsToSeed(words, generated ? '' : hdPassphrase);
     let expected: HdAccountAddresses;
     let blindBox: Awaited<ReturnType<typeof sealBlindBox>>;
     try {
       expected = deriveAccounts(seed, 1)[0];
       const pubkey = await api.getVaultPubkey();
-      blindBox = await sealBlindBox(seed, pubkey, hdSeedImportBlindBoxContext(secretName));
+      blindBox = await sealBlindBox(seed, pubkey, hdSeedImportBlindBoxContext(name));
     } finally {
       seed.fill(0);
     }
@@ -581,7 +586,7 @@ export const VaultSecretForm: React.FC<{
     const skillLinks = partitionTags(tags).skills;
     const created = await api.createVaultSecret(
       {
-        name: secretName,
+        name,
         kind: 'keypair',
         protection: 'standard',
         signer_kind: 'hd-seed',
@@ -614,9 +619,9 @@ export const VaultSecretForm: React.FC<{
     const stored = created.secret?.accounts?.find((account) => account.account === 0);
     if (!stored || !sameHdAddresses(stored, expected)) {
       // Logged by name only: never the words, the seed or an address the user could be steered to.
-      console.error('[vault] seed-phrase wallet address check failed; the wallet is blocked', { name: secretName });
+      console.error('[vault] seed-phrase wallet address check failed; the wallet is blocked', { name });
       // Fail closed: block it in this browser first, then delete it. Only a confirmed delete unblocks.
-      blockHdWallet(secretName);
+      blockHdWallet(name);
       setHdMismatch(true);
       await deleteMismatched();
       return;
@@ -629,9 +634,9 @@ export const VaultSecretForm: React.FC<{
   const [hdMismatchDeleted, setHdMismatchDeleted] = useState(false);
   const deleteMismatched = async () => {
     try {
-      const result = await api.deleteVaultSecret(secretName);
+      const result = await api.deleteVaultSecret(hdSavedNameRef.current);
       if (result?.ok) {
-        unblockHdWallet(secretName);
+        unblockHdWallet(hdSavedNameRef.current);
         setHdMismatchDeleted(true);
         setError(null);
       } else {
@@ -647,7 +652,7 @@ export const VaultSecretForm: React.FC<{
   const applyHdAsk = async () => {
     // A refused answer and a dropped connection both leave #0 without the restriction asked for.
     try {
-      const asked = await api.updateVaultHdAccount(secretName, 0, { always_ask: true }, { handleError: false });
+      const asked = await api.updateVaultHdAccount(hdSavedNameRef.current, 0, { always_ask: true }, { handleError: false });
       if (asked.ok) {
         setHdAskFailed(false);
         setError(null);
@@ -1533,7 +1538,7 @@ export const VaultSecretForm: React.FC<{
           </>
         ) : hdStep === 'done' && hdCreated ? (
           <>
-            <HdDoneStep name={secretName} account={hdCreated} />
+            <HdDoneStep name={hdSavedNameRef.current} account={hdCreated} />
             {hdAskFailed ? (
               <HdNotice tone="error" icon={TriangleAlert}>
                 <span className="font-semibold text-destructive-ink">{t('vaults.hd.askFailed')}</span>
@@ -1554,7 +1559,7 @@ export const VaultSecretForm: React.FC<{
                   {t('vaults.hd.askRetry')}
                 </Button>
               ) : null}
-              <Button type="button" disabled={hdAskFailed || submitting} onClick={() => onCreated(secretName, 'created')}>{t('vaults.hd.done.finish')}</Button>
+              <Button type="button" disabled={hdAskFailed || submitting} onClick={() => onCreated(hdSavedNameRef.current, 'created')}>{t('vaults.hd.done.finish')}</Button>
             </div>
           </>
         ) : (
@@ -1631,6 +1636,7 @@ export const VaultSecretForm: React.FC<{
           }}
           autoFocus
           required
+          disabled={submitting}
           aria-invalid={nameInvalid || undefined}
           className={cn('font-mono', nameInvalid && 'border-destructive/60')}
         />

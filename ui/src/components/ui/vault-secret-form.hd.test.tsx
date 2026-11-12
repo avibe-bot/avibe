@@ -296,3 +296,22 @@ it('is not blocked by proxy settings left in Advanced before choosing a seed-phr
   await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
   expect(screen.queryByText(en.vaults.dialog.errors.authNameRequired)).toBeNull();
 });
+
+it('keeps acting on the wallet it created even if the name field changes', async () => {
+  await openWallet('WALLET_A');
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  fireEvent.click(screen.getByRole('switch', { name: hd.askAccount0 }));
+  let resolveCreate!: (value: unknown) => void;
+  api.createVaultSecret.mockReturnValue(new Promise((resolve) => { resolveCreate = resolve; }));
+  api.updateVaultHdAccount.mockResolvedValueOnce({ ok: false, code: 'boom' } as never);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  const nameBox = screen.getByRole('textbox', { name: new RegExp(`^${en.vaults.dialog.name}`) }) as HTMLInputElement;
+  expect(nameBox.disabled).toBe(true);
+  fireEvent.change(nameBox, { target: { value: 'WALLET_B' } });
+  await act(async () => { resolveCreate({ ok: true, secret: { accounts: [storedFor(OFFICIAL.split(' '))] } }); });
+  await screen.findByText(hd.askFailed);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.askRetry })); });
+  expect(api.updateVaultHdAccount.mock.calls.every((call) => call[0] === 'WALLET_A')).toBe(true);
+  expect(screen.getByText(hd.done.title.replace('{{name}}', 'WALLET_A'))).toBeTruthy();
+});
