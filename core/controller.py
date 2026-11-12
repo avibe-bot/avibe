@@ -2463,10 +2463,34 @@ class Controller:
             except Exception:
                 break
 
+    def _run_background_storage_pass(self, cancel_event=None) -> dict:
+        """Share the joined maintenance worker without sharing job cadences."""
+        import time
+
+        from storage.db import get_cached_sqlite_engine
+        from storage.message_search_index import run_pass
+
+        self._message_search_pending = False
+        try:
+            search_status = run_pass(get_cached_sqlite_engine(), cancel_event=cancel_event)
+            self._message_search_pending = search_status == "pending"
+            if search_status == "unsupported" and getattr(self, "_message_search_last_status", None) != search_status:
+                logger.warning("Message search acceleration unavailable; using LIKE without accumulating an index journal")
+            self._message_search_last_status = search_status
+        except Exception:
+            # The journal + legacy query remain authoritative if indexing fails.
+            logger.exception("Message search index maintenance failed")
+        now = time.monotonic()
+        if now < getattr(self, "_next_trace_retention_check", 0):
+            return {"status": "not_due"}
+        self._next_trace_retention_check = now + self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS
+        return self._run_agent_events_retention_pass(cancel_event)
+
     async def _agent_events_retention_loop(self) -> None:
         """Bounded retention for internal agent trace events (avibe#1506).
 
-        Checks immediately and then hourly; the storage marker inside
+        Retention checks immediately and then hourly. Search indexing gets short
+        resumable passes (one-second pauses while pending, otherwise one minute).
         ``agent_events_retention.run_once`` owns the once-per-day cadence, so
         short-lived sessions still get their first pass on startup. Work runs
         on a single-worker executor so shutdown can join it.
@@ -2489,7 +2513,7 @@ class Controller:
                 try:
                     future = loop.run_in_executor(
                         executor,
-                        self._run_agent_events_retention_pass,
+                        self._run_background_storage_pass,
                         cancel_event,
                     )
                     self._trace_retention_future = future
@@ -2512,7 +2536,7 @@ class Controller:
                     raise
                 except Exception:
                     logger.error("Agent trace-event retention failed", exc_info=True)
-                await asyncio.sleep(self._AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS)
+                await asyncio.sleep(1 if getattr(self, "_message_search_pending", False) else 60)
         finally:
             cancel_event.set()
             await self._join_trace_retention_future()

@@ -58,6 +58,7 @@ _OPERATION_KWARGS = {
     "create_index": {"schema", "unique", "if_not_exists"},
     "create_table": {"schema", "if_not_exists"},
     "add_column": {"schema"},
+    "execute": set(),
 }
 _LITERAL_SQL = re.compile(r"(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|'(?:[^']|'')*'|NULL)\Z", re.I | re.S)
 
@@ -301,7 +302,11 @@ def _emitted_operations(tree: ast.Module) -> list[ops.MigrateOperation]:
             and type(kwargs["if_not_exists"]) is not bool
         ):
             raise UnprovenMigration("if_not_exists must be a literal boolean")
-        if fn.attr == "create_index":
+        if fn.attr == "execute":
+            if len(args) != 1 or type(args[0]) is not str:
+                raise UnprovenMigration("journal DDL requires one literal SQL string")
+            operation = ops.ExecuteSQLOp(args[0])
+        elif fn.attr == "create_index":
             operation = ops.CreateIndexOp(*args, **kwargs)
         elif fn.attr == "add_column":
             operation = ops.AddColumnOp(*args, **kwargs)
@@ -310,7 +315,70 @@ def _emitted_operations(tree: ast.Module) -> list[ops.MigrateOperation]:
         emitted.append(operation)
     if not emitted:
         raise UnprovenMigration("no proven additive operations")
+    _validate_search_journal_operations(emitted)
     return emitted
+
+
+def _validate_search_journal_operations(operations: list[ops.MigrateOperation]) -> None:
+    """Prove the only permitted trigger effects target a new independent journal.
+
+    This is deliberately not a raw-SQL or general trigger exemption. Names,
+    source columns, timing, conflict policy and complete bodies are fixed. No
+    FTS module or user-defined function participates in an old binary's writes.
+    """
+    journal_sql = [item for item in operations if isinstance(item, ops.ExecuteSQLOp)]
+    if not journal_sql:
+        return
+    bodies = {
+        "insert": ("INSERT", ("new",)),
+        "update": ("UPDATE OF id, content_text", ("old", "new")),
+        "delete": ("DELETE", ("old",)),
+    }
+    expected = {
+        " ".join((
+            f"CREATE TRIGGER message_search_{name} AFTER {event} ON messages "
+            "WHEN EXISTS (SELECT 1 FROM message_search_state WHERE id = 1) BEGIN "
+            + " ".join(
+                f"INSERT OR IGNORE INTO message_search_dirty (message_id) VALUES ({row}.id);"
+                for row in rows
+            )
+            + " END"
+        ).split())
+        for name, (event, rows) in bodies.items()
+    }
+    actual = [" ".join(item.sqltext.split()) for item in journal_sql]
+    if len(actual) != len(expected) or set(actual) != expected:
+        raise UnprovenMigration("only the complete message-search journal trigger bundle is additive")
+    states = [
+        item for item in operations
+        if isinstance(item, ops.CreateTableOp) and item.table_name == "message_search_state"
+    ]
+    if len(states) != 1 or not any(
+        isinstance(column, sa.Column) and column.name == "id"
+        and type(column.type) is sa.Integer and column.primary_key and not column.nullable
+        for column in states[0].columns
+    ):
+        raise UnprovenMigration("journal activation requires its new integer-keyed state table")
+    targets = [
+        item for item in operations
+        if isinstance(item, ops.CreateTableOp) and item.table_name == "message_search_dirty"
+    ]
+    if len(targets) != 1 or len(targets[0].columns) != 1:
+        raise UnprovenMigration("journal requires its new independent single-column target")
+    column = targets[0].columns[0]
+    if not (
+        isinstance(column, sa.Column) and column.name == "message_id"
+        and type(column.type) is sa.Text and column.primary_key
+        and not column.nullable and column.server_default is None
+        and _column_safe(column, independent=True)
+    ):
+        raise UnprovenMigration("journal target must accept every non-null Message id")
+    # A later operation must not constrain the journal or replace its key shape.
+    if any(
+        getattr(item, "table_name", None) == "message_search_dirty" and item is not targets[0]
+        for item in operations
+    ):
+        raise UnprovenMigration("journal target cannot have additional operations")
 
 
 def _column_safe(column: object, *, independent: bool) -> bool:
@@ -344,6 +412,9 @@ def _column_safe(column: object, *, independent: bool) -> bool:
 
 
 def _operation_safe(operation: ops.MigrateOperation) -> bool:
+    if isinstance(operation, ops.ExecuteSQLOp):
+        # Whole-bundle validation (including the target table) ran above.
+        return True
     if operation.schema is not None or type(operation.table_name) is not str or not operation.table_name:
         return False
     if isinstance(operation, ops.CreateIndexOp):
