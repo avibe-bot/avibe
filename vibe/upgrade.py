@@ -122,6 +122,7 @@ class UpgradePlan:
     activation: "AtomicActivation | None" = None
     preflight_error: str | None = None
     python_upgrade_command: list[str] | None = None
+    release_spec_index: int | None = None
 
 
 def execute_upgrade_plan(
@@ -151,7 +152,33 @@ def execute_upgrade_plan(
         from vibe.install_generations import mark_install_generation
 
         mark_install_generation(plan.activation.candidate_launcher, os.getpid())
-    return run(plan.command, env=plan.env, **run_kwargs)
+    if plan.release_spec_index is None:
+        return run(plan.command, env=plan.env, **run_kwargs)
+    from vibe.release_dependencies import prepare_release
+
+    # Resolve and inspect the target, never constrain a new version with this
+    # running version's lock. Keep downloads alive until the installer exits.
+    with tempfile.TemporaryDirectory(prefix="avibe-release-") as scratch:
+        command = list(plan.command)
+        spec, constraints = prepare_release(command[plan.release_spec_index], Path(scratch))
+        command[plan.release_spec_index] = spec
+        if constraints is not None:
+            if plan.method == "pip":
+                # pip treats any --hash in a constraints file as enabling full
+                # hash-check mode, including the core wheel. This path promises
+                # exact versions, not a partially configured hash-only install.
+                version_constraints = Path(scratch) / "version-constraints.txt"
+                version_constraints.write_text(
+                    "\n".join(
+                        line.removesuffix("\\").rstrip()
+                        for line in constraints.read_text(encoding="utf-8").splitlines()
+                        if not line.lstrip().startswith("--hash=")
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                constraints = version_constraints
+            command.extend(["--constraints" if plan.method == "uv" else "--constraint", str(constraints)])
+        return run(command, env=plan.env, **run_kwargs)
 
 
 def _upgrade_python_patch(
@@ -1808,6 +1835,7 @@ def build_upgrade_plan(
             activation=atomic,
             preflight_error=preflight_error,
             python_upgrade_command=python_upgrade_command,
+            release_spec_index=3,
         )
 
     command = [executable, "-m", "pip", "install"]
@@ -1817,6 +1845,7 @@ def build_upgrade_plan(
     # installs force only when metadata disagrees with the running files.
     if version or not installed_metadata_describes_running_code():
         command.append("--force-reinstall")
+    release_spec_index = len(command)
     command.append(package_spec)
     preflight_command = None
     # A forward core-only install needs a single resolver pass. Exact repairs
@@ -1838,6 +1867,7 @@ def build_upgrade_plan(
         method="pip",
         preflight_command=preflight_command,
         preflight_fallback_command=preflight_fallback_command,
+        release_spec_index=release_spec_index,
     )
 
 def get_safe_cwd() -> str:

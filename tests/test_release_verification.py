@@ -287,7 +287,7 @@ def test_release_shell_steps_parse(workflow):
 def test_preview_upload_validates_all_existing_bytes_before_runtime_then_packages(tmp_path, existing):
     dist = tmp_path / "dist"
     dist.mkdir()
-    names = ["vibe-show-runtime-node-linux-arm64.tgz", "show-runtime-manifest.json",
+    names = ["vibe-show-runtime-node-linux-arm64.tgz", "show-runtime-manifest.json", "dependency-constraints.txt",
              "avibe_os-1.0.0-py3-none-any.whl", "avibe_os-1.0.0.tar.gz"]
     for name in names:
         (dist / name).write_bytes(b"immutable asset")
@@ -324,9 +324,9 @@ elif args[:2] == ["release", "download"]:
     else:
         assert result.returncode == 0, result.stdout + result.stderr
         assert len(uploads) == 2
-        assert uploads[0][-2:] == [f"dist/{name}" for name in names[:2]]
+        assert uploads[0][-3:] == [f"dist/{name}" for name in names[:3]]
         assert uploads[1][6:] == [
-            *(f"dist/{name}" for name in names[2:] if existing == "none" or name != names[-1]),
+            *(f"dist/{name}" for name in names[3:] if existing == "none" or name != names[-1]),
         ]
         assert "finalize" in calls[-1]
 
@@ -526,7 +526,7 @@ def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
 @pytest.mark.parametrize(
     "state",
     ["empty", "identical", "partial", "core-mismatch", "core-sdist-mismatch",
-     "runtime-mismatch", "retired-bridge", "missing-wheel", "empty-sdist", "read-failure"],
+     "runtime-mismatch", "constraints-mismatch", "retired-bridge", "missing-wheel", "missing-constraints", "empty-sdist", "read-failure"],
 )
 def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_name, state):
     workspace = tmp_path / "release source 中文"
@@ -548,6 +548,7 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
         **{f"vibe-show-runtime-node-{platform}.tgz": platform.encode()
            for platform in ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64")},
         "show-runtime-manifest.json": b"show manifest",
+        "dependency-constraints.txt": b"example==1.0.0\n",
     }
     for directory, assets in ((dist, packages), (runtime, runtimes)):
         for name, data in assets.items():
@@ -569,11 +570,14 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
         "core-mismatch": "avibe_os-3.1.0-py3-none-any.whl",
         "core-sdist-mismatch": "avibe_os-3.1.0.tar.gz",
         "runtime-mismatch": "show-runtime-manifest.json",
+        "constraints-mismatch": "dependency-constraints.txt",
     }.get(state)
     if mismatch:
         existing[mismatch] = b"already published different bytes"
     if state == "missing-wheel":
         (dist / "avibe_os-3.1.0-py3-none-any.whl").unlink()
+    if state == "missing-constraints":
+        (runtime / "dependency-constraints.txt").unlink()
     if state == "empty-sdist":
         (dist / "avibe_os-3.1.0.tar.gz").write_bytes(b"")
 

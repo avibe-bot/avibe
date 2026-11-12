@@ -75,6 +75,7 @@ from core.show_runtime_failures import (
     show_runtime_recovery_action,
 )
 from storage import resource_access_service
+from tests.show_runtime_npm_helpers import write_npm_runtime_project
 from tests.ui_server_test_helpers import _mock_interface, _remote_peer, _save_config, permissions_backend_unreachable
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, show_identity, ui_server
@@ -8534,7 +8535,7 @@ def test_failed_forced_replacement_does_not_block_installed_runtime(monkeypatch,
         runtime_source="npm",
     )
 
-    def install(*, force=None):
+    def install(*, force=None, offline=False):
         manager._install_reason = "runtime_install_failed"
         return None
 
@@ -10423,6 +10424,7 @@ def test_show_runtime_candidate_reference_failure_never_publishes_pointer(
         manager_kwargs["archive_path"] = archive_path
         pointer = runtime_dir / "prebuilt" / "current.json"
     else:
+        manager_kwargs["npm_project"] = write_npm_runtime_project(tmp_path / "npm-project")
         pointer = runtime_dir / "package" / "current.json"
 
         def install_npm(argv, **_kwargs):
@@ -12459,7 +12461,7 @@ def test_show_runtime_manager_can_use_npm_source(monkeypatch, tmp_path):
     monkeypatch.setattr(
         manager,
         "_install_npm_runtime",
-        lambda *, force: called.append(force) or ["/tmp/avibe-show-runtime"],
+        lambda *, force, offline: called.append(force) or ["/tmp/avibe-show-runtime"],
     )
 
     assert manager._install_managed_runtime_locked(force=False, offline=False).command == ["/tmp/avibe-show-runtime"]
@@ -12504,6 +12506,7 @@ def test_show_runtime_manager_forced_npm_replacement_preserves_old_tree_on_faile
         workspace_root=tmp_path / "show",
         runtime_dir=runtime_dir,
         runtime_source="npm",
+        npm_project=write_npm_runtime_project(tmp_path / "npm-project"),
     )
     manager._managed_command = [str(managed_bin)]
     install_calls = []
@@ -12535,6 +12538,7 @@ def test_show_runtime_manager_forced_npm_replacement_publishes_immutable_tree(mo
         workspace_root=tmp_path / "show",
         runtime_dir=runtime_dir,
         runtime_source="npm",
+        npm_project=write_npm_runtime_project(tmp_path / "npm-project"),
     )
     manager._managed_command = [str(managed_bin)]
     monkeypatch.setattr(
@@ -12565,7 +12569,7 @@ def test_show_runtime_manager_forced_npm_replacement_publishes_immutable_tree(mo
     "install_error",
     (
         OSError("npm spawn failed"),
-        subprocess.TimeoutExpired(cmd=["npm", "install"], timeout=180),
+        subprocess.TimeoutExpired(cmd=["npm", "ci"], timeout=180),
     ),
 )
 def test_show_runtime_manager_forced_npm_replacement_reports_delegate_exception(
@@ -12582,6 +12586,7 @@ def test_show_runtime_manager_forced_npm_replacement_reports_delegate_exception(
         workspace_root=tmp_path / "show",
         runtime_dir=runtime_dir,
         runtime_source="npm",
+        npm_project=write_npm_runtime_project(tmp_path / "npm-project"),
     )
     manager._managed_command = [str(managed_bin)]
     monkeypatch.setattr(
