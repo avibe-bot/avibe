@@ -114,14 +114,14 @@ def crash_before_commit(conn, cursor, statement, parameters, context, executeman
     if sys.argv[2] == 'before-commit' and statement.startswith('UPDATE alembic_version SET') and '20261108_0083' in statement:
         os._exit(71)
 event.listen(Engine, 'after_cursor_execute', crash_before_commit)
-migrations.run_migrations(Path(sys.argv[1]))
+migrations.run_migrations(Path(sys.argv[1]), revision='20261108_0083')
 os._exit(72)
 """, str(path), crash], check=False, capture_output=True, text=True)
     assert result.returncode == (71 if crash == "before-commit" else 72), result.stderr
     with closing(sqlite3.connect(path)) as conn:
         epoch = conn.execute("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").fetchone()[0]
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert (epoch, stamp) == (("1", PRE_PROJECTION_REVISION) if crash == "before-commit" else ("2", latest_migration_revision()))
+    assert (epoch, stamp) == (("1", PRE_PROJECTION_REVISION) if crash == "before-commit" else ("2", "20261108_0083"))
     [backup] = list((tmp_path / "backups").glob("*/vibe.sqlite"))
     assert _snapshot(backup)["database.sql"] == before
     if crash == "before-commit":
