@@ -1029,6 +1029,58 @@ def _openai_family_elimination_proof(
     return None
 
 
+_FORMAT_ANSWER_STATUSES = frozenset({400, 422})
+
+
+def _format_answered(evidence: _ProtocolEvidence) -> bool:
+    """Whether a probe's own request path parsed the synthetic request.
+
+    A success, or a structured request error (400/422) about the body it was
+    sent, means the path exists and read that body as its format. A 404 -- even a
+    structured one, which is how many servers word an unknown path -- a server or
+    rate-limit error, a non-JSON or unstructured body, and a rejection say
+    nothing of the kind.
+    """
+
+    status = evidence.status
+    if status is None or evidence.authentication is _AuthenticationEvidence.REJECTED:
+        return False
+    if 200 <= status < 300:
+        return evidence.protocol is _ProtocolProof.PROVEN
+    return status in _FORMAT_ANSWER_STATUSES and (
+        evidence.protocol is _ProtocolProof.PROVEN
+        or evidence.shape is _ProtocolObservationShape.GENERIC_REQUEST_ERROR
+    )
+
+
+# What Auto settles on when the endpoint parses several formats, Chat
+# Completions among them: any of them serves, and this is the one the add form
+# starts on, so detection never contradicts a default that would have worked.
+_MULTI_FORMAT_PREFERENCE = "openai_chat"
+
+
+def _answered_format(
+    considered: Sequence[str],
+    answering: Sequence[str],
+    ruled_out: frozenset[str],
+) -> str | None:
+    """The one format Auto can name from the paths that answered, if any.
+
+    Chat Completions answering is enough on its own: whatever else the endpoint
+    also speaks, that format serves. Any other format is the endpoint's only when
+    it alone answered and every other candidate was ruled out -- a candidate that
+    timed out or answered something unrecognised might be the one it speaks.
+    """
+
+    answered = [protocol for protocol in dict.fromkeys(answering) if protocol not in ruled_out]
+    if _MULTI_FORMAT_PREFERENCE in answered:
+        return _MULTI_FORMAT_PREFERENCE
+    undecided = [protocol for protocol in considered if protocol not in ruled_out and protocol not in answered]
+    if len(answered) == 1 and not undecided:
+        return answered[0]
+    return None
+
+
 def _pairwise_positive_exclusion(evidence: _ProtocolEvidence) -> bool:
     return (
         evidence.protocol is _ProtocolProof.UNPROVEN
@@ -1119,8 +1171,9 @@ async def _authenticate_with_models_witness(
     in either direction. The first real call catches a credential nothing
     validated, exactly where it catches one revoked after its add.
 
-    Only a catalog pin or a concrete declaration asks, because the answer names
-    no protocol; that owner supplies it. The accepted result carries the
+    Only a catalog pin, a concrete declaration, or an Auto round whose own
+    responses narrowed the format asks, because the answer names no protocol;
+    that owner, or those responses, supply it. The accepted result carries the
     listing, so one call both authenticates the source and populates it.
     """
 
@@ -3165,7 +3218,10 @@ class CLIProxyEngineAdapter:
         Source creation, not this observation. A shaped rejection is
         recorded while later candidates continue on Auto detect. Vendor, URL,
         and order never create a conclusion on their own; `custom` Auto still requires response-backed
-        proof, and exhausting that path without one remains ambiguous.
+        proof. When its paths' own request errors narrow it to one format, or
+        show it parses Chat Completions among others, the credential-gated
+        listing answers the key as it does for a declaration; without that,
+        exhausting the path remains ambiguous.
         """
 
         metadata = await run_owned_in_thread(
@@ -3227,6 +3283,9 @@ class CLIProxyEngineAdapter:
         received_accepted_unproven_response = False
         response_evidence_by_protocol: dict[str, _ProtocolEvidence] = {}
         ruled_out_protocols: set[str] = set()
+        # Auto candidates whose own request path parsed the model-less probe:
+        # the endpoint speaks that format, whatever the key turns out to be.
+        answering_protocols: list[str] = []
         for protocol in protocol_order:
             if protocol not in MODEL_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
@@ -3300,6 +3359,8 @@ class CLIProxyEngineAdapter:
                         discovery=ObservationDiscovery.SUCCEEDED,
                         models=witness.models,
                     )
+            if not owner_scoped_protocol and _format_answered(evidence):
+                answering_protocols.append(protocol)
             proved_protocol: str | None = None
             if evidence.protocol is _ProtocolProof.PROVEN:
                 if evidence.authentication is _AuthenticationEvidence.UNKNOWN:
@@ -3387,6 +3448,30 @@ class CLIProxyEngineAdapter:
                 discovery=discovery,
                 models=tuple(models),
             )
+
+        answered_protocol = _answered_format(protocol_order, answering_protocols, frozenset(ruled_out_protocols))
+        if credential_kind == "api_key" and answered_protocol is not None:
+            # The responses narrowed the endpoint to a format but left the key
+            # open, the same place a declared interface's model-less probe leaves
+            # it. Its credential-gated listing answers that here exactly as it
+            # does there, and only ever upgrades: a listing that refuses or proves
+            # nothing leaves the outcome below as it was.
+            witness = await _authenticate_with_models_witness(
+                vendor=normalized_vendor,
+                protocol=answered_protocol,
+                base_url=base_url,
+                secret=secret or "",
+                **scheme_options,
+            )
+            if witness.credential is _ModelsWitness.ACCEPTED:
+                return make_source_observation(
+                    outcome=ObservationOutcome.OBSERVED,
+                    reachable=True,
+                    authenticated=True,
+                    protocol=answered_protocol,
+                    discovery=ObservationDiscovery.SUCCEEDED,
+                    models=witness.models,
+                )
 
         if received_accepted_unproven_response:
             # A shaped request error already proved the credential was accepted
