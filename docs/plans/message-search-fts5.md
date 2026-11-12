@@ -23,8 +23,8 @@ Neither the backup policy nor authorization provenance is weakened here.
 
 ## Representation and rollout
 
-Migration `20261112_0088` (currently following the landed runtime-checkpoint
-revision `20261112_0084`) adds three initially empty ordinary tables and three
+Migration `20261112_0088` (currently following the landed session-cache
+revision `20261112_0085`) adds three initially empty ordinary tables and three
 journal-only triggers, without changing the compatibility epoch:
 
 - `message_search_state`: singleton activation row, backfill cursor and readiness.

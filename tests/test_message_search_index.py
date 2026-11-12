@@ -229,7 +229,7 @@ def test_no_fts_module_falls_back_without_affecting_ledger_writes(engine):
 @pytest.mark.no_sqlite_template
 def test_upgrade_is_empty_additive_and_downgrade_preserves_old_writes(tmp_path):
     path = tmp_path / "fixture.sqlite"
-    migrations.run_migrations(path, revision="20261112_0084")
+    migrations.run_migrations(path, revision="20261112_0085")
     with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute("INSERT INTO messages (id,platform,author,type,content_text,content_json,metadata_json,created_at,updated_at) "
                      "VALUES ('old','avibe','user','user','watch','{}','{}','now','now')")
@@ -249,7 +249,7 @@ def test_upgrade_is_empty_additive_and_downgrade_preserves_old_writes(tmp_path):
         conn.execute("UPDATE messages SET id='renamed' WHERE id='old'")
         conn.execute("DELETE FROM messages WHERE id='renamed'")
         assert set(conn.execute("SELECT message_id FROM message_search_dirty")) == {("old",), ("renamed",)}
-    command.downgrade(migrations.alembic_config(path), "20261112_0084")
+    command.downgrade(migrations.alembic_config(path), "20261112_0085")
     with closing(sqlite3.connect(path)) as conn:
         assert conn.execute("SELECT name FROM sqlite_schema WHERE name LIKE 'message_search_%'").fetchall() == []
         assert conn.execute("SELECT * FROM messages").fetchall() == []

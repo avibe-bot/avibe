@@ -218,9 +218,7 @@ class WeChatAuthManager:
             qrcode_url = qr_response.get("qrcode_img_content", "")
 
             logger.info(
-                "QR code received, qrcode=%s...%s img_url_len=%d",
-                qrcode[:8] if len(qrcode) > 8 else qrcode,
-                qrcode[-4:] if len(qrcode) > 4 else "",
+                "QR code received, img_url_len=%d",
                 len(qrcode_url),
             )
 

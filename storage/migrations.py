@@ -97,6 +97,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "session_delegations",
     "agent_events",
     "session_digests",
+    "session_cache_state",
     "skill_usage_daily",
     "show_session_events",
     "media_objects",
@@ -190,6 +191,7 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "session_cache_state": {"session_id", "provider", "model", "record_json"},
     "session_delegations": {
         "sender_session_id", "recipient_session_id", "message_id", "run_id", "state", "notice_run_id", "updated_at",
     },

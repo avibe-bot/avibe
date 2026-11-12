@@ -9124,44 +9124,81 @@ class SQLiteBackgroundTaskStore:
         )
 
     def write_watch_runtime(self, payload: dict[str, Any], *, updated_at: str) -> None:
+        """Persist process-state changes, not a rewrite of every waiter per tick.
+
+        ``updated_at`` is the last persisted state change, not a lease: recovery
+        checks the saved process identity. A snapshot's fresh timestamp alone
+        must not dirty every live row and its run-history indexes.
+        """
         watches = payload.get("watches", {}) if isinstance(payload, dict) else {}
+        entries = {
+            _watch_runtime_run_id(watch_id): (watch_id, runtime_payload)
+            for watch_id, runtime_payload in watches.items()
+            if isinstance(runtime_payload, dict)
+        }
         with self.engine.begin() as conn:
-            conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.run_type == "watch_runtime")
+            # Keep the read/diff/write atomic just as the old leading UPDATE did,
+            # but BEGIN IMMEDIATE itself generates no WAL frames on a no-op.
+            reserve_write_lock(conn)
+            active_ids = set(conn.execute(
+                select(agent_runs.c.id)
+                .where(agent_runs.c.run_type == _WATCH_RUNTIME_RUN_TYPE)
                 .where(agent_runs.c.status.in_(_status_query_values("running") + _status_query_values("queued")))
-                .values(status="succeeded", completed_at=updated_at, updated_at=updated_at)
-            )
-            for watch_id, runtime_payload in watches.items():
-                if not isinstance(runtime_payload, dict):
-                    continue
-                run_id = _watch_runtime_run_id(watch_id)
+            ).scalars())
+            for batch in _id_batches(active_ids - entries.keys()):
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id.in_(batch))
+                    .values(status="succeeded", completed_at=updated_at, updated_at=updated_at)
+                )
+            existing_rows = {}
+            for batch in _id_batches(entries):
+                existing_rows.update({
+                    row["id"]: row
+                    for row in conn.execute(select(agent_runs).where(agent_runs.c.id.in_(batch))).mappings()
+                })
+            for run_id, (watch_id, runtime_payload) in entries.items():
+                existing = existing_rows.get(run_id)
                 values = self._run_values(
                     {
                         "id": run_id,
-                        "request_type": "watch_runtime",
+                        "request_type": _WATCH_RUNTIME_RUN_TYPE,
                         "status": "running" if runtime_payload.get("running") else "completed",
                         "definition_id": watch_id,
                         "pid": runtime_payload.get("pid"),
-                        "created_at": runtime_payload.get("started_at") or updated_at,
+                        "created_at": runtime_payload.get("started_at")
+                        or (existing["created_at"] if existing is not None else updated_at),
                         "started_at": runtime_payload.get("started_at"),
                         "updated_at": runtime_payload.get("updated_at") or updated_at,
                         "metadata": runtime_payload,
                     }
                 )
-                existing = conn.execute(
-                    select(agent_runs.c.id).where(agent_runs.c.id == run_id).limit(1)
-                ).scalar_one_or_none()
-                if existing:
-                    conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
-                else:
+                if existing is None:
                     conn.execute(insert(agent_runs).values(**values))
+                    continue
+                changed = {
+                    key: value for key, value in values.items()
+                    if key not in {"updated_at", "metadata_json"} and existing[key] != value
+                }
+                old_metadata = _json_loads(existing["metadata_json"], {})
+                if not isinstance(old_metadata, dict) or (
+                    {key: value for key, value in old_metadata.items() if key != "updated_at"}
+                    != {key: value for key, value in runtime_payload.items() if key != "updated_at"}
+                ):
+                    changed["metadata_json"] = values["metadata_json"]
+                if changed:
+                    # Carry the new observation time only with a real change,
+                    # and put only changed columns in SET to avoid index churn.
+                    for key in ("updated_at", "metadata_json"):
+                        if existing[key] != values[key]:
+                            changed[key] = values[key]
+                    conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**changed))
 
     def load_watch_runtime(self) -> dict[str, Any]:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 select(agent_runs)
-                .where(agent_runs.c.run_type == "watch_runtime")
+                .where(agent_runs.c.run_type == _WATCH_RUNTIME_RUN_TYPE)
                 .where(agent_runs.c.status == "running")
             ).mappings()
             watches: dict[str, Any] = {}

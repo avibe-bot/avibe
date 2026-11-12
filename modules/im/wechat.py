@@ -1368,10 +1368,10 @@ class WeChatBot(BaseIMClient):
 
         context_token = msg.get("context_token", "")
         logger.info(
-            "Processing inbound message: id=%s from=%s context_token=%s items=%d",
+            "Processing inbound message: id=%s from=%s has_context=%s items=%d",
             message_id,
             from_user,
-            context_token[:16] + "..." if len(context_token) > 16 else context_token,
+            bool(context_token),
             len(msg.get("item_list", [])),
         )
 
