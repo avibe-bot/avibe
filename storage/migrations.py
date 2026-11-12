@@ -107,6 +107,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "vault_requests",
     "vault_grants",
     "vault_audit",
+    "vault_audit_access_snapshots",
     "vault_auth_factors",
     "vault_operation_challenges",
     "resource_access_policies",
