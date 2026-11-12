@@ -77,6 +77,46 @@ def test_stale_constraints_fail_closed(tmp_path, damage):
         check_constraints(root)
 
 
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ('"anyio>=4.16.0",', '"anyio>=4.17.0",'),
+        ('"anyio>=4.16.0",', '"anyio>=4.16.0", "new-runtime-dependency>=1.0",'),
+        ('"anyio>=4.16.0",', ''),
+        ("SQLAlchemy>=2.1.0; python_version >= '3.11'", "SQLAlchemy>=2.1.0; python_version >= '3.12'"),
+        ('"httpx[http2,socks]>=0.27"', '"httpx[http2,socks,brotli]>=0.27"'),
+        ('requires-python = ">=3.10,<3.15"', 'requires-python = ">=3.11,<3.15"'),
+    ],
+    ids=["range", "new-runtime", "removed-runtime", "marker", "extras", "python-range"],
+)
+def test_source_drift_cannot_be_blessed_by_frozen_export(tmp_path, before, after):
+    root = _lock_copy(tmp_path)
+    project = root / "pyproject.toml"
+    original = project.read_text(encoding="utf-8")
+    assert before in original
+    project.write_text(original.replace(before, after), encoding="utf-8")
+    constraints = (root / CONSTRAINTS_PATH).read_bytes()
+    lock = (root / "uv.lock").read_bytes()
+    with pytest.raises(RuntimeError, match="runtime requirements do not match uv.lock"):
+        check_constraints(root)
+    assert (root / CONSTRAINTS_PATH).read_bytes() == constraints
+    assert (root / "uv.lock").read_bytes() == lock
+
+
+def test_equivalent_requirement_syntax_and_dev_only_drift_are_allowed(tmp_path):
+    root = _lock_copy(tmp_path)
+    project = root / "pyproject.toml"
+    original = project.read_text(encoding="utf-8")
+    project.write_text(
+        original.replace("sys_platform == 'darwin' and platform_machine == 'x86_64'",
+                         "platform_machine == 'x86_64' and sys_platform == 'darwin'")
+        .replace("SQLAlchemy>=2.0.57,<2.1", "sqlalchemy<2.1,>=2.0.57")
+        .replace("pytest>=9.0.3", "pytest>=9.1.0"),
+        encoding="utf-8",
+    )
+    assert check_constraints(root) == check_constraints(ROOT)
+
+
 @pytest.mark.parametrize("requirement", ["package>=1.0", "package==1.*", "package @ https://example.com/a.whl", ""])
 def test_release_pins_reject_non_exact_or_empty_graph(requirement):
     with pytest.raises(ValueError):
@@ -236,13 +276,22 @@ def test_wheel_and_rebuilt_sdist_pin_graph_without_changing_source_or_editable(t
     }
 
 
-def test_build_hook_rejects_stale_artifact(tmp_path, monkeypatch):
+@pytest.mark.parametrize("damage", ["artifact", "source-range", "source-new-runtime"])
+def test_build_hook_rejects_stale_artifact(tmp_path, monkeypatch, damage):
     pytest.importorskip("hatchling")
     pytest.importorskip("hatch_vcs")
     from hatchling.builders.wheel import WheelBuilder
 
     monkeypatch.setenv("SETUPTOOLS_SCM_PRETEND_VERSION", "9.9.9")
     root = _build_source(tmp_path)
-    (root / CONSTRAINTS_PATH).write_text("httpcore==0.0.0\n")
-    with pytest.raises(RuntimeError, match="Missing or stale"):
+    if damage == "artifact":
+        (root / CONSTRAINTS_PATH).write_text("httpcore==0.0.0\n")
+        error = "Missing or stale"
+    else:
+        project = root / "pyproject.toml"
+        replacement = ('"anyio>=4.17.0",' if damage == "source-range"
+                       else '"anyio>=4.16.0", "new-runtime-dependency>=1.0",')
+        project.write_text(project.read_text().replace('"anyio>=4.16.0",', replacement))
+        error = "runtime requirements do not match uv.lock"
+    with pytest.raises(RuntimeError, match=error):
         next(WheelBuilder(str(root)).build(directory=str(tmp_path / "wheel"), versions=["standard"]))
