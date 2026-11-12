@@ -763,6 +763,25 @@ def test_launcher_identity_is_windows_only(monkeypatch, tmp_path):
     assert not upgrade.launcher_is_current_process(launcher)
 
 
+@pytest.mark.parametrize("parent_kind", ["launcher", "python", "missing", "inaccessible"])
+def test_deferred_wait_owns_the_matching_console_trampoline_only(monkeypatch, tmp_path, parent_kind):
+    import psutil
+    from vibe import upgrade
+
+    launcher = tmp_path / "vibe.exe"
+    parent = SimpleNamespace(pid=123, exe=lambda: str(launcher if parent_kind == "launcher" else tmp_path / "python.exe"))
+
+    def process(pid):
+        assert pid == 456
+        if parent_kind == "inaccessible":
+            raise psutil.AccessDenied(pid)
+        return SimpleNamespace(parent=lambda: None if parent_kind == "missing" else parent)
+
+    monkeypatch.setattr(psutil, "Process", process)
+    monkeypatch.setattr(upgrade, "os", SimpleNamespace(name="nt", path=os.path))
+    assert upgrade._launcher_wait_pid(launcher, 456) == (123 if parent_kind == "launcher" else 456)
+
+
 def test_deferred_activation_dispatch_activates_then_schedules_restart(monkeypatch, tmp_path):
     from vibe import cli
 

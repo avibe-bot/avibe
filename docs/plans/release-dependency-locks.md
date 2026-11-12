@@ -37,6 +37,11 @@ Windows argv[0]'s omitted `.exe`, path case and 8.3 aliases before deciding whet
 to defer activation. An inherited `VIBE_CURRENT_EXECUTABLE` never proves the current
 process holds the launcher. Non-Windows and module-entry behavior stay unchanged;
 the existing detached helper still owns replacement/restart after the parent exits.
+When the CLI is the Python child of a verified Windows console trampoline, wait
+for that trampoline's PID/create-time identity, not just the Python child: the
+wrapper can remain loaded briefly after Python exits. A missing/inaccessible or
+unrelated parent retains the Python-process wait, never an unrelated long-lived
+process. The helper protocol and activation lock remain unchanged.
 
 `scripts/windows_launcher_upgrade_regression.py` separately installs the candidate
 wheel and invokes its actual `vibe.exe upgrade` on native Windows x64 and Windows
