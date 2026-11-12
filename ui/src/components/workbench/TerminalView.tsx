@@ -162,10 +162,13 @@ export const TerminalView: React.FC<{
   const authorizationRecoveryPendingRef = useRef(false);
   // For the direct-closure handler below. `persistentSession`: a 'ready' frame for this session
   // said the server keeps it across sockets (tmux). It belongs to the session, not to one socket:
-  // it survives a replacement socket that has not attached yet, and is cleared when the session
-  // changes, a later 'ready' frame says otherwise, the shell exits, or an authorization or
-  // disabled close ends it. `settled`: the current socket ended in a way that some other path owns
-  // (exit, disabled, authorization recovery), so nothing else should reconnect it.
+  // it survives replacement sockets that have not attached yet (an ordinary lost connection, a
+  // busy retry, an authorization change), and is cleared when the session id changes, a later
+  // 'ready' frame says otherwise, the shell exits, or an authorization (login required, revoked,
+  // unavailable) or disabled close ends it. After a clear, only a new socket's own persistent
+  // 'ready' sets it again. `settled`: the current socket ended in a way that some other path owns
+  // (exit, disabled, authorization recovery), so nothing else should reconnect it; every new
+  // socket resets it.
   const persistentSessionRef = useRef(false);
   const persistentSessionIdRef = useRef(sessionId);
   const settledRef = useRef(false);
@@ -409,7 +412,11 @@ export const TerminalView: React.FC<{
       term.write(new Uint8Array(ev.data as ArrayBuffer));
     };
     ws.onclose = (ev: CloseEvent) => {
+      // An authorization or disabled close ends this session's eligibility for a closure
+      // reattach. Whatever reopens it afterwards (recovery, Reconnect, a re-created terminal),
+      // its socket must confirm persistence with its own 'ready'.
       if (ev.code === AUTHORIZATION_LOGIN_REQUIRED_CLOSE_CODE) {
+        persistentSessionRef.current = false;
         settledRef.current = true;
         authorizationRecoveryPendingRef.current = true;
         setStatus('error');
@@ -417,6 +424,7 @@ export const TerminalView: React.FC<{
         return;
       }
       if (ev.code === AUTHORIZATION_REVOKED_CLOSE_CODE) {
+        persistentSessionRef.current = false;
         settledRef.current = true;
         authorizationRecoveryPendingRef.current = false;
         setStatus('disabled');
@@ -424,6 +432,7 @@ export const TerminalView: React.FC<{
         return;
       }
       if (ev.code === AUTHORIZATION_UNAVAILABLE_CLOSE_CODE) {
+        persistentSessionRef.current = false;
         settledRef.current = true;
         authorizationRecoveryPendingRef.current = true;
         setStatus('error');
@@ -452,7 +461,10 @@ export const TerminalView: React.FC<{
         return;
       }
       // 1008: the terminal is disabled on this instance, which no reconnect changes.
-      if (ev.code === 1008) settledRef.current = true;
+      if (ev.code === 1008) {
+        persistentSessionRef.current = false;
+        settledRef.current = true;
+      }
       setStatus((prev) =>
         prev === 'closed' ? prev : ev.code === 1008 ? 'disabled' : prev === 'ready' ? 'closed' : 'error',
       );

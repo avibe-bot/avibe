@@ -390,6 +390,90 @@ describe('TerminalView when the native shell closes connections on a lost path',
     }
   });
 
+  // An authorization or disabled close ends the session's eligibility. Whatever reopens the
+  // terminal afterwards, its next socket must earn eligibility with its own persistent ready.
+  const authorizationRecovered = () =>
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('avibe:test:remote-auth-state', { detail: { state: 'current' } }),
+      );
+    });
+
+  it.each([
+    ['authorization unavailable, then the terminal\'s Reconnect', 4503, 'button'],
+    ['authorization unavailable, then authorization recovered', 4503, 'recovered'],
+    ['sign-in required, then authorization recovered', 4401, 'recovered'],
+  ] as const)('needs a new persistent ready after %s', async (_label, code, reopen) => {
+    const first = await mountTerminal();
+    act(() => first.frame({ type: 'ready', persistent: true }));
+    act(() => first.drop(code));
+
+    if (reopen === 'button') {
+      act(() => fireEvent.click(screen.getByRole('button', { name: /apps\.terminal\.reconnect/ })));
+    } else {
+      authorizationRecovered();
+    }
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    // The replacement is still connecting: a closure reattaches nothing.
+    closeLostPath();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    // The positive control: once the replacement confirms persistence, a closure reattaches.
+    act(() => FakeWebSocket.latest().frame({ type: 'ready', persistent: true }));
+    closeLostPath();
+    expect(FakeWebSocket.instances).toHaveLength(3);
+  });
+
+  it.each([
+    ['access was revoked', 4403],
+    ['the terminal is disabled', 1008],
+  ])('needs a new persistent ready after %s, when the terminal is reopened', async (_label, code) => {
+    vi.resetModules();
+    const { TerminalView } = await import('./TerminalView');
+    const view = render(<TerminalView sessionId="term-1" cwd="/a" />);
+    await act(async () => {
+      statusAnswers[0]({ preferred: 'tunnel', sequence, closure });
+    });
+    act(() => FakeWebSocket.latest().frame({ type: 'ready', persistent: true }));
+    act(() => FakeWebSocket.latest().drop(code));
+
+    // These offer no Reconnect. What reopens the same session is the owner re-creating the
+    // terminal, here a new working directory.
+    view.rerender(<TerminalView sessionId="term-1" cwd="/b" />);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    closeLostPath();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    act(() => FakeWebSocket.latest().frame({ type: 'ready', persistent: false }));
+    closeLostPath();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it('keeps eligibility through an authorization change and a busy retry, which are not session ends', async () => {
+    vi.useFakeTimers();
+    try {
+      const first = await mountTerminal();
+      act(() => first.frame({ type: 'ready', persistent: true }));
+      act(() => first.drop(1012));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      act(() => FakeWebSocket.latest().drop(1013));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      expect(FakeWebSocket.instances).toHaveLength(3);
+
+      // Neither replacement has attached; the session is still the confirmed persistent one.
+      closeLostPath();
+      expect(FakeWebSocket.instances).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('starts a new session without the old one\'s persistence', async () => {
     vi.resetModules();
     const { TerminalView } = await import('./TerminalView');
