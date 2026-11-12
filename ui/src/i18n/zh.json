@@ -6164,7 +6164,7 @@
     "sort": {
       "label": "排序",
       "name": "名称",
-      "recent": "最近使用",
+      "recent": "最近活跃",
       "added": "最近添加"
     },
     "grants": {

@@ -326,7 +326,7 @@ describe('VaultsPage list discovery', () => {
     expect(rows()[0].querySelector('mark')?.textContent).toBe('[prod]');
     await user.click(screen.getByRole('button', { name: 'Clear search' }));
     expect(params().has('q')).toBe(false);
-    expect(names()).toEqual(['alpha', 'beta', 'zeta']);
+    expect(names()).toEqual(['beta', 'alpha', 'zeta']);
   });
 
   // A Solana key is one identity. Its row must not borrow the EVM/Bitcoin rows or their notes, and
@@ -442,15 +442,22 @@ describe('VaultsPage list discovery', () => {
     expect(count()).toBe('1 / 1 secrets');
   });
 
-  it('composes quick filters and sorting, keeping unused last and dates relative even beyond a week', async () => {
+  it('composes quick filters and sorting, most recent activity first by default, dates relative even beyond a week', async () => {
     api.listVaultSecrets.mockResolvedValue({ secrets: [...inventory, makeSecret('aardvark', { last_used_at: '2026-09-30T12:00:00Z' })] });
     const user = userEvent.setup();
     renderPage();
     await screen.findByText('alpha');
+    // Last activity: last used, or added when never used (zeta, added 2026-09-01, after
+    // a secret last used before that would be).
+    expect(names()).toEqual(['beta', 'alpha', 'aardvark', 'zeta']);
+    expect(rows()[2].textContent).toContain('13d ago');
+    const sort = screen.getByRole('combobox', { name: 'Sort' }) as HTMLSelectElement;
+    expect(sort.value).toBe('recent');
+    await user.selectOptions(sort, 'name');
     expect(names()).toEqual(['aardvark', 'alpha', 'beta', 'zeta']);
-    expect(rows()[0].textContent).toContain('13d ago');
-    const sort = screen.getByRole('combobox', { name: 'Sort' });
+    expect(params().get('sort')).toBe('name');
     await user.selectOptions(sort, 'recent');
+    expect(params().get('sort')).toBeNull();
     expect(names()).toEqual(['beta', 'alpha', 'aardvark', 'zeta']);
     await user.selectOptions(sort, 'added');
     expect(names()).toEqual(['zeta', 'beta', 'aardvark', 'alpha']);
