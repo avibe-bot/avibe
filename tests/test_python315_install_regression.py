@@ -28,6 +28,19 @@ def test_acceptance_isolates_old_cli_launcher_and_package_manager_state(tmp_path
     assert env["UV_PYTHON_DOWNLOADS"] == "never"
 
 
+def test_windows_acceptance_exposes_base_python_without_sharing_managed_state(tmp_path, monkeypatch):
+    from scripts import windows_launcher_upgrade_regression as windows
+
+    root = tmp_path / "fixture"
+    base = tmp_path / "installed-python" / "python.exe"
+    monkeypatch.setattr(windows.sys, "_base_executable", str(base))
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(tmp_path / "owner-managed-python"))
+    env = windows.windows_env(root, str(tmp_path / "uv-bin" / "uv.exe"))
+    assert env["PATH"].split(os.pathsep)[:2] == [str(root / "bin"), str(base.parent)]
+    assert env["UV_PYTHON_INSTALL_DIR"] == str(root / "python")
+    assert env["UV_PYTHON_DOWNLOADS"] == "never"
+
+
 def test_windows_legacy_coverage_uses_the_unchanged_module_not_self_replacement(monkeypatch):
     python = Path("old-runtime-python")
     launcher = Path("stable-launcher")

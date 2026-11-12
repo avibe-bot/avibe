@@ -32,8 +32,30 @@ Python policy. On Windows, the public 3.2.5 client is invoked through its unchan
 `python -m vibe upgrade` entry point: its `vibe.exe` path has a pre-existing
 self-replacement defect and is **not** shown to pass by this acceptance. Windows
 3.2.5 users can rerun the official `install.ps1`, or invoke that module with the
-Python interpreter from their existing Avibe environment. A separate future-client
-launcher fix is required for normal 3.2.6-to-later Windows CLI upgrades.
+Python interpreter from their existing Avibe environment. Future clients normalize
+Windows argv[0]'s omitted `.exe`, path case and 8.3 aliases before deciding whether
+to defer activation. An inherited `VIBE_CURRENT_EXECUTABLE` never proves the current
+process holds the launcher. Non-Windows and module-entry behavior stay unchanged;
+the existing detached helper still owns replacement/restart after the parent exits.
+When the CLI is the Python child of a verified Windows console trampoline, wait
+for that trampoline's PID/create-time identity, not just the Python child: the
+wrapper can remain loaded briefly after Python exits. A missing/inaccessible or
+unrelated parent retains the Python-process wait, never an unrelated long-lived
+process. The helper protocol and activation lock remain unchanged.
+
+`scripts/windows_launcher_upgrade_regression.py` separately installs the candidate
+wheel and invokes its actual `vibe.exe upgrade` on native Windows x64 and Windows
+on Arm (the latter retains x64 Python). The fixture exposes its invoking interpreter's
+already-installed base Python on PATH, since uv ignores virtualenv interpreters
+for tool resolution; managed-install/cache/home directories remain isolated and
+Python downloads stay disabled. It advertises a future version and stages
+the same CI fixture wheel into a different environment: this proves future-client
+self-replacement, not a released 3.2.5 console-path success or a published future
+version. It requires deferred activation, waits only on the post-replace generation
+marker, then verifies changed launcher/interpreter identity and the active version.
+Focused tests cover extensionless paths, native canonicalization order, module
+entry points, inherited hints and the unchanged deferred activation owner. Recovery
+copy lives in `docs/UPGRADING.md` and must accompany the 3.2.6 release notes.
 
 Native dependency source builds are disallowed in the acceptance,
 except PyYAML 6.0.3 (no cp315 wheel, supported source build). The existing pure
