@@ -238,6 +238,7 @@ export const VaultSecretForm: React.FC<{
   // The name the wallet was created under: every later action (retry, delete, done) uses it, never
   // whatever the name field says now.
   const hdSavedNameRef = useRef('');
+  const [hdSavedName, setHdSavedName] = useState('');
   const [signingError, setSigningError] = useState<string | null>(null);
   const [signingAddresses, setSigningAddresses] = useState<SigningAddresses | null>(null);
   const [addressesLoading, setAddressesLoading] = useState(false);
@@ -572,6 +573,7 @@ export const VaultSecretForm: React.FC<{
     if (!words) return;
     const name = secretName;
     hdSavedNameRef.current = name;
+    setHdSavedName(name);
     const seed = wordsToSeed(words, generated ? '' : hdPassphrase);
     let expected: HdAccountAddresses;
     let blindBox: Awaited<ReturnType<typeof sealBlindBox>>;
@@ -1538,7 +1540,7 @@ export const VaultSecretForm: React.FC<{
           </>
         ) : hdStep === 'done' && hdCreated ? (
           <>
-            <HdDoneStep name={hdSavedNameRef.current} account={hdCreated} />
+            <HdDoneStep name={hdSavedName} account={hdCreated} />
             {hdAskFailed ? (
               <HdNotice tone="error" icon={TriangleAlert}>
                 <span className="font-semibold text-destructive-ink">{t('vaults.hd.askFailed')}</span>
@@ -1559,7 +1561,7 @@ export const VaultSecretForm: React.FC<{
                   {t('vaults.hd.askRetry')}
                 </Button>
               ) : null}
-              <Button type="button" disabled={hdAskFailed || submitting} onClick={() => onCreated(hdSavedNameRef.current, 'created')}>{t('vaults.hd.done.finish')}</Button>
+              <Button type="button" disabled={hdAskFailed || submitting} onClick={() => onCreated(hdSavedName, 'created')}>{t('vaults.hd.done.finish')}</Button>
             </div>
           </>
         ) : (
