@@ -492,7 +492,7 @@ final class DirectPathControllerTests: XCTestCase {
         harness.enterForeground()
 
         // A bind under way when the App goes to the background ends parked:
-        // its socket closed, no route written.
+        // its socket closed, no route written, and the host excluded.
         _ = try harness.coordinator.selectInstance(id: "instance-2")
         let runtime = try XCTUnwrap(harness.lastOpened)
         let coordinator = harness.coordinator
@@ -512,7 +512,9 @@ final class DirectPathControllerTests: XCTestCase {
         await preparing.value
 
         XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
-        XCTAssertEqual(harness.controller.listenerState, .closedForBackground)
+        // Parked, and then, with no route pointing at it, stopped: nothing
+        // listens until a later open in the foreground binds again.
+        XCTAssertEqual(harness.controller.listenerState, .none)
         XCTAssertTrue(
             harness.controller.routeOwner.isExcluded(two, store: harness.websiteDataStore.identifier)
         )
