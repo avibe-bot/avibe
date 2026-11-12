@@ -27,6 +27,7 @@ type WorkbenchEventHandlers = {
 
 const eventHandlers = vi.hoisted(() => [] as WorkbenchEventHandlers[]);
 const api = vi.hoisted(() => ({
+  deleteVaultSecret: vi.fn(),
   connectWorkbenchEvents: vi.fn(() => () => undefined),
   createVaultRevealContext: vi.fn(),
   getVaultAudit: vi.fn(),
@@ -460,6 +461,18 @@ describe('VaultsPage list discovery', () => {
     expect(screen.getByText(en.vaults.hd.blocked)).toBeTruthy();
     expect(screen.queryByRole('button', { name: en.vaults.hd.wallet.open })).toBeNull();
     expect(screen.queryByText('Trading')).toBeNull();
+    // A refused delete keeps it blocked.
+    api.deleteVaultSecret.mockResolvedValueOnce({ ok: false, message: 'nope' });
+    // The keypair delete confirm holds for 5 s; run that countdown on fake timers.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.rowActions }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: en.vaults.delete }));
+    const dialog = await screen.findByRole('dialog');
+    await act(async () => { vi.advanceTimersByTime(5000); });
+    vi.useRealTimers();
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: /^Delete/ })); });
+    expect(api.deleteVaultSecret).toHaveBeenCalledWith('AGENT_WALLET');
+    expect(JSON.parse(localStorage.getItem('avibe.vault.hdAddressCheckFailed') ?? '[]').map((b: { name: string }) => b.name)).toEqual(['AGENT_WALLET']);
     localStorage.clear();
   });
 

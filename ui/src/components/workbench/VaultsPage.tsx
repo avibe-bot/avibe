@@ -938,7 +938,12 @@ export const VaultsPage: React.FC = () => {
     if (!secret) return;
     try {
       setError(null);
-      await api.deleteVaultSecret(secret.name);
+      const removed = await api.deleteVaultSecret(secret.name);
+      // Only a confirmed delete counts: a blocked wallet stays blocked, and no "deleted" toast.
+      if (!removed?.ok) {
+        setError(removed?.message || t('vaults.request.saveFailed'));
+        return;
+      }
       unblockHdWallet(secret.name);
       showToast(t('vaults.deleted', { name: secret.name }), 'success');
       refresh();
