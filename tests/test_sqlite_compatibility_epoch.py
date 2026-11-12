@@ -27,17 +27,23 @@ pytestmark = pytest.mark.no_sqlite_template
 
 @pytest.fixture(autouse=True)
 def bridge_graph(tmp_path, monkeypatch):
-    """Keep these historical bridge/next-epoch fault cases on their original graph.
+    """Keep epoch-transition fault cases on the bridge's epoch-1 graph.
 
-    The production epoch-2 transition is exercised in test_tool_trace_suppression.
+    Backport additive reader prerequisites into this source fixture without the
+    real epoch-2 transition (covered in test_tool_trace_suppression). This is not
+    evidence about a published historical binary.
     """
     graph = tmp_path / "bridge-alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     script = ScriptDirectory.from_config(migrations.alembic_config(tmp_path / "historical.sqlite"))
     retained = {Path(revision.path).name for revision in script.iterate_revisions("20261108_0082", "base")}
+    index_name = "20261112_0084_runtime_checkpoint_index.py"
+    retained.add(index_name)
     for path in (graph / "versions").glob("*.py"):
         if path.name != "__init__.py" and path.name not in retained:
             path.unlink()
+    index = graph / "versions" / index_name
+    index.write_text(index.read_text().replace('down_revision = "20261108_0083"', 'down_revision = "20261108_0082"'))
     monkeypatch.setattr(migrations, "alembic_dir", lambda: graph)
     importer._installed_schema_revision.cache_clear()
     importer._installed_schema_epoch.cache_clear()
