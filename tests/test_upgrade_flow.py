@@ -703,29 +703,63 @@ def test_copy_marker_validation_reads_fresh_bytes_after_same_stat_replacement(
     assert upgrade._launcher_generation(launcher, root) is None
 
 
-def test_launcher_is_current_process_only_matches_windows_launcher(monkeypatch, tmp_path):
+@pytest.mark.parametrize("extensionless", [False, True])
+def test_launcher_is_current_process_only_matches_windows_launcher(monkeypatch, tmp_path, extensionless):
     from vibe import upgrade
 
     launcher = tmp_path / "bin" / "vibe.exe"
     launcher.parent.mkdir()
     launcher.write_text("launcher\n", encoding="utf-8")
     monkeypatch.setattr(upgrade.os, "name", "nt")
-    monkeypatch.setattr(upgrade.sys, "argv", [str(launcher)])
+    monkeypatch.setattr(upgrade.sys, "argv", [str(launcher.with_suffix("") if extensionless else launcher)])
 
     assert upgrade.launcher_is_current_process(launcher)
     assert not upgrade.launcher_is_current_process(tmp_path / "bin" / "other.exe")
 
 
-def test_launcher_is_current_process_ignores_inherited_launcher_hint(monkeypatch, tmp_path):
+@pytest.mark.parametrize("argv", [[], [""], ["service_main.py"], ["__main__.py"], ["python.exe"]])
+def test_launcher_is_current_process_ignores_inherited_launcher_hint(monkeypatch, tmp_path, argv):
     from vibe import upgrade
 
     launcher = tmp_path / "bin" / "vibe.exe"
     launcher.parent.mkdir()
     launcher.write_text("launcher\n", encoding="utf-8")
     monkeypatch.setattr(upgrade.os, "name", "nt")
-    monkeypatch.setattr(upgrade.sys, "argv", [str(tmp_path / "service_main.py")])
+    monkeypatch.setattr(upgrade.sys, "argv", argv)
     monkeypatch.setenv("VIBE_CURRENT_EXECUTABLE", str(launcher))
 
+    assert not upgrade.launcher_is_current_process(launcher)
+
+
+def test_launcher_identity_resolves_executable_before_comparing_case_and_short_paths(monkeypatch):
+    from vibe import upgrade
+    import ntpath
+
+    target = r"C:\Users\Long User Name\bin\vibe.EXE"
+    short = r"C:\Users\LONGUS~1\bin\vibe"
+    calls = []
+
+    def realpath(path):
+        calls.append(path)
+        # Like Windows realpath, the short alias expands only for an existing
+        # file. A synthetic extensionless path is not the loaded executable.
+        return target if path == short + ".exe" else path
+
+    monkeypatch.setattr(upgrade, "os", SimpleNamespace(name="nt", path=SimpleNamespace(
+        expanduser=ntpath.expanduser, splitext=ntpath.splitext,
+        normcase=ntpath.normcase, realpath=realpath,
+    )))
+    monkeypatch.setattr(upgrade.sys, "argv", [short])
+    assert upgrade.launcher_is_current_process(target.lower())
+    assert calls == [target.lower(), short + ".exe"]
+
+
+def test_launcher_identity_is_windows_only(monkeypatch, tmp_path):
+    from vibe import upgrade
+
+    launcher = tmp_path / "vibe"
+    monkeypatch.setattr(upgrade, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(upgrade.sys, "argv", [str(launcher)])
     assert not upgrade.launcher_is_current_process(launcher)
 
 

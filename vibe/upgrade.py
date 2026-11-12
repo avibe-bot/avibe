@@ -396,11 +396,19 @@ def launcher_is_current_process(launcher: Path | str) -> bool:
 
     if os.name != "nt":
         return False
-    target = os.path.normcase(os.path.abspath(os.path.expanduser(str(launcher))))
+    target = os.path.normcase(os.path.realpath(os.path.expanduser(str(launcher))))
     # ``VIBE_CURRENT_EXECUTABLE`` is inherited by the long-lived Web process
     # from the CLI that started it. It identifies a PATH entry, not the image
     # currently holding the file open, so only argv[0] is authoritative here.
-    current = os.path.normcase(os.path.abspath(os.path.expanduser(sys.argv[0])))
+    if not sys.argv or not sys.argv[0]:
+        return False
+    current = os.path.expanduser(sys.argv[0])
+    # uv's Windows console launcher strips .exe from argv[0]. Restore it before
+    # realpath so Windows can expand 8.3 aliases of the *existing* executable.
+    # Never rewrite a module/script entry point (python -m vibe, Web workers).
+    if not os.path.splitext(current)[1]:
+        current += ".exe"
+    current = os.path.normcase(os.path.realpath(current))
     return current == target
 
 

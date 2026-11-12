@@ -909,6 +909,10 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
             assert key in matrix
     assert "scripts/python315_install_regression.py" in windows_acceptance["run"]
     assert "$LASTEXITCODE -ne 0" in windows_acceptance["run"]
+    native = next(step for step in windows["steps"] if step.get("name") == "Verify native vibe.exe deferred self-upgrade")
+    assert not native.get("if") and not native.get("continue-on-error")
+    assert "-m scripts.windows_launcher_upgrade_regression --wheel $wheel" in native["run"]
+    assert "$LASTEXITCODE -ne 0" in native["run"]
     assert jobs["install-upgrade-regression"]["needs"] == ["changes", "install-upgrade-shards"]
 
 

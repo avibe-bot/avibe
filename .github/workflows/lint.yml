@@ -1078,6 +1078,15 @@ jobs:
             throw "The installed Python reports $platform, expected win-amd64"
           }
 
+      - name: Verify native vibe.exe deferred self-upgrade
+        shell: pwsh
+        run: |
+          $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+          $python = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations\*\uv\tools\avibe-os\Scripts\python.exe")[0].FullName
+          $wheel = (Get-ChildItem dist\avibe_os-*.whl | Select-Object -First 1).FullName
+          & $python -m scripts.windows_launcher_upgrade_regression --wheel $wheel
+          if ($LASTEXITCODE -ne 0) { throw "Native vibe.exe self-upgrade acceptance failed" }
+
       # Windows on Arm deliberately remains on its x64 3.12 runtime policy.
       # Verify the no-minor-pin 3.15 path on native x64, including the old client.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
