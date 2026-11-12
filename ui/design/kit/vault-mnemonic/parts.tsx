@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils';
 
 import { useDraft } from '../draft';
 
-export const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
+const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
 
 /** The Add dialog's branded header, as VaultSecretDialog draws it. */
 export function DialogHeading({ icon: Icon, title, subtitle, tone = 'accent' }: {
@@ -34,7 +34,6 @@ export function DialogHeading({ icon: Icon, title, subtitle, tone = 'accent' }: 
   );
 }
 
-/** Where the user is in creating a wallet: three short steps, so the length is known up front. */
 export function Stepper({ step }: { step: 1 | 2 | 3 }) {
   const d = useDraft();
   const labels = [d('设置', 'Set up'), d('抄下助记词', 'Write it down'), d('核对', 'Check')];
@@ -171,7 +170,6 @@ export function AccountIndex({ index, className }: { index: number; className?: 
   );
 }
 
-/** A shell command shown as the user would paste it to an Agent. */
 export function CommandLine({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <code className={cn('block min-w-0 break-words rounded-md bg-surface px-2.5 py-1.5 font-mono text-[11.5px] text-foreground', className)}>

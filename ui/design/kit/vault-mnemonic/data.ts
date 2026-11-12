@@ -6,7 +6,6 @@
 import type { SigningAddresses } from '@/context/ApiContext';
 
 export type MnemonicChain = 'evm' | 'bitcoin' | 'solana';
-export const CHAINS: MnemonicChain[] = ['evm', 'bitcoin', 'solana'];
 
 export const CREATED_WORDS = 'legal winner thank year wave sausage worth useful legal winner thank yellow'.split(' ');
 export const IMPORTED_WORDS = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'.split(' ');
@@ -29,9 +28,6 @@ export const IMPORTED_ADDRESSES: Triple[] = [
 
 export const path = (chain: MnemonicChain, index: number) =>
   chain === 'evm' ? `m/44'/60'/0'/0/${index}` : chain === 'bitcoin' ? `m/86'/0'/0'/0/${index}` : `m/44'/501'/${index}'/0'`;
-
-export const addressOf = (addresses: Triple, chain: MnemonicChain) =>
-  chain === 'evm' ? addresses.eth : chain === 'bitcoin' ? addresses.btc_taproot : addresses.solana;
 
 /** One account of a wallet, as the wallet view lists it. Names and activity are draft fixtures. */
 export type WalletAccount = {

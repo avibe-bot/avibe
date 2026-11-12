@@ -6491,7 +6491,8 @@
         "missingMaterial": "无法获取用于签名的保护层密钥材料，请重新加载后重试。"
       },
       "account": "账户",
-      "path": "派生路径 {{path}}"
+      "path": "派生路径 {{path}}",
+      "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。"
     },
     "request": {
       "provide": "填写",

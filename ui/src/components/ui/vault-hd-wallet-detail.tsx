@@ -45,16 +45,18 @@ export function HdWalletBadges({ count }: { count: number }) {
 /** The requesting Session's title, read with the reader's own access; its id when it cannot be read. */
 function useSessionTitle(sessionId: string | null | undefined): string | null {
   const api = useApi();
-  const [title, setTitle] = useState<string | null>(null);
+  // The title is kept with the id it was read for, so a new signer never shows the last one's name.
+  const [read, setRead] = useState<{ id: string; title: string | null } | null>(null);
   useEffect(() => {
     if (!sessionId) return undefined;
     let alive = true;
     api.getSession(sessionId, { handleError: false })
-      .then((session) => { if (alive) setTitle(session?.title || null); })
-      .catch(() => undefined);
+      .then((session) => { if (alive) setRead({ id: sessionId, title: session?.title || null }); })
+      .catch(() => { if (alive) setRead({ id: sessionId, title: null }); });
     return () => { alive = false; };
   }, [api, sessionId]);
-  return sessionId ? title || sessionId : null;
+  if (!sessionId) return null;
+  return (read?.id === sessionId ? read.title : null) || sessionId;
 }
 
 function LastSigned({ account }: { account: VaultHdAccount }) {

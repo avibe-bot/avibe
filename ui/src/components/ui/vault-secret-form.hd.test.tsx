@@ -71,7 +71,11 @@ const openWallet = async (name = 'AGENT_WALLET') => {
 const postedPayload = () => api.createVaultSecret.mock.calls[0][0] as Record<string, unknown>;
 const expectNoSecretsPosted = (words: string[]) => {
   const body = JSON.stringify(api.createVaultSecret.mock.calls);
-  for (const word of new Set(words)) expect(body).not.toContain(word);
+  // The phrase, any two adjacent words, or a word as a value: none may be posted. (A single word can
+  // legitimately spell a payload key, such as "type".)
+  expect(body).not.toContain(words.join(' '));
+  for (let i = 1; i < words.length; i += 1) expect(body).not.toContain(`${words[i - 1]} ${words[i]}`);
+  for (const word of new Set(words)) expect(body).not.toContain(`"${word}"`);
   expect(body).not.toContain(bytesToHex(sealed.plaintext!));
   expect(postedPayload()).toEqual(expect.objectContaining({
     kind: 'keypair', protection: 'standard', signer_kind: 'hd-seed',

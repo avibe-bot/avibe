@@ -749,6 +749,11 @@ export const VaultApprovalCard: React.FC<{
                 </button>
               </div>
               {delivery.scheme ? <Badge variant="secondary" className="self-start">{delivery.scheme}</Badge> : null}
+              {/* A standard digest with no context the daemon could parse is a blind signature: say
+                  so plainly rather than let the hash look like checked transfer details. */}
+              {!isProtected && !(delivery.signing_context ?? delivery.signingContext) ? (
+                <span role="note" className="text-[12px] leading-snug text-gold-ink">{t('vaults.approval.rawDigestNote')}</span>
+              ) : null}
             </div>
           </DetailRow>
         ) : null}

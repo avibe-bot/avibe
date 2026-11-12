@@ -1492,8 +1492,12 @@ export const VaultSecretForm: React.FC<{
                 disabled={submitting}
                 onClick={() => {
                   setSubmitting(true);
+                  // Only a confirmed delete dismisses the warning: the wrapper answers errors as { ok: false }.
                   void api.deleteVaultSecret(secretName)
-                    .then(() => onCreated(secretName, 'created'))
+                    .then((result) => {
+                      if (result?.ok) onCreated(secretName, 'created');
+                      else setError(vaultErrorMessage(t, result, t('vaults.request.saveFailed')));
+                    })
                     .catch((err: unknown) => setError(vaultErrorMessage(t, err, t('vaults.request.saveFailed'))))
                     .finally(() => setSubmitting(false));
                 }}

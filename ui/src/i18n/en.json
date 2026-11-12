@@ -6491,7 +6491,8 @@
         "missingMaterial": "Protected key material wasn't available to sign. Reload and try again."
       },
       "account": "Account",
-      "path": "Derivation path {{path}}"
+      "path": "Derivation path {{path}}",
+      "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise."
     },
     "request": {
       "provide": "provide",
