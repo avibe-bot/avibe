@@ -9490,16 +9490,16 @@ AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION = "0.1.8"
 # Developer ID signed release (identifier bot.avibe.avault, Team 68B2SQ6YK3): a
 # master key an ad-hoc release created needs one "Authorize avault" after the
 # upgrade, and later signed releases read it without asking again.
-AVAULT_VERSION = "0.1.10"
+AVAULT_VERSION = "0.1.11"
 # (sha256, size) of each AVAULT_VERSION archive by target: digests verified against
 # the published manifest.json, sizes checked against the downloaded release assets.
 _AVAULT_ARCHIVES = {
-    "linux-arm64": ("ffed26317b9557c76913c07cb2dd640b088c1abe21364cb54ad43603c601d17a", 3321093),
-    "linux-x64": ("3812bfc870210a65b6b1712a913f6db305366223e94b96f99491da756a760f51", 3652699),
-    "macos-arm64": ("a3424c5cbe3abcad3198305603ac8dfa94d96e8a68378fcd2621376e88186e3a", 1569937),
-    "macos-x64": ("1db282933bfa2ed61476d21bdbc6ec2503a4aed1f65c9ee9c803d19ef5694700", 1699588),
-    "windows-arm64": ("4991460026ea9e18bbf0c9f0117706cdb1fb9f5a2dbf31e3889bb00514da4622", 1376774),
-    "windows-x64": ("e4e44f48bdfe3aa6c760b64d4b0fe351e47cf30687ea0823e98f36809dd6e331", 1463132),
+    "linux-arm64": ("06c31e5607b9098d1d14bbec4cfc30c42c796d705fa468c6e682ed8e92093619", 3335557),
+    "linux-x64": ("3c17361f74cdcbcc18f223636c3ba5e49129cbaeddd4b4e75526442469390390", 3668096),
+    "macos-arm64": ("22860f6bdb4bf076f7a28fbf54f383603243edb895b1062a4f45a4c97f067302", 1584052),
+    "macos-x64": ("40c3508391d7ec4a29847f970ce30860ffd2857e9febb101a85ce56ee23aad14", 1710645),
+    "windows-arm64": ("89a8bfae24d8b0c70fd0a2a1bab61ed4b9dfbe91ea7a387b39ba50c95165e53c", 1391154),
+    "windows-x64": ("dfdff8d619a0dbb58202387949ea6beffc6a03e6e9b4dcda7957b4729fd308aa", 1475295),
 }
 
 
