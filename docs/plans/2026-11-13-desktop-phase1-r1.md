@@ -97,9 +97,10 @@ and 16 subtests. Changed Python files pass Ruff.
 
 The `lint` workflow owns the required CI. This diff selects the cheap Linux
 checks, unit-test shards, UI tests, scenario evidence, hosted Model Hub wire,
-web-fetch runtime, and Windows agent/Model Hub/control IPC checks. Browser,
-native Desktop/iOS, install-upgrade, macOS fetch, and native Model Hub lifecycle
-producers are explicitly skipped by the current scope classifier. The aggregate
+web-fetch runtime, and Windows agent/Model Hub/control IPC checks. The pending
+error translations also select browser and native Desktop checks. Native iOS,
+install-upgrade, macOS fetch, and native Model Hub lifecycle producers are
+explicitly skipped by the current scope classifier. The aggregate
 unit-tests, install-upgrade-regression, and windows-install-smoke gates must
 still pass. Review and integration gates remain pending.
 
@@ -111,3 +112,13 @@ the original implementation head and pass after exact-request fencing. The
 refreshed Runtime/recovery/scenario selection passes 131 tests. Real B2/R1
 expired-unconsumed, missing-receipt, digest-mismatch and delayed-old-response
 producer-consumer checks remain required in the native integration harness.
+
+CI exposed two integration omissions after the request-fencing repair: the
+management route inventory still expected 325 routes, and the real Web pairing
+error consumer found an untranslated pending code in both locales. The inventory
+now names both new Owner/direct-loopback-only routes, expects 327, and exercises
+their refusal for every remote role. The pending translations preserve the same
+attempt and recovery information. The complete parity file passes 106 tests;
+the real recovery-error consumer passes 29 cases across English and Chinese,
+and the UI production build and changed-Python Ruff pass. Product auth and
+pairing behavior are unchanged in this CI repair.
