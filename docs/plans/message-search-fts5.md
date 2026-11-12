@@ -172,10 +172,20 @@ of the measurement procedure, not a runtime storage guarantee.
 The approved single-database progression initializes an empty P6 `0088` schema
 through the normal initializer **before** synthetic fill. Old baseline source
 then uses the same-epoch compatible-open path with FTS absent and journaling
-inactive, followed by P4 planner optimization, P5 comparison and P6 backfill.
+inactive, followed by the experimental P4 planner-statistics pass and P5
+comparison. P4 is held out of the release and is **not** a P6 landing prerequisite;
+P6 has no code dependency on it. Primary P6 acceptance must compare baseline and
+indexed search in a verified **no-statistics** planner state, because P4's optimize
+hook does not ship. A post-P4/with-statistics result is secondary evidence only.
+After P5 hands off, the approved final transition saves planner-statistics
+metadata and immutable P4/P5 result hashes, then removes planner statistics from
+this shared synthetic database without a full copy. Reopen every measurement
+connection and verify no-statistics query plans before P6 baseline, backfill and
+indexed parity. Record that transition and the exact source/schema/planner state;
+there are no further shared-fixture consumers after P6. No statistics removal is
+a product migration or an operation on a live/user database.
 Preserve immutable result ids/order/hashes from each phase and the original
-`0083` smoke evidence; do not create parallel mutable copies, fabricate importer
-receipts or bypass migration backups. Final acceptance uses the landed P4 code.
+`0083` smoke evidence; do not fabricate importer receipts or bypass backups.
 The original smoke's P6-only `0084` stamp predates the unrelated landed `0084`
 runtime-checkpoint revision; it is evidence only and must not be opened or
 migrated under the corrected graph. Export the corrected schema for the final
