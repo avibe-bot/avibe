@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from sqlalchemy import event, select
 
 from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
@@ -124,3 +125,36 @@ async def test_batch_boundary_outside_retained_ids_and_same_connection_refresh(e
         assert [row["id"] for row in results[last.row_id]] == ["last-result"]
         conn.execute(messages.delete().where(messages.c.id == last.row_id))
         assert tool_activity_service._response_results(conn, snapshots) == {row_id: [] for row_id in retained}
+
+
+@pytest.mark.parametrize("analyzed", [False, True])
+async def test_activity_delivery_lookup_is_message_keyed_for_full_window(engine, session, analyzed):
+    """Planner statistics must not turn a bounded IN lookup into a state scan."""
+    await _store(engine)
+    with engine.begin() as conn:
+        source = dict(conn.execute(select(messages).where(messages.c.session_id == SESSION)).mappings().one())
+        conn.execute(messages.insert(), [
+            {**source, "id": f"message-{i:04d}'quoted", "context_seq": None}
+            for i in range(500)
+        ])
+        if analyzed:
+            conn.exec_driver_sql("ANALYZE")
+    statements = []
+    def capture(_conn, _cursor, statement, parameters, _context, _many):
+        if "FROM message_deliveries INDEXED BY" in statement:
+            statements.append((statement, parameters))
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            agent_activity_service.list_turn_groups(conn, session_id=SESSION)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    [(sql, parameters)] = statements
+    assert len(parameters) == 500
+    assert "'quoted" not in sql  # IDs are always bound, never interpolated.
+    with engine.connect() as conn:
+        plans = [row[3] for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)]
+    assert any("SEARCH message_deliveries USING INDEX ix_message_deliveries_message (message_id=?)" in plan
+               for plan in plans), plans
+    assert not any("SCAN message_deliveries" in plan or "recovery_owner" in plan or "TEMP B-TREE" in plan
+                   for plan in plans), plans

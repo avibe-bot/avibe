@@ -12,6 +12,12 @@ plus one media lookup per image. Batch these reads without replacing their bound
 seeks with a scan of a Session's history. Parse retained canonical JSON once per projection and
 reuse formatter instances only within that projection. No schema or migration changes.
 
+The accepted-Delivery lookup must seek the retained message IDs, not all accepted Deliveries.
+SQLite 3.45.1 still selected `recovery_owner(state=?)` for the actual 500-ID IN lookup after
+bounded ANALYZE. Pin this read to `ix_message_deliveries_message`, installed by migration 0067
+and retained by the supported schema-compatibility contract. The fixed SQL binds every ID;
+no optional statistics job or new migration is required.
+
 ## Validation
 
 - Existing Activity/projection tests, including reused call ids, opaque response barriers,
@@ -19,15 +25,19 @@ reuse formatter instances only within that projection. No schema or migration ch
 - Query-count regression across multiple batches, per-response result limits, no stale cache
   after writes, scoped/revoked/missing media tests and EXPLAIN checks of the batched seeks.
 - Synthetic large database generated and measured only in held local Incus, shared with
-  P4 planner-statistics and P6 FTS lanes. Compare pre-change and changed summary/detail on the
-  same fixture, after P4 lands. Record wall time and SQL counts, not owner data.
+  planner-statistics and FTS investigations. Compare unchanged baseline and changed summary/detail
+  on the same fixture without planner statistics as primary acceptance; record experimental
+  post-statistics measurements separately. Record wall time and SQL counts, not owner data.
 - Focused pytest and changed-file Ruff; exact-head Codex and required PR CI.
 
 ## Progress
 
 - Root cause confirmed in `storage/tool_activity_service.py`: `response_steps` loops over
   `response_results` (next response + result interval) and `_media_urls` (one read per image).
-- Search indexing is an independent change; large-fixture measurement is shared with the
-  planner-statistics work. Final measurement waits for that prerequisite to land.
-- Focused Activity and projection coverage: 95 passing tests. A 129-response fixture needs
-  eight projection SELECTs, versus two per response plus the window/Turn reads before batching.
+- Search indexing is independent. Planner-statistics work was deferred after the actual
+  500-ID lookup retained the unsuitable state-keyed plan; this PR no longer depends on it.
+- Focused Activity and projection coverage: 97 passing tests, including full-window delivery
+  EXPLAIN checks with and without ANALYZE. A 129-response fixture needs eight projection
+  SELECTs, versus two per response plus the window/Turn reads before batching.
+- Shared 922 MB synthetic fixture preliminary result: 626 to 17 SQL statements with identical
+  summary/detail payload hashes. Final index-pinned, no-statistics measurement is pending.
