@@ -246,18 +246,33 @@ it('keeps what was typed and says to update when avault is too old', async () =>
   expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe(OFFICIAL);
 });
 
-it('sets #0 to ask before signing only after the wallet is created, never in the create body', async () => {
+it('saves #0 asking before signing in the create itself, with no later PATCH and no window without it', async () => {
+  api.updateVaultHdAccount.mockClear();
   await openWallet();
   fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
   fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
   fireEvent.click(screen.getByRole('switch', { name: hd.askAccount0 }));
-  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [storedFor(OFFICIAL.split(' '))] } });
+  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [{ ...storedFor(OFFICIAL.split(' ')), always_ask: true }] } });
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
-  await waitFor(() => expect(api.updateVaultHdAccount).toHaveBeenCalledWith('AGENT_WALLET', 0, { always_ask: true }, { handleError: false }));
+  await screen.findByRole('button', { name: hd.done.finish });
+  expect(postedPayload().account0_always_ask).toBe(true);
   expect(postedPayload()).not.toHaveProperty('policy');
+  expect(api.updateVaultHdAccount).not.toHaveBeenCalled();
+  expect((screen.getByRole('button', { name: hd.done.finish }) as HTMLButtonElement).disabled).toBe(false);
 });
 
-it('does not report the wallet done while the requested ask-before-signing did not stick, and retries it in place', async () => {
+it('leaves account0_always_ask out of the create when the switch is off', async () => {
+  await openWallet();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [storedFor(OFFICIAL.split(' '))] } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  await screen.findByRole('button', { name: hd.done.finish });
+  // undefined is dropped on the wire, like the other optional fields.
+  expect(JSON.parse(JSON.stringify(postedPayload()))).not.toHaveProperty('account0_always_ask');
+});
+
+it('falls back to turning it on if the server ignored it, and does not report done until it sticks', async () => {
   await openWallet();
   fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
   fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
@@ -325,13 +340,18 @@ it('keeps acting on the wallet it created even if the name field changes', async
   expect(screen.getByText(hd.done.title.replace('{{name}}', 'WALLET_A'))).toBeTruthy();
 });
 
-it('tells an Editor that only an admin can set ask-before-signing, and never PATCHes it', async () => {
+it('lets an Editor (creator) choose ask-before-signing for #0 at creation', async () => {
   canManage = false;
   try {
     await openWallet('WALLET_E');
+    fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+    fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
     const sw = screen.getByRole('switch', { name: hd.askAccount0 }) as HTMLButtonElement;
-    expect(sw.disabled).toBe(true);
-    expect(screen.getByText(hd.askNeedsManager)).toBeTruthy();
+    expect(sw.disabled).toBe(false);
+    fireEvent.click(sw);
+    api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [{ ...storedFor(OFFICIAL.split(' ')), always_ask: true }] } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+    expect(postedPayload().account0_always_ask).toBe(true);
   } finally {
     canManage = true;
   }
