@@ -12,7 +12,10 @@ use reqwest::header::{HeaderMap, SET_COOKIE};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use tokio::sync::{oneshot, Notify};
 
@@ -67,6 +70,7 @@ fn ok(body: Value) -> Reply {
 struct Private(
     Mutex<HashMap<String, Vec<u8>>>,
     Mutex<Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    AtomicBool,
 );
 impl Credentials for Private {
     fn read(&self, id: &str) -> Result<Option<Vec<u8>>, ClientError> {
@@ -81,6 +85,9 @@ impl Credentials for Private {
         Ok(())
     }
     fn erase(&self, id: &str) -> Result<(), ClientError> {
+        if self.2.load(Ordering::SeqCst) {
+            return Err(ClientError::new("credentials_unavailable"));
+        }
         self.0.lock().unwrap().remove(id);
         Ok(())
     }
@@ -399,7 +406,7 @@ async fn old_signout_cannot_erase_a_newer_generation() {
 // race the same way. Neither may leave credentials from an uncommitted epoch.
 #[tokio::test]
 async fn cancellation_rolls_back_unpublished_credential_writes() {
-    for refresh_existing in [false, true] {
+    for (refresh_existing, erase_failure) in [(false, false), (true, false), (false, true)] {
         let mut replies = first_factor();
         replies.push((
             "/api/desktop/session",
@@ -437,6 +444,7 @@ async fn cancellation_rolls_back_unpublished_credential_writes() {
                     .ok
             );
         }
+        f.private.2.store(erase_failure, Ordering::SeqCst);
         let before = f.private.0.lock().unwrap().clone();
         let before_record = f.store.load("unused").unwrap().account_id;
         let (entered, writing) = oneshot::channel();
@@ -466,8 +474,26 @@ async fn cancellation_rolls_back_unpublished_credential_writes() {
         .await
         .unwrap();
         release.send(()).unwrap();
-        assert_eq!(verification.await.unwrap().error.unwrap().code, "stale_generation");
-        assert!(cancel.await.unwrap().ok);
+        assert_eq!(
+            verification.await.unwrap().error.unwrap().code,
+            if erase_failure {
+                "credentials_unavailable"
+            } else {
+                "stale_generation"
+            }
+        );
+        let cancelled = cancel.await.unwrap();
+        if erase_failure {
+            assert_eq!(cancelled.error.unwrap().code, "credentials_unavailable");
+            assert_eq!(
+                f.client.state().enrollment.error_code.as_deref(),
+                Some("credentials_unavailable")
+            );
+            f.private.2.store(false, Ordering::SeqCst);
+            assert!(action(&f.client, ClientAction::SignOut).await.ok);
+        } else {
+            assert!(cancelled.ok);
+        }
         assert_eq!(*f.private.0.lock().unwrap(), before);
         assert_eq!(f.store.load("unused").unwrap().account_id, before_record);
     }
@@ -538,4 +564,58 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
             Some(error.code.as_str())
         );
     }
+}
+
+// A second catalog fetch follows successful registration. Its failure must not
+// consume the only recovery-code response after TOTP enrollment succeeded.
+#[tokio::test]
+async fn recovery_codes_survive_catalog_failure_after_local_registration() {
+    let mut replies = first_factor();
+    let descriptor = json!({"schema_version":1,"installation_id":"installation","device_name":"小明的 Mac",
+        "binding_revision":"revision","pairing":{"instance_id":"local-1","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"},
+        "remote_access":{"configured_enabled":false,"requested":false,"running":false},"enrollment":null});
+    replies.extend([
+        ("/api/desktop/session", Reply::Ready(response(403,json!({"error":"two_factor_required","email":"xiaoming@example.test","gate":"enroll","methods":["totp"]}),None))),
+        ("/api/two-factor/totp/setup",ok(json!({"token":"private-token","uri":"otpauth://fixture","qrSvg":"<svg/>","secret":"private-seed"}))),
+        ("/api/two-factor/totp",ok(json!({"method":{"id":"totp-1","kind":"totp","name":"Authenticator","createdAt":"2026-11-13","lastUsedAt":null},"recoveryCodes":["one-time-code"]}))),
+        ("/api/mobile/session",ok(signed_in())),
+        ("/api/mobile/session",ok(signed_in())),
+        ("/api/desktop/local-instance",ok(descriptor.clone())),
+        ("/api/csrf-token",Reply::Ready(response(200,json!({"csrf_token":"csrf"}),Some("vibe_csrf_token=csrf; Path=/")))),
+        ("/api/desktop/local-instance/prepare",ok(json!({"local":descriptor,"operation_id":"operation"}))),
+        ("/api/desktop/instances/ensure-local",ok(json!({"outcome":"already_paired","owner_match":true,"instance_id":"local-1"}))),
+        ("/api/desktop/local-instance",ok(descriptor)),
+        ("/api/mobile/session",Reply::Ready(response(503,json!({"error":"unavailable"}),None))),
+    ]);
+    let f = fixture(replies);
+    f.client.local_origin(Some(
+        avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
+    ));
+    assert!(
+        action(
+            &f.client,
+            ClientAction::RequestOtp {
+                email: "xiaoming@example.test".into()
+            }
+        )
+        .await
+        .ok
+    );
+    assert!(
+        action(&f.client, ClientAction::VerifyOtp { code: "123456".into() })
+            .await
+            .ok
+    );
+    assert!(action(&f.client, ClientAction::BeginTotpEnrollment).await.ok);
+    let reply = action(&f.client, ClientAction::FinishTotpEnrollment { code: "123456".into() }).await;
+    assert!(reply.ok, "{:?}", reply.error);
+    match reply.result {
+        Some(DirectResult::TotpEnrolled { recovery_codes, .. }) => {
+            assert_eq!(recovery_codes, Some(vec!["one-time-code".into()]))
+        }
+        other => panic!("missing direct recovery result: {other:?}"),
+    }
+    assert!(!serde_json::to_string(&*f.view.states.lock().unwrap())
+        .unwrap()
+        .contains("one-time-code"));
 }

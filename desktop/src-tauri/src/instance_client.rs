@@ -458,7 +458,7 @@ impl NativeView {
     }
     async fn retire_current(&self) -> Result<(), ClientError> {
         let disposable = self.presentation.lock().expect("presentation").disposable;
-        if let Some(window) = self.app.get_webview_window(MAIN_WINDOW) {
+        let retired = if let Some(window) = self.app.get_webview_window(MAIN_WINDOW) {
             tokio::task::spawn_blocking(move || {
                 if disposable {
                     crate::instance_store::retire(&window)
@@ -467,13 +467,17 @@ impl NativeView {
                 }
             })
             .await
-            .map_err(failure)?
-            .map_err(failure)?;
-        }
-        if let Some(directory) = self.store_directory.lock().expect("store directory").take() {
-            directory.close().map_err(failure)?;
-        }
-        Ok(())
+            .map_err(failure)
+            .and_then(|result| result.map_err(failure))
+        } else {
+            Ok(())
+        };
+        let removed = if let Some(directory) = self.store_directory.lock().expect("store directory").take() {
+            directory.close().map_err(failure)
+        } else {
+            Ok(())
+        };
+        retired.and(removed)
     }
     async fn build(
         &self,
@@ -705,24 +709,27 @@ impl ClientView for NativeView {
         };
         let url: Url = canonical_origin.parse().map_err(failure)?;
         self.remember_current(&epoch).await?;
-        self.retire_current().await?;
-        epoch.check()?;
-        {
-            let mut state = self.presentation.lock().expect("presentation");
-            state.account = false;
-            state.disposable = true;
-            state.remote = Some(url.clone());
-            state.route = Some(url.clone());
-            state.pending_commit = true;
-            state.state.connection = ConnectionState {
-                committed: target,
-                pending: None,
-                status: ConnectionStatus::RemoteConnected,
-            };
-            state.state.generation = epoch.value;
-            state.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
+        let result = async {
+            self.retire_current().await?;
+            epoch.check()?;
+            {
+                let mut state = self.presentation.lock().expect("presentation");
+                state.account = false;
+                state.disposable = true;
+                state.remote = Some(url.clone());
+                state.route = Some(url.clone());
+                state.pending_commit = true;
+                state.state.connection = ConnectionState {
+                    committed: target,
+                    pending: None,
+                    status: ConnectionStatus::RemoteConnected,
+                };
+                state.state.generation = epoch.value;
+                state.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
+            }
+            self.build(epoch.clone(), url, true, cookies).await
         }
-        let result = self.build(epoch.clone(), url, true, cookies).await;
+        .await;
         if result.is_err() && epoch.check().is_ok() {
             let previous = self.presentation.lock().expect("presentation").previous.take();
             if let Some(previous) = previous {
@@ -816,14 +823,15 @@ impl ClientView for NativeView {
             state.route = None;
             state.previous = None;
         }
-        retired?;
         // A local escape may supersede sign-out while erasure waits. New
         // sign-in stays blocked until this method finishes, so restore local
         // under the newest generation instead of leaving a destroyed window.
         let epoch = self.app.state::<Client>().coordinator.epoch();
-        self.build(epoch.clone(), self.local_url()?, false, vec![]).await?;
-        self.show(epoch);
-        Ok(())
+        let restored = self.build(epoch.clone(), self.local_url()?, false, vec![]).await;
+        if restored.is_ok() {
+            self.show(epoch);
+        }
+        retired.and(restored)
     }
 }
 

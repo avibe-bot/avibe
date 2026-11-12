@@ -17,9 +17,13 @@ use std::{
     collections::HashMap,
     io::BufRead,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tokio::sync::oneshot;
 use url::Url;
 
 #[derive(Deserialize)]
@@ -34,6 +38,13 @@ struct Config {
 struct Wire {
     client: reqwest::Client,
     config: Arc<Config>,
+    controls: Arc<Controls>,
+}
+#[derive(Default)]
+struct Controls {
+    hold: Mutex<Option<(String, oneshot::Receiver<()>)>>,
+    release: Mutex<Option<oneshot::Sender<()>>>,
+    bad_csrf: AtomicBool,
 }
 #[async_trait]
 impl Transport for Wire {
@@ -67,16 +78,37 @@ impl Transport for Wire {
                 .unwrap(),
         );
         headers.insert("X-Fixture-Scheme", request.url.scheme().parse().unwrap());
+        if request.url.path() == "/api/desktop/local-instance/prepare"
+            && self.controls.bad_csrf.swap(false, Ordering::SeqCst)
+        {
+            headers.insert("X-Vibe-CSRF-Token", "fixture-wrong-token".parse().unwrap());
+        }
         let mut call = self.client.request(request.method, url).headers(headers);
         if let Some(body) = request.body {
             call = call.json(&body);
         }
         let response = call.send().await?;
-        Ok(Response {
+        let result = Response {
             status: response.status().as_u16(),
             headers: response.headers().clone(),
             body: response.bytes().await?.to_vec(),
-        })
+        };
+        let held = {
+            let mut hold = self.controls.hold.lock().unwrap();
+            if hold.as_ref().is_some_and(|(path, _)| path == request.url.path()) {
+                hold.take().map(|(_, receiver)| receiver)
+            } else {
+                None
+            }
+        };
+        if let Some(receiver) = held {
+            emit(json!({"event":"http_held","path":request.url.path(),"status":result.status}));
+            tokio::time::timeout(std::time::Duration::from_secs(30), receiver)
+                .await
+                .map_err(|_| ClientError::new("fixture_hold_timeout"))?
+                .map_err(|_| ClientError::new("fixture_hold_cancelled"))?;
+        }
+        Ok(result)
     }
 }
 #[derive(Default)]
@@ -168,11 +200,12 @@ fn main() {
             let store=ConnectionStore::new(setup.root.join("connection.json"));
             let record=store.load("小明的 Mac").map_err(|error|std::io::Error::other(error.code))?;
             let private=Arc::new(Private::default());
+            let controls=Arc::new(Controls::default());
             let local=LoopbackOrigin::parse(setup.local.as_str())?;
             let coordinator=instance_client::attach(app.handle(),NativeClientConfig {
                 bundle:bundle.clone(), state:ClientState::new("小明的 Mac".into(),"0.1.0".into(),json!({"phase":"idle","channel":"stable","prereleases":false,"interactive":false})),
                 record,store,local_origin:Arc::new(Mutex::new(Some(local.clone()))),
-            },Arc::new(Wire { client:reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build()?,config:setup.clone() }),private.clone(),Arc::new(NoSystemPasskey));
+            },Arc::new(Wire { client:reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build()?,config:setup.clone(),controls:controls.clone() }),private.clone(),Arc::new(NoSystemPasskey));
             coordinator.local_origin(Some(local));
             let mut window_config=app.config().app.windows[0].clone();
             window_config.url=WebviewUrl::External(bundle);
@@ -185,7 +218,17 @@ fn main() {
                 for line in std::io::stdin().lock().lines() {
                     let command:Value=serde_json::from_str(&line.unwrap()).unwrap();
                     match command["action"].as_str().unwrap() {
-                        "state"=>emit(json!({"event":"state","state":coordinator.state(),"credential_count":private.0.lock().unwrap().len()})),
+                        "state"=>emit(json!({"event":"state","state":coordinator.state(),"credential_count":private.0.lock().unwrap().len(),
+                            "instance_stores": std::fs::read_dir(handle.path().app_local_data_dir().unwrap().join("instance-stores")).map(|entries|entries.count()).unwrap_or(0),
+                        })),
+                        "wrong_csrf"=> { controls.bad_csrf.store(true, Ordering::SeqCst);emit(json!({"event":"control_ready"})); },
+                        "hold"=> {
+                            let (sender,receiver)=oneshot::channel();
+                            *controls.hold.lock().unwrap()=Some((command["path"].as_str().unwrap().into(),receiver));
+                            *controls.release.lock().unwrap()=Some(sender);
+                            emit(json!({"event":"control_ready"}));
+                        },
+                        "release"=> { controls.release.lock().unwrap().take().unwrap().send(()).unwrap(); },
                         "eval"=> { let window=handle.get_webview_window("main").expect("main"); window.eval(command["script"].as_str().unwrap()).unwrap(); },
                         "present"=>instance_client::present(&handle, match command["view"].as_str().unwrap() {
                             "instances"=>"instances","sign-out"=>"sign-out","account"=>"account",_=>panic!("unsupported view"),

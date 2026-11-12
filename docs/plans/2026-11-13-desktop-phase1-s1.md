@@ -170,3 +170,43 @@ Runtime-host tests and native all-targets Clippy pass at this checkpoint.
 Cross-checking the Windows target locally stopped before application compilation
 because this macOS host lacks Windows C SDK headers required by `ring`.
 Windows CI remains required; this local limitation is not a platform pass.
+
+### Current native failure-boundary checkpoint (2026-11-13 05:00 +08)
+
+The immutable test assembly is `226adca03d2f3aeb5bbe7af2403ad1b97b8fa37b`
+at `/tmp/avibe-desktop-phase1-seszkwvjjwaz5/combined-backend-cc23881`:
+B2 `cc23881ff2b2d31c2d4004e9117a968de9912e6e` plus the unchanged complete B1
+`690445a02491a2aeb4f73b66eef5a23a45000b00` delta. The sole assembly conflict
+was the CI job list; both candidate test groups are retained. No peer worktree
+was changed. The build used a temporary HOME/XDG/TMPDIR and no real env file.
+R1 and both U1 asset pins remain those listed above.
+
+The current actual native chain has two passing cases (17.90 seconds): actual
+U1 account login, registration, catalog, structured consent, OIDC, remote store
+and local return; then a second remote selection followed by direct sign-out.
+Native credential count and disposable instance-store count reach zero while
+R1's local pairing and requested remote-access intent remain. A separate real
+TOTP challenge blocks enrollment until verification; one deliberately incorrect
+native CSRF header is rejected before local prepare changes any descriptor or
+B2 device count. An actual B1 session response held at the native transport is
+released after sign-out and rejected as `stale_generation` without recreating
+account state, credentials or stores. Evidence is
+`native-chain-cc23881-run2.log`; run1 is preserved (the fixture incorrectly
+assumed an instance display name rather than using its actual catalog tuple).
+The same assembly also passes all five actual B2/R1 A2/A3 cases in
+`b2-cc23881-r1-a3.log`.
+
+Two coordinator regressions first failed on the previous product implementation:
+post-registration discovery discarded one-time recovery codes, and a cancelled
+credential write hid a failed rollback behind `stale_generation`. Both are fixed
+at their owner boundary; eight coordinator tests pass. A rollback error remains
+visible to the cancelling request and retains erasure ownership until sign-out.
+A native retirement error now still attempts local-window recovery and removes
+the disposable directory, while returning the original failure. Changed Rust
+fmt and native all-target clippy pass; changed Python Ruff passes.
+
+These checks do not complete updater confirmation, download presentation,
+Windows native execution, final quiescent integration, or signed-package gates.
+The current probe was rebuilt from the checkpoint's source before the two-case
+run. Earlier b50 chain results and the initial cookie erasure failure remain
+historical evidence and are not substituted for this candidate.

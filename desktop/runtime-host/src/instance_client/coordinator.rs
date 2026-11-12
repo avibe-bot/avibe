@@ -57,13 +57,18 @@ pub struct Coordinator {
     inner: Mutex<Inner>,
     generation: Arc<AtomicU64>,
     operation: tokio::sync::Mutex<()>,
-    credential_io: tokio::sync::Mutex<HashSet<String>>,
+    credential_io: tokio::sync::Mutex<CredentialWrites>,
     signing_out: AtomicBool,
     transport: Arc<dyn Transport>,
     credentials: Arc<dyn Credentials>,
     store: ConnectionStore,
     passkeys: Arc<dyn Passkeys>,
     view: Arc<dyn ClientView>,
+}
+
+struct CredentialWrites {
+    ids: HashSet<String>,
+    cleanup_error: Option<ClientError>,
 }
 
 impl Coordinator {
@@ -89,7 +94,10 @@ impl Coordinator {
             }),
             generation,
             operation: tokio::sync::Mutex::new(()),
-            credential_io: tokio::sync::Mutex::new(credential_ids),
+            credential_io: tokio::sync::Mutex::new(CredentialWrites {
+                ids: credential_ids,
+                cleanup_error: None,
+            }),
             signing_out: AtomicBool::new(false),
             transport,
             credentials,
@@ -256,7 +264,12 @@ impl Coordinator {
         }
         let persistence = self.persist(&mut working, &epoch).await;
         if epoch.check().is_err() {
-            return self.reply(request.request_id, Err(ClientError::new("stale_generation")));
+            return self.reply(
+                request.request_id,
+                Err(persistence
+                    .err()
+                    .unwrap_or_else(|| ClientError::new("stale_generation"))),
+            );
         }
         self.view.committed(epoch);
         self.view.changed(&self.state());
@@ -355,7 +368,12 @@ impl Coordinator {
         if authenticated && working.state.account.status == AccountStatus::SignedIn {
             // Registration failure must not block discovery or local use.
             if Self::enroll(working).await.is_ok() {
-                working.account.discover(&mut working.state).await?;
+                let discovery = working.account.discover(&mut working.state).await;
+                // TOTP recovery codes are delivered only once. A subsequent
+                // catalog failure must not discard that successful direct reply.
+                if direct.is_none() {
+                    discovery?;
+                }
             }
         }
         epoch.check()?;
@@ -410,6 +428,9 @@ impl Coordinator {
     async fn persist(&self, working: &mut Inner, epoch: &Epoch) -> Result<(), ClientError> {
         let mut owned = self.credential_io.lock().await;
         epoch.check()?;
+        if let Some(error) = &owned.cleanup_error {
+            return Err(error.clone());
+        }
         if working.state.account.status == AccountStatus::SignedIn {
             let account = working
                 .state
@@ -423,7 +444,7 @@ impl Coordinator {
         if let Some(id) = &working.record.account_id {
             // Own the key before the blocking write starts. Sign-out waits for
             // this lock and erases even a write whose public commit was fenced.
-            owned.insert(id.clone());
+            owned.ids.insert(id.clone());
         }
         let bytes = working.account.session.persist()?;
         let record = working.record.clone();
@@ -479,17 +500,32 @@ impl Coordinator {
             let id = working.record.account_id.clone();
             let credentials = self.credentials.clone();
             let store = self.store.clone();
-            tokio::task::spawn_blocking(move || {
-                if let (Some(id), Some(previous)) = (id, previous) {
+            let rollback = tokio::task::spawn_blocking(move || {
+                let erased = if let (Some(id), Some(previous)) = (id, previous) {
                     match previous {
-                        Some(bytes) => credentials.write(&id, &bytes)?,
-                        None => credentials.erase(&id)?,
+                        Some(bytes) => credentials.write(&id, &bytes),
+                        None => credentials.erase(&id),
                     }
-                }
-                store.save(&record)
+                } else {
+                    Ok(())
+                };
+                // Restore metadata even when credential rollback fails.
+                store.save(&record).and(erased)
             })
             .await
-            .map_err(|_| ClientError::new("credentials_unavailable"))??;
+            .map_err(|_| ClientError::new("credentials_unavailable"))
+            .and_then(|result| result);
+            if let Err(error) = rollback {
+                owned.cleanup_error = Some(error.clone());
+                let state = {
+                    let mut current = self.inner.lock().expect("client state");
+                    current.state.enrollment.error_code = Some(error.code.clone());
+                    current.state.revision += 1;
+                    current.state.clone()
+                };
+                self.view.changed(&state);
+                return Err(error);
+            }
             return Err(ClientError::new("stale_generation"));
         }
         saved
@@ -559,13 +595,14 @@ impl Coordinator {
         self.view.changed(&self.state());
         let mut owned = self.credential_io.lock().await;
         let ids: Vec<_> = if signing_out {
-            owned.iter().cloned().collect()
+            owned.ids.iter().cloned().collect()
         } else {
             vec![]
         };
         let credentials = self.credentials.clone();
         let store = self.store.clone();
         let write_epoch = epoch.clone();
+        let prior_error = owned.cleanup_error.clone();
         let cleanup = tokio::task::spawn_blocking(move || {
             // Clearing restoration metadata comes first: an erasure error must
             // never allow restart to revive a signed-out credential.
@@ -585,14 +622,15 @@ impl Coordinator {
                 }
                 result
             } else {
-                Ok(())
+                prior_error.map_or(Ok(()), Err)
             };
             saved.and(erased)
         })
         .await
         .map_err(|_| ClientError::new("credentials_unavailable"))?;
         if signing_out && cleanup.is_ok() {
-            owned.clear();
+            owned.ids.clear();
+            owned.cleanup_error = None;
         }
         drop(owned);
         let view_result = if signing_out {

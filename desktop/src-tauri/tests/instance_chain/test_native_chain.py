@@ -136,6 +136,7 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
             "info": info,
             "root": tmp_path,
             "studio": studio_instance,
+            "local": local,
         }
     finally:
         for process in (native, studio, producer):
@@ -154,8 +155,7 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
         print(f"native producer chain evidence: {tmp_path}")
 
 
-def test_actual_bundled_account_login_registers_through_native_and_r1(native_chain):
-    f = native_chain
+def login(f):
     f["wait"]("loaded", lambda event: "account/index.html" in event["url"])
     deadline = time.monotonic() + 10
     while True:
@@ -181,6 +181,11 @@ def test_actual_bundled_account_login_registers_through_native_and_r1(native_cha
         is True
     )
     f["js"]("document.querySelector('form').requestSubmit(); return true;")
+
+
+def test_actual_bundled_account_login_registers_through_native_and_r1(native_chain):
+    f = native_chain
+    login(f)
     state = f["state"](lambda state: state["account"]["status"] == "signed_in")
     assert state["state"]["enrollment"]["status"] in ("paired_this_account", "paired_tunnel_unavailable"), state
     assert state["state"]["local"]["name"] == "小明的 Mac"
@@ -228,3 +233,85 @@ def test_actual_bundled_account_login_registers_through_native_and_r1(native_cha
     returned = f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")
     assert returned["state"]["account"]["status"] == "signed_in"
     assert returned["state"]["remote_auxiliary"] == "local"
+
+    # Re-enter the real remote store and sign out directly from it. This must
+    # erase the instance store as well as native credentials before local return.
+    select_studio(f)
+    assert f["state"](lambda state: state["connection"]["committed"]["kind"] == "remote")["instance_stores"] == 1
+    sign_out(f)
+    ended = f["state"](lambda state: state["account"]["status"] == "signed_out")
+    assert ended["credential_count"] == 0
+    assert ended["instance_stores"] == 0
+    assert ended["state"]["connection"]["committed"]["kind"] == "local"
+    descriptor = requests.get(f["local"] + "/api/desktop/local-instance", timeout=5).json()
+    assert descriptor["pairing"] is not None
+    assert descriptor["remote_access"]["requested"] is True
+
+
+def select_studio(f):
+    f["send"](action="present", view="instances")
+    f["wait"]("loaded", lambda event: "view=instances" in event["url"])
+    selector = studio_selector(f)
+    f["ready"]("return Boolean(" + selector + ");")
+    f["js"](selector + ".click(); return true;")
+    state = f["state"](lambda state: state["consent"] is not None or state["connection"]["committed"]["kind"] == "remote")
+    if state["state"]["consent"] is not None:
+        f["ready"]("return document.body.innerText.includes('openid');")
+        f["js"]("document.querySelector('main button').click(); return true;")
+    return f["state"](lambda state: state["connection"]["committed"]["kind"] == "remote")
+
+
+def sign_out(f):
+    f["send"](action="present", view="sign-out")
+    f["wait"]("loaded", lambda event: "view=sign-out" in event["url"])
+    f["ready"]("return document.querySelectorAll('main button').length === 2;")
+    f["js"]("document.querySelector('main button').click(); return true;")
+    f["wait"]("loaded", lambda event: event["url"].startswith("http://127.0.0.1:"))
+
+
+def test_totp_wrong_csrf_and_late_account_result_cannot_recreate_signed_out_state(native_chain):
+    f = native_chain
+    control = requests.post(f["info"]["provider"] + "/fixture/control", json={"factor":"totp"}, timeout=5).json()
+    before = requests.get(f["local"] + "/api/desktop/local-instance", timeout=5).json()
+    f["send"](action="wrong_csrf")
+    f["wait"]("control_ready")
+    login(f)
+    gated = f["state"](lambda state: state["account"]["status"] == "second_factor_required")
+    assert gated["credential_count"] == 0
+    assert requests.get(f["local"] + "/api/desktop/local-instance", timeout=5).json() == before
+    f["ready"]("return Boolean(document.querySelector('#factor-code'));")
+    f["js"]("const input=document.querySelector('#factor-code'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input," + json.dumps(control["factor_code"]) + "); input.dispatchEvent(new Event('input',{bubbles:true})); return true;")
+    f["js"]("document.querySelector('form').requestSubmit(); return true;")
+    failed = f["state"](lambda state: state["account"]["status"] == "signed_in")
+    assert failed["state"]["enrollment"]["status"] == "failed"
+    assert failed["credential_count"] == 1
+    # Actual R1 rejected the mismatched native header before prepare could
+    # allocate identity, claim an operation, or call B2 ensure/redeem.
+    assert requests.get(f["local"] + "/api/desktop/local-instance", timeout=5).json() == before
+    counts = requests.post(f["info"]["provider"] + "/fixture/control", json={}, timeout=5).json()
+    assert counts["devices"] == control["devices"] == 1
+    assert counts["instances"] == control["instances"] == 1
+    f["send"](action="present", view="instances")
+    f["wait"]("loaded", lambda event: "view=instances" in event["url"])
+    selector = studio_selector(f)
+    f["ready"]("return Boolean(" + selector + ");")
+    f["send"](action="hold", path="/api/mobile/session")
+    f["wait"]("control_ready")
+    f["js"](selector + ".click(); return true;")
+    held = f["wait"]("http_held")
+    assert held["status"] == 200
+    sign_out(f)
+    f["send"](action="release")
+    late = f["wait"]("reply", lambda event: event["error"] == "stale_generation")
+    assert late["error"] == "stale_generation"
+    final = f["state"](lambda state: state["account"]["status"] == "signed_out")
+    assert final["credential_count"] == 0
+    assert final["instance_stores"] == 0
+    assert final["state"]["catalog"]["instances"] == []
+    assert final["state"]["connection"]["committed"]["kind"] == "local"
+
+
+def studio_selector(f):
+    state = f["state"](lambda state: state["account"]["status"] == "signed_in")["state"]
+    name = next(item["name"] for item in state["catalog"]["instances"] if item["id"] == f["studio"]["id"])
+    return "Array.from(document.querySelectorAll('main button')).find(button=>button.innerText.includes(" + json.dumps(name) + "))"
