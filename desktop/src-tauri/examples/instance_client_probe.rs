@@ -165,9 +165,9 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![desktop_client_request])
         .plugin(tauri::plugin::Builder::<_,()>::new("instance-fixture")
-            .on_webview_ready(|view| {
+            .on_webview_ready(|_view| {
                 #[cfg(target_os="macos")]
-                support::fixture_tls::install(&view);
+                support::fixture_tls::install(&_view);
             })
             .on_page_load(|view, payload| {
                 emit(json!({"event":"page_load","label":view.label(),"finished":payload.event()==tauri::webview::PageLoadEvent::Finished,"origin":payload.url().origin().ascii_serialization(),"path":payload.url().path()}));
@@ -206,9 +206,10 @@ fn main() {
             let private=Arc::new(Private::default());
             let controls=Arc::new(Controls::default());
             let local=LoopbackOrigin::parse(setup.local.as_str())?;
+            let local_origin=Arc::new(Mutex::new(Some(local.clone())));
             let coordinator=instance_client::attach(app.handle(),NativeClientConfig {
                 bundle:bundle.clone(), state:ClientState::new("小明的 Mac".into(),"0.1.0".into(),json!({"phase":"idle","channel":"stable","prereleases":false,"interactive":false})),
-                record,store,local_origin:Arc::new(Mutex::new(Some(local.clone()))),
+                record,store,local_origin:local_origin.clone(),
             },Arc::new(Wire { client:reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build()?,config:setup.clone(),controls:controls.clone() }),private.clone(),Arc::new(NoSystemPasskey));
             coordinator.local_origin(Some(local));
             let mut window_config=app.config().app.windows[0].clone();
@@ -224,6 +225,7 @@ fn main() {
                     match command["action"].as_str().unwrap() {
                         "state"=>emit(json!({"event":"state","state":coordinator.state(),"credential_count":private.0.lock().unwrap().len(),
                             "instance_stores": std::fs::read_dir(handle.path().app_local_data_dir().unwrap().join("instance-stores")).map(|entries|entries.count()).unwrap_or(0),
+                            "visible":handle.get_webview_window("main").is_some_and(|window|window.is_visible().unwrap_or(false)),
                         })),
                         "wrong_csrf"=> { controls.bad_csrf.store(true, Ordering::SeqCst);emit(json!({"event":"control_ready"})); },
                         "hold"=> {
@@ -249,6 +251,25 @@ fn main() {
                         "local_unavailable"=> {
                             coordinator.local_origin(None);
                             emit(json!({"event":"local_unavailable","generation":coordinator.state().generation}));
+                        },
+                        "runtime_offline"=> {
+                            *local_origin.lock().unwrap()=None;
+                            coordinator.local_origin(None);
+                            emit(json!({"event":"runtime_offline"}));
+                        },
+                        "presentation_status"=> {
+                            let window=handle.get_webview_window("main").unwrap();
+                            let url=window.url().unwrap();
+                            emit(json!({"event":"presentation_status","url":url.as_str(),
+                                "allowed":instance_client::caller_can_present(&handle,"main",&url)}));
+                        },
+                        "remote_update"=> {
+                            let path=handle.path().app_data_dir().unwrap().join(avibe_runtime_host::update_status::DESKTOP_UPDATE_REQUEST_FILE);
+                            assert!(path.starts_with(&setup.root));
+                            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                            std::fs::write(path,serde_json::to_vec(&command["request"]).unwrap()).unwrap();
+                            avibe_desktop_lib::updater::handle_remote_update_request(&handle);
+                            emit(json!({"event":"remote_dispatched"}));
                         },
                         "eval"=> { let window=handle.get_webview_window("main").expect("main"); window.eval(command["script"].as_str().unwrap()).unwrap(); },
                         "present"=>instance_client::present(&handle, match command["view"].as_str().unwrap() {

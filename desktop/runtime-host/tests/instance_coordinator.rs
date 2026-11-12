@@ -71,10 +71,16 @@ struct Private(
     Mutex<HashMap<String, Vec<u8>>>,
     Mutex<Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     AtomicBool,
+    Mutex<Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 );
 impl Credentials for Private {
     fn read(&self, id: &str) -> Result<Option<Vec<u8>>, ClientError> {
-        Ok(self.0.lock().unwrap().get(id).cloned())
+        let bytes = self.0.lock().unwrap().get(id).cloned();
+        if let Some((entered, release)) = self.3.lock().unwrap().take() {
+            let _ = entered.send(());
+            release.recv().unwrap();
+        }
+        Ok(bytes)
     }
     fn write(&self, id: &str, bytes: &[u8]) -> Result<(), ClientError> {
         self.0.lock().unwrap().insert(id.into(), bytes.into());
@@ -191,6 +197,102 @@ fn signed_in() -> Value {
     serde_json::from_str::<Value>(include_str!("../../contracts/instance-client-v1/transport.json")).unwrap()
         ["account_session"]
         .clone()
+}
+
+// Initial binding may invalidate credential reads or discovery. Only that
+// lifecycle event may continue startup restoration; explicit escape still wins.
+#[tokio::test]
+async fn startup_restore_continues_only_after_local_lifecycle_invalidation() {
+    for held_read in [true, false] {
+        for escape in [
+            None,
+            Some(ClientAction::Cancel),
+            Some(ClientAction::ReturnLocal),
+            Some(ClientAction::SignOut),
+        ] {
+            let mut replies = first_factor();
+            replies.push((
+                "/api/desktop/session",
+                Reply::Ready(response(
+                    200,
+                    signed_in(),
+                    Some("avibe_session=saved; Secure; HttpOnly; Path=/"),
+                )),
+            ));
+            let f = fixture(replies);
+            assert!(
+                action(
+                    &f.client,
+                    ClientAction::RequestOtp {
+                        email: "saved@example.test".into()
+                    }
+                )
+                .await
+                .ok
+            );
+            assert!(
+                action(&f.client, ClientAction::VerifyOtp { code: "123456".into() })
+                    .await
+                    .ok
+            );
+            let restored = Arc::new(Coordinator::new(
+                ClientState::new("小明的 Mac".into(), "0.1.0".into(), json!({})),
+                f.store.load("unused").unwrap(),
+                f.store.clone(),
+                f.http.clone(),
+                f.private.clone(),
+                Arc::new(NoPasskeys),
+                f.view.clone(),
+            ));
+            let (read_entered, reading) = oneshot::channel();
+            let (read_release, read_receiver) = std::sync::mpsc::channel();
+            let (http_release, http_held) = oneshot::channel();
+            let http_entered = Arc::new(Notify::new());
+            if held_read {
+                *f.private.3.lock().unwrap() = Some((read_entered, read_receiver));
+            } else {
+                f.http
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .push_back(("/api/mobile/session", Reply::Held(http_held, http_entered.clone())));
+            }
+            if escape.is_none() {
+                f.http
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .push_back(("/api/mobile/session", ok(signed_in())));
+            }
+            let client = restored.clone();
+            let restore = tokio::spawn(async move { client.restore_account().await });
+            if held_read {
+                reading.await.unwrap();
+            } else {
+                http_entered.notified().await;
+            }
+            restored.local_origin(Some(
+                avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
+            ));
+            if let Some(action_kind) = escape.clone() {
+                assert!(action(&restored, action_kind).await.ok);
+            }
+            if held_read {
+                read_release.send(()).unwrap();
+            } else {
+                http_release.send(response(200, signed_in(), None)).ok().unwrap();
+            }
+            let result = restore.await.unwrap();
+            if escape.is_none() {
+                result.unwrap();
+                assert_eq!(restored.state().account.status, AccountStatus::SignedIn);
+            } else {
+                assert_eq!(result.unwrap_err().code, "stale_generation");
+                assert_eq!(restored.state().account.status, AccountStatus::SignedOut);
+            }
+            assert!(f.http.replies.lock().unwrap().is_empty());
+        }
+    }
 }
 
 #[tokio::test]

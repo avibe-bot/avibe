@@ -9,6 +9,9 @@ from pathlib import Path
 import json
 import os
 import queue
+import re
+from datetime import datetime, timedelta, timezone
+import uuid
 import subprocess
 import threading
 import time
@@ -42,7 +45,7 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
     studio, studio_log, studio_instance = peer.start(tmp_path / "studio", info, mapping_file)
     updater = updater_fixture.start(tmp_path)
     runtime_fixture.publish_mapping(mapping_file, "dl.avibe.bot", updater["base"])
-    tunnel, tunnel_url, fingerprint = proxy.start(tmp_path, mapping_file)
+    tunnel, tunnel_url, fingerprint, document = proxy.start(tmp_path, mapping_file)
     fixture = tmp_path / "native.json"
     fixture.write_text(
         json.dumps(
@@ -149,8 +152,10 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
             "local": local,
             "updater": updater,
             "updates": updates,
+            "document": document,
         }
     finally:
+        document.release.set()
         for process in (native, studio, producer):
             if process.poll() is None:
                 process.terminate()
@@ -331,6 +336,66 @@ def studio_selector(f):
     return "Array.from(document.querySelectorAll('main button')).find(button=>button.innerText.includes(" + json.dumps(name) + "))"
 
 
+@pytest.mark.parametrize("interruption", ["escape", "local_unavailable"])
+def test_staged_document_cannot_commit_after_local_lifecycle_or_escape(native_chain, interruption):
+    # Unit transport tests cannot see the physical gap between cookie projection
+    # and main-document readiness. Hold a real Runtime response in that gap.
+    f = native_chain
+    login(f)
+    selected = select_studio(f)
+    committed = selected["state"]["connection"]["committed"]
+    f["send"](action="present", view="instances")
+    f["wait"]("loaded", lambda event: "view=instances" in event["url"])
+    selector = studio_selector(f)
+    f["ready"]("return Boolean(" + selector + ");")
+    f["document"].arm(committed["canonical_origin"].removeprefix("https://"), "/")
+    f["js"](selector + ".click(); return true;")
+    assert f["document"].entered.wait(timeout=15)
+    pending = f["state"](lambda state: state["generation"] > selected["state"]["generation"])
+    assert pending["state"]["connection"]["committed"] == committed
+    f["send"](action=interruption)
+    if interruption == "escape":
+        assert f["wait"]("escaped")["ok"] is True
+        f["ready"]("return window.location.origin === " + json.dumps(f["local"]) + ";")
+        ended = f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")
+        assert ended["instance_stores"] == 0
+    else:
+        f["wait"]("local_unavailable")
+        f["wait"]("loaded", lambda event: "account/index.html" in event["url"])
+        ended = f["state"](lambda state: state["connection"]["pending"] is None)
+        assert ended["state"]["connection"]["committed"] == committed
+        assert ended["instance_stores"] == 1
+        f["ready"]("return Boolean(window.__TAURI_INTERNALS__);")
+        # The restored bundled page must still have a usable trusted bridge.
+        reply = f["js"]("return await window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:{version:1,request_id:'restored-state',expected_generation:0,action:{type:'get_state'}}});")
+        assert reply["ok"] is True
+        assert reply["state"]["connection"]["committed"] == committed
+    f["document"].release.set()
+    assert ended["credential_count"] == 1
+    assert ended["state"]["generation"] > pending["state"]["generation"]
+    assert ended["state"]["account"]["status"] == "signed_in"
+
+
+def open_footer(f):
+    f["ready"]("return Boolean(document.querySelector('[data-version-trigger]'));")
+    f["js"]("document.querySelector('[data-version-trigger]').click(); return true;")
+    f["ready"]("return Boolean(document.querySelector('[data-update-menu] button'));")
+    # This click navigates to the native presentation scheme. Sending the
+    # observation scheme in the same turn would replace that navigation.
+    f["send"](action="eval", script="document.querySelector('[data-update-menu] button').click();")
+
+def native_dialog(f, expected=3):
+    deadline = time.monotonic() + 15
+    while True:
+        f["send"](action="dialog")
+        value = f["wait"]("dialog")
+        if len(value["buttons"]) == expected:
+            assert set(value["buttons"]) == ({"Download and Install", "Skip This Version", "Later"} if expected == 3 else {"Download and Install", "Later"})
+            return value["buttons"]
+        assert time.monotonic() < deadline, {"dialog": value, "updates": f["updates"]}
+        time.sleep(0.1)
+
+
 @pytest.mark.skipif(os.environ.get("DESKTOP_FIXTURE_UPDATER") != "1", reason="requires signed updater transport fixture build")
 def test_actual_remote_footer_opens_native_confirmation_and_fences_download_completion(native_chain):
     f = native_chain
@@ -338,37 +403,18 @@ def test_actual_remote_footer_opens_native_confirmation_and_fences_download_comp
     f["state"](lambda state: state["account"]["status"] == "signed_in")
     select_studio(f)
 
-    def footer():
-        f["ready"]("return Boolean(document.querySelector('[data-version-trigger]'));")
-        f["js"]("document.querySelector('[data-version-trigger]').click(); return true;")
-        f["ready"]("return Boolean(document.querySelector('[data-update-menu] button'));")
-        # This click navigates to the native presentation scheme. Sending the
-        # observation scheme in the same turn would replace that navigation.
-        f["send"](action="eval", script="document.querySelector('[data-update-menu] button').click();")
-
-    def dialog():
-        deadline = time.monotonic() + 15
-        while True:
-            f["send"](action="dialog")
-            value = f["wait"]("dialog")
-            if len(value["buttons"]) == 3:
-                assert set(value["buttons"]) == {"Download and Install", "Skip This Version", "Later"}
-                return value["buttons"]
-            assert time.monotonic() < deadline, {"dialog": value, "updates": f["updates"]}
-            time.sleep(0.1)
-
     # The real U1 CTA is a presentation request. It must reach the actual native
     # three-choice dialog, and Later must cause no artifact download.
-    footer()
-    buttons = dialog()
+    open_footer(f)
+    buttons = native_dialog(f)
     f["send"](action="dialog", choice=buttons.index("Later"))
     f["wait"]("dialog")
     f["wait"]("update", lambda event: event["state"]["phase"] == "available")
     assert not f["updater"]["requested"].is_set()
 
     # A confirmation that survives a generation change cannot start download.
-    footer()
-    buttons = dialog()
+    open_footer(f)
+    buttons = native_dialog(f)
     f["send"](action="local_unavailable")
     f["wait"]("local_unavailable")
     f["send"](action="dialog", choice=buttons.index("Download and Install"))
@@ -378,8 +424,8 @@ def test_actual_remote_footer_opens_native_confirmation_and_fences_download_comp
 
     # The same real owner must fence an already accepted download whose bytes
     # arrive after local escape. The inert signed fixture is never installed.
-    footer()
-    buttons = dialog()
+    open_footer(f)
+    buttons = native_dialog(f)
     f["send"](action="dialog", choice=buttons.index("Download and Install"))
     f["wait"]("dialog")
     assert f["updater"]["requested"].wait(timeout=10)
@@ -389,3 +435,105 @@ def test_actual_remote_footer_opens_native_confirmation_and_fences_download_comp
     f["wait"]("update", lambda event: event["state"]["phase"] == "available")
     assert not any(update["phase"] in ("installing", "installed") for update in f["updates"])
     assert f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")["credential_count"] == 1
+
+
+@pytest.mark.parametrize("escape", ["return_local", "sign_out"])
+def test_remote_escape_without_local_runtime_finishes_visible_owned_bootstrap(native_chain, escape):
+    f = native_chain
+    login(f)
+    select_studio(f)
+    f["send"](action="runtime_offline")
+    f["wait"]("runtime_offline")
+    if escape == "return_local":
+        f["send"](action="escape")
+        assert f["wait"]("escaped")["ok"] is True
+    else:
+        f["send"](action="present", view="sign-out")
+        f["wait"]("loaded", lambda event: "view=sign-out" in event["url"])
+        f["ready"]("return document.querySelectorAll('main button').length === 2;")
+        f["send"](action="eval", script="document.querySelector('main button').click();")
+    f["wait"]("loaded", lambda event: event["url"] == "tauri://localhost/")
+    final = f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")
+    deadline = time.monotonic() + 5
+    while not final["visible"]:
+        assert time.monotonic() < deadline
+        final = f["state"](lambda _: True)
+    assert final["instance_stores"] == 0
+    assert final["credential_count"] == (0 if escape == "sign_out" else 1)
+    assert final["state"]["enrollment"]["error_code"] is None
+
+
+def test_pending_remote_document_cannot_present_until_public_commit(native_chain):
+    f = native_chain
+    login(f)
+    selected = select_studio(f)
+    target = selected["state"]["connection"]["committed"]
+    html = requests.get(f["local"] + "/", timeout=5).text
+    script = re.search(r'<script[^>]*src="([^"]+)"', html).group(1)
+    f["send"](action="present", view="instances")
+    f["wait"]("loaded", lambda event: "view=instances" in event["url"])
+    selector = studio_selector(f)
+    f["ready"]("return Boolean(" + selector + ");")
+    f["document"].arm(target["canonical_origin"].removeprefix("https://"), script)
+    f["js"](selector + ".click(); return true;")
+    assert f["document"].entered.wait(timeout=15)
+    f["send"](action="presentation_status")
+    pending = f["wait"]("presentation_status")
+    assert pending["url"].startswith(target["canonical_origin"])
+    assert pending["allowed"] is False
+    f["document"].release.set()
+    f["wait"]("loaded", lambda event: event["url"].startswith(target["canonical_origin"]))
+    deadline = time.monotonic() + 10
+    while True:
+        f["send"](action="presentation_status")
+        if f["wait"]("presentation_status")["allowed"]:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.1)
+
+
+@pytest.mark.skipif(os.environ.get("DESKTOP_FIXTURE_UPDATER") != "1", reason="requires signed updater transport fixture build")
+@pytest.mark.parametrize("boundary", ["accept", "stale", "expired"])
+def test_awaiting_remote_update_keeps_exact_ticket_through_native_host_approval(native_chain, boundary):
+    f = native_chain
+    login(f)
+    select_studio(f)
+    now = datetime.now(timezone.utc)
+    request = {"schema_version": 1, "request_id": str(uuid.uuid4()), "target": f["updater"]["version"], "state": "pending",
+               "created_at": (now-timedelta(seconds=1)).isoformat(), "expires_at": (now+timedelta(minutes=5)).isoformat()}
+    f["send"](action="remote_update", request=request)
+    f["wait"]("remote_dispatched")
+    awaiting = f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "awaiting_host")
+    assert awaiting["state"]["remoteInstallAllowed"] is False
+    assert awaiting["state"]["remoteRequest"]["requestId"] == request["request_id"]
+    open_footer(f)
+    buttons = native_dialog(f, 2)
+    f["send"](action="dialog", choice=buttons.index("Later"))
+    f["wait"]("dialog")
+    assert not f["updater"]["requested"].is_set()
+    open_footer(f)
+    buttons = native_dialog(f, 2)
+    if boundary == "stale":
+        f["send"](action="local_unavailable")
+        f["wait"]("local_unavailable")
+    elif boundary == "expired":
+        request["state"] = "expired"
+        f["send"](action="remote_update", request=request)
+        f["wait"]("remote_dispatched")
+        f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "expired")
+    f["send"](action="dialog", choice=buttons.index("Download and Install"))
+    f["wait"]("dialog")
+    if boundary == "accept":
+        assert f["updater"]["requested"].wait(timeout=10)
+        download = f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "downloading")
+        assert download["state"]["remoteRequest"]["requestId"] == request["request_id"]
+        assert download["state"]["remoteRequest"]["target"] == request["target"]
+        f["send"](action="escape")
+        assert f["wait"]("escaped")["ok"] is True
+        f["updater"]["release"].set()
+        f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "failed")
+    else:
+        # A later state command orders observation after the dialog callback.
+        f["state"](lambda _: True)
+        assert not f["updater"]["requested"].is_set()
+    assert not any(update["phase"] in ("installing", "installed") for update in f["updates"])

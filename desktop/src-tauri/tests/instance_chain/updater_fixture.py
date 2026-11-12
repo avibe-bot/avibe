@@ -61,4 +61,5 @@ def start(root: Path):
     return {
         "server": server, "base": f"http://127.0.0.1:{server.server_port}",
         "requested": requested, "release": released, "calls": calls,
+        "version": manifest["version"],
     }

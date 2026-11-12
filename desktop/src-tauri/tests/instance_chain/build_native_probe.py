@@ -1,8 +1,9 @@
 """Build an immutable native fixture without changing product signing settings.
 
-Only the updater HTTP client's socket/root trust and the compile-time public
-test key differ in this test-only source copy. Actual discovery, signature
-validation, CTA routing, dialog, generation checks and installer owner remain.
+The updater HTTP client's socket/root trust and compile-time public test key
+are fixture-owned. Automatic OS notification/popover nudges are recorded in
+the fixture process; explicit UI CTA, native dialogs, mailbox dispatcher,
+signature validation, generation checks and installer owner remain actual.
 The checked-in artifact is inert test bytes, never an installable package.
 """
 
@@ -61,7 +62,15 @@ def main():
         .add_root_certificate(certificate)
         .redirect(reqwest::redirect::Policy::none())
 '''
-    updater.write_text(original.replace(needle, replacement))
+    patched = original.replace(needle, replacement)
+    peripheral_calls = [
+        "super::request_and_open_desktop_updates(&app);",
+        "notify_remote_request(&app);",
+    ]
+    for call in peripheral_calls:
+        assert patched.count(call) == 1
+        patched = patched.replace(call, 'eprintln!("fixture: automatic update notification deferred");')
+    updater.write_text(patched)
     environment = {key: os.environ[key] for key in ("PATH", "LANG", "CARGO_HOME", "RUSTUP_HOME") if key in os.environ}
     environment.setdefault("CARGO_HOME", str(Path.home() / ".cargo"))
     environment.setdefault("RUSTUP_HOME", str(Path.home() / ".rustup"))
@@ -89,6 +98,7 @@ def main():
         "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "binary": str(executable), "source": str(source),
         "fixture_public_key": "desktop/runtime-host/tests/fixtures/updater/public-key.txt",
+        "recorded_peripheral_calls": peripheral_calls,
     }
     (args.output / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record))

@@ -32,7 +32,7 @@ struct Presentation {
     account: bool,
     disposable: bool,
     staging: bool,
-    pending_commit: bool,
+    pending_commit: Option<u64>,
     remote: Option<Url>,
     route: Option<Url>,
 }
@@ -46,6 +46,7 @@ struct NativeView {
     store_directory: Mutex<Option<tempfile::TempDir>>,
 }
 struct Navigation {
+    epoch: Epoch,
     destination: Url,
     completed: tokio::sync::oneshot::Sender<Result<(), ClientError>>,
 }
@@ -77,7 +78,7 @@ pub(crate) fn epoch_matches(app: &AppHandle, generation: u64) -> bool {
 pub(crate) fn download_epoch(app: &AppHandle, current: &Url, target: &Url) -> Option<Epoch> {
     let client = app.try_state::<Client>()?;
     let state = client.view.presentation.lock().expect("presentation");
-    if state.account || state.staging || state.pending_commit || current.origin() != target.origin() {
+    if state.account || state.staging || state.pending_commit.is_some() || current.origin() != target.origin() {
         return None;
     }
     match (&state.remote, &state.state.connection.committed) {
@@ -194,7 +195,7 @@ pub fn attach(
             account: false,
             disposable: false,
             staging: false,
-            pending_commit: false,
+            pending_commit: None,
             remote: None,
             route: None,
         }),
@@ -293,23 +294,31 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
 }
 pub fn page_loaded(app: &AppHandle) {
     if let Some(client) = app.try_state::<Client>() {
-        if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-            if let Ok(url) = window.url() {
-                let mut pending = client.view.navigation.lock().expect("navigation");
-                if pending.as_ref().is_some_and(|pending| {
-                    if account_view(&pending.destination, &client.view.bundle).is_some() {
-                        account_view(&url, &client.view.bundle).is_some()
-                    } else {
-                        pending.destination.origin() == url.origin()
-                    }
-                }) {
-                    if let Some(pending) = pending.take() {
-                        let _ = pending.completed.send(Ok(()));
-                    }
-                }
-            }
-        }
         client.view.changed(&client.coordinator.state());
+    }
+}
+/// The per-window callback captures the generation at construction. A late
+/// event from a retired window with the reused main label cannot complete a
+/// successor's navigation, including a reconnect to the same instance.
+pub(crate) fn navigation_loaded(app: &AppHandle, generation: u64, url: &Url) {
+    let Some(client) = app.try_state::<Client>() else {
+        return;
+    };
+    let mut pending = client.view.navigation.lock().expect("navigation");
+    if pending.as_ref().is_some_and(|pending| {
+        pending.epoch.value == generation
+            && pending.epoch.check().is_ok()
+            && if account_view(&pending.destination, &client.view.bundle).is_some() {
+                account_view(url, &client.view.bundle).is_some()
+            } else if pending.destination == client.view.bundle {
+                *url == client.view.bundle
+            } else {
+                pending.destination.origin() == url.origin()
+            }
+    }) {
+        if let Some(pending) = pending.take() {
+            let _ = pending.completed.send(Ok(()));
+        }
     }
 }
 fn trusted_page(client: &Client, window: &WebviewWindow) -> bool {
@@ -343,6 +352,9 @@ pub fn caller_can_present(app: &AppHandle, label: &str, current: &Url) -> bool {
         return false;
     };
     let view = client.view.presentation.lock().expect("presentation");
+    if view.staging || view.pending_commit.is_some() {
+        return false;
+    }
     if view.account {
         return account_view(current, &client.view.bundle).is_some();
     }
@@ -500,7 +512,7 @@ impl NativeView {
         {
             let mut state = self.presentation.lock().expect("presentation");
             state.account = account;
-            state.pending_commit = false;
+            state.pending_commit = None;
             state.remote = previous.remote;
             state.disposable = disposable;
             state.route = previous.route;
@@ -595,6 +607,7 @@ impl NativeView {
         .map_err(failure)??;
         let (loaded, navigation) = tokio::sync::oneshot::channel();
         *self.navigation.lock().expect("navigation") = Some(Navigation {
+            epoch: epoch.clone(),
             destination: url.clone(),
             completed: loaded,
         });
@@ -673,12 +686,12 @@ impl ClientView for NativeView {
             if epoch.check().is_err() {
                 return;
             }
-            let committed = coordinator.state().connection.committed;
+            let committed = coordinator.committed_view_generation();
             let (previous, committed_candidate) = {
                 let mut state = view.presentation.lock().expect("presentation");
-                if state.pending_commit && state.state.connection.committed == committed {
+                if state.pending_commit.is_some() && state.pending_commit == committed {
                     // Public commit won the lifecycle race after load completed.
-                    state.pending_commit = false;
+                    state.pending_commit = None;
                     state.previous = None;
                     (None, true)
                 } else {
@@ -701,7 +714,7 @@ impl ClientView for NativeView {
             let mut view = self.presentation.lock().expect("presentation");
             let staged = view.state.connection.clone();
             view.state = state.clone();
-            if view.pending_commit {
+            if view.pending_commit.is_some() {
                 // A fresh candidate is still hidden. Its document receives the
                 // identity whose cookies it owns, never the previous target's
                 // initial footer snapshot. Public commit follows load/readback.
@@ -723,8 +736,15 @@ impl ClientView for NativeView {
         if epoch.check().is_ok() {
             {
                 let mut view = self.presentation.lock().expect("presentation");
+                if let Some(pending) = view.pending_commit {
+                    if pending != epoch.value
+                        || self.app.state::<Client>().coordinator.committed_view_generation() != Some(pending)
+                    {
+                        return;
+                    }
+                }
                 view.previous = None;
-                view.pending_commit = false;
+                view.pending_commit = None;
             }
             // Publish the committed projection while the staged window is
             // hidden, then make the new identity visible.
@@ -770,7 +790,7 @@ impl ClientView for NativeView {
                 state.disposable = true;
                 state.remote = Some(url.clone());
                 state.route = Some(url.clone());
-                state.pending_commit = true;
+                state.pending_commit = Some(epoch.value);
                 state.state.connection = ConnectionState {
                     committed: target,
                     pending: None,
@@ -826,7 +846,7 @@ impl ClientView for NativeView {
             {
                 let mut state = self.presentation.lock().expect("presentation");
                 state.account = false;
-                state.pending_commit = false;
+                state.pending_commit = None;
                 state.remote = None;
                 state.disposable = false;
                 state.route = None;
@@ -869,7 +889,7 @@ impl ClientView for NativeView {
         {
             let mut state = self.presentation.lock().expect("presentation");
             state.account = false;
-            state.pending_commit = false;
+            state.pending_commit = None;
             state.remote = None;
             state.disposable = false;
             state.route = None;

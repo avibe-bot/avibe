@@ -1815,6 +1815,14 @@ fn build_main_window(
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
         ))
         .on_new_window(|url, _features| handle_new_window_request(url));
+    let generation = instance_client::epoch(app);
+    let builder = builder.on_page_load(move |webview, payload| {
+        if payload.event() == tauri::webview::PageLoadEvent::Finished {
+            if let Some(generation) = generation {
+                instance_client::navigation_loaded(webview.app_handle(), generation, payload.url());
+            }
+        }
+    });
     let builder = if let Some(directory) = directory {
         builder.data_directory(directory)
     } else {

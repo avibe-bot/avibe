@@ -16,7 +16,35 @@ from cryptography.x509.oid import NameOID
 import requests
 
 
+class ResponseHold:
+    """Hold one actual document response at the WebView socket boundary."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.target = None
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def arm(self, host, path):
+        with self.lock:
+            assert self.target is None
+            self.entered.clear()
+            self.release.clear()
+            self.target = (host, path)
+
+    def wait_if_armed(self, host, path, status):
+        with self.lock:
+            held = self.target == (host, path)
+            if held:
+                self.target = None
+        if held:
+            assert status == 200, "the held response must come from a successful actual Runtime handler"
+            self.entered.set()
+            assert self.release.wait(timeout=25), "fixture response was not released"
+
+
 def start(root: Path, mappings: Path):
+    hold = ResponseHold()
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Desktop fixture only")])
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -108,6 +136,7 @@ def start(root: Path, mappings: Path):
                 log.write(
                     json.dumps({"host": host, "path": self.path.split("?")[0], "status": result.status_code}) + "\n"
                 )
+            hold.wait_if_armed(host, path, result.status_code)
             self.send_response(result.status_code)
             for key in result.raw.headers:
                 if key.lower() not in ("connection", "content-length", "transfer-encoding", "content-encoding"):
@@ -126,4 +155,4 @@ def start(root: Path, mappings: Path):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     fingerprint = hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
-    return server, f"http://127.0.0.1:{server.server_port}", fingerprint
+    return server, f"http://127.0.0.1:{server.server_port}", fingerprint, hold

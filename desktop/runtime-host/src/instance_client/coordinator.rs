@@ -51,6 +51,8 @@ struct Inner {
     enrollment: EnrollmentFlow,
     selection: Option<Selection>,
     record: ConnectionRecord,
+    restore_allowed: bool,
+    committed_view_generation: Option<u64>,
 }
 
 pub struct Coordinator {
@@ -59,6 +61,7 @@ pub struct Coordinator {
     operation: tokio::sync::Mutex<()>,
     credential_io: tokio::sync::Mutex<CredentialWrites>,
     signing_out: AtomicBool,
+    restore_started: AtomicBool,
     transport: Arc<dyn Transport>,
     credentials: Arc<dyn Credentials>,
     store: ConnectionStore,
@@ -91,6 +94,8 @@ impl Coordinator {
                 enrollment: EnrollmentFlow::default(),
                 selection: None,
                 record,
+                restore_allowed: true,
+                committed_view_generation: None,
             }),
             generation,
             operation: tokio::sync::Mutex::new(()),
@@ -99,6 +104,7 @@ impl Coordinator {
                 cleanup_error: None,
             }),
             signing_out: AtomicBool::new(false),
+            restore_started: AtomicBool::new(false),
             transport,
             credentials,
             store,
@@ -111,6 +117,11 @@ impl Coordinator {
     }
     pub fn epoch(&self) -> Epoch {
         Epoch::new(self.generation.clone(), self.generation.load(Ordering::SeqCst))
+    }
+    /// Receipt for the view selection that reached public state publication.
+    /// Target equality cannot distinguish a reconnect to the same instance.
+    pub fn committed_view_generation(&self) -> Option<u64> {
+        self.inner.lock().expect("client state").committed_view_generation
     }
 
     /// Local lifecycle supplies only its validated loopback origin. Rebinding
@@ -173,10 +184,13 @@ impl Coordinator {
         drop(inner);
         self.view.changed(&state);
     }
-    fn advance(&self, expected: Option<u64>) -> Result<Epoch, ClientError> {
+    fn advance(&self, expected: Option<u64>, restoring: bool) -> Result<Epoch, ClientError> {
         let mut inner = self.inner.lock().expect("client state");
-        if expected.is_some_and(|value| value != inner.state.generation) {
+        if expected.is_some_and(|value| value != inner.state.generation) || (restoring && !inner.restore_allowed) {
             return Err(ClientError::new("stale_generation"));
+        }
+        if !restoring {
+            inner.restore_allowed = false;
         }
         let value = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         inner.state.generation = value;
@@ -201,6 +215,10 @@ impl Coordinator {
     }
 
     pub async fn request(&self, request: ClientRequest) -> ClientReply {
+        self.request_owned(request, false).await
+    }
+
+    async fn request_owned(&self, request: ClientRequest, restoring: bool) -> ClientReply {
         if request.version != 1 || request.request_id.is_empty() || request.request_id.len() > 128 {
             return self.reply(request.request_id, Err(ClientError::new("invalid_request")));
         }
@@ -225,14 +243,21 @@ impl Coordinator {
         if let Some(error) = self.credential_io.lock().await.cleanup_error.clone() {
             return self.reply(request.request_id, Err(error));
         }
-        if request.expected_generation != self.generation.load(Ordering::SeqCst) {
-            return self.reply(request.request_id, Err(ClientError::new("stale_generation")));
+        {
+            let mut inner = self.inner.lock().expect("client state");
+            if request.expected_generation != inner.state.generation || (restoring && !inner.restore_allowed) {
+                drop(inner);
+                return self.reply(request.request_id, Err(ClientError::new("stale_generation")));
+            }
+            if !restoring {
+                inner.restore_allowed = false;
+            }
         }
         let epoch = if matches!(
             request.action,
             ClientAction::RequestOtp { .. } | ClientAction::SelectInstance { .. }
         ) {
-            match self.advance(Some(request.expected_generation)) {
+            match self.advance(Some(request.expected_generation), restoring) {
                 Ok(epoch) => epoch,
                 Err(error) => return self.reply(request.request_id, Err(error)),
             }
@@ -423,6 +448,7 @@ impl Coordinator {
                 pending: None,
             };
             working.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
+            working.committed_view_generation = Some(epoch.value);
             working.selection = None;
         }
         Ok(())
@@ -543,7 +569,7 @@ impl Coordinator {
             flag: &self.signing_out,
             active: signing_out,
         };
-        let epoch = self.advance(expected)?;
+        let epoch = self.advance(expected, false)?;
         let (target, record, mut old_session) = {
             let mut inner = self.inner.lock().expect("client state");
             inner.selection = None;
@@ -667,7 +693,21 @@ impl Coordinator {
 
     /// Called once at native initialization; cached URLs never authorize restore.
     pub async fn restore_account(&self) -> Result<(), ClientError> {
-        let result = self.restore_saved_account().await;
+        if self.restore_started.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let restore = self.inner.lock().expect("client state").record.last_committed.clone();
+        let result = loop {
+            let result = self.restore_saved_account(&restore).await;
+            // Only local_origin can invalidate an epoch without cancelling the
+            // startup owner. User actions and cleanup failures never retry.
+            if result.as_ref().is_err_and(|error| error.code == "stale_generation")
+                && self.inner.lock().expect("client state").restore_allowed
+            {
+                continue;
+            }
+            break result;
+        };
         if let Err(error) = &result {
             if error.code != "stale_generation" {
                 let state = {
@@ -682,9 +722,12 @@ impl Coordinator {
         result
     }
 
-    async fn restore_saved_account(&self) -> Result<(), ClientError> {
+    async fn restore_saved_account(&self, restore: &ClientTarget) -> Result<(), ClientError> {
         let _operation = self.operation.lock().await;
-        let epoch = self.advance(None)?;
+        if let Some(error) = self.credential_io.lock().await.cleanup_error.clone() {
+            return Err(error);
+        }
+        let epoch = self.advance(None, true)?;
         let mut working = self.inner.lock().expect("client state").clone();
         let Some(id) = working.record.account_id.clone() else {
             return Ok(());
@@ -719,7 +762,6 @@ impl Coordinator {
             self.escape(ClientAction::SignOut, None).await?;
             return Err(ClientError::new("account_changed"));
         }
-        let restore = working.record.last_committed.clone();
         self.persist(&mut working, &epoch).await?;
         self.view.changed(&self.state());
         drop(_operation);
@@ -727,7 +769,7 @@ impl Coordinator {
             instance_id,
             canonical_origin,
             ..
-        } = restore
+        } = restore.clone()
         {
             let state = self.state();
             if state.account.status == AccountStatus::SignedIn
@@ -738,12 +780,15 @@ impl Coordinator {
                 })
             {
                 let reply = self
-                    .request(ClientRequest {
-                        version: 1,
-                        request_id: "native-restore".into(),
-                        expected_generation: state.generation,
-                        action: ClientAction::SelectInstance { instance_id },
-                    })
+                    .request_owned(
+                        ClientRequest {
+                            version: 1,
+                            request_id: "native-restore".into(),
+                            expected_generation: state.generation,
+                            action: ClientAction::SelectInstance { instance_id },
+                        },
+                        true,
+                    )
                     .await;
                 if let Some(error) = reply.error {
                     return Err(error);
