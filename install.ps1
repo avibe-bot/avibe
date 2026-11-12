@@ -507,7 +507,7 @@ function Invoke-UvToolInstallAttempt {
         # cryptography and claude-agent-sdk publish no win_arm64 wheels yet, so a
         # native arm64 interpreter cannot install it. Drop this once both do.
         # vibe upgrade carries the same rule (core/windows_arch.py).
-        $pythonArguments = @()
+        $pythonArguments = @("--python", ">=3.10")
         if (Test-WindowsOnArm) {
             $pythonArguments = @("--python", "cpython-3.12-windows-x86_64-none")
         }
@@ -834,7 +834,7 @@ if __name__ == "__main__":
 '@
     $helperPath = Join-Path $Destination "release_dependencies.py"
     [System.IO.File]::WriteAllText($helperPath, $helper, (New-Object System.Text.UTF8Encoding($false)))
-    $python = if (Test-WindowsOnArm) { "cpython-3.12-windows-x86_64-none" } else { ">=3.10,<3.15" }
+    $python = if (Test-WindowsOnArm) { "cpython-3.12-windows-x86_64-none" } else { ">=3.10" }
     if ($PythonInstallMirror) { $env:UV_PYTHON_INSTALL_MIRROR = $PythonInstallMirror }
     try {
         return Invoke-NativeCommand -FilePath "uv" -Arguments @(

@@ -38,6 +38,36 @@ running service is older than the last activation, `vibe status` includes a
 `generation_downgrade` object and `vibe doctor` warns; restart through the named
 launcher to run the new version.
 
+## Windows 3.2.5 launcher recovery
+
+The released Windows 3.2.5 client can fail during `vibe.exe upgrade` with
+`[WinError 5] Access is denied`: it tries to replace the launcher while that
+launcher is still running. Repeating the same command does not fix its identity
+check. From a separate PowerShell terminal, rerun the official installer:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod https://avibe.bot/install.ps1)))
+```
+
+This preserves Avibe's user data and configuration. Alternatively, use the
+**Python interpreter from the existing Avibe installation** (not an unrelated
+system Python) to run the unchanged 3.2.5 module entry point:
+
+```powershell
+& 'C:\path\to\Avibe-environment\Scripts\python.exe' -m vibe upgrade
+```
+
+Replace the example interpreter path with your actual Avibe environment path.
+The module is `vibe`, **not** `vibe.cli`. If the service is running, the upgrade
+arranges a restart; restarting interrupts active sessions, so use an external
+terminal and choose an appropriate time.
+
+The 3.2.6 client normalizes the Windows executable path, including uv's omitted
+`.exe` suffix, and defers replacement until the invoking command exits. This
+fix enables subsequent upgrades; it cannot repair the code already running in a
+3.2.5 client. After a deferred upgrade exits, allow activation to finish before
+running another `vibe` command; the upgrade prints its activation log location.
+
 ## Memory removal
 
 Avibe no longer includes the optional Memory product. Upgrading does not delete

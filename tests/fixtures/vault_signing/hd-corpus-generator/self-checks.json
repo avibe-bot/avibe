@@ -1,0 +1,122 @@
+{
+  "english_bip39_known_seeds_and_xprvs": 24,
+  "japanese_bip39_known_seeds_and_xprvs": 24,
+  "bip86_published_examples": 3,
+  "status": "PASS",
+  "corpus_entries": 37,
+  "synthetic_entries": 20,
+  "official_bip39_entries": 16,
+  "bip86_entries": 1,
+  "accounts_per_entry": 20,
+  "total_accounts": 740,
+  "synthetic_strata": {
+    "12w-no-pass": 5,
+    "12w-pass": 5,
+    "24w-no-pass": 5,
+    "24w-pass": 5
+  },
+  "bitcoin_internal_parities": {
+    "03": 364,
+    "02": 376
+  },
+  "unicode_passphrase_checks": [
+    {
+      "id": "synthetic-12w-pass-01",
+      "equivalent_passphrases": {
+        "NFC": "café",
+        "NFD": "café",
+        "NFKD": "café"
+      },
+      "expected_seed_sha256": "185585ec46c5eb1a38df0e23b2c420f00f370c58a2992b81c7084e0d04b4bddb",
+      "different_passphrase": "café!",
+      "different_passphrase_seed_sha256": "d9c42dd26aca4e809f79b24b557d8abbe2c2bf41b968437c90fdf020a5dc57fa",
+      "non_nfkd_pbkdf2_differs": true
+    },
+    {
+      "id": "synthetic-12w-pass-02",
+      "equivalent_passphrases": {
+        "NFC": "Ångström",
+        "NFD": "Ångström",
+        "NFKD": "Ångström"
+      },
+      "expected_seed_sha256": "08639ef9293959a0df820aa4637e1dd9a53f543fa82c6861c4f0c525830577e7",
+      "different_passphrase": "Ångström!",
+      "different_passphrase_seed_sha256": "2655541e130315eab9a1b0a5beaa25cc8c42565a40724967c9196d977bbc97d4",
+      "non_nfkd_pbkdf2_differs": false
+    },
+    {
+      "id": "synthetic-12w-pass-03",
+      "equivalent_passphrases": {
+        "NFC": "㍍ガバヴァぱばぐゞちぢ十人十色",
+        "NFD": "㍍ガバヴァぱばぐゞちぢ十人十色",
+        "NFKD": "メートルガバヴァぱばぐゞちぢ十人十色"
+      },
+      "expected_seed_sha256": "b07039f3941b4509a3cd1ca8ced83c433a37f1c1b5ee8be1d1bc7e111f1676fe",
+      "different_passphrase": "㍍ガバヴァぱばぐゞちぢ十人十色!",
+      "different_passphrase_seed_sha256": "201a4b2f3ff37fe26291220e84bce1b8b07023b761fcbf50d773e88e1a2891b5",
+      "non_nfkd_pbkdf2_differs": true
+    },
+    {
+      "id": "synthetic-12w-pass-04",
+      "equivalent_passphrases": {
+        "NFC": "  PUBLIC é 🧀  ",
+        "NFD": "  PUBLIC é 🧀  ",
+        "NFKD": "  PUBLIC é 🧀  "
+      },
+      "expected_seed_sha256": "c2fcf87fb21c89c7005ab9d7c59f82af07a38858ee763824006f10cb21bd4101",
+      "different_passphrase": "  PUBLIC é 🧀  !",
+      "different_passphrase_seed_sha256": "632c2b6d6412d9d5f21a2a33d248feaebeddfcefb5d6d0663064a7016d723fd0",
+      "non_nfkd_pbkdf2_differs": true
+    },
+    {
+      "id": "synthetic-24w-pass-01",
+      "equivalent_passphrases": {
+        "NFC": "café",
+        "NFD": "café",
+        "NFKD": "café"
+      },
+      "expected_seed_sha256": "9e85d6bffc4c9db16c8a7cb4d72663ece70a8542b1a5cf0f0751d6611c5aa1b3",
+      "different_passphrase": "café!",
+      "different_passphrase_seed_sha256": "9933d7411280e6ce897646ece537a063c0c82b1ebf9020bb252e563fa7792a10",
+      "non_nfkd_pbkdf2_differs": true
+    },
+    {
+      "id": "synthetic-24w-pass-02",
+      "equivalent_passphrases": {
+        "NFC": "Ångström",
+        "NFD": "Ångström",
+        "NFKD": "Ångström"
+      },
+      "expected_seed_sha256": "730ddfe39e167cb1f65650f33a5eb92a156b41d96c5a9055f0da9dde6aebf40b",
+      "different_passphrase": "Ångström!",
+      "different_passphrase_seed_sha256": "9309170874a8ee459a879b0d5454271851c6a9f7bc157d98cff9aa359191e30f",
+      "non_nfkd_pbkdf2_differs": false
+    },
+    {
+      "id": "synthetic-24w-pass-03",
+      "equivalent_passphrases": {
+        "NFC": "㍍ガバヴァぱばぐゞちぢ十人十色",
+        "NFD": "㍍ガバヴァぱばぐゞちぢ十人十色",
+        "NFKD": "メートルガバヴァぱばぐゞちぢ十人十色"
+      },
+      "expected_seed_sha256": "c5360fe500f11bc7b4a18f5e2f05f824bce1408328bda10ea220211e2c7aa5c6",
+      "different_passphrase": "㍍ガバヴァぱばぐゞちぢ十人十色!",
+      "different_passphrase_seed_sha256": "771c667239d42de0c158c15b1eaff9c88f43f647aa864b43c4bb573dd6848dc0",
+      "non_nfkd_pbkdf2_differs": true
+    },
+    {
+      "id": "synthetic-24w-pass-04",
+      "equivalent_passphrases": {
+        "NFC": "  PUBLIC é 🧀  ",
+        "NFD": "  PUBLIC é 🧀  ",
+        "NFKD": "  PUBLIC é 🧀  "
+      },
+      "expected_seed_sha256": "4cbc304d01fd3b8fac7c51d78a51fa77452cb59bc9cb31d996ece080a1b83164",
+      "different_passphrase": "  PUBLIC é 🧀  !",
+      "different_passphrase_seed_sha256": "6316c5cf02fc3e79dc534d417706bb3377d0c0e15559f625030b6007b2889c4c",
+      "non_nfkd_pbkdf2_differs": true
+    }
+  ],
+  "all_seeds_64_bytes": true,
+  "all_seeds_and_chain_case_account_keys_distinct": true
+}

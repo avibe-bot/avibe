@@ -8095,24 +8095,35 @@ _RELAY_MODEL_REQUIRED = {
 }
 
 
+_ALL_FORMATS = ("anthropic", "openai_responses", "openai_chat")
+_MIXED = ("claude-sonnet-4-5", "gpt-5")
+_CLAUDE = ("claude-sonnet-4-5", "claude-opus-4-6", "gpt-5")
+_OPENAI = ("gpt-5", "o4-mini", "claude-sonnet-4-5")
+
+
 @pytest.mark.parametrize(
-    ("speaks", "stored_key", "listing_gated", "expected_protocol"),
+    ("speaks", "listed", "stored_key", "listing_gated", "expected_protocol"),
     [
-        # The reported relay: every format answers, and Chat Completions -- the
-        # add form's default, which saved and listed its models -- is named.
-        (("anthropic", "openai_responses", "openai_chat"), "relay-live-key", True, "openai_chat"),
-        (("openai_chat",), "relay-live-key", True, "openai_chat"),
-        (("anthropic",), "relay-live-key", True, "anthropic"),
+        # A relay speaking every format is named by the family most of its
+        # models are native to; a mixed list keeps the form's Chat default.
+        (_ALL_FORMATS, _MIXED, "relay-live-key", True, "openai_chat"),
+        (_ALL_FORMATS, _CLAUDE, "relay-live-key", True, "anthropic"),
+        (_ALL_FORMATS, _OPENAI, "relay-live-key", True, "openai_responses"),
+        # The native format is named only where the relay answered on it.
+        (("openai_responses", "openai_chat"), _CLAUDE, "relay-live-key", True, "openai_chat"),
+        (("openai_chat",), _CLAUDE, "relay-live-key", True, "openai_chat"),
+        (("anthropic",), _MIXED, "relay-live-key", True, "anthropic"),
         # Two formats without Chat Completions name neither.
-        (("anthropic", "openai_responses"), "relay-live-key", True, None),
+        (("anthropic", "openai_responses"), _MIXED, "relay-live-key", True, None),
         # A listing published to anyone attests to no key.
-        (("anthropic", "openai_responses", "openai_chat"), "relay-live-key", False, None),
-        (("anthropic", "openai_responses", "openai_chat"), "relay-wrong-key", True, None),
+        (_ALL_FORMATS, _MIXED, "relay-live-key", False, None),
+        (_ALL_FORMATS, _MIXED, "relay-wrong-key", True, None),
     ],
 )
 def test_custom_auto_names_the_format_a_relay_answers_once_its_listing_accepts_the_key(
     tmp_path: Path,
     speaks: tuple[str, ...],
+    listed: tuple[str, ...],
     stored_key: str,
     listing_gated: bool,
     expected_protocol: str | None,
@@ -8153,7 +8164,7 @@ def test_custom_auto_names_the_format_a_relay_answers_once_its_listing_accepts_t
             requests.append((request.method, request.path))
             if listing_gated and supplied(request) != live_key:
                 return web.json_response({"code": "INVALID_API_KEY", "message": "Invalid API key"}, status=401)
-            return web.json_response({"object": "list", "data": [{"id": "claude-sonnet-4-5"}, {"id": "gpt-5"}]})
+            return web.json_response({"object": "list", "data": [{"id": model} for model in listed]})
 
         app = web.Application()
         app.router.add_get("/v1/models", relay_models)
@@ -8183,7 +8194,7 @@ def test_custom_auto_names_the_format_a_relay_answers_once_its_listing_accepts_t
     if expected_protocol is not None:
         assert observed.outcome.value == "observed"
         assert observed.authenticated is True
-        assert observed.model_ids == ("claude-sonnet-4-5", "gpt-5")
+        assert observed.model_ids == listed
     elif stored_key != live_key:
         assert observed.outcome.value == "authentication_failed"
         assert requests == probes

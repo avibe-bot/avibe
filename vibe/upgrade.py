@@ -396,11 +396,19 @@ def launcher_is_current_process(launcher: Path | str) -> bool:
 
     if os.name != "nt":
         return False
-    target = os.path.normcase(os.path.abspath(os.path.expanduser(str(launcher))))
+    target = os.path.normcase(os.path.realpath(os.path.expanduser(str(launcher))))
     # ``VIBE_CURRENT_EXECUTABLE`` is inherited by the long-lived Web process
     # from the CLI that started it. It identifies a PATH entry, not the image
     # currently holding the file open, so only argv[0] is authoritative here.
-    current = os.path.normcase(os.path.abspath(os.path.expanduser(sys.argv[0])))
+    if not sys.argv or not sys.argv[0]:
+        return False
+    current = os.path.expanduser(sys.argv[0])
+    # uv's Windows console launcher strips .exe from argv[0]. Restore it before
+    # realpath so Windows can expand 8.3 aliases of the *existing* executable.
+    # Never rewrite a module/script entry point (python -m vibe, Web workers).
+    if not os.path.splitext(current)[1]:
+        current += ".exe"
+    current = os.path.normcase(os.path.realpath(current))
     return current == target
 
 
@@ -452,6 +460,26 @@ def _candidate_python(candidate_launcher: Path) -> Path | None:
     return None
 
 
+def _launcher_wait_pid(launcher: Path, cli_pid: int) -> int:
+    """Wait for the Windows console trampoline, not only its Python child."""
+    if os.name != "nt":
+        return cli_pid
+    import psutil
+
+    try:
+        parent = psutil.Process(cli_pid).parent()
+        if parent is not None:
+            image = os.path.normcase(os.path.realpath(parent.exe()))
+            target = os.path.normcase(os.path.realpath(str(launcher)))
+            if image == target:
+                return parent.pid
+    except (OSError, psutil.Error):
+        # No verified trampoline: retain the existing Python-process wait. An
+        # unavailable/foreign parent must never introduce an unrelated waiter.
+        pass
+    return cli_pid
+
+
 def defer_upgrade_activation(
     activation: AtomicActivation,
     *,
@@ -464,6 +492,9 @@ def defer_upgrade_activation(
     candidate_python = _candidate_python(activation.candidate_launcher)
     if candidate_python is None:
         raise RuntimeError(f"candidate Python missing beside {activation.candidate_launcher}")
+    # uv's executable waits for its Python child before exiting. Waiting only
+    # for os.getpid() leaves a race with that still-loaded parent executable.
+    parent_pid = _launcher_wait_pid(activation.launcher, parent_pid)
     command = [
         str(candidate_python),
         "-c",
@@ -1829,10 +1860,9 @@ def build_upgrade_plan(
             command += ["--python", WINDOWS_ARM64_UV_PYTHON]
             python_minor = WINDOWS_ARM64_UV_PYTHON
         else:
-            # uv still chooses the staged interpreter: an explicit `--python`
-            # would stop it from leaving a minor version that a new release
-            # no longer supports. Upgrading the current minor first only gives
-            # that choice its newest patch.
+            # Keep the supported floor without pinning a minor: the target
+            # release may need a newer Python than the running generation.
+            command += ["--python", ">=3.10"]
             python_minor = _uv_managed_python_minor(executable, uv_binary, env)
         python_upgrade_command = (
             [uv_binary, "python", "install", "--upgrade", "--no-bin", "--no-registry", python_minor]

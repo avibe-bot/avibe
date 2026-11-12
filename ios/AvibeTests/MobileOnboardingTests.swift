@@ -2280,10 +2280,20 @@ final class MobileOnboardingTests: XCTestCase {
         return result as? Bool == true
     }
 
+    /// Waits for the page's own state. The web content process and the
+    /// document are waited for first, on WebKit's bound (`WebKitReadiness`),
+    /// so the five seconds left are the page's alone.
     private func waitForJavaScriptValue(
         in webView: WKWebView,
+        file: StaticString = #filePath,
+        line: UInt = #line,
         script: () -> String
     ) async throws -> Bool {
+        try await WebKitReadiness.waitForDocument(
+            in: webView,
+            file: file,
+            line: line
+        )
         for _ in 0..<50 {
             if try await webView.evaluateJavaScript(script()) as? Bool == true {
                 return true

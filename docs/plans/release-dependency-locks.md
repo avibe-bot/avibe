@@ -16,10 +16,51 @@ preserving direct requirements and extras. This is necessary for an unmodified
 already obeys `Requires-Dist`. Source/editable developer dependencies retain
 their ranges. Rebuilding a released sdist must preserve the same pins.
 
-The lock's native extensions do not support CPython 3.15 (watchfiles' PyO3
-refuses it). This release bounds Python to >=3.10,<3.15 rather than publishing
-pins that select an unsupported default interpreter. Supported platform forks
-include Windows Claude SDK, Intel Mac cryptography and Python 3.10 SQLAlchemy.
+The runtime graph supports CPython 3.15 as well as 3.10–3.14. A metadata upper
+bound alone did not protect old upgraders or uv's default-interpreter selection:
+the previously locked pydantic-core/watchfiles native builds rejected 3.15.
+Upgrade only native dependency releases needed for compatible cp315 or abi3
+wheels (and their required companions); refresh the other wheel inventories
+without changing their versions. Preserve Windows Claude SDK, Intel Mac
+cryptography, Python 3.10 SQLAlchemy/Pillow and rpds-py compatibility forks.
+
+Acceptance installs the built wheel and its shipped constraints on a real 3.15
+interpreter and exercises the unmodified public 3.2.5 upgrader without new-client
+Python flags. New installers and upgrades enforce a Python >=3.10 floor without
+pinning an upper bound or a minor; Windows on Arm retains its explicit x64
+Python policy. On Windows, the public 3.2.5 client is invoked through its unchanged
+`python -m vibe upgrade` entry point: its `vibe.exe` path has a pre-existing
+self-replacement defect and is **not** shown to pass by this acceptance. Windows
+3.2.5 users can rerun the official `install.ps1`, or invoke that module with the
+Python interpreter from their existing Avibe environment. Future clients normalize
+Windows argv[0]'s omitted `.exe`, path case and 8.3 aliases before deciding whether
+to defer activation. An inherited `VIBE_CURRENT_EXECUTABLE` never proves the current
+process holds the launcher. Non-Windows and module-entry behavior stay unchanged;
+the existing detached helper still owns replacement/restart after the parent exits.
+When the CLI is the Python child of a verified Windows console trampoline, wait
+for that trampoline's PID/create-time identity, not just the Python child: the
+wrapper can remain loaded briefly after Python exits. A missing/inaccessible or
+unrelated parent retains the Python-process wait, never an unrelated long-lived
+process. The helper protocol and activation lock remain unchanged.
+
+`scripts/windows_launcher_upgrade_regression.py` separately installs the candidate
+wheel and invokes its actual `vibe.exe upgrade` on native Windows x64 and Windows
+on Arm (the latter retains x64 Python). The fixture exposes its invoking interpreter's
+already-installed base Python on PATH, since uv ignores virtualenv interpreters
+for tool resolution; managed-install/cache/home directories remain isolated and
+Python downloads stay disabled. It advertises a future version and stages
+the same CI fixture wheel into a different environment: this proves future-client
+self-replacement, not a released 3.2.5 console-path success or a published future
+version. It requires deferred activation, waits only on the post-replace generation
+marker, then verifies changed launcher/interpreter identity and the active version.
+Focused tests cover extensionless paths, native canonicalization order, module
+entry points, inherited hints and the unchanged deferred activation owner. Recovery
+copy lives in `docs/UPGRADING.md` and must accompany the 3.2.6 release notes.
+
+Native dependency source builds are disallowed in the acceptance,
+except PyYAML 6.0.3 (no cp315 wheel, supported source build). The existing pure
+Python http-ece 1.2.1 also remains a source-only package. These exceptions are
+explicit build-input trust boundaries, not hash-verified or compiler-free claims.
 
 ## Trust and limitations
 

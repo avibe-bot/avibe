@@ -546,7 +546,7 @@ uv_tool_install() {
 
     # Suppress package-manager progress only, not activation/retention diagnostics.
     if env ${UV_INSTALL_PYTHON_MIRROR:+"UV_PYTHON_INSTALL_MIRROR=$UV_INSTALL_PYTHON_MIRROR"} \
-        UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@" --quiet; then
+        UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@" --python '>=3.10' --quiet; then
         VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
         if [ ! -x "$VIBE_CANDIDATE_BIN_PATH" ]; then
             warn "uv completed but the candidate vibe launcher was not created"
@@ -630,7 +630,7 @@ prepare_release_candidate() {
     # The embedded stdlib-only helper is generated from vibe/release_dependencies.py.
     # uv supplies Python on machines that have no system interpreter yet.
     env ${UV_INSTALL_PYTHON_MIRROR:+"UV_PYTHON_INSTALL_MIRROR=$UV_INSTALL_PYTHON_MIRROR"} \
-        uv run --no-project --python '>=3.10,<3.15' python - "$spec" "$destination" <<'AVIBE_RELEASE_DEPENDENCIES'
+        uv run --no-project --python '>=3.10' python - "$spec" "$destination" <<'AVIBE_RELEASE_DEPENDENCIES'
 # BEGIN GENERATED RELEASE DEPENDENCIES
 """Resolve the *target* wheel and its release constraints before installation.
 
