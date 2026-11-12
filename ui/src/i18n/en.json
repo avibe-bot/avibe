@@ -3305,7 +3305,8 @@
     "provider_unavailable": "The provider is unavailable.",
     "provider_error": "The provider rejected the request.",
     "endpoint_not_configured": "The provider endpoint is not configured.",
-    "avault_upgrade_required": "This needs a newer avault. Update it under Settings → Dependencies first."
+    "avault_upgrade_required": "This needs a newer avault. Update it under Settings → Dependencies first.",
+    "sandbox_curve_unsupported": "This Avibe's secure sandbox can't create Solana keys yet. Nothing was saved. Update Avibe, then try again."
   },
   "modelHub": {
     "errors": {
@@ -6353,7 +6354,8 @@
       "solanaGenerateHint": "A new key is created when you save. Its address appears once the key is saved.",
       "solanaImportPlaceholder": "Paste a Solana CLI keypair (a JSON array of 64 numbers) or a base58 secret key",
       "solanaImportHelp": "The key is encrypted in this browser for avault, which checks it. Its address appears once the key is saved. Recovery phrases are not supported.",
-      "solanaProtectedUnavailable": "Protected isn't available for Solana keys yet. Choose Standard to create this key.",
+      "solanaProtectedHelp": "A new Solana key is generated inside the sandbox and sealed there. Only the ciphertext and the key's public key (its address) reach Avibe; the private key never leaves the sandbox.",
+      "solanaProtectedBornHint": "The private key was born inside the sandbox and never entered this app.",
       "checkingAvault": "Checking avault…",
       "p2Unavailable": "Browser-side vault create requires avault {{version}} or newer. Installed: {{installed}}. Install a compatible avault release before saving standard secrets.",
       "browserSealingPending": "Browser-side sealing requires a compatible avault release. This UI never sends plaintext values to Python.",
