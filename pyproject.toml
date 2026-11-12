@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Local-first Agent OS for Web and IM agent workflows"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.10"
 authors = [
     { name = "cyhhao", email = "cyhhao@users.noreply.github.com" }
 ]

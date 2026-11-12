@@ -85,7 +85,7 @@ def test_build_upgrade_plan_stages_custom_legacy_uv_launcher(monkeypatch):
     )
 
     assert plan.method == "uv"
-    assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"]
+    assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--python", ">=3.10", "--upgrade"]
     assert plan.env is not None
     assert "UV_TOOL_DIR" in plan.env
     assert "UV_TOOL_BIN_DIR" in plan.env
@@ -107,7 +107,7 @@ def test_build_upgrade_plan_forces_legacy_uv_tool_install(monkeypatch):
     )
 
     assert plan.method == "uv"
-    assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade", "--force"]
+    assert plan.command == ["/usr/local/bin/uv", "tool", "install", "avibe-os", "--python", ">=3.10", "--upgrade", "--force"]
 
 
 def test_build_upgrade_plan_uses_pip_for_non_uv_install(monkeypatch):
@@ -247,7 +247,7 @@ def test_uv_upgrade_moves_only_a_uv_managed_interpreter_to_its_newest_patch(
     )
     # uv keeps choosing the staged interpreter, so a release that drops this
     # minor version can still move the install to a supported one.
-    assert "--python" not in plan.command
+    assert plan.command[plan.command.index("--python") + 1] == ">=3.10"
 
 
 @pytest.mark.parametrize("outcome", ["upgraded", "old-uv", "offline", "timeout", "uv-missing"])
@@ -1426,6 +1426,8 @@ def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):
         "tool",
         "install",
         "/tmp/vibe_remote-9999.0.0-py3-none-any.whl",
+        "--python",
+        ">=3.10",
         "--upgrade",
         "--force",
     ]
@@ -1457,6 +1459,8 @@ def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
         "tool",
         "install",
         "avibe-os==3.0.10",
+        "--python",
+        ">=3.10",
         # Unconditional here: the version already installed is the newer one, so
         # without it uv reports the tool as satisfied and installs nothing.
         "--force",
@@ -2164,7 +2168,7 @@ def test_build_upgrade_plan_finds_uv_outside_current_path(monkeypatch):
     )
 
     assert plan.method == "uv"
-    assert plan.command == ["/home/test/.local/bin/uv", "tool", "install", "avibe-os", "--upgrade"]
+    assert plan.command == ["/home/test/.local/bin/uv", "tool", "install", "avibe-os", "--python", ">=3.10", "--upgrade"]
 
 
 def test_get_current_vibe_bin_dir_resolves_launcher_target(monkeypatch):
@@ -2749,6 +2753,8 @@ def test_an_exact_plan_installs_the_named_sources_instead_of_index_pins(monkeypa
         "tool",
         "install",
         PREVIEW_CORE_URL,
+        "--python",
+        ">=3.10",
         "--force",
     ]
     pip_plan = build_upgrade_plan(python_executable="/usr/bin/python3", uv_path=None, **shared)

@@ -1829,10 +1829,9 @@ def build_upgrade_plan(
             command += ["--python", WINDOWS_ARM64_UV_PYTHON]
             python_minor = WINDOWS_ARM64_UV_PYTHON
         else:
-            # uv still chooses the staged interpreter: an explicit `--python`
-            # would stop it from leaving a minor version that a new release
-            # no longer supports. Upgrading the current minor first only gives
-            # that choice its newest patch.
+            # Keep the supported floor without pinning a minor: the target
+            # release may need a newer Python than the running generation.
+            command += ["--python", ">=3.10"]
             python_minor = _uv_managed_python_minor(executable, uv_binary, env)
         python_upgrade_command = (
             [uv_binary, "python", "install", "--upgrade", "--no-bin", "--no-registry", python_minor]
