@@ -177,6 +177,72 @@ const networkBack = () => {
   window.dispatchEvent(new Event('online'));
 };
 
+/**
+ * A native shell with the `direct` capability. Its `direct.status` answers are
+ * held until the test gives them; `emit` is the shell's event.
+ */
+const installDirectShell = (capabilities: Record<string, number> = { direct: 1 }) => {
+  let deliver: (payload: unknown) => void = () => {};
+  const answers: Array<(value: unknown) => void> = [];
+  const call = vi.fn(
+    (method: string) =>
+      new Promise((resolve) => {
+        if (method === 'direct.status') answers.push(resolve);
+        else resolve(null);
+      }),
+  );
+  Object.defineProperty(window, 'avibeNative', {
+    configurable: true,
+    value: {
+      contract: 1,
+      platform: 'ios',
+      shellVersion: '1.0 (1)',
+      capabilities,
+      call,
+      on: (event: string, handler: (payload: unknown) => void) => {
+        if (event === 'direct.transportChanged') deliver = handler;
+        return () => undefined;
+      },
+    },
+  });
+  return {
+    call,
+    statusCalls: () => answers.length,
+    answer: async (index: number, closure: number, sequence = closure) => {
+      answers[index]({ preferred: 'tunnel', sequence, closure });
+      await vi.advanceTimersByTimeAsync(0);
+    },
+    malformed: async (index: number) => {
+      answers[index]({ preferred: 'direct' });
+      await vi.advanceTimersByTimeAsync(0);
+    },
+    emit: (payload: { preferred: 'tunnel' | 'direct'; sequence: number; closure: number }) =>
+      deliver(payload),
+  };
+};
+
+/**
+ * The direct state belongs to the document, so each of these cases mounts a
+ * fresh copy of the provider and of the bridge module, as a new page would.
+ */
+const mountDirectPage = async () => {
+  vi.resetModules();
+  const fresh = await import('./ApiContext');
+  const FreshSubscriber = () => {
+    const api = fresh.useApi();
+    useEffect(
+      () => api.connectWorkbenchEvents({ onConnected, onMessageNew, onMessageUpdated }),
+      [api],
+    );
+    return null;
+  };
+  render(
+    <fresh.ApiProvider>
+      <FreshSubscriber />
+    </fresh.ApiProvider>,
+  );
+};
+
 beforeEach(() => {
   vi.useFakeTimers();
   // jsdom reports no window focus, and a page that never counts as active never
@@ -198,6 +264,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(window, 'avibeNative');
   Reflect.deleteProperty(document, 'hasFocus');
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -504,5 +571,120 @@ describe('ApiProvider workbench stream liveness', () => {
     FakeEventSource.latest().emit('connected', { type: 'connected' });
     vi.advanceTimersByTime(1_000);
     expect(declared.closed).toBe(true);
+  });
+
+  it('opens the first stream only after the direct baseline, and at once without the capability', async () => {
+    const shell = installDirectShell();
+    await mountDirectPage();
+    expect(shell.statusCalls()).toBe(1);
+    expect(FakeEventSource.instances).toHaveLength(0);
+
+    await shell.answer(0, 4);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    cleanup();
+    FakeEventSource.instances = [];
+
+    const plain = installDirectShell({ app: 1 });
+    await mountDirectPage();
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(plain.call).not.toHaveBeenCalled();
+  });
+
+  it('opens no stream while the baseline is unavailable, and opens once when the held answer comes', async () => {
+    const shell = installDirectShell();
+    const states: string[] = [];
+    vi.resetModules();
+    const fresh = await import('./ApiContext');
+    const Watcher = () => {
+      const api = fresh.useApi();
+      useEffect(
+        () => api.connectWorkbenchEvents({ onConnected, onConnectionState: (state) => states.push(state) }),
+        [api],
+      );
+      return null;
+    };
+    render(
+      <fresh.ApiProvider>
+        <Watcher />
+      </fresh.ApiProvider>,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(states.at(-1)).toBe('reconnecting');
+
+    // The shell holds its answer past the wait: unavailable, still no stream,
+    // and the reconnect loop's own attempts open nothing either.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(shell.statusCalls()).toBe(1);
+    expect(states.at(-1)).toBe('reconnecting');
+
+    await shell.answer(0, 2);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    await shell.answer(0, 2);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('opens nothing after a malformed baseline, until a visible return reads a valid one', async () => {
+    const shell = installDirectShell();
+    await mountDirectPage();
+    await shell.malformed(0);
+    expect(FakeEventSource.instances).toHaveLength(0);
+
+    setVisibility('hidden');
+    setVisibility('visible');
+    expect(shell.statusCalls()).toBe(2);
+    await shell.answer(1, 0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('rebuilds a healthy stream once per closure, and never for a change of preferred path', async () => {
+    const shell = installDirectShell();
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    emitHeartbeat();
+    const first = FakeEventSource.latest();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    // The preferred path changes. Nothing was closed: the stream stays.
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    expect(first.closed).toBe(false);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    // The shell closed connections because their path was lost. It cannot
+    // say whether this stream was one of them, so it is replaced now, not
+    // after a backoff, and the replacement announces the gap.
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 1 });
+    expect(first.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(localStore.noteLocalStoreStreamState).toHaveBeenLastCalledWith(false);
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    emitHandshake(2);
+    emitControllerLeg(true);
+    expect(onConnected).toHaveBeenCalledTimes(2);
+
+    // The same closure again, late or duplicated: nothing more.
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 1 });
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 1 });
+    vi.advanceTimersByTime(WORKBENCH_EVENT_RETRY_INITIAL_MS * 2);
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  it('opens the replacement when a hidden page returns after a closure', async () => {
+    const shell = installDirectShell();
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    const pinned = FakeEventSource.latest();
+
+    setVisibility('hidden');
+    shell.emit({ preferred: 'tunnel', sequence: 1, closure: 1 });
+    expect(pinned.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    setVisibility('visible');
+    expect(FakeEventSource.instances).toHaveLength(2);
   });
 });

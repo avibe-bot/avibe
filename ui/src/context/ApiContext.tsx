@@ -27,6 +27,11 @@ import { mcpPath } from '../lib/mcpPath';
 import { parseHomePreferences, type HomePreferences } from '../lib/homePreferences';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
+import {
+  nativeDirectBaselineState,
+  onNativeDirectClosure,
+  subscribeNativeDirectBaseline,
+} from '../lib/native';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
@@ -2747,6 +2752,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const resumeWorkbenchEventsRef = useRef<PageReactivationListener>(() => {});
+  const rebuildWorkbenchEventsRef = useRef<() => void>(() => {});
+  const openWorkbenchEventsRef = useRef<() => void>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
@@ -3234,6 +3241,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventHandlersRef.current.size === 0 ||
       document.visibilityState !== 'visible'
     ) return;
+    // Inside a native shell with the `direct` capability, no stream opens
+    // until this document has a valid direct baseline: a closure from before
+    // the stream existed must not be taken for one to act on, and the shell
+    // may not be ready for new connections yet. Until then the connection
+    // state stays `reconnecting`, the same not-live state as any outage, and
+    // the stream opens when the baseline becomes ready (subscribed below).
+    // Without the capability there is nothing to wait for.
+    const directState = nativeDirectBaselineState();
+    if (directState === 'pending' || directState === 'unavailable') return;
 
     let source: EventSource;
     try {
@@ -3609,6 +3625,29 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
   resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
 
+  /**
+   * The native shell closed connections for this origin because their path
+   * was lost (a new `closure`). It cannot say whether this stream was on that
+   * path, so the stream is rebuilt even if it was healthy: it ends the way any
+   * lost stream ends, and the loop reconnects at once instead of sitting out a
+   * backoff. The replacement's handshake announces the gap, so consumers catch
+   * up exactly as they do after an ordinary reconnect. A hidden page opens its
+   * replacement when it returns.
+   *
+   * Nothing but the stream is rebuilt here. A request in flight completes or
+   * fails by itself and is never sent again. A change of the preferred path
+   * alone does not come here.
+   */
+  const rebuildWorkbenchEventsAfterClosure = () => {
+    if (eventHandlersRef.current.size === 0) return;
+    failWorkbenchEventStream();
+    getWorkbenchEventReconnectLoop().wake();
+  };
+  rebuildWorkbenchEventsRef.current = rebuildWorkbenchEventsAfterClosure;
+  openWorkbenchEventsRef.current = () => {
+    if (nativeDirectBaselineState() === 'ready') ensureWorkbenchEventSource();
+  };
+
   useEffect(() => {
     const wakeIfVisible: PageReactivationListener = (awaySince) => {
       if (document.visibilityState !== 'visible') return;
@@ -3621,9 +3660,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const wakeFromNetwork = () => wakeIfVisible(null);
     const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeFromNetwork);
+    const stopDirectClosures = onNativeDirectClosure(() => rebuildWorkbenchEventsRef.current());
+    const stopDirectBaseline = subscribeNativeDirectBaseline(() => openWorkbenchEventsRef.current());
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       stopReactivation();
+      stopDirectClosures();
+      stopDirectBaseline();
       window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();
     };
