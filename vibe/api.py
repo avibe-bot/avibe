@@ -3836,8 +3836,9 @@ def _vault_hd_keypair_spec(payload: dict, *, kind: str, protection: str, public_
         return VaultApiError(message, code="invalid_hd_wallet")
 
     if not hd:
-        if "expected_account0" in payload:
-            raise invalid("expected_account0 is only valid for HD seed imports")
+        for field in ("expected_account0", "account0_always_ask"):
+            if field in payload:
+                raise invalid(f"{field} is only valid for HD seed imports")
         if "hd_accounts" in (public_meta or {}):
             raise invalid("HD account public keys must come from avault")
         return None
@@ -3849,9 +3850,11 @@ def _vault_hd_keypair_spec(payload: dict, *, kind: str, protection: str, public_
         raise invalid("HD keypair requires type hd-seed, source import and format raw-seed")
     if public_meta or set(payload) - {
         "name", "kind", "protection", "signer_kind", "keypair", "blind_box", "description", "tags",
-        "policy", "links", "provision_request_id", "public_meta", "expected_account0",
+        "policy", "links", "provision_request_id", "public_meta", "expected_account0", "account0_always_ask",
     }:
-        raise invalid("HD create accepts a blind_box, display metadata and expected account-0 addresses only; no seed or client public keys")
+        raise invalid("HD create accepts a blind_box, display metadata, expected account-0 addresses and initial account-0 signing policy only; no seed or client public keys")
+    if "account0_always_ask" in payload and type(payload["account0_always_ask"]) is not bool:
+        raise invalid("account0_always_ask must be a boolean")
     policy = payload.get("policy")
     if policy is not None and (not isinstance(policy, dict) or "always_ask" in policy):
         raise invalid("HD ask-before-signing is configured per account")
@@ -4041,6 +4044,7 @@ def create_vault_secret(
                 authz_factor_origin=origin,
                 provision_request_id=provision_request_id,
                 user_context=user_context,
+                **({"account0_always_ask": payload["account0_always_ask"]} if "account0_always_ask" in payload else {}),
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
