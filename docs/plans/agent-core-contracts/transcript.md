@@ -45,6 +45,9 @@ Old readers ignore them. Only usage-bearing records restore the request-start cl
 lookups recover the per-route state without scanning history. Each persisted prefix holds at most 32 sampled
 128-bit hash boundaries (including tools, system, and the exact final boundary), not copied prompt content.
 Partial-prefix counts are estimates/lower bounds; a fully retained request uses its reported input count.
+The [cache prefix reader bridge](../cache-prefix-state.md) also understands optional per-Session/provider/model
+state and prefixless historical observations. Its writers remain unchanged until the coordinated activation;
+a missing full baseline is explicit, never replaced with a parent's future prefix or an older inline record.
 
 - Every store implements the whole `TranscriptStore` protocol (`harness/store.py`) with the same behavior: an append
   returns exactly the entry `load` reads back, `created_at` (epoch seconds) included; a response keeps C-9's request
