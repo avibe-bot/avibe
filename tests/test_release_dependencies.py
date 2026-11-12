@@ -33,7 +33,7 @@ def test_reads_target_wheel_without_importing_it(tmp_path):
     assert constraints.read_text() == PINS
 
 
-@pytest.mark.parametrize("version,allowed", [("3.2.5", True), ("3.1.0", True), ("3.2.5rc1", True), ("3.2.6", False), ("3.3.0rc1", False)])
+@pytest.mark.parametrize("version,allowed", [("3.2.5", True), ("3.1.0", True), ("3.2.5rc1", True), ("3.2.5.dev1", True), ("3.2.4.post1", True), ("3.2.4rc1.post1", True), ("3.2.5.post0", False), ("3.2.5+local", False), ("3.2.6.dev1", False), ("3.2.6", False), ("3.3.0rc1", False)])
 def test_only_released_legacy_artifacts_may_lack_lock(tmp_path, version, allowed):
     target = wheel(tmp_path, version=version, constraints=None)
     if allowed:
@@ -94,6 +94,48 @@ def test_missing_pypi_uses_only_first_party_release_index(monkeypatch):
     monkeypatch.setattr(release, "_get", get)
     assert release._official_wheel(None) == ("https://dl.avibe.bot/releases/v3.2.6/avibe_os-3.2.6-py3-none-any.whl", "a" * 64)
     assert calls == ["https://pypi.org/pypi/avibe-os/json", release.RELEASE_INDEX]
+
+
+@pytest.mark.parametrize("tags", [["v3.2.6", "v3.2.6.post1"], ["v3.2.6.post1"], ["gh-v9.0.0", "v3.2.6.post1"]])
+def test_mirror_latest_includes_official_post_releases(monkeypatch, tags):
+    from scripts.release_package_version import package_version_from_release_tag
+
+    metadata = {"schema_version": 1, "repository": "avibe-bot/avibe", "releases": [
+        {"tag": tag, "prerelease": False, "assets": [{
+            "name": f"avibe_os-{package_version_from_release_tag(tag)}-py3-none-any.whl", "sha256": "a" * 64,
+        }]} for tag in tags
+    ]}
+    monkeypatch.setattr(release, "_get", lambda *_: json.dumps(metadata).encode())
+    assert release._mirror_wheel(None)[0] == "https://dl.avibe.bot/releases/v3.2.6.post1/avibe_os-3.2.6.post1-py3-none-any.whl"
+
+
+def test_explicit_mirror_tag_normalizes_package_filename(monkeypatch):
+    metadata = {"schema_version": 1, "repository": "avibe-bot/avibe", "releases": [{
+        "tag": "gh-v3.2.5-dev1", "prerelease": True,
+        "assets": [{"name": "avibe_os-3.2.5.dev1-py3-none-any.whl", "sha256": "a" * 64}],
+    }]}
+    monkeypatch.setattr(release, "_get", lambda *_: json.dumps(metadata).encode())
+    assert release._mirror_wheel("3.2.5.dev1")[0] == "https://dl.avibe.bot/releases/gh-v3.2.5-dev1/avibe_os-3.2.5.dev1-py3-none-any.whl"
+
+
+def test_bootstrap_public_version_grammar_and_order_match_release_owner():
+    from packaging.version import Version
+    from scripts.release_package_version import package_version_from_release_tag, official_stable_version_key
+
+    versions = [f"{base}{phase}{post}" for base in ["03.02.004", "3.2.5", "3.2.6"]
+                for phase in ["", "a1", ".b2", "-rc3", ".dev4"] for post in ["", ".post1"]]
+    accepted = []
+    for version in versions:
+        try:
+            canonical = package_version_from_release_tag("gh-v" + version)
+        except ValueError:
+            assert release._public_version(version) is None
+            continue
+        parsed = release._public_version(version)
+        assert parsed[0] == canonical
+        assert parsed[2] == (official_stable_version_key("v" + canonical) is not None)
+        accepted.append(version)
+    assert sorted(accepted, key=lambda value: release._public_version(value)[1]) == sorted(accepted, key=Version)
 
 
 def test_upgrade_passes_target_constraints_and_keeps_files_until_install_exits(tmp_path):

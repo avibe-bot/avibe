@@ -847,7 +847,7 @@ jobs:
               fi
             else
               case "$name" in
-                vibe-show-runtime-node-*.tgz|show-runtime-manifest.json)
+                vibe-show-runtime-node-*.tgz|show-runtime-manifest.json|dependency-constraints.txt)
                   runtime_to_upload+=("$path") ;;
                 *) package_to_upload+=("$path") ;;
               esac

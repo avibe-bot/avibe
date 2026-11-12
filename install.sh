@@ -668,8 +668,30 @@ def _get(url: str, limit: int) -> bytes:
     return data
 
 
-def _stable_version(value: str) -> tuple[int, ...] | None:
-    return tuple(map(int, value.split("."))) if re.fullmatch(r"\d+\.\d+\.\d+", value) else None
+# Keep the bootstrap's stdlib-only grammar aligned with
+# scripts/release_package_version.py (contract-tested below).
+_VERSION_PATTERN = re.compile(
+    r"^(?P<release>[0-9]+\.[0-9]+\.[0-9]+)"
+    r"(?:[.-]?(?P<phase>a|b|rc|dev)(?P<phase_number>[0-9]+))?"
+    r"(?:\.post(?P<post_number>[0-9]+))?$"
+)
+
+
+def _public_version(value: str) -> tuple[str, tuple[int, ...], bool] | None:
+    match = _VERSION_PATTERN.fullmatch(value)
+    if not match or (match["phase"] == "dev" and match["post_number"] is not None):
+        return None
+    release = tuple(map(int, match["release"].split(".")))
+    phase, number = match["phase"], int(match["phase_number"] or 0)
+    post = int(match["post_number"]) if match["post_number"] is not None else -1
+    canonical = ".".join(map(str, release))
+    if phase:
+        canonical += ("." if phase == "dev" else "") + phase + str(number)
+    if post >= 0:
+        canonical += f".post{post}"
+    # Development < alpha < beta < RC < final; post releases follow their base.
+    key = (*release, {"dev": 0, "a": 1, "b": 2, "rc": 3, None: 4}[phase], number, post)
+    return canonical, key, phase is None
 
 
 def _official_wheel(version: str | None) -> tuple[str, str]:
@@ -691,11 +713,18 @@ def _mirror_wheel(version: str | None) -> tuple[str, str]:
     candidates = []
     for release in metadata.get("releases", []):
         tag = release.get("tag", "")
-        selected = tag.removeprefix("gh-v").removeprefix("v")
-        if version is not None and selected != version:
+        if not isinstance(tag, str) or not tag.startswith(("v", "gh-v")):
             continue
-        key = _stable_version(selected)
-        if version is None and (key is None or release.get("prerelease")):
+        parsed = _public_version(tag.removeprefix("gh-v").removeprefix("v"))
+        if parsed is None:
+            continue
+        selected, key, stable = parsed
+        if tag.startswith("v") and tag != f"v{selected}":
+            continue
+        requested = _public_version(version) if version is not None else None
+        if version is not None and (requested is None or selected != requested[0]):
+            continue
+        if version is None and (not stable or not tag.startswith("v") or release.get("prerelease")):
             continue
         for asset in release.get("assets", []):
             if asset.get("name") == f"avibe_os-{selected}-py3-none-any.whl":
@@ -767,12 +796,13 @@ def prepare_release(spec: str, destination: Path) -> tuple[str, Path | None]:
         if metadata.get("Name", "").lower().replace("_", "-") != "avibe-os":
             raise ValueError("Expected an avibe-os wheel")
         version = metadata.get("Version", "")
-        if match and match[1] and version != match[1]:
-            raise ValueError("Avibe wheel version does not match the requested release")
+        if match and match[1]:
+            requested = _public_version(match[1])
+            if version != (requested[0] if requested else match[1]):
+                raise ValueError("Avibe wheel version does not match the requested release")
         if CONSTRAINT_MEMBER not in names:
-            legacy_match = re.fullmatch(r"(\d+\.\d+\.\d+)(?:(?:a|b|rc)\d+)?", version)
-            legacy = _stable_version(legacy_match[1]) if legacy_match else None
-            if legacy is not None and legacy <= (3, 2, 5):
+            legacy = _public_version(version)
+            if legacy is not None and legacy[1] <= _public_version("3.2.5")[1]:
                 return str(wheel), None
             raise ValueError("Avibe release wheel is missing dependency constraints")
         info = archive.getinfo(CONSTRAINT_MEMBER)
