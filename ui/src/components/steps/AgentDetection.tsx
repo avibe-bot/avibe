@@ -16,6 +16,7 @@ import { BackendIcon } from '../visual';
 import { InstallOutcome, type InstallOutcomeResult } from '../shared/InstallOutcome';
 import { AssistantRow } from '../onboarding/AssistantRow';
 import { BuiltinAssistantRow } from '../onboarding/BuiltinAssistantRow';
+import { MoreAssistantsCard } from '../onboarding/MoreAssistantsCard';
 import { useSetupModelChoice } from '../onboarding/useSetupModelChoice';
 import { ASSISTANT_ORDER, SETUP_LINEUP } from '../onboarding/collaborationTimeline';
 import '../onboarding/onboarding.css';
@@ -133,6 +134,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const routeSurfaceActive = useRouteSurfaceActive();
   const modelHubEnabled = modelHubEnabledFromConfig(data);
   const [visited, setVisited] = useState(active);
+  // The CLI assistants start folded behind Vibey: the one thing this screen has to
+  // settle for a new user is an assistant with a model. Unfolding is one-way, like a
+  // 「show more」: someone who asked to see them is choosing among them now.
+  const [moreShown, setMoreShown] = useState(false);
   const activation = useRef(0);
   const activeRef = useRef(active);
   useLayoutEffect(() => { activeRef.current = active; activation.current += 1; }, [active]);
@@ -984,7 +989,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             onAllModels={() => setPickerFor(name)}
             onRetryOffer={() => void readOffer(name)} />
         ))}
-        {ASSISTANT_ORDER.map((name) => {
+        {!moreShown && <MoreAssistantsCard backends={ASSISTANT_ORDER} onShow={() => setMoreShown(true)}
+          state={(name) => {
+            const result = installResults[name];
+            return detectionErrors[name] || (result && !result.ok) || (agents[name].enabled && (connectionErrors[name] || connections[name]?.message))
+              ? 'attention' : agents[name].enabled ? 'enabled' : 'notEnabled';
+          }} />}
+        {moreShown && ASSISTANT_ORDER.map((name) => {
           const agent = agents[name];
           const result = installResults[name];
           const error = detectionErrors[name] ? { message: detectionErrors[name] }

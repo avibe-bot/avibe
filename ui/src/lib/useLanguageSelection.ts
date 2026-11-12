@@ -33,9 +33,9 @@ type LanguageHost = {
 };
 
 /** What a mounted control lends the operation. Every field is read when a write
- *  actually runs, never captured when it is queued: `ApiContext` memoizes its
- *  value on `t`, so changing the language is itself what hands out a new
- *  `mutateConfig`, and the user's authority can change while a save waits. */
+ *  actually runs, never captured when it is queued: the control that queued a
+ *  save may be gone or replaced when it runs, and the user's authority can
+ *  change while a save waits. */
 type LanguageConsumer = {
   /** Asked twice on purpose: once as the pick is made, which decides whether it
    *  is an instance decision at all, and again when its write actually runs, so
@@ -72,8 +72,8 @@ type LanguageOperation = {
 // started it. Settings unmounts the moment the user leaves it, so a queue owned
 // by the component let the next control fire a second POST beside the first and
 // let the older one commit last. Keyed by the i18n instance rather than by the
-// api, because ApiContext's value is memoized on `t` and is therefore replaced by
-// the very language change being ordered; a WeakMap rather than a singleton so
+// api, because the instance is what the language belongs to and an api object
+// need not outlive the change being ordered; a WeakMap rather than a singleton so
 // two independent interfaces cannot serialize each other's writes.
 const operations = new WeakMap<LanguageHost, LanguageOperation>();
 

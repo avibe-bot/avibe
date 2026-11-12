@@ -56,7 +56,7 @@ import { OAuthConnectDialog } from '@/components/settings/models/OAuthConnectDia
 import { SubscriptionTermsNote } from '@/components/settings/models/SubscriptionTermsNote';
 import { reconcileUnknownWrite } from '@/components/settings/models/reconcileUnknownWrite';
 import { serverText } from '@/components/settings/models/serverCopy';
-import { subscriptionChooser } from '@/components/settings/models/subscriptionOptions';
+import { SUBSCRIPTION_VENDORS, subscriptionChooser } from '@/components/settings/models/subscriptionOptions';
 import type { Source } from '@/components/settings/models/types';
 import { VendorGlyph } from '@/components/settings/models/vendorGlyph';
 import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
@@ -64,15 +64,10 @@ import type { TranslationKey } from '@/i18n/types';
 
 import { type ProviderSlot } from './providerStage';
 
-/**
- * The subscriptions setup offers.
- *
- * Two, named here rather than derived: `ModelsApi` publishes no vendor-capability
- * list, and C6 ruled out inventing a producer for one. The full set lives in
- * `subscriptionOptions.ts` and Settings is where the rest are connected — this is
- * the shortlist the handoff ships, in the shortlist's own order.
- */
-const SUBSCRIPTION_CHOICES: readonly string[] = ['openai', 'anthropic'];
+/** The subscriptions setup offers: the same list, in the same order, as
+ *  Settings › Models. A subscription setup leaves out is one a new user concludes
+ *  Avibe cannot use. */
+const SUBSCRIPTION_CHOICES: readonly string[] = SUBSCRIPTION_VENDORS;
 
 export type AddSourceMethod = 'detected' | 'subscription' | 'apiKey';
 
