@@ -374,10 +374,9 @@ class SearchChain:
         ended_at = ended_at or owner.now()
 
         result = None
-        write = None
 
         async def settle_result():
-            nonlocal result, write
+            nonlocal result
             result = await asyncio.to_thread(map_response, catalog, response, sent=sent, results=slot.results, say=self.say)
             if stopped and response.http_status in {None, 200}:
                 # Stop is not a vendor failure. Keep billing/authentication facts
@@ -394,10 +393,11 @@ class SearchChain:
                     elapsed_ms=round((asyncio.get_running_loop().time() - started_at) * 1000),
                 )
             # Queue first, synchronously; stopped calls cannot lose sent usage.
-            write = owner.usage_writer.record_service(
-                source_id=source.id, service_id=slot.model_id, billable=result.billable,
-                uncertain=result.uncertain, reported_usd=result.reported_usd, at=ended_at,
-            ) if sent else None
+            if sent:
+                owner.usage_writer.record_service(
+                    source_id=source.id, service_id=slot.model_id, billable=result.billable,
+                    uncertain=result.uncertain, reported_usd=result.reported_usd, at=ended_at,
+                )
             superseded = False
             async with owner._mutation_lock:
                 previous = await asyncio.to_thread(owner.store.load)
@@ -446,8 +446,6 @@ class SearchChain:
                             owner.settle_search_reenable_trial(source.id)
                             if result is not None and result.record.get("error_code") == "service_refused":
                                 owner._search_reenable_trials.add(source.id)
-                if write is not None:
-                    await owner.usage_writer.wait_recorded(write)
 
         settlement = asyncio.create_task(settle())
         try:

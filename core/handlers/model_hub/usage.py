@@ -1504,6 +1504,14 @@ class BoundedUsageLedger:
         # is *read* where the write happens rather than handed in from a call.
         self._now = now
         self._lock = threading.RLock()
+        # Buffered metering is an in-process overlay. It never waits on the
+        # durable ledger lock, because record() runs on the controller loop.
+        self._buffer_lock = threading.Lock()
+        self._buffer: dict[tuple, UsageCall | ServiceUsageCall] = {}
+        # The in-flight batch remains visible until its durable merge commits.
+        # Readers take the durable lock before this short state lock so a commit
+        # cannot be observed both on disk and in the overlay.
+        self._inflight: Optional[tuple[UsageCall | ServiceUsageCall, ...]] = None
 
     def _within_capacity(
         self, rows: list[dict], *, measured: datetime, utc_owner_days: bool = False,
@@ -1590,8 +1598,63 @@ class BoundedUsageLedger:
             )
         return _LedgerRead(sorted(held, key=_row_key), degraded)
 
-    def _write(self, rows: list[dict], *, measured: datetime) -> None:
-        """Persist the rows the file can hold, at both of the capacities it has.
+    def buffer_many(
+        self, calls: Sequence["UsageCall | ServiceUsageCall"],
+    ) -> tuple["UsageCall | ServiceUsageCall", ...]:
+        """Fold calls into the memory-visible overlay and return their aggregates."""
+
+        folded = []
+        with self._buffer_lock:
+            for call in calls:
+                key = _queue_key(call)
+                existing = self._buffer.get(key)
+                self._buffer[key] = call if existing is None else existing.folded_with(call)
+                folded.append(self._buffer[key])
+        return tuple(folded)
+
+    def begin_buffered_flush(self) -> tuple["UsageCall | ServiceUsageCall", ...]:
+        """Move the current overlay to an in-flight batch without touching disk."""
+
+        with self._buffer_lock:
+            batch = tuple(self._buffer.values())
+            self._buffer = {}
+            self._inflight = batch
+            return batch
+
+    def commit_buffered_flush(self, batch: tuple["UsageCall | ServiceUsageCall", ...]) -> None:
+        """Durably merge one in-flight batch, clearing its overlay atomically."""
+
+        with self._lock:
+            try:
+                self._record_many_locked(batch, persisted_at=_aware(self._now()))
+            finally:
+                # Keep this under the durable lock: readers acquire locks in this
+                # same order, so they see either the old file plus the overlay or
+                # the new file without it, never both.
+                with self._buffer_lock:
+                    if self._inflight is batch:
+                        self._inflight = None
+
+    def _read_projected(self) -> _LedgerRead:
+        """Read durable rows plus pending/in-flight calls as one view."""
+
+        # Reads may wait on the durable lock, but synchronous buffer acceptance
+        # only takes the short memory lock. Acquire these in this order only.
+        with self._lock:
+            read = self._read()
+            with self._buffer_lock:
+                inflight = self._inflight
+                buffered = tuple(self._buffer.values())
+            measured = _aware(self._now())
+            rows = {_row_key(row): row for row in read.rows}
+            for calls in (inflight or (), buffered):
+                if self._fold_calls(rows, calls, persisted_at=measured, degraded=read.degraded):
+                    held = self._prepare_rows(self._retained(list(rows.values()), measured), measured=measured)
+                    rows = {_row_key(row): row for row in held}
+            return _LedgerRead(sorted(rows.values(), key=_row_key), read.degraded)
+
+    def _prepare_rows(self, rows: list[dict], *, measured: datetime) -> list[dict]:
+        """Bound rows identically for projected reads and durable persistence.
 
         `max_rows` is one, and `_within_capacity` is where it is applied for this
         door and for `window` together — holding it here alone is what let a larger
@@ -1632,6 +1695,10 @@ class BoundedUsageLedger:
             # call. Preserve the existing degradation witness on a survivor so
             # reopening cannot publish the retained row as complete history.
             retained = [{**row, "history_degraded": True} for row in retained]
+        return retained
+
+    def _write(self, rows: list[dict], *, measured: datetime) -> None:
+        retained = self._prepare_rows(rows, measured=measured)
         write_state_document(self.path, [_persistable_row(row) for row in sorted(retained, key=_row_key)])
 
     def record(
@@ -1662,89 +1729,81 @@ class BoundedUsageLedger:
 
         self.record_many((UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at, speed=speed),))
 
+    def _fold_calls(
+        self,
+        rows: dict[tuple, dict],
+        calls: Sequence["UsageCall | ServiceUsageCall"],
+        *,
+        persisted_at: datetime,
+        degraded: bool,
+    ) -> bool:
+        """Apply calls to rows without deciding whether those rows are persisted."""
+
+        if not calls:
+            return False
+        if degraded:
+            # A successful write must not turn damaged history into a complete
+            # report. Carry the uncertainty forward in the surviving/new rows.
+            for row in rows.values():
+                row["history_degraded"] = True
+        folded = False
+        for call in calls:
+            metered_at = min(_aware(call.at), persisted_at)
+            owner_day = (
+                local_usage_day(persisted_at).isoformat()
+                if _aware(call.at) > persisted_at
+                else call.owner_day
+            )
+            source_key = usage_ledger_key(call.source_id)
+            increment = None
+            if source_key is not None:
+                increment = _normalize_row(
+                    _service_increment(call, source_key, owner_day=owner_day, metered_at=metered_at)
+                    if isinstance(call, ServiceUsageCall)
+                    else _model_increment(call, source_key, owner_day=owner_day, metered_at=metered_at)
+                )
+            if increment is None:
+                logger.warning(
+                    "Model Hub usage metering skipped a call with an unusable identifier",
+                    extra={"source_id_usable": source_key is not None},
+                )
+                continue
+            if degraded:
+                increment["history_degraded"] = True
+            existing = rows.get(_row_key(increment))
+            if existing is None:
+                rows[_row_key(increment)] = increment
+            else:
+                if existing.get("_legacy_cache_write_shape"):
+                    existing.pop("_legacy_cache_write_shape", None)
+                _accumulate(existing, increment)
+                existing["last_metered_at"] = _newer_timestamp(
+                    existing["last_metered_at"], increment["last_metered_at"]
+                )
+                _merge_hour_slices(existing, increment)
+            folded = True
+        return folded
+
+    def _record_many_locked(
+        self,
+        calls: Sequence["UsageCall | ServiceUsageCall"],
+        *,
+        persisted_at: datetime,
+    ) -> None:
+        read = self._read()
+        rows = {_row_key(row): row for row in read.rows}
+        if not self._fold_calls(rows, calls, persisted_at=persisted_at, degraded=read.degraded):
+            return
+        retained = self._retained(list(rows.values()), persisted_at)
+        self._write(retained, measured=persisted_at)
+
     def record_many(self, calls: Sequence["UsageCall | ServiceUsageCall"]) -> None:
-        """Fold a batch of metered calls into their days' rows in one transaction.
-
-        The batch is the reason a backlog cannot grow: one read, one retention
-        pass and one fsync serve however many calls arrived while the previous
-        batch was being written, so the queue drains in bursts of whatever size
-        it reached rather than one durable write at a time. Folding is what makes
-        that safe — every call still lands in its own day's row with its own
-        stamp, so a batch of ten is arithmetically the ten separate writes it
-        replaces, never a summary of them. A call that already speaks for several
-        (`UsageCall.requests`) folds by the same arithmetic onto the same row those
-        calls would each have reached.
-
-        One `persisted_at` reading covers the batch, for the same reason `record`
-        takes its own: it is the moment these calls reached the disk, and none of
-        them was metered later than that.
-        """
+        """Fold and durably persist a batch in one transaction."""
 
         if not calls:
             return
         with self._lock:
-            persisted_at = _aware(self._now())
-            read = self._read()
-            rows = {_row_key(row): row for row in read.rows}
-            if read.degraded:
-                # A successful write must not turn damaged history into a
-                # complete report. Carry the uncertainty forward in the
-                # surviving/new rows until the ledger is explicitly repaired.
-                for row in rows.values():
-                    row["history_degraded"] = True
-            folded = False
-            for call in calls:
-                metered_at = min(_aware(call.at), persisted_at)
-                # Ordinary delayed writes retain the date captured before queueing,
-                # even if the host zone changes. Future calls still clamp to the
-                # persistence clock, including its local date.
-                owner_day = (
-                    local_usage_day(persisted_at).isoformat()
-                    if _aware(call.at) > persisted_at
-                    else call.owner_day
-                )
-                # A live call carries identities, not keys, and this is the one place
-                # they become one: derive here and every row downstream — new,
-                # accumulated, or read back next restart — is already a key, so no
-                # later surface can re-derive one that was folded and orphan its row.
-                source_key = usage_ledger_key(call.source_id)
-                increment = None
-                if source_key is not None:
-                    increment = _normalize_row(
-                        _service_increment(call, source_key, owner_day=owner_day, metered_at=metered_at)
-                        if isinstance(call, ServiceUsageCall)
-                        else _model_increment(call, source_key, owner_day=owner_day, metered_at=metered_at)
-                    )
-                if increment is None:
-                    # Reachable only for a value no config can hold — not text, or
-                    # empty — because a long identity is folded to a bounded key
-                    # rather than refused. Loud rather than silent so a caller that
-                    # invents an identifier shows up as lost metering instead of as
-                    # a quietly incomplete tab.
-                    logger.warning(
-                        "Model Hub usage metering skipped a call with an unusable identifier",
-                        extra={"source_id_usable": source_key is not None},
-                    )
-                    continue
-                if read.degraded:
-                    increment["history_degraded"] = True
-                existing = rows.get(_row_key(increment))
-                if existing is None:
-                    rows[_row_key(increment)] = increment
-                else:
-                    if existing.get("_legacy_cache_write_shape"):
-                        existing.pop("_legacy_cache_write_shape", None)
-                    _accumulate(existing, increment)
-                    existing["last_metered_at"] = _newer_timestamp(
-                        existing["last_metered_at"],
-                        increment["last_metered_at"],
-                    )
-                    _merge_hour_slices(existing, increment)
-                folded = True
-            if not folded:
-                return
-            retained = self._retained(list(rows.values()), persisted_at)
-            self._write(retained, measured=persisted_at)
+            self._record_many_locked(calls, persisted_at=_aware(self._now()))
 
     def _retained(self, rows: list[dict], measured: datetime) -> list[dict]:
         """Keep daily owners or real evidence needed by the hourly reader.
@@ -1794,8 +1853,7 @@ class BoundedUsageLedger:
         today = local_usage_day(now)
         first_day = (today - timedelta(days=bounded_days - 1)).isoformat()
         last_day = today.isoformat()
-        with self._lock:
-            read = self._read()
+        read = self._read_projected()
         rows = read.rows
         placed = [row for row in rows if first_day <= row["day"] <= last_day]
         # The reportable set is formed here, so this is where the file's row
@@ -1872,8 +1930,7 @@ class BoundedUsageLedger:
 
         report_instant = _aware(now)
         horizon_start = starts[0].astimezone(timezone.utc)
-        with self._lock:
-            read = self._read()
+        read = self._read_projected()
 
         candidates: list[dict] = []
         for row in read.rows:
@@ -2416,6 +2473,9 @@ _LEDGER_EXECUTOR: Optional[_AbandonableWriter] = None
 # local read-modify-write and an fsync plus scheduling slack, which is orders of
 # magnitude under it, so nothing but a disk that has stopped answering gets here.
 _DURABILITY_WAIT_SECONDS: Final = 2.0
+# A leading-edge in-memory window lets readers see calls immediately while one
+# durable full-file rewrite serves the calls collected for up to five seconds.
+_USAGE_WRITE_COALESCE_SECONDS: Final = 5.0
 # How long a price table the writer read decides context tiers before a flush reads
 # it again. A read parses the whole models.dev copy, megabytes, so it happens on the
 # writer's thread rather than once per call; the override file is hand-edited, and
@@ -2645,7 +2705,7 @@ class _QueuedRow:
     """One queued row and the future every call folded into it is waiting on."""
 
     call: UsageCall | ServiceUsageCall
-    done: "asyncio.Future[None]"
+    done: "asyncio.Future[bool]"
 
 
 class UsageWriter:
@@ -2684,6 +2744,9 @@ class UsageWriter:
         self.ledger = ledger
         self._durability_wait = durability_wait
         self._pending: dict[tuple, _QueuedRow] = {}
+        self._state_lock = threading.Lock()
+        self._pending_started: float | None = None
+        self._drainers = 0
         # Where context tiers come from: the valuation's table factory, and the
         # table last read from it with the monotonic instant it was read.
         self._price_table = price_table
@@ -2697,6 +2760,10 @@ class UsageWriter:
         # can count it: in the executor is not the same as persisted.
         self._writing: tuple[_QueuedRow, ...] = ()
         self._flush: Optional[asyncio.Task[None]] = None
+        # A drain can bypass the normal coalescing window for shutdown. It is
+        # created when the writer first enters an event loop, not at construction,
+        # because writers are also built during synchronous service setup.
+        self._flush_now: Optional[asyncio.Event] = None
         # Whether the last flush lost its batch, so an outage is reported when it
         # starts and ends rather than once per failed write.
         self._dropping = False
@@ -2716,7 +2783,7 @@ class UsageWriter:
         usage: Optional[ProtocolUsageReport],
         at: datetime,
         speed: Optional[str] = None,
-    ) -> "asyncio.Future[None]":
+    ) -> "asyncio.Future[bool]":
         """Own one call and queue it, handing back what will finish it.
 
         Synchronous on purpose: nothing may suspend between a caller deciding to
@@ -2727,10 +2794,10 @@ class UsageWriter:
         than re-read, because the flush that persists this can start well after
         it and a queued write is still a report about the moment it finished.
 
-        A caller that wants the row on disk before it returns hands the result to
-        `wait_recorded`; one that does not can simply drop it. Callers whose calls
-        fold together share one future, which is the same promise each would have
-        had alone: it completes when their row reaches the disk.
+        This returns one future for each folded row. It resolves True after the
+        durable flush succeeds, or False when a storage failure drops the batch.
+        Producers must not await it on a response or failover path; ``drain`` is
+        the shutdown durability boundary. Reads include accepted usage immediately.
 
         The call's context tier is decided here from the price table the writer
         holds, a lookup in memory. A writer built without a table, or holding one
@@ -2760,7 +2827,7 @@ class UsageWriter:
         reported_usd: Optional[float] = None,
         at: datetime,
         tool: str = "web_search",
-    ) -> "asyncio.Future[None]":
+    ) -> "asyncio.Future[bool]":
         """Own one sent search-service request and queue it, as `record` does a model call.
 
         Synchronous for the same reason, so a stopped turn still meters a request
@@ -2784,43 +2851,40 @@ class UsageWriter:
             )
         )
 
-    def _queue(self, call: UsageCall | ServiceUsageCall) -> "asyncio.Future[None]":
-        done = asyncio.get_running_loop().create_future
-        key = _queue_key(call)
-        if (queued := self._pending.get(key)) is None:
-            queued = _QueuedRow(call=call, done=done())
-            self._pending[key] = queued
-        else:
-            queued.call = queued.call.folded_with(call)
-        if self._flush is None or self._flush.done():
-            self._flush = asyncio.create_task(self._flush_pending())
-        return queued.done
+    def _queue(self, call: UsageCall | ServiceUsageCall) -> "asyncio.Future[bool]":
+        loop = asyncio.get_running_loop()
+        with self._state_lock:
+            key = _queue_key(call)
+            (folded,) = self.ledger.buffer_many((call,))
+            if (queued := self._pending.get(key)) is None:
+                queued = _QueuedRow(call=folded, done=loop.create_future())
+                self._pending[key] = queued
+            else:
+                queued.call = folded
+            if self._pending_started is None:
+                self._pending_started = loop.time()
+            if self._flush_now is None:
+                self._flush_now = asyncio.Event()
+            if self._drainers:
+                self._flush_now.set()
+            if self._flush is None or self._flush.done():
+                self._flush = asyncio.create_task(self._flush_pending())
+            return queued.done
 
-    async def wait_recorded(self, write: "asyncio.Future[None]") -> bool:
-        """Wait out one queued write, bounded, and answer whether it landed.
+    async def wait_recorded(self, write: "asyncio.Future[bool]") -> bool:
+        """Wait for one durable flush, bounded, and answer whether it succeeded.
 
-        Two properties every metering caller wants and none of them owns. The
-        shield is why a caller cancelled here loses its ordering and not the row.
-        The bound is why a ledger that has stopped answering cannot hold a served
-        turn open behind it: the wait exists so a caller reading the usage tab
-        right after its own call sees that call, which is an ordering convenience,
-        not a durability requirement the turn is allowed to fail for.
-
-        Both used to be spelled at each metering call site, which made the bound
-        the one property a new call site could omit by writing the obvious thing —
-        and it did: awaiting a write with no deadline puts a stuck disk on the
-        turn's critical path. Here there is nothing to omit.
-
-        A timed-out write is not lost or cancelled. It stays this writer's, keeps
-        its place in the queue, and keeps counting in `unpersisted` until the disk
-        answers; only the caller's wait for it ends.
+        This is intentionally distinct from synchronous acceptance in ``record``.
+        A cancelled waiter cannot cancel the writer-owned future because of the
+        shield; a timed-out waiter also leaves the batch owned for ``drain``.
         """
 
+        if self._flush_now is not None:
+            self._flush_now.set()
         try:
-            await asyncio.wait_for(asyncio.shield(write), self._durability_wait)
+            return await asyncio.wait_for(asyncio.shield(write), self._durability_wait)
         except asyncio.TimeoutError:
             return False
-        return True
 
     @property
     def unpersisted(self) -> int:
@@ -2832,51 +2896,89 @@ class UsageWriter:
         because the hub got busier.
         """
 
-        return sum(
-            queued.call.requests
-            for queued in (*self._pending.values(), *self._writing)
-        )
+        with self._state_lock:
+            return sum(
+                queued.call.requests
+                for queued in (*self._pending.values(), *self._writing)
+            )
 
     async def drain(self, *, timeout: float) -> int:
-        """Wait out the calls still queued; answers how many did not reach disk.
+        """Flush accepted calls, bounded, and answer how many remain unfinished."""
 
-        Bounded, because a ledger that cannot be reached must not hold a shutdown
-        open — the same trade every owned drain in the hub makes.
-        """
-
-        flush = self._flush
-        if flush is not None and not flush.done():
-            await asyncio.wait((flush,), timeout=timeout)
-        return self.unpersisted
+        self._drainers += 1
+        try:
+            flush = self._flush
+            if flush is not None and not flush.done():
+                if self._flush_now is not None:
+                    self._flush_now.set()
+                await asyncio.wait((flush,), timeout=timeout)
+            return self.unpersisted
+        finally:
+            self._drainers -= 1
 
     async def _flush_pending(self) -> None:
-        """Write queued calls a batch at a time until nothing is left waiting.
+        """Persist each leading-edge buffer after at most five seconds.
 
-        The loop ends only with the queue empty and without having awaited since
-        it saw that, which is what lets `record` treat a finished flush as proof
-        that it must start the next one.
+        Acceptance is synchronous and readers project the buffer immediately. The
+        timer only delays the durable full-file rewrite; ``drain`` wakes it for
+        shutdown. A batch swapped into the ledger remains in-flight until its
+        durable merge commits, so readers never double count it.
         """
 
+        wake = self._flush_now
         loop = asyncio.get_running_loop()
-        while self._pending:
-            batch = tuple(self._pending.values())
-            self._pending = {}
-            self._writing = batch
-            try:
-                calls = tuple(queued.call for queued in batch)
+        try:
+            while True:
+                with self._state_lock:
+                    started = self._pending_started
+                if started is None:
+                    return
+                delay = max(0.0, started + _USAGE_WRITE_COALESCE_SECONDS - loop.time())
+                if delay and not self._drainers:
+                    if wake is None:
+                        await asyncio.sleep(delay)
+                    else:
+                        try:
+                            await asyncio.wait_for(wake.wait(), delay)
+                        except asyncio.TimeoutError:
+                            pass
+                        finally:
+                            wake.clear()
+
                 if self._prices_due():
-                    # A refresh for the calls after this batch; these are already tiered.
+                    # _read_prices contains optional valuation failures. Refresh
+                    # before swapping so queued calls remain owned during it.
                     await loop.run_in_executor(_ledger_executor(), self._read_prices)
-                await loop.run_in_executor(_ledger_executor(), self.ledger.record_many, calls)
-            except (OSError, ValueError) as exc:
-                self._report_dropped(batch, exc)
-            else:
-                self._report_recovered()
-            finally:
-                self._writing = ()
-            for queued in batch:
-                if not queued.done.done():
-                    queued.done.set_result(None)
+
+                with self._state_lock:
+                    if not self._pending:
+                        self._pending_started = None
+                        continue
+                    calls = self.ledger.begin_buffered_flush()
+                    batch = tuple(self._pending.values())
+                    self._pending = {}
+                    self._pending_started = None
+                    self._writing = batch
+
+                success = False
+                try:
+                    await loop.run_in_executor(
+                        _ledger_executor(), self.ledger.commit_buffered_flush, calls
+                    )
+                except (OSError, ValueError) as exc:
+                    self._report_dropped(batch, exc)
+                else:
+                    success = True
+                    self._report_recovered()
+                finally:
+                    with self._state_lock:
+                        self._writing = ()
+                for queued in batch:
+                    if not queued.done.done():
+                        queued.done.set_result(success)
+        finally:
+            if wake is not None:
+                wake.clear()
 
     def _context_tier(self, model_id: str, usage: Optional[ProtocolUsageReport], speed: Optional[str] = None) -> int:
         """The tier the held price table puts one call in; the base tier without usage or a table.
