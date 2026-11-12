@@ -16,7 +16,7 @@ export function placementFrames(placement: InstancePlacement): (Omit<FrameSpec, 
    {name:'update',page:'home',status:'update'},
    {name:'switching',page:'home',status:'switching'},
    {name:'collapsed',page:'home',status:'update',compact:true},
-   {name:'menu',page:'home',status:'update',menu:true},
+   {name:'menu',page:'home',status:'signed-in',menu:true},
  );
  return scenes.flatMap(scene => (placement === 'bottom' ? ['zh','en'] as const : ['zh'] as const).map(lang=>({
    name:`${scene.name}-${lang}`,title:`${placement === 'top' ? 'A · Sidebar brand (rejected history)' : 'C · Two-row sidebar footer (selected)'} · ${scene.name} · ${lang}`,
