@@ -336,3 +336,20 @@ it('tells an Editor that only an admin can set ask-before-signing, and never PAT
     canManage = true;
   }
 });
+
+it('always sends account #0 for the server to check, and shows nothing-saved when it refuses', async () => {
+  await openWallet('WALLET_C');
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'hd_address_check_failed', message: 'mismatch' });
+  api.deleteVaultSecret.mockClear();
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  const own = storedFor(OFFICIAL.split(' '));
+  expect(api.createVaultSecret).toHaveBeenCalledOnce();
+  expect(postedPayload().expected_account0).toEqual({ eth: own.eth, btc_taproot: own.btc_taproot, solana: own.solana });
+  expect(await screen.findByText(hd.mismatch)).toBeTruthy();
+  expect(screen.getByText(hd.mismatchNotSaved)).toBeTruthy();
+  // Nothing was stored: no delete, no local block, no retry without the check.
+  expect(api.deleteVaultSecret).not.toHaveBeenCalled();
+  expect(localStorage.getItem('avibe.vault.hdAddressCheckFailed') ?? '[]').toBe('[]');
+});

@@ -238,6 +238,7 @@ export const VaultSecretForm: React.FC<{
   const canSetHdAsk = capabilities.can_manage_instance;
   const [hdCreated, setHdCreated] = useState<VaultHdAccount | null>(null);
   const [hdMismatch, setHdMismatch] = useState(false);
+  const [hdMismatchNotSaved, setHdMismatchNotSaved] = useState(false);
   // The wallet exists but #0's requested ask-before-signing did not stick: not done until it does.
   const [hdAskFailed, setHdAskFailed] = useState(false);
   // The name the wallet was created under: every later action (retry, delete, done) uses it, never
@@ -567,6 +568,7 @@ export const VaultSecretForm: React.FC<{
     setHdImport('');
     setHdPassphrase('');
     setHdMismatch(false);
+    setHdMismatchNotSaved(false);
   };
 
   // A seed-phrase wallet is saved the way every key is: the browser seals the 64-byte BIP39 seed for
@@ -599,6 +601,8 @@ export const VaultSecretForm: React.FC<{
         signer_kind: 'hd-seed',
         keypair: { type: 'hd-seed', source: 'import', format: 'raw-seed' },
         blind_box: blindBox,
+        // Always sent, never dropped on a retry: the server saves nothing unless avault's #0 matches.
+        expected_account0: { eth: expected.eth, btc_taproot: expected.btc_taproot, solana: expected.solana },
         description: description.trim() || undefined,
         tags: mergedTags.length ? mergedTags : undefined,
         links: skillLinks.length ? { skills: skillLinks } : undefined,
@@ -606,6 +610,19 @@ export const VaultSecretForm: React.FC<{
       },
       { handleError: false },
     );
+    if (!created.ok && created.code === 'hd_address_check_failed') {
+      // Refused before anything was stored: nothing to block or delete.
+      console.error('[vault] seed-phrase wallet address check failed; nothing was saved', { name });
+      setHdWords(null);
+      setHdImport('');
+      setHdPassphrase('');
+      setHdQuiz([]);
+      setHdChosen({});
+      setHdMismatchNotSaved(true);
+      setHdMismatchDeleted(true);
+      setHdMismatch(true);
+      return;
+    }
     if (!created.ok) {
       if (created.code === 'secret_exists') {
         handleExistingSecret();
@@ -1521,7 +1538,7 @@ export const VaultSecretForm: React.FC<{
           <>
             <HdNotice tone="error" icon={TriangleAlert}>
               <span className="font-semibold text-destructive-ink">{t('vaults.hd.mismatch')}</span>
-              <span>{hdMismatchDeleted ? t('vaults.hd.mismatchDeleted') : t('vaults.hd.mismatchHint')}</span>
+              <span>{hdMismatchNotSaved ? t('vaults.hd.mismatchNotSaved') : hdMismatchDeleted ? t('vaults.hd.mismatchDeleted') : t('vaults.hd.mismatchHint')}</span>
             </HdNotice>
             {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
             <div className="mt-1 flex justify-end gap-2">

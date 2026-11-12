@@ -461,6 +461,9 @@ export type VaultCreatePayload = {
   tags?: string[];
   kind?: string;
   signer_kind?: string | null;
+  /** Seed-phrase wallets: account #0 as this browser derived it. The server compares it with what
+   *  avault derives before saving anything, and refuses with 409 `hd_address_check_failed`. */
+  expected_account0?: { eth: string; btc_taproot: string; solana: string };
   /**
    * A Solana signing key, which avault creates: it generates the key, or imports the secret key
    * sealed in `blind_box`. Standard tier only, and sent without `public_meta`.

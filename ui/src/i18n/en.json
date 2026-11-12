@@ -6613,6 +6613,7 @@
       "askFailed": "The wallet was created, but ask-before-signing for account #0 did not stick.",
       "askRetry": "Try again",
       "mismatchDeleted": "The wallet was deleted; nothing was kept. Create or import it again.",
+      "mismatchNotSaved": "The wallet was not saved; nothing was kept. Create or import it again.",
       "close": "Close",
       "blocked": "Address check failed: don’t send funds to this wallet. Delete it."
     }
