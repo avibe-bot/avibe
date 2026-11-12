@@ -302,7 +302,19 @@ def test_actual_locked_five_target_notice_inventory_has_complete_policy():
             assert policy["packages"][key]["crate_sha256"] == package["crate_sha256"], key
             assert policy["packages"][key]["license"] == package["license"], key
             assert policy["packages"][key]["files"], key
-    assert policy["composition"]["base_sha256"] == release.file_hash(release.ROOT / "packaging/iroh-apple/license-sources.json")
+    assert policy["composition"]["base_sha256"] == release.digest(
+        (release.ROOT / "packaging/iroh-apple/license-sources.json").read_bytes().replace(b"\r\n", b"\n"))
+
+
+def test_notice_policy_identity_survives_windows_checkout_line_endings(tmp_path, monkeypatch):
+    from scripts import direct_transport_notices
+    expected = direct_transport_notices.policy_bytes()
+    for name in ("packaging/iroh-apple/license-sources.json", "direct-transport/license-policy-overlay.json"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((release.ROOT / name).read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(direct_transport_notices, "ROOT", tmp_path)
+    assert direct_transport_notices.policy_bytes() == expected
 
 
 def test_real_prepare_packet_is_stable_across_successful_backstop_rerun(packet, tmp_path, monkeypatch):
