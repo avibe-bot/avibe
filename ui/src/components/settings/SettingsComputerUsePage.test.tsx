@@ -131,7 +131,7 @@ describe('SettingsComputerUsePage', () => {
     expect(Object.values(stepStates())).toEqual(['complete', 'complete', 'complete']);
   });
 
-  it('gives each current step its native action', async () => {
+  it('gives each actionable step its native action', async () => {
     const invoke = enterActionableShell();
     statusSequence({ supported: true, status: 'off', reason: 'never_enabled' });
     const user = userEvent.setup();
@@ -139,8 +139,8 @@ describe('SettingsComputerUsePage', () => {
     const { unmount } = render(<SettingsComputerUsePage />);
     await user.click(await screen.findByTestId('computer-use-action-enable'));
     expect(invoke).toHaveBeenLastCalledWith('computer_use_enable');
-    // Only the current step acts; later steps wait for the status to reach them.
-    expect(screen.queryByTestId('computer-use-action-accessibility')).toBeNull();
+    expect(screen.getByTestId('computer-use-action-accessibility')).toBeTruthy();
+    expect(screen.getByTestId('computer-use-action-screenRecording')).toBeTruthy();
     unmount();
 
     statusSequence({ supported: true, status: 'needs_permission', reason: 'accessibility' });
@@ -154,6 +154,85 @@ describe('SettingsComputerUsePage', () => {
     render(<SettingsComputerUsePage />);
     await user.click(await screen.findByTestId('computer-use-action-screenRecording'));
     expect(invoke).toHaveBeenLastCalledWith('computer_use_open_permission', { pane: 'screen_recording' });
+  });
+
+  it.each([
+    ['error', 'driver_not_ready', false, false],
+    ['starting', null, false, false],
+    ['needs_runtime', null, false, false],
+    ['needs_permission', 'accessibility', false, false],
+    ['needs_permission', 'screen_recording', true, false],
+    ['unavailable', 'invalid_state_file', false, false],
+    ['unavailable', 'snapshot_invalid', false, false],
+    ['unavailable', 'shell_not_running', false, false],
+    ['unavailable', 'controller_unavailable', false, false],
+    ['ready', null, true, true],
+  ])('offers native settings for every incomplete permission step in %s (%s)', async (
+    status, reason, accessibilityComplete, screenRecordingComplete,
+  ) => {
+    const invoke = enterActionableShell();
+    statusSequence({ supported: true, status, reason });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    await waitFor(() => expect(
+      screen.getByTestId('computer-use-guide-status').getAttribute('data-computer-use-status'),
+    ).toBe(status));
+    expect(screen.queryByTestId('computer-use-action-enable')).toBeNull();
+
+    for (const [step, pane, complete] of [
+      ['accessibility', 'accessibility', accessibilityComplete],
+      ['screenRecording', 'screen_recording', screenRecordingComplete],
+    ] as const) {
+      if (complete) {
+        expect(screen.queryByTestId(`computer-use-action-${step}`)).toBeNull();
+      } else {
+        const button = screen.getByTestId(`computer-use-action-${step}`);
+        expect((button as HTMLButtonElement).disabled).toBe(false);
+        await user.click(button);
+        expect(invoke).toHaveBeenLastCalledWith('computer_use_open_permission', { pane });
+      }
+    }
+  });
+
+  it('waits for the first readable status before offering native actions', async () => {
+    enterActionableShell();
+    let finish!: (response: ReturnType<typeof statusResponse>) => void;
+    apiFetch.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    apiFetch.mockResolvedValue(statusResponse({ supported: true, status: 'error', reason: 'driver_not_ready' }));
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
+    // An unreadable response still provides no progress; keep waiting.
+    await act(async () => finish(statusResponse({})));
+    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
+
+    await user.click(screen.getByRole('button', { name: /settings\.computerUse\.recheck/ }));
+    expect(await screen.findByTestId('computer-use-action-accessibility')).toBeTruthy();
+    expect(screen.getByTestId('computer-use-action-screenRecording')).toBeTruthy();
+    expect(screen.queryByTestId('computer-use-action-enable')).toBeNull();
+  });
+
+  it('disables all permission actions until the running native action settles', async () => {
+    let finish!: () => void;
+    const invoke = enterActionableShell(vi.fn(() => new Promise<void>((resolve) => { finish = resolve; })));
+    statusSequence({ supported: true, status: 'error', reason: 'driver_not_ready' });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    await waitFor(() => expect(stepStates().enable).toBe('complete'));
+    const accessibility = screen.getByTestId('computer-use-action-accessibility') as HTMLButtonElement;
+    const screenRecording = screen.getByTestId('computer-use-action-screenRecording') as HTMLButtonElement;
+    await user.click(accessibility);
+    expect(accessibility.disabled).toBe(true);
+    expect(screenRecording.disabled).toBe(true);
+    await user.click(screenRecording);
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    await act(async () => finish());
+    expect(accessibility.disabled).toBe(false);
+    expect(screenRecording.disabled).toBe(false);
   });
 
   it('flips each step to done as the polled status advances, without a recheck', async () => {
