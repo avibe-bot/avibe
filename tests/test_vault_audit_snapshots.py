@@ -134,6 +134,61 @@ def test_corrupt_snapshot_payload_fails_closed_without_recursive_resolution(vaul
         assert not [row for row in vs.list_audit(conn, user_context=_member()) if row["id"] == "broken"]
 
 
+@pytest.mark.parametrize("representation", ["inline", "reference", "tombstone-reference"])
+@pytest.mark.parametrize("damage", [
+    "bool-version", "float-version", "string-version", "missing-version",
+    "nested-reference", "null-reference", "bool-reference", "missing-resources",
+    "null-resources", "object-resources", "empty-resources", "non-object",
+])
+def test_snapshot_envelope_corruption_denies_history_without_mutating_admin_stream(vault, representation, damage):
+    """Valid ACLs must not hide a malformed envelope or a reference chain.
+
+    Existing corrupt-target fixtures have no otherwise-authorizing resources,
+    so they cannot catch version coercion or a ref-bearing inline target.
+    Tombstones exercise the separate legacy-history fallback using this decoder.
+    """
+    with vault.begin() as conn:
+        snapshot = _secret_snapshot(conn)
+        damaged = deepcopy(snapshot)
+        if damage.endswith("-version"):
+            if damage == "missing-version":
+                damaged.pop("version")
+            else:
+                damaged["version"] = {"bool-version": True, "float-version": 1.0, "string-version": "1"}[damage]
+        elif damage.endswith("-reference"):
+            damaged["ref"] = {"nested-reference": 2, "null-reference": None, "bool-reference": True}[damage]
+        elif damage == "missing-resources":
+            damaged.pop("resources")
+        elif damage.endswith("-resources"):
+            damaged["resources"] = {"null-resources": None, "object-resources": {}, "empty-resources": []}[damage]
+        else:
+            damaged = [snapshot]
+        conn.execute(vault_audit_access_snapshots.insert(), [
+            {"id": 1, "snapshot": json.dumps(damaged)},
+            {"id": 2, "snapshot": json.dumps(snapshot)},
+        ])
+        if representation == "tombstone-reference":
+            # Remove current policy and the genuine tombstone. Only the malformed
+            # historical snapshot could authorize this older snapshot-free event.
+            vs.delete_secret(conn, "KEY")
+            conn.execute(vault_audit.delete())
+            conn.execute(vault_audit.insert().values(**_row("tombstone", {"ref": 1}, event_name="deleted")))
+            row = _row("broken", None)
+            row.update(request_id=None, grant_id=None, delivery='{"host": "example.test"}')
+        else:
+            row = _row("broken", damaged if representation == "inline" else {"ref": 1})
+        conn.execute(vault_audit.insert().values(**row))
+        before = [dict(item) for item in conn.execute(select(vault_audit).order_by(vault_audit.c.id)).mappings()]
+        snapshots_before = conn.execute(select(vault_audit_access_snapshots)).all()
+        assert not [item for item in vs.list_audit(conn, user_context=_member()) if item["id"] == "broken"]
+        admin = {item["id"]: item for item in vs.list_audit(conn)}
+        expected = {**row, "delivery": ('{"host": "example.test"}' if representation == "tombstone-reference" else
+                    '{"host": "example.test", "method": "POST", "status": 201, "field": "value"}')}
+        assert admin["broken"] == expected
+        assert [dict(item) for item in conn.execute(select(vault_audit).order_by(vault_audit.c.id)).mappings()] == before
+        assert conn.execute(select(vault_audit_access_snapshots)).all() == snapshots_before
+
+
 def test_reference_lookups_are_bounded_batches_using_primary_key(vault, monkeypatch):
     monkeypatch.setattr(vs, "_REMOTE_AUDIT_MIN_BATCH_SIZE", 2)
     monkeypatch.setattr(vs, "_REMOTE_AUDIT_MAX_BATCH_SIZE", 2)

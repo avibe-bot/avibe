@@ -6525,7 +6525,13 @@ def _audit_access_snapshot(
     if isinstance(snapshot, dict) and "ref" in snapshot:
         ref = _audit_snapshot_ref(snapshot)
         snapshot = snapshots.get(ref) if ref is not None and snapshots is not None else None
-    if not isinstance(snapshot, dict) or snapshot.get("version") != 1 or not isinstance(snapshot.get("resources"), list):
+    # Resolve at most once. A normalized target must itself be an inline v1
+    # envelope, not another reference (even one carrying otherwise valid ACLs).
+    if (
+        not isinstance(snapshot, dict) or "ref" in snapshot
+        or type(snapshot.get("version")) is not int or snapshot["version"] != 1
+        or not isinstance(snapshot.get("resources"), list)
+    ):
         return True, None
     return True, snapshot
 
