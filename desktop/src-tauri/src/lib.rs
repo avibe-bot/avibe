@@ -2483,7 +2483,7 @@ pub fn run() {
                         if instance_client::presentation_request(
                             webview.app_handle(),
                             webview.label(),
-                            webview.url().ok().as_ref(),
+                            || webview.url().ok(),
                             url,
                         ) {
                             return false;

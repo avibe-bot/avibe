@@ -239,3 +239,14 @@ manifest verification, the actual native three-choice dialog and the generation
 checks execute the candidate implementation. The signed artifact is the existing
 38-byte inert fixture, not an application package. This is a native presentation
 and cancellation probe, not release/package acceptance.
+
+The updater fixture's first immutable run exposed a bootstrap crash: the
+presentation caller evaluated Wry's current URL before initial navigation had
+created one. The shared handler now reads it lazily, only for an enumerated
+presentation URL. The failed native log remains preserved. A separate existing
+restore test was expanded to cover credential erasure failure: it failed because
+automatic sign-out discarded that failure. Automatic sign-out now propagates
+cleanup failure, retains cleanup ownership and refuses a new account operation
+until erasure succeeds. Eight coordinator tests pass after the fix; the
+before/after logs are `s1-auto-signout-before.log` and
+`s1-auto-signout-after.log` in the lane evidence directory.

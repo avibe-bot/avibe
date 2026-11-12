@@ -1763,6 +1763,12 @@ mod tests {
         assert!(should_show_current_dialog(true, CheckPresentation::Workbench, false));
         assert!(should_show_current_dialog(true, CheckPresentation::Native, true));
         assert!(!should_show_current_dialog(false, CheckPresentation::Native, false));
+        // A Phase 1 footer CTA must reach the native decision even when the
+        // current local Workbench is ready to display the legacy popover.
+        assert!(!handoff_to_workbench(CheckPresentation::TrustedDecision(7), true));
+        assert!(handoff_to_workbench(CheckPresentation::Native, true));
+        assert!(handoff_to_workbench(CheckPresentation::Workbench, true));
+        assert!(!handoff_to_workbench(CheckPresentation::Workbench, false));
     }
 
     #[test]

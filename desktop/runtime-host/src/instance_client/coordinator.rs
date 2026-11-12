@@ -222,6 +222,9 @@ impl Coordinator {
         let Ok(_operation) = self.operation.try_lock() else {
             return self.reply(request.request_id, Err(ClientError::new("busy")));
         };
+        if let Some(error) = self.credential_io.lock().await.cleanup_error.clone() {
+            return self.reply(request.request_id, Err(error));
+        }
         if request.expected_generation != self.generation.load(Ordering::SeqCst) {
             return self.reply(request.request_id, Err(ClientError::new("stale_generation")));
         }
@@ -253,8 +256,8 @@ impl Coordinator {
             .err()
             .is_some_and(|error| matches!(error.code.as_str(), "signed_out" | "account_changed"))
         {
-            let _ = self.escape(ClientAction::SignOut, None).await;
-            return self.reply(request.request_id, result);
+            let cleanup = self.escape(ClientAction::SignOut, None).await;
+            return self.reply(request.request_id, cleanup.and(result));
         }
         if result.is_err() {
             working.selection = None;
@@ -627,10 +630,13 @@ impl Coordinator {
             saved.and(erased)
         })
         .await
-        .map_err(|_| ClientError::new("credentials_unavailable"))?;
-        if signing_out && cleanup.is_ok() {
-            owned.ids.clear();
-            owned.cleanup_error = None;
+        .map_err(|_| ClientError::new("credentials_unavailable"))
+        .and_then(|result| result);
+        if signing_out {
+            if cleanup.is_ok() {
+                owned.ids.clear();
+            }
+            owned.cleanup_error = cleanup.as_ref().err().cloned();
         }
         drop(owned);
         let view_result = if signing_out {
@@ -646,7 +652,17 @@ impl Coordinator {
                 let _ = old_session.request(Method::DELETE, "/api/mobile/session", None).await;
             });
         }
-        view_result.and(cleanup)
+        let result = view_result.and(cleanup);
+        let state = {
+            let mut inner = self.inner.lock().expect("client state");
+            if epoch.check().is_ok() {
+                inner.state.enrollment.error_code = result.as_ref().err().map(|error| error.code.clone());
+                inner.state.revision += 1;
+            }
+            inner.state.clone()
+        };
+        self.view.changed(&state);
+        result
     }
 
     /// Called once at native initialization; cached URLs never authorize restore.
@@ -688,7 +704,7 @@ impl Coordinator {
         working.account.fence(epoch.clone());
         if let Err(error) = working.account.discover(&mut working.state).await {
             if matches!(error.code.as_str(), "signed_out" | "account_changed") {
-                let _ = self.escape(ClientAction::SignOut, None).await;
+                self.escape(ClientAction::SignOut, None).await?;
             }
             return Err(error);
         }
@@ -700,7 +716,7 @@ impl Coordinator {
                 .as_ref()
                 .is_none_or(|account| account.id != id)
         {
-            let _ = self.escape(ClientAction::SignOut, None).await;
+            self.escape(ClientAction::SignOut, None).await?;
             return Err(ClientError::new("account_changed"));
         }
         let restore = working.record.last_committed.clone();

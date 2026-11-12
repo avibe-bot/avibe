@@ -359,18 +359,31 @@ pub fn caller_can_present(app: &AppHandle, label: &str, current: &Url) -> bool {
 }
 /// Native presentation requests share one caller check in every shell assembly.
 /// Returning true means the URL was consumed, never that an action was approved.
-pub fn presentation_request(app: &AppHandle, label: &str, current: Option<&Url>, destination: &Url) -> bool {
+pub fn presentation_request(
+    app: &AppHandle,
+    label: &str,
+    current: impl FnOnce() -> Option<Url>,
+    destination: &Url,
+) -> bool {
     if !enabled(app) || label != MAIN_WINDOW {
         return false;
     }
-    let allowed = current.is_some_and(|url| caller_can_present(app, label, url));
-    if let Some(view) = presentation_view(destination) {
+    let view = presentation_view(destination);
+    let updates = destination.as_str() == crate::updater::OPEN_URL;
+    if view.is_none() && !updates {
+        return false;
+    }
+    // Wry's macOS URL getter has no value during the initial navigation.
+    // Presentation can only originate from an already loaded document; do not
+    // ask for its current URL when admitting bootstrap/ordinary navigation.
+    let allowed = current().is_some_and(|url| caller_can_present(app, label, &url));
+    if let Some(view) = view {
         if allowed {
             present(app, view);
         }
         return true;
     }
-    if destination.as_str() == crate::updater::OPEN_URL {
+    if updates {
         if allowed {
             crate::updater::trusted_decision(app.clone());
         }

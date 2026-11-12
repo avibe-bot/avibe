@@ -501,7 +501,7 @@ async fn cancellation_rolls_back_unpublished_credential_writes() {
 
 #[tokio::test]
 async fn restore_rejects_expired_or_different_account_and_erases_owned_credential() {
-    for changed_account in [false, true] {
+    for (changed_account, erase_failure) in [(false, false), (true, false), (false, true)] {
         let mut replies = first_factor();
         replies.push((
             "/api/desktop/session",
@@ -537,6 +537,7 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
                 Reply::Ready(response(401, json!({"error":"signed_out"}), None))
             },
         ));
+        f.private.2.store(erase_failure, Ordering::SeqCst);
         let restored = Coordinator::new(
             ClientState::new("小明的 Mac".into(), "0.1.0".into(), json!({})),
             f.store.load("unused").unwrap(),
@@ -549,7 +550,9 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
         let error = restored.restore_account().await.unwrap_err();
         assert_eq!(
             error.code,
-            if changed_account {
+            if erase_failure {
+                "credentials_unavailable"
+            } else if changed_account {
                 "account_changed"
             } else {
                 "signed_out"
@@ -557,12 +560,31 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
         );
         assert_eq!(restored.state().account.status, AccountStatus::SignedOut);
         assert!(restored.state().connection.committed.is_local());
-        assert!(f.private.0.lock().unwrap().is_empty());
-        assert!(f.store.load("unused").unwrap().account_id.is_none());
         assert_eq!(
             restored.state().enrollment.error_code.as_deref(),
             Some(error.code.as_str())
         );
+        if erase_failure {
+            assert!(!f.private.0.lock().unwrap().is_empty());
+            assert_eq!(
+                action(
+                    &restored,
+                    ClientAction::RequestOtp {
+                        email: "other@example.test".into()
+                    }
+                )
+                .await
+                .error
+                .unwrap()
+                .code,
+                "credentials_unavailable"
+            );
+            f.private.2.store(false, Ordering::SeqCst);
+            assert!(action(&restored, ClientAction::SignOut).await.ok);
+            assert!(restored.state().enrollment.error_code.is_none());
+        }
+        assert!(f.private.0.lock().unwrap().is_empty());
+        assert!(f.store.load("unused").unwrap().account_id.is_none());
     }
 }
 

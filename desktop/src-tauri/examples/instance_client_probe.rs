@@ -182,7 +182,7 @@ fn main() {
                     emit(json!({"event":"javascript","value":serde_json::from_str::<Value>(&data).unwrap_or(Value::String(data))}));
                     return false;
                 }
-                if instance_client::presentation_request(view.app_handle(),view.label(),view.url().ok().as_ref(),url) {
+                if instance_client::presentation_request(view.app_handle(),view.label(),||view.url().ok(),url) {
                     return false;
                 }
                 let allowed=instance_client::navigation(view.app_handle(),view.label(),url).unwrap_or_else(|| {
