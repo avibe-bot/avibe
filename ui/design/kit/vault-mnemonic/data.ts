@@ -49,3 +49,10 @@ export const WALLET_ACCOUNTS: WalletAccount[] = [
 
 /** The 150-byte Solana legacy message the shipped approval frames sign (vault/solana): 0.01 SOL. */
 export const SOLANA_TRANSFER_BYTES = 150;
+
+/** Account #0 of the `abandon … about` phrase with the BIP39 passphrase `TREZOR` (derived once). */
+export const IMPORTED_PASSPHRASE_ADDRESS_0: Triple = {
+  eth: '0x9c32F71D4DB8Fb9e1A58B0a80dF79935e7256FA6',
+  btc_taproot: 'bc1p3ryfth56dp058avv97ppn065ctsk263puvwp4rcka3wpg6cudp9qd3jsuu',
+  solana: '7zSmbu6gKkb6HB7UDPtHYjwCWuBHU1D4TpNZFm4sndQe',
+};

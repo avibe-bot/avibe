@@ -8,8 +8,9 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 
 import type { VaultHdAccount } from '@/context/ApiContext';
+import type { HdAccountAddresses, PhraseCheck } from '@/lib/vaultHdWallet';
 
-import { IMPORTED_ADDRESSES, path } from '../../../kit/vault-mnemonic/data';
+import { IMPORTED_ADDRESSES, IMPORTED_PASSPHRASE_ADDRESS_0, IMPORTED_WORDS, path } from '../../../kit/vault-mnemonic/data';
 import { DESIGN_NOW } from '../../../shell/clock';
 import { consolePage } from '../../workbench/fixtures';
 import { secret, vaultApi, vaultFixtures, vaultSecrets } from '../fixtures';
@@ -87,3 +88,20 @@ export const onCanvas = (body: ReactNode, width: number) => () => (
     <div style={{ width }}>{body}</div>
   </div>
 );
+
+/** The import panel's states, fixed: the phrase as pasted, its check, and #0 to compare. */
+export type ImportFixture = { text: string; check: PhraseCheck; passphrase: string; preview: HdAccountAddresses | null };
+const preview0 = (addresses: typeof IMPORTED_PASSPHRASE_ADDRESS_0): HdAccountAddresses => ({
+  account: 0, ...addresses, paths: { evm: path('evm', 0), bitcoin: path('bitcoin', 0), solana: path('solana', 0) },
+});
+export const importFixtures: Record<'valid' | 'passphrase' | 'unknownWord' | 'checksum', ImportFixture> = {
+  valid: { text: IMPORTED_WORDS.join(' '), check: { ok: true, words: IMPORTED_WORDS }, passphrase: '', preview: preview0(IMPORTED_ADDRESSES[0]) },
+  passphrase: { text: IMPORTED_WORDS.join(' '), check: { ok: true, words: IMPORTED_WORDS }, passphrase: 'TREZOR', preview: preview0(IMPORTED_PASSPHRASE_ADDRESS_0) },
+  unknownWord: {
+    text: IMPORTED_WORDS.map((w, i) => (i === 6 ? 'abandn' : w)).join(' '),
+    check: { ok: false, reason: 'unknown-word', position: 7, word: 'abandn', suggestions: ['abandon'] },
+    passphrase: '',
+    preview: null,
+  },
+  checksum: { text: IMPORTED_WORDS.map((w, i) => (i === 11 ? 'abandon' : w)).join(' '), check: { ok: false, reason: 'checksum' }, passphrase: '', preview: null },
+};

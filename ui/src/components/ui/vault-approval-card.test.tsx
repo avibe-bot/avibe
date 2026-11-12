@@ -716,3 +716,17 @@ it('does not sign with a wallet this browser blocked after a failed address chec
   unblockHdWallet('AGENT_WALLET');
 });
 
+it('shows a wallet Solana approval the account snapshot address in the message details too', async () => {
+  api.listVaultSecrets.mockResolvedValue({ secrets: [{ name: 'AGENT_WALLET' }] });
+  const snapshot = { account: 2, name: null, eth: '0xE', btc_taproot: 'bc1pB', solana: 'SoLsnapshotAddress111', paths: { evm: '', bitcoin: '', solana: "m/44'/501'/2'/0'" }, always_ask: true, last_signer: null };
+  const request = {
+    ...standardSignRequest, id: 'vrq_hd_sol', secret_name: 'AGENT_WALLET',
+    delivery: { message_hex: '0102', scheme: 'ed25519', derivation: { chain: 'solana', account: 2 }, signing_context: { kind: 'solana-message' } },
+    card: { request_type: 'sign', secret_name: 'AGENT_WALLET', kind: 'keypair', protection: 'standard', derivation: { chain: 'solana', account: 2 }, account: snapshot },
+  } as unknown as VaultRequest;
+  render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+  const details = screen.queryByRole('button', { name: i18n.t('vaults.approval.details') });
+  if (details) fireEvent.click(details);
+  expect(screen.getAllByText('SoLsnapshotAddress111').length).toBeGreaterThanOrEqual(2);
+});
+

@@ -335,6 +335,10 @@ export const VaultApprovalCard: React.FC<{
   // The last approval failed because avault needs its one-time Keychain authorization.
   const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
+  // The addresses this request signs as: a wallet's stored account snapshot, else the key's row.
+  const signingAddresses = hdDerivation
+    ? (hdAccount ? { eth: hdAccount.eth, btc_taproot: hdAccount.btc_taproot, solana: hdAccount.solana } : null)
+    : signAddresses;
   const [copiedDigest, setCopiedDigest] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
 
@@ -698,7 +702,7 @@ export const VaultApprovalCard: React.FC<{
         {isSign ? (
           <VaultSigningIdentity
             scheme={delivery.scheme}
-            addresses={hdDerivation ? (hdAccount ? { eth: hdAccount.eth, btc_taproot: hdAccount.btc_taproot, solana: hdAccount.solana } : null) : signAddresses}
+            addresses={signingAddresses}
             protectedKey={isProtected && isKeypair}
           />
         ) : null}
@@ -725,7 +729,7 @@ export const VaultApprovalCard: React.FC<{
           </DetailRow>
         ) : null}
         {isSign && signsMessage && typeof signInput === 'string' ? (
-          <SignMessage messageHex={signInput} scheme={delivery.scheme ?? 'ed25519'} address={signAddresses?.solana} />
+          <SignMessage messageHex={signInput} scheme={delivery.scheme ?? 'ed25519'} address={signingAddresses?.solana} />
         ) : isSign && typeof signInput === 'string' ? (
           <DetailRow label={t('vaults.approval.digest')}>
             <div className="flex min-w-0 flex-1 flex-col gap-1.5">
