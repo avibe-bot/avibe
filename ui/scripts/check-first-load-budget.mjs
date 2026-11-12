@@ -28,6 +28,15 @@ const BUDGETS = {
 const dist = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 const html = readFileSync(join(dist, 'index.html'), 'utf8');
 
+// The first screen draws only what the server sends: a cross-origin stylesheet,
+// script or preconnect would block or delay render on a third party the budget
+// cannot measure (the type tokens in src/index.css name local/system fonts).
+const crossOrigin = [...html.matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)="((?:https?:)?\/\/[^"]+)"/g)].map((m) => m[1]);
+if (crossOrigin.length) {
+  console.error(`check-first-load-budget: index.html loads from another origin: ${crossOrigin.join(', ')}`);
+  process.exit(1);
+}
+
 const attributeFiles = [...html.matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)="(\/assets\/[^"]+)"/g)].map((m) => m[1]);
 const firstScreen = html.match(/var L=(\{.*?\}),C=(\[.*?\]),d=document/);
 if (!firstScreen) {
