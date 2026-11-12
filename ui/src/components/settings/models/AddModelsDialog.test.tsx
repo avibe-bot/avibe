@@ -85,4 +85,44 @@ describe('AddModelsDialog', () => {
     await waitFor(() => expect(onAdded).toHaveBeenCalled());
     expect(write.mock.calls[0][1].models.map((row: { id: string }) => row.id)).toEqual(['opus-x', 'my-finetune']);
   });
+
+  it('sends a written model back through the re-ask when a ticked row\'s suppliers changed', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(supply as never);
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentModelCandidates')
+      .mockResolvedValueOnce(offering('src_a', 'Relay A'))
+      .mockResolvedValue(offering('src_b', 'Relay B'));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError('candidate_suppliers_changed', 'modelHub.errors.candidate_suppliers_changed', true))
+      .mockResolvedValue(supply as never);
+    const onAdded = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ToastContext.Provider value={{ showToast: vi.fn() }}>
+          <AddModelsDialog open backend="claude" onClose={vi.fn()} onAdded={onAdded} />
+        </ToastContext.Provider>
+      </I18nextProvider>,
+    );
+    const editor = () => screen.getByRole('dialog', { name: 'Add model' });
+
+    await user.click(await screen.findByRole('checkbox', { name: /opus-x/ }));
+    await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
+    await user.type(within(editor()).getByLabelText('Model'), 'my-finetune');
+    await user.click(within(editor()).getByRole('button', { name: 'Add model' }));
+
+    // Refused: the editor steps aside so today's supplier can be seen, still ticked.
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add model' })).toBeNull());
+    const row = await screen.findByRole('checkbox', { name: /opus-x/ });
+    await waitFor(() => expect(within(row).queryByText('Relay B')).toBeTruthy());
+    expect(row.getAttribute('aria-checked')).toBe('true');
+
+    // The written model comes back as it was left, and goes out with today's supplier.
+    await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
+    expect((within(editor()).getByLabelText('Model') as HTMLInputElement).value).toBe('my-finetune');
+    await user.click(within(editor()).getByRole('button', { name: 'Add model' }));
+    await waitFor(() => expect(onAdded).toHaveBeenCalled());
+    expect(write.mock.calls[1][1].models.map((model: { id: string }) => model.id)).toEqual(['opus-x', 'my-finetune']);
+    expect(write.mock.calls[1][1].expected_suppliers).toEqual({ 'opus-x': [{ source_id: 'src_b', model_id: 'opus-x' }] });
+  });
 });

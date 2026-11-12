@@ -46,6 +46,10 @@ export const AddModelsDialog: React.FC<{
   /** The editor, over the picker, with the rows the picker had ticked: they are
    *  saved with the written model, and still ticked if the editor is cancelled. */
   const [editing, setEditing] = React.useState<{ seedId: string; picks: ChosenCandidate[] } | null>(null);
+  /** A written model whose save was refused because a ticked row's suppliers
+   *  changed: the editor closes so the picker can show today's suppliers, and
+   *  reopens on this row. */
+  const [written, setWritten] = React.useState<BackendModel | undefined>(undefined);
   const [busy, setBusy] = React.useState(false);
   /** A refused agreement about suppliers is asked again: the picker re-reads its
    *  candidates and opens with the same models picked, showing today's suppliers. */
@@ -67,7 +71,7 @@ export const AddModelsDialog: React.FC<{
   const listed = React.useMemo(() => (held.length ? new Set(held.map((model) => model.id)) : NOTHING), [held]);
   const effortSuggestions = React.useMemo(() => [...new Set(held.flatMap((model) => model.reasoning_efforts))], [held]);
 
-  const add = (picks: ChosenCandidate[]) => {
+  const add = (picks: ChosenCandidate[], row?: BackendModel) => {
     if (busy || picks.length === 0) return;
     setBusy(true);
     void track(async () => {
@@ -75,10 +79,19 @@ export const AddModelsDialog: React.FC<{
       if (!result.ok) {
         // The picks stay on screen; the sentence says what to do about them.
         showToast(t(result.reason) as string, 'error');
-        if (result.reason === SUPPLIERS_CHANGED) setReask(new Set(picks.map((pick) => pick.candidate.id)));
+        if (result.reason === SUPPLIERS_CHANGED) {
+          // The refused projection must not be sent again from the editor, and the
+          // new suppliers are for the user to see: back to the picker, re-asked.
+          setReask(new Set(picks.filter((pick) => pick.candidate.id !== row?.id).map((pick) => pick.candidate.id)));
+          if (row) {
+            setWritten(row);
+            setEditing(null);
+          }
+        }
         return;
       }
       setEditing(null);
+      setWritten(undefined);
       await Promise.resolve(onAdded(result.ids, result.agent)).catch(() => undefined);
     }).finally(() => setBusy(false));
   };
@@ -95,6 +108,7 @@ export const AddModelsDialog: React.FC<{
           // A write in flight belongs to this dialog: it cannot be walked away from.
           if (busy) return;
           setEditing(null);
+          setWritten(undefined);
           onClose();
         }}
         onAdd={add}
@@ -106,11 +120,12 @@ export const AddModelsDialog: React.FC<{
           backend={backend}
           model={null}
           seedId={editing.seedId}
+          draftSeed={written}
           takenIds={listed}
           effortSuggestions={effortSuggestions}
           busy={busy}
-          onCancel={() => setEditing(null)}
-          onCommit={(row) => add([...editing.picks.filter((pick) => pick.candidate.id !== row.id), editedPick(row)])}
+          onCancel={() => { setEditing(null); setWritten(undefined); }}
+          onCommit={(row) => add([...editing.picks.filter((pick) => pick.candidate.id !== row.id), editedPick(row)], row)}
         />
       )}
     </>

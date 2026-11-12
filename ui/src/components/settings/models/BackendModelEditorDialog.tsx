@@ -125,6 +125,9 @@ export const BackendModelEditorDialog: React.FC<{
   /** What the picker's 「add as a custom model」 action carried over, so the
    *  editor opens on that query instead of asking for it a second time. */
   seedId?: string;
+  /** A row written here before and not yet saved, reopened in add mode as it was
+   *  left — a write refused for another reason does not cost what was typed. */
+  draftSeed?: BackendModel;
   /** Ids the draft catalog already holds; a second row may not claim one. */
   takenIds: ReadonlySet<string>;
   /** Effort values this backend's other rows already use. Suggestions, never a
@@ -134,7 +137,7 @@ export const BackendModelEditorDialog: React.FC<{
   busy?: boolean;
   onCancel: () => void;
   onCommit: (model: BackendModel) => void;
-}> = ({ open, backend, model, seedId, takenIds, effortSuggestions, busy = false, onCancel, onCommit }) => {
+}> = ({ open, backend, model, seedId, draftSeed, takenIds, effortSuggestions, busy = false, onCancel, onCommit }) => {
   const { t } = useTranslation();
   const creating = model === null;
   const [draft, setDraft] = React.useState<BackendModel>(() => model ?? blankBackendModel());
@@ -189,10 +192,10 @@ export const BackendModelEditorDialog: React.FC<{
     // id it lands as goes through the one chokepoint like every other produced
     // id — a seed that skipped it would be a row missing what that chokepoint
     // is the only place to give it, arriving by the one route nobody watches.
-    const next = model ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend);
+    const next = model ?? draftSeed ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend);
     seed(next);
-    setLookup(model === null ? seedId?.trim() ?? '' : '');
-  }, [backend, model, open, seed, seedId]);
+    setLookup(model === null && !draftSeed ? seedId?.trim() ?? '' : '');
+  }, [backend, draftSeed, model, open, seed, seedId]);
 
   /**
    * The typeahead: what has been typed so far, answered by models.dev.
