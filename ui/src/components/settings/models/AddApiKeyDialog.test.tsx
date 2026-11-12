@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
@@ -16,8 +17,10 @@ import type {
   TrackSourceMutation,
 } from './mutationSettlement';
 import {
+  CONTRACT_VERSION,
   type RouteHopRef,
   type Source,
+  type SourceObservation,
   type SupplyGap,
 } from './types';
 
@@ -124,7 +127,7 @@ const fillCredentials = async () => {
 
 /** Named by its label AND its own contents, so the name starts with 服务商 and
  *  continues with whichever vendor is currently chosen. */
-const vendorField = () => screen.getByRole('combobox', { name: /^(Vendor|服务商)(\s|$)/ });
+const vendorField = () => screen.getByRole('combobox', { name: /^(Provider|供应商)(\s|$)/ });
 const baseUrlInput = () => screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement;
 
 /** A catalog row read from the shipped file, so the case does not restate an id,
@@ -161,8 +164,31 @@ const clickConfirm = async (user: ReturnType<typeof userEvent.setup>) => {
   await user.click(await screen.findByRole('button', { name: CONFIRM }));
 };
 
+/** What the observation route answers when no format proves itself. */
+const unrecognisedObservation = (authenticated: 'unknown' | 'rejected' = 'unknown'): SourceObservation => ({
+  contract_version: CONTRACT_VERSION,
+  outcome: 'ambiguous' as const,
+  reachable: true,
+  authenticated,
+  protocol: null,
+  discovery: 'not_attempted' as const,
+  models: [],
+});
+
+const recognisedObservation = (protocol: 'anthropic' | 'openai_responses' | 'openai_chat'): SourceObservation => ({
+  ...unrecognisedObservation(),
+  outcome: 'observed' as const,
+  authenticated: 'authenticated' as const,
+  protocol,
+});
+
+/** Long enough for the debounce and the probe, short of the test timeout. */
+const DETECTION_WAIT = { timeout: 3000 };
+
 beforeEach(async () => {
   await i18n.changeLanguage('en');
+  // Detection would otherwise reach a real network from a custom endpoint test.
+  vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation());
   // The 服务商 picker anchors a popover over its trigger and scrolls the
   // highlighted row into view; jsdom implements neither measurement.
   vi.stubGlobal('ResizeObserver', class {
@@ -181,20 +207,94 @@ afterEach(() => {
 });
 
 describe('AddApiKeyDialog · save reconciliation', () => {
-  it('saves directly with a visible protocol and never performs automatic detection', async () => {
-    const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
+  it('stays open on a click outside, keeping the key being typed', async () => {
+    const { onClose } = renderDialog();
+    await userEvent.type(screen.getByLabelText('API key'), 'sk-typed');
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('API key') as HTMLInputElement).value).toBe('sk-typed');
+  });
+
+  it('saves the visible protocol at once, without waiting for detection', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
+      .mockReturnValue(new Promise<never>(() => undefined));
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
       source, added_to: [], adopted_by: [],
     });
     const { onAdded } = renderDialog();
     const user = await fillCredentials();
+    // The probe is in flight and never answers; the save does not care.
+    await waitFor(() => expect(observe).toHaveBeenCalledOnce(), DETECTION_WAIT);
     expect(screen.getByRole('button', { name: 'OpenAI Chat Completions' }).getAttribute('aria-pressed')).toBe('true');
     await clickConfirm(user);
     await waitFor(() => expect(onAdded).toHaveBeenCalledOnce());
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
       protocol: 'openai_chat', save_unverified: true, key: 'secret-key',
     }));
-    expect(observe).not.toHaveBeenCalled();
+  });
+
+  it('preselects the format the typed endpoint answers in, and saves it', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
+      .mockResolvedValue(recognisedObservation('anthropic'));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source, added_to: [], adopted_by: [],
+    });
+    renderDialog();
+    const user = await fillCredentials();
+    await screen.findByText('Recognised as Anthropic Messages', undefined, DETECTION_WAIT);
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: 'Anthropic Messages' }).getAttribute('aria-pressed'),
+    ).toBe('true'));
+    // Only the address and key the person typed are probed.
+    expect(observe).toHaveBeenCalledOnce();
+    expect(observe.mock.calls[0][0]).toEqual({
+      vendor: 'custom', base_url: 'https://relay.example/v1', key: 'secret-key',
+    });
+    await clickConfirm(user);
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0][0]).toMatchObject({ protocol: 'anthropic', save_unverified: true });
+  });
+
+  it.each([
+    ['unknown', /Couldn't recognise the format, so OpenAI Chat Completions is used/],
+    ['rejected', /The endpoint rejected this key/],
+  ] as const)('keeps the default when nothing answers (%s) and still saves a picked format', async (authenticated, note) => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation(authenticated));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source, added_to: [], adopted_by: [],
+    });
+    renderDialog();
+    const user = await fillCredentials();
+    await screen.findByText(note, undefined, DETECTION_WAIT);
+    expect(screen.getByRole('button', { name: 'OpenAI Chat Completions' }).getAttribute('aria-pressed')).toBe('true');
+    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
+    await clickConfirm(user);
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0][0]).toMatchObject({ protocol: 'openai_responses' });
+  });
+
+  it('never moves a format the person picked, even when detection answers later', async () => {
+    const answer = deferred<SourceObservation>();
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockReturnValue(answer.promise);
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source, added_to: [], adopted_by: [],
+    });
+    renderDialog();
+    const user = await fillCredentials();
+    await waitFor(() => expect(observe).toHaveBeenCalledOnce(), DETECTION_WAIT);
+    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
+    answer.resolve(recognisedObservation('anthropic'));
+    await waitFor(() => expect(screen.queryByText(/Detecting the API format/)).toBeNull());
+    expect(screen.getByRole('button', { name: 'OpenAI Responses' }).getAttribute('aria-pressed')).toBe('true');
+    await clickConfirm(user);
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0][0]).toMatchObject({ protocol: 'openai_responses' });
+  });
+
+  it('shows the host an unnamed custom endpoint will be called', async () => {
+    renderDialog();
+    await fillCredentials();
+    expect(screen.getByRole('textbox', { name: /^Name/ }).getAttribute('placeholder')).toBe('relay.example');
   });
 
   it.each(API_KEY_VENDOR_PRESETS)('saves $id with its catalog protocol without a connectivity gate', async (entry) => {
@@ -777,7 +877,7 @@ describe('AddApiKeyDialog · vendor accessibility', () => {
     const user = userEvent.setup();
 
     await user.click(vendorField());
-    const search = screen.getByPlaceholderText(/Search vendors|搜索服务商/);
+    const search = screen.getByPlaceholderText(/Search providers|搜索供应商/);
     await user.type(search, entry.label);
     await waitFor(() => expect(screen.getAllByRole('option').map((row) => row.textContent))
       .toEqual([expect.stringContaining(entry.label)]));
@@ -788,7 +888,7 @@ describe('AddApiKeyDialog · vendor accessibility', () => {
     await user.clear(search);
     await user.type(search, 'not-a-vendor');
     await waitFor(() => expect(screen.queryAllByRole('option')).toEqual([]));
-    expect(screen.getByText(/No vendor by that name|没有同名的服务商/)).toBeTruthy();
+    expect(screen.getByText(/No provider by that name|没有同名的供应商/)).toBeTruthy();
   });
 
 });

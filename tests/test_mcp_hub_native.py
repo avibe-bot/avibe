@@ -74,7 +74,8 @@ def test_add_writes_avibe_store_without_touching_native(native_files, runtime):
     before = claude.read_bytes()
     new = {"name": "fresh", "server": {"command": "/nonexistent/mcp-fresh"}}
     result = _run(runtime, "add", {"servers": [new]})
-    assert result["ok"] is False  # discovery failed, but the owned definition remains manageable
+    assert result["ok"] is True
+    assert result["added"][0]["warning"]["type"] == "connection"
     assert repository.read_avibe_definition("fresh") is not None
     assert repository.summarize("fresh")["state"] == "not_generated"
     assert claude.read_bytes() == before

@@ -63,9 +63,14 @@ advance the marker inside that revision's transaction. The runtime's supported
 reader set is separate from parsing a known old epoch for forward upgrade.
 
 C-alt's projection-aware reader shipped in `gh-v3.2.5rc19` with support for
-`{1, 2}` while retaining compatibility traces. Breaking revision `20261108_0083`
-activates epoch 2; it always takes the conservative upgrade snapshot on populated
-state, even in an activated build. The epoch/stamp commit together, without
+`{1, 2}` while retaining compatibility traces. The 3.2.6 reader bridge extends
+that admission set to `{1, 2, 3}` only for a full unknown exact future revision
+whose current required schema is present. It does not declare the current graph
+as epoch 3, advance the persisted marker, or authorize any writer suppression.
+The coordinated 3.2.7 boundary owns the epoch-3 breaking revision and must
+activate cache, Vault snapshot, and Skill catalog reference writes together.
+Breaking revision `20261108_0083` activates epoch 2; it always takes the
+conservative upgrade snapshot on populated state, even in an activated build. The epoch/stamp commit together, without
 backfilling or deleting any history. Only exact supported committed Vibey calls
 may then omit their redundant trace, and only with an epoch-2 predecessor proof.
 Unmarked/unknown/non-Vibey and routed-scope fallback paths retain single-copy
@@ -228,9 +233,15 @@ def upgrade() -> None:
 The finite allowlist is non-unique indexes on plain columns, independent new
 column-only tables, and nullable or non-null literal-server-default columns.
 Existing-table uniqueness, foreign keys, checks, generated columns, expression
-indexes, rowid-alias-shadowing columns, triggers, raw SQL, helpers, conditionals,
-rebuild/drop/rename, unknown constructors/options and module-level work are not
-proven. Type sizes/precision must be literal integers: SQLAlchemy accepting a
+indexes, rowid-alias-shadowing columns, general triggers, raw SQL, helpers,
+conditionals, rebuild/drop/rename, unknown constructors/options and module-level
+work are not proven. The sole trigger exception is the mechanically matched
+Message-search journal bundle, accompanied by its new independent journal and
+integer-keyed activation tables. Its bounded id-only writes do not invoke FTS or
+change accepted Message writes; the optional index is built after readiness.
+See [the search contract](../plans/message-search-fts5.md) and its real old-writer,
+crash/resume and negative-classifier tests. Type sizes/precision must be literal
+integers: SQLAlchemy accepting a
 string constructor argument does not make its emitted DDL safe. A function or
 module annotation/default that could run code is also not proof. Extend this allowlist
 only with actual operation and old-writer tests, not a label exemption.

@@ -124,39 +124,52 @@ describe('McpHubSection project view', () => {
     expect(within(detail()).getByText(en.mcpHub.pendingApprovalHint)).toBeTruthy();
     expect(actions('tokened')).toEqual([en.mcpHub.configure, en.mcpHub.remove]);
     expect(within(detail()).getByText(en.mcpHub.needsConfigHint.replace('{{names}}', 'API_TOKEN'))).toBeTruthy();
-    expect(actions('stale')).toEqual([en.mcpHub.toolsToggle.replace('{{count}}', '0'), en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
-    expect(actions('ready')).toEqual([en.mcpHub.toolsToggle.replace('{{count}}', '1'), en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
+    expect(actions('stale')).toEqual([en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
+    expect(actions('ready')).toEqual([en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
     // The inherited global row is view-only here; manage it in the Global tab.
-    expect(actions('echo')).toEqual([en.mcpHub.toolsToggle.replace('{{count}}', '0')]);
+    expect(actions('echo')).toEqual([]);
     expect(within(rowButton('echo')).queryByRole('link')).toBeNull();
     expect(within(detail()).queryByRole('link')).toBeNull();
   });
 
-  it('collapses tools by default, toggles the list, and resets when another server opens', async () => {
+  it('shows the first five tools and folds the rest until asked, per opened server', async () => {
+    const tools = (count: number, prefix: string) => Array.from({ length: count }, (_, i) => ({ name: `${prefix}-${i + 1}` }));
+    api.listMcpServers.mockResolvedValue({
+      ok: true,
+      oauthMode: 'direct',
+      servers: [
+        row('seven', 'ok', { toolCount: 7, tools: tools(7, 'seven') }),
+        row('also-seven', 'ok', { toolCount: 7, tools: tools(7, 'also') }),
+        row('three', 'ok', { toolCount: 3, tools: tools(3, 'three') }),
+      ],
+    });
     renderHub();
-    await screen.findByText('ready');
-    fireEvent.click(rowButton('ready'));
+    await screen.findByText('seven');
+    const shown = (panel: HTMLElement, prefix: string) =>
+      within(panel).queryAllByText(new RegExp(`^${prefix}-\\d$`)).map((node) => node.textContent);
+    const showMore = (count: number) => en.mcpHub.toolsShowMore.replace('{{count}}', String(count));
 
+    fireEvent.click(rowButton('seven'));
     const panel = detail();
-    const toolsToggle = within(panel).getByRole('button', { name: `${en.mcpHub.toolsToggle.replace('{{count}}', '1')}` });
-    expect(toolsToggle.getAttribute('aria-expanded')).toBe('false');
-    expect(within(panel).queryByText('search')).toBeNull();
-    expect(within(panel).getByText(en.mcpHub.callHint.replace('{{name}}', 'ready'))).toBeTruthy();
+    expect(within(panel).getByText(en.mcpHub.toolsHeader.replace('{{count}}', '7'))).toBeTruthy();
+    expect(shown(panel, 'seven')).toEqual(['seven-1', 'seven-2', 'seven-3', 'seven-4', 'seven-5']);
+    const more = within(panel).getByRole('button', { name: showMore(2) });
+    expect(more.getAttribute('aria-expanded')).toBe('false');
 
-    fireEvent.click(toolsToggle);
-    expect(toolsToggle.getAttribute('aria-expanded')).toBe('true');
-    expect(within(panel).getByText('search')).toBeTruthy();
+    fireEvent.click(more);
+    expect(shown(panel, 'seven')).toHaveLength(7);
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    expect(more.textContent).toBe(en.mcpHub.toolsShowLess);
 
-    fireEvent.click(rowButton('other-ready'));
+    fireEvent.click(rowButton('also-seven'));
     const otherPanel = detail();
-    const otherToggle = within(otherPanel).getByRole('button', { name: `${en.mcpHub.toolsToggle.replace('{{count}}', '1')}` });
-    expect(otherToggle.getAttribute('aria-expanded')).toBe('false');
-    expect(within(otherPanel).queryByText('fetch')).toBeNull();
+    expect(shown(otherPanel, 'also')).toHaveLength(5);
+    expect(within(otherPanel).getByRole('button', { name: showMore(2) }).getAttribute('aria-expanded')).toBe('false');
 
-    fireEvent.click(otherToggle);
-    expect(within(otherPanel).getByText('fetch')).toBeTruthy();
-    fireEvent.click(otherToggle);
-    expect(within(otherPanel).queryByText('fetch')).toBeNull();
+    fireEvent.click(rowButton('three'));
+    const smallPanel = detail();
+    expect(shown(smallPanel, 'three')).toEqual(['three-1', 'three-2', 'three-3']);
+    expect(within(smallPanel).queryByRole('button', { expanded: false })).toBeNull();
   });
 
   it.each(['project', 'global'])('configures changed or cleared maps in %s without showing stored values', async (scope) => {
@@ -257,13 +270,7 @@ describe('McpHubSection project view', () => {
     for (const name of ['pending', 'tokened', 'stale', 'ready']) {
       fireEvent.click(rowButton(name));
       const buttons = within(detail()).getAllByRole('button').map((node) => node.textContent);
-      expect(buttons.filter((text) => text)).toEqual(
-        name === 'ready'
-          ? [en.mcpHub.toolsToggle.replace('{{count}}', '1')]
-          : name === 'stale'
-            ? [en.mcpHub.toolsToggle.replace('{{count}}', '0')]
-            : [],
-      );
+      expect(buttons.filter((text) => text)).toEqual([]);
     }
   });
 

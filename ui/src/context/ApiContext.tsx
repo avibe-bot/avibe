@@ -27,6 +27,11 @@ import { mcpPath } from '../lib/mcpPath';
 import { parseHomePreferences, type HomePreferences } from '../lib/homePreferences';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
+import {
+  nativeDirectBaselineState,
+  onNativeDirectClosure,
+  subscribeNativeDirectBaseline,
+} from '../lib/native';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
@@ -62,6 +67,7 @@ import {
   type SessionDraftWrite,
 } from '../lib/sessionDraftPersistence';
 import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
+import { useLatestRef } from '../lib/useLatestRef';
 import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
 import {
   configMutationsToPayload,
@@ -1040,7 +1046,7 @@ export type ApiContextType = {
     saved?: string[];
     name?: string;
     toolCount?: number;
-    added?: { name: string; toolCount?: number; auth?: McpServerSummary['auth'] }[];
+    added?: { name: string; toolCount?: number; auth?: McpServerSummary['auth']; state?: string; warning?: McpError }[];
     unchanged?: { name: string; auth?: McpServerSummary['auth'] }[];
     failed?: { name: string; error?: string; type?: string }[];
   }>;
@@ -2696,7 +2702,12 @@ export const useApi = () => {
 
 export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { showToast } = useToast();
+  // Read through a ref, never a memo dependency: `t` is replaced on every language
+  // change, and a value memoized on it handed every `useApi()` consumer a new
+  // identity and re-ran their effects (AuthGuard's setup check unmounted the
+  // wizard back to its first screen). Messages are localized when produced.
   const { t } = useTranslation();
+  const tRef = useLatestRef(t);
   const readCacheRef = useRef(new Map<string, {
     expiresAt: number;
     promise: Promise<any>;
@@ -2741,6 +2752,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const resumeWorkbenchEventsRef = useRef<PageReactivationListener>(() => {});
+  const rebuildWorkbenchEventsRef = useRef<() => void>(() => {});
+  const openWorkbenchEventsRef = useRef<() => void>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
@@ -2774,7 +2787,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // key like ``errors.[object Object]``.
         errorCode = parsed.code;
         errorMessage = parsed.code
-          ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+          ? tRef.current(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
           : parsed.fallback;
       }
     } catch {
@@ -3228,6 +3241,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventHandlersRef.current.size === 0 ||
       document.visibilityState !== 'visible'
     ) return;
+    // Inside a native shell with the `direct` capability, no stream opens
+    // until this document has a valid direct baseline: a closure from before
+    // the stream existed must not be taken for one to act on, and the shell
+    // may not be ready for new connections yet. Until then the connection
+    // state stays `reconnecting`, the same not-live state as any outage, and
+    // the stream opens when the baseline becomes ready (subscribed below).
+    // Without the capability there is nothing to wait for.
+    const directState = nativeDirectBaselineState();
+    if (directState === 'pending' || directState === 'unavailable') return;
 
     let source: EventSource;
     try {
@@ -3603,6 +3625,29 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
   resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
 
+  /**
+   * The native shell closed connections for this origin because their path
+   * was lost (a new `closure`). It cannot say whether this stream was on that
+   * path, so the stream is rebuilt even if it was healthy: it ends the way any
+   * lost stream ends, and the loop reconnects at once instead of sitting out a
+   * backoff. The replacement's handshake announces the gap, so consumers catch
+   * up exactly as they do after an ordinary reconnect. A hidden page opens its
+   * replacement when it returns.
+   *
+   * Nothing but the stream is rebuilt here. A request in flight completes or
+   * fails by itself and is never sent again. A change of the preferred path
+   * alone does not come here.
+   */
+  const rebuildWorkbenchEventsAfterClosure = () => {
+    if (eventHandlersRef.current.size === 0) return;
+    failWorkbenchEventStream();
+    getWorkbenchEventReconnectLoop().wake();
+  };
+  rebuildWorkbenchEventsRef.current = rebuildWorkbenchEventsAfterClosure;
+  openWorkbenchEventsRef.current = () => {
+    if (nativeDirectBaselineState() === 'ready') ensureWorkbenchEventSource();
+  };
+
   useEffect(() => {
     const wakeIfVisible: PageReactivationListener = (awaySince) => {
       if (document.visibilityState !== 'visible') return;
@@ -3615,9 +3660,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const wakeFromNetwork = () => wakeIfVisible(null);
     const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeFromNetwork);
+    const stopDirectClosures = onNativeDirectClosure(() => rebuildWorkbenchEventsRef.current());
+    const stopDirectBaseline = subscribeNativeDirectBaseline(() => openWorkbenchEventsRef.current());
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       stopReactivation();
+      stopDirectClosures();
+      stopDirectBaseline();
       window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();
     };
@@ -3827,7 +3876,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return last;
       }
     }
-    return { ...last, ok: false, status: 'failed', message: t('settings.dependencies.installFailed') };
+    return { ...last, ok: false, status: 'failed', message: tRef.current('settings.dependencies.installFailed') };
   };
 
   const startAndPollAgentInstall = async (name: string): Promise<InstallResult> => {
@@ -3856,7 +3905,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...last,
       ok: false,
       status: 'failed',
-      message: t('backendLifecycle.upgradeFailed'),
+      message: tRef.current('backendLifecycle.upgradeFailed'),
     };
   };
 
@@ -3879,11 +3928,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // disabled buttons, setter guards) didn't help because the click
   // wasn't the trigger — the cascading re-render was.
   //
-  // ``[showToast, t]`` are intentional deps: ``showToast`` is stable
-  // (``useCallback`` in ToastContext) so it never invalidates by
-  // itself; ``t`` only changes on locale switch — recomputing then
-  // is correct (cached error messages would otherwise stay in the
-  // old language).
+  // ``showToast`` is stable (``useCallback`` in ToastContext) and
+  // ``t`` is read through ``tRef``, so neither invalidates the value: a
+  // language switch keeps ``api`` as it is.
   const value: ApiContextType = useMemo(() => ({
     getConfig: (options) => (options?.cache === false
       ? getJson('/api/config')
@@ -4286,7 +4333,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         return payloadJson;
       } catch (error) {
-        if (!(error instanceof ApiError)) showToast(t('errors.invalid_project_order'), 'error');
+        if (!(error instanceof ApiError)) showToast(tRef.current('errors.invalid_project_order'), 'error');
         throw error;
       }
     },
@@ -4978,7 +5025,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     },
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
-  }), [sessionDraftPersistence, showToast, t]);
+  }), [sessionDraftPersistence, showToast, tRef]);
 
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;
 };

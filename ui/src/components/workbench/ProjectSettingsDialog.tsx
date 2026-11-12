@@ -110,7 +110,7 @@ export const ProjectSettingsDialog: React.FC<{
   return (
     <>
       <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-        <DialogContent className="max-w-md">
+        <DialogContent keepOnOutsideClick className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t('projectSettings.title')}</DialogTitle>
             <DialogDescription>{t('projectSettings.description')}</DialogDescription>

@@ -170,6 +170,64 @@ def test_selected_cli_health_refusal_recovers_through_setup_http(monkeypatch, tm
     assert commands.calls and {path for _backend, path in commands.calls} == {str(selected)}
 
 
+def test_setup_finishes_without_a_provider_closed_loop(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-161 — 「稍后再配」 through the real config boundary.
+
+    A fresh install with no Model Hub source sends the one write the Wizard's
+    Set up later sends, then reads back what the shell and the home read: the
+    config's own setup projection, and the main Bot's backend connection whose
+    `auth` is what the home's model card keys on.
+    """
+    from vibe import api, internal_client
+
+    monkeypatch.setattr(
+        internal_client, "reconcile_platforms",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True}}),
+    )
+    # The controller answers that the backend's config is applied; what the home
+    # reads from the connection is the supply verdict, not process state.
+    monkeypatch.setattr(
+        internal_client, "backend_application",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "state": "applied", "controller_pid": 123}}),
+    )
+    monkeypatch.setattr(api, "_backend_apply_receipts", {})
+    monkeypatch.setattr(
+        ui_server, "_schedule_service_restart_for_config_fallback",
+        Mock(side_effect=AssertionError("unexpected restart")),
+    )
+    V2Config.default().save()
+    client = app.test_client()
+    runner = ScenarioRunner(SimpleNamespace())
+
+    def fresh(_h):
+        envelope = client.get("/api/config").get_json()
+        assert envelope["setup_completed"] is False
+        assert envelope["setup_state"]["needs_setup"] is True
+        assert V2Config.load().model_hub.sources == []
+
+    def later(_h):
+        response = client.post("/api/config", json={"setup_completed": True}, headers=csrf_headers(client))
+        assert response.status_code == 200, response.get_json()
+
+    def read_back(_h):
+        envelope = client.get("/api/config").get_json()
+        assert envelope["setup_completed"] is True
+        assert envelope["setup_state"]["needs_setup"] is False
+        saved = V2Config.load()
+        # Finishing chose nothing about supply.
+        assert saved.model_hub.sources == []
+
+    def home_sees_no_model(_h):
+        response = client.get("/api/backend/vibey/connection")
+        assert response.status_code == 200, response.get_json()
+        # `auth: none` is what the home's Getting started reads as "Give Vibey a model".
+        assert response.get_json()["auth"] == "none"
+
+    steps = [("fresh", fresh), ("later", later), ("read_back", read_back), ("home_sees_no_model", home_sees_no_model)]
+    asyncio.run(runner.run(*(ScenarioStep(name, action) for name, action in steps)))
+    ScenarioExpect.step_history(runner, [name for name, _ in steps])
+
+
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
     catalog = yaml.safe_load((ROOT / "tests/scenarios/auth_setup/catalog.yaml").read_text())
     live_ids = {scenario["id"] for scenario in catalog["scenarios"]}
@@ -4380,7 +4438,7 @@ def test_api_key_setup_does_not_schedule_a_model(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     state_store = EngineStateStore(tmp_path / "engine-state")
-    transport = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    transport = CLIProxyEngineAdapter(supervisor=Mock(lifecycle=None, _published_release=None), state_store=state_store)
     service, store, adapter = _service(tmp_path)
     # Keep engine lifecycle simulated; exercise real credential custody, HTTP
     # observation, inventory discovery, and Source admission together.
@@ -4541,6 +4599,123 @@ def test_api_key_setup_does_not_schedule_a_model(
     asyncio.run(scenario())
 
 
+def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-164
+
+    The wizard's key, carried through real credential custody and real model
+    listing: saved unverified, checked and refused with the provider's 401,
+    replaced by another refused key without losing the stored one, replaced by
+    the right key, checked again, and removed.
+    """
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    transport = CLIProxyEngineAdapter(supervisor=Mock(lifecycle=None, _published_release=None), state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    # Engine lifecycle stays simulated; custody, listing and replacement are real.
+    for method in (
+        "provision_credential", "credential_auth_scheme", "revoke_credential",
+        "revoke_api_key_credential", "discover_models",
+    ):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+
+    right_key, wrong_key, other_wrong_key = "right-test-key", "wrong-test-key", "other-wrong-test-key"
+
+    async def scenario():
+        presented = []
+
+        async def models(request):
+            supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
+            presented.append(supplied)
+            if supplied != right_key:
+                return web.json_response({"error": {
+                    "code": "invalid_api_key", "message": "This key cannot list models.",
+                }}, status=401)
+            return web.json_response({"data": [{"id": "relay-model-a"}, {"id": "relay-model-b"}]})
+
+        upstream_app = web.Application()
+        upstream_app.router.add_get("/v1/models", models)
+        web_runner = web.AppRunner(upstream_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        harness = SimpleNamespace(source_id=None)
+        runner = ScenarioRunner(harness)
+
+        def stored_key(h):
+            [source] = store.config.sources
+            return state_store.read_api_key(source.credential_ref)
+
+        async def save_wrong_key(h):
+            # What the wizard's key form sends: saved without verification.
+            created = (await service.create_source({
+                "kind": "api_key", "vendor": "custom", "protocol": "openai_chat",
+                "base_url": f"http://127.0.0.1:{port}", "key": wrong_key, "save_unverified": True,
+            }))["source"]
+            h.source_id = created["id"]
+            assert created["state"]["status"] == "standby"
+            assert created["verification_pending"]
+            assert created["models"] == []
+
+        async def check_names_the_refusal(h):
+            with pytest.raises(ModelHubError) as refused:
+                await service.refresh_source(h.source_id)
+            assert refused.value.code == "discovery_failed"
+            assert refused.value.detail == "modelHub.errors.authentication_failed"
+            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
+            assert store.config.sources[0].state.status == "error"
+
+        async def refused_replacement_keeps_the_key(h):
+            with pytest.raises(ModelHubError) as refused:
+                await service.replace_credential(h.source_id, {"key": other_wrong_key})
+            assert refused.value.detail == "modelHub.errors.authentication_failed"
+            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
+            assert stored_key(h) == wrong_key
+
+        async def right_replacement_lists_models(h):
+            replaced = (await service.replace_credential(h.source_id, {"key": right_key}))["source"]
+            assert [model["id"] for model in replaced["models"]] == ["relay-model-a", "relay-model-b"]
+            assert replaced["state"]["status"] == "standby"
+            assert stored_key(h) == right_key
+
+        async def check_passes(h):
+            refreshed = (await service.refresh_source(h.source_id))["source"]
+            assert len([model for model in refreshed["models"] if not model.get("retired")]) == 2
+
+        async def remove(h):
+            try:
+                await service.delete_source(h.source_id)
+            except ModelHubError as guarded:
+                await service.delete_source(
+                    h.source_id,
+                    force=True,
+                    confirmed_remove_hops=guarded.data.get("would_remove_hops"),
+                    confirmed_interruptions=guarded.data.get("would_interrupt"),
+                )
+            assert store.config.sources == []
+
+        steps = [
+            ("save_wrong_key", save_wrong_key),
+            ("check_names_the_refusal", check_names_the_refusal),
+            ("refused_replacement_keeps_the_key", refused_replacement_keeps_the_key),
+            ("right_replacement_lists_models", right_replacement_lists_models),
+            ("check_passes", check_passes),
+            ("remove", remove),
+        ]
+        try:
+            await runner.run(*(ScenarioStep(name, action) for name, action in steps))
+            ScenarioExpect.step_history(runner, [name for name, _ in steps])
+            assert set(presented) == {wrong_key, other_wrong_key, right_key}
+        finally:
+            await web_runner.cleanup()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("status", "body"),
     [
@@ -4637,7 +4812,7 @@ def test_hub_oauth_model_free_observation_closed_loop(
 
     client = Mock()
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
     service, store, adapter = _service(tmp_path)
@@ -4692,6 +4867,105 @@ def test_hub_oauth_model_free_observation_closed_loop(
         ScenarioStep("materialize_source", materialize_source),
     ))
     ScenarioExpect.step_history(runner, ["start_login", "complete_consent", "materialize_source"])
+
+
+def test_hub_oauth_loopback_callback_signs_in_without_a_paste(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-165
+
+    A browser on the Avibe machine signs in. The provider redirects it to the
+    loopback callback, where the engine's forwarder (started because Avibe asks
+    for every sign-in as a Web-UI one) hands the grant to the engine. Avibe never
+    receives a paste: its status poll alone sees the sign-in and materializes the
+    subscription Source, which is what lets the dialog fold the paste field.
+    """
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    auth_name = "codex-account-loopback.json"
+    engine = SimpleNamespace(files=[], posted=[], fields=[], start_queries=[], signed_in=False)
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": list(engine.files)}
+        if path == "/codex-auth-url":
+            engine.start_queries.append(dict(query or {}))
+            return {
+                "state": "loopback-state",
+                "url": "https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=loopback-state",
+            }
+        if path == "/get-auth-status":
+            assert query == {"state": "loopback-state"}
+            return {"status": "ok" if engine.signed_in else "wait"}
+        if path == "/oauth-callback":
+            engine.posted.append(dict(payload))
+            return {"status": "ok"}
+        if (method, path) == ("PATCH", "/auth-files/fields"):
+            engine.fields.append(dict(payload))
+            return {"status": "ok"}
+        raise AssertionError((method, path))
+
+    def forwarder_delivers_the_redirect():
+        # What the engine does once its loopback forwarder receives the browser's
+        # redirect: exchange the code and save the grant as an auth file.
+        state_store._secure_write_json(
+            state_store.auth_dir / auth_name,
+            {"type": "codex", "access_token": "test-access", "refresh_token": "test-refresh"},
+        )
+        engine.files.append({
+            "id": auth_name, "auth_index": "auth-index-loopback", "name": auth_name, "provider": "codex",
+            "account": "user@example.test", "id_token": {"chatgpt_account_id": "account-test"},
+        })
+        engine.signed_in = True
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock(lifecycle=None, _published_release=None)
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    for method in ("start_oauth", "oauth_status", "submit_oauth", "cancel_oauth"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+    submitted = Mock(side_effect=AssertionError("a loopback sign-in needs no paste"))
+    monkeypatch.setattr(service, "oauth_submit", submitted)
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+        h.source_id = started["flow"]["source_id"]
+        presentation = started["flow"]["presentation"]
+        assert presentation["expects"] == "paste_callback_url"
+        # The redirect the dialog reads to know the callback can come back by itself.
+        assert "redirect_uri=http%3A%2F%2Flocalhost%3A1455" in presentation["auth_url"]
+        assert engine.start_queries == [{"is_webui": "true"}]
+        assert (await service.oauth_status(h.flow_id))["flow"]["state"] == "awaiting_action"
+
+    async def browser_signs_in_on_this_machine(h):
+        forwarder_delivers_the_redirect()
+
+    async def poll_materializes_source(h):
+        terminal = await service.oauth_status(h.flow_id)
+        assert terminal["flow"]["state"] == "success"
+        source = terminal["source"]
+        assert source["id"] == h.source_id
+        assert (source["vendor"], source["kind"], source["supply_channel"]) == ("openai", "subscription", "hub")
+        assert source["credential_ref"] == state_store.oauth_credential_ref(auth_name)
+        assert [listed["id"] for listed in service.list_sources()] == [h.source_id]
+        # Nothing reached the engine through Avibe: no paste, no callback post.
+        assert engine.posted == []
+        submitted.assert_not_called()
+
+    steps = [
+        ("start_login", start_login),
+        ("browser_signs_in_on_this_machine", browser_signs_in_on_this_machine),
+        ("poll_materializes_source", poll_materializes_source),
+    ]
+    asyncio.run(runner.run(*(ScenarioStep(name, action) for name, action in steps)))
+    ScenarioExpect.step_history(runner, [name for name, _ in steps])
 
 
 def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(monkeypatch, tmp_path):
@@ -4753,7 +5027,7 @@ def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(mo
 
     client = Mock()
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
     service, store, adapter = _service(tmp_path)
@@ -4829,7 +5103,7 @@ def test_custom_auto_policy_response_cannot_reject_or_exclude_credentials(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     transport = CLIProxyEngineAdapter(
-        supervisor=Mock(), state_store=EngineStateStore(tmp_path / "engine-state"),
+        supervisor=Mock(lifecycle=None, _published_release=None), state_store=EngineStateStore(tmp_path / "engine-state"),
     )
     service, store, adapter = _service(tmp_path)
     for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source"):
@@ -5424,6 +5698,192 @@ def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp
         assert completed.status_code == 200, completed.get_json()
         assert V2Config.load().setup_completed
         assert agents.get_default_agent().name == vibey["name"]
+    finally:
+        agents.close()
+
+
+def test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes_setup(monkeypatch, tmp_path):
+    """AUTH-SETUP-163: CLI card's Default model -> candidates -> catalog write -> Agent model -> runnable route -> completion.
+
+    In the setup wizard a Hub-owned CLI assistant's Default model card opens the model
+    picker instead of the route editor. Its Agent starts on a model no provider supplies,
+    so its route is unconfigured; the pick reads the backend's candidates, adds the model
+    its catalog lacks with the suppliers it displayed, names it as the Agent's model, and
+    the Agent can then run and setup completes on it. Every step is the HTTP route the
+    card calls; the Hub service is wired to the real Agent store.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    config = V2Config.default()
+    config.agents.claude.enabled = True
+    config.save()
+    service, store, _adapter = _service(tmp_path / "hub")
+    agents = VibeAgentStore()
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    source = ModelHubSourceConfig(
+        id="src_claude161",
+        kind="api_key",
+        vendor="custom",
+        display_name="Mock Relay",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model, provenance="discovered") for model in ("relay-opus", "relay-sonnet")],
+        credential_ref="cred_claude161",
+    )
+    store.config.sources = [source]
+    store.config.agents["claude"].sources.order = [source.id]
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        listed = client.get("/api/agents?include_disabled=1").get_json()
+        claude = next(row for row in listed["agents"] if row["backend"] == "claude" and row["bot"] is None)
+        # The card's Agent sits on a model nothing supplies: its route has no hop yet.
+        unsupplied = client.patch(f"/api/agents/{claude['name']}", json={"model": "not-supplied"}, headers=headers)
+        assert unsupplied.status_code == 200, unsupplied.get_json()
+
+        def claude_supply():
+            rows = client.get("/api/models/agents").get_json()["agents"]
+            return next(row for row in rows if row["backend"] == "claude")
+
+        def claude_route():
+            return next(row for row in claude_supply()["named_agents"] if row["name"] == claude["name"])
+
+        assert claude_route()["supply_status"] not in {"ok", "degraded"}
+
+        candidates = client.get("/api/models/agents/claude/models/candidates").get_json()["candidates"]
+        pick = next(row for row in candidates["providers"] if row["id"] == "relay-sonnet")
+        suppliers = [{"source_id": row["source_id"], "model_id": row["model_id"]} for row in pick["suppliers"]]
+        assert suppliers == [{"source_id": source.id, "model_id": "relay-sonnet"}]
+
+        baseline = claude_supply()["catalog_models"]
+        added = {
+            "id": pick["id"], "display_name": pick["display_name"], "origin": pick["origin"],
+            "models_dev_id": None, "context_window": None, "max_output_tokens": None,
+            "input_modalities": [], "output_modalities": [], "supports_tools": None,
+            "supports_reasoning": None, "reasoning_efforts": list(pick["reasoning_efforts"]),
+            "locked": False, "routeable": True,
+        }
+        written = client.put(
+            "/api/models/agents/claude/models",
+            json={"baseline": baseline, "models": [*baseline, added], "expected_suppliers": {"relay-sonnet": suppliers}},
+            headers=headers,
+        )
+        assert written.status_code == 200, written.get_json()
+        assert "relay-sonnet" in [row["id"] for row in claude_supply()["catalog_models"]]
+
+        named = client.patch(f"/api/agents/{claude['name']}", json={"model": "relay-sonnet"}, headers=headers)
+        assert named.status_code == 200, named.get_json()
+        assert agents.require(claude["name"]).model == "relay-sonnet"
+        route = claude_route()
+        assert route["effective_model_id"] == "relay-sonnet"
+        assert route["supply_status"] in {"ok", "degraded"}
+        assert route["route_reason"] != "route_unconfigured"
+
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+    finally:
+        agents.close()
+
+
+@pytest.mark.parametrize(
+    ("model_id", "origin", "row"),
+    [
+        # A model the catalog knows that no provider lists, described by the catalog.
+        ("mock-xl", "models_dev", {"display_name": "Mock XL", "models_dev_id": "mocklab/mock-xl",
+                                    "context_window": 400000, "max_output_tokens": 64000,
+                                    "input_modalities": ["text"], "output_modalities": ["text"],
+                                    "supports_tools": True, "supports_reasoning": True,
+                                    "reasoning_efforts": ["low", "high"]}),
+        # An ID typed when nothing matched, on the custom-model editor's defaults.
+        ("my-finetune-v3", "manual", {"display_name": None, "models_dev_id": None,
+                                      "context_window": None, "max_output_tokens": None,
+                                      "input_modalities": ["text"], "output_modalities": ["text"],
+                                      "supports_tools": True, "supports_reasoning": False,
+                                      "reasoning_efforts": []}),
+    ],
+)
+def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_path, model_id, origin, row):
+    """AUTH-SETUP-166: unlisted pick -> catalog write with no supplier promise -> Agent model -> runnable route -> completion.
+
+    The setup picker also offers what no provider lists: a catalog model, or the ID the
+    user typed. Neither showed a supplier, so the catalog write states no expectation for
+    it; the API-key provider receives the ID as it is, which makes the built-in Agent
+    runnable and lets setup finish on it. Every step is the HTTP route the picker calls.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    V2Config.default().save()
+    service, store, _adapter = _service(tmp_path / "hub")
+    agents = VibeAgentStore()
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    source = ModelHubSourceConfig(
+        id="src_vibey164",
+        kind="api_key",
+        vendor="custom",
+        display_name="Mock Lab",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model, provenance="discovered") for model in ("mock-large", "mock-mini")],
+        credential_ref="cred_vibey164",
+    )
+    store.config.sources = [source]
+    store.config.agents["vibey"].sources.order = [source.id]
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        listed = client.get("/api/agents").get_json()
+        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey" and row["bot"] is None)
+        candidates = client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]
+        offered = {row["id"] for group in candidates.values() for row in group}
+        assert model_id not in offered
+
+        def vibey_supply():
+            rows = client.get("/api/models/agents").get_json()["agents"]
+            return next(row for row in rows if row["backend"] == "vibey")
+
+        baseline = vibey_supply()["catalog_models"]
+        added = {"id": model_id, "origin": origin, "locked": False, "routeable": True, **row}
+        written = client.put(
+            "/api/models/agents/vibey/models",
+            json={"baseline": baseline, "models": [*baseline, added]},
+            headers=headers,
+        )
+        assert written.status_code == 200, written.get_json()
+        saved = next(row for row in vibey_supply()["catalog_models"] if row["id"] == model_id)
+        assert saved["origin"] == origin
+        assert saved["context_window"] == row["context_window"]
+
+        named = client.patch(f"/api/agents/{vibey['name']}", json={"model": model_id}, headers=headers)
+        assert named.status_code == 200, named.get_json()
+        route = next(row for row in vibey_supply()["named_agents"] if row["name"] == vibey["name"])
+        assert route["effective_model_id"] == model_id
+        assert route["supply_status"] in {"ok", "degraded"}
+        assert route["route_reason"] != "route_unconfigured"
+
+        chosen = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
+        assert chosen.status_code == 200, chosen.get_json()
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
     finally:
         agents.close()
 

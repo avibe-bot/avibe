@@ -21,7 +21,7 @@ Controller startup runs one discovery pass in the background. To run it now:
 vibe mcp-discover
 ```
 
-Avibe-owned definitions remain listed if discovery fails, with no callable tools. Native discovery failures are omitted; `vibe mcp-discover` prints the reason. A discovery requested from a project directory refreshes both the global candidates and that project's approved, configured servers. Concurrent global passes join.
+Avibe-owned definitions remain listed if discovery fails, with no callable tools; add reports the saved-but-not-connected result and `vibe mcp <name> --refresh` retries it. Native discovery failures are omitted; `vibe mcp-discover` prints the reason. A discovery requested from a project directory refreshes both the global candidates and that project's approved, configured servers. Concurrent global passes join.
 
 Refresh one server:
 
@@ -56,7 +56,7 @@ vibe mcp-add --json-stdin < servers.json
 - Global Avibe and project servers accept `${VAR}` in URL, env values and header values, never command or args. Variables come only from that server's private configuration, not the process environment.
 - Unconfigured definitions are saved and show **needs config** with missing variable names. Use **Configure** or `vibe mcp <name> --configure '{"env": {"TOKEN": "<value>"}}'`. A supplied map replaces that map (an empty map clears it); omitted maps stay unchanged. Only the Owner can configure.
 - Templates stay in the definition. Concrete env/header values supplied through Avibe are stored in private `secrets.json`; add/replace moves each supplied key to the correct destination and preserves unspecified keys. Native imports retain their existing semantics.
-- After an accepted add/replace or configuration change, tools become callable only after successful discovery. If discovery fails, the saved definition remains visible for Configure, Refresh or Remove. Calls already admitted may finish; new admissions are serialized with the mutation. This is not a guarantee of an old OAuth-secret snapshot.
+- After an accepted add/replace or configuration change, tools become callable only after successful discovery. If discovery fails, the saved definition remains visible for Configure, Refresh or Remove, and add returns success with a warning. Calls already admitted may finish; new admissions are serialized with the mutation. This is not a guarantee of an old OAuth-secret snapshot.
 
 ## Delete
 

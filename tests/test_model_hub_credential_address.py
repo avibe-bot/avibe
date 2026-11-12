@@ -792,8 +792,7 @@ def test_custody_is_what_proves_an_address(tmp_path) -> None:
     """
 
     store, credential_ref = _bound_store(tmp_path)
-    adapter = CLIProxyEngineAdapter.__new__(CLIProxyEngineAdapter)
-    adapter.state_store = store
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=store)
 
     address = asyncio.run(adapter.credential_address(credential_ref))
 
@@ -817,8 +816,7 @@ def test_custody_answers_for_a_credential_that_records_no_address(tmp_path) -> N
         "sk-fixture", vendor="openai", protocol="openai_chat",
     )
     assert "prefix" not in store.credential_metadata(credential_ref)
-    adapter = CLIProxyEngineAdapter.__new__(CLIProxyEngineAdapter)
-    adapter.state_store = store
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=store)
 
     assert asyncio.run(adapter.credential_address(credential_ref)) is None
 

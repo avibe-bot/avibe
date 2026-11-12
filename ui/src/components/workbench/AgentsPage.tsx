@@ -49,7 +49,8 @@ import { EditorDialog } from '../ui/editor-dialog';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
-import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit, type BackendModels } from '../../lib/backendModels';
+import { useAddModelDialog } from '../../lib/useAddModelDialog';
+import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, type BackendModels } from '../../lib/backendModels';
 import { compatibleEffort, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
 // with the Skills surface (BACKEND_TEXT is this page's old BACKEND_ICON_CLASS).
@@ -1796,7 +1797,6 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
   const activeModelCatalog = modelCatalogs[agent.backend];
   const modelOptions = activeModelCatalog?.modelOptions ?? [];
   const reasoningOptions = activeModelCatalog?.reasoningOptions ?? {};
-  const openAddModel = useAddModelExit(agent.backend, canEdit);
   const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
@@ -2110,6 +2110,36 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
     }
   };
 
+  const chooseModel = (next: string, catalogReasoning = reasoningOptions) => {
+    const value = next.trim();
+    // Choosing the current model again is no edit: nothing to write, and a
+    // refused saved effort stays what it is.
+    if (!value || value === model) return;
+    markFieldEdit('model');
+    markFieldSubmitted('model');
+    setModel(value);
+    const patch: Partial<VibeAgentFull> = { model: value };
+    // If the new model can't use the current effort, fall back to a
+    // valid one and persist it in the same patch — otherwise the record
+    // keeps an effort the model can't run (Codex P2).
+    const opts = resolveEffortOptions(agent.backend, value, catalogReasoning);
+    if (effort && !opts.includes(effort)) {
+      const fallback = compatibleEffort(effort, opts);
+      markFieldEdit('effort');
+      markFieldSubmitted('effort');
+      setEffort(fallback);
+      patch.reasoning_effort = fallback;
+    }
+    consumeBackgroundMutation(
+      submitFields(patch, 'reasoning_effort' in patch ? ['model', 'effort'] : ['model']),
+    );
+  };
+  // Added in place, the new model is the one chosen.
+  // The list the add left decides the new model's efforts, and is the catalog now.
+  const addModel = useAddModelDialog(agent.backend, canEdit, (modelId, catalog) => {
+    if (catalog) applyModelCatalog(agent.backend, catalog);
+    chooseModel(modelId, catalog?.reasoningOptions ?? reasoningOptions);
+  });
   return (
     <div className="flex flex-col gap-4">
       {isBot ? (
@@ -2250,37 +2280,15 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
           <Combobox
             options={modelOptions}
             value={model}
-            onValueChange={(next) => {
-              const value = next.trim();
-              // Choosing the current model again is no edit: nothing to write, and a
-              // refused saved effort stays what it is.
-              if (!value || value === model) return;
-              markFieldEdit('model');
-              markFieldSubmitted('model');
-              setModel(value);
-              const patch: Partial<VibeAgentFull> = { model: value };
-              // If the new model can't use the current effort, fall back to a
-              // valid one and persist it in the same patch — otherwise the record
-              // keeps an effort the model can't run (Codex P2).
-              const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
-              if (effort && !opts.includes(effort)) {
-                const fallback = compatibleEffort(effort, opts);
-                markFieldEdit('effort');
-                markFieldSubmitted('effort');
-                setEffort(fallback);
-                patch.reasoning_effort = fallback;
-              }
-              consumeBackgroundMutation(
-                submitFields(patch, 'reasoning_effort' in patch ? ['model', 'effort'] : ['model']),
-              );
-            }}
+            onValueChange={chooseModel}
             placeholder={t('agents.detail.modelPlaceholder')}
             emptyText={t('agents.detail.modelEmpty')}
             allowCustomValue
             disabled={effortRefreshOut}
-            footerAction={openAddModel ? { label: t('chat.picker.addModel'), onSelect: openAddModel } : undefined}
+            footerAction={addModel.open ? { label: t('chat.picker.addModel'), onSelect: addModel.open } : undefined}
           />
         )}
+        {addModel.dialog}
       </Field>
 
       {/* Reasoning effort. A model whose catalog row states

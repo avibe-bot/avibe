@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+
+import httpx
 import pytest
 
 from core import web_push_notifications
@@ -19,7 +22,12 @@ pytestmark = pytest.mark.real_web_push_sender
 @pytest.fixture(autouse=True)
 def _clear_recent_delivery_dispositions():
     web_push_notifications._RECENT_DELIVERY_DISPOSITIONS.clear()
+    web_push_notifications._RECENT_BADGE_DISPOSITIONS.clear()
+    with web_push_notifications._BADGE_RECONCILIATION_LOCK:
+        web_push_notifications._BADGE_RECONCILIATIONS.clear()
     yield
+    with web_push_notifications._BADGE_RECONCILIATION_LOCK:
+        web_push_notifications._BADGE_RECONCILIATIONS.clear()
 
 
 def _remote_authorization_record(
@@ -246,6 +254,299 @@ def _paired_revision_config(revision: int, *, instance_kind: str = ""):
     return config
 
 
+def test_badge_reconciliation_coalesces_owner_wakes_and_keeps_latest_context(monkeypatch):
+    threads = []
+    reconciliations = []
+
+    class _Thread:
+        def __init__(self, *, target, args, daemon):
+            assert daemon is True
+            self.target = target
+            self.args = args
+
+        def start(self):
+            threads.append(self)
+
+    first_context = AuthorizationContext(
+        instance_role="editor",
+        subject="user-a",
+        email="old@example.com",
+        is_remote=True,
+    )
+    latest_context = AuthorizationContext(
+        instance_role="editor",
+        subject="user-a",
+        email="new@example.com",
+        is_remote=True,
+    )
+    monkeypatch.setattr(web_push_notifications.threading, "Thread", _Thread)
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_reconcile_badge_for_owner",
+        lambda user_key, context: reconciliations.append((user_key, context)),
+    )
+
+    web_push_notifications.schedule_badge_reconciliation(
+        "remote:user-a",
+        first_context,
+    )
+    web_push_notifications.schedule_badge_reconciliation(
+        "remote:user-a",
+        latest_context,
+    )
+
+    assert len(threads) == 1
+    web_push_notifications._BADGE_RECONCILIATIONS[
+        "remote:user-a"
+    ].delay_seconds = 0
+    threads[0].target(*threads[0].args)
+    assert reconciliations == [("remote:user-a", latest_context)]
+    assert web_push_notifications._BADGE_RECONCILIATIONS == {}
+
+
+def test_badge_reconciliation_records_browser_only_owner_without_sending(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="local",
+            payload={
+                "endpoint": "https://push.example.test/sub/browser-only",
+                "keys": {"p256dh": "browser-key", "auth": "browser-auth"},
+            },
+        )
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_badge_count_for_user_key",
+        lambda *_args, **_kwargs: 0,
+    )
+    sends = []
+    monkeypatch.setattr(
+        "core.web_push.send_badge_update",
+        lambda **kwargs: sends.append(kwargs),
+    )
+
+    web_push_notifications._reconcile_badge_for_owner("local", None)
+
+    assert sends == []
+    assert (
+        web_push_notifications.recent_badge_dispositions()[0]["disposition"]
+        == web_push_notifications.BADGE_DISPOSITION_NO_NATIVE_SUBSCRIPTION
+    )
+    engine.dispose()
+
+
+def test_badge_reconciliation_targets_only_native_and_suppresses_same_success(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    native_endpoint = f"https://avibe.bot/api/push/apns/{'A' * 43}"
+    browser_endpoint = "https://push.example.test/sub/browser"
+    with engine.begin() as conn:
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="local",
+            payload={
+                "endpoint": native_endpoint,
+                "keys": {"p256dh": "native-key", "auth": "native-auth"},
+            },
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="local",
+            payload={
+                "endpoint": browser_endpoint,
+                "keys": {"p256dh": "browser-key", "auth": "browser-auth"},
+            },
+        )
+    sends = []
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_badge_count_for_user_key",
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        "core.web_push.send_badge_update",
+        lambda *, subscription, badge, **_kwargs: sends.append(
+            (subscription["endpoint"], badge)
+        ),
+    )
+
+    web_push_notifications._reconcile_badge_for_owner("local", None)
+    assert sends == [(native_endpoint, 0)]
+    with engine.connect() as conn:
+        assert web_push_service.get_last_successful_badge(
+            conn,
+            endpoint=native_endpoint,
+        ) == 0
+        assert web_push_service.get_last_successful_badge(
+            conn,
+            endpoint=browser_endpoint,
+        ) is None
+
+    web_push_notifications._reconcile_badge_for_owner("local", None)
+    assert sends == [(native_endpoint, 0)]
+    recent = web_push_notifications.recent_badge_dispositions()
+    assert recent[0]["disposition"] == web_push_notifications.BADGE_DISPOSITION_SUPPRESSED_SAME
+    assert recent[1]["disposition"] == web_push_notifications.BADGE_DISPOSITION_SENT
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "disabled"),
+    [(410, True), (429, False), (503, False)],
+)
+def test_badge_reconciliation_reuses_provider_invalidation_without_advancing_baseline(
+    monkeypatch,
+    tmp_path,
+    status_code,
+    disabled,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    endpoint = f"https://avibe.bot/api/push/apns/{'B' * 43}"
+    with engine.begin() as conn:
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="local",
+            payload={
+                "endpoint": endpoint,
+                "keys": {"p256dh": "native-key", "auth": "native-auth"},
+            },
+        )
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_badge_count_for_user_key",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    def fail(**_kwargs):
+        request = httpx.Request("POST", endpoint + "/badge")
+        response = httpx.Response(status_code, request=request)
+        raise httpx.HTTPStatusError(
+            "fixture relay failure",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr("core.web_push.send_badge_update", fail)
+
+    retry_after = web_push_notifications._reconcile_badge_for_owner("local", None)
+
+    assert retry_after == (
+        web_push_notifications.BADGE_RETRY_DEFAULT_SECONDS
+        if status_code in {429, 503}
+        else None
+    )
+    with engine.connect() as conn:
+        row = web_push_service.get_by_endpoint(
+            conn,
+            endpoint=endpoint,
+            user_key="local",
+        )
+        assert row is not None
+        assert row["enabled"] is (not disabled)
+        assert bool(row["provider_invalidated_at"]) is disabled
+        assert row["failure_count"] == 1
+        assert web_push_service.get_last_successful_badge(
+            conn,
+            endpoint=endpoint,
+        ) is None
+    assert (
+        web_push_notifications.recent_badge_dispositions()[0]["disposition"]
+        == web_push_notifications.BADGE_DISPOSITION_FAILED
+    )
+    engine.dispose()
+
+
+def test_badge_reconciliation_retries_transient_relay_failure(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    endpoint = f"https://avibe.bot/api/push/apns/{'C' * 43}"
+    with engine.begin() as conn:
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="local",
+            payload={
+                "endpoint": endpoint,
+                "keys": {"p256dh": "native-key", "auth": "native-auth"},
+            },
+        )
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_badge_count_for_user_key",
+        lambda *_args, **_kwargs: 0,
+    )
+    threads = []
+
+    class _Thread:
+        def __init__(self, *, target, args, daemon):
+            assert daemon is True
+            self.target = target
+            self.args = args
+
+        def start(self):
+            threads.append(self)
+
+    monkeypatch.setattr(web_push_notifications.threading, "Thread", _Thread)
+    monkeypatch.setattr(
+        web_push_notifications.threading.Event,
+        "wait",
+        lambda _self, _timeout: False,
+    )
+    attempts = []
+
+    def send(**_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            request = httpx.Request("POST", endpoint + "/badge")
+            response = httpx.Response(
+                503,
+                request=request,
+                headers={"Retry-After": "1"},
+            )
+            raise httpx.HTTPStatusError(
+                "fixture relay failure",
+                request=request,
+                response=response,
+            )
+
+    monkeypatch.setattr("core.web_push.send_badge_update", send)
+
+    web_push_notifications.schedule_badge_reconciliation("local", None)
+    assert len(threads) == 1
+    threads[0].target(*threads[0].args)
+
+    assert len(attempts) == 2
+    assert web_push_notifications._BADGE_RECONCILIATIONS == {}
+    with engine.connect() as conn:
+        assert web_push_service.get_last_successful_badge(
+            conn,
+            endpoint=endpoint,
+        ) == 0
+        row = web_push_service.get_by_endpoint(
+            conn,
+            endpoint=endpoint,
+            user_key="local",
+        )
+        assert row is not None
+        assert row["enabled"] is True
+    engine.dispose()
+
+
 def test_maybe_notify_inbox_message_schedules_agent_result(monkeypatch):
     calls = []
 
@@ -422,8 +723,16 @@ def test_backend_failure_notify_passes_durable_web_push_gates(monkeypatch, tmp_p
     engine.dispose()
 
 
-def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
+@pytest.mark.parametrize("maintenance", ["none", "vacuum", "batch-rebuild"])
+@pytest.mark.parametrize(
+    "later_prompt_at",
+    ["2026-08-04T00:00:04.000000Z", "2026-08-04T00:00:02.500000Z"],
+    ids=["forward-clock", "backdated-later-prompt"],
+)
+def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path, later_prompt_at, maintenance):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    message_ids = iter(["msg_z_before", "msg_m_result", "msg_a_after"])
+    monkeypatch.setattr(messages_service, "_new_message_id", lambda: next(message_ids))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -461,6 +770,19 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
             message_type="user",
             text="accepted before result",
         )
+        result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_acceptance_owner",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="done",
+        )
+        # Deferred inputs are materialized in messages only on acceptance, so
+        # this later prompt must be inserted after the result even if its
+        # submission timestamp (or a stepped wall clock) precedes the result.
         after = messages_service.append(
             conn,
             scope_id=scope_id,
@@ -471,16 +793,6 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
             metadata={"_web_push_user_key": "remote:after"},
             message_type="user",
             text="accepted after result",
-        )
-        result = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id="ses_acceptance_owner",
-            platform="avibe",
-            author="agent",
-            source="agent",
-            message_type="result",
-            text="done",
         )
         conn.execute(
             messages.update()
@@ -495,7 +807,7 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
             .where(messages.c.id == after["id"])
             .values(
                 created_at="2026-08-04T00:00:02.000000Z",
-                delivered_at="2026-08-04T00:00:04.000000Z",
+                delivered_at=later_prompt_at,
             )
         )
         conn.execute(
@@ -503,6 +815,22 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
             .where(messages.c.id == result["id"])
             .values(created_at="2026-08-04T00:00:03.000000Z")
         )
+
+    # The rowid is private to this query, not a persisted reference. Check its
+    # relative order through the maintenance operations that can renumber it,
+    # using message IDs whose lexical order is opposite to insertion order.
+    if maintenance == "vacuum":
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.exec_driver_sql("VACUUM")
+    elif maintenance == "batch-rebuild":
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from sqlalchemy import Column, Integer
+
+        with engine.begin() as conn:
+            operations = Operations(MigrationContext.configure(conn))
+            with operations.batch_alter_table("messages", recreate="always") as batch:
+                batch.add_column(Column("test_copy_marker", Integer, nullable=True))
 
     with engine.connect() as conn:
         assert web_push_notifications._web_push_user_keys_for_message(
@@ -629,6 +957,11 @@ def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeyp
         "https://push.example.test/a",
         "https://push.example.test/a",
     ]
+    with engine.connect() as conn:
+        assert web_push_service.get_last_successful_badge(
+            conn,
+            endpoint="https://push.example.test/a",
+        ) == sends[-1][1]["badge_count"]
     recent = web_push_notifications.recent_delivery_dispositions()
     assert [entry["disposition"] for entry in recent] == [
         web_push_notifications.WEB_PUSH_DISPOSITION_SENT,
@@ -770,7 +1103,16 @@ def test_send_to_enabled_subscriptions_rejects_stale_instance_authorization_revi
     engine.dispose()
 
 
-def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "second_result_at",
+    [
+        "2026-08-04T00:00:00.020000Z",
+        "2026-08-04T00:00:00.000000Z",
+        "2026-08-03T23:59:59.900000Z",
+    ],
+    ids=["forward-clock", "tied-clock", "backward-clock"],
+)
+def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, tmp_path, second_result_at):
     """Personal notification authorization is isolated from Organization gates."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -784,6 +1126,8 @@ def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, 
         authorization_revision=41,
         instance_kind="personal",
     )
+    message_times = iter([now, "2026-08-04T00:00:00.010000Z", second_result_at])
+    monkeypatch.setattr(messages_service, "_utc_now_iso", lambda: next(message_times))
 
     with engine.begin() as conn:
         scope_id = upsert_scope(
@@ -867,7 +1211,7 @@ def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, 
     web_push_notifications._send_to_enabled_subscriptions(
         {"title": "Personal Push", "body": "Done again", "session_id": "ses_push_personal", "message_id": second_message}
     )
-    assert len(sends) == 2
+    assert len(sends) == 2, web_push_notifications.recent_delivery_dispositions()
     recent = web_push_notifications.recent_delivery_dispositions()
     assert all(
         entry["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT
@@ -2769,6 +3113,12 @@ def test_send_to_enabled_subscriptions_sets_visible_badge_count(monkeypatch, tmp
     )
 
     assert [send[1]["badge_count"] for send in sends] == [2]
+    with engine.connect() as conn:
+        assert web_push_service.get_last_successful_badge(
+            conn,
+            endpoint="https://push.example.test/a",
+        ) == 2
+    engine.dispose()
 
 
 def test_send_to_enabled_subscriptions_rejects_legacy_session_owner(monkeypatch, tmp_path):
@@ -3310,6 +3660,111 @@ def test_send_to_enabled_subscriptions_falls_back_to_local_owner(monkeypatch, tm
         "disposition": web_push_notifications.WEB_PUSH_DISPOSITION_SENT,
         "reason": "local fallback with remote access disabled",
     }
+
+
+def test_owner_delivery_lock_orders_ordinary_notification_before_read_clear(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-11-11T00:00:00Z"
+    endpoint = f"https://avibe.bot/api/push/apns/{'D' * 43}"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_badge_order",
+            now=now,
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_badge_order",
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="default",
+                session_anchor="ses_badge_order",
+                native_session_id="",
+                title="Badge order",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_badge_order",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Done",
+        )
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="local",
+            payload={
+                "endpoint": endpoint,
+                "keys": {"p256dh": "native-key", "auth": "native-auth"},
+            },
+        )
+
+    ordinary_started = threading.Event()
+    release_ordinary = threading.Event()
+    deliveries = []
+
+    def send_ordinary(*, subscription, payload):
+        ordinary_started.set()
+        assert release_ordinary.wait(5)
+        deliveries.append(("ordinary", payload["badge_count"]))
+
+    def send_badge(*, subscription, badge, **_kwargs):
+        deliveries.append(("badge", badge))
+
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(web_push_notifications, "_remote_access_enabled", lambda: False)
+    monkeypatch.setattr("core.web_push.send_web_push", send_ordinary)
+    monkeypatch.setattr("core.web_push.send_badge_update", send_badge)
+
+    ordinary_thread = threading.Thread(
+        target=web_push_notifications._send_to_enabled_subscriptions,
+        args=(
+            {
+                "title": "Badge order",
+                "body": "Done",
+                "session_id": "ses_badge_order",
+                "message_id": message["id"],
+            },
+        ),
+    )
+    ordinary_thread.start()
+    assert ordinary_started.wait(5)
+
+    with engine.begin() as conn:
+        assert messages_service.mark_session_read(conn, "ses_badge_order") == 1
+    badge_thread = threading.Thread(
+        target=web_push_notifications._reconcile_badge_for_owner,
+        args=("local", None),
+    )
+    badge_thread.start()
+    release_ordinary.set()
+    ordinary_thread.join(5)
+    badge_thread.join(5)
+
+    assert not ordinary_thread.is_alive()
+    assert not badge_thread.is_alive()
+    assert deliveries == [("ordinary", 1), ("badge", 0)]
+    with engine.connect() as conn:
+        assert web_push_service.get_last_successful_badge(
+            conn,
+            endpoint=endpoint,
+        ) == 0
+    engine.dispose()
 
 
 def test_send_to_enabled_subscriptions_skips_local_fallback_when_remote_access_enabled(monkeypatch, tmp_path):

@@ -629,6 +629,18 @@ def test_cli_protected_sign_creates_the_same_bound_pending_request(avault, capfd
     assert output["request"]["status"] == "pending"
     assert output["request"]["delivery"]["operation_context"]["release"] == {**RELEASE, "name": "KEY"}
     assert avault.calls == []
+    assert cli.cmd_vault_list(cli.build_parser().parse_args(["vault", "list"])) == 0
+    note = json.loads(capfd.readouterr().out)["secrets"][0]["solana_signing_note"]
+    # The listing names the flags and context this request just used, not a refusal.
+    for flag in ("--scheme ed25519", "--message-hex", "--signing-context-json", '"kind":"solana-transaction-v1"', '"messageHex"'):
+        assert flag in note
+    assert "--digest is refused" in note
+    assert "not supported" not in note
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["vault", "sign", "--help"])
+    help_text = " ".join(capfd.readouterr().out.split())
+    assert '"kind":"solana-transaction-v1"' in help_text
+    assert "cannot sign yet" not in help_text
 
 
 def test_protected_solana_refusal_is_removed_without_downgrade_copy(avault):

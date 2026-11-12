@@ -28,11 +28,11 @@ vi.hoisted(() => {
   });
 });
 
-// The real ApiContext memoizes its value on `t`, so a language change is itself
-// what hands every consumer a new `mutateConfig`. Reproduced here — through the
-// real `t`, not a stand-in — because that identity is the one a language queue
-// must not be keyed on: keying on it would rebuild the queue on the very
-// operation it is meant to order.
+// An api whose identity changes with the language — as ApiContext's once did, and
+// as any provider may — hands every consumer a new `mutateConfig` on the very
+// change being ordered. Reproduced here, through the real `t`, because that
+// identity is the one a language queue must not be keyed on: keying on it would
+// rebuild the queue on the operation it is meant to order.
 vi.mock('../../context/ApiContext', async () => {
   const { useMemo } = await import('react');
   const { useTranslation } = await import('react-i18next');

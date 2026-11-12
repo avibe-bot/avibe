@@ -3,17 +3,29 @@ run-name: iOS 17.0 iroh binary qualification (no private datapath or local disco
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional pinned iroh-apple-v<upstream>-<revision> tag (owner approval required)"
+        type: string
+        default: ""
+      dry_run:
+        description: "Validate publication without writing a tag or release"
+        type: boolean
+        default: true
   pull_request:
     paths:
       - .github/workflows/iroh-apple-gate.yml
       - packaging/iroh-apple/**
+      - scripts/ci_release_backstop.py
+      - scripts/cargo_notices.py
+      - tests/test_cargo_notices.py
 
 permissions:
   contents: read
 
 concurrency:
   group: iroh-apple-gate-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
@@ -27,6 +39,9 @@ jobs:
     steps:
       - name: Check out Avibe
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test publication refusals without network or release writes
+        run: python3 -m unittest discover -s packaging/iroh-apple -p 'test_release.py'
 
       - name: Report pinned Apple toolchain
         run: |
@@ -118,3 +133,115 @@ jobs:
             ${{ runner.temp }}/iroh-apple-artifacts/ios-runtime-*.log
             ${{ runner.temp }}/iroh-apple-artifacts/ios-runtime.env
             ${{ runner.temp }}/iroh-apple-artifacts/ios-runtimes-at-test.json
+
+      # A separate companion keeps the qualified binary zip unchanged.
+      - name: Collect redistribution notices and matching Swift binding
+        run: |
+          python3 "$IROH_GATE_DIR/release.py" support \
+            --source "$IROH_SOURCE" --directory "$IROH_OUTPUT" \
+            --lockfile "$IROH_SOURCE/Cargo.lock" \
+            --target aarch64-apple-ios --target aarch64-apple-ios-sim --target x86_64-apple-ios
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: iroh-apple-support-${{ github.sha }}
+          path: ${{ runner.temp }}/iroh-apple-artifacts/IrohLib-support.zip
+          if-no-files-found: error
+
+  manifest:
+    name: Publication manifest (read-only dry run)
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: iroh-apple-gate-${{ github.sha }}
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: iroh-apple-support-${{ github.sha }}
+          path: dist
+      - name: Validate same-run candidate and requested tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 "$IROH_GATE_DIR/release.py" prepare --directory dist --tag "$RELEASE_TAG"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: iroh-apple-release-candidate-${{ github.sha }}
+          path: dist/iroh-apple-release.json
+          if-no-files-found: error
+
+  publish:
+    name: Owner-triggered iroh asset publication
+    needs: [gate, manifest]
+    if: >-
+      github.repository == 'avibe-bot/avibe' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/master' &&
+      inputs.release_tag != '' && inputs.dry_run == false
+    runs-on: ubuntu-latest
+    # This is the only write-capable job. Owner approval is a procedure, not an
+    # environment reviewer lock; repository writers can dispatch this workflow.
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: iroh-apple-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: iroh-apple-gate-${{ github.sha }}
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: iroh-apple-support-${{ github.sha }}
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: iroh-apple-release-candidate-${{ github.sha }}
+          path: dist
+      - name: Require exact-SHA master backstop and refuse mismatched or existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: python3 "$IROH_GATE_DIR/release.py" preflight --directory dist --tag "$RELEASE_TAG"
+      - name: Publish only this run's verified artifacts (never latest)
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: "Avibe iroh Apple binary ${{ inputs.release_tag }}"
+          make_latest: "false"
+          prerelease: false
+          overwrite_files: false
+          fail_on_unmatched_files: true
+          body: |
+            <!-- avibe:update-notification=none -->
+            Qualified iroh Apple binary, not an Avibe product release.
+            See iroh-apple-release.json for the upstream/core versions, deployment
+            floor, exact tested runtime, provenance, URLs and SHA-256 checksums.
+            Consume IrohLib-support.zip with the binary: it contains the matching
+            generated Swift wrapper and redistribution license/NOTICE texts.
+          files: |
+            dist/IrohLib.xcframework.zip
+            dist/IrohLib.xcframework.zip.sha256
+            dist/IrohLib.swift
+            dist/IrohLib-support.zip
+            dist/manifest.json
+            dist/iroh-apple-release.json
+            dist/ios-runtime-test.json
+            dist/ios-runtime-test.log
+            dist/patched-check.log
+            dist/positive-control-check.log
+            dist/xcodebuild-*.log
+            dist/feature-graph-*.txt

@@ -10,6 +10,7 @@ import pytest
 
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.classification import classify_outcome
+from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _service, _source, _usage_of
 from vibe.model_hub_runtime import client as client_module
@@ -55,7 +56,7 @@ def test_connected_inference_waits_for_its_owner(
     tmp_path,
     protocol: str,
     phase: str,
-    cancel: bool,
+    cancel: bool | str,
     entrypoint: str,
 ) -> None:
     """MH-RUNTIME-009: connected inference ends by completion or owner cancellation."""
@@ -134,7 +135,7 @@ def test_connected_inference_waits_for_its_owner(
         )
         gateway = None
         adapter = None
-        if entrypoint == "gateway":
+        if entrypoint != "client":
             backend, endpoint = {
                 "openai_responses": ("codex", "responses"),
                 "openai_chat": ("opencode", "chat/completions"),
@@ -160,17 +161,45 @@ def test_connected_inference_waits_for_its_owner(
             adapter.ensure_installed = service.adapter.ensure_installed
             service.adapter = adapter
             service._engine_synced = True
-            gateway = ModelHubTurnGateway(service)
-            base_url, token = await gateway.endpoint(
-                backend,
-                process_scope="/repo",
-                turn_id="turn_patient_inference",
-                requested_model_id=models.get(backend, "shared-model"),
-                resolved_model_id="shared-model",
-                source_id=configured.id,
-            )
+            if entrypoint == "gateway":
+                gateway = ModelHubTurnGateway(service)
+                base_url, token = await gateway.endpoint(
+                    backend,
+                    process_scope="/repo",
+                    turn_id="turn_patient_inference",
+                    requested_model_id=models.get(backend, "shared-model"),
+                    resolved_model_id="shared-model",
+                    source_id=configured.id,
+                )
 
         async def consume() -> bytes:
+            if entrypoint in {"hosted", "user_test"}:
+                request = ModelHubRequest({"model": "shared-model", "stream": True}, protocol=protocol)
+
+                async def feed(_chunk):
+                    pytest.fail("metadata before cancellation is not model output")
+
+                async def admitted_now():
+                    return service._source(service.store.load(), configured.id)
+
+                async def drain(handle):
+                    if handle.stream is not None:
+                        async for chunk in handle.stream:
+                            await feed(chunk)
+
+                if entrypoint == "hosted":
+                    called = await service._hosted_upstream_call(
+                        configured, "shared-model", request, stream=True,
+                        deadline=asyncio.get_running_loop().time() + 5,
+                        feed=feed, admitted_now=admitted_now,
+                    )
+                    assert called.billable and called.usage.input_tokens == 41
+                else:
+                    called = await service._user_test_call(
+                        configured.id, "shared-model", lambda config: service._source(config, configured.id),
+                        lambda _source: request, stream=True, origin=backend, consume=drain, timeout=5,
+                    )
+                return called.outcome.error_code.encode()
             if gateway is not None:
                 async with real_session(trust_env=False) as downstream:
                     async with downstream.post(
@@ -178,7 +207,7 @@ def test_connected_inference_waits_for_its_owner(
                         json={"model": "shared-model", "stream": streaming},
                         headers={"Authorization": f"Bearer {token}"},
                     ) as response:
-                        assert response.status == 200
+                        assert response.status in ({200, 503} if cancel == "withdraw" else {200})
                         return await response.read()
             handle = await client.invoke(source, "patient-model", {}, stream=streaming)
             try:
@@ -199,7 +228,12 @@ def test_connected_inference_waits_for_its_owner(
             # Spend several connection budgets while the server owns the wait.
             done, _pending = await asyncio.wait({task}, timeout=0.1)
             assert not done, "inference was terminated solely because model output was delayed"
-            if cancel:
+            if cancel == "withdraw":
+                adapter._engine_admission.close("engine_withdrawn")
+                await adapter._engine_admission.interrupt()
+                body = await asyncio.wait_for(task, timeout=2)
+                await asyncio.wait_for(request_finished.wait(), timeout=2)
+            elif cancel:
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, timeout=2)
@@ -213,12 +247,15 @@ def test_connected_inference_waits_for_its_owner(
             if adapter is not None:
                 assert adapter._active_transports == 0
                 assert adapter._transports_idle.is_set()
-                await gateway._drain_turn_requests("turn_patient_inference")
+                if gateway is not None:
+                    await gateway._drain_turn_requests("turn_patient_inference")
                 assert service.events.list() == []
                 if protocol == "anthropic" and phase in {"prelude", "stream_body"}:
                     usage = _usage_of(service, configured.id)
                     assert usage["input_tokens"] == 41
                     assert usage["requests"] == 1
+                if cancel == "withdraw":
+                    assert b"engine_withdrawn" in body
         finally:
             release.set()
             if not task.done():
@@ -229,3 +266,10 @@ def test_connected_inference_waits_for_its_owner(
             await runner.cleanup()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("entrypoint", ["gateway", "hosted", "user_test"])
+def test_withdrawal_before_stream_handle_preserves_observed_usage(monkeypatch, tmp_path, entrypoint):
+    test_connected_inference_waits_for_its_owner(
+        monkeypatch, tmp_path, protocol="anthropic", phase="prelude", cancel="withdraw", entrypoint=entrypoint,
+    )

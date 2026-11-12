@@ -656,23 +656,31 @@ class McpRuntime:
         try:
             definition = await asyncio.to_thread(mcp_scope.add_definition, name.name, item.get("server"), project=repository.is_project(name))
             async with self._lock(name):
+                retry = False
                 if not replace:
                     outcome = await asyncio.to_thread(self._existing_add, name, definition)
                     if outcome == "unchanged":
                         return {"name": name.name, "status": "unchanged"}
+                    retry = outcome == "retry"
                     if outcome == "exists":
                         raise McpHubError("exists", f"{name} already exists with a different definition.")
                 # Calls take this same lock only for admission. Already admitted calls
                 # may finish; no revision-bound OAuth/secret snapshot is promised.
-                await asyncio.to_thread(mcp_scope.write_server, name, item["server"], replace=replace or repository.is_project(name))
+                if not retry:
+                    await asyncio.to_thread(mcp_scope.write_server, name, item["server"], replace=replace or repository.is_project(name))
                 await asyncio.to_thread(repository.unlist, name)
                 await self._cancel_login(name)
                 await self._retire_package(name)
                 server = await asyncio.to_thread(mcp_scope.load_server, name)
                 if server.state != "ok":
                     return {"name": name.name, "status": "added", "state": server.state}
-                body = json.loads(await self._refresh_locked(name, wait_stdio=True))
-                return {"name": name.name, "status": "added", **{k: body[k] for k in ("revision", "toolCount", "auth") if k in body}}
+                try:
+                    body = json.loads(await self._refresh_locked(name, wait_stdio=True))
+                    return {"name": name.name, "status": "added", **{k: body[k] for k in ("revision", "toolCount", "auth") if k in body}}
+                except McpHubError as exc:
+                    server = await asyncio.to_thread(mcp_scope.load_server, name)
+                    warning = {"type": exc.type, "message": exc.message, **({"messageKey": exc.message_key} if exc.message_key else {})}
+                    return {"name": name.name, "status": "added", "state": server.state, "warning": warning}
         except McpHubError as exc:
             return {"name": name.name, "status": "failed", "error": exc.message, "type": exc.type, **({"messageKey": exc.message_key} if exc.message_key else {})}
 
@@ -728,6 +736,11 @@ class McpRuntime:
             mcp_scope.publication_matches(name, existing, published) if owned
             else McpRuntime._comparable_definition(published["definition"]) == McpRuntime._comparable_definition(existing)
         )
+        # A saved definition without a publication is a failed-discovery retry:
+        # admit it again so add reruns discovery instead of trapping the user in
+        # an ``exists`` result. Published identical definitions remain unchanged.
+        if same_input and published is None:
+            return "retry"
         return "unchanged" if same_input and same_publication else "exists"
 
     async def _refresh(self, payload: dict[str, Any]) -> bytes:

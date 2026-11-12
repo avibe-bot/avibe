@@ -688,7 +688,7 @@ def sign_from_ledger(
     key_name: str,
     key_envelope: Mapping[str, Any],
     published: bytes | None,
-    qualified_baselines: Mapping[str, str] | None = None,
+    rehearsal_baselines: Mapping[str, str] | None = None,
 ) -> bytes:
     """Allocate ``operation`` (or resume the current allocation) and return its envelope.
 
@@ -712,13 +712,13 @@ def sign_from_ledger(
         else:
             if isinstance(operation, Promote):
                 standing = standing_releases(state.payload)
-                unqualified = sorted(
-                    tag for tag, digest in standing.items() if (qualified_baselines or {}).get(tag) != digest
+                missing = sorted(
+                    tag for tag, digest in standing.items() if (rehearsal_baselines or {}).get(tag) != digest
                 )
-                if unqualified:
+                if missing:
                     raise ProducerError(
-                        "the candidate was not qualified against every release this ledger lists: "
-                        + ", ".join(unqualified)
+                        "the rehearsal context does not cover every release this ledger lists: "
+                        + ", ".join(missing)
                     )
             state = ledger.allocate(operation, now=now, roots=roots)
         allocation = state.allocation
@@ -1020,15 +1020,15 @@ def _operation(args: argparse.Namespace) -> Operation | None:
     return Promote(candidate.manifest_bytes, candidate.min_avibe_version)
 
 
-def _qualified_baselines(raw: str | None) -> dict[str, str]:
+def _rehearsal_baselines(raw: str | None) -> dict[str, str]:
     if not raw:
         return {}
     try:
         baselines = channel.strict_json(raw.encode("utf-8"))
     except ValueError as exc:
-        raise ProducerError(f"the qualified baselines cannot be read: {exc}") from exc
+        raise ProducerError(f"the rehearsal baselines cannot be read: {exc}") from exc
     if not isinstance(baselines, dict) or not all(isinstance(value, str) for value in baselines.values()):
-        raise ProducerError("the qualified baselines map a release tag to a manifest digest")
+        raise ProducerError("the rehearsal baselines map a release tag to a manifest digest")
     return baselines
 
 
@@ -1057,7 +1057,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sign_parser.add_argument("--rollback-to")
     sign_parser.add_argument("--reason")
     sign_parser.add_argument("--candidate-dir", type=Path)
-    sign_parser.add_argument("--qualified-baselines", help="JSON object the qualify job produced: tag to digest")
+    sign_parser.add_argument("--rehearsal-baselines", help="JSON object the trusted prepare job produced: tag to digest")
     sign_parser.add_argument("--avault", required=True)
     sign_parser.add_argument("--key-name", required=True)
     sign_parser.add_argument("--key-envelope", type=Path, required=True)
@@ -1086,7 +1086,7 @@ def _published_payload(avault: str | None) -> ChannelPayload | None:
     """The index clients are served, authenticated. ``None`` when there is none to read.
 
     Used only where the published index is evidence about availability or
-    qualification, never as the state a new index is signed from.
+    rehearsal context, never as the state a new index is signed from.
     """
 
     if not channel_commissioned():
@@ -1126,8 +1126,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": True, "releases": sorted(manifests)}))
             return 0
         if args.command == "baselines":
-            # Evidence for qualification, not state: the signer checks it
-            # against its own ledger before it promotes anything.
+            # Concrete baseline context for the owner-approved rehearsal; the
+            # signer checks it against its own ledger before promotion.
             manifests = baseline_manifests(_published_payload(args.avault), [path.read_bytes() for path in args.bundled])
             (args.output_dir / "manifests").mkdir(parents=True, exist_ok=True)
             for tag, manifest_bytes in manifests.items():
@@ -1165,7 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
                 key_name=args.key_name,
                 key_envelope=key_envelope,
                 published=fetch_public_index(),
-                qualified_baselines=_qualified_baselines(args.qualified_baselines),
+                rehearsal_baselines=_rehearsal_baselines(args.rehearsal_baselines),
             )
             args.output.write_bytes(envelope)
             signed = channel.parse_payload(channel.parse_envelope(envelope).payload)

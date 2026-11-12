@@ -7,7 +7,7 @@ for (const lang of ['en', 'zh'] as const) {
       await page.goto(`/e2e/model-catalog/fixture.html?view=gateway&backend=opencode&lang=${lang}${long ? '&long=1' : ''}`);
       const card = page.locator('[data-agent-backend="opencode"]');
       const head = card.locator('[data-agent-group-head]');
-      await expect(head).toContainText(lang === 'zh' ? '网关 · 路由可用' : 'Gateway · Ready');
+      await expect(head).toContainText(lang === 'zh' ? '托管 · 路由可用' : 'Managed · Ready');
       await expect(head).not.toContainText('grok');
       await expect(card.locator('[data-route-model]')).toHaveCount(5);
       const issues = card.locator('[data-agent-supply-issues]');

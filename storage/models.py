@@ -568,6 +568,12 @@ agent_events = Table(
     Column("updated_at", String, nullable=False),
     Index("ix_agent_events_session_created_id", "session_id", "created_at", "id"),
     Index("ix_agent_events_session_type_created_id", "session_id", "event_type", "created_at", "id"),
+    Index(
+        "ix_agent_events_session_type_context_seq",
+        "session_id",
+        "event_type",
+        "context_seq",
+    ),
     Index("ix_agent_events_scope_created_id", "scope_id", "created_at", "id"),
     Index("ix_agent_events_turn_sequence_id", "turn_id", "sequence", "id"),
     Index(
@@ -610,6 +616,26 @@ session_digests = Table(
     Column("mind", Text, nullable=True),
     Column("memo", Text, nullable=True),
     Column("now", Text, nullable=True),
+)
+
+# Optional cache comparison state, one latest full record per Session/provider/model.
+# Independent of transcript history; older writers need not know this table exists.
+session_cache_state = Table(
+    "session_cache_state",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column("provider", String, primary_key=True),
+    Column("model", String, primary_key=True),
+    Column("record_json", Text, nullable=False),
+)
+
+# Reader-first catalog snapshots. Production observations remain inline until a
+# separately released compatibility boundary activates reference writes.
+skill_catalogs = Table(
+    "skill_catalogs",
+    metadata,
+    Column("digest", Text, primary_key=True),
+    Column("entries_json", Text, nullable=False),
 )
 
 skill_usage_daily = Table(
@@ -711,6 +737,26 @@ skill_usage_daily = Table(
 # identity is scoped to its conversation because some platforms reuse message
 # ids across chats. ``read_at`` drives unread counts for the
 # Inbox; legacy IM platforms ignore it.
+# Ordinary, migration-owned search bookkeeping. The optional FTS virtual table
+# is deliberately absent: it is initialized only by post-readiness maintenance.
+message_search_dirty = Table(
+    "message_search_dirty", metadata,
+    Column("message_id", Text, primary_key=True, nullable=False),
+)
+message_search_documents = Table(
+    "message_search_documents", metadata,
+    Column("id", Integer, primary_key=True, nullable=False),
+    Column("message_id", Text, nullable=False, unique=True),
+    Column("oversized", Integer, nullable=False, server_default="0"),
+    Index("ix_message_search_documents_oversized", "oversized"),
+)
+message_search_state = Table(
+    "message_search_state", metadata,
+    Column("id", Integer, primary_key=True, nullable=False),
+    Column("cursor", Text, nullable=True),
+    Column("ready", Integer, nullable=False, server_default="0"),
+)
+
 messages = Table(
     "messages",
     metadata,
@@ -1386,7 +1432,7 @@ vault_secrets = Table(
     Column("tags", Text, nullable=True),  # JSON array
     Column("kind", String, nullable=False, server_default="static"),  # static | keypair (P2)
     Column("protection", String, nullable=False, server_default="standard"),  # standard (P0) | protected (P1)
-    Column("signer_kind", String, nullable=True),  # local | external | mpc:<provider> (P2, keypair only)
+    Column("signer_kind", String, nullable=True),  # local | hd-seed | external | mpc:<provider> (keypair only)
     Column("source", String, nullable=False, server_default="manual"),  # manual | imported:1password | op-reference
     # Envelope: AES-256-GCM ciphertext/nonce (base64 text); ``wrap_meta`` JSON holds the
     # wrapped DEK + scheme. All null for external/mpc/op-reference (no local key/value).
@@ -1543,6 +1589,15 @@ vault_operation_challenges = Table(
     Column("created_at", String, nullable=False),
     Index("ix_vault_operation_challenges_lookup", "operation", "secret_name", "expires_at"),
     Index("ix_vault_operation_challenges_consumed", "consumed_at", "expires_at"),
+)
+
+# Reader-first storage for immutable audit ACL snapshots. Writers still inline
+# snapshots until the coordinated compatibility-epoch activation.
+vault_audit_access_snapshots = Table(
+    "vault_audit_access_snapshots",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("snapshot", Text, nullable=False, unique=True),
 )
 
 # Append-only audit log. Secret VALUES never appear here — only names, requesters,

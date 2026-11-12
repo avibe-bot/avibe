@@ -137,7 +137,7 @@ jobs:
   master-full-backstop:
     runs-on: ubuntu-latest
     if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    needs: [changes, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper, ui-checks, manifest-consistency, python-smoke, model-hub-hosted-wire, unit-test-shards, ui-tests, scenario-evidence, ui-browser-checks, ios-shell, desktop-shell, install-upgrade-shards, web-fetch-runtime, web-fetch-macos, windows-install-smoke-runners, windows-agent, windows-model-hub, windows-control-ipc, unit-tests, install-upgrade-regression, windows-install-smoke]
+    needs: [changes, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper, ui-checks, manifest-consistency, python-smoke, model-hub-hosted-wire, model-hub-lifecycle-native, unit-test-shards, ui-tests, scenario-evidence, ui-browser-checks, ios-shell, desktop-shell, install-upgrade-shards, web-fetch-runtime, web-fetch-macos, windows-install-smoke-runners, windows-agent, windows-model-hub, windows-control-ipc, unit-tests, install-upgrade-regression, windows-install-smoke]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Certify this exact SHA only after every full-scope job succeeded
@@ -274,6 +274,15 @@ jobs:
     # for every lane, including failure/cancellation. Design captures stay manual.
     name: ui-browser-checks (${{ matrix.lane }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Browsers and their OS libraries are baked in: no runtime apt/mirror
+    # dependency. Keep this version equal to ui/package-lock.json (tested).
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --init --ipc=host
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -339,34 +348,20 @@ jobs:
         working-directory: ui
         run: npm ci
 
-      # `--with-deps` fetches about 120 MB of WebKit system packages from the
-      # runner's Ubuntu mirror, which has taken 13 to 44 minutes when the
-      # mirror is slow. apt keeps the packages it downloads in this directory,
-      # restored and saved per runner image and Playwright version; apt still
-      # resolves, verifies and installs every package, and fetches any it lacks.
-      - name: Keep Playwright system packages restorable
-        id: browser-packages
+      - name: Verify preinstalled browsers
+        timeout-minutes: 10
         working-directory: ui
         run: |
-          mkdir -p "$HOME/.cache/playwright-apt/partial"
-          echo "Dir::Cache::Archives \"$HOME/.cache/playwright-apt/\";" | sudo tee /etc/apt/apt.conf.d/99playwright-archives
-          prefix="playwright-apt-$ImageOS-"
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-          echo "key=$prefix$ImageVersion-$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.cache/playwright-apt
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.key }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.prefix }}
-      - name: Install browsers
-        working-directory: ui
-        run: |
-          npx playwright install --with-deps chromium webkit
-          # Drop superseded packages, then hand apt's root-owned files to the
-          # runner user so the cache can save them.
-          sudo apt-get autoclean
-          sudo rm -rf "$HOME/.cache/playwright-apt/partial" "$HOME/.cache/playwright-apt/lock"
-          sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/playwright-apt"
+          # Launch both engines to fail early on missing binaries/libraries.
+          # Do not install here: the matching image already supplies them.
+          node --input-type=module <<'JS'
+          import { chromium, webkit } from 'playwright';
+          for (const engine of [chromium, webkit]) {
+            const browser = await engine.launch();
+            console.log(`${engine.name()}: ${browser.version()}`);
+            await browser.close();
+          }
+          JS
 
       - name: Test browser interactions
         # The Model Hub catalog regression (about ten minutes) runs on the
@@ -462,6 +457,7 @@ jobs:
           # Ordinary UI changes still validate the bundled phone app on Linux;
           # only native/bridge/contract changes allocate the iOS simulator.
           npm run build:mobile
+          python3 ../ios/scripts/app_licenses.py generate --bundle ../ios/Avibe/Resources/MobileApp
           ../ios/scripts/verify_mobile_bundle.sh ../ios/Avibe/Resources/MobileApp
 
       # What a phone downloads before the first screen draws (docs/plans/web-ui-first-load.md).
@@ -558,7 +554,9 @@ jobs:
         # Install the declared dev group instead of a hand-listed set so test
         # dependencies (pytest, pytest-asyncio for asyncio_mode="auto",
         # jsonschema) cannot drift from pyproject.
-        run: uv pip install --system -e . --group dev
+        # Release dependency tests build/rebuild tiny wheel/sdist fixtures;
+        # install their build frontends so those acceptance cases cannot skip.
+        run: uv pip install --system -e . --group dev hatchling hatch-vcs tomlkit editables
 
       # Only the tests run with loopback alone, so no process a test starts can
       # reach past it; installing dependencies above still needs the network.
@@ -652,9 +650,86 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  model-hub-lifecycle-native:
+    name: model-hub-lifecycle-native (${{ matrix.runner }})
+    needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['model-hub-lifecycle-native'] == 'run'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            python_arch: x64
+            engine_platform: linux-amd64
+          - runner: ubuntu-24.04-arm
+            python_arch: arm64
+            engine_platform: linux-arm64
+          - runner: macos-15
+            python_arch: arm64
+            engine_platform: darwin-arm64
+          - runner: macos-15-intel
+            python_arch: x64
+            engine_platform: darwin-x64
+          - runner: windows-latest
+            python_arch: x64
+            engine_platform: windows-amd64
+          # Same supported emulated x64 Python as windows-model-hub. Native
+          # OS publication/process primitives still run on Windows on Arm.
+          - runner: windows-11-arm
+            python_arch: x64
+            engine_platform: windows-arm64
+    env:
+      AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Fetch pinned released caller source (not a candidate rehearsal)
+        run: git fetch --no-tags --depth=1 origin ea402b8bc3ab5f7f29cc85b28f22aed17544cc2d
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        id: python
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        if: steps.python.outputs.python-path == ''
+        id: python_retry
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
+      - name: Require requested interpreter and install locked test dependencies
+        shell: bash
+        env:
+          SETUP_PYTHON: ${{ steps.python.outputs.python-path || steps.python_retry.outputs.python-path }}
+        run: |
+          test -n "$SETUP_PYTHON"
+          "$SETUP_PYTHON" -c 'import os, sys, sysconfig; assert sys.version_info[:2] == (3, 12); assert os.name != "nt" or sysconfig.get_platform() == "win-amd64"'
+          "$SETUP_PYTHON" -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+          uv sync --locked --no-install-project --python "$SETUP_PYTHON"
+      - name: Exercise journal, admission, native owner death and released callers
+        shell: bash
+        env:
+          AVIBE_EXPECT_ENGINE_PLATFORM: ${{ matrix.engine_platform }}
+        run: |
+          uv run --no-sync python -c 'import os; from vibe.model_hub_runtime.installer import EngineRuntimeManager; assert EngineRuntimeManager(offline=True).host_platform() == os.environ["AVIBE_EXPECT_ENGINE_PLATFORM"]'
+          uv run --no-sync python -m pytest -q -ra \
+            tests/test_model_hub_engine_lifecycle.py tests/test_model_hub_engine_admission.py \
+            tests/test_model_hub_engine_consumers.py tests/test_model_hub_engine_processes.py \
+            tests/test_model_hub_engine_owner_crashes.py tests/test_model_hub_engine_released_callers.py
+      - name: Upload native lifecycle junit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: junit-${{ github.job }}-${{ strategy.job-index }}
+          path: ci-junit/
+          if-no-files-found: ignore
+          retention-days: 7
+
   unit-tests:
     runs-on: ubuntu-latest
-    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-tests, ui-browser-checks, model-hub-hosted-wire, manifest-consistency, python-smoke, ios-shell, desktop-shell, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper]
+    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-tests, ui-browser-checks, model-hub-hosted-wire, model-hub-lifecycle-native, manifest-consistency, python-smoke, ios-shell, desktop-shell, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper]
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -669,6 +744,7 @@ jobs:
   scenario-evidence:
     needs:
       - changes
+      - model-hub-lifecycle-native
       - unit-test-shards
       - memory-insight-contract
       - migration-release-guard
@@ -1405,6 +1481,11 @@ jobs:
       # PowerShell 5.1, which every Windows has.
       - name: Verify the powershell tool
         run: python -m pytest -q -ra tests/agent_core/tools/test_powershell.py
+
+      - name: Verify locked Windows installer failures and upgrade recovery guidance
+        run: >-
+          python -m pytest -q -ra
+          tests/test_windows_install_release.py tests/test_install_network_guidance.py
 
       # Its job object is the one the watch worker uses; no other job runs
       # this file on Windows.

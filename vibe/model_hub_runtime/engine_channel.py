@@ -16,10 +16,13 @@ known here. Two things stop an index from bringing in anything new, and
 neither is its age: offline mode, and a sequence floor a later Avibe raised
 above it.
 
-A withdrawal this machine recorded outlives the ability to check it. When the
-recorded index cannot be authenticated, because avault cannot run or because
-this Avibe build ships no readable key, an engine recorded as withdrawn is
-blocked, not kept. Only a manifest override leaves the channel entirely.
+A withdrawal this machine recorded outlives the ability to check it **while
+its one local history file remains readable**. When that index cannot be
+authenticated because avault cannot run or this Avibe ships no readable key,
+a recorded withdrawal blocks the engine, not keeps it. Missing or unreadable
+history authorizes no channel change; a later authenticated fetch may replace
+it with an older list and reopen a lost withdrawal. Only a manifest override
+leaves the channel entirely.
 
 Nothing in Avibe calls this yet. Adoption, activation, scheduling and recovery
 belong to the engine lifecycle, which decides when to act on a resolution. A
@@ -32,6 +35,7 @@ Callers on the controller loop run it on a thread.
 from __future__ import annotations
 
 import logging
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -51,6 +55,7 @@ from core.model_hub_engine_channel import (
     Resolution,
     ResolutionAction,
     SignatureVerifier,
+    Tombstone,
     TrustRoots,
     authenticate,
     parse_trust_roots,
@@ -162,6 +167,12 @@ class EngineChannel:
         )
         self.store = ChannelStateStore(self.manager.runtime_dir / "channel")
         self._fetch = fetch
+        # Authenticated withdrawals learned in THIS process may block execution
+        # when state publication fails. Keep failures additive until a refresh
+        # actually succeeds; rejecting another attempt cannot forget them. This
+        # is volatile, not another history authority after file loss/restart.
+        self._unpublished_withdrawals: dict[str, Tombstone] = {}
+        self._refresh_lock = threading.Lock()
         if avibe_version is None:
             from vibe import __version__ as avibe_version
         self._avibe_version = avibe_version
@@ -182,7 +193,13 @@ class EngineChannel:
         return None
 
     def refresh(self) -> ChannelStatus:
-        """Download, authenticate and record the index. Never raises."""
+        """Download, authenticate and record the index. Never raises.
+
+        An authenticated fetch may replace missing/unreadable history. Its
+        old floor and withdrawals are then lost, not recovered. Offline or
+        failed fetches leave the file untouched and authorize no new adoption
+        when no readable index remains.
+        """
 
         reason = self.opt_out_reason()
         if reason is not None:
@@ -195,23 +212,40 @@ class EngineChannel:
             return ChannelStatus("unavailable", str(exc.details.get("kind") or "network"), str(exc))
         except (OSError, ValueError, urllib.error.URLError) as exc:
             return ChannelStatus("unavailable", "network", type(exc).__name__)
-        try:
-            envelope, payload = authenticate(raw, roots=self.roots, verifier=self.verifier)
-            changed = self.store.accept(envelope, payload, floor=self.roots.sequence_floor)
-        except ChannelError as exc:
-            logger.warning("Model Hub engine channel index rejected: %s", exc)
-            return ChannelStatus("rejected", exc.reason, exc.detail)
-        except Exception as exc:  # noqa: BLE001 - a refresh reports, it does not raise
-            logger.exception("Model Hub engine channel refresh failed")
-            return ChannelStatus("rejected", "state_unreadable", type(exc).__name__)
-        return ChannelStatus("accepted", sequence=payload.sequence, changed=changed)
+        # Serialize publication/settlement, not resolve(): execution can still
+        # observe an earlier withdrawal while another refresh is stuck in I/O.
+        with self._refresh_lock:
+            payload = None
+            try:
+                envelope, payload = authenticate(raw, roots=self.roots, verifier=self.verifier)
+                changed = self.store.accept(envelope, payload, floor=self.roots.sequence_floor)
+            except ChannelError as exc:
+                # This attempt never became authoritative. Neither publish its
+                # withdrawals nor discard restrictions from an earlier failure.
+                logger.warning("Model Hub engine channel index rejected: %s", exc)
+                return ChannelStatus("rejected", exc.reason, exc.detail)
+            except Exception as exc:  # noqa: BLE001 - a refresh reports, it does not raise
+                if payload is not None:
+                    self._unpublished_withdrawals = {
+                        **self._unpublished_withdrawals,
+                        **{item.asset_release_tag: item for item in payload.revoked},
+                    }
+                logger.exception("Model Hub engine channel refresh failed")
+                return ChannelStatus("rejected", "state_unreadable", type(exc).__name__)
+            # A completed publication, not a rejection or unchanged-file
+            # refresh, hands authority back to the single state file (including
+            # its deliberate loss contract).
+            if changed:
+                self._unpublished_withdrawals = {}
+            return ChannelStatus("accepted", sequence=payload.sequence, changed=changed)
 
     def snapshot(self) -> ChannelSnapshot | None:
         """The last accepted index, re-authenticated from disk; no network.
 
-        ``None`` when this installation is outside the channel or has accepted
-        nothing yet. Raises ``ChannelError`` when what is on disk cannot be
-        trusted, including when avault cannot verify it right now.
+        ``None`` when this installation is outside the channel or local
+        history is missing, not proof that it never accepted an index. Raises
+        ``ChannelError`` when what is on disk cannot be trusted, including
+        when avault cannot verify it right now.
         """
 
         if self.opt_out_reason() is not None:
@@ -219,7 +253,7 @@ class EngineChannel:
         return self.store.cached(roots=self.roots, verifier=self.verifier)
 
     def bundled_release_tag(self) -> str | None:
-        manifest = self.manager.load_manifest_for_diagnostics()
+        manifest = self.manager.bundled_manifest()
         tag = manifest.payload.get("asset_release_tag") if manifest is not None else None
         return tag if isinstance(tag, str) else None
 
@@ -239,12 +273,18 @@ class EngineChannel:
         the resolution's reason says which. An Avibe build with no readable
         key, such as a downgrade to a release that ships none, reads the
         record and nothing else. A manifest override is the one documented way
-        out of the channel, withdrawals included.
+        out of the channel, withdrawals included. Missing/unreadable history
+        returns restrictive KEEP, not a claim the installed engine is verified
+        or healthy; its owner still checks identity/integrity before use. No
+        new channel adoption is authorized until a signed fetch succeeds.
         """
 
         reason = self.opt_out_reason()
         if reason == "manifest_override":
             return Resolution(ResolutionAction.KEEP, reason)
+        withdrawal = self._unpublished_withdrawals.get(current)
+        if withdrawal is not None:
+            return Resolution(ResolutionAction.BLOCKED, "channel_state_write_failed", None, withdrawal)
         if reason is not None:
             return self._unverifiable(current, reason)
         try:

@@ -70,17 +70,17 @@ describe('BackendSupplyModeCard', () => {
         <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="vibey" /></I18nextProvider>
       </MemoryRouter>,
     );
-    const hub = await screen.findByRole('radio', { name: /Gateway mode/ });
+    const hub = await screen.findByRole('radio', { name: /Managed by Model Hub/ });
     expect(hub.getAttribute('aria-checked')).toBe('true');
     expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
-    expect(screen.queryByRole('radio', { name: /Direct mode/ })).toBeNull();
+    expect(screen.queryByRole('radio', { name: /Own login/ })).toBeNull();
     await userEvent.click(hub);
     expect(modelsApi.scanMigration).not.toHaveBeenCalled();
     expect(setMode).not.toHaveBeenCalled();
   });
 
   it.each([
-    ['en', 'On the gateway · no source enabled yet, the next turn will fail. Add or enable a source on the Models page to bring it back.'],
+    ['en', 'On Model Hub · no provider enabled yet, the next turn will fail. Add or enable a provider on the Models page to bring it back.'],
     ['zh', '已接入模型网关 · 还没有启用任何供应商，下一个回合会失败。去「模型」页添加或启用供应商即可恢复。'],
   ])('punctuates the warning and its fix as one %s sentence pair', async (language, banner) => {
     await i18n.changeLanguage(language);
@@ -96,7 +96,7 @@ describe('BackendSupplyModeCard', () => {
   });
 
   it.each([
-    ['switching to the gateway', /Gateway mode/, true],
+    ['switching to the gateway', /Managed by Model Hub/, true],
     ['importing from the Direct strip', null, false],
   ] as const)('declining the migration offered while %s', async (_, radio, switches) => {
     const apply = vi.spyOn(modelsApi, 'applyMigration');
@@ -104,7 +104,7 @@ describe('BackendSupplyModeCard', () => {
     renderCard();
 
     if (radio) await userEvent.click(await screen.findByRole('radio', { name: radio }));
-    else await userEvent.click(await screen.findByRole('button', { name: /Import to gateway/ }));
+    else await userEvent.click(await screen.findByRole('button', { name: /Import to Model Hub/ }));
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('Anthropic')).toBeTruthy());
     expect(setMode).not.toHaveBeenCalled();
@@ -112,7 +112,7 @@ describe('BackendSupplyModeCard', () => {
 
     if (switches) {
       await waitFor(() => expect(setMode).toHaveBeenCalledWith('claude', 'hub'));
-      await waitFor(() => expect(showToast).toHaveBeenCalledWith('Switched to Gateway', 'success'));
+      await waitFor(() => expect(showToast).toHaveBeenCalledWith('Now managed by Model Hub', 'success'));
     } else {
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
       expect(setMode).not.toHaveBeenCalled();

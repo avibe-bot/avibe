@@ -80,7 +80,7 @@ const UNKNOWN_WRITE_CASES = (['edit', 'delete'] as const).flatMap((action) =>
 const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean) => {
   await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
   if (action === 'edit') {
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Unknown edit');
@@ -93,8 +93,8 @@ const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean
 
   // A deletion is confirmed before its first attempt, which agrees to the hops
   // it takes but shows no Agent: the one the guard names is confirmed first.
-  await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
-  await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+  await userEvent.click(screen.getByRole('menuitem', { name: /^Remove provider$|^移除供应商$/i }));
+  await userEvent.click(screen.getByRole('button', { name: /^Remove provider$|^移除供应商$/i }));
   if (forced) await confirmShownAgents();
 };
 
@@ -102,7 +102,7 @@ const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean
 const confirmShownAgents = async () => {
   const guard = await screen.findByRole('dialog');
   await within(guard).findByText(/Release bot/);
-  await userEvent.click(within(guard).getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+  await userEvent.click(within(guard).getByRole('button', { name: /^Remove provider$|^移除供应商$/i }));
 };
 
 const noReauth = () => {
@@ -229,7 +229,7 @@ describe('SourceDetailPanel', () => {
     );
     expect(screen.getAllByText('mcp.exa.ai').length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: /Manage|管理/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /Remove source|移除供应商/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Remove provider|移除供应商/ })).toBeNull();
   });
 
   it.each(['en', 'zh'])('hides endpoint, key and domain-derived metadata with one header control in %s', async (lng) => {
@@ -261,7 +261,7 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByRole('button', { name: /Advanced settings|高级设置/ })).toBeNull();
     expect(row.querySelector('[data-tier-provenance]')).toBeNull();
     expect(within(row as HTMLElement).getByRole('button', { name: /Remove|移除/ })).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i }));
     const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i).closest('[data-manual-model-draft]')!;
     expect(within(draft as HTMLElement).getAllByRole('textbox')).toHaveLength(1);
     expect(update).not.toHaveBeenCalled();
@@ -365,7 +365,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(name);
@@ -384,7 +384,7 @@ describe('SourceDetailPanel', () => {
   it('explains client validation instead of leaving a mute disabled save', async () => {
     renderEchoPanel();
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
 
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(endpoint);
@@ -398,7 +398,7 @@ describe('SourceDetailPanel', () => {
       .mockRejectedValueOnce(new ApiCallError('discovery_failed'));
     renderEchoPanel();
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
 
     const endpoint = screen.getByLabelText(/^Base URL$/i);
     await userEvent.clear(endpoint);
@@ -408,7 +408,7 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(save);
 
     await waitFor(() => expect(patch).toHaveBeenCalledWith(source.id, { base_url: 'https:relay.example' }));
-    expect(await screen.findByText(/source was not saved|供应商没有保存/i)).toBeTruthy();
+    expect(await screen.findByText(/provider was not saved|供应商没有保存/i)).toBeTruthy();
     expect(screen.getByDisplayValue('https:relay.example')).toBeTruthy();
   });
 
@@ -423,7 +423,7 @@ describe('SourceDetailPanel', () => {
       </I18nextProvider>,
     );
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
 
     expect(screen.getByTitle('relay.example · OpenAI Chat Completions')).toBeTruthy();
     expect(screen.queryByText('openai_chat')).toBeNull();
@@ -441,7 +441,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, updated.display_name);
@@ -475,8 +475,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove provider$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove provider$|^移除供应商$/i }));
     if (gaps.length > 0) {
       // The first confirmation showed no Agent, so nothing is removed until it does.
       await screen.findByText(/Release bot/);
@@ -511,8 +511,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove provider$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove provider$|^移除供应商$/i }));
 
     expect(await screen.findByTestId('source-gone')).toBeTruthy();
     expect(requests).toHaveLength(1);
@@ -534,8 +534,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove provider$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove provider$|^移除供应商$/i }));
 
     expect(await screen.findByRole('heading', { name: source.display_name })).toBeTruthy();
     const retry = await screen.findByRole('button', { name: /^Try again$|^重试$/i });
@@ -560,7 +560,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Held draft');
@@ -596,7 +596,7 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
     const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
     await userEvent.clear(name);
     await userEvent.type(name, 'Held failure');
@@ -604,7 +604,7 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Save anyway$|^仍要保存$/i }));
 
     expect(await screen.findByDisplayValue('Held failure')).toBeTruthy();
-    expect(screen.getByText(/source was not saved|供应商没有保存/i)).toBeTruthy();
+    expect(screen.getByText(/provider was not saved|供应商没有保存/i)).toBeTruthy();
   });
 
   it('retries a failed forced delete with the exact held server plan', async () => {
@@ -625,8 +625,8 @@ describe('SourceDetailPanel', () => {
     renderEchoPanel();
 
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove provider$|^移除供应商$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Remove provider$|^移除供应商$/i }));
     await confirmShownAgents();
     await userEvent.click(await screen.findByRole('button', { name: /^Try again$|^重试$/i }));
 
@@ -703,7 +703,7 @@ describe('SourceDetailPanel', () => {
       renderEchoPanel();
 
       await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-      await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+      await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
       const endpoint = screen.getByLabelText(/^Base URL$/i);
       await userEvent.clear(endpoint);
       await userEvent.type(endpoint, requestedBaseUrl);
@@ -885,12 +885,12 @@ describe('SourceDetailPanel', () => {
 
   it('opens the manual model draft in the table and keeps Add disabled while blank', async () => {
     renderPanel();
-    await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
+    await userEvent.click(screen.getAllByRole('button', { name: /^Add model ID$|^补充模型 ID$/i })[0]);
     const input = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i);
     expect(input).toBeTruthy();
     const draft = input.closest('[data-manual-model-draft]');
     expect(draft).toBeTruthy();
-    const add = within(draft as HTMLElement).getByRole('button', { name: /^Add model$|^添加模型$/i });
+    const add = within(draft as HTMLElement).getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i });
     expect((add as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -902,11 +902,11 @@ describe('SourceDetailPanel', () => {
   it('places every manual-draft cell without column arithmetic in the markup', async () => {
     vi.spyOn(modelsApi, 'addCustomModel').mockRejectedValueOnce(new Error('write failed'));
     renderPanel();
-    await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
+    await userEvent.click(screen.getAllByRole('button', { name: /^Add model ID$|^补充模型 ID$/i })[0]);
     const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i)
       .closest('[data-manual-model-draft]') as HTMLElement;
     await userEvent.type(within(draft).getByPlaceholderText(/^Model ID$|^模型 ID$/i), 'model-b');
-    await userEvent.click(within(draft).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await userEvent.click(within(draft).getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i }));
     // The failure line is the third cell, and the only one that has to be
     // waited for; the count is what proves the band is fully seeded.
     await waitFor(() => { expect(draft.children.length).toBe(3); });
@@ -919,7 +919,23 @@ describe('SourceDetailPanel', () => {
     vi.spyOn(modelsApi, 'refreshSource').mockRejectedValueOnce(new Error('lost response'));
     renderPanel();
     await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
-    expect(await screen.findByText(/fetch did not come back|拉取没有回来/i)).toBeTruthy();
+    expect(await screen.findByText(/Could not fetch models|模型拉取失败/i)).toBeTruthy();
+  });
+
+  it.each(['en', 'zh'])('shows the upstream refresh status and message in %s, preserving the list', async (language) => {
+    await i18n.changeLanguage(language);
+    const failure = new ApiCallError('discovery_failed', undefined, true, [], [], [], 502, undefined, {}, 403,
+      'This key cannot list models.');
+    vi.spyOn(modelsApi, 'refreshSource').mockRejectedValueOnce(failure);
+    renderPanel();
+    await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
+    expect(await screen.findByText('HTTP 403 · This key cannot list models.')).toBeTruthy();
+    expect(screen.getByText(language === 'en'
+      ? 'Could not fetch models. The last model list is shown below.'
+      : '模型拉取失败，下面保留上次的模型列表。')).toBeTruthy();
+    expect(screen.getByText('model-a')).toBeTruthy();
+    expect(screen.queryByText(/HTTP 502/)).toBeNull();
+    await i18n.changeLanguage('en');
   });
 
   it('settles a failed refetch from the authoritative Source inventory', async () => {
@@ -940,7 +956,7 @@ describe('SourceDetailPanel', () => {
       ...source,
       models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null }],
     };
-    const refresh = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: echoed, discovered: echoed.models.length });
+    const refresh = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: echoed, removed_hops: [], interrupted: [] });
     const reconcile = vi.fn().mockResolvedValue(undefined);
     renderEchoPanel(reconcile);
 
@@ -1009,10 +1025,10 @@ describe('SourceDetailPanel', () => {
     vi.spyOn(modelsApi, 'addCustomModel').mockResolvedValueOnce(echoed);
     renderEchoPanel();
 
-    await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
+    await userEvent.click(screen.getAllByRole('button', { name: /^Add model ID$|^补充模型 ID$/i })[0]);
     const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i).closest('[data-manual-model-draft]');
     await userEvent.type(within(draft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i), 'model-b');
-    await userEvent.click(within(draft as HTMLElement).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await userEvent.click(within(draft as HTMLElement).getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i }));
 
     expect(await screen.findByText('model-b')).toBeTruthy();
   });
@@ -1157,7 +1173,7 @@ describe('SourceDetailPanel', () => {
       path: `/api/models/sources/${source.id}/refresh`,
       error: 'source_in_route_chain',
       guard: /^Refetch models from|^从.*重新拉取模型/,
-      failure: /fetch did not come back|拉取没有回来/,
+      failure: /Could not fetch models|模型拉取失败/,
       start: async () => {
         await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
         await userEvent.click(await screen.findByRole('button', { name: /^Refetch anyway$|^仍要拉取$/i }));
@@ -1180,10 +1196,10 @@ describe('SourceDetailPanel', () => {
       path: `/api/models/sources/${source.id}`,
       error: 'source_last_supplier',
       guard: /save changes|保存.*更改/i,
-      failure: /source was not saved|供应商没有保存/,
+      failure: /provider was not saved|供应商没有保存/,
       start: async () => {
         await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
-        await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+        await userEvent.click(screen.getByRole('menuitem', { name: /^Edit provider$|^编辑供应商$/i }));
         const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
         await userEvent.clear(name);
         await userEvent.type(name, 'Moving plan');
@@ -1567,7 +1583,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
       </I18nextProvider>,
     );
     const line = screen.getByRole('status');
-    within(line).getByText(/Couldn't read this Source's tool capabilities|未能读取此供应商的工具能力/);
+    within(line).getByText(/Couldn't read this provider's tool capabilities|未能读取此供应商的工具能力/);
     await userEvent.click(within(line).getByRole('button', { name: /^Retry$|^重试$/ }));
     expect(retry).toHaveBeenCalledTimes(1);
   });

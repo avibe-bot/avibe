@@ -497,9 +497,16 @@ class AgentService:
                 language = getattr(getattr(self.controller, "config", None), "language", "en")
                 if not str(requested_model or "").strip():
                     # When the Model Hub is why there is no model to select, say so, not "select a model".
-                    refusal = await asyncio.to_thread(hub_supply_refusal, self.controller, agent.name, language)
+                    refusal = await asyncio.to_thread(
+                        hub_supply_refusal,
+                        self.controller,
+                        agent.name,
+                        language,
+                        agent_id=getattr(request, "vibe_agent_id", None),
+                        agent_name=getattr(request, "vibe_agent_name", None),
+                    )
                     if refusal is not None:
-                        hold_refused_input(request.context)
+                        hold_refused_input(request.context, fixed_in_models=refusal.fixed_in_models)
                         raise refusal
                 try:
                     selected_model = require_agent_model(requested_model, agent.name, language)

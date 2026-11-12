@@ -112,6 +112,32 @@
   border-color: var(--mint);
   box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
 }
+/* A connected card opens its own key. Pressing it is an edit, not a decision, so hover
+   only lifts the edge it already wears. */
+.setup-provider-card[data-state='connected']:hover:not(:disabled),
+.setup-provider-card[data-state='connected']:focus-visible {
+  box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
+}
+/* The mint fill says a provider supplies models, which is exactly what is not known
+   while its key is being checked, or once the check could not answer: the card goes
+   back to the plain surface until it is. A key the provider refused wears the same
+   denial edge the gateway card does when it fails. */
+.setup-provider-card[data-state='connected'][data-check='checking'],
+.setup-provider-card[data-state='connected'][data-check='failed'],
+.setup-provider-card[data-state='connected'][data-check='changed'],
+.setup-provider-card[data-state='connected'][data-check='rejected'] {
+  border-color: var(--ob-card-border);
+  background: var(--ob-card);
+  box-shadow: none;
+}
+.setup-provider-card[data-state='connected'][data-check='rejected'] {
+  border-color: var(--destructive-ink);
+}
+.setup-provider-card[data-check='rejected'] .setup-provider-key { color: var(--destructive-ink); }
+.setup-provider-card[data-state='connected'][data-check]:hover:not(:disabled),
+.setup-provider-card[data-state='connected'][data-check]:focus-visible {
+  box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
+}
 /* Greying a card out and showing the no-entry cursor says the person is being kept
    from acting. A connected card is disabled for a purely mechanical reason — there is
    nothing left to press — and the reference draws it at full strength beside the rest.
@@ -211,6 +237,7 @@
   height: var(--obp-check);
 }
 .setup-provider-check { color: var(--mint-ink); }
+.setup-provider-check--busy { color: var(--muted); }
 /* The plus states an offer, not a decision, so it is drawn in the same quiet ink the
    third card's plus wears rather than in the mint the check owns. */
 .setup-provider-add-mark { color: var(--muted); }
@@ -408,6 +435,19 @@
   text-align: center;
 }
 .setup-provider-summary[data-tone='error'] { color: var(--destructive-ink); }
+.setup-provider-summary > .setup-summary-actions { display: inline-flex; align-items: center; gap: 10px; }
+/* With the way out in it, the line takes the assistants step's hint shape: the
+   sentence centred on the action's axis, its controls in the flanking column beside
+   it, both columns free to give their width back on a narrow screen. */
+.setup-provider-summary[data-later] {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
+}
+.setup-provider-summary[data-later] > span:first-child { grid-column: 2; }
+.setup-provider-summary[data-later] > .setup-summary-actions { grid-column: 3; justify-self: start; }
+.setup-provider-summary[data-later] .setup-summary-retry { margin-inline-start: 0; }
+.setup-summary-later { font-size: var(--ob-cap-fs); }
 /* The summary rests on the stage's floor, the line the welcome's return wire and the
    assistants hint share, even at a tier where another screen is the tallest and this
    diagram is shorter than its stage. The stage fills that room and splits the slack
@@ -438,7 +478,7 @@
  * two dialogs asking for a key must look like the same question. */
 .setup-add-dialog {
   --obs-dialog-w: 568px;
-  --obs-dialog-h: 632px;
+  --obs-dialog-h: 720px;
   --obs-pad: 24px;
   --obs-gap: 20px;
   --obs-row-h: 56px;
@@ -454,6 +494,10 @@
   background: var(--card);
   box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
 }
+
+/* A frame about one key has one short question in it, so it is fitted to that
+   rather than held at the add dialog's height for a comparison it never offers. */
+.setup-add-dialog[data-size='compact'] { height: auto; }
 
 .setup-add-head {
   display: flex;
@@ -478,6 +522,7 @@
   line-height: 1.5;
   color: var(--muted);
 }
+.setup-add-subtitle[data-tone='error'] { color: var(--destructive-ink); }
 
 /* The same segmented control `ApiKeySourceForm` uses for protocol, at this
    dialog's scale: one track, equal segments, the chosen one filled. */
@@ -518,6 +563,15 @@
   overflow-y: auto;
   padding: var(--obs-gap) var(--obs-pad);
 }
+
+.setup-add-terms {
+  margin: -6px 2px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.setup-add-terms a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.setup-add-terms a:hover { color: var(--foreground); }
 
 .setup-add-note {
   font-size: 12px;
@@ -606,12 +660,15 @@
   color: var(--muted);
 }
 
+/* The body scrolls under a ruled footer, so a long form reads as continuing
+   rather than as cut off by the buttons. */
 .setup-add-foot {
   display: flex;
   flex: none;
   align-items: center;
   gap: 10px;
-  padding: 0 var(--obs-pad) var(--obs-pad);
+  padding: 14px var(--obs-pad) var(--obs-pad);
+  border-top: 1px solid var(--border);
 }
 
 /* Reserved, not conditional: the strip holds its line whether or not there is

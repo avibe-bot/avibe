@@ -260,6 +260,10 @@ async def dispatch_model_hub_rpc(
         return await service.migration_apply(
             payload.get("item_ids"), payload.get("clean_api_keys", False),
         )
+    if operation == "engine_status":
+        return await service.engine_status()
+    if operation in {"engine_check", "engine_update"}:
+        return await service.engine_operation(update=operation == "engine_update")
     if operation == "runtime_status":
         return await service.runtime_status()
     if operation == "runtime_install":

@@ -1,0 +1,373 @@
+{
+  "fixture_version": 1,
+  "warning": "PUBLIC TEST WALLET ONLY. Never send funds. No plaintext seed, private child key or machine key is included.",
+  "source": {
+    "commit": "fcefea28a63016085ead3650f05c7b272bae1589",
+    "ref_at_archive": "origin/master",
+    "version": "avault 0.1.10",
+    "binary_version": "avault 0.1.10",
+    "release_status": "unreleased HD implementation; version intentionally unchanged"
+  },
+  "vector": {
+    "mnemonic": "abandon x11 about",
+    "passphrase": "",
+    "paths": {
+      "evm": "m/44'/60'/0'/0/i",
+      "bitcoin": "m/86'/0'/0'/0/i",
+      "solana": "m/44'/501'/i'/0'"
+    }
+  },
+  "name": "HD_TEST_WALLET",
+  "import_response": {
+    "type": "hd-seed",
+    "envelope": {
+      "ciphertext": "JeOTy/N91Qr9HvLPj7t3TenAz6W3KWuTvqdEZUo3aQrbBbrmYS01aqrQ4duMyeDVfBVjbzvmts5UXBY+Dj7zyemqUr+5Q9WbuSQrXW9CzX0=",
+      "nonce": "xqdqO2mLqv7DG4WP",
+      "wrap_meta": "{\"v\":1,\"scheme\":\"machine-hd-seed-aesgcm-v1\",\"wrapped_dek\":\"j5McQFYPR5Fu3ICepTVDhUJxORumrD0Y/1iivEqvl5Ui7eE6JPaIlxjsWed029AG\",\"dek_nonce\":\"8In+1YMQLQQXQPfn\"}"
+    },
+    "accounts": [
+      {
+        "account": 0,
+        "evm": "0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+        "bitcoin": "03cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115",
+        "solana": "f036276246a75b9de3349ed42b15e232f6518fc20f5fcd4f1d64e81f9bd258f7"
+      },
+      {
+        "account": 1,
+        "evm": "039fd0991d0222b4e1339c1a1a5b5f6d9f6a96672a3247b638ee6156d9ea877a2f",
+        "bitcoin": "0283dfe85a3151d2517290da461fe2815591ef69f2b18a2ce63f01697a8b313145",
+        "solana": "f8029acf5cbcbdd5ac46ec147f3b78a3df6e5022ef0411db2bab650d329a4cd4"
+      },
+      {
+        "account": 2,
+        "evm": "03880bcb4bf46b49bdb071e307e282b11b9166907d9708f8c706092c44743f3e67",
+        "bitcoin": "03a730a23ce8b47248a5ddfb32eef75262d91f0b55b084dd1ff0d2f9e032e0e533",
+        "solana": "60c5985f58a32ff8ab91e2fbd1d211b8de6b4acc4f6ce4458830efc0c801ca1c"
+      },
+      {
+        "account": 3,
+        "evm": "0371fd9d361f19065cb8e7be22dfd2ff3f7f265dcaf01f45cfcc956e55dba8b124",
+        "bitcoin": "0206ed434ae00d8e4b4c89dd4bafe081fa1bbc6db0abf17c606b1a865ca50309a3",
+        "solana": "25deec12e0409b3f009b208fad2d9bd9d7f9c195d3e829897f9b21dfdb4a8649"
+      },
+      {
+        "account": 4,
+        "evm": "02b1692ae0dfea1c15ba4250f4feb903a6633a3458acffa46a5380ef55645d1695",
+        "bitcoin": "0399bb20fad9ed657cb8448aed6c68b444814272577e89abf1f5dc746acacd74e7",
+        "solana": "5606495f786320894dddea3473da80de07e66c70b16cdca2155a8c4ad41c831e"
+      },
+      {
+        "account": 5,
+        "evm": "03e3b32aa461b0be7833198fbb49c0d3f5a2bbabf9ab052a7bb97545d0e05c2816",
+        "bitcoin": "03b2d59fb7434ee9d5db34e3b6fbde28ce13ddccc811df8125b1c2add769dccf1f",
+        "solana": "124fbb5086d5e4f49b23538a3267f97218f9e58844a40797b8c2f1a435b956b6"
+      },
+      {
+        "account": 6,
+        "evm": "02aed1de6d479451b94c8635a10db38e2ea5ec612ec166bc8d78029a08d2878332",
+        "bitcoin": "024fcb4f77649c427b6754fda21d9901c9e5dfc98f2fb0c0b101d0170405b4dcbd",
+        "solana": "411362b15d612b9185f2b1625cb95c4e635e68fcbfcd0aa55f568bd58fe4a8a4"
+      },
+      {
+        "account": 7,
+        "evm": "0279b17216ab974c61dcd96feeff8d90e2dc449d27bfe474565859ac3a0df6e3c2",
+        "bitcoin": "02068f9740962b5b6b9dee508705ef2017eeccc99f25ed5499cdc42f3e3eb901df",
+        "solana": "811d6aa295c9db8b6f12d71a10a4d0dad4f0e92e6f6526d0c238a82eaa81683d"
+      },
+      {
+        "account": 8,
+        "evm": "02339d0a24275c9e67cf247669a0dc6bfa70044ff4a074d78bdce6ac648f67b1d6",
+        "bitcoin": "0255f987ea88a8402dbcac8744380df929e34ade6af5071154a5bc23dafaed7aa1",
+        "solana": "e54d15a9b6b9f1a946b12b25816b281055889fcc97040eb8bade43aab1ff8205"
+      },
+      {
+        "account": 9,
+        "evm": "0276c0e5cf2e56e519b44946ac76c7703023457d8c78ce3d44e4a571faa6addb85",
+        "bitcoin": "0218f8d08d9b8481b3833ce7aa1dc41feee9c5f2c90926462dc52d2f6ba7249b16",
+        "solana": "f10dcc1824bae5ed9b650b728eb0642f7e9f52274f2563c03f7100342a37f52d"
+      },
+      {
+        "account": 10,
+        "evm": "03a2075c4f558e4b1b4688b3e55eff56e84f574a3fe563db4fececd8cd978bfed1",
+        "bitcoin": "03e5935b53ef34cc033060c7edb69b9b2194b1614f7a9251e0feb862802a3a6671",
+        "solana": "8ec67b662faddd44e7d79875a4cf1e7f8c3f756a4b171ccea95a4149b8dddf2b"
+      },
+      {
+        "account": 11,
+        "evm": "03dca1645d3ab3b2b0a2327349d2e72f0b3f6c3f8d299658cefae7d20b0d9511f0",
+        "bitcoin": "02a2206a36c6e595e4d7fdf45a385520114692cda58d5793ad98ba20024b8e2793",
+        "solana": "d523049b8db090f8b47bdbfc027ba4c42df08782835303be44ea61d9f1955dfb"
+      },
+      {
+        "account": 12,
+        "evm": "03948e9881cd76a42abe2f75b69c3939889b67f5bedc39fddeaf68bd119bf2a93f",
+        "bitcoin": "0352d25a7241e3d3f86d8cf785063aafaaf867079cc5cb540f1656f66627c34150",
+        "solana": "28657270c4fb400254635f294c7c32cb28df65b3bc239edebd46103f5c4ba6b0"
+      },
+      {
+        "account": 13,
+        "evm": "02fec2772229838c151d139b947970f03572b4a1e085c5a11f16dd999f3f27774f",
+        "bitcoin": "035d4047dd9245864eec2d824a6bc4f3d42a25c6cf1728208755d961095242ab53",
+        "solana": "f3d1dde4bab409b1c5e685e516ac314cebcc4b444c5d7ae1fbf6321909725156"
+      },
+      {
+        "account": 14,
+        "evm": "03677011ecc56ae98f297372db8f0f3503046da7d3486988190f38cd7eaa0e873d",
+        "bitcoin": "03f582ec5934389194bca95cc6354896efc7fe748f3ef0af91d820177b2d0578d9",
+        "solana": "7469397223e860958e4699a947260b5579f5da3d7edf6c276070952ee9973c41"
+      },
+      {
+        "account": 15,
+        "evm": "028e0993f4cb4b55fa83b7476f3192d57e082a0673f458c1fb23be35e70654f3a8",
+        "bitcoin": "02db45b7b3e057681a3fb91aed33031902c5972f41ab7c3db5930f48e5692a43cc",
+        "solana": "bf4bd7aa1667244e7cccd528e45f34148f227a7e2fef555fff1882a33df91e3f"
+      },
+      {
+        "account": 16,
+        "evm": "0383581e36e032b770c6084d2118934d8d759e3a90b05862363fbbe623cc64cdd0",
+        "bitcoin": "037324439f61c90bcf456707c513ca5870bb34d301dbc2774cb482deee29527a44",
+        "solana": "e2c0f46df0fbcf89fff16e807df7c639087bf48b4097cb7a260e11f6eb9440e4"
+      },
+      {
+        "account": 17,
+        "evm": "0222129db06753beff10cfbfdc0f330934036d4301d43421835038045d25f9e24a",
+        "bitcoin": "02c7ead4851cbbbed0ec108d2dc8d57225df0c1f6d760dbd07c542e475266e6aff",
+        "solana": "7ca921b52b6213838ee46b441f6cffe5fbcd6e74fcab79d7f2a09cbae195e470"
+      },
+      {
+        "account": 18,
+        "evm": "03a4831ed3c4f9c6478789f0c7cb9a26866aefab9412addfc2ea3325714ca73adf",
+        "bitcoin": "03d0acea92827f91ec9c8ed8cfba08a049c83dea441fe753048fdeb718aa0837fc",
+        "solana": "b20e54da7edd322e1984b5a44a97a9f2b7dcb7ba9ffa1f718f9f6d1f30ca82cb"
+      },
+      {
+        "account": 19,
+        "evm": "03851f3f43111d8f89f3a9d69fa4297c07959e7969ea880d0e6ae38a8d6490c469",
+        "bitcoin": "032d381d0397cb4a4403bf48514fbe424a7ff99ea96e44ea29bc69639d01a9f020",
+        "solana": "aaf1f9df77ba3d96bf9604239cf1307600df0a8d45d2519812f59d11aca0782a"
+      }
+    ]
+  },
+  "signatures": [
+    {
+      "account": 0,
+      "chain": "evm",
+      "scheme": "ecdsa-secp256k1-recoverable",
+      "digest": "0101010101010101010101010101010101010101010101010101010101010101",
+      "public_key": "0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299",
+      "signature": {
+        "signature": "4ab49e72dbefd70b0de57ea08f4c7b53b450750108f9b6c7990070dfd21ee60943de43f0861662da78a94090e2daeae20863ce98e86123a5806a93f4473a73c4",
+        "recovery_id": 0
+      },
+      "verification": {
+        "independent_library": "@noble/curves via viem",
+        "valid": true,
+        "other_account_rejected": true
+      }
+    },
+    {
+      "account": 0,
+      "chain": "bitcoin",
+      "scheme": "schnorr-secp256k1-bip341-keypath",
+      "digest": "0101010101010101010101010101010101010101010101010101010101010101",
+      "public_key": "03cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115",
+      "taproot_output_key": "a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c",
+      "signature": {
+        "signature": "1ab6060f64cf5feaf7eaef7aa19a1bac2dc7af632e8ea10e0d3c1fd961e184e8464a61ba5eed1a76d9e634215f8971846db2f2379a4c5e1a5edd055e33a930ca",
+        "recovery_id": null
+      },
+      "verification": {
+        "independent_library": "@noble/curves via viem",
+        "valid": true,
+        "other_account_rejected": true
+      }
+    },
+    {
+      "account": 0,
+      "chain": "solana",
+      "scheme": "ed25519",
+      "message_hex": "deadbeef",
+      "public_key": "f036276246a75b9de3349ed42b15e232f6518fc20f5fcd4f1d64e81f9bd258f7",
+      "signature": {
+        "signature": "a90493687a56d7247a8c661127b9890bf824ccb2ffd83c8b1102b24b1220ce68f480a405722b40e026b4ad6afb9ac370a8c8322750b85b1371525555d1e0e90e",
+        "recovery_id": null
+      },
+      "verification": {
+        "independent_library": "@noble/curves via viem",
+        "valid": true,
+        "other_account_rejected": true
+      }
+    },
+    {
+      "account": 1,
+      "chain": "evm",
+      "scheme": "ecdsa-secp256k1-recoverable",
+      "digest": "0101010101010101010101010101010101010101010101010101010101010101",
+      "public_key": "039fd0991d0222b4e1339c1a1a5b5f6d9f6a96672a3247b638ee6156d9ea877a2f",
+      "signature": {
+        "signature": "6b4230dab8fed467d1129e3fed6384c32811df2117294cb3092470ded138659b2f25ed45adfb48c90ce778c862ce28e1beaab0d0438d50109b7693282f74a98e",
+        "recovery_id": 0
+      },
+      "verification": {
+        "independent_library": "@noble/curves via viem",
+        "valid": true,
+        "other_account_rejected": true
+      }
+    },
+    {
+      "account": 1,
+      "chain": "bitcoin",
+      "scheme": "schnorr-secp256k1-bip341-keypath",
+      "digest": "0101010101010101010101010101010101010101010101010101010101010101",
+      "public_key": "0283dfe85a3151d2517290da461fe2815591ef69f2b18a2ce63f01697a8b313145",
+      "taproot_output_key": "a82f29944d65b86ae6b5e5cc75e294ead6c59391a1edc5e016e3498c67fc7bbb",
+      "signature": {
+        "signature": "743723ab02eafbca4727ea4e6de76705490b8345e2a579c937ff22845a2342aa10934f935580086f85ff64750cc89a30dd829ef5b5c36e688def65b496676c51",
+        "recovery_id": null
+      },
+      "verification": {
+        "independent_library": "@noble/curves via viem",
+        "valid": true,
+        "other_account_rejected": true
+      }
+    },
+    {
+      "account": 1,
+      "chain": "solana",
+      "scheme": "ed25519",
+      "message_hex": "deadbeef",
+      "public_key": "f8029acf5cbcbdd5ac46ec147f3b78a3df6e5022ef0411db2bab650d329a4cd4",
+      "signature": {
+        "signature": "d4e73e1a0a0dc83879492681654568deb3168be57a9816d50ca8a239c63819651c1fafd9b3ddecd3611af925c86233d15dcba111d95d57f34a1db52ccbdfb30d",
+        "recovery_id": null
+      },
+      "verification": {
+        "independent_library": "@noble/curves via viem",
+        "valid": true,
+        "other_account_rejected": true
+      }
+    }
+  ],
+  "expected_addresses": [
+    {
+      "account": 0,
+      "eth": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+      "btc_taproot": "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+      "solana": "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+    },
+    {
+      "account": 1,
+      "eth": "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0",
+      "btc_taproot": "bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh",
+      "solana": "Hh8QwFUA6MtVu1qAoq12ucvFHNwCcVTV7hpWjeY1Hztb"
+    },
+    {
+      "account": 2,
+      "eth": "0xb6716976A3ebe8D39aCEB04372f22Ff8e6802D7A",
+      "btc_taproot": "bc1p0d0rhyynq0awa9m8cqrcr8f5nxqx3aw29w4ru5u9my3h0sfygnzs9khxz8",
+      "solana": "7WktogJEd2wQ9eH2oWusmcoFTgeYi6rS632UviTBJ2jm"
+    },
+    {
+      "account": 3,
+      "eth": "0xF3f50213C1d2e255e4B2bAD430F8A38EEF8D718E",
+      "btc_taproot": "bc1py0vryk8aqusz65yzuudypggvswzkcpwtau8q0sjm0stctwup0xlqkkxler",
+      "solana": "3YqEpfo3c818GhvbQ1UmVY1nJxw16vtu4JB9peJXT94k"
+    },
+    {
+      "account": 4,
+      "eth": "0x51cA8ff9f1C0a99f88E86B8112eA3237F55374cA",
+      "btc_taproot": "bc1pjpp8nwqvhkx6kdna6vpujdqglvz2304twfd308ve5ppyxpmcjufs7k6xyr",
+      "solana": "6nod592sTfEWD3VSVPdQndLMVBCNmMc6ngt7MyGBK21j"
+    },
+    {
+      "account": 5,
+      "eth": "0xA40cFBFc8534FFC84E20a7d8bBC3729B26a35F6f",
+      "btc_taproot": "bc1pl4frjws098l3nslfjlnry6jxt46w694kuexvs5ar0cmkvxyahfkq0m445f",
+      "solana": "2EUrWmf5xMmWER9BtDbXbGbZjoL7R3eTDMXYR6H6cKPj"
+    },
+    {
+      "account": 6,
+      "eth": "0xB191a13bfE648B61002F2e2135867015B71816a6",
+      "btc_taproot": "bc1p5sxs429uz2s2yn6tt98sf67qwytwvffae4dqnzracq586cu0t6zsftdgvv",
+      "solana": "5P2eQoLncuFMjAmNNF4PspnAXYNaDSE2t1gb5os76Svw"
+    },
+    {
+      "account": 7,
+      "eth": "0x593814d3309e2dF31D112824F0bb5aa7Cb0D7d47",
+      "btc_taproot": "bc1pxsvy7ep2awd5x9lg90tgm4xre8wxcuj5cpgun8hmzwqnltqha8pqkkf3st",
+      "solana": "9h1cLBiraaUqM1CdJTaVaew1oQtgQUW24FZ8YdnLLgJY"
+    },
+    {
+      "account": 8,
+      "eth": "0xB14c391e2bf19E5a26941617ab546FA620A4f163",
+      "btc_taproot": "bc1ptk8pqtszta5pv5tymccfqkezf3f2q39765q4fj8zcr79np6wmj6qrg2udy",
+      "solana": "GS6Y8rQB8W3SWfLpQuooT1pEm7mqRKnTP1EkNKL2Xeha"
+    },
+    {
+      "account": 9,
+      "eth": "0x4C1C56443AbFe6dD33de31dAaF0a6E929DBc4971",
+      "btc_taproot": "bc1p7pkeudt8wq7fc6nzj6yxkqmnrjg25fu4s9l777ca3w3qrxanjehq06a7d6",
+      "solana": "HDyTY5B1TJ3WgyfaziZtDGaBqj3ofKm8499Q8meqk4nx"
+    },
+    {
+      "account": 10,
+      "eth": "0xEf4ba16373841C53a9Ba168873fC3967118C1d37",
+      "btc_taproot": "bc1pzhnqyfvxe08zl0d9e592t62pwvp3l2xwhau5a8dsfjcker6xmjuqmss0eg",
+      "solana": "AcLS2t8rzEqeQnbJK4HBS7g8NBCa7SowjARdvxtqBE3t"
+    },
+    {
+      "account": 11,
+      "eth": "0xa251F9b1F365bF1be54b6bDa3bbEAD414f1Af763",
+      "btc_taproot": "bc1ps7jvy2px7nul84amuck404cuhl5lf528cf543ctt6fazm98c49lqz5k3dk",
+      "solana": "FLzoxtpBbnn5nGcyokN47Di2M3VJ7FaiUNGpeZWVRUgz"
+    },
+    {
+      "account": 12,
+      "eth": "0x7286A5102BB0FaC25F53A4819A5F933698155945",
+      "btc_taproot": "bc1psv77lwsll4pv3e32trz59ywsdldh67ace2hs6d3hg7emhd3nfjhsfv2799",
+      "solana": "3ih2doS8hZJsnMnZ4Xho4rckrZKq8Co5N5GdCEnD6Mx3"
+    },
+    {
+      "account": 13,
+      "eth": "0x5Edc7559F077dD692901e7e4E92970ad81022Ee7",
+      "btc_taproot": "bc1pv7w4rd7q5pje0r6lzdlukplwe9kgveeanzes4c577hsf0p2tf3yqz720dh",
+      "solana": "HQmgK6Syw5XG8zkEnSoBaNz3fhrGHLt1LUfeGWaVuhLh"
+    },
+    {
+      "account": 14,
+      "eth": "0x9Ef58eAb71ab36B337450598a9F56451e13DB8E3",
+      "btc_taproot": "bc1pltdrdvugugzd3ylzmflf42s97l0vvfrss67cqusnz7nrk8l34jgs950ver",
+      "solana": "8qRMXdEGhfrVMSEgYiBvDrPVQTR83PXWPzUFsLzwp1hS"
+    },
+    {
+      "account": 15,
+      "eth": "0xa25d37554EB084969C85362f7E6B1A6108e51d0e",
+      "btc_taproot": "bc1p3xkku35m5yf3dn6zmxukkewv289f7xfg74reqhz6k0e3hjscddjq508fff",
+      "solana": "DsjwrNNNQL9LpRrGmgvzvuFHrApXDCQ2mVTZg4NT4mGr"
+    },
+    {
+      "account": 16,
+      "eth": "0xF4EeD1f0589E2Cd7cF29CCE5f6f45e1ed65594aB",
+      "btc_taproot": "bc1pczfxmv2k4nzemc99dpd50lmxv0kuxl0eh00feagya03e26xtgezqz6xzlm",
+      "solana": "GG9npDte2RMSejBwzBuLsdENouHZVdcMgTK3FEnsdHxF"
+    },
+    {
+      "account": 17,
+      "eth": "0x516A2191b53f7654654F209CcA9668b16f149988",
+      "btc_taproot": "bc1pfwehd5lyr469xzz9u0cpdqz69fdk4d6gheulzxypl6tk2w9zchxqd8cynz",
+      "solana": "9Pd8ratWtmsyVXtcThE6rzURzSk77iAheqBn87Q66RtB"
+    },
+    {
+      "account": 18,
+      "eth": "0x944A807C53BCe5a96dD4E558E993833aB41CE65F",
+      "btc_taproot": "bc1p5dkc7gmlu0y7qc0n59yqsypgkmvjlevahcswskgdp6986j873erqz6pq3w",
+      "solana": "Cz4FDEewmYtKpoBQYmMVaXXL6GJPU3ZjHx7RH2enm5Pp"
+    },
+    {
+      "account": 19,
+      "eth": "0x5096eEe90Aa1b783AF381669938C688F02bb43D8",
+      "btc_taproot": "bc1pd6nqrg63ex4025vaw89l9xke00zqjm5vdgm88us6036yqugpfdcq0dfmeg",
+      "solana": "CWJKBYW8VndqhBJyMLX1kaHbx5R47CTKCbHHx78dhFQV"
+    }
+  ]
+}

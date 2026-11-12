@@ -1,5 +1,5 @@
 import type { TranslationKey } from '@/i18n/types';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -19,6 +19,12 @@ import {
 import { IS_APPLE } from '../../lib/platform';
 import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { isComposingKey } from '@/lib/imeComposition';
+import {
+  nativeDirectBaselineState,
+  onNativeDirectClosure,
+  retryNativeDirectBaseline,
+  subscribeNativeDirectBaseline,
+} from '@/lib/native';
 import { useLatestRef } from '@/lib/useLatestRef';
 import {
   REMOTE_AUTH_STATE_EVENT,
@@ -154,6 +160,18 @@ export const TerminalView: React.FC<{
   const busyRetriesRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
   const authorizationRecoveryPendingRef = useRef(false);
+  // For the direct-closure handler below. `persistentSession`: a 'ready' frame for this session
+  // said the server keeps it across sockets (tmux). It belongs to the session, not to one socket:
+  // it survives replacement sockets that have not attached yet (an ordinary lost connection, a
+  // busy retry, an authorization change), and is cleared when the session id changes, a later
+  // 'ready' frame says otherwise, the shell exits, or an authorization (login required, revoked,
+  // unavailable) or disabled close ends it. After a clear, only a new socket's own persistent
+  // 'ready' sets it again. `settled`: the current socket ended in a way that some other path owns
+  // (exit, disabled, authorization recovery), so nothing else should reconnect it; every new
+  // socket resets it.
+  const persistentSessionRef = useRef(false);
+  const persistentSessionIdRef = useRef(sessionId);
+  const settledRef = useRef(false);
   // Auto-dismiss timer for the mobile Paste key's "clipboard blocked" hint.
   const pasteHintTimerRef = useRef<number | null>(null);
   // Report actual session persistence (from the backend 'ready' frame) up to the tab bar, so its
@@ -163,6 +181,16 @@ export const TerminalView: React.FC<{
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
+  // Inside a native shell with the `direct` capability, no socket opens until the document has a
+  // valid direct baseline: a closure from before the socket existed must not be taken for one to
+  // act on, and the shell may not be ready for new connections yet. `absent` (no capability) and
+  // `ready` open as usual.
+  const directState = useSyncExternalStore(subscribeNativeDirectBaseline, nativeDirectBaselineState);
+  const directBlocked = directState === 'pending' || directState === 'unavailable';
+  // While blocked, the existing states show it: connecting while the read is out, and the error
+  // overlay with its Reconnect button once it is unavailable. No socket either way.
+  const shownStatus: TerminalStatus =
+    directState === 'pending' ? 'connecting' : directState === 'unavailable' ? 'error' : status;
   // Scrollback search (SearchAddon). Opened with ⌘F/Ctrl+F while the terminal has focus; results
   // carry {index,count} for the "3/12" match counter (index is -1 past the highlight threshold).
   const [searchOpen, setSearchOpen] = useState(false);
@@ -176,8 +204,8 @@ export const TerminalView: React.FC<{
   // body was removed — only the terminating states render an in-body overlay (below).
   const onStatusRef = useLatestRef(onStatus);
   useEffect(() => {
-    onStatusRef.current?.(status, exitCode);
-  }, [status, exitCode]);
+    onStatusRef.current?.(shownStatus, exitCode);
+  }, [shownStatus, exitCode]);
 
   useEffect(() => {
     const onAuthorizationState = (event: Event) => {
@@ -190,7 +218,28 @@ export const TerminalView: React.FC<{
     return () => window.removeEventListener(REMOTE_AUTH_STATE_EVENT, onAuthorizationState);
   }, []);
 
+
+  // The native shell closed connections for this origin because their path was lost (a new
+  // `closure`). It cannot say whether this socket was on that path, and a browser WebSocket never
+  // reconnects by itself, so a session the server keeps (tmux) reattaches through the same
+  // reconnect the button uses, even if its socket was healthy. Only the server-side session
+  // survives: the client view (scrollback, viewport, search, selection) starts over. A plain
+  // shell, or a session the server never confirmed as persistent, is left alone: a live plain
+  // shell dies with its socket, and one already lost keeps the overlay that tells the user its
+  // process is gone. A confirmed session stays eligible while its replacement connects. Input
+  // typed while there is no open socket is dropped, never queued, so nothing is replayed.
+  useEffect(
+    () =>
+      onNativeDirectClosure(() => {
+        if (settledRef.current || !persistentSessionRef.current) return;
+        busyRetriesRef.current = 0;
+        setReconnectKey((key) => key + 1);
+      }),
+    [],
+  );
+
   useEffect(() => {
+    if (directBlocked) return;
     const term = new Terminal({
       fontSize: getTerminalFontSize(), // shared, persisted preference — see terminalFontSize.ts
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
@@ -325,6 +374,11 @@ export const TerminalView: React.FC<{
     const ws = new WebSocket(buildWsUrl(sessionId, cwd));
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
+    if (persistentSessionIdRef.current !== sessionId) {
+      persistentSessionIdRef.current = sessionId;
+      persistentSessionRef.current = false;
+    }
+    settledRef.current = false;
     ws.onopen = () => {
       try {
         refit();
@@ -338,12 +392,15 @@ export const TerminalView: React.FC<{
           const msg = JSON.parse(ev.data) as { type?: string; persistent?: boolean; code?: number };
           if (msg.type === 'ready') {
             busyRetriesRef.current = 0; // a successful attach resets the transient-retry budget
+            persistentSessionRef.current = !!msg.persistent;
             setStatus('ready');
             onPersistentRef.current?.(!!msg.persistent);
             // The shell is live and about to paint its first content — settle the fit again so a
             // late cell-metric correction doesn't leave the terminal a few rows tall.
             settle();
           } else if (msg.type === 'exit') {
+            settledRef.current = true;
+            persistentSessionRef.current = false;
             setExitCode(typeof msg.code === 'number' ? msg.code : null);
             setStatus('closed');
           }
@@ -355,19 +412,28 @@ export const TerminalView: React.FC<{
       term.write(new Uint8Array(ev.data as ArrayBuffer));
     };
     ws.onclose = (ev: CloseEvent) => {
+      // An authorization or disabled close ends this session's eligibility for a closure
+      // reattach. Whatever reopens it afterwards (recovery, Reconnect, a re-created terminal),
+      // its socket must confirm persistence with its own 'ready'.
       if (ev.code === AUTHORIZATION_LOGIN_REQUIRED_CLOSE_CODE) {
+        persistentSessionRef.current = false;
+        settledRef.current = true;
         authorizationRecoveryPendingRef.current = true;
         setStatus('error');
         reportRemoteAuthorizationState('login_required');
         return;
       }
       if (ev.code === AUTHORIZATION_REVOKED_CLOSE_CODE) {
+        persistentSessionRef.current = false;
+        settledRef.current = true;
         authorizationRecoveryPendingRef.current = false;
         setStatus('disabled');
         reportRemoteAuthorizationState('revoked');
         return;
       }
       if (ev.code === AUTHORIZATION_UNAVAILABLE_CLOSE_CODE) {
+        persistentSessionRef.current = false;
+        settledRef.current = true;
         authorizationRecoveryPendingRef.current = true;
         setStatus('error');
         reportRemoteAuthorizationState('unavailable');
@@ -393,6 +459,11 @@ export const TerminalView: React.FC<{
           250 * busyRetriesRef.current,
         );
         return;
+      }
+      // 1008: the terminal is disabled on this instance, which no reconnect changes.
+      if (ev.code === 1008) {
+        persistentSessionRef.current = false;
+        settledRef.current = true;
       }
       setStatus((prev) =>
         prev === 'closed' ? prev : ev.code === 1008 ? 'disabled' : prev === 'ready' ? 'closed' : 'error',
@@ -428,7 +499,7 @@ export const TerminalView: React.FC<{
       termRef.current = null;
       searchRef.current = null;
     };
-  }, [sessionId, cwd, reconnectKey]);
+  }, [sessionId, cwd, reconnectKey, directBlocked]);
 
   // Clear the paste-hint auto-dismiss timer if the view unmounts before it fires.
   useEffect(
@@ -470,6 +541,12 @@ export const TerminalView: React.FC<{
 
   const reconnect = () => {
     busyRetriesRef.current = 0;
+    // Without a valid direct baseline there is nothing to reconnect yet: the user's retry asks for
+    // one. The socket opens when it is ready.
+    if (directState === 'unavailable') {
+      retryNativeDirectBaseline();
+      return;
+    }
     setReconnectKey((k) => k + 1);
   };
 
@@ -524,7 +601,7 @@ export const TerminalView: React.FC<{
 
   return (
     <div className="flex h-full min-h-0 flex-col" style={{ backgroundColor: TERMINAL_BG }}>
-      {status === 'disabled' ? (
+      {shownStatus === 'disabled' ? (
         <div className="grid flex-1 place-items-center p-6 text-center text-[12.5px] text-muted">
           <div className="max-w-md">{t('apps.terminal.disabled')}</div>
         </div>
@@ -585,15 +662,15 @@ export const TerminalView: React.FC<{
               </button>
             </div>
           )}
-          {(status === 'closed' || status === 'error') && (
+          {(shownStatus === 'closed' || shownStatus === 'error') && (
             // The "connected" status no longer occupies its own row — it lives in the tab bar.
             // Only the terminating states surface in the body, as a centred overlay that offers
             // a reconnect (the dimmed last output stays visible underneath).
             <div className="absolute inset-0 grid place-items-center bg-surface/85 p-6 text-center backdrop-blur-[1px]">
               <div className="flex flex-col items-center gap-3">
                 <span className="text-[12.5px] text-muted">
-                  {t(`apps.terminal.status.${status}`)}
-                  {status === 'closed' && exitCode != null ? ` · ${t('apps.terminal.exitCode', { code: exitCode })}` : ''}
+                  {t(`apps.terminal.status.${shownStatus}`)}
+                  {shownStatus === 'closed' && exitCode != null ? ` · ${t('apps.terminal.exitCode', { code: exitCode })}` : ''}
                 </span>
                 <Button
                   type="button"
@@ -620,7 +697,7 @@ export const TerminalView: React.FC<{
         </div>
       )}
 
-      {status !== 'disabled' && (
+      {shownStatus !== 'disabled' && (
         // Accessory key bar for touch devices only — soft keyboards lack esc/tab/ctrl/arrows.
         // Hidden when the primary pointer is fine (desktop, incl. touchscreen laptops): a
         // hardware keyboard already has these keys and the bar just costs a row. Keyed off

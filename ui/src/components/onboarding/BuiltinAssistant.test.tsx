@@ -118,7 +118,7 @@ describe('the built-in assistant card', () => {
     expect(await card().findByText(en.onboarding.setup.noteBuiltinUnset)).toBeTruthy();
     const pick = await card().findByRole('button', { name: /gpt-5\.6-mini/ });
     expect(card().getAllByRole('button').map((node) => node.textContent)).toEqual([
-      'gpt-5.6-solOpenAI', 'gpt-5.6-miniOpenAI', 'gpt-5.6-nanoOpenAI', en.onboarding.setup.allModels,
+      `gpt-5.6-sol${en.onboarding.setup.recommended}OpenAI`, 'gpt-5.6-miniOpenAI', 'gpt-5.6-nanoOpenAI', en.onboarding.setup.allModels,
     ]);
     expect(enter().disabled).toBe(true);
     expect(screen.getByText(en.onboarding.connection.builtinModelHint.replace('{{name}}', 'Vibey'))).toBeTruthy();
@@ -243,21 +243,26 @@ describe('the built-in assistant card', () => {
     expect(mock.models.putAgentModels).not.toHaveBeenCalled();
   });
 
-  it('reads as an enabled assistant once it has a model, and opens its route', async () => {
+  it('reads as an enabled assistant once it has a model, and its card changes that model', async () => {
     model = 'gpt-5.6-sol';
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
-    const choice = await card().findByRole('button', { name: 'Model route for Vibey, review and reorder' });
+    const choice = await card().findByRole('button', { name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Vibey') });
     await waitFor(() => expect(within(choice).getByText('gpt-5.6-sol')).toBeTruthy());
     expect(card().getByText(en.onboarding.setup.noteEnabled)).toBeTruthy();
     expect(mock.models.getAgentModelCandidates).not.toHaveBeenCalled();
     await waitFor(() => expect(enter().disabled).toBe(false));
+    fireEvent.click(choice);
+    const dialog = within(await screen.findByRole('dialog', { name: 'Choose a Vibey model' }));
+    fireEvent.click(await dialog.findByRole('radio', { name: /gpt-5\.6-mini/ }));
+    fireEvent.click(dialog.getByRole('button', { name: en.settings.models.gateway.picker.use }));
+    await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-mini' }));
   });
 
   it('says the gateway is off and holds its model still', async () => {
     model = 'gpt-5.6-sol';
     render(wrap(<AgentDetection data={data({ agent_supply_blocks: { vibey: 'gateway_off' } })} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
     expect(await card().findByText(en.onboarding.setup.noteGatewayOff.replace('{{name}}', 'Vibey'))).toBeTruthy();
-    const choice = await card().findByRole('button', { name: 'Model route for Vibey, review and reorder' });
+    const choice = await card().findByRole('button', { name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Vibey') });
     await waitFor(() => expect(within(choice).getByText('gpt-5.6-sol')).toBeTruthy());
     expect(choice.getAttribute('aria-disabled')).toBe('true');
     await act(async () => undefined);

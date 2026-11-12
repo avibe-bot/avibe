@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -57,17 +58,43 @@ class ShowVaultSnapshot:
                 if self._retired.is_set():
                     self._remove()
 
+    def _matches(self, content: bytes) -> bool:
+        """Only an intact private regular file can make publication a no-op."""
+        try:
+            before = self.path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                return False
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            with os.fdopen(os.open(self.path, flags), "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
+                    or not is_private(self.path, info.st_mode, fd=stream.fileno())
+                    or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+                    or info.st_size != len(content)
+                ):
+                    return False
+                return stream.read(len(content) + 1) == content
+        except OSError:
+            return False
+
     def _write(self, endpoint: dict | None) -> None:
         if self._retired.is_set():
             raise OSError("Show server transport owner retired")
+        content = json.dumps({"schema_version": 1, "endpoint": endpoint}, separators=(",", ":")).encode("utf-8")
+        if self._matches(content):
+            if self._retired.is_set():
+                raise OSError("Show server transport owner retired")
+            return
         if os.name == "nt":
             fd, temporary = windows_security().create_private_temporary_file(self.path)
         else:
             fd, name = tempfile.mkstemp(prefix=".endpoint-", dir=self.directory)
             temporary = Path(name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump({"schema_version": 1, "endpoint": endpoint}, stream, separators=(",", ":"))
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
             if self._retired.is_set():
                 raise OSError("Show server transport owner retired")
             os.replace(temporary, self.path)

@@ -10,6 +10,8 @@ for (const theme of ['light', 'dark']) {
       await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=${lang}&queued=1`);
       await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
       await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      // The bubble's slot opens a frame after the stack; settle its entrance too.
+      await expect(bubbleShown(page)).toBeVisible();
       await expect(page.locator('.pet-mini-stage')).toHaveCSS('color', theme === 'dark' ? 'rgb(255, 255, 255)' : 'rgb(23, 23, 28)');
       await page.evaluate(async () => {
         await Promise.all(document.getAnimations()
@@ -2233,6 +2235,8 @@ for (const lang of ['en', 'zh']) {
   test(`280px activity stack aligns with reply and keeps controls (${lang})`, async ({ page }) => {
     await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&activities=3&queued=1&lang=${lang}`);
     await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+    // The bubble's slot opens a frame after the stack; settle its entrance too.
+    await expect(bubbleShown(page)).toBeVisible();
     await settleMotion(page);
     const bubble = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
     const front = (await page.locator('.pet-mini-card').boundingBox())!;

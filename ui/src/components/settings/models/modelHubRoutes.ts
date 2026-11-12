@@ -15,9 +15,9 @@ export const modelHubRouteTarget = (
   overSetup = false,
 ): string => enabled ? requestedPath : modelHubDisabledRedirect(overSetup);
 
-// Opens the Model Hub with one backend's model catalog dialog in front, so a
-// model picker can send the user straight to where its list is edited.
-export const MODEL_HUB_MANAGE_PARAM = 'manage';
+// Opens the Model Hub with one Source's detail in front, so a failed turn's
+// 「Open Models」 lands on the Source that failed, where its key is replaced.
+export const MODEL_HUB_SOURCE_PARAM = 'source';
 
-export const modelHubCatalogPath = (backend: string): string =>
-  `${MODEL_HUB_SETTINGS_PATH}?${MODEL_HUB_MANAGE_PARAM}=${encodeURIComponent(backend)}`;
+export const modelHubSourcePath = (sourceId: string): string =>
+  `${MODEL_HUB_SETTINGS_PATH}?${MODEL_HUB_SOURCE_PARAM}=${encodeURIComponent(sourceId)}`;

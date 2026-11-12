@@ -71,9 +71,9 @@ describe('hosted tool cards', () => {
   });
   it.each(['en', 'zh'] as const)('explains interrupted responses without inventing a subject in %s, live and reloaded', (lng) => {
     for (const [interruption, reason] of [
-      ['overloaded', lng === 'en' ? 'upstream overloaded' : '上游服务过载'],
+      ['overloaded', lng === 'en' ? 'provider overloaded' : '供应商服务过载'],
       ['disconnected', lng === 'en' ? 'stream disconnected' : '连接中断'],
-      ['upstream', lng === 'en' ? 'upstream error' : '上游服务异常'],
+      ['upstream', lng === 'en' ? 'provider error' : '供应商服务异常'],
     ]) {
       for (const retried of [false, true]) {
         renderGroup([{

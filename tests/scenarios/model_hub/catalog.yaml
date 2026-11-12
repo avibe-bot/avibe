@@ -35,6 +35,7 @@ capability:
     - tests/test_model_hub_inference_wait.py
     - tests/test_model_hub_retry_advice.py
     - tests/test_model_hub_retry_policy.py
+    - tests/test_model_hub_unlisted_backoff.py
     - tests/test_model_hub_retry_lifecycle.py
     - tests/test_model_hub_streamed_overload.py
     - tests/test_model_hub_streamed_overload_lifecycle.py
@@ -631,6 +632,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_fresh_install_seeds_vibey_with_its_first_source
       - tests/test_model_hub_vibey_consumer.py::test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capable_model
+      - tests/test_model_hub_vibey_consumer.py::test_vibey_offers_and_starts_on_the_flagship_rather_than_a_listings_first_row
       - tests/test_vibey_backend_registration.py::test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model
       - tests/test_model_hub_native_takeover.py::test_takeover_seeds_a_pending_vibey_entry_from_its_whole_batch
       - tests/test_vibey_backend_registration.py::test_vibey_agent_runs_its_catalogs_first_model_until_it_has_one
@@ -791,6 +793,21 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_policy.py::test_real_gateway_retries_preoutput_then_preserves_one_response
+  - id: MH-RETRY-UNLISTED-001
+    name: An unlisted model's 503 waits privately without cooling the shared Source
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_unlisted_backoff.py::test_fast_503_waits_but_only_listed_model_changes_shared_health
+    related_tests:
+      - tests/test_model_hub_unlisted_backoff.py::test_private_wait_does_not_block_listed_model_on_same_source
+      - tests/test_model_hub_unlisted_backoff.py::test_private_retry_after_keeps_the_earlier_fallback_available
+      - tests/test_model_hub_unlisted_backoff.py::test_inventory_membership_is_frozen_at_admission
+      - tests/test_model_hub_unlisted_backoff.py::test_only_unlisted_server_503_is_exempt
+      - tests/test_model_hub_unlisted_backoff.py::test_configuration_wake_cannot_bypass_private_deadline
+      - tests/test_model_hub_unlisted_backoff.py::test_configuration_change_rechecks_private_wait_against_global_authority
+      - tests/test_model_hub_unlisted_backoff.py::test_listed_failure_during_private_wait_keeps_its_global_deadline
+      - tests/test_model_hub_unlisted_backoff.py::test_consumed_stream_failure_keeps_admitted_inventory_scope
   - id: MH-RETRY-CONCURRENCY-001
     name: Concurrent requests share one half-open slot through cancellation and slow inference
     status: covered
@@ -997,7 +1014,7 @@ scenarios:
     test: ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::MH-MENU-COMPOSE-001
     related_tests:
       - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx::finds an already-added model by its supplier and shows it as already added
-      - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::asks which row a typed ID names as the ID it would be saved as
+      - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::re-adds a typed ID as the row the user already has, not a blank one
       - ui/e2e/model-catalog/token-scope.spec.ts
   - id: MH-GATEWAY-STATUS-001
     name: Gateway route coverage stays independent of Agent selections and attributes Agent issues below the catalog
@@ -2916,12 +2933,12 @@ scenarios:
     missing_layer: e2e
     test:
       - tests/test_model_hub_engine_qualification.py::test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified
-      - tests/test_model_hub_engine_qualification.py::test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself
+      - tests/test_model_hub_engine_qualification.py::test_a_run_identity_mismatch_is_refused_even_when_the_untrusted_result_claims_success
       - tests/test_model_hub_engine_qualification.py::test_a_run_that_did_not_provably_test_the_released_wheel_is_neither_evidence_nor_a_clean_rehearsal
       - tests/test_model_hub_engine_qualification.py::test_a_log_that_never_catches_up_is_refused_although_what_it_holds_reads_as_complete
-      - tests/test_model_hub_engine_qualification.py::test_no_job_can_supply_the_evidence_classes_that_have_no_producer
-      - tests/test_model_hub_engine_qualification.py::test_an_artifact_holding_evidence_its_job_does_not_produce_stops_the_receipt
-      - tests/test_model_hub_engine_qualification.py::test_an_assembled_receipt_with_every_class_is_refused_when_it_is_made_and_when_it_is_checked
+      - tests/test_model_hub_engine_qualification.py::test_untrusted_reports_do_not_gain_authority_from_artifact_or_job_names
+      - tests/test_model_hub_engine_qualification.py::test_an_artifact_holding_untrusted_reports_is_parsed_as_data
+      - tests/test_model_hub_engine_qualification.py::test_an_assembled_authority_result_is_rejected_as_an_untrusted_rehearsal
   - id: MH-ENGINE-CHANNEL-011
     name: Every engine release the channel lists, withdrawn ones and rollback targets included, stays under the release guard, which restores lost assets from a backup that still verifies and never overwrites published bytes
     status: covered

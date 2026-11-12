@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { BackendModelEditorDialog } from './BackendModelEditorDialog';
 import { blankBackendModel } from './backendCatalog';
@@ -84,6 +85,14 @@ afterEach(() => {
 });
 
 describe('BackendModelEditorDialog', () => {
+  it('stays open on a click outside, keeping the model being typed', async () => {
+    const { onCancel } = renderEditor();
+    await userEvent.type(screen.getByLabelText('Model'), 'my-finetune');
+    await pressOutside();
+    expect(onCancel).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('my-finetune');
+  });
+
   it.each(['claude', 'codex', 'opencode'] as const)('does not add Off when saving an existing %s model', async (backend) => {
     const user = userEvent.setup();
     const model: BackendModel = {
@@ -122,6 +131,32 @@ describe('BackendModelEditorDialog', () => {
       cleanup();
       await i18n.changeLanguage(previous);
     }
+  });
+
+  it('closes only the suggestion list on the first Escape, and the editor on the next', async () => {
+    const { onCancel } = renderEditor();
+    const user = userEvent.setup();
+    await user.type(modelField(), 'qwen');
+    expect(await screen.findByRole('listbox')).toBeTruthy();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(modelField().value).toBe('qwen');
+
+    await user.keyboard('{Escape}');
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes only the custom effort field on Escape', async () => {
+    const { onCancel } = renderEditor({ model: { ...blankBackendModel(), id: 'reasoner', supports_reasoning: true } });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Custom effort' }));
+    const effort = screen.getByLabelText(i18n.t('settings.models.gateway.modelEditor.customEffort') as string);
+    await user.type(effort, 'ultra');
+    await user.keyboard('{Escape}');
+    expect(screen.queryByLabelText(i18n.t('settings.models.gateway.modelEditor.customEffort') as string)).toBeNull();
+    expect(onCancel).not.toHaveBeenCalled();
   });
 
   it('refuses an empty or already-taken model ID', async () => {

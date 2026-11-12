@@ -46,6 +46,7 @@ from core.caller_context import (
 from core.watch_protocol import DEFAULT_RETRY_EXIT_CODE, NO_EVENT_EXIT_CODE, NO_EVENT_MARKER
 from vibe import __version__
 from vibe.i18n import t as i18n_t
+from vibe.logging_config import RedactingFormatter, configure_library_logging
 from vibe.restart_state import RestartState
 from vibe.launcher_path import CURRENT_VIBE_EXECUTABLE_ENV, cache_running_vibe_path
 from vibe.package_shape import CORE_PACKAGE_NAME as PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME as LEGACY_PACKAGE_NAME
@@ -9825,12 +9826,17 @@ def _vault_secret_row(secret: dict) -> dict:
             "tags": secret.get("tags"),
             "description": secret.get("description"),
             "policy": secret.get("policy"),
+            "signer_kind": secret.get("signer_kind") if secret.get("signer_kind") == "hd-seed" else None,
+            "accounts": [
+                {key: account.get(key) for key in ("account", "name", "eth", "btc_taproot", "solana")}
+                for account in secret.get("accounts", [])
+            ] if secret.get("signer_kind") == "hd-seed" else None,
             "signing_curve": secret.get("signing_curve"),
             "signing_addresses": secret.get("signing_addresses"),
             "solana_signing_note": (
                 None
                 if secret.get("signing_curve") != "ed25519"
-                else "Protected Solana signing is not supported yet."
+                else "Sign with --scheme ed25519 --message-hex <exact non-empty serialized message, lowercase hex> and --signing-context-json '{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"<the same hex>\"}'; --digest is refused. Needs browser approval and a compatible Vault sandbox."
                 if secret.get("protection") == "protected"
                 else "Sign with --scheme ed25519 --message-hex <exact serialized message bytes>; --digest is refused."
             ),
@@ -11708,8 +11714,14 @@ def cmd_vault_sign(args):
     try:
         if not vault_crypto.is_valid_secret_name(name):
             raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
+        selection = {
+            key: value for key in ("chain", "account")
+            if (value := getattr(args, key, None)) is not None
+        }
+        derivation = api._sign_derivation_from_payload(selection)
         scheme, digest, message_hex = api._sign_input_from_payload(
             {
+                **selection,
                 "scheme": getattr(args, "scheme", None),
                 "digest": getattr(args, "digest", None),
                 "message_hex": getattr(args, "message_hex", None),
@@ -11719,17 +11731,18 @@ def cmd_vault_sign(args):
             args, digest=digest, message_hex=message_hex, help_command=help_command,
         )
         engine = _open_vault_engine()
+        api._preflight_hd_signing(engine, name, derivation, scheme)
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
             if meta.get("kind") != "keypair":
                 raise TaskCliError(f"secret '{name}' is not a signing key", code="not_signing_key", help_command=help_command)
-            if (meta.get("signer_kind") or "local") != "local":
+            if (meta.get("signer_kind") or "local") not in {"local", "hd-seed"}:
                 raise TaskCliError(
                     f"secret '{name}' is not locally signable",
                     code="unsupported_signer_kind",
                     help_command=help_command,
                 )
-            needs_approval = vault_service.sign_needs_approval(conn, name)
+            needs_approval = vault_service.sign_needs_approval(conn, name, derivation=derivation)
             if meta.get("protection") == "protected" and signing_context is None:
                 raise TaskCliError(
                     "protected signing requires --signing-context-json",
@@ -11746,26 +11759,38 @@ def cmd_vault_sign(args):
                     signing_context=signing_context,
                     requester=_vault_cli_requester(args),
                     delivery=_vault_cli_delivery(args, mode="sign"),
+                    derivation=derivation,
                 )
         if not needs_approval:
             sign_input = {"digest": digest} if message_hex is None else {"message_hex": message_hex}
             result = api.vault_sign(
                 {
                     "name": name,
+                    **selection,
                     **sign_input,
                     "scheme": scheme,
                     "signing_context": signing_context,
                     "requester": _vault_cli_requester(args),
+                    "delivery": _vault_cli_delivery(args, mode="sign"),
                 }
             )
-            _print_cli_payload(
-                "vault_signature",
-                name=name,
-                scheme=scheme,
-                **sign_input,
-                signature=result.get("signature"),
-            )
-            return 0
+            if result.get("ok") is True and isinstance(result.get("signature"), dict):
+                _print_cli_payload(
+                    "vault_signature",
+                    name=name,
+                    scheme=scheme,
+                    **sign_input,
+                    signature=result["signature"],
+                    **({"derivation": derivation} if derivation is not None else {}),
+                )
+                return 0
+            # The user may enable ask-before-signing after our initial read. The
+            # API's later policy check owns the handoff: never report a null
+            # signature or create a second request when it returns approval.
+            if result.get("code") in {"approval_required", "browser_signature_required"} and isinstance(result.get("request"), dict):
+                request = result["request"]
+            else:
+                raise TaskCliError("signing did not return a signature or an approval request", code="invalid_request", help_command=help_command)
         request = api._attach_signed_sign_operation_context(str(request["id"]))
         _publish_cli_vaults_updated(scope="request", request=request)
         _print_cli_payload(
@@ -11788,7 +11813,7 @@ def cmd_vault_sign(args):
         _print_task_error(TaskCliError(str(exc), code="protected_solana_unsupported", help_command=help_command))
         return 1
     except vault_service.InvalidSigningKeyError as exc:
-        _print_task_error(TaskCliError(str(exc), code="invalid_signing_key", help_command=help_command))
+        _print_task_error(TaskCliError(str(exc), code=getattr(exc, "code", "invalid_signing_key"), help_command=help_command))
         return 1
     except vault_service.InvalidRequestError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_request", help_command=help_command))
@@ -15224,6 +15249,11 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
             "reason": f"{target}_invalid_result",
             "error": i18n_t("doctor.value.unknownError"),
         }
+    if target == "model-hub-engine" and result.get("ok") and result.get("reason") == "waiting_for_controller":
+        return _doctor_repair_result(
+            target, "skipped", i18n_t("doctor.repair.dependencyStaged"),
+            reason="waiting_for_controller", state="staged", path=result.get("path"), version=result.get("version"),
+        )
     if result.get("ok"):
         version = result.get("version")
         detail = (
@@ -16140,6 +16170,13 @@ def _print_remote_status(result: dict) -> None:
         print(f"  Tunnel: {'running' if result.get('running') else 'stopped'}")
     if result.get("binary_found") is not None:
         print(f"  cloudflared: {'found' if result.get('binary_found') else 'not found'}")
+    direct = result.get("direct")
+    if isinstance(direct, dict):
+        print(f"  Direct paths: {'enabled' if direct.get('enabled') else 'disabled'}")
+        print(f"  Direct state: {direct.get('state') or 'unknown'} ({direct.get('reason') or 'unknown'})")
+        if direct.get("certificate_not_after"):
+            print(f"  Direct certificate expiry: {direct['certificate_not_after']}")
+        print(f"  Direct transport: {'running' if direct.get('transport_running') else 'stopped'}")
     if result.get("error"):
         print(f"  Error: {result.get('error')}")
     if result.get("detail"):
@@ -16473,6 +16510,55 @@ def cmd_remote_stop(args):
             print(f"Remote access failed to stop: {result.get('error') or 'unknown_error'}", file=sys.stderr)
             if result.get("detail"):
                 print(str(result["detail"]), file=sys.stderr)
+    return 0 if result.get("ok") else 1
+
+
+def cmd_remote_direct(args):
+    from config.v2_config import update_config_fields
+    from vibe import remote_access
+
+    action = getattr(args, "direct_command", None)
+    if action in {"on", "off"}:
+        enabled = action == "on"
+
+        def apply(config) -> None:
+            config.remote_access.vibe_cloud.direct = enabled
+
+        config = update_config_fields(apply)
+        result = remote_access.status(config)
+        result["direct_setting_changed"] = enabled
+    else:
+        config = V2Config.load()
+        result = remote_access.status(config)
+    live_direct = remote_access.live_direct_status(config, wait_for_setting=action in {"on", "off"})
+    if live_direct is not None:
+        result["direct"] = live_direct
+    elif action in {"on", "off"}:
+        from vibe import runtime
+
+        if runtime.recorded_ui_is_gone():
+            remote_access._report_runtime_status_async(
+                config, event="direct_paths_enabled" if action == "on" else "direct_paths_disabled",
+            )
+    if getattr(args, "json", False):
+        # This dedicated diagnostic must not inherit the ordinary tunnel
+        # status's public URL, instance identifiers or filesystem paths.
+        _print_cli_payload(
+            "remote_direct", ok=bool(result.get("ok")), direct=result.get("direct") or {},
+            **({"direct_setting_changed": result["direct_setting_changed"]}
+               if "direct_setting_changed" in result else {}),
+        )
+    else:
+        direct = result.get("direct") or {}
+        if action == "on":
+            print("Direct paths enabled.")
+        elif action == "off":
+            print("Direct paths disabled.")
+        print(f"  State: {direct.get('state') or 'unknown'}")
+        print(f"  Reason: {direct.get('reason') or 'unknown'}")
+        if direct.get("certificate_not_after"):
+            print(f"  Certificate expiry: {direct['certificate_not_after']}")
+        print(f"  Transport: {'running' if direct.get('transport_running') else 'stopped'}")
     return 0 if result.get("ok") else 1
 
 
@@ -17724,6 +17810,7 @@ def cmd_upgrade():
         launcher_is_current_process,
         restart_is_pending,
         should_skip_show_runtime_prepare,
+        upgrade_download_help,
         verify_upgrade_candidate,
     )
 
@@ -17880,6 +17967,7 @@ def cmd_upgrade():
             return 0
         else:
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
+            print(upgrade_download_help(plan.method))
             return 1
     except Exception as e:
         if plan.activation is not None:
@@ -17899,6 +17987,7 @@ def cmd_upgrade():
             )
             return 0
         print(f"\033[31mUpgrade failed: {e}\033[0m")
+        print(upgrade_download_help(plan.method))
         return 1
 
 
@@ -18050,6 +18139,8 @@ def cmd_runtime(args) -> int:
                 print(
                     "Model Hub engine: skipped ({reason}).".format(reason=model_hub_engine.get("reason") or "skipped")
                 )
+            elif model_hub_engine.get("ok") and model_hub_engine.get("reason") == "waiting_for_controller":
+                print("Model Hub engine files staged; waiting for the controller. Execution was not changed.")
             elif model_hub_engine.get("ok"):
                 print(
                     "Model Hub engine installed."
@@ -18544,7 +18635,7 @@ def _ensure_model_hub_engine_during_prepare(
     offline: bool = False,
     force: bool = False,
 ) -> dict:
-    """Converge CPA to the Avibe pin without making upgrade success depend on it."""
+    """Stage/repair required CPA files without making upgrade success depend on it."""
     from vibe import api
 
     try:
@@ -19099,6 +19190,32 @@ def build_parser():
         error_help_command="vibe remote stop --help",
     )
     _add_json_flag(remote_stop_parser)
+
+    remote_direct_parser = remote_subparsers.add_parser(
+        "direct",
+        help="Enable, disable, or inspect optional direct paths",
+        description="Change the optional direct iOS path setting without restarting Avibe.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe remote direct --help",
+    )
+    remote_direct_subparsers = remote_direct_parser.add_subparsers(
+        dest="direct_command",
+        metavar="{on,off,status}",
+        required=True,
+    )
+    for direct_action, direct_help in (
+        ("on", "Enable direct paths"),
+        ("off", "Disable direct paths"),
+        ("status", "Show direct-path status"),
+    ):
+        _add_json_flag(
+            remote_direct_subparsers.add_parser(
+                direct_action,
+                help=direct_help,
+                description=direct_help,
+                error_help_command=f"vibe remote direct {direct_action} --help",
+            )
+        )
 
     autostart_parser = subparsers.add_parser(
         "autostart",
@@ -19883,12 +20000,10 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message with a keypair secret (standard signs inline; protected needs approval)",
         description=(
-            "Sign with a local keypair. secp256k1 schemes sign a 32-byte --digest. A Solana key signs "
-            "with --scheme ed25519 --message-hex: the exact serialized message bytes, not a digest, so "
-            "do not hash them first. Standard keys sign immediately via avault and return the public "
-            "signature inline. Protected keys — and standard keys marked always-ask — instead create a "
-            "pending per-use request you approve in the browser; then 'vibe vault await <request-id>' "
-            "returns the public signature. Protected Solana keys cannot sign yet."
+            "Sign with a keypair or HD wallet (--chain required). Solana signs exact --message-hex "
+            "bytes, never a hash; secp256k1 uses --digest. Protected/ask-first keys need browser "
+            "approval; use 'vibe vault await REQUEST_ID'. Protected Solana needs "
+            "--signing-context-json: {\"kind\":\"solana-transaction-v1\",\"messageHex\":<same lowercase hex>}."
         ),
         epilog=(
             "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
@@ -19898,6 +20013,8 @@ def build_parser():
         error_help_command="vibe vault sign --help",
     )
     vault_sign_parser.add_argument("name", help="Keypair secret name")
+    vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="Required for HD seed wallets; fixes the signing scheme")
+    vault_sign_parser.add_argument("--account", type=int, help="Enabled HD account index, 0..19 (default: 0); not valid for plain keypairs")
     vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",
@@ -19905,7 +20022,7 @@ def build_parser():
     )
     vault_sign_parser.add_argument(
         "--scheme",
-        default="ecdsa-secp256k1-recoverable",
+        default=None,
         choices=[
             "ecdsa-secp256k1-recoverable",
             "ecdsa-secp256k1-der",
@@ -19913,7 +20030,7 @@ def build_parser():
             "schnorr-secp256k1-bip341-keypath",
             "ed25519",
         ],
-        help="Signature scheme; a Solana key uses ed25519",
+        help="Signature scheme (plain keypair default: ecdsa-secp256k1-recoverable); must match --chain for HD wallets",
     )
     vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
@@ -20910,7 +21027,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     return 0
 
 
-class _InstallerRetentionFormatter(logging.Formatter):
+class _InstallerRetentionFormatter(RedactingFormatter):
     """Show an optional collection failure without an installation traceback."""
 
     def format(self, record: logging.LogRecord) -> str:
@@ -20959,6 +21076,7 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
     # Keep best-effort retention decisions visible even when activation succeeds.
     from vibe.install_generations import logger as retention_logger
 
+    configure_library_logging()
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(_InstallerRetentionFormatter())
     previous_level = retention_logger.level
@@ -21049,6 +21167,9 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "start"): "member",
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
+    ("remote", "direct", "on"): "owner",
+    ("remote", "direct", "off"): "owner",
+    ("remote", "direct", "status"): "member",
     # Launch at login writes a login item on this machine, outside the instance.
     ("autostart", "on"): "owner",
     ("autostart", "off"): "owner",
@@ -21414,6 +21535,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_remote_start(args))
         if args.remote_command == "stop":
             sys.exit(cmd_remote_stop(args))
+        if args.remote_command == "direct":
+            sys.exit(cmd_remote_direct(args))
         parser.error("remote command is invalid")
     if args.command == "autostart":
         sys.exit(cmd_autostart(args))

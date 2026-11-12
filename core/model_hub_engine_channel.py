@@ -34,6 +34,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -85,6 +86,8 @@ _TIMESTAMP_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _AVAULT_VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)([-+].+)?")
 _STATE_SCHEMA_VERSION = 1
+
+logger = logging.getLogger(__name__)
 
 
 class ChannelError(Exception):
@@ -673,14 +676,20 @@ class ChannelStateStore:
     the file's current contents, so concurrent refreshes cannot move it back,
     and a rejected payload never changes the file.
 
-    Nothing recorded here ages. The sequence alone decides what replaces it:
-    the same payload offered again is accepted at any later time, and what was
-    accepted stays the machine's index until a higher sequence arrives.
+    Nothing recorded here ages. While this file is readable, the sequence
+    alone decides what replaces it: the same payload offered again is
+    accepted at any later time, and lower sequences cannot replace it.
 
-    The file is replaced atomically, with a best-effort directory flush. That
-    suits a record nothing acts on yet; it is not proof that an accepted
-    sequence survives power loss, which a consumer that activates engines
-    must have first (docs/plans/model-hub-engine-channel.md).
+    This is the only local history file. If it is missing or unreadable, a
+    newly authenticated fetch may establish a lower local floor and reopen a
+    lost withdrawal. Until that fetch, readers authorize no channel change;
+    they do not invent history or declare the installed engine fit to start.
+
+    Publication uses the shared atomic writer: a distinct same-directory
+    temporary file, file flush, replacement, and best-effort directory flush.
+    That protects whole-document readers, not history after state loss or
+    physical power-loss persistence beyond the helper's platform contract.
+    There is no replica, backup or recovery marker.
 
     This is not a defense against whoever controls the OS account.
     """
@@ -734,7 +743,10 @@ class ChannelStateStore:
         Raises ``ChannelError`` and leaves the stored state untouched when the
         payload is below the shipped floor, is older than what was accepted,
         differs from the accepted payload at the same sequence, or rewrites
-        earlier history. When it was issued plays no part.
+        earlier readable history. When it was issued plays no part. If the
+        file is missing or unreadable, the authenticated payload instead
+        becomes the new local history, subject to the shipped floor; the
+        lost sequence and withdrawals cannot be reconstructed.
         """
 
         from config.atomic_io import write_atomic
@@ -745,7 +757,17 @@ class ChannelStateStore:
 
         self.directory.mkdir(parents=True, exist_ok=True)
         with MigrationFileLock(self.lock_path):
-            state = self.load()
+            try:
+                state = self.load()
+            except ChannelError as exc:
+                if exc.reason != "state_unreadable":
+                    raise
+                logger.warning(
+                    "Model Hub channel history is unreadable; attempting to record a signed fetch as the new local floor. "
+                    "Prior replay protection and withdrawals may be lost (%s)",
+                    exc.reason,
+                )
+                state = None
             if state is not None:
                 if payload.sequence < state.sequence:
                     raise ChannelError("replayed", "the index is older than one this machine already accepted")
@@ -777,7 +799,9 @@ class ChannelStateStore:
             return True
 
     def cached(self, *, roots: TrustRoots, verifier: SignatureVerifier) -> ChannelSnapshot | None:
-        """Re-authenticate the stored envelope. ``None`` when nothing was accepted yet.
+        """Re-authenticate the stored envelope. ``None`` when local history is missing.
+
+        Missing history is not proof this installation never saw an index.
 
         A snapshot below the sequence floor this Avibe release ships is still
         returned, marked as not meeting it: it can show where a retained

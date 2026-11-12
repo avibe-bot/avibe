@@ -27,6 +27,20 @@ export type NativePushStatus =
       revokeState?: NativePushRevokeState;
     } & NativePushSubscription);
 
+export type NativeDirectPreference = 'tunnel' | 'direct';
+/**
+ * `direct.status()` and `direct.transportChanged`, as specified in
+ * docs/plans/ios-app.md section 4. `preferred` is what this document's new
+ * connections try first, ordered by `sequence`. `closure` counts the times the
+ * shell closed connections for this host because their path was lost; it only
+ * grows, and each increase asks the Web UI to reconnect once.
+ */
+export type NativeDirectStatus = {
+  preferred: NativeDirectPreference;
+  sequence: number;
+  closure: number;
+};
+
 export type NativeBridgeError = {
   code: string;
   message: string;
@@ -305,4 +319,241 @@ export function onNativePushOpened(
       }
     }
   });
+}
+
+function isCounter(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function parseNativeDirectStatus(payload: unknown): NativeDirectStatus | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const { preferred, sequence, closure } = payload as {
+    preferred?: unknown;
+    sequence?: unknown;
+    closure?: unknown;
+  };
+  if (preferred !== 'tunnel' && preferred !== 'direct') return null;
+  if (!isCounter(sequence) || !isCounter(closure)) return null;
+  return { preferred, sequence, closure };
+}
+
+/**
+ * How long a baseline read may go unanswered before this document shows its
+ * streams as unavailable. A proposed display timing for the UI, not a native
+ * deadline: the shell may hold its answer longer (while its local proxy gets
+ * ready after a resume), and a valid answer that arrives later still counts.
+ */
+const DIRECT_BASELINE_WAIT_MS = 1500;
+
+/**
+ * Whether this document may open its first SSE stream or terminal socket.
+ * `absent`: no `direct` capability, so nothing to wait for. `pending`: a
+ * baseline read is out. `ready`: a valid `direct.status()` answer was
+ * received; only then may a first stream open, and the state never changes
+ * again. `unavailable`: no valid answer yet (the read failed, or has not
+ * answered within the wait); nothing opens until one arrives.
+ */
+export type NativeDirectBaselineState = 'absent' | 'pending' | 'ready' | 'unavailable';
+
+type DirectTracker = {
+  state: Exclude<NativeDirectBaselineState, 'absent'>;
+  /** The highest closure handled after `ready`, or seen before it. */
+  closure: number;
+  /** Numbers baseline attempts; only the current one may change the state. */
+  attempt: number;
+  attemptTimer: number | null;
+  /** Counts the times this document was hidden; one read per return. */
+  hiddenCount: number;
+  /** The `hiddenCount` whose return has already read the status. */
+  readForHidden: number;
+  closureHandlers: Set<() => void>;
+  stateListeners: Set<() => void>;
+};
+
+// One per document: a WebView document and each child window load their own
+// copy of this module, so each takes its own baseline. Kept outside React so
+// a remount cannot take a second one.
+let directTracker: DirectTracker | null = null;
+
+function notifyDirectState(tracker: DirectTracker): void {
+  for (const listener of Array.from(tracker.stateListeners)) {
+    if (tracker.stateListeners.has(listener)) listener();
+  }
+}
+
+// Every valid answer and event comes here, whichever attempt or read it
+// belongs to. Only `closure` drives anything: `preferred` (ordered by
+// `sequence`) is what new connections try first, and nothing in the Web UI
+// acts on it. Closure is compared only with closure, so order, duplicates,
+// and late replies all converge on one action per higher value.
+function observeDirectStatus(
+  tracker: DirectTracker,
+  status: NativeDirectStatus,
+  fromRead: boolean,
+): void {
+  if (tracker.state !== 'ready') {
+    // No stream of this document is open yet: a closure only raises the
+    // baseline. A valid status answer is the baseline; an event is not.
+    tracker.closure = Math.max(tracker.closure, status.closure);
+    if (!fromRead) return;
+    tracker.state = 'ready';
+    if (tracker.attemptTimer !== null) window.clearTimeout(tracker.attemptTimer);
+    tracker.attemptTimer = null;
+    notifyDirectState(tracker);
+    return;
+  }
+  if (status.closure <= tracker.closure) return;
+  tracker.closure = status.closure;
+  for (const handler of Array.from(tracker.closureHandlers)) {
+    if (tracker.closureHandlers.has(handler)) handler();
+  }
+}
+
+async function readDirectStatus(native: AvibeNative): Promise<NativeDirectStatus | null> {
+  try {
+    return parseNativeDirectStatus(await native.call<unknown>('direct.status'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Starts a baseline attempt, which becomes the current one. An older attempt
+ * cannot be cancelled (the bridge has no way to), but it loses its timer and
+ * its power to make the state `unavailable`. A valid answer from it still
+ * counts, like any observation.
+ */
+function startBaselineAttempt(native: AvibeNative, tracker: DirectTracker): void {
+  tracker.attempt += 1;
+  const attempt = tracker.attempt;
+  if (tracker.attemptTimer !== null) window.clearTimeout(tracker.attemptTimer);
+  tracker.state = 'pending';
+  tracker.attemptTimer = window.setTimeout(() => {
+    if (tracker.attempt !== attempt || tracker.state !== 'pending') return;
+    tracker.attemptTimer = null;
+    tracker.state = 'unavailable';
+    notifyDirectState(tracker);
+  }, DIRECT_BASELINE_WAIT_MS);
+  notifyDirectState(tracker);
+  void readDirectStatus(native).then((status) => {
+    if (status) {
+      observeDirectStatus(tracker, status, true);
+      return;
+    }
+    // A failed read ends only the current attempt, and never a `ready` one.
+    if (tracker.attempt !== attempt || tracker.state !== 'pending') return;
+    if (tracker.attemptTimer !== null) window.clearTimeout(tracker.attemptTimer);
+    tracker.attemptTimer = null;
+    tracker.state = 'unavailable';
+    notifyDirectState(tracker);
+  });
+}
+
+function directTrackerFor(native: AvibeNative): DirectTracker {
+  if (directTracker) return directTracker;
+  const tracker: DirectTracker = {
+    state: 'pending',
+    closure: 0,
+    attempt: 0,
+    attemptTimer: null,
+    // A document installed while hidden has already had its hidden edge, so
+    // its first visible return is a return like any other.
+    hiddenCount: document.visibilityState === 'visible' ? 0 : 1,
+    readForHidden: 0,
+    closureHandlers: new Set(),
+    stateListeners: new Set(),
+  };
+  directTracker = tracker;
+
+  native.on('direct.transportChanged', (payload) => {
+    const status = parseNativeDirectStatus(payload);
+    if (status) observeDirectStatus(tracker, status, false);
+  });
+
+  // One read each time the document is shown again after being hidden.
+  // `visibilitychange` and a back-forward-cache `pageshow` for the same return
+  // share it. When `ready`, it catches up on a closure whose events were all
+  // missed while the App was suspended (the shell holds the answer until its
+  // local proxy is ready again). When `unavailable`, it is a new baseline
+  // attempt. While an attempt is pending it adds nothing.
+  const onReturn = () => {
+    if (tracker.readForHidden === tracker.hiddenCount) return;
+    tracker.readForHidden = tracker.hiddenCount;
+    if (tracker.state === 'unavailable') {
+      startBaselineAttempt(native, tracker);
+    } else if (tracker.state === 'ready') {
+      void readDirectStatus(native).then((status) => {
+        if (status) observeDirectStatus(tracker, status, true);
+      });
+    }
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') onReturn();
+    else tracker.hiddenCount += 1;
+  });
+  window.addEventListener('pagehide', () => {
+    tracker.hiddenCount += 1;
+  });
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) onReturn();
+  });
+
+  startBaselineAttempt(native, tracker);
+  return tracker;
+}
+
+function directBridge(): AvibeNative | null {
+  const native = bridge();
+  return native && (native.capabilities.direct ?? 0) >= 1 ? native : null;
+}
+
+/**
+ * This document's baseline state. The first call with the `direct`
+ * capability starts the baseline read; without it the answer is `absent` and
+ * nothing is started.
+ */
+export function nativeDirectBaselineState(): NativeDirectBaselineState {
+  const native = directBridge();
+  return native ? directTrackerFor(native).state : 'absent';
+}
+
+/** Calls `listener` on every change of `nativeDirectBaselineState()`. */
+export function subscribeNativeDirectBaseline(listener: () => void): () => void {
+  const native = directBridge();
+  if (!native) return () => undefined;
+  const tracker = directTrackerFor(native);
+  tracker.stateListeners.add(listener);
+  return () => {
+    tracker.stateListeners.delete(listener);
+  };
+}
+
+/**
+ * A user asked to try again while the baseline is `unavailable`: starts one
+ * new attempt. Does nothing while an attempt is pending, once `ready`, or
+ * without the capability.
+ */
+export function retryNativeDirectBaseline(): void {
+  const native = directBridge();
+  if (!native) return;
+  const tracker = directTrackerFor(native);
+  if (tracker.state === 'unavailable') startBaselineAttempt(native, tracker);
+}
+
+/**
+ * Calls `handler` once for each higher `closure` this document observes after
+ * its baseline, from an event or from a status read on resume: the shell
+ * closed connections for this host because their path was lost. The handler
+ * reconnects only what reconnects without repeating an action. A change of
+ * the preferred path alone never calls it. Without the `direct` capability
+ * this never fires.
+ */
+export function onNativeDirectClosure(handler: () => void): () => void {
+  const native = directBridge();
+  if (!native) return () => undefined;
+  const tracker = directTrackerFor(native);
+  tracker.closureHandlers.add(handler);
+  return () => {
+    tracker.closureHandlers.delete(handler);
+  };
 }

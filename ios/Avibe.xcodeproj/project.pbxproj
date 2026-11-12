@@ -409,6 +409,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/Avibe/Resources/MobileApp/assets",
+				"$(SRCROOT)/Avibe/Resources/MobileApp/licenses.json",
 				"$(SRCROOT)/Avibe/Resources/MobileApp/mobile.html",
 				"$(SRCROOT)/scripts/verify_mobile_bundle.sh",
 			);

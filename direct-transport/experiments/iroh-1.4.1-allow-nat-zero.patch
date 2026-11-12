@@ -1,0 +1,15 @@
+--- a/src/endpoint/quic.rs
++++ b/src/endpoint/quic.rs
+@@ -534,9 +534,10 @@
+     /// enabled via [`Self::max_concurrent_multipath_paths`], a default value of
+     /// 8 will be used.
+     ///
+-    /// Note: this method will ignore values less than the recommended 8 and will log a warning.
++    /// Zero disables NAT traversal. Other values less than the recommended 8
++    /// are ignored and log a warning.
+     pub fn max_remote_nat_traversal_addresses(mut self, max_addresses: u8) -> Self {
+-        if max_addresses < MAX_MULTIPATH_PATHS as u8 {
++        if max_addresses != 0 && max_addresses < MAX_MULTIPATH_PATHS as u8 {
+             warn!(
+                 "QuicTransportConfig::max_remote_nat_traversal_addresses must be at least {}, ignoring user supplied value",
+                 MAX_MULTIPATH_PATHS

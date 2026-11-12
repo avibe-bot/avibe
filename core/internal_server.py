@@ -1803,7 +1803,9 @@ def create_app(
         body = await _safe_json(request)
         operation = body.get("operation") if isinstance(body, dict) else None
         payload = body.get("payload") if isinstance(body, dict) else None
-        dependency_operation = operation == "runtime_ensure_dependency"
+        dependency_operation = operation in {
+            "runtime_ensure_dependency", "engine_status", "engine_check", "engine_update",
+        }
         if not is_model_hub_enabled() and not dependency_operation:
             return JSONResponse(
                 status_code=404,
@@ -1818,6 +1820,10 @@ def create_app(
         try:
             if service is not None:
                 result = await dispatch_model_hub_rpc(service, operation, payload)
+            elif operation == "engine_status":
+                result = await adapter.engine_status()
+            elif operation in {"engine_check", "engine_update"}:
+                result = await adapter.request_engine_operation(update=operation == "engine_update")
             else:
                 ensured = await ensure_runtime_dependency(
                     adapter,

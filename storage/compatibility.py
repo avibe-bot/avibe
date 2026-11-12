@@ -15,7 +15,11 @@ COMPATIBILITY_EPOCH_KEY = "compatibility_epoch"
 # Epoch 2 activates C-alt's projection-only tool steps. RC19 shipped support for
 # both epochs before the representation transition; older readers must refuse.
 VIBEY_TOOL_PROJECTION_EPOCH = 2
-SUPPORTED_COMPATIBILITY_EPOCHS = frozenset({1, VIBEY_TOOL_PROJECTION_EPOCH})
+# Epoch 3 is a reader bridge only in this release. The coordinated writer
+# activation will advance the persisted marker in a later release; accepting
+# this future marker must never enable an epoch-2 writer gate.
+READER_COMPATIBILITY_EPOCH = 3
+SUPPORTED_COMPATIBILITY_EPOCHS = frozenset({1, VIBEY_TOOL_PROJECTION_EPOCH, READER_COMPATIBILITY_EPOCH})
 BRIDGE_REVISION = "20261108_0076"
 PRE_BRIDGE_REVISION = "20261107_0075"
 # Activate only after exercising the immediately previous published wheel (RC19

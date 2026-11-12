@@ -78,6 +78,20 @@ revocation must fail closed or ship an approved replacement pin, never mutate
 an immutable path or silently relax verification. This task removes/revokes no
 published release and changes no user's keys.
 
+## Registration identity compatibility
+
+The source-generated pin selects sandbox #36, which validates supplied WebAuthn
+registration `user.id` encodings before credential creation. The daemon's
+per-instance registration ID travels through the existing `authzCreationOptions`
+field; it is separate from `vault_user_handle` scope/AAD. Legacy registration IDs
+remain accepted and omitted options retain the historical compatibility path.
+No credential, RP, root metadata, unlock/sign policy or protocol migration is
+introduced. The previous immutable e7be runtime already transports valid new IDs;
+the successor adds validation, not a capability gate. The owning identity contract
+is in `vault-crypto-sandbox.md` and `vault-sandbox/docs/integrity.md`. Reproduction,
+fixtures and public hosting equality do not prove real provider coexistence,
+passkey ceremonies or transaction acceptance.
+
 ## Evidence and scope
 
 - `vaultSandboxIntegrity.test.ts`: actual pinned fixture hashes, malformed/stale/

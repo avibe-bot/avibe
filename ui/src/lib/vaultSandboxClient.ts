@@ -4,6 +4,33 @@ import type {
   VaultWebAuthnRegistrationPayload,
 } from '@/context/ApiContext';
 import type { BlindBox, ProtectedRecordEnvelope, SignatureResult, SignatureScheme } from './vaultCrypto';
+
+/** The schemes the sandbox signs with: a 32-byte digest for secp256k1, the exact message for `ed25519`. */
+export type VaultSandboxSignScheme = SignatureScheme | 'ed25519';
+
+/**
+ * Check that a sealed Solana keypair is what was asked for: an Ed25519 record whose authenticated
+ * metadata names the same 32-byte public key the sandbox reported. A sandbox that cannot create
+ * Ed25519 keys returns a secp256k1 record instead, so the result itself is the evidence, not a
+ * version number. Nothing is saved from a result that fails this check.
+ */
+function assertEd25519Record(sealed: VaultSandboxSealResult): VaultSandboxSealResult {
+  const publicKey = sealed.publicKey;
+  let recordMeta: unknown;
+  try {
+    recordMeta = (JSON.parse(sealed.envelope.wrap_meta) as { record_meta?: unknown }).record_meta;
+  } catch {
+    recordMeta = undefined;
+  }
+  const meta = recordMeta && typeof recordMeta === 'object' ? (recordMeta as Record<string, unknown>) : null;
+  if (
+    typeof publicKey !== 'string' || !/^[0-9a-f]{64}$/.test(publicKey)
+    || !meta || meta.kind !== 'keypair' || meta.curve !== 'ed25519' || meta.public_key !== publicKey
+  ) {
+    throw new VaultSandboxError('sandbox_curve_unsupported', 'The sandbox did not create an Ed25519 keypair record');
+  }
+  return sealed;
+}
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH,
   VAULT_SANDBOX_VERSION,
@@ -774,18 +801,22 @@ export class VaultSandboxClient {
     return this.request<{ ok?: boolean; state?: VaultSandboxState }>('lock', {}, { timeoutMs: DEFAULT_TIMEOUT_MS });
   }
 
-  seal(
+  async seal(
     payload:
       | { name: string; kind: 'static'; value: string; wrapMeta?: string | null }
-      | { name: string; kind: 'keypair'; wrapMeta?: string | null },
+      | { name: string; kind: 'keypair'; curve?: 'ed25519'; wrapMeta?: string | null },
   ): Promise<VaultSandboxSealResult> {
     // Static = parent-typed value handed in for sealing (the #842 concession). Keypair = generated
     // entirely inside the sandbox (generate-only, no input) returning ciphertext + public material.
+    // A keypair is secp256k1 unless `curve` asks for an Ed25519 (Solana) key; the field is sent only
+    // then, so a secp256k1 request is byte-for-byte what it always was.
+    const solana = payload.kind === 'keypair' && payload.curve === 'ed25519';
     const wire =
       payload.kind === 'static'
         ? { name: payload.name, kind: 'static', inputMode: 'parent-value', value: payload.value, wrapMeta: payload.wrapMeta }
-        : { name: payload.name, kind: 'keypair', wrapMeta: payload.wrapMeta };
-    return this.request<VaultSandboxSealResult>('seal', wire, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
+        : { name: payload.name, kind: 'keypair', ...(solana ? { curve: 'ed25519' } : {}), wrapMeta: payload.wrapMeta };
+    const sealed = await this.request<VaultSandboxSealResult>('seal', wire, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
+    return solana ? assertEd25519Record(sealed) : sealed;
   }
 
   reveal(
@@ -801,7 +832,7 @@ export class VaultSandboxClient {
 
   sign(payload: {
     material: ProtectedUnlockMaterialLike;
-    scheme: SignatureScheme;
+    scheme: VaultSandboxSignScheme;
     signingContext: VaultSandboxSigningContext;
     context: VaultSignedOperationContext;
   }, authorizationWindow?: string): Promise<SignatureResult> {

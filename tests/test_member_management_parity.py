@@ -110,6 +110,7 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("POST", "/api/remote-access/direct/suspend"),
     ("POST", "/api/wechat/qr_login/start"),
     ("POST", "/api/wechat/qr_login/poll"),
     ("POST", "/api/users/{user_id}/admin"),
@@ -141,7 +142,10 @@ def test_complete_registered_api_management_inventory():
     # master 297 + 12 MCP Hub routes, classified in tests/test_mcp_hub_api.py, + 8 Bots routes (Owner, above), + 2 notification preference methods
     # + 2 home preference methods (Viewer, like the notification preferences)
     # + 1 direct-path rendezvous (Viewer: transport bootstrap for any signed-in remote user)
-    assert len(endpoints) == 322
+    # + 1 direct lifecycle suspend (Owner, with an additional local-only token guard)
+    # + 2 HD account metadata mutations (Editor, like other Vault metadata;
+    # the service also requires resource-management authority).
+    assert len(endpoints) == 325
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):
@@ -159,6 +163,12 @@ def test_complete_registered_api_management_inventory():
     for method in ("PUT", "DELETE"):
         assert (method, "/api/vault/secrets/{name}/fields/{field}") in endpoints
         assert http_authorization_policy(method, "/api/vault/secrets/LOGIN/fields/username").minimum_role == "editor"
+    for method, path in (
+        ("POST", "/api/vault/secrets/{name}/accounts"),
+        ("PATCH", "/api/vault/secrets/{name}/accounts/{account}"),
+    ):
+        assert (method, path) in endpoints
+        assert http_authorization_policy(method, path).minimum_role == "editor"
     assert http_authorization_policy("POST", "/api/desktop-mini/session").minimum_role == "editor"
     assert http_authorization_policy("GET", "/api/desktop/capabilities").minimum_role == "member"
     assert http_authorization_policy("GET", "/api/desktop/computer-use/status").minimum_role == "member"

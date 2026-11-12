@@ -242,7 +242,7 @@ class _TurnExecution:
     # The writer-owned task that persists this turn's row, and by its existence
     # the record that this turn has already been metered. A flag would only say
     # the write was started by something whose own death could still take it.
-    usage_write: asyncio.Future[None] | None = None
+    usage_write: asyncio.Future[bool] | None = None
     # OpenCode owns its public tool names; the gateway may use collision-free
     # upstream aliases, but those names must never escape back to OpenCode.
     response_tool_aliases: Mapping[str, str] = field(default_factory=dict)
@@ -1723,13 +1723,10 @@ class ModelHubTurnGateway:
         metering is a report, never a control input, and a ledger failure must not
         change the turn the caller sees.
 
-        Which also means the turn cannot own the write. `UsageWriter` holds it, and
-        holds the waiting for it too, so an ending is a *when* in one more sense: it
-        decides when a call is metered and never whether the metering survives, nor
-        how long the turn waits on a disk. Nothing suspends between reading the
-        facts and handing the write over, so a cancellation lands either before this
-        turn was ever going to be metered or after the write is already someone
-        else's to finish.
+        Which also means the turn cannot own the write. `UsageWriter` accepts it
+        into a memory-visible buffer synchronously and persists it independently.
+        Nothing suspends between reading the facts and handing the write over,
+        so cancellation can stop the turn but cannot take its accepted usage.
 
         Every ending calls this before it settles, and the completion instant is
         read from the turn rather than here. Both say the same thing: a metered call
@@ -1758,7 +1755,6 @@ class ModelHubTurnGateway:
             at=execution.completed_at or self._now(),
             speed=execution.reported_tier,
         )
-        await self._usage_writer.wait_recorded(execution.usage_write)
 
     async def _write_stream_terminal_copy(
         self,

@@ -827,7 +827,7 @@ describe('the registered journey', () => {
     expectNoForwardWrite();
 
     await act(async () => confirmSources([]));
-    const recover = await screen.findByRole('button', { name: 'Add model source' });
+    const recover = await screen.findByRole('button', { name: 'Add a provider' });
     expect(primaryAction().hasAttribute('disabled')).toBe(true);
     expect(within(error).getByRole('button', { name: 'Retry' }).hasAttribute('disabled')).toBe(true);
     fireEvent.click(recover);
@@ -846,7 +846,7 @@ describe('the registered journey', () => {
       application: 'applied', ready: true, entry_eligible: true, supply_mode: 'direct',
     }));
     fireEvent.click(primaryAction());
-    const recover = await screen.findByRole('button', { name: 'Add model source' });
+    const recover = await screen.findByRole('button', { name: 'Add a provider' });
     expect(primaryAction().hasAttribute('disabled')).toBe(true);
     fireEvent.click(primaryAction());
     expect(screenId()).toBe('assistants');
@@ -1055,5 +1055,45 @@ describe('the registered journey', () => {
     await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
     fireEvent.click(enter);
     expect(await screen.findByTestId('destination')).toBeTruthy();
+  });
+});
+
+describe('AUTH-SETUP-161 set up later', () => {
+  /** A machine with nothing to add yet: no source, the Hub up. */
+  async function arriveWithNothing() {
+    mock.models.listSources.mockResolvedValue([]);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionAdd));
+    return screen.findByRole('button', { name: en.onboarding.providers.later });
+  }
+
+  it('AUTH-SETUP-161 finishes setup without a provider and lands home, choosing nothing about supply', async () => {
+    const later = await arriveWithNothing();
+    const gateReads = mock.api.listVibeAgents.mock.calls.length;
+    fireEvent.click(later);
+
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
+    // No entry gate, no default Agent: with no provider there is nothing to judge or pick,
+    // and the home's Getting started is what leads back to a model.
+    expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
+    expect(mock.api.listVibeAgents.mock.calls.length).toBe(gateReads);
+    expect(mock.control).not.toHaveBeenCalled();
+  });
+
+  it('AUTH-SETUP-161 stays in setup and says so when the finish cannot be confirmed', async () => {
+    const later = await arriveWithNothing();
+    // The write answers, but the config read afterwards does not say setup is finished.
+    mock.api.mutateConfig.mockResolvedValue({});
+    fireEvent.click(later);
+
+    expect((await screen.findByRole('alert')).textContent).toContain(en.onboarding.flow.completionUnconfirmed);
+    expect(screen.queryByTestId('destination')).toBeNull();
+  });
+
+  it('AUTH-SETUP-161 is not offered once a provider is there to continue with', async () => {
+    await arriveAtProviders();
+    expect(screen.queryByRole('button', { name: en.onboarding.providers.later })).toBeNull();
   });
 });

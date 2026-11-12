@@ -10,10 +10,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiFetch = vi.hoisted(() => vi.fn());
 // The wire is the only stand-in in this file. Everything above it is the app's
-// own code — the provider that memoizes its value on `t`, react-i18next's
-// instance copying, the real page — which is what separates this from the
-// sibling file's mocked api: there the identity rule is reproduced, here it is
-// the one the product actually has.
+// own code — the provider, react-i18next's instance copying, the real page —
+// which is what separates this from the sibling file's mocked api: there an api
+// that changes with the language is reproduced, here it is the one the product
+// actually has, which does not.
 vi.mock('../../lib/apiFetch', () => ({ apiFetch }));
 
 const authorization = vi.hoisted(() => ({ capabilities: { can_manage_instance: true } }));
@@ -95,9 +95,7 @@ const instanceServer = () => {
   };
 };
 
-/** Every distinct api the provider has handed a consumer. A language change is
- *  itself what produces a new one, which is the churn this file exists to put
- *  the real provider behind. */
+/** Every distinct api the provider has handed a consumer. */
 const handedOut: unknown[] = [];
 const WatchApi = () => {
   const api = useApi();
@@ -158,10 +156,11 @@ describe('General settings — language through the real ApiProvider', () => {
     await waitFor(() => expect(screen.getByText(zh.settings.general.title)).toBeTruthy());
 
     // The write is on the wire and unanswered, and the interface is already
-    // Chinese — so the provider has re-memoized and the page is holding an api
-    // it did not have when the pick was made.
+    // Chinese — and every consumer still holds the api it had. An api replaced by
+    // a language change re-runs every effect keyed on it: AuthGuard's setup check
+    // did, and unmounted the setup wizard back to its first screen.
     expect(server.sent()).toEqual(['zh']);
-    expect(new Set(handedOut).size).toBeGreaterThan(beforeAnyPick);
+    expect(new Set(handedOut).size).toBe(beforeAnyPick);
 
     view.leave();
     view.comeBack();

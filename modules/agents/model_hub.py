@@ -450,8 +450,59 @@ class ModelSupplyRefusal(ValueError):
         self.fixed_in_models = fixed_in_models
 
 
-def hub_supply_refusal(controller: Any, backend: str, language: str) -> ModelSupplyRefusal | None:
-    """The refusal a turn raises when ``hub_supply_block`` names why ``backend`` has no model, else ``None``."""
+def refusal_subject_name(
+    controller: Any,
+    backend: str,
+    language: str,
+    *,
+    agent_id: str | None = None,
+    agent_name: str | None = None,
+) -> str:
+    """Who a refusal says has no model: the Session's Bot by the name the Workbench shows it
+    (「歪比」 for the main Bot in Chinese, or the name the person gave it), else the backend."""
+
+    store = getattr(controller, "vibe_agent_store", None)
+    agent = None
+    if store is not None and (agent_id or agent_name):
+        try:
+            agent = store.get_by_id(agent_id) if agent_id else store.get(str(agent_name))
+        except Exception:  # noqa: BLE001 - the backend's name still says who refused
+            logger.debug("Could not read the Agent a refusal names", exc_info=True)
+    # Only an Agent on this backend is the one refusing: another Bot's name would misname it.
+    if agent is not None and getattr(agent, "backend", None) == backend:
+        from core.bots import bot_display_name
+
+        name = bot_display_name(agent, language)
+        if name:
+            return name
+    return display_name_for_backend(backend)
+
+
+_ENDS_LATIN = re.compile(r"[A-Za-z0-9]$")
+
+
+def spaced_before_cjk(name: str, language: str) -> str:
+    """``name`` as it sits before Chinese text in a Chinese sentence: CJK runs straight on
+    (「歪比还没有」), a Latin letter or digit takes a space (「Vibey 还没有」). The Chinese copy
+    has no space of its own after the name, so this decides it."""
+
+    if str(language or "").lower().startswith("zh") and _ENDS_LATIN.search(name):
+        return f"{name} "
+    return name
+
+
+def hub_supply_refusal(
+    controller: Any,
+    backend: str,
+    language: str,
+    *,
+    agent_id: str | None = None,
+    agent_name: str | None = None,
+) -> ModelSupplyRefusal | None:
+    """The refusal a turn raises when ``hub_supply_block`` names why ``backend`` has no model, else ``None``.
+
+    It names the Session's Bot when the Agent running it (``agent_id``, else ``agent_name``) is one.
+    """
 
     from config.v2_config import hub_supply_block
 
@@ -459,8 +510,9 @@ def hub_supply_refusal(controller: Any, backend: str, language: str) -> ModelSup
     block = hub_supply_block(backend, store.load() if store is not None else None)
     if block is None:
         return None
+    subject = refusal_subject_name(controller, backend, language, agent_id=agent_id, agent_name=agent_name)
     return ModelSupplyRefusal(
-        t(_HUB_SUPPLY_REFUSALS[block], language, backend=display_name_for_backend(backend)),
+        t(_HUB_SUPPLY_REFUSALS[block], language, backend=spaced_before_cjk(subject, language)),
         fixed_in_models=block != "hub_disabled",
     )
 
@@ -474,6 +526,7 @@ def is_model_hub_refusal(error: BaseException | None) -> bool:
 # The structured next step a Workbench notice carries; the Workbench draws it from its own copy.
 MODELS_NEXT_STEP = "models"
 SUPPLY_REFUSAL_RETRY_REASON = "model_supply_refusal"
+HUB_DISABLED_RETRY_REASON = "model_hub_disabled"
 
 
 def refusal_fixed_in_models(
@@ -509,15 +562,19 @@ def models_next_step_text(controller: Any) -> str:
     return t("errors.modelsNextStepImUrl", language, url=url) if url else t("errors.modelsNextStepIm", language)
 
 
-def hold_refused_input(context: Any) -> None:
+def hold_refused_input(context: Any, *, fixed_in_models: bool = True) -> None:
     """Keep an input the Model Hub refused for want of a model for an explicit retry.
 
     A supply refusal fails the same way until someone changes Models, so it must not
-    spend the automatic startup retries a transient failure gets.
+    spend the automatic startup retries a transient failure gets. The reason says
+    whether Models is the fix, so the queue can offer it: an operator who switched the
+    Model Hub off took Models away too.
     """
 
     if context is not None:
-        mark_prewrite_recovery_required(context, SUPPLY_REFUSAL_RETRY_REASON)
+        mark_prewrite_recovery_required(
+            context, SUPPLY_REFUSAL_RETRY_REASON if fixed_in_models else HUB_DISABLED_RETRY_REASON
+        )
 
 
 def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:

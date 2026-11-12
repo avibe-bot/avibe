@@ -2,11 +2,12 @@
 //
 // A card is either a fact or an offer, and the difference is what it does when
 // pressed: a connected card does nothing, a detected card toggles consent, an empty
-// card opens the add dialog. Only the detected one carries `aria-pressed`, because
-// only it is a toggle — giving a connected card a pressed state would announce that
-// something already true can be turned off here, which it cannot.
+// card opens the add dialog — and a connected card opens its own key, so a key that
+// failed its check can be changed or removed right where it failed. Only the detected
+// one carries `aria-pressed`, because only it is a toggle — giving a connected card a
+// pressed state would announce that something already true can be turned off here.
 import type { FC } from 'react';
-import { Check, KeyRound, Plus } from 'lucide-react';
+import { Check, KeyRound, LoaderCircle, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { BLOCKED_REASON_FALLBACK_KEY } from '@/components/settings/models/migrationGrouping';
@@ -15,7 +16,7 @@ import type { SourceKind } from '@/components/settings/models/types';
 import { VendorGlyph } from '@/components/settings/models/vendorGlyph';
 import type { TranslationKey } from '@/i18n/types';
 
-import type { ProviderSlot } from './providerStage';
+import { checkLine, type ProviderSlot, type SourceCheck } from './providerStage';
 
 /** What a connected card says when there is no mask to say — Settings' own words for
  *  the same distinction, so one source reads one way in both places. */
@@ -29,7 +30,11 @@ export const ProviderCard: FC<{
   selected: boolean;
   onToggle: () => void;
   onAdd: () => void;
-}> = ({ slot, selected, onToggle, onAdd }) => {
+  /** Open the connected card's own key. Absent where there is nothing to edit. */
+  onEdit?: () => void;
+  /** Setup's check of the key this card stands for, while the screen holds one. */
+  check?: SourceCheck;
+}> = ({ slot, selected, onToggle, onAdd, onEdit, check }) => {
   const { t } = useTranslation();
   const detected = slot.kind === 'detected';
   const connected = slot.kind === 'connected';
@@ -73,10 +78,23 @@ export const ProviderCard: FC<{
   const note = slot.pending
     ? ` · ${t('settings.models.sourceDetail.status.saved')}`
     : connected ? ` · ${t('onboarding.providers.cardImported')}` : '';
-  const keyLine = [`${written}${note}`, reason].filter(Boolean).join(' · ');
+  // A check, once there is one, IS the line: "Saved" was the most the card could say
+  // before anything had asked the provider, and once something has, repeating it
+  // beside the answer would keep the claim the answer replaced. While it runs the
+  // key stays named, so the card still says which key is being asked about.
+  const line = checkLine(t, connected ? check : undefined);
+  const keyLine = line === null
+    ? [`${written}${note}`, reason].filter(Boolean).join(' · ')
+    : check?.kind === 'checking'
+      ? `${written} · ${line}`
+      : line;
+  const checkState = connected ? check?.kind : undefined;
+  const editable = connected && onEdit !== undefined;
 
   const label = connected
-    ? t('onboarding.providers.cardUseExistingNamed', { name: slot.label })
+    ? editable
+      ? t('onboarding.providers.cardEditNamed', { name: slot.label })
+      : t('onboarding.providers.cardUseExistingNamed', { name: slot.label })
     : detected
       ? t('onboarding.providers.cardSelected')
       : t('onboarding.providers.cardAddSubscriptionNamed', { name: slot.label });
@@ -88,11 +106,14 @@ export const ProviderCard: FC<{
       data-provider={slot.vendor}
       data-state={slot.kind}
       {...(slot.pending ? { 'data-pending': 'true' } : {})}
+      {...(checkState ? { 'data-check': checkState } : {})}
       {...(blocked ? { 'data-blocked': 'true' } : {})}
       {...(detected && !blocked ? { 'aria-pressed': selected } : {})}
-      aria-label={detected ? `${slot.label} · ${keyLine}` : `${label}${note}`}
-      disabled={connected || blocked}
-      onClick={detected ? onToggle : onAdd}
+      aria-label={detected
+        ? `${slot.label} · ${keyLine}`
+        : line !== null ? `${label} · ${keyLine}` : `${label}${note}`}
+      disabled={(connected && !editable) || blocked}
+      onClick={detected ? onToggle : connected ? onEdit : onAdd}
     >
       {/* The catalog's own mark, filed by the same vendor id the slot carries — the
           picker, the import rows and this card therefore draw one provider one way,
@@ -111,9 +132,14 @@ export const ProviderCard: FC<{
       </span>
       {/* The check states a decision, not a label: the reference draws no word
           beside it, and the card's accessible name already carries the meaning. */}
-      {(connected || selected) && (
-        <Check className="setup-provider-check" strokeWidth={2.2} aria-hidden="true" />
-      )}
+      {/* The check is the card's claim that this provider supplies models, so it is
+          drawn only where nothing contradicts that: not while the question is still
+          out, and not once the provider has said no. */}
+      {checkState === 'checking'
+        ? <LoaderCircle className="setup-provider-check setup-provider-check--busy motion-safe:animate-spin" strokeWidth={2.2} aria-hidden="true" />
+        : ((connected && (checkState === undefined || checkState === 'connected')) || selected) && (
+          <Check className="setup-provider-check" strokeWidth={2.2} aria-hidden="true" />
+        )}
       {/* An empty slot is the one card here that is an offer, and it says so the way
           the third card does: the plus. The accessible name already carries what
           pressing it opens, so the mark is decoration. */}

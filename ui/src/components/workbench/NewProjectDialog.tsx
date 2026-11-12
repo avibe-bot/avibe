@@ -98,6 +98,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
   return (
     <Dialog open onOpenChange={(next) => { if (!next) close(); }}>
       <DialogContent
+        keepOnOutsideClick
         closeLabel={t('workbench.newProjectDialog.cancel')}
         className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl p-5"
       >

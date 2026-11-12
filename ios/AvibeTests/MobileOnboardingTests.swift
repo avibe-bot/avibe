@@ -829,6 +829,32 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
+    func testExternalURLAllowlistAddsOnlyTheBundledLicenseSources() throws {
+        let archive = "https://static.crates.io/crates/uniffi/uniffi-0.31.2.crate"
+        let upstream = "https://github.com/mozilla/uniffi-rs/tree/05b45b110f652d58d94c653992aeb3adc3a094f4"
+        let data = try JSONSerialization.data(withJSONObject: [
+            "sources": [
+                ["version": "0.31.2", "upstream": upstream, "crates": [["name": "uniffi", "registry": archive]]],
+                ["version": "1", "upstream": "http://github.com/x/y", "crates": [["name": "x", "registry": "https://example.com/x.crate"]]],
+            ],
+            "groups": [["title": "MIT", "text": "https://github.com/linked/in-a-text", "components": []]],
+        ])
+        let sources = MobileExternalURLPolicy.licenseSourceURLs(from: data)
+        XCTAssertEqual(sources, [archive, upstream])
+        XCTAssertTrue(MobileExternalURLPolicy.allows(URL(string: archive)!, licenseSources: sources))
+        XCTAssertTrue(MobileExternalURLPolicy.allows(URL(string: upstream)!, licenseSources: sources))
+        for url in [
+            "https://github.com/mozilla/uniffi-rs",
+            "https://github.com/linked/in-a-text",
+            "http://github.com/x/y",
+            "https://example.com/x.crate",
+            "\(archive)?download=1",
+        ] {
+            XCTAssertFalse(MobileExternalURLPolicy.allows(URL(string: url)!, licenseSources: sources), url)
+        }
+        XCTAssertEqual(MobileExternalURLPolicy.licenseSourceURLs(from: Data("not json".utf8)), [])
+    }
+
     func testDebugControlPlaneOverrideIsBuildBounded() {
         let override = URL(string: "http://127.0.0.1:43127")!
         let configuration = MobileControlPlaneConfiguration(

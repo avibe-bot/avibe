@@ -6,18 +6,29 @@ name: desktop-self-contained-package
 # the final installer, and then rebuilds all release metadata from those signed
 # bytes.
 #
-# Only reruns of the same tag can read a tag's caches, so release builds
-# restore caches but never save them. The unsigned cache warm-up (a master push
-# that changes a Rust cache input, and a daily run) builds every target without
-# signing or uploading anything; release builds restore its default-branch
-# caches.
+# Caches have one writer: the unsigned warm-up, which runs on master only (a
+# push that changes a desktop build input, and a daily run), builds every
+# target, and signs and uploads nothing. Release and manual builds restore its
+# default-branch entries by exact key and never save; a miss rebuilds from
+# source. desktop-cache-keepalive.yml performs the separate five-day lookup-only
+# observation and tells an operator to run the warm-up when a cache is missing,
+# unreadable, or not refreshed.
+#
+# The warm-up is also the only Intel Mac build between stable releases: an RC
+# builds the targets its caller names, which leave out x86_64-apple-darwin, and
+# pull request CI compiles the shell for Apple silicon and Windows only. Its
+# push paths cover native sources, packaging helpers and locked dependencies;
+# the scheduled run also covers other changes and hosted toolchain updates.
 on:
   push:
     branches: [master]
     paths:
-      - desktop/Cargo.lock
-      - desktop/cua-driver/**
-      - desktop/scripts/prepare-cua-driver.py
+      - desktop/**
+      - "!desktop/**/*.md"
+      - uv.lock
+      - scripts/desktop_release.py
+      - scripts/desktop_updater.py
+      - scripts/release_package_version.py
       - .github/workflows/desktop-package.yml
   schedule:
     - cron: "41 18 * * *"
@@ -27,6 +38,11 @@ on:
         description: SemVer version stamped into the desktop application and installer
         required: true
         type: string
+      warmup:
+        description: Retry the unsigned master cache warm-up (maintenance use only)
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       version:
@@ -44,6 +60,16 @@ on:
         description: Canonical gh-vX.Y.ZrcN TEST or vX.Y.Z stable tag
         required: true
         type: string
+      targets:
+        description: JSON array of the target triples to build; empty builds every target
+        type: string
+        default: ""
+
+concurrency:
+  group: desktop-package-${{ inputs.release_tag || github.ref }}
+  # Only master cache warm-ups may cancel an older warm-up. Release and manual
+  # non-warm-up builds must not cancel one another.
+  cancel-in-progress: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || inputs.warmup == true) && github.ref == 'refs/heads/master' && !inputs.release_tag }}
 
 permissions:
   contents: read
@@ -55,38 +81,23 @@ env:
 jobs:
   package:
     name: ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    # Each target builds on its own architecture. A target this map does not
+    # name resolves to no runner, so the job cannot start.
+    runs-on: ${{ fromJSON('{"aarch64-apple-darwin":"macos-26","x86_64-apple-darwin":"macos-26-intel","x86_64-pc-windows-msvc":"windows-latest"}')[matrix.target] }}
     environment: desktop-updater
     env:
       # Never a release: a release build always carries its tag.
-      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') }}
+      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && github.ref == 'refs/heads/master' && ((github.event_name == 'push' || github.event_name == 'schedule') || (github.event_name == 'workflow_dispatch' && inputs.warmup)) }}
       DESKTOP_VERSION: ${{ inputs.version || '0.0.0' }}
-      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+      DEVELOPER_DIR: ${{ contains(matrix.target, '-apple-') && '/Applications/Xcode_26.6.app/Contents/Developer' || '' }}
+      DESKTOP_BUNDLE: ${{ contains(matrix.target, '-apple-') && 'app' || 'nsis' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-26
-            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
-            cache_scope: default-target-
-            cache_separator: "-"
-            bundle: app
-            artifact_glob: desktop/target/release/bundle/dmg/*.dmg
-          - target: x86_64-apple-darwin
-            os: macos-26-intel
-            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
-            cache_scope: default-target-
-            cache_separator: "-"
-            bundle: app
-            artifact_glob: desktop/target/release/bundle/dmg/*.dmg
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            developer_dir: ""
-            cache_scope: ""
-            cache_separator: ""
-            bundle: nsis
-            artifact_glob: desktop/target/release/bundle/nsis/*setup.exe
+        # A static `include` list cannot be narrowed: an entry that matches no
+        # combination adds one. The caller's list is therefore the whole matrix,
+        # and everything else about a target follows from its operating system.
+        target: ${{ fromJSON(inputs.targets || '["aarch64-apple-darwin","x86_64-apple-darwin","x86_64-pc-windows-msvc"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -139,8 +150,11 @@ jobs:
             echo "apple=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-build-version; } | fingerprint)" >> "$GITHUB_OUTPUT"
           fi
 
-      # Dependencies only: bundles and final binaries are rebuilt every time.
-      # The warm-up restores its exact key only, so each entry starts clean.
+      # Cargo's dependency output for the Tauri build: bundles and final
+      # binaries are rebuilt every time, and the Cua Driver's own build tree is
+      # left out because the prepared driver has its own entry. Every build
+      # restores this exact key or nothing, so a warm-up entry starts clean and
+      # a release never reuses output from another lockfile or toolchain.
       - name: Restore Rust build cache
         id: rust-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -152,9 +166,15 @@ jobs:
             desktop/target/release/.fingerprint
             desktop/target/release/build
             desktop/target/release/deps
-            desktop/target/cua-driver-patched
-          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ steps.toolchain.outputs.rustc }}-${{ matrix.cache_scope }}${{ steps.toolchain.outputs.apple }}${{ matrix.cache_separator }}${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
-          restore-keys: ${{ env.DESKTOP_CACHE_WARMUP != 'true' && format('{0}-{1}-desktop-package-{2}-{3}{4}{5}', runner.os, matrix.target, steps.toolchain.outputs.rustc, matrix.cache_scope, steps.toolchain.outputs.apple, matrix.cache_separator) || '' }}
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ steps.toolchain.outputs.rustc }}-${{ runner.os == 'macOS' && format('default-target-{0}-', steps.toolchain.outputs.apple) || '' }}${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
+
+      # The cache service may answer a key with an entry whose key merely starts
+      # with it. Only an exact hit is build input; anything else is removed.
+      - name: Discard an inexact Rust cache match
+        if: steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-matched-key != ''
+        shell: bash
+        run: |
+          rm -rf desktop/target/release/.fingerprint desktop/target/release/build desktop/target/release/deps
 
       - name: Build Workbench
         working-directory: ui
@@ -239,14 +259,52 @@ jobs:
             desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
           key: cua-driver-${{ matrix.target }}-${{ steps.toolchain.outputs.apple }}-default-target-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
 
+      # A release that misses rebuilds from source, which is correct and slow:
+      # the driver alone takes 9 to 17 minutes. The warning names the cause on
+      # the run page instead of leaving a long build to be explained later.
+      - name: Report build cache state
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET: ${{ matrix.target }}
+          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+          DRIVER_CACHE_HIT: ${{ steps.cua-driver-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "| Target | Cache | State |" "| --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          report() {
+            local name="$1" hit="$2" state=hit
+            if [ "$hit" != true ]; then
+              state=miss
+              if [ -n "$RELEASE_TAG" ]; then
+                echo "::warning title=Desktop cache miss::$TARGET restored no $name cache for $RELEASE_TAG and rebuilds it from source."
+              fi
+            fi
+            echo "| $TARGET | $name | $state |" >> "$GITHUB_STEP_SUMMARY"
+          }
+          report "Rust build" "$RUST_CACHE_HIT"
+          if [ "$RUNNER_OS" = macOS ]; then report "prepared Cua Driver" "$DRIVER_CACHE_HIT"; fi
+
+      # A restored driver that fails verification is rebuilt, never used. That
+      # should not happen to an entry the warm-up wrote, so it is reported.
       - name: Prepare pinned Cua Driver sidecar
         if: runner.os == 'macOS'
-        run: >
-          python desktop/scripts/prepare-cua-driver.py
-          --target "${{ matrix.target }}" --reuse-verified
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          DRIVER_CACHE_HIT: ${{ steps.cua-driver-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          driver="desktop/src-tauri/binaries/cua-driver-$TARGET"
+          digest() { if [ -f "$driver" ]; then shasum -a 256 "$driver" | cut -d ' ' -f 1; fi; }
+          restored="$(digest)"
+          python desktop/scripts/prepare-cua-driver.py --target "$TARGET" --reuse-verified
+          if [ "$DRIVER_CACHE_HIT" = true ] && [ "$restored" != "$(digest)" ]; then
+            echo "::warning title=Cua Driver cache rejected::The restored $TARGET driver failed verification and was rebuilt from source."
+          fi
 
       - name: Save prepared Cua Driver
-        if: runner.os == 'macOS' && !inputs.release_tag && steps.cua-driver-cache.outputs.cache-hit != 'true'
+        if: runner.os == 'macOS' && !inputs.release_tag && env.DESKTOP_CACHE_WARMUP == 'true' && steps.cua-driver-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
@@ -271,7 +329,7 @@ jobs:
         run: >
           npm run tauri --
           build
-          --bundles "${{ matrix.bundle }}"
+          --bundles "${{ env.DESKTOP_BUNDLE }}"
           --features bundled-runtime
           --config tauri.release.conf.json
           -- --locked
@@ -290,8 +348,16 @@ jobs:
             --binary "$app/Contents/Helpers/cua-driver=13.0" \
             --minimum-sdk 26.0
 
+      # The entry holds third-party output only, and Cargo.lock in its key pins
+      # every third-party source by checksum. Avibe's own crates are removed
+      # here, so no build can take first-party code from a cache.
+      - name: Remove first-party build output before saving
+        if: ${{ !inputs.release_tag && env.DESKTOP_CACHE_WARMUP == 'true' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        working-directory: desktop
+        run: cargo clean --locked --release -p avibe-desktop -p avibe-runtime-host
+
       - name: Save Rust build cache
-        if: ${{ !inputs.release_tag && steps.rust-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !inputs.release_tag && env.DESKTOP_CACHE_WARMUP == 'true' && steps.rust-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
@@ -301,7 +367,6 @@ jobs:
             desktop/target/release/.fingerprint
             desktop/target/release/build
             desktop/target/release/deps
-            desktop/target/cua-driver-patched
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
       # The .app inside the DMG. A signed build signs the Cua Driver helper and
@@ -467,7 +532,11 @@ jobs:
           RUNNER_OS: ${{ runner.os }}
         run: |
           set -euo pipefail
-          installers=(${{ matrix.artifact_glob }})
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            installers=(desktop/target/release/bundle/dmg/*.dmg)
+          else
+            installers=(desktop/target/release/bundle/nsis/*setup.exe)
+          fi
           [ "${#installers[@]}" -eq 1 ] || { echo "Expected exactly one installer" >&2; exit 1; }
           driver_args=()
           if [ "$RUNNER_OS" = "macOS" ]; then

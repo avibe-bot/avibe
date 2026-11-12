@@ -5,7 +5,8 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentFull } from '../../context/ApiContext';
-import { loadBackendModelsWithRefresh, modelOptionLabel, readHubBackendModels, useAddModelExit } from '../../lib/backendModels';
+import { useAddModelDialog } from '../../lib/useAddModelDialog';
+import { loadBackendModelsWithRefresh, modelOptionLabel, readHubBackendModels } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
@@ -69,7 +70,17 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     setSubmitting(false);
   }, [backend, open]);
   const [editorOpen, setEditorOpen] = useState(false);
-  const openAddModel = useAddModelExit(backend, open);
+  // Added in place, the new model is the one the Agent will use.
+  // The list the add saved is the catalog now, so the effort menu follows the new
+  // model's own efforts before Create is pressed.
+  const addModel = useAddModelDialog(backend, open, (modelId, catalog) => {
+    if (catalog) {
+      setModelOptions(catalog.models.map((m) => ({ value: m, label: modelOptionLabel(m, catalog.modelLabels) })));
+      setReasoningOptions(catalog.reasoningOptions ?? {});
+      setHubAnswered(catalog.effortMenus !== undefined);
+    }
+    setModel(modelId);
+  });
   const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
@@ -196,6 +207,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     <>
       <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
         <DialogContent
+          keepOnOutsideClick
           closeLabel={t('common.close')}
           className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[520px] flex-col gap-5 overflow-y-auto rounded-2xl p-7"
         >
@@ -296,10 +308,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
               placeholder={t('agents.detail.modelPlaceholder')}
               emptyText={t('agents.detail.modelEmpty')}
               allowCustomValue
-              // The dialog stays open: Settings hides the page it sits in, and
-              // the form is here again when the user comes back.
-              footerAction={openAddModel ? { label: t('chat.picker.addModel'), onSelect: openAddModel } : undefined}
+              footerAction={addModel.open ? { label: t('chat.picker.addModel'), onSelect: addModel.open } : undefined}
             />
+            {addModel.dialog}
           </div>
           {effortOptions.length > 0 && (
             <div className="flex flex-col gap-1.5">

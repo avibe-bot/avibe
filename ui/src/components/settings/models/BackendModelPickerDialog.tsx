@@ -1,11 +1,15 @@
 // Picking models to add to a backend's catalog.
 //
-// The whole dialog renders one server read. What a candidate is, which group it
+// The lists render one server read. What a candidate is, which group it
 // belongs to, which suppliers it has, and what its label and efforts should be
 // are all answered by `GET .../models/candidates` (C4) — this file adds no rule
 // of its own, because every rule it could add is one the server already applies
 // to the write that follows. A client that re-derived them would disagree with
 // the server the moment either changed.
+//
+// A search also asks the model catalog (the custom-model editor's lookup), so a
+// model no provider lists is still one click away, described by the catalog; and
+// a search that finds nothing to add ends in adding exactly what was typed.
 //
 // It writes nothing either. Picks go back into the catalog dialog's draft, so
 // the list still settles through one `PUT .../models` with one baseline.
@@ -19,13 +23,22 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { getBackendUiMeta } from '@/lib/agentBackends';
-import { chosenCandidate, EMPTY_PICKER_GROUPS, pickerGroups } from './backendCatalog';
+import { backendModelId, catalogPick, chosenCandidate, EMPTY_PICKER_GROUPS, pickerGroups, typedPick } from './backendCatalog';
 import type { ChosenCandidate, PickerGroups } from './backendCatalog';
 import { modelSearchMatches } from './modelSearch';
 import { modelsApi } from './modelsApi';
-import type { AgentBackend, BackendModelCandidates, ModelCandidate } from './types';
+import { RadioDot } from './RadioDot';
+import type { AgentBackend, BackendModelCandidates, ModelCandidate, ModelsDevMatch } from './types';
 
 type ReadState = 'loading' | 'ready' | 'error';
+
+/** The catalog is asked once typing pauses, like the custom-model editor's lookup. */
+const CATALOG_DEBOUNCE_MS = 250;
+/** Catalog rows trail the providers' own; a handful is what a search needs. */
+const CATALOG_ROWS = 6;
+
+/** The catalog's answer to one query. */
+type CatalogRead = { query: string; matches: readonly ModelsDevMatch[] };
 
 const NO_SEED: ReadonlySet<string> = new Set();
 const NO_PICKS: ReadonlyMap<string, ChosenCandidate> = new Map();
@@ -83,11 +96,16 @@ export const BackendModelPickerDialog: React.FC<{
   /** `one` asks for a single model — setup choosing a built-in assistant's model —
    *  so picking a row replaces the pick instead of adding to it. */
   choose?: 'many' | 'one';
-}> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom, choose = 'many' }) => {
+  /** The search the dialog opens with: a search the model list already ran. */
+  initialQuery?: string;
+  /** The add is being written: the dialog holds still until it settles. */
+  busy?: boolean;
+}> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom, choose = 'many', initialQuery = '', busy = false }) => {
   const { t } = useTranslation();
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [candidates, setCandidates] = React.useState<BackendModelCandidates | null>(null);
-  const [query, setQuery] = React.useState('');
+  const [query, setQuery] = React.useState(initialQuery);
+  const [catalog, setCatalog] = React.useState<CatalogRead>({ query: '', matches: [] });
   /** What the confirmation will send, held as the agreement itself rather than as
    *  ids beside a projection kept somewhere else. */
   const [chosen, setChosen] = React.useState<ReadonlyMap<string, ChosenCandidate>>(NO_PICKS);
@@ -113,9 +131,11 @@ export const BackendModelPickerDialog: React.FC<{
   const seed = seedPicked ?? NO_SEED;
   React.useEffect(() => {
     if (!open) return;
-    setQuery('');
+    setQuery(initialQuery);
     load(seed);
     return () => { readAttempt.current += 1; };
+    // Opening with a query is opening a search; a later prop change is not a new one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load, open, seed]);
 
   const groups = candidates ? pickerGroups(candidates, listedIds) : EMPTY_PICKER_GROUPS;
@@ -128,15 +148,54 @@ export const BackendModelPickerDialog: React.FC<{
     // group exists exactly when a search could otherwise dead-end on it.
     listed: filtering ? groups.listed.filter((candidate) => matchesQuery(candidate, needle)) : [],
   };
-  const nothingShown = shown.builtin.length === 0 && shown.providers.length === 0 && shown.listed.length === 0;
+
+  /**
+   * The catalog's answer to the current search: models it knows that no group above
+   * offers. Asked only while a search is typed and the candidates are read, so a row
+   * it adds is judged against the same ids the groups hold. An unreachable catalog
+   * adds nothing — the providers' rows and the typed-ID action still stand.
+   */
+  const searchText = query.trim();
+  // Only the answer is stored: an answer for another query reads as 「still asking」.
+  React.useEffect(() => {
+    if (!open || readState !== 'ready' || searchText === '') return undefined;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void modelsApi.searchModelsDev(searchText, controller.signal).then(
+        (matches) => { if (!controller.signal.aborted) setCatalog({ query: searchText, matches }); },
+        () => { if (!controller.signal.aborted) setCatalog({ query: searchText, matches: [] }); },
+      );
+    }, CATALOG_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [open, readState, searchText]);
+  const offeredIds = new Set([...groups.builtin, ...groups.providers, ...groups.listed].map((candidate) => candidate.id));
+  const catalogPicks = filtering && catalog.query === searchText
+    ? catalog.matches
+      .map((match) => catalogPick(match, backend))
+      .filter((pick, index, all) => pick.candidate.id !== ''
+        && !offeredIds.has(pick.candidate.id) && !listedIds.has(pick.candidate.id)
+        && all.findIndex((other) => other.candidate.id === pick.candidate.id) === index)
+      .slice(0, CATALOG_ROWS)
+    : [];
+  const catalogSettled = !filtering || catalog.query === searchText;
+  const addableShown = shown.builtin.length + shown.providers.length + catalogPicks.length;
+  const nothingShown = addableShown === 0 && shown.listed.length === 0;
+  /** What was typed, as an ID — offered once nothing that can be added matched and
+   *  the catalog has answered, and never for an ID the list or a group already holds. */
+  const typedId = backendModelId(searchText);
+  const offerTyped = filtering && catalogSettled && addableShown === 0 && typedId !== ''
+    && !offeredIds.has(typedId) && !listedIds.has(typedId);
 
   /** Picking a row records the row: the id and the suppliers it is showing.
    *  Unpicking deletes that one object, so there is no expectation left over to
    *  promise something about a model the user just took off the list. */
-  const toggle = (candidate: ModelCandidate) => {
+  const toggle = (candidate: ModelCandidate, pick: ChosenCandidate = chosenCandidate(candidate)) => {
     setChosen((current) => {
       const next = new Map(choose === 'one' ? [] : current);
-      if (!current.has(candidate.id)) next.set(candidate.id, chosenCandidate(candidate));
+      if (!current.has(candidate.id)) next.set(candidate.id, pick);
       else if (choose === 'many') next.delete(candidate.id);
       return next;
     });
@@ -147,10 +206,34 @@ export const BackendModelPickerDialog: React.FC<{
    *  offered rather than the order they were clicked. The count comes from the
    *  same list the confirmation sends, so a seeded id the current read no longer
    *  offers cannot be counted in a label that would then add fewer. */
-  const picks = [...groups.builtin, ...groups.providers].flatMap((candidate) => {
+  const groupPicks = [...groups.builtin, ...groups.providers].flatMap((candidate) => {
     const pick = chosen.get(candidate.id);
     return pick ? [pick] : [];
   });
+  // Catalog picks carry their own row, so they outlive the search that showed them.
+  const picks = [
+    ...groupPicks,
+    ...[...chosen.values()].filter((pick) => pick.row && !offeredIds.has(pick.candidate.id)),
+  ];
+  /** Adding what was typed needs no second step: it is the one thing left to do. */
+  const addTyped = () => !busy && onAdd(choose === 'one' ? [typedPick(typedId, backend)] : [...picks, typedPick(typedId, backend)]);
+
+  const typedAction = (prominent: boolean) => (
+    <button
+      type="button"
+      className={cn('model-hub-picker-typed', prominent && 'model-hub-picker-typed--prominent')}
+      disabled={busy}
+      onClick={addTyped}
+    >
+      <Plus aria-hidden="true" />
+      <span className="min-w-0 flex-1">
+        <span className="model-hub-picker-typed-title">
+          {t('settings.models.gateway.picker.customFromQuery', { query: typedId })}
+        </span>
+        <span className="model-hub-picker-typed-note">{t('settings.models.gateway.picker.customFromQueryNote')}</span>
+      </span>
+    </button>
+  );
 
   const group = (key: 'builtin' | 'providers' | 'listed', label: string, rows: ModelCandidate[]) => (
     rows.length === 0 ? null : (
@@ -174,8 +257,10 @@ export const BackendModelPickerDialog: React.FC<{
   );
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>
+    <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
       <DialogContent
+        // A search typed and rows ticked are work in progress, kept like a form's.
+        keepOnOutsideClick
         mobileSheetHeight="tall"
         closeLabel={t('common.close') as string}
         className="model-hub-catalog-dialog model-hub-picker flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
@@ -219,27 +304,41 @@ export const BackendModelPickerDialog: React.FC<{
               </div>
             ) : nothingShown ? (
               <div className="model-hub-picker-empty">
-                <p>{t('settings.models.gateway.picker.noMatch')}</p>
-                {/* Only when the query is the thing the action would name. With an
-                    empty one the footer already offers the same editor, and the
-                    label would quote nothing. */}
-                {filtering && onCustom && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="model-hub-catalog-control rounded-md px-2.5 text-[12.5px] font-semibold text-muted-foreground"
-                    onClick={() => onCustom(query.trim())}
-                  >
-                    <Plus aria-hidden="true" />
-                    {t('settings.models.gateway.picker.customFromQuery', { query: query.trim() })}
-                  </Button>
-                )}
+                {catalogSettled ? (
+                  <>
+                    <p>{t('settings.models.gateway.picker.noMatch')}</p>
+                    {/* Only for a typed query: with none there is nothing to name. */}
+                    {offerTyped && typedAction(true)}
+                  </>
+                ) : <LoaderCircle className="size-5 animate-spin" aria-label={t('settings.models.gateway.picker.searchingCatalog') as string} />}
               </div>
             ) : (
               <div className="model-hub-picker-list">
                 {group('builtin', t('settings.models.gateway.picker.groupBuiltin', { backend: getBackendUiMeta(backend).label }) as string, shown.builtin)}
                 {group('providers', t('settings.models.gateway.picker.groupProviders') as string, shown.providers)}
+                {catalogPicks.length > 0 && (
+                  <div role="group" aria-label={t('settings.models.gateway.picker.groupCatalog') as string} className="model-hub-picker-group">
+                    <div className="model-hub-picker-group-head">
+                      <span>{t('settings.models.gateway.picker.groupCatalog')}</span>
+                      <span>{catalogPicks.length}</span>
+                    </div>
+                    <p className="model-hub-picker-group-note">{t('settings.models.gateway.picker.catalogNote')}</p>
+                    {catalogPicks.map((pick) => (
+                      <PickerRow
+                        key={pick.candidate.id}
+                        candidate={pick.candidate}
+                        picked={chosen.has(pick.candidate.id)}
+                        listed={false}
+                        unlisted
+                        single={choose === 'one'}
+                        onToggle={() => toggle(pick.candidate, pick)}
+                      />
+                    ))}
+                  </div>
+                )}
                 {group('listed', t('settings.models.gateway.picker.groupListed') as string, shown.listed)}
+                {/* Only when nothing that can be added matched: then what was typed is most likely an ID. */}
+                {offerTyped && typedAction(false)}
               </div>
             )}
           </div>
@@ -260,6 +359,7 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="ghost"
               className="model-hub-catalog-control shrink-0 rounded-md px-2.5 text-[12.5px] font-semibold text-muted-foreground max-sm:w-full"
+              disabled={busy}
               onClick={() => onCustom('')}
             >
               <Plus aria-hidden="true" />
@@ -271,6 +371,7 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="outline"
               className="model-hub-catalog-control flex-1 rounded-md px-5 text-[12.5px] font-semibold sm:flex-none"
+              disabled={busy}
               onClick={onCancel}
             >
               {t('settings.models.gateway.catalog.cancel')}
@@ -279,9 +380,10 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="brand"
               className="model-hub-catalog-control flex-1 rounded-md px-5 text-[12.5px] font-semibold sm:flex-none"
-              disabled={picks.length === 0}
+              disabled={picks.length === 0 || busy}
               onClick={() => onAdd(picks)}
             >
+              {busy && <LoaderCircle className="animate-spin" aria-hidden="true" />}
               {/* The empty state borrows the catalog's own action label rather
                   than a count of zero, so the footer keeps its width and the
                   button keeps naming what it does. */}
@@ -312,10 +414,13 @@ const PickerRow: React.FC<{
   listed: boolean;
   /** One of a single choice: the row is a radio rather than a checkbox. */
   single?: boolean;
+  /** A catalog model no provider lists: the chip says so instead of naming suppliers. */
+  unlisted?: boolean;
   onToggle: () => void;
-}> = ({ candidate, picked, listed, single = false, onToggle }) => {
+}> = ({ candidate, picked, listed, single = false, unlisted = false, onToggle }) => {
+  const { t } = useTranslation();
   const checked = picked || listed;
-  const supplied = candidate.suppliers.length > 0;
+  const supplied = candidate.suppliers.length > 0 || unlisted;
   return (
     <button
       type="button"
@@ -330,7 +435,9 @@ const PickerRow: React.FC<{
         supplied && 'model-hub-picker-row--suppliers',
       )}
     >
-      <Checkbox presentational checked={checked} disabled={listed} />
+      {single
+        ? <RadioDot selected={checked} />
+        : <Checkbox presentational checked={checked} disabled={listed} />}
       {/* The label and the strip share a box so the checkbox stays centred on
         * the pair however the pair is arranged, and so the narrow layout can
         * stack them without the row itself having to wrap. */}
@@ -355,6 +462,11 @@ const PickerRow: React.FC<{
         </span>
         {supplied && (
           <span className="model-hub-picker-chips">
+            {unlisted && (
+              <span className="model-hub-pill model-hub-fill-0a border border-edge text-muted">
+                {t('settings.models.gateway.picker.notListed')}
+              </span>
+            )}
             {candidate.suppliers.map((supplier) => (
               <span
                 key={`${supplier.source_id}\0${supplier.model_id}`}

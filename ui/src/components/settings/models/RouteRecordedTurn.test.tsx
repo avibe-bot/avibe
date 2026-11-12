@@ -48,7 +48,7 @@ describe('recorded turn error', () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(record);
     render(view());
-    expect(await screen.findByText(/Latest recorded turn.*Upstream returned model not found/)).toBeTruthy();
+    expect(await screen.findByText(/Latest recorded turn.*The provider returned model not found/)).toBeTruthy();
     expect(screen.getByText('src_historical · historical-model')).toBeTruthy();
     expect(document.querySelector('time')?.dateTime).toBe(record.ts);
     await user.click(screen.getByRole('button', { name: 'View error details' }));
@@ -58,7 +58,7 @@ describe('recorded turn error', () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(record);
     render(view('requested-model', [{ source_id: 'src_other', model_id: 'historical-model' }, { source_id: 'src_historical', model_id: 'historical-model' }]));
-    const badge = await screen.findByRole('button', { name: 'Latest recorded turn · Upstream returned model not found' });
+    const badge = await screen.findByRole('button', { name: 'Latest recorded turn · The provider returned model not found' });
     expect(badge.closest('[data-hop]')?.getAttribute('data-hop')).toBe('src_historical');
     expect(badge.textContent).toBe('404');
     expect(document.querySelector('.model-hub-recorded-turn')).toBeNull();

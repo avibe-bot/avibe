@@ -1,9 +1,9 @@
 import { useTranslation } from 'react-i18next';
 
-import { Button } from './button';
 import { Textarea } from './textarea';
+import { HintLine, KeySourceTabs, type KeySource } from './vault-key-builder-parts';
 
-export type SolanaKeySource = 'generate' | 'import';
+export type SolanaKeySource = KeySource;
 
 /**
  * The signing-key builder of the Add dialog for a Solana key (ui/design: vault/solana/create-generate,
@@ -22,26 +22,10 @@ export const VaultSolanaKeyFields: React.FC<{
 }> = ({ source, onSourceChange, importText, onImportTextChange, importFailed = false, disabled = false }) => {
   const { t } = useTranslation();
   return (
-    <div className="flex flex-col gap-2.5 rounded-lg border border-edge bg-surface-2 p-3 shadow-elevation-0">
-      {/* True of a generated key only: an imported key is pasted here, so this browser reads it. */}
-      {source === 'generate' ? <span className="text-xs text-muted">{t('vaults.dialog.solanaGenerateHelp')}</span> : null}
-      <div className="grid grid-cols-2 gap-2">
-        {(['generate', 'import'] as const).map((src) => (
-          <Button
-            key={src}
-            type="button"
-            size="sm"
-            variant={source === src ? 'secondary' : 'ghost'}
-            aria-pressed={source === src}
-            disabled={disabled}
-            onClick={() => onSourceChange(src)}
-          >
-            {src === 'generate' ? t('vaults.dialog.signingGenerate') : t('vaults.dialog.signingImport')}
-          </Button>
-        ))}
-      </div>
+    <div className="flex flex-col gap-2.5">
+      <KeySourceTabs value={source} onChange={onSourceChange} disabled={disabled} />
       {source === 'generate' ? (
-        <span className="text-xs text-muted">{t('vaults.dialog.solanaGenerateHint')}</span>
+        <HintLine text={t('vaults.dialog.signingCreateHint')} info={t('vaults.dialog.solanaKeyInfo')} />
       ) : (
         <>
           <Textarea
@@ -58,7 +42,7 @@ export const VaultSolanaKeyFields: React.FC<{
           {importFailed ? (
             <span role="alert" className="text-xs text-destructive-ink">{t('vaults.dialog.errors.solanaImportFailed')}</span>
           ) : (
-            <span className="text-xs text-muted">{t('vaults.dialog.solanaImportHelp')}</span>
+            <HintLine text={t('vaults.dialog.solanaImportHint')} info={t('vaults.dialog.solanaImportInfo')} />
           )}
         </>
       )}

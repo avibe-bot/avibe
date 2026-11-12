@@ -57,6 +57,13 @@ vi.mock('./bridge', () => ({
   },
 }));
 
+const appLicenses = vi.hoisted(() => ({ load: vi.fn() }));
+
+vi.mock('./appLicenses', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./appLicenses')>()),
+  loadAppLicenses: appLicenses.load,
+}));
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     i18n: { language: 'en' },
@@ -111,6 +118,8 @@ const owed = (overrides: Partial<SecondFactorState> = {}): SecondFactorState => 
 });
 
 const resetMobileMocks = () => {
+  appLicenses.load.mockReset();
+  appLicenses.load.mockResolvedValue(null);
   mobile.bootstrap.mockReset();
   mobile.logout.mockReset();
   mobile.openExternal.mockReset();
@@ -1866,5 +1875,73 @@ describe('mobile password sign-in', () => {
     expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'mobileApp.password.weakTitle' })).toBeNull();
     expect(mobile.logout).toHaveBeenCalledTimes(1);
+  });
+
+  describe('open-source licenses', () => {
+    const licensesData = {
+      schema_version: 1 as const,
+      native: { state: 'published' as const, release_tag: 'iroh-apple-v1.2.0-1' },
+      web: { sha256: 'a'.repeat(64), packages: 1 },
+      components: 3,
+      sources: [
+        {
+          version: '0.31.2',
+          upstream: 'https://github.com/mozilla/uniffi-rs/tree/0000000000000000000000000000000000000000',
+          crates: [
+            { name: 'uniffi', registry: 'https://static.crates.io/crates/uniffi/uniffi-0.31.2.crate' },
+            { name: 'uniffi_core', registry: 'https://static.crates.io/crates/uniffi_core/uniffi_core-0.31.2.crate' },
+          ],
+        },
+      ],
+      groups: [
+        {
+          title: 'MIT',
+          text: 'Copyright (c) 2018 Carl Lerche\n\nPermission is hereby granted.',
+          components: [{ name: 'bytes', version: '1.10.1', origin: 'native' as const }],
+        },
+        {
+          title: 'MIT',
+          text: 'Permission is hereby granted.',
+          components: [
+            { name: 'anyhow', version: '1.0.98', origin: 'native' as const },
+            { name: 'objc2', version: '0.6.5', origin: 'native' as const, authors: ['Mads Marquart'] },
+          ],
+        },
+      ],
+    };
+
+    it('shows no About entry when the App carries no license data', async () => {
+      await openAccount('#account');
+      await settle();
+      expect(screen.queryByRole('button', { name: 'mobileApp.licenses.title' })).toBeNull();
+    });
+
+    it('opens the page from Account, keeps each text as its own group, and opens source links natively', async () => {
+      appLicenses.load.mockResolvedValue(licensesData);
+      mobile.openExternal.mockResolvedValue({ opened: true });
+      await openAccount('#account');
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.licenses.title' }));
+
+      expect(await screen.findByRole('heading', { name: 'mobileApp.licenses.title' })).toBeTruthy();
+      expect(screen.getAllByText('MIT')).toHaveLength(2);
+      // Components of one text are listed together, with declared authors for a canonical text.
+      expect(
+        screen.getByText(
+          'mobileApp.licenses.crate:anyhowmobileApp.licenses.separatormobileApp.licenses.withAuthors',
+        ),
+      ).toBeTruthy();
+      expect(screen.getByText('mobileApp.licenses.crate:bytes')).toBeTruthy();
+      expect(screen.getByText('Copyright (c) 2018 Carl Lerche')).toBeTruthy();
+
+      fireEvent.click(screen.getByRole('link', { name: 'mobileApp.licenses.sourceFor:mobileApp.licenses.family:uniffi' }));
+      fireEvent.click(screen.getByRole('link', { name: 'mobileApp.licenses.archiveFor:mobileApp.licenses.crate:uniffi_core' }));
+      expect(mobile.openExternal.mock.calls).toEqual([
+        ['https://github.com/mozilla/uniffi-rs/tree/0000000000000000000000000000000000000000'],
+        ['https://static.crates.io/crates/uniffi_core/uniffi_core-0.31.2.crate'],
+      ]);
+
+      fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+      expect(await screen.findByRole('heading', { name: 'mobileApp.account.title' })).toBeTruthy();
+    });
   });
 });

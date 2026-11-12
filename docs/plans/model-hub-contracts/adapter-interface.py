@@ -126,6 +126,10 @@ class EngineStatus:
     last_check_iso: str | None
     host_platform: str | None = None
     error_key: str | None = None
+    manifest: Mapping[str, Any] | None = None
+    committed_release: str | None = None
+    running_release: str | None = None
+    engine_lifecycle: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -310,6 +314,8 @@ class RawCallOutcome:
     # and provider ``request-id`` values cannot be conflated. The client and
     # provenance writer re-validate this tuple before persistence.
     response_correlation_ids: tuple[tuple[str, str], ...] = ()
+    # Identity captured by the engine admission, not by a later evidence writer.
+    engine_release: str | None = None
 
 
 class ObservationOutcome(str, Enum):
@@ -335,6 +341,15 @@ class DiscoveredModel:
     supported_parameters: tuple[str, ...] | None = None
 
 
+class ModelInventory(tuple):
+    """A sequence with the admitted engine identity retained for later writes."""
+
+    def __new__(cls, models, *, engine_release: str | None = None):
+        result = super().__new__(cls, models)
+        result.engine_release = engine_release
+        return result
+
+
 @dataclass(frozen=True)
 class SourceObservation:
     """Response-backed result of an unsaved Source observation."""
@@ -345,6 +360,7 @@ class SourceObservation:
     protocol: str | None
     discovery: ObservationDiscovery
     models: tuple[DiscoveredModel, ...]
+    engine_release: str | None = None
 
     @property
     def model_ids(self) -> tuple[str, ...]:
@@ -550,6 +566,7 @@ class OAuthFlowState:
     # application failed. This does not undo Source materialization or assert
     # the runtime's current health.
     application_failed: bool = False
+    engine_release: str | None = None
 
 
 class InvokeHandle(Protocol):
@@ -911,6 +928,9 @@ class EngineAdapter(Protocol):
         altered-credential controls and public inventory cannot establish
         authentication. A shaped success can; a bare status cannot. Auto still
         requires response-backed proof; order alone never proves a protocol.
+        When the probes narrow a `custom` endpoint to one format, or show it
+        parses Chat Completions among others, the credential-gated model
+        listing may answer the key the model-less probes leave open.
         Explicit unverified API-key saving and completed Hub OAuth admission
         belong to Source creation, not this non-persisting evidence result.
         They retain a fixed protocol owner with verification pending and do

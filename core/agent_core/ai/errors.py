@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -92,7 +92,19 @@ _CREDENTIAL_KEY_RE = re.compile(
 _QUOTED_CREDENTIAL_VALUE_RE = re.compile(r""""(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'""")
 _LINE_END_RE = re.compile(r"[\r\n]")
 _AUTH_SCHEME_RE = re.compile(r"(?i)(Bearer|Basic|Digest|Token|AWS4-HMAC-SHA256)[ \t]+\S")
-_DIAGNOSTIC_URL_RE = re.compile(r"""https?://[^\s"'<>\\]+""", re.IGNORECASE)
+# A scheme starts only at a boundary. Retrying its unbounded character class at
+# every position in a long non-URL string would make all diagnostic redaction O(n²).
+_DIAGNOSTIC_URL_RE = re.compile(
+    r"""(?<![a-z0-9+.-])(?:[a-z][a-z0-9+.-]*:)?//[^\s"'<>\\]+""", re.IGNORECASE,
+)
+# ASGI access/WebSocket logs contain request targets, not absolute URLs.
+_DIAGNOSTIC_PATH_RE = re.compile(r"""(?<![\w/:])/(?!/)[^\s"'<>\\]+""")
+_CREDENTIAL_PATH_RE = re.compile(
+    r"(?i)(/bot)\d+:[^/]+"
+    r"|(/services/)[^/]+/[^/]+/[^/]+"
+    r"|(/webhooks/[^/]+/)[^/]+"
+    r"|(/bot/v2/hook/)[^/]+"
+)
 _TOKEN_SHAPE_RE = re.compile(
     r"(?ix)(?<![A-Za-z0-9_-])(?:"
     r"sk-[A-Za-z0-9][A-Za-z0-9._~+/=-]*|"
@@ -499,17 +511,29 @@ def _literal_secret_variants(literal_secrets: tuple[str, ...]) -> tuple[str, ...
     return tuple(sorted(variants, key=len, reverse=True))
 
 
+def _credential_free_path(path: str) -> str:
+    # Decode for recognition, but preserve the original spelling of safe paths.
+    # Telegram tokens can be percent-encoded by the HTTP client.
+    decoded = unquote(path)
+    return _CREDENTIAL_PATH_RE.sub(
+        lambda match: next(group for group in match.groups() if group is not None) + "[redacted]",
+        decoded,
+    ) if _CREDENTIAL_PATH_RE.search(decoded) else path
+
+
 def _credential_free_url(raw: str) -> str:
     try:
         parsed = urlsplit(raw)
     except ValueError:
         return "[redacted-url]"
-    if not parsed.scheme:
+    if not parsed.scheme and not parsed.netloc:
         return "[redacted-url]"
+    prefix = f"{parsed.scheme}://" if parsed.scheme else "//"
+    path = _credential_free_path(parsed.path or "/")
     host = parsed.hostname
     if host is None:
         authority = parsed.netloc.rsplit("@", 1)[-1]
-        return f"{parsed.scheme}://{authority}{parsed.path or '/'}"
+        return f"{prefix}{authority}{path}"
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     try:
@@ -518,7 +542,7 @@ def _credential_free_url(raw: str) -> str:
         port = None
     if port is not None:
         host = f"{host}:{port}"
-    identity = f"{parsed.scheme}://{host}{parsed.path or '/'}"
+    identity = f"{prefix}{host}{path}"
     return identity
 
 
@@ -533,7 +557,14 @@ def sanitize_endpoint_text(text: str, endpoint_url: str | None = None) -> str:
         url = raw.rstrip(".,;:!?)]}")
         return _credential_free_url(url) + raw[len(url):]
 
-    return _DIAGNOSTIC_URL_RE.sub(sanitize, text)
+    text = _DIAGNOSTIC_URL_RE.sub(sanitize, text)
+
+    def sanitize_path(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        path = raw.split("?", 1)[0].split("#", 1)[0]
+        return _credential_free_path(path)
+
+    return _DIAGNOSTIC_PATH_RE.sub(sanitize_path, text)
 
 
 def _extract_message(value: Any) -> str | None:

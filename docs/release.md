@@ -99,6 +99,32 @@ remain mandatory.
 
 ## Workflow ownership and artifacts
 
+The desktop packaging cache is intentionally separate from release correctness.
+`desktop-package.yml` has one writer: the unsigned `master` warm-up. It builds
+all three targets, caches only third-party Cargo output, and keys Rust entries
+by `Cargo.lock` checksums, rustc, Apple SDK, and target. First-party crates,
+version stamping, the private Runtime, final packaging, signing, notarization,
+and verification are rebuilt; release jobs restore only an exact key and visibly
+warn before rebuilding on a miss. The Cua Driver cache remains provenance- and
+input-verified. PR desktop-shell jobs are restore-only, and maintenance keeps
+one newest release entry per target, removes superseded entries and retired PR
+caches, reports total usage/headroom against the 10 GB repository budget, and
+retries a failed master warm-up once. The existing master warm-up remains the
+cache writer for changed desktop inputs and its existing schedule; no additional
+five-day warm-up was added. Instead, `desktop-cache-keepalive.yml` is the
+retention mechanism and runs lookup-only on master pushes and every five days.
+A missing, unreadable, or unrefreshed entry emits an explicit instruction to run
+the next warm-up; it never silently dispatches one.
+
+A TEST RC deliberately builds Apple silicon macOS and Windows only. Stable
+still requires Apple silicon, Intel macOS, and Windows with the complete signed
+set. The unsigned master warm-up is the early Intel signal for desktop source,
+locked dependency, and release-helper changes plus its existing schedule; it
+catches Intel compile/SDK/smoke/DMG failures before stable. Intel-specific
+Developer ID signing, notarization, stapling, Gatekeeper, and updater-signature
+failures still first appear on the stable path. The keepalive's lookup-only
+behavior is an observation with warnings, not a release correctness gate.
+
 The official workflows stage notes and release assets in one immutable tag/release.
 `Release (AI Notes)` generates notes and publishes the core/runtime assets for
 GitHub-only pre-releases; for official stable tags it leaves a Draft for
@@ -153,6 +179,31 @@ GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 `gh-v2.2.8rc2`, so they remain distinct from PyPI-triggering `v*` tags. They
 must include an installable wheel containing `ui/dist` and
 `vibe/show_runtime/*.tgz`, plus the source distribution.
+
+## Python dependency artifacts
+
+Every new release ships `dependency-constraints.txt` as a GitHub asset and the
+same content as `vibe/dependency_constraints.txt` inside its wheel and sdist.
+Regenerate it after updating `uv.lock` with
+`python scripts/release_dependency_constraints.py`; `--check` verifies freshness.
+Release builds retain exact transitive pins in distribution metadata, including
+platform/Python markers, so older installers such as 3.2.5 also obey the release
+graph. Source/editable development keeps its declared ranges.
+
+The shell installer and `vibe upgrade` inspect the target wheel before installing
+and pass its own constraints, not those of the running release. The shell's
+stdlib resolver is generated from `vibe/release_dependencies.py`; after changing
+it run `python scripts/sync_install_dependencies.py` (`--check` detects drift).
+Explicit old stable artifacts through 3.2.5 remain installable without a lock.
+
+Exported hashes are provided for verification, but uv tool installation does
+**not** enforce dependency hashes from constraints. Exact versions do not remove
+trust in the selected package index or pin source-build dependencies. The default
+installer no longer silently retries a third-party Python index or Git HEAD.
+Avibe's release mirror can provide the core wheel; it does not mirror the full
+Python dependency graph. Where PyPI is unreachable, configure a trusted HTTPS
+proxy or explicitly select an index whose artifacts you trust. See the change
+contract in [release dependency locks](plans/release-dependency-locks.md).
 
 ## Activate a release on a machine
 
@@ -244,85 +295,67 @@ Nothing regenerates the index from the list of GitHub releases, and
    `patches/model-hub-engine-candidates/` (format in its `README.md`): the exact
    six-asset manifest and the minimum Avibe version. The record is separate
    from the packaged engine, so merging it changes nothing users install.
-2. **Qualify.** Dispatch `Qualify Model Hub engine candidate` on `master` with
-   the record's tag. It holds no secret. It rebuilds the pinned source and
-   requires the reviewed digests, then gathers evidence about those exact
-   bytes. The run produces a receipt only when every class below is present.
-3. **Publish the assets.** Dispatch the channel workflow with
-   `operation: release` and the qualification run id. It re-checks the receipt
-   and publishes the qualified bytes as an immutable, non-latest release. It
-   never rebuilds them. Publication alone makes no engine adoptable.
+2. **Rehearse.** Dispatch `Qualify Model Hub engine candidate` on `master` with
+   the record's tag. It holds no business secret, repository-write token or
+   OIDC publication authority. Its disposable jobs rebuild and exercise the
+   exact candidate and publish only the informational result named
+   `untrusted_rehearsal`, with source, manifest/archive digests, run identity,
+   and missing/failed observations. It does not authorize anything.
+3. **Prepare and publish.** Dispatch the channel workflow with
+   `operation: release` and the rehearsal run id. Its trusted prepare job uses
+   a fixed checkout, checks the exact run and current candidate/source/manifest/
+   archive digests, parses the result as bounded untrusted data, and places
+   only byte-checked assets in a separate trusted artifact namespace. The
+   existing protected writer environment then requires explicit owner approval
+   for this run and digest before publishing immutable, non-latest assets.
 4. **Promote.** After the mirror holds the release, dispatch
-   `operation: promote` with the same run id. It re-checks the receipt, requires
-   every asset from both the release and the mirror byte for byte, and only
-   then allocates, signs and publishes an index that lists the release.
+   `operation: promote` with the same rehearsal run id. Trusted prepare checks
+   the same exact context and availability. The existing protected signer and
+   writer approvals then authorize allocation, signing and publication of the
+   index. Owner authorization is the promotion authority, not a rehearsal
+   receipt.
 
-A receipt is not taken on trust. Before publishing or promoting, the workflow
-reads the qualification run from GitHub: the workflow file, a commit on
-`master`, the run attempt, and a successful conclusion for every job. It then
-requires the receipt to name the reviewed record, the qualification harness as
-it is on `master` now, the Avibe wheels as GitHub serves them now, and every
-baseline engine the published index lists now. Those baselines are handed to
-the signer, which refuses to promote unless they cover every release its own
-ledger lists. A newer stable Avibe, a changed harness, or a newly listed
-engine means qualifying again.
+The trusted prepare job verifies the workflow run is the intended dispatch on
+`master`, the run attempt and commit, the current reviewed candidate, the
+upstream source reference, exact manifest/archive digests, minimum Avibe and
+the concrete baseline context. It independently resolves the current minimum
+and stable Avibe releases, verifies immutable wheel sizes and SHA-256 digests,
+and reads their packaged manifests as ZIP data; it does not trust released-role
+or bundled-manifest files from the rehearsal artifact. It never executes
+candidate code, imports uploaded modules or wheels, or accepts an uploaded
+executable as trusted input. Runtime pass/fail assertions remain explicitly
+untrusted. The job split protects the
+trusted workflow and privileged credentials; it does not prove that a
+malicious candidate reported honestly. A future stronger receipt or
+malicious-candidate-resistant provenance requires a new product/owner decision.
 
-| Evidence | What it shows | Producer today |
+| Observation | What it shows | Current producer |
 | --- | --- | --- |
-| `build` | The pinned source rebuilds to the reviewed manifest and six assets. | Yes |
-| `platform_smoke` | Each archive starts on its own platform and passes Avibe's health check. | Yes; the producer runs in PR CI against the packaged engine |
-| `hosted_wire` | The hosted passthrough compared with every baseline engine. A difference needs a reviewed reason in the record. | Yes; not yet run |
-| `released_avibe_e2e` | The full hermetic Model Hub E2E, driven through the released wheel of the minimum Avibe and of the current stable Avibe. | Yes; rehearsed against a release candidate, not run for qualification |
-| `backward_state` | State written by the candidate, read back by every baseline engine. | No. Arrives with the engine lifecycle work. |
-| `lifecycle` | Activation, rollback and recovery of the candidate. | No. Arrives with the engine lifecycle work. |
+| `build` | The pinned source reports a rebuild matching the reviewed manifest and six assets. | Yes; independently rechecked by trusted prepare |
+| `platform_smoke` | Each archive reports startup and Avibe health on its own platform. | Yes; untrusted runtime data |
+| `hosted_wire` | The hosted passthrough comparison with each baseline engine. Reviewed differences remain visible. | Yes when a candidate has baselines |
+| `released_avibe_e2e` | The hermetic E2E through the minimum and current-stable released wheels. | Yes when immutable wheels are available |
+| `backward_state` | Candidate state read back by baseline engines. | Future lifecycle work; missing is reported, not fabricated |
+| `lifecycle` | Activation, rollback and recovery observations. | Future lifecycle work; missing is reported, not fabricated |
 
-The last two are required like the others, so no receipt can be produced, and
-no engine promoted, until their producing jobs exist. No engine may declare a
-minimum below 3.2.6, the first Avibe that reads the channel, so the first
-promotion also waits for the stable 3.2.6 artifacts.
-
-Evidence counts only under the job that produces its class. The receipt job
-reads each class from the artifact named for its job, refuses any document
-that job does not produce and any artifact named for no job, and records the
-job on what it accepts. A class with no producing job is accepted from
-nowhere, whatever a job uploads. The finalizer applies the same rule, so a
-receipt that carries all six classes is refused when it is made and when it
-is checked, until both missing producers exist.
-
-That rule is an allowlist by artifact name and document shape. It does not
-authenticate which job uploaded an artifact.
-
-**Containing the candidate is unfinished.** The smoke, hosted-wire and
-released-Avibe jobs execute the candidate as the user that writes their
-evidence, beside the run's artifact credential. A candidate that attacks its
-runner can make such a job report anything about itself and could replace an
-artifact another job uploaded. What stands against that today is the review
-of the candidate's record and of the pinned source, which the `build` job
-compiles without running it and must reproduce to the reviewed digests.
-
-This is qualification engineering owed in this repository, not an
-owner-held step, and there is no switch that waives it. The change that
-gives the last evidence class a producer does not merge before the
-containment is implemented, reviewed independently and exercised. The first
-usable receipt, the first promotion and commissioning all wait for it. What
-the containment must show is in `docs/plans/model-hub-engine-channel.md`.
+All concrete integrity, manifest, minimum-version, availability, health and
+rollback checks remain useful data or trusted checks at their owning boundary.
+No universal failure is caused solely by absent backward-state or lifecycle
+producers. Full candidate containment is rejected for this scope, not deferred
+as a prerequisite. PR4 must not restore the removed producer/receipt gate under
+another name.
 
 The released-Avibe job installs the published stable wheel into its own
 environment and runs **that release tag's own tests** from a directory that
 holds no product package. The service starts from the wheel's own entry
 script. Every Python process in that environment logs where it imported each
 Avibe module from, and the run is refused if any module, in the test runner,
-the service or a helper, came from anywhere else. A module is imported only
-once its process's log accounts for it, and a run is also refused if any
-process's log is marked as not holding every import.
+the service or a helper, came from anywhere else.
 
 `Rehearse the released-wheel Model Hub E2E` runs the same shared steps against
 one pinned release candidate, so the harness is exercised before the stable
-tag freezes its tests. It has two legs. One runs the candidate's own tagged
-tests and only reports what fails, since a tag cannot be fixed. The other runs
-the current tests against the same wheel and must pass. A rehearsal qualifies
-nothing: it does not use the stable-only resolver, and its record is of a
-kind no receipt reads.
+tag freezes its tests. A rehearsal qualifies nothing; its result is separate
+from `untrusted_rehearsal` and no owner approval can be inferred from it.
 
 ### Operations
 
@@ -331,8 +364,8 @@ dispatch on `master` and this run's approval.
 
 | Operation | What it does |
 | --- | --- |
-| `release` | Publishes a qualified candidate's assets. Does not touch the index. |
-| `promote` | Lists a qualified, published, mirrored release in the index. Allocates the next sequence. |
+| `release` | Publishes trusted-checked candidate assets after owner approval. Does not touch the index. |
+| `promote` | Lists an owner-approved, published, mirrored release in the index. Allocates the next sequence. |
 | `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. Allocates the next sequence. |
 | `resume` | Publishes again, byte for byte, the index the ledger last allocated. No new sequence and no new signature, however long ago it was allocated. |
 
@@ -417,8 +450,9 @@ seconds, so the workflow waits for the public URL instead of purging it.
 
 ### Commissioning (owner-held, not done)
 
-Commissioning also waits for the containment of candidate execution
-described under qualification above. That is engineering in this repository.
+Commissioning does not turn `untrusted_rehearsal` into an authority. It remains
+an owner-held action that requires the signer, ledger, protected environments and
+custody boundaries below; this follow-up neither commissions nor verifies them.
 
 Nothing below exists yet, and this repository creates none of it:
 

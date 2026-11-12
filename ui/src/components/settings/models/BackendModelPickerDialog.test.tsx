@@ -5,10 +5,11 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
+import { pressOutside } from '@/lib/testing/pressOutside';
 import type { ChosenCandidate } from './backendCatalog';
 import { BackendModelPickerDialog } from './BackendModelPickerDialog';
 import { modelsApi } from './modelsApi';
-import type { BackendModelCandidates, ModelCandidate } from './types';
+import type { BackendModelCandidates, ModelCandidate, ModelsDevMatch } from './types';
 
 const candidate = (id: string, overrides: Partial<ModelCandidate> = {}): ModelCandidate => ({
   id,
@@ -29,6 +30,8 @@ const answers = (groups: Partial<BackendModelCandidates> = {}) =>
   vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(read(groups));
 
 const renderPicker = (overrides: Partial<React.ComponentProps<typeof BackendModelPickerDialog>> = {}) => {
+  // A search also asks the model catalog; a test that does not answer it hears nothing.
+  if (!vi.isMockFunction(modelsApi.searchModelsDev)) vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
   const onCancel = vi.fn();
   const onAdd = vi.fn();
   const onCustom = vi.fn();
@@ -63,6 +66,23 @@ afterEach(() => {
 });
 
 describe('BackendModelPickerDialog', () => {
+  it('stays open on a click outside, keeping the search and the ticked rows', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(
+      read({ builtin: [candidate('gpt-6', { origin: 'builtin' }), candidate('gpt-6-mini', { origin: 'builtin' })] }),
+    );
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    const { onCancel } = renderPicker();
+    await user.click(await screen.findByRole('checkbox', { name: 'gpt-6' }));
+    await user.type(search(), 'gpt');
+
+    await pressOutside();
+
+    expect(onCancel).not.toHaveBeenCalled();
+    expect((search() as HTMLInputElement).value).toBe('gpt');
+    expect(screen.getByRole('checkbox', { name: 'gpt-6' }).getAttribute('aria-checked')).toBe('true');
+  });
+
   it('keeps the visible dialog unready until the candidate read completes', async () => {
     const user = userEvent.setup();
     let finishRead!: (value: BackendModelCandidates) => void;
@@ -75,7 +95,7 @@ describe('BackendModelPickerDialog', () => {
     expect(confirm().disabled).toBe(true);
     expect((search() as HTMLInputElement).disabled).toBe(true);
     expect(screen.queryByRole('group')).toBeNull();
-    expect(screen.queryByText('No model matches.')).toBeNull();
+    expect(screen.queryByText('Neither your providers nor the model catalog has this model.')).toBeNull();
     await user.type(search(), 'ignored while loading');
     expect((search() as HTMLInputElement).value).toBe('');
 
@@ -205,7 +225,7 @@ describe('BackendModelPickerDialog', () => {
 
     // And the search did not dead-end: there is no 「no model matches」 to answer
     // with a duplicate.
-    expect(screen.queryByText('No model matches.')).toBeNull();
+    expect(screen.queryByText('Neither your providers nor the model catalog has this model.')).toBeNull();
     expect(onAdd).not.toHaveBeenCalled();
   });
 
@@ -228,25 +248,57 @@ describe('BackendModelPickerDialog', () => {
     },
   );
 
-  it('hands an unmatched query to the editor, and hands over nothing when there is none', async () => {
+  it('adds an unmatched query as a custom model at once, and offers nothing to add when there is no query', async () => {
     const user = userEvent.setup();
     answers({ builtin: [candidate('gpt-6', { origin: 'builtin' })] });
-    const { onCustom } = renderPicker();
+    const { onAdd, onCustom } = renderPicker();
 
     await waitFor(() => expect((search() as HTMLInputElement).disabled).toBe(false));
     await user.type(search(), '  gemini-4  ');
-    expect(screen.getByText('No model matches.')).toBeTruthy();
-    // The query is the id the user has already typed once. Asking for it again
-    // in the next dialog would be this one forgetting.
-    await user.click(screen.getByRole('button', { name: 'Add "gemini-4" as a custom model…' }));
-    expect(onCustom).toHaveBeenLastCalledWith('gemini-4');
+    expect(await screen.findByText('Neither your providers nor the model catalog has this model.')).toBeTruthy();
+    // No form in between: the ID as typed, on the editor's defaults, is the whole add.
+    await user.click(screen.getByRole('button', { name: /^Add "gemini-4" as a custom model/ }));
+    expect(onCustom).not.toHaveBeenCalled();
+    const [[picks]] = onAdd.mock.calls as [[ChosenCandidate[]]];
+    // No supplier was shown, so the write promises none (as the editor's rows do).
+    expect(picks.map((pick) => [pick.candidate.id, pick.row?.origin, pick.row?.supports_tools, pick.expected_suppliers]))
+      .toEqual([['gemini-4', 'manual', true, undefined]]);
 
     await user.clear(search());
-    // With no query there is nothing to quote, and the footer already offers the
-    // same editor.
     expect(screen.queryByRole('button', { name: /as a custom model/ })).toBeNull();
+    // The full editor is still the footer's.
     await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
     expect(onCustom).toHaveBeenLastCalledWith('');
+  });
+
+  it('offers a catalog model no provider lists as a pick described by the catalog', async () => {
+    const user = userEvent.setup();
+    const fable: ModelsDevMatch = {
+      provider_id: 'anthropic', provider_name: 'Anthropic', model_id: 'claude-fable-5-2', models_dev_id: 'anthropic/claude-fable-5-2',
+      display_name: 'Claude Fable 5.2', context_window: 400000, max_output_tokens: 64000, input_modalities: ['text', 'image'],
+      output_modalities: ['text'], supports_tools: true, supports_reasoning: true, reasoning_efforts: ['low', 'high'],
+      native_protocol: 'anthropic', first_party: true,
+    };
+    // The provider lists Fable 5; the catalog also answers with it, and it is offered once.
+    answers({ providers: [candidate('claude-fable-5', { suppliers: [{ source_id: 'src_a', source_name: 'Relay', model_id: 'claude-fable-5' }] })] });
+    const lookup = vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([fable, { ...fable, model_id: 'claude-fable-5', models_dev_id: 'anthropic/claude-fable-5', display_name: 'Claude Fable 5' }]);
+    const { onAdd } = renderPicker();
+
+    await waitFor(() => expect((search() as HTMLInputElement).disabled).toBe(false));
+    await user.type(search(), 'Fable');
+    const row = within(await screen.findByRole('group', { name: 'Model catalog' })).getByRole('checkbox', { name: /Claude Fable 5\.2/ });
+    expect(row.textContent).toContain('Not listed by a provider');
+    expect(screen.queryByRole('group', { name: 'Model catalog' })?.querySelectorAll('[role="checkbox"]')).toHaveLength(1);
+    expect(lookup).toHaveBeenLastCalledWith('Fable', expect.anything());
+    await user.click(row);
+    // The pick outlives the search that showed it.
+    await user.clear(search());
+    await user.click(confirm());
+    const [[picks]] = onAdd.mock.calls as [[ChosenCandidate[]]];
+    expect(picks).toHaveLength(1);
+    // No supplier was shown: the server's own matching decides, unasserted.
+    expect(picks[0].expected_suppliers).toBeUndefined();
+    expect(picks[0].row).toMatchObject({ id: 'claude-fable-5-2', origin: 'models_dev', models_dev_id: 'anthropic/claude-fable-5-2', context_window: 400000, reasoning_efforts: ['low', 'high'] });
   });
 
   it('offers a retry when the models it can add cannot be read', async () => {

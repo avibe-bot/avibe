@@ -402,6 +402,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
 
   return (
     <DialogContent
+      keepOnOutsideClick
       // A name or role without a break opportunity still wraps rather than running past its box.
       className="max-w-[460px] gap-0 p-0 [overflow-wrap:anywhere] max-md:p-0"
       closeLabel={t('common.close')}

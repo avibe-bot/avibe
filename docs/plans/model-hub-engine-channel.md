@@ -3,10 +3,14 @@
 **Status:** design approved by the owner, with minimum-only compatibility;
 target Avibe **3.2.6**. Delivery is four PRs (section 6), each needing owner
 merge approval. Step 1 shipped as avault 0.1.10. Step 2, the channel contract
-and its producer, is described under "Step 2 as built" at the end. Steps 3 and
-4 are not built: **no installed Avibe adopts an engine from the channel, and
-the channel is not commissioned.** This note authorizes no publication, key
-creation, or rollout.
+and its producer, is described under "Step 2 as built" at the end. Step 3a's
+single-file channel recovery is merged; Step 3b implements lifecycle ownership
+and its consumers in this change. Step 4's new UI/CLI/policy surfaces remain
+future work. **The channel is not commissioned.** This note authorizes no
+publication, key creation, or rollout. The owner-selected Job split keeps
+`untrusted_rehearsal` informational and owner approval as promotion authority;
+publication/receipt cleanup is a separate follow-up, not a prerequisite restored
+by the lifecycle implementation.
 
 **The index has no expiry and is never renewed** (owner decision, 2026-11-11;
 section 2 says what that means for a machine that misses a withdrawal). The
@@ -17,17 +21,21 @@ serve them are gone from the design and from the code.
 
 Example: publish `model-hub-engine-v8.0.63-2` with minimum Avibe `3.2.6`.
 An installed 3.2.6 or later discovers it without an Avibe release, verifies it,
-and changes only CPA at a safe boundary. An older Avibe stays on its own engine.
+and changes only CPA at a safe boundary. An older Avibe does not adopt channel C;
+released compatibility exposure is described in section 3.
 A failed activation restores the previous working engine. A withdrawn release
-cannot be selected again. This is an example, not approval of that engine build.
+cannot be selected again while the local channel history remembers its withdrawal.
+Loss of that history has the explicit limitation in section 2. This is an
+example, not approval of that engine build.
 
 Independent **artifacts already exist**: the builder produces six deterministic
 archives and the guard publishes `model-hub-engine-v…` releases. What is missing
-is independent, authenticated **adoption**. Today the installer, Dependencies,
-startup reconciliation, and hosted-tool evidence all use the packaged pin.
-The publish workflow does not depend on full Model Hub E2E. The November 10
-v8.0.63 adoption (#3460, followed by E2E expectation fixes in #3464) demonstrated
-why a successful build/hosted-wire check is not full release qualification.
+is independent, authenticated **adoption**. The lifecycle below now resolves
+startup, repair, Dependencies payloads and producing evidence from the committed
+engine rather than the packaged pin. The publication workflow remains a
+separate boundary; a build/hosted-wire check is not full end-to-end assurance.
+The November 10 v8.0.63 adoption (#3460, followed by E2E expectation fixes in
+#3464) demonstrated that distinction.
 
 Sources: [CPA lifecycle](model-hub-cpa-dependency.md), [release workflow](../release.md),
 [download mirror](release-download-mirror.md), `scripts/build_model_hub_engine.py`,
@@ -85,7 +93,7 @@ Each decoded manifest retains the existing `version`, `asset_release_tag`, sourc
 commit, toolchain/patch identity and six assets (`platform`, canonical owned `url`,
 `size_bytes`, archive `sha256`, `binary_sha256`, `bin_path`). Reuse that schema and
 strict release guard. The signed digest binds the exact decoded bytes, the CI
-receipt and the published manifest; never regenerate the file from parsed JSON.
+result and the published manifest; never regenerate the file from parsed JSON.
 The placeholders above are not a publishable release.
 
 Each entry adds a required stable `min_avibe_version`; an identity's bytes and
@@ -109,7 +117,7 @@ Selection rules:
   round trips, not by a signature or a second publisher-assigned number. There is
   no independent CPA contract-epoch handshake today. A falsely assigned epoch
   would not protect against a falsely assigned minimum. Future Avibe releases
-  must preserve the qualified boundary or revise this protocol before breaking
+  must preserve the reviewed compatibility boundary or revise this protocol before breaking
   it; incompatible state migrations are ineligible for this channel. Raising the
   minimum on a *new* engine leaves older Avibe on their newest eligible entry.
 - Every Avibe release keeps its reviewed packaged manifest. Startup, repair,
@@ -167,8 +175,9 @@ permits engine B. Sequence 11 withdraws B, but the device cannot get 11 while
 B's pinned archive is still reachable. With no index expiry, it may newly
 install B even a month later. The signature proves 10 was authorized. The
 sequence rule prevents going backward from something already seen. Neither
-proves that 11 was received. A device that has accepted 11 refuses 10.
-Explicit offline mode still makes no network requests. So the behaviour is
+proves that 11 was received. With its local history readable, a device that
+accepted 11 refuses 10. Explicit offline mode still makes no network requests.
+So the behaviour is
 "continue following the latest accepted list", not merely "keep the already
 installed engine".
 
@@ -182,15 +191,56 @@ What is kept, and the result each piece protects:
 | Kept | What it protects |
 | --- | --- |
 | A signature over the exact payload, by a key shipped in Avibe | Only an index the channel key signed is acted on. Whoever controls the mirror cannot change a download and its expected hash together. |
-| The recorded highest sequence and payload digest | A device never goes back from an index it accepted, and two different indexes cannot share a sequence. |
+| The recorded highest sequence and payload digest | While the one local history file is readable, a device refuses an index below its recorded sequence and different bytes at an equal sequence. State loss removes that local memory; the shipped floor still applies. |
 | The shipped sequence floor | A device that installs an Avibe release with a higher floor accepts no index below it and adopts nothing new from a recorded index below it. The floor does not deliver a newer index, does not reveal a withdrawal the device has not received, and does not stop an engine that is already installed and that the device's record does not show as withdrawn. |
-| Permanent tombstones and remembered release identities | A withdrawal a device has seen cannot be dropped later, and a promoted release cannot return with other bytes. |
-| Explicit offline mode | No network request and nothing adopted, while withdrawals the device already recorded still apply. |
+| Cumulative tombstones and remembered release identities | While local history is readable, a later list cannot drop/change a remembered withdrawal or change a promoted release's bytes/minimum. They are not recoverable after that file is lost or unreadable. |
+| Single-file atomic publication | Readers observe the whole old or new document, not a partial write. The shared helper flushes the temp file before replacement and attempts the parent-directory flush; it does not provide a second-fault history guarantee or certify physical power-loss persistence. |
+| Explicit offline mode | No network request and nothing adopted, while withdrawals still available in the readable record apply. Lost history cannot authorize a new adoption offline. |
 | Regular metadata checks (section 3; arrives with step 3) | A device learns of a withdrawal the first time it can reach the index. |
 | The signer's ledger, allocation before signing, exact resume | One sequence is signed over one payload. A publication that failed is finished with the identical envelope, however much later. |
 | Per-run approval, the protected environment, the runner-group restriction | Only an approved promotion or withdrawal reaches the key. |
 | Separate signer and writer credentials, conditional write, read-back | A stale or racing writer, or the mirror's credential, cannot replace a newer index or drop a withdrawal. |
 | The release-asset guard | Every listed release stays downloadable. It is unrelated to signing and was never a renewal. |
+
+### One local history file: the accepted state-loss trade-off
+
+The channel uses **one** local `channel/state.json` file as the source of local
+sequence, payload and cumulative release/withdrawal history. There is no second
+authority, registry replica, backup, immutable generation bundle, completion
+marker or witness. Product chose this Simple contract on 2026-11-11; the rejected
+dual-authority designs are historical scratch artifacts, not requirements.
+
+If that file is missing or unreadable, the installation has **unavailable local
+history**, not proof of a clean first install. Until a signed list can be fetched
+and accepted, the channel returns restrictive `keep`: no new channel adoption or
+fallback is authorized. The existing engine may remain usable only after its
+owner independently verifies its installed identity and integrity (and ordinary
+compatibility/health checks); `keep` itself proves none of those facts. Offline
+mode and fetch failure do not reconstruct a lost withdrawal.
+
+A successfully fetched, authenticated and validated list may then become the new
+local floor **even when its sequence is lower than one this installation saw
+before losing the file**. It must still meet the running Avibe's shipped floor,
+signature, schema, manifest and minimum-version rules, and any candidate still
+passes the ordinary integrity, compatibility, quarantine and health gates before
+activation. A valid signature proves authorization, not that a list is newest.
+
+For example, this installation once accepted 11 withdrawing B, loses its state,
+and later fetches valid signed 10 with no withdrawal. It may accept 10 and select
+B again. The lost withdrawal stays lost until a newer list carrying it arrives;
+there is **no time bound**. This limitation is intentional. Atomic replacement
+protects the normal complete-document publication path, not deletion, corruption,
+or a second fault that destroys local history. No expiry, renewal, hidden backup
+or never-reopen rule is added to compensate. A future requirement never to reopen
+a withdrawal after state loss needs a new owner decision.
+
+Within a running controller, authenticated withdrawals from failed state
+publication remain restrictive until a later state publication completes.
+Rejected refresh attempts contribute no withdrawal and cannot erase an earlier
+one; an unchanged-file refresh is not publication completion either. Further
+publication failures accumulate only in-process restrictions. No extra history
+file or restart-survival promise is introduced, and successful signed recovery
+of lost history still has the state-loss behavior above.
 
 What was removed with the expiry: the `expires_at` field, the seven-day
 bound, the clock-skew allowance and every wall-clock check on the device; the
@@ -242,53 +292,106 @@ install-claim schema unless an additive migration is actually needed.
 | `idle -> checking` | Authenticate index and select compatible candidate; active engine keeps serving. |
 | `downloading -> staged` | Hold one update reservation; download/verify into a distinct immutable generation. Do not move `current.json` or hold the routing lock during download. |
 | `preflight` | Run candidate with isolated temporary config/auth and loopback fixtures; validate startup, management ownership/config and gateway contract without provider traffic or user credentials. |
-| `waiting_for_idle` | Wait for a quiet boundary. Under the routing lock, count all inference transports **and** OAuth/management/config operations. Briefly gate new admissions and drain existing work; after 30 seconds reopen admission and defer five minutes instead of killing a stream. |
-| `activating` | Journal old/candidate identities and run intent durably; stop only the owned old CPA, select candidate, start if previously running, validate the real local health/ownership/config contract within a 30-second budget. No new request reaches a half-activated generation. |
-| `applied` | Commit active/previous selection and success only after health passes; release admission, update effective engine evidence identity, then permit cleanup. A stopped Model Hub stays stopped after isolated preflight/selection. |
+| `waiting_for_idle` | Engine-only leases cover inference, OAuth flow continuations and management/config/credential work. Gate fresh admissions without holding routing or installation locks needed by admitted continuations. After 30 seconds, routine updates reopen and defer five minutes; they never kill/replay work. |
+| `activating` | Durably journal old/candidate identities and run intent before stopping old CPA. Start only through the owner's fenced resolver, if previously running, and validate the real local health/ownership/config contract. No request can acquire a provisional generation. |
+| `applied` | Commit active/previous before publishing running identity, and publish identity before reopening admission. A stopped engine remains stopped; its first real start has a confirmation transaction and authorized rollback. |
 | `rolling_back -> rolled_back` | Stop candidate; restore previous verified selection and run intent; health-check it before resuming. Keep the failure visible and quarantine the candidate identity until explicit retry or a different build. |
 | `blocked` | Neither candidate nor a safe fallback can run: report an actionable dependency error and stop Model Hub only; Avibe and unrelated backends continue. |
 
-Reuse `_routing_lock`, `_transports_idle`, installer claims and the supervisor,
-but split existing `ensure` into staging and activation: today it changes the
-pointer before restart and does not roll back a failed restart. Do not layer a
-second updater around that behavior. Durability order is explicit:
+Reuse the adapter's routing and installation serialization and the supervisor,
+but keep network/staging and drains outside the swap fence. A failed same-release
+repair sibling is quarantined by its immutable installation, not by the shared
+release tag: the prior healthy installation remains eligible for rollback and
+ordinary required-file repair. This applies to preflight, real-config health and
+interrupted repair recovery; integrity, provenance, minimum and current withdrawal
+checks still apply to the rollback target. Other failed candidate releases remain
+release-quarantined. Terminal OAuth status is an existing local snapshot, not new
+engine work: its failure and retained-material disposition remain readable even
+when withdrawal has released its flow lease and no fallback can run. Mutating or
+active-flow operations keep their admission requirements. Durability order is
+explicit:
 
-1. Persist the verified candidate and both generations' manifests/archives.
-2. Durably write `intent(old, candidate, run_intent)` **before** stopping old CPA.
-3. Write the candidate pointer; start/health-check only under the activation fence.
-4. Durably commit `(active=candidate, previous=old)` **before** success/admission
-   or cleanup. A pointer is a projection, not the recovery source of truth.
+1. Stage exact verified manifests/archives into immutable generations, with
+   digest-addressed cache names. Stage-only callers execute no version probe.
+2. Isolated preflight uses empty test-owned home/config/auth inputs. Its own
+   durable launch witness allows recovery to reap a child even if its temporary
+   process record is missing/malformed; it is not another real-auth engine.
+3. Durably write `intent(old, candidate, run_intent)` **before** stopping old CPA.
+   Fence the provisional start/health check; no compatibility pointer selects it.
+4. Durably commit `(active=candidate, previous=old)` **before** publishing running
+   identity, reopening admission or allowing role-based cleanup.
+5. Afterwards project `current.json` to an eligible, already installed **actual
+   current package B_new**, or remove it. Never write channel C there and never
+   install/start an extra bundle merely to fill the hint.
 
-On restart, intent without commit restores old; durable commit repairs a stale
-pointer to candidate; no pending intent uses the last committed generation. A
-revoked/incompatible recovery target is never restarted; use the permitted safe
-fallback or block Model Hub. Stop surviving owned CPA processes only after checking
-recorded process identity. POSIX writes require file fsync, atomic replacement and
-parent-directory fsync; Windows needs tested native flush/write-through semantics.
-Plain atomic rename is insufficient. An unsupported durability primitive blocks
-automatic activation rather than claiming power-loss safety. Inject failure at
-every write/flush/stop/start boundary, including commit-with-stale-pointer recovery.
+On restart, intent without commit restores an authorized old target; durable
+commit keeps that exact generation regardless of a stale legacy hint. `KEEP`
+is not start authorization. Recovery and every fresh start check installed
+identity/integrity, minimum, provenance, changed package identity and currently
+available withdrawal history. A corrupt/missing committed C requires repair of
+C, not repinning to B. Re-evaluating a newer shipped baseline is a separate owner
+selection, not candidate adoption by ordinary repair. Config reload/credential
+invalidation can restart only the committed generation. Ordinary supervisor
+start resolves a previously authorized identity without network/recovery
+recursion under its lock. Recorded process identity and durable launch witnesses,
+not missing/malformed process records, settle survivor ownership.
+
+The **activation journal**, independently of the single-file channel history,
+uses file fsync, atomic replacement and parent-directory fsync on POSIX, final
+native full flush on Darwin, and native flush/write-through publication on
+Windows. Unsupported/completion-failed primitives block activation. Fault tests
+cover write/flush/stop/start/health/commit boundaries. Dedicated native CI kills
+an actual test owner and recovers real fixture children, separately from injected
+failures. Neither native process-crash tests nor successful native syscalls are
+physical power-loss certification. Provenance, launch witnesses and transaction
+intents never recreate a lost sequence floor or withdrawal: section 2's older
+signed-list acceptance and lost-withdrawal reopening remain intentional.
+
+`available`, `staged`, `committed`, `running` and `legacy` are separate identities.
+A failed compatibility projection is visible as pending and retried by the owner;
+stale/unreadable retained exposure is reported, never falsely called absent or
+used for new-client execution. Released v3.2.5 understands neither channel minimums
+nor withdrawals. Its OAuth/reauth can start retained B_new before successful
+prepare, but cannot discover C through this hint. Ordinary successfully prepared
+old demand can run B_old. Upgrade-back uses committed C without repinning. There
+is no release fence or claim that an old client enforces new policy.
 
 Do not automatically replay a request already sent upstream, especially one
 that streamed or invoked a hosted tool. Existing transports drain unchanged;
 not-yet-admitted requests wait within their caller budget or receive a retryable
 local unavailable result. Ordinary updates may remain pending under sustained
 activity. OAuth flows and credential mutations share admission leases, not only
-inference calls. Do not run two real-auth CPA processes side by side.
+inference calls. Do not run two real-auth CPA processes side by side. Tool-only
+search/fetch operations and search API-key custody have no CPA projection:
+provisioning, free checks and dedicated search retirement bypass CPA recovery
+and admission. Legacy generic retirement does so only for a readable search
+API-key identity, with the search namespace revalidated at deletion; unknown or
+model-facing credentials retain their engine fence.
 
 Rollback restores binaries/selection, **not** a stale snapshot of live credentials.
-Backward-state compatibility is an eligibility gate: run the exact candidate on
-synthetic Avibe-rendered config and CPA credential documents, exercise supported
-writes/refresh through loopback mocks with external egress denied, then read/use
-those resulting files with each retained rollback/bundled baseline in the minimum
-and current-stable qualification set. No production secrets or restored old-token
-snapshots. Missing or failing round-trip evidence forbids promotion. An engine
-requiring irreversible data migration needs an Avibe-coordinated change, not this
-channel. Cleanup preserves bundled, active, previous, staged and journal-referenced
-generations/archives.
-Hosted-tool capability/refusal stamps must use the actual admitted engine identity,
-not the current cached packaged-manifest stamp; swap and rollback invalidate new
-resolutions without rewriting completed evidence.
+An engine requiring irreversible data migration needs an Avibe-coordinated
+change, not this channel. Publication/backward-state rehearsal belongs to the
+owner-selected Job split, not a receipt/missing-producer runtime hard gate.
+Cleanup protects one verified current-package bundled copy (preferring an eligible
+legacy hint), committed, previous, staged and pending/launch/preflight roles and
+their archives; unreadable lifecycle state fails the whole cleanup plan closed.
+Projection and cleanup share the bundled-copy chooser. Superseded bundled repair
+siblings lose protection with their last role, rather than every matching prefix
+being retained forever. Settled/quarantined/superseded stages retire rather than becoming
+permanent roots. Content-addressed archives retain cleanup ownership even when
+their unused install was removed while the archive was still too young.
+Hosted-tool capability/refusal/result stamps carry the admitted producing engine
+through later persistence, even after a swap. An unknown identity/manifest stays
+unknown: no renderer or evidence writer substitutes the packaged/current engine.
+
+For a known signed withdrawal the loop gates new admissions immediately, without
+waiting for routing or a metadata/status I/O worker. A single nonrenewing deadline
+of at most five minutes explicitly fails remaining work once, including stuck
+transport close; leases stay fenced until mutable cleanup joins. Routine updates
+never use this interruption path. No upstream replay is automatic. Recalled CPA
+is paused before fallback download/preflight, so a slow fallback cannot extend
+its execution. A pause records run intent, **not withdrawal history**; accepted
+history loss can reopen the generation as section 2 permits.
 
 ## 4. Publication gate and emergency withdrawal
 
@@ -316,19 +419,23 @@ Extend the existing builder/guard and workflows; do not create a second builder.
 4. Require per-platform startup/version/health smoke checks for all six artifacts,
    focused lifecycle/rollback tests, and backward-state fixtures. Full protocol E2E
    remains Linux-based. Record exact runtime/test SHA, manifest digest, asset
-   digests and CI run/attempt in a qualification receipt. Skipped, cancelled or
-   failing required checks do not qualify; reviewed strict xfails follow existing
-   policy, never a new blanket waiver.
-5. A protected default-branch finalizer validates the receipt and owner publication
-   authorization, publishes an immutable non-latest engine release, mirrors and
-   reads back all assets, then signs and atomically promotes the new index. It
-   never rebuilds different bytes after qualification. Availability precedes
-   advertisement. Publication alone does not make an engine eligible.
+   digests and CI run/attempt in an informational `untrusted_rehearsal` result.
+   Missing, skipped, cancelled or failing checks remain visible to the owner;
+   they are not relabeled as passes and do not create promotion authority.
+5. A trusted default-branch finalizer independently checks the exact rehearsal
+   run, current candidate/source/manifest/archive digests and owner-facing
+   summary, then the existing protected owner approval authorizes publication or
+   promotion for that exact run and digest. It publishes an immutable non-latest
+   engine release, mirrors and reads back all assets, then signs and atomically
+   promotes the new index. It never rebuilds different bytes after the trusted
+   digest check. Availability precedes advertisement. Publication alone does
+   not make an engine eligible. A future malicious-candidate-resistant receipt
+   needs a new product decision.
 
 Extend backup/recovery coverage to all advertised and rollback targets, not just
 the packaged pin. Generic mirror/recovery jobs cannot promote releases or erase
 revocations. Withdraw via an owner-authorized dispatch that adds a permanent
-signed tombstone, names a previously qualified compatible rollback target, bumps
+signed tombstone, names a previously reviewed compatible rollback target, bumps
 sequence, writes the index and purges/revalidates its 60-second cache. Do not
 remove immutable assets or merely delete the entry. Normal updates remain
 forward-only; an explicit authenticated revocation is the narrow downgrade
@@ -346,6 +453,15 @@ revocation until it can, and until then it follows the index it has, which
 may still let it install the withdrawn release (section 2).
 
 ## 5. Dependencies, API and CLI
+
+**PR3b boundary:** existing Dependencies/status, prepare, Doctor, clean and runtime
+payload consumers now use the effective manifest and lifecycle identities.
+Stage-only results say `waiting_for_controller`, not installed/running/applied.
+Internal authenticated service/IPC status/check/update operations are shared;
+the current owner deduplicates concurrent requests and reports an operation ID.
+PR3b adds no new CLI command, persisted policy switch or Dependencies redesign.
+The following UI/CLI/policy surface remains **PR4 work**, not an existing API
+promise; routine adoption already has an internal provider for that integration.
 
 Keep the existing **Model Hub engine (CPA)** Dependencies row, not a new settings
 page. Show upstream **and Avibe build revision**, active/default/available version,
@@ -385,7 +501,12 @@ preservation. Turning it off prevents routine automatic adoption, not checking,
 explicit Update now, repair of the already selected/default target, or withdrawal
 of a known-bad build. It must not silently adopt the newest engine under “repair”.
 State that exception beside the switch. An explicit Retry after a failed update
-clears only that candidate's quarantine. Explicit offline mode suppresses network
+clears only that candidate's quarantine. If there is no adoption target, explicit
+Update or a forced owner repair can retry the required committed generation,
+without bypassing provenance, compatibility or current withdrawal checks. A
+blocked same-identity retry re-enters fenced preflight/activation; it is not an
+unchanged-file success and does not silently start a stopped engine. Unrelated
+failed repair siblings remain quarantined. Explicit offline mode suppresses network
 operations; known locally recorded revocations still apply. Local/test manifest
 overrides opt out of the public channel and are visibly identified. Use English/
 Chinese catalog keys; implementation includes dependency-row design frames and Show
@@ -396,9 +517,10 @@ review.
 After approval, deliver four bounded PRs, in contract order (no stacked branches):
 
 1. avault keyless verifier + shared signed-envelope vectors and custody docs.
-2. Avibe channel contract/resolver, pinned verifier integration, gated producer,
-   promotion/withdrawal workflow and release docs; no client adoption until
-   complete. A follow-up before step 3 removes the index's expiry and renewal.
+2. Avibe channel contract/resolver, pinned verifier integration, the
+   informational untrusted rehearsal and trusted owner-approved publication/
+   promotion workflow; no client adoption until the lifecycle lane is ready.
+   A follow-up before step 3 removes the index's expiry and renewal.
 3. Transactional engine lifecycle, shared auto/manual updater, recovery, effective
    evidence identity and all startup/repair/cleanup consumers.
 4. Dependencies/CLI/policy controls, design frames, English/Chinese public docs,
@@ -413,7 +535,8 @@ Avibe upgrades/downgrades and offline restart do not accidentally repin; rejecte
 candidates do not loop; revocation beats a stale promotion and cannot be undone by
 mirror recovery; production data never enters hermetic tests. Use focused owning-
 boundary tests, CI native-platform smokes, and the repository local Incus runner.
-No install, deploy, load test or restart on the owner's desktop.
+No owner-service install/deploy, synthetic load test or service restart on the
+owner's desktop. Hermetic fixture children are distinct from that live service.
 
 **Estimate:** 7–10 focused engineering days after design approval and verifier/
 release-signer decisions, plus review/CI and owner-held publication time. The
@@ -489,32 +612,47 @@ caller never installs or upgrades avault, selects no store, and removes
 verifies. Until the managed avault pin reaches 0.1.10 (#3517), a managed
 install reports the verifier as too old and the channel stays closed.
 
-**Recorded state.** `<engine runtime dir>/channel/state.json`, separate from
-the install claim. It holds the highest accepted sequence, that payload's
-digest, the accepted envelope, every withdrawal, and the minimum and manifest
-digest of every release ever listed. A release that stops being listed keeps
-its recorded identity, so it cannot come back with other bytes. Acceptance
-runs under a cross-process lock against the file's current contents. A
-rejected index changes nothing. On read the stored envelope is authenticated
-again. Nothing in the record ages: it is this machine's index until a higher
-sequence replaces it, and the same index offered again is accepted at any
-time. One that is below the sequence floor the running Avibe ships is
-returned marked as not meeting it: its withdrawals still apply, and it brings
-in nothing new.
+**Recorded state (Simple single-file contract).**
+`<engine runtime dir>/channel/state.json`, separate from the install claim, is the
+only local channel history authority. It holds the highest accepted sequence
+currently known here, that payload's digest/envelope, every withdrawal and the
+minimum/manifest digest of every release seen while the file remains readable.
+A release that stops being listed keeps its recorded identity. Acceptance runs
+under the existing cross-process lock against current readable contents and
+rejects replay, equivocation, changed identities/minimums and dropped/changed
+tombstones. Authentication and payload/manifest validation precede acceptance;
+a rejected fetch does not replace even a damaged file.
 
-Damaged state is never treated as a fresh start. Every refresh is rejected as
-`state_unreadable`, including a newer index that would otherwise be accepted,
-and the damaged bytes stay as they are. `resolve` returns `keep` with the
-reason `state_unreadable`: no channel change is authorized. Nothing intact
-shows that the engine in effect was withdrawn, so a withdrawal is not
-invented. This step has no recovery from that state, and removing the file is
-not one: it would discard the replay and withdrawal memory the file exists to
-keep.
+On read the stored envelope is authenticated again. The payload digest is
+SHA-256 of its **exact decoded payload bytes**, not the outer envelope or
+signature-domain digest. Nothing ages. A recorded list below the shipped floor
+still reports remembered withdrawals but authorizes no new adoption.
 
-The file is written by atomic replacement, with a directory flush that is
-best effort. That is enough while nothing acts on the channel. It is not
-proof that an accepted sequence or withdrawal survives power loss; step 3
-carries that obligation (below).
+**Missing/unreadable history and recovery.** `snapshot` returns no index for a
+missing file, and `state_unreadable` for an unreadable/malformed file. Neither
+claims that history survived or that the installation is clean fresh. With no
+successful fetch, `resolve` returns restrictive `keep` (`no_index` or
+`state_unreadable`): no new adoption/fallback, no fabricated withdrawal. Existing
+engine use remains subject to its owner's independent installed-identity,
+integrity, compatibility and health checks. Offline/fetch-unavailable inspection
+creates no recovery marker and leaves existing damaged bytes untouched.
+
+Once a signed fetch passes the current shipped floor and normal validation,
+`accept` may replace missing/unreadable history with that list, even at a lower
+sequence than the lost one, and logs the lost-history limitation for unreadable
+state. The new file has only history carried by that fetched list and accumulated
+since it. Lost withdrawals may reopen until a newer list carrying them is fetched,
+with no time bound. This is state-loss recovery, **not recovery of lost history**.
+It is not an instruction to delete state as a routine repair.
+
+**Publication guarantee.** The existing `config.atomic_io.write_atomic` creates
+a distinct temp file in the same directory, writes/flushes/fsyncs its complete
+bytes, atomically replaces the destination, and attempts the helper-owned
+best-effort parent-directory flush (where supported). Acceptance returns only
+after that path completes. Errors before replacement preserve the old file;
+a successful replacement can be visible before a later failure. These are
+whole-document reader/writer guarantees, not a guarantee against loss of the
+one file or physical power-loss certification. No second authority is added.
 
 **Selection.** `resolve` returns one of four actions. A withdrawal of the
 engine in effect is decided first and by itself.
@@ -548,8 +686,8 @@ roots document that is missing or damaged. If the recorded state names the
 engine in effect as withdrawn, the result is `blocked`: the engine is not
 kept, and no fallback is taken from an index that could not be checked. The
 keyless case reads the record and nothing else: no request, no verifier. A
-machine with no record, which is every machine before commissioning, keeps
-its engine and creates no state.
+machine with no readable record keeps only an independently verified installed
+engine and creates no state; missing history does not prove it never saw an index.
 
 A manifest override is the one documented way out of the channel, withdrawals
 included. It takes precedence whether or not this Avibe ships a root.
@@ -577,21 +715,38 @@ and the writer make are diagnostics for a ledger that is behind; they are not
 that protection. Ledger loss or doubt stops the channel pending a separately
 approved recovery.
 
-**Qualification status.** The receipt requires six evidence classes. Four have
-producing jobs. `build` reuses the release guard's strict rebuild, which
-already publishes the packaged engine. The per-platform smoke producer runs in
-pull-request CI on all six platforms against the packaged engine, which shows
-the producer works and qualifies nothing. The hosted-wire job has not run: it
-needs a candidate. The released-Avibe job has not run for qualification: it
-needs published 3.2.6 artifacts. Its steps are rehearsed in pull-request CI
-against a pinned 3.2.6 release candidate. `backward_state` and `lifecycle`
-have no producer until steps 3 and 4, so no receipt can be produced before
-then. That holds whatever a job uploads: evidence counts only under the job
-that produces its class, read from the artifact named for that job, and a
-class with no job is accepted from nowhere, when a receipt is made and when
-the finalizer checks one. This is an allowlist by artifact name and document
-shape; it does not authenticate the uploading job. Jobs that execute the
-candidate are not contained. That is unfinished work, listed below.
+**Untrusted rehearsal status.** The candidate workflow now runs the concrete
+checks as an informational `untrusted_rehearsal`: source rebuild and exact
+manifest/archive hashes, six-platform smoke, hosted-wire comparisons, and the
+released-wheel minimum/current-stable E2E where those inputs exist. Missing,
+skipped and failed reports remain visible; no result is relabeled as a pass.
+`backward_state` and `lifecycle` are future observations, not universal
+producer requirements, and their absence does not block every rehearsal.
+
+The rehearsal result includes the upstream source reference, exact manifest and
+archive digests, minimum Avibe, run/attempt identity, baseline context, and the
+observed reports. The name of an artifact or job is not authentication, and
+candidate assertions are not proof against a malicious candidate.
+
+A separate trusted prepare job in the publication workflow checks the exact
+rehearsal run on `master`, the current candidate record, source reference,
+manifest and archive digests, baseline context, and run identity. It independently
+resolves the current minimum and stable Avibe releases, verifies their immutable
+wheel sizes and SHA-256 digests, and reads their packaged manifests as ZIP data;
+it does not trust released-role or bundled-manifest files from the rehearsal
+artifact. It uses a fixed checkout, bounded JSON parsing and a separate
+trusted-checked artifact namespace. It never executes candidate code, imports
+uploaded modules or wheels, or uses uploaded executables as trusted inputs. The owner sees this summary and
+explicitly approves each publication or promotion for that exact run and
+manifest/archive digest through the existing protected environments. Owner
+authorization, not the rehearsal result, is the promotion authority.
+
+The job split protects trusted workflow code and privileged credentials; it
+does not make candidate self-reporting honest. Full candidate containment is
+rejected for this scope, not deferred as a prerequisite. A future requirement
+for malicious-candidate-resistant receipts or stronger provenance needs a new
+product/owner decision. PR4 must not restore this removed gate under another
+name.
 
 **Not in this step.** Adoption, activation, scheduling, recovery, the
 effective-engine consumers (step 3); the Dependencies row, CLI, policy switch
@@ -607,45 +762,11 @@ decisions; these are what a lifecycle that acts on them must hold.
 - A `keep` whose reason is `state_unreadable`, `uncommissioned`, or a verifier
   that cannot run is a degraded state. What the user sees must say that
   updates are blocked, not that Model Hub is ready.
-- Recovery from a damaged record needs its own supported trust protocol,
-  which decides what replaces the lost replay and withdrawal memory. Removing
-  the file is not that protocol and must not be documented as a remedy.
-- Before any consumer activates an engine on the channel's word, the accepted
-  sequence and history must be durable to the bar section 3 sets for the
-  activation journal: file flush, atomic replacement and parent-directory
-  flush on POSIX, tested native write-through on Windows, with crash recovery
-  tested by injected failure. The current write path does not meet that bar,
-  and a platform that cannot meet it blocks automatic activation.
-
-**Containment of candidate execution, owed before every evidence class has a
-producer.** Qualification runs the candidate in the smoke, hosted-wire and
-released-Avibe jobs, and steps 3 and 4 add the backward-state and lifecycle
-producers, which run it too. Today the candidate runs as the user that writes
-each job's evidence, beside the run's artifact credential, so a candidate
-that attacks its runner can make those jobs report anything and could replace
-another job's artifact. Step 2 only guarantees that no receipt can be
-completed: the two missing classes have no producer, and nothing accepts them
-from anywhere.
-
-- The change that gives the last evidence class a producer does not merge
-  until the containment is implemented, reviewed independently and exercised.
-  The first usable receipt, the first promotion and commissioning stay
-  blocked until then. No flag or manual waiver may bypass it.
-- The design names three things: the trusted collector and receipt
-  authority, the untrusted engine with every process it starts, and the
-  operating-system boundary between them on each of the six platforms.
-- The new producers use the same protected collection boundary as the
-  existing ones. Step 4 cannot close qualification without it.
-- The candidate gets only the read-only inputs and the writable test state
-  it needs, with loopback fixtures.
-- Tests show that the candidate cannot alter the collector's code, the
-  manifests, the reports or the workflow's command files; cannot obtain the
-  runner's or the run's artifact credentials; cannot tamper with the trusted
-  collector's processes; and cannot persist into the trusted upload phase.
-- Missing privileges or a platform without the containment fail closed.
-- A separate working directory, a cleared child environment, a subprocess of
-  the same user, or a container label is not that proof by itself.
-- The boundary can be rehearsed before a candidate or a stable release
-  exists, with the packaged engine and test-owned negative probes. As with
-  the released-wheel rehearsal, such runs produce no qualification receipt.
-  They extract no real credential and write nowhere outside the run.
+- State-loss recovery is the Simple single-file contract in section 2: no
+  adoption before a successful signed fetch; the fetched list then becomes the
+  new local history even if lower than the lost floor. No lifecycle marker or
+  backup is used to reconstruct channel history. The installed engine remains
+  independently verified, and a lost withdrawal may reopen without a time bound.
+- The activation journal's separate durability/health gates remain necessary
+  before execution. They do not strengthen or replace the one-file channel
+  history guarantee and may not silently add a never-reopen requirement.
