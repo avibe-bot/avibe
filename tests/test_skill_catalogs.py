@@ -82,7 +82,7 @@ def test_populated_upgrade_and_production_writes_keep_exact_inline_bytes(tmp_pat
     finally:
         db.dispose()
     decision = classify_migration(
-        Path(migrations.alembic_dir()) / "versions" / "20261112_0087_skill_catalog_readers.py"
+        Path(migrations.alembic_dir()) / "versions" / "20261112_0088_skill_catalog_readers.py"
     )
     assert decision.permitted == "additive", decision.reason
 

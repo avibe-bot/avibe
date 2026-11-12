@@ -618,6 +618,17 @@ session_digests = Table(
     Column("now", Text, nullable=True),
 )
 
+# Optional cache comparison state, one latest full record per Session/provider/model.
+# Independent of transcript history; older writers need not know this table exists.
+session_cache_state = Table(
+    "session_cache_state",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column("provider", String, primary_key=True),
+    Column("model", String, primary_key=True),
+    Column("record_json", Text, nullable=False),
+)
+
 # Reader-first catalog snapshots. Production observations remain inline until a
 # separately released compatibility boundary activates reference writes.
 skill_catalogs = Table(
@@ -726,6 +737,26 @@ skill_usage_daily = Table(
 # identity is scoped to its conversation because some platforms reuse message
 # ids across chats. ``read_at`` drives unread counts for the
 # Inbox; legacy IM platforms ignore it.
+# Ordinary, migration-owned search bookkeeping. The optional FTS virtual table
+# is deliberately absent: it is initialized only by post-readiness maintenance.
+message_search_dirty = Table(
+    "message_search_dirty", metadata,
+    Column("message_id", Text, primary_key=True, nullable=False),
+)
+message_search_documents = Table(
+    "message_search_documents", metadata,
+    Column("id", Integer, primary_key=True, nullable=False),
+    Column("message_id", Text, nullable=False, unique=True),
+    Column("oversized", Integer, nullable=False, server_default="0"),
+    Index("ix_message_search_documents_oversized", "oversized"),
+)
+message_search_state = Table(
+    "message_search_state", metadata,
+    Column("id", Integer, primary_key=True, nullable=False),
+    Column("cursor", Text, nullable=True),
+    Column("ready", Integer, nullable=False, server_default="0"),
+)
+
 messages = Table(
     "messages",
     metadata,
@@ -1558,6 +1589,15 @@ vault_operation_challenges = Table(
     Column("created_at", String, nullable=False),
     Index("ix_vault_operation_challenges_lookup", "operation", "secret_name", "expires_at"),
     Index("ix_vault_operation_challenges_consumed", "consumed_at", "expires_at"),
+)
+
+# Reader-first storage for immutable audit ACL snapshots. Writers still inline
+# snapshots until the coordinated compatibility-epoch activation.
+vault_audit_access_snapshots = Table(
+    "vault_audit_access_snapshots",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("snapshot", Text, nullable=False, unique=True),
 )
 
 # Append-only audit log. Secret VALUES never appear here — only names, requesters,

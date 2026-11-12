@@ -13,6 +13,7 @@ from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
     APPLICATION_LOG_FORMAT,
     APPLICATION_LOG_MAX_BYTES,
+    RedactingFormatter,
 )
 from vibe.service_logging import (
     ServiceFileHandler,
@@ -56,7 +57,7 @@ def setup_logging(level: str = "INFO") -> None:
     ensure_data_dirs()
     logs_dir = str(get_logs_dir())
     configure_service_logging(
-        lambda: _build_logging_handlers(logs_dir), log_level, logging.Formatter(APPLICATION_LOG_FORMAT),
+        lambda: _build_logging_handlers(logs_dir), log_level, RedactingFormatter(APPLICATION_LOG_FORMAT),
     )
 
 

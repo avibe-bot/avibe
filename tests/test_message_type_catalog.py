@@ -104,12 +104,27 @@ def test_transcript_types_match_current_constant() -> None:
 
 
 def test_searchable_types_match_current_default_query() -> None:
-    connection = _CaptureConnection()
-    messages_service.search_messages(connection, query="catalog-probe")
+    from sqlalchemy import create_engine, event
+    from storage.models import metadata
+
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    statements = []
+
+    def capture(conn, statement, multiparams, params, execution_options):
+        if getattr(statement, "is_select", False):
+            statements.append(statement)
+
+    event.listen(engine, "before_execute", capture)
+    try:
+        with engine.connect() as connection:
+            messages_service.search_messages(connection, query="catalog-probe")
+    finally:
+        engine.dispose()
 
     expected = ("user", "harness", "annotation", "output", "result", "vault", "interim")
     assert types_with("searchable") == expected
-    assert _message_type_sequences(connection.statements[-1]) == {expected}
+    assert _message_type_sequences(statements[-1]) == {expected}
 
 
 def test_inbox_activity_types_match_current_constant() -> None:

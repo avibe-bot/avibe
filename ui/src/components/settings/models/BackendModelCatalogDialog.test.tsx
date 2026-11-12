@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
 import { blankBackendModel, candidateBackendModel } from './backendCatalog';
@@ -101,6 +102,15 @@ afterEach(async () => {
 });
 
 describe('BackendModelCatalogDialog', () => {
+  it('stays open on a click outside, keeping an unsaved edit', async () => {
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
+    const { onClose } = renderDialog();
+    await userEvent.click(await screen.findByRole('button', { name: 'Remove alpha' }));
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('enables catalog controls only after the baseline read completes', async () => {
     let finishRead!: (value: AgentSupply) => void;
     const pendingRead = new Promise<AgentSupply>((resolve) => { finishRead = resolve; });

@@ -180,6 +180,31 @@ GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 must include an installable wheel containing `ui/dist` and
 `vibe/show_runtime/*.tgz`, plus the source distribution.
 
+## Python dependency artifacts
+
+Every new release ships `dependency-constraints.txt` as a GitHub asset and the
+same content as `vibe/dependency_constraints.txt` inside its wheel and sdist.
+Regenerate it after updating `uv.lock` with
+`python scripts/release_dependency_constraints.py`; `--check` verifies freshness.
+Release builds retain exact transitive pins in distribution metadata, including
+platform/Python markers, so older installers such as 3.2.5 also obey the release
+graph. Source/editable development keeps its declared ranges.
+
+The shell installer and `vibe upgrade` inspect the target wheel before installing
+and pass its own constraints, not those of the running release. The shell's
+stdlib resolver is generated from `vibe/release_dependencies.py`; after changing
+it run `python scripts/sync_install_dependencies.py` (`--check` detects drift).
+Explicit old stable artifacts through 3.2.5 remain installable without a lock.
+
+Exported hashes are provided for verification, but uv tool installation does
+**not** enforce dependency hashes from constraints. Exact versions do not remove
+trust in the selected package index or pin source-build dependencies. The default
+installer no longer silently retries a third-party Python index or Git HEAD.
+Avibe's release mirror can provide the core wheel; it does not mirror the full
+Python dependency graph. Where PyPI is unreachable, configure a trusted HTTPS
+proxy or explicitly select an index whose artifacts you trust. See the change
+contract in [release dependency locks](plans/release-dependency-locks.md).
+
 ## Activate a release on a machine
 
 Install a release, RC or stable, only from the published GitHub Release, never

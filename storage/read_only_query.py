@@ -25,7 +25,8 @@ DEFAULT_QUERY_STEP_LIMIT = 250_000
 # ciphertext is encrypted anyway, but there's no reason to expose it (or let backups
 # of a query result carry it); names/policy live behind the proper Vaults API/CLI.
 # Sibling vault tables (requests/links/grants/audit) stay queryable for inspection.
-_DENIED_TABLES = frozenset({"vault_secrets"})
+# Normalized historical ACL evidence is internal to the authorized audit reader.
+_DENIED_TABLES = frozenset({"vault_secrets", "vault_audit_access_snapshots"})
 
 # Harness concepts whose table name shares nothing a fuzzy match could find.
 _CONCEPT_TABLES = {

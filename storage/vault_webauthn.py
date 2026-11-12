@@ -13,8 +13,11 @@ factor.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
+import hmac
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -33,6 +36,9 @@ _FLAG_UP = 0x01
 _FLAG_UV = 0x04
 _FLAG_AT = 0x40
 VAULT_SANDBOX_ORIGIN = "https://sandbox.avibe.bot"
+LEGACY_WEBAUTHN_USER_HANDLE = b"avibe-vault"
+WEBAUTHN_USER_HANDLE_MAX_BYTES = 64
+_USER_HANDLE_B64_RE = re.compile(r"^[A-Za-z0-9+/_-]*={0,2}$")
 
 
 class WebAuthnVerificationError(ValueError):
@@ -77,6 +83,45 @@ def b64decode(value: str) -> bytes:
             return base64.urlsafe_b64decode(padded)
         except Exception:
             raise WebAuthnVerificationError("invalid base64 field") from exc
+
+
+def decode_user_handle(value: Any) -> bytes:
+    """Decode a serialized WebAuthn user handle without lossy coercion."""
+    if not isinstance(value, str):
+        raise WebAuthnVerificationError("invalid WebAuthn user handle")
+    if len(value) > 88:
+        raise WebAuthnVerificationError("invalid WebAuthn user handle length")
+    if not value or _USER_HANDLE_B64_RE.fullmatch(value) is None:
+        raise WebAuthnVerificationError("invalid WebAuthn user handle")
+    standard_alphabet = "+" in value or "/" in value
+    urlsafe_alphabet = "-" in value or "_" in value
+    if standard_alphabet and urlsafe_alphabet:
+        raise WebAuthnVerificationError("invalid WebAuthn user handle")
+    padding = len(value) - len(value.rstrip("="))
+    if padding:
+        if padding > 2 or len(value) % 4 != 0:
+            raise WebAuthnVerificationError("invalid WebAuthn user handle")
+        encoded = value
+    else:
+        if len(value) % 4 == 1:
+            raise WebAuthnVerificationError("invalid WebAuthn user handle")
+        encoded = value + "=" * (-len(value) % 4)
+    try:
+        decoded = base64.b64decode(encoded.replace("-", "+").replace("_", "/"), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise WebAuthnVerificationError("invalid WebAuthn user handle") from exc
+    if not 0 < len(decoded) <= WEBAUTHN_USER_HANDLE_MAX_BYTES:
+        raise WebAuthnVerificationError("invalid WebAuthn user handle length")
+    canonical_standard = b64encode(decoded)
+    canonical_urlsafe = base64.urlsafe_b64encode(decoded).decode("ascii")
+    if value not in {
+        canonical_standard,
+        canonical_standard.rstrip("="),
+        canonical_urlsafe,
+        canonical_urlsafe.rstrip("="),
+    }:
+        raise WebAuthnVerificationError("invalid WebAuthn user handle")
+    return decoded
 
 
 def challenge_hash(challenge: bytes) -> str:
@@ -340,12 +385,20 @@ def verify_assertion(
     expected_challenge_hash: str,
     expected_origin: str,
     rp_id: str,
+    expected_user_handles: tuple[bytes, ...] | None = None,
 ) -> WebAuthnAssertion:
     if not isinstance(assertion, dict):
         raise WebAuthnVerificationError("WebAuthn assertion must be an object")
     response = assertion.get("response")
     if not isinstance(response, dict):
         raise WebAuthnVerificationError("WebAuthn assertion response is missing")
+    supplied_user_handle = response.get("userHandle")
+    if supplied_user_handle is not None:
+        decoded_user_handle = decode_user_handle(supplied_user_handle)
+        if expected_user_handles is None or not any(
+            hmac.compare_digest(decoded_user_handle, expected) for expected in expected_user_handles
+        ):
+            raise WebAuthnVerificationError("WebAuthn user handle mismatch")
     raw_id = b64decode(str(assertion.get("rawId") or ""))
     if b64encode(raw_id) != credential_id:
         raise WebAuthnVerificationError("WebAuthn assertion credential mismatch")

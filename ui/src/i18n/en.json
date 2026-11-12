@@ -6164,7 +6164,7 @@
     "sort": {
       "label": "Sort",
       "name": "Name",
-      "recent": "Recently used",
+      "recent": "Last active",
       "added": "Recently added"
     },
     "grants": {

@@ -228,9 +228,15 @@ def upgrade() -> None:
 The finite allowlist is non-unique indexes on plain columns, independent new
 column-only tables, and nullable or non-null literal-server-default columns.
 Existing-table uniqueness, foreign keys, checks, generated columns, expression
-indexes, rowid-alias-shadowing columns, triggers, raw SQL, helpers, conditionals,
-rebuild/drop/rename, unknown constructors/options and module-level work are not
-proven. Type sizes/precision must be literal integers: SQLAlchemy accepting a
+indexes, rowid-alias-shadowing columns, general triggers, raw SQL, helpers,
+conditionals, rebuild/drop/rename, unknown constructors/options and module-level
+work are not proven. The sole trigger exception is the mechanically matched
+Message-search journal bundle, accompanied by its new independent journal and
+integer-keyed activation tables. Its bounded id-only writes do not invoke FTS or
+change accepted Message writes; the optional index is built after readiness.
+See [the search contract](../plans/message-search-fts5.md) and its real old-writer,
+crash/resume and negative-classifier tests. Type sizes/precision must be literal
+integers: SQLAlchemy accepting a
 string constructor argument does not make its emitted DDL safe. A function or
 module annotation/default that could run code is also not proof. Extend this allowlist
 only with actual operation and old-writer tests, not a label exemption.

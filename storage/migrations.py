@@ -89,11 +89,15 @@ HEAD_TABLES = INITIAL_TABLES | {
     "show_page_access_entries",
     "messages",
     "message_deliveries",
+    "message_search_dirty",
+    "message_search_documents",
+    "message_search_state",
     "session_turns",
     "session_turn_replies",
     "session_delegations",
     "agent_events",
     "session_digests",
+    "session_cache_state",
     "skill_usage_daily",
     "skill_catalogs",
     "show_session_events",
@@ -107,6 +111,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "vault_requests",
     "vault_grants",
     "vault_audit",
+    "vault_audit_access_snapshots",
     "vault_auth_factors",
     "vault_operation_challenges",
     "resource_access_policies",
@@ -188,6 +193,7 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "session_cache_state": {"session_id", "provider", "model", "record_json"},
     "session_delegations": {
         "sender_session_id", "recipient_session_id", "message_id", "run_id", "state", "notice_run_id", "updated_at",
     },

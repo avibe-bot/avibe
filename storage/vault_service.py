@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from storage import vault_crypto, vault_webauthn
 from storage import vault_bitcoin, vault_solana
@@ -41,6 +41,7 @@ from storage.models import (
     scopes,
     state_meta,
     vault_audit,
+    vault_audit_access_snapshots,
     vault_auth_factors,
     vault_grants,
     vault_operation_challenges,
@@ -56,6 +57,8 @@ logger = logging.getLogger(__name__)
 SKILL_TAG_PREFIX = "skill:"
 VAULT_SETTINGS_META_KEY = "vault_settings"
 PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY = "vault_protected_establishment_lock"
+WEBAUTHN_USER_HANDLE_META_KEY = "vault.webauthn_user_handle.v1"
+WEBAUTHN_USER_HANDLE_BYTES = 32
 DEFAULT_UNLOCK_WINDOW_SECONDS = 600
 UNLOCK_WINDOW_OPTIONS_SECONDS = (300, 600, 1800)
 GRANT_DURATION_ONE_TIME = "one-time"
@@ -2797,6 +2800,65 @@ def _usable_webauthn_factor_rows(conn: Connection, *, rp_id: str) -> list[dict[s
     ]
 
 
+def _parse_persisted_webauthn_user_handle(raw: object) -> bytes:
+    if not isinstance(raw, str):
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid")
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid") from exc
+    if not isinstance(value, str):
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid")
+    try:
+        decoded = vault_webauthn.decode_user_handle(value)
+    except vault_webauthn.WebAuthnVerificationError as exc:
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid") from exc
+    if len(decoded) != WEBAUTHN_USER_HANDLE_BYTES or vault_webauthn.b64encode(decoded) != value:
+        raise InvalidProtectedAuthzError("persisted WebAuthn user handle is invalid")
+    return decoded
+
+
+def _read_persisted_webauthn_user_handle(conn: Connection) -> bytes | None:
+    raw = conn.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == WEBAUTHN_USER_HANDLE_META_KEY)
+    ).scalar_one_or_none()
+    if raw is None:
+        return None
+    return _parse_persisted_webauthn_user_handle(raw)
+
+
+def _load_or_create_webauthn_user_handle(conn: Connection) -> bytes:
+    candidate = vault_webauthn.b64encode(secrets.token_bytes(WEBAUTHN_USER_HANDLE_BYTES))
+    statement = sqlite_insert(state_meta).values(
+        key=WEBAUTHN_USER_HANDLE_META_KEY,
+        value_json=json.dumps(candidate),
+        updated_at=_now(),
+    )
+    # This is deliberately the first database operation in registration-options creation:
+    # concurrent first callers must serialize on the state_meta key before any factor snapshot.
+    conn.execute(statement.on_conflict_do_nothing(index_elements=[state_meta.c.key]))
+    persisted = _read_persisted_webauthn_user_handle(conn)
+    if persisted is None:
+        raise InvalidProtectedAuthzError("WebAuthn user handle could not be initialized")
+    return persisted
+
+
+def _webauthn_assertion_user_handle_aliases(conn: Connection, payload: dict[str, Any]) -> tuple[bytes, ...]:
+    # Released sandbox clients serialized AuthenticatorAssertionResponse.userHandle with
+    # bytesToBase64; pre-3.2.6 registration options therefore used these legacy bytes.
+    aliases = [vault_webauthn.LEGACY_WEBAUTHN_USER_HANDLE]
+    assertion = payload.get("assertion")
+    response = assertion.get("response") if isinstance(assertion, dict) else None
+    if not isinstance(response, dict) or response.get("userHandle") is None:
+        # A pre-upgrade pending assertion may have no instance handle yet. Do not create one
+        # merely to verify the historical credential or a null userHandle response.
+        return tuple(aliases)
+    current = _read_persisted_webauthn_user_handle(conn)
+    if current is not None:
+        aliases.append(current)
+    return tuple(aliases)
+
+
 def _has_any_webauthn_factor(conn: Connection) -> bool:
     return (
         conn.execute(
@@ -2935,6 +2997,7 @@ def _verify_webauthn_operation_authz(
     if factor.get("rp_id") != challenge.get("rp_id"):
         raise InvalidProtectedAuthzError("protected operation authorization factor RP mismatch")
     assertion = payload.get("assertion")
+    expected_user_handles = _webauthn_assertion_user_handle_aliases(conn, payload)
     try:
         result = vault_webauthn.verify_assertion(
             assertion if isinstance(assertion, dict) else {},
@@ -2945,6 +3008,7 @@ def _verify_webauthn_operation_authz(
             expected_challenge_hash=str(challenge["challenge_hash"]),
             expected_origin=str(challenge["origin"]),
             rp_id=str(challenge["rp_id"]),
+            expected_user_handles=expected_user_handles,
         )
     except vault_webauthn.WebAuthnVerificationError as exc:
         raise InvalidProtectedAuthzError(str(exc)) from exc
@@ -2966,6 +3030,7 @@ def create_webauthn_registration_options(
     origin: str,
     ttl_seconds: int = DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS,
 ) -> dict[str, Any]:
+    webauthn_user_handle = _load_or_create_webauthn_user_handle(conn)
     challenge, challenge_digest = _new_challenge()
     challenge_id = _id("vop")
     expires_at = _challenge_expiry(ttl_seconds)
@@ -2995,7 +3060,7 @@ def create_webauthn_registration_options(
         "webauthn": {
             "rp": {"name": "Avibe Vault", "id": rp_id},
             "user": {
-                "id": vault_webauthn.b64encode(b"avibe-vault"),
+                "id": vault_webauthn.b64encode(webauthn_user_handle),
                 "name": "avibe-vault",
                 "displayName": "Avibe Vault",
             },
@@ -6252,11 +6317,51 @@ def resolve_secret_access(
     return {"status": "approval_required", "secret": _meta_payload(row), "request": request_payload}
 
 
-def _audit_access_snapshot(row: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+def _audit_snapshot_ref(snapshot: Any) -> int | None:
+    if not isinstance(snapshot, dict) or set(snapshot) != {"ref"}:
+        return None
+    ref = snapshot["ref"]
+    # SQLite INTEGER PRIMARY KEY uses signed 64-bit integers. Reject bools and
+    # oversized JSON integers before binding, rather than failing the whole read.
+    return ref if type(ref) is int and 0 < ref <= 9223372036854775807 else None
+
+
+def _load_audit_access_snapshots(conn: Connection, rows: list[dict[str, Any]]) -> dict[int, Any]:
+    """Resolve one bounded audit batch; inline-only history needs no new table."""
+    refs: set[int] = set()
+    for row in rows:
+        delivery = _loads(row.get("delivery"))
+        ref = _audit_snapshot_ref(delivery.get(_AUDIT_ACCESS_SNAPSHOT_KEY)) if isinstance(delivery, dict) else None
+        if ref is not None:
+            refs.add(ref)
+    if not refs:
+        return {}
+    try:
+        return {
+            row.id: _loads(row.snapshot)
+            for row in conn.execute(
+                select(vault_audit_access_snapshots).where(vault_audit_access_snapshots.c.id.in_(refs))
+            )
+        }
+    except OperationalError as exc:
+        # A pre-0087 database has no reference table. References are never
+        # written by this reader-first release, but an accidental reference
+        # must fail closed rather than fall back to current ACL state.
+        if "no such table" in str(exc).lower() and "vault_audit_access_snapshots" in str(exc).lower():
+            return {}
+        raise
+
+
+def _audit_access_snapshot(
+    row: dict[str, Any], *, snapshots: dict[int, Any] | None = None,
+) -> tuple[bool, dict[str, Any] | None]:
     delivery = _loads(row.get("delivery"))
     if not isinstance(delivery, dict) or _AUDIT_ACCESS_SNAPSHOT_KEY not in delivery:
         return False, None
     snapshot = delivery.get(_AUDIT_ACCESS_SNAPSHOT_KEY)
+    if isinstance(snapshot, dict) and "ref" in snapshot:
+        ref = _audit_snapshot_ref(snapshot)
+        snapshot = snapshots.get(ref) if ref is not None and snapshots is not None else None
     if not isinstance(snapshot, dict) or snapshot.get("version") != 1 or not isinstance(snapshot.get("resources"), list):
         return True, None
     return True, snapshot
@@ -6332,7 +6437,8 @@ def _deleted_audit_policy_snapshot(
         .first()
     )
     if row is not None:
-        present, snapshot = _audit_access_snapshot(dict(row))
+        payload = dict(row)
+        present, snapshot = _audit_access_snapshot(payload, snapshots=_load_audit_access_snapshots(conn, [payload]))
         if present and snapshot is not None:
             for resource in snapshot["resources"]:
                 if isinstance(resource, dict) and resource.get("name") == name:
@@ -6389,12 +6495,13 @@ def _require_audit_row_access(
     grant_members: dict[str, list[str] | None] | None = None,
     access_by_name: dict[str, bool] | None = None,
     tombstone_policies: dict[str, tuple[bool, Any]] | None = None,
+    snapshots: dict[int, Any] | None = None,
 ) -> None:
     context = resolve_resource_access_context(user_context)
     if _audit_fast_path_allowed(context):
         return
 
-    snapshot_present, snapshot = _audit_access_snapshot(row)
+    snapshot_present, snapshot = _audit_access_snapshot(row, snapshots=snapshots)
     if snapshot_present:
         if snapshot is None or not _audit_snapshot_allows(context, snapshot):
             raise VaultSecretAccessError("Vault secret access is not permitted.")
@@ -6469,6 +6576,7 @@ def list_audit(
         if not batch:
             break
         cursor = (str(batch[-1]["ts"]), str(batch[-1]["id"]))
+        snapshots = _load_audit_access_snapshots(conn, batch)
         for row in batch:
             try:
                 _require_audit_row_access(
@@ -6479,6 +6587,7 @@ def list_audit(
                     grant_members=grant_members,
                     access_by_name=access_by_name,
                     tombstone_policies=tombstone_policies,
+                    snapshots=snapshots,
                 )
             except VaultSecretAccessError:
                 continue

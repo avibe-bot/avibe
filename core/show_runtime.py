@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import base64
+import binascii
 import contextlib
 import errno
 import fnmatch
@@ -844,6 +846,7 @@ class ShowRuntimeManager:
         runtime_dir: Path | None = None,
         auto_install: bool | None = None,
         package_spec: str | None = None,
+        npm_project: Path | str | None = None,
         runtime_source: str | None = None,
         archive_path: Path | str | None = None,
         archive_url: str | None = None,
@@ -868,6 +871,8 @@ class ShowRuntimeManager:
             source_value = _RUNTIME_SOURCE_ARCHIVE
         self.auto_install = _auto_install_enabled() if auto_install is None else auto_install
         self.package_spec = package_spec or os.environ.get("VIBE_SHOW_RUNTIME_PACKAGE_SPEC") or _RUNTIME_PACKAGE
+        npm_project_value = npm_project or os.environ.get("VIBE_SHOW_RUNTIME_NPM_PROJECT")
+        self.npm_project = Path(npm_project_value).expanduser() if npm_project_value else None
         self.runtime_source = _normalize_runtime_source(source_value)
         configured_archive_url = archive_url if archive_url is not None else archive_url_env
         self.archive_url = configured_archive_url if configured_archive_url is not None else _default_runtime_archive_url()
@@ -1406,10 +1411,13 @@ class ShowRuntimeManager:
         *,
         envelope: ShowRuntimeProtocolEnvelope,
     ) -> ShowRuntimeWebSocketTarget:
-        ready = await self.ensure()
-        if not ready.available or not ready.base_url:
-            raise self._unavailable_error(ready)
-        base_url = ready.base_url
+        """Address the existing runtime; an old tab must never start one."""
+        base_url = self._base_url
+        if base_url is None:
+            evidence = ShowRuntimeFailureEvidence(ShowRuntimeFailureDimension.RUNTIME, "runtime_unavailable")
+            raise ShowRuntimeUnavailableError(
+                evidence.reason, classify_show_runtime_failure(evidence), show_runtime_recovery_action(evidence)
+            )
         process = self._process
         await self._negotiate_context_key_capability(base_url)
         url = f"{base_url.replace('http://', 'ws://', 1).replace('https://', 'wss://', 1)}{path}"
@@ -2068,10 +2076,11 @@ class ShowRuntimeManager:
             )
         elif self.runtime_source == _RUNTIME_SOURCE_NPM:
             command = (
-                self._install_npm_runtime(force=force)
+                self._install_npm_runtime(force=force, offline=offline)
                 if candidate_validator is None
                 else self._install_npm_runtime(
                     force=force,
+                    offline=offline,
                     candidate_validator=candidate_validator,
                 )
             )
@@ -4110,13 +4119,103 @@ class ShowRuntimeManager:
             return None
         return [*node, str(cli_path)]
 
+    def _read_npm_project(self) -> tuple[bytes, bytes, str]:
+        """Accept only a standalone, integrity-pinned consumer project.
+
+        Local/workspace/git sources would need additional unreviewed input or
+        copying arbitrary files. Reject them rather than resolving or building
+        a different dependency graph. npm ci owns manifest/lock consistency.
+        """
+        assert self.npm_project is not None
+        package_bytes = (self.npm_project / "package.json").read_bytes()
+        lock_bytes = (self.npm_project / "package-lock.json").read_bytes()
+        package = json.loads(package_bytes)
+        lock = json.loads(lock_bytes)
+        if not isinstance(package, dict) or not isinstance(lock, dict):
+            raise ValueError("npm project and lock must be JSON objects")
+        if lock.get("lockfileVersion") not in (2, 3):
+            raise ValueError("npm project requires a version 2 or 3 package-lock.json")
+        packages = lock.get("packages")
+        if not isinstance(packages, dict) or "" not in packages or f"node_modules/{_RUNTIME_PACKAGE}" not in packages:
+            raise ValueError("npm lock must include its root and Show Runtime package")
+        for name, entry in [("", package), *packages.items()]:
+            if not isinstance(entry, dict):
+                raise ValueError("npm lock package records must be objects")
+            if any(entry.get(field) for field in ("workspaces", "bundleDependencies", "bundledDependencies", "overrides")):
+                raise ValueError("npm project must not contain workspaces, bundled dependencies, or overrides")
+            if entry.get("link") or entry.get("inBundle"):
+                raise ValueError("npm lock must not contain linked or bundled packages")
+            for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+                if not _npm_dependency_specs(entry.get(field, {})):
+                    raise ValueError("npm dependencies must use registry versions/tags or HTTPS tarballs")
+            if not name:
+                continue
+            if (
+                not name.startswith("node_modules/")
+                or any(part in ("", ".", "..") for part in name.split("/"))
+                or "\\" in name
+                or not _npm_https_url(entry.get("resolved"))
+                or not _npm_integrity(entry.get("integrity"))
+            ):
+                raise ValueError("npm lock entries require HTTPS tarballs with SHA-256 or SHA-512 integrity")
+        # Version 2 also carries the tree consumed by older npm clients. Do
+        # not validate only `packages` while leaving that alternate tree free
+        # to fetch local, git, or unpinned sources.
+        legacy_trees = [lock.get("dependencies", {})]
+        while legacy_trees:
+            tree = legacy_trees.pop()
+            if not isinstance(tree, dict):
+                raise ValueError("npm legacy lock dependencies must be objects")
+            for entry in tree.values():
+                if (
+                    not isinstance(entry, dict)
+                    or entry.get("bundled")
+                    or not _npm_dependency_specs(entry.get("requires", {}))
+                    or not _npm_dependency_specs({"version": entry.get("version")})
+                    or not _npm_https_url(entry.get("resolved"))
+                    or not _npm_integrity(entry.get("integrity"))
+                ):
+                    raise ValueError("npm legacy lock entries require HTTPS tarballs and integrity")
+                legacy_trees.append(entry.get("dependencies", {}))
+        dependency = package.get("dependencies", {}).get(_RUNTIME_PACKAGE)
+        if not dependency:
+            raise ValueError("npm project must declare @avibe/show-runtime in dependencies")
+        return package_bytes, lock_bytes, dependency
+
     def _install_npm_runtime(
         self,
         *,
         force: bool | None = None,
+        offline: bool = False,
         candidate_validator: Callable[[list[str]], ShowRuntimeStartability] | None = None,
     ) -> list[str] | None:
         replacement_required = self.force_install if force is None else force
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        existing_command_value = _resolve_executable_path(self._managed_bin_path())
+        existing_command = [existing_command_value] if existing_command_value else None
+        if existing_command and not self._retain_managed_command(existing_command):
+            existing_command = None
+        project_error = None
+        if self.npm_project is None:
+            self._install_reason = "runtime_npm_project_missing"
+            project_error = "Set VIBE_SHOW_RUNTIME_NPM_PROJECT to a reviewed package.json/package-lock.json project."
+        else:
+            try:
+                package_bytes, lock_bytes, dependency = self._read_npm_project()
+            except (OSError, ValueError):
+                self._install_reason = "runtime_npm_project_invalid"
+                project_error = (
+                    "VIBE_SHOW_RUNTIME_NPM_PROJECT must contain readable standalone package.json and package-lock.json "
+                    "with HTTPS integrity-pinned dependencies; local, git, workspace, bundled and override sources are unsupported."
+                )
+            else:
+                if self.package_spec not in (_RUNTIME_PACKAGE, dependency, f"{_RUNTIME_PACKAGE}@{dependency}"):
+                    self._install_reason = "runtime_npm_spec_mismatch"
+                    project_error = "VIBE_SHOW_RUNTIME_PACKAGE_SPEC must match the reviewed project's Show Runtime dependency."
+        if project_error is not None:
+            self.install_log_path.write_text(project_error + "\n", encoding="utf-8")
+            logger.warning("%s", project_error)
+            return self._managed_install_operation_command(existing_command, replacement_required=replacement_required)
         try:
             npm = _resolve_command("npm")
         except (OSError, ValueError):
@@ -4127,28 +4226,28 @@ class ShowRuntimeManager:
                 None,
                 replacement_required=replacement_required,
             )
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        existing_command_value = _resolve_executable_path(self._managed_bin_path())
-        existing_command = [existing_command_value] if existing_command_value else None
-        if existing_command and not self._retain_managed_command(existing_command):
-            existing_command = None
         staging_root = Path(tempfile.mkdtemp(prefix="npm-", dir=self.runtime_dir))
-        package_json = staging_root / "package.json"
-        package_json.write_text('{"private":true,"type":"module"}\n', encoding="utf-8")
         candidate_dir: Path | None = None
         retained_publication_key: tuple[str, str] | None = None
         try:
+            (staging_root / "package.json").write_bytes(package_bytes)
+            (staging_root / "package-lock.json").write_bytes(lock_bytes)
             with self.install_log_path.open("w", encoding="utf-8") as log:
                 result = subprocess.run(
                     [
                         *npm,
-                        "install",
+                        "ci",
                         "--prefix",
                         str(staging_root),
+                        "--ignore-scripts",
+                        "--omit=dev",
+                        "--include=optional",
+                        "--global=false",
                         "--no-audit",
                         "--no-fund",
-                        self.package_spec,
+                        *(["--offline"] if offline else []),
                     ],
+                    cwd=staging_root,
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -4199,6 +4298,8 @@ class ShowRuntimeManager:
                         "provider": _RUNTIME_SOURCE_NPM,
                         "runtime_id": "show-runtime",
                         "package_spec": self.package_spec,
+                        "package_sha256": hashlib.sha256(package_bytes).hexdigest(),
+                        "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
                     },
                     sort_keys=True,
                 )
@@ -4540,6 +4641,36 @@ def _packaged_runtime_manifest_exists() -> bool:
     except Exception:
         return False
     return resource.is_file()
+
+
+def _npm_dependency_specs(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(spec, str)
+        and (re.fullmatch(r"[a-zA-Z0-9.*+<>=|~^ _-]+", spec) or _npm_https_url(spec))
+        for spec in value.values()
+    )
+
+
+def _npm_https_url(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        url = urllib.parse.urlsplit(value)
+        return url.scheme == "https" and bool(url.hostname) and url.username is None and url.password is None
+    except ValueError:
+        return False
+
+
+def _npm_integrity(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    algorithm, separator, encoded = value.partition("-")
+    if not separator or algorithm not in {"sha256", "sha512"}:
+        return False
+    try:
+        return len(base64.b64decode(encoded, validate=True)) == (32 if algorithm == "sha256" else 64)
+    except (ValueError, binascii.Error):
+        return False
 
 
 def _normalize_runtime_source(value: str | None) -> str:

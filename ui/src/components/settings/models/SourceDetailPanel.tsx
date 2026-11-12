@@ -1,5 +1,6 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
 import { FlaskConical, Info, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -1034,7 +1035,7 @@ export const SourceDetailPanel: React.FC<{
           <DialogPrimitive.Content
             className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-edge bg-popover outline-none"
             onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-            onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+            onPointerDownOutside={keepOpenOnOutsideClick}
           >
             <form className="contents" onSubmit={(event) => {
               event.preventDefault();

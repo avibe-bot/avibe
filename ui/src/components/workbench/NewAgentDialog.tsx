@@ -207,6 +207,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     <>
       <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
         <DialogContent
+          keepOnOutsideClick
           closeLabel={t('common.close')}
           className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[520px] flex-col gap-5 overflow-y-auto rounded-2xl p-7"
         >

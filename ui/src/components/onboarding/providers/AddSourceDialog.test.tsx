@@ -16,6 +16,7 @@ import * as React from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { apiKeyVendorPreset } from '@/components/settings/models/apiKeyVendors';
 import { createSourceCollectionReadAuthority } from '@/components/settings/models/collectionReadAuthority';
@@ -287,6 +288,16 @@ describe('AddSourceDialog — the frame', () => {
 });
 
 describe('AddSourceDialog — what a switch preserves', () => {
+  it('stays open on a click outside, keeping the half-typed key', async () => {
+    renderDialog();
+    const user = userEvent.setup();
+    await chooseMethod(user, 'API Key');
+    await user.type(within(body()).getByLabelText('API key'), 'sk-half-typed');
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    expect((within(body()).getByLabelText('API key') as HTMLInputElement).value).toBe('sk-half-typed');
+  });
+
   it('keeps a half-typed key across a switch away and back', async () => {
     renderDialog();
     const user = userEvent.setup();

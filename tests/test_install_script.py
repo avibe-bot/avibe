@@ -132,6 +132,18 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
             exit 0
         fi
 
+        if [ "$1" = "run" ]; then
+            # Resolver downloads are tested at their owning boundary separately.
+            # This fake uv exercises launcher/activation behavior only.
+            args=("$@")
+            count=${{#args[@]}}
+            spec="${{args[$((count-2))]}}"
+            destination="${{args[$((count-1))]}}"
+            printf '%s' "$spec" > "$destination/package-spec"
+            printf '' > "$destination/constraints-path"
+            exit 0
+        fi
+
         printf '%s' "${{UV_TOOL_BIN_DIR:-}}" > "{uv_log}"
         printf '%s' "${{UV_TOOL_DIR:-}}" > "{uv_log}.tools"
 
@@ -490,9 +502,8 @@ ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-s
         (
             "uv 0.9.8",
             {"VIBE_TEST_UV_FAIL_WITH_PYTHON_MIRROR": "1"},
-            [ASTRAL_PYTHON_INSTALL_MIRROR] * 3 + ["<unset>"],
+            [ASTRAL_PYTHON_INSTALL_MIRROR, "<unset>"],
         ),
-        ("uv 0.9.8", {"VIBE_TEST_UV_FAIL_WITHOUT_INDEX_URL": "1"}, [ASTRAL_PYTHON_INSTALL_MIRROR] * 2),
     ],
     ids=[
         "uv-without-cdn",
@@ -502,8 +513,7 @@ ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-s
         "uv-config-mirror",
         "uv-config-downloads-json",
         "uv-config-unreadable",
-        "cdn-down-retries-every-source-without-it",
-        "pypi-down-keeps-cdn-for-tsinghua",
+        "cdn-down-retries-official-release-without-it",
     ],
 )
 def test_install_script_gives_uv_without_a_python_cdn_the_astral_mirror(

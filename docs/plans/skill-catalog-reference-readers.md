@@ -3,7 +3,7 @@
 ## Rollout and change contract
 
 This is the **reader-first 3.2.6 stage**, not write activation. Revision
-`20261112_0087` adds one empty, independent `skill_catalogs` table. It does not
+`20261112_0088` adds one empty, independent `skill_catalogs` table. It does not
 scan, rewrite, backfill, or delete existing events. The compatibility epoch and
 supported reader epochs are unchanged. Every production observation still writes
 its complete inline `entries` array, byte-for-byte as before. This stage alone
@@ -103,10 +103,10 @@ premature garbage collection. No full historical rewrite or VACUUM is required.
   history-wide scan or temporary sort for bounded session reads.
 
 Existing Skill observability, event retention, query, compatibility and no-copy
-coverage protects the surrounding contracts. The historical bridge fixture pins
-its historical schema requirements as well as its migration graph, including its
-crash subprocess, so later independent tables do not falsely become old-reader
-requirements.
+coverage protects the surrounding contracts. The shared bridge fixture retains
+additive migrations while omitting only the marker-only epoch-2 transition,
+including its crash subprocess. This tests the bridge protocol against today's
+schema, not the capabilities of a historical published binary.
 
 Remaining deployment check: in the lead's serialized local Incus slot, migrate a
 populated **test-owned** instance, verify ordinary Skill list/load plus the
