@@ -22,6 +22,7 @@ const api = vi.hoisted(() => ({
   approveVaultDeleteRequest: vi.fn(),
   listVaultSecrets: vi.fn(),
   signVaultDigest: vi.fn(),
+  getSession: vi.fn(async () => ({ title: '' })),
   getAvaultAuthorization: vi.fn(),
   authorizeAvault: vi.fn(),
 }));
@@ -651,3 +652,44 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'delete' });
   });
 });
+
+// A seed-phrase wallet's sign request: the card shows the account as it was when the Agent asked
+// (the stored snapshot, not the wallet's current row), and the approval repeats chain, account and
+// the stored signing context exactly (docs/plans/vault-hd-wallets.md).
+describe('seed-phrase wallet sign approval', () => {
+  const snapshot = {
+    account: 1, name: 'trading', eth: '0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0',
+    btc_taproot: 'bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh', solana: 'Hh8QwFUA6MtVu1qAoq12ucvFHNwCcVTV7hpWjeY1Hztb',
+    paths: { evm: "m/44'/60'/0'/0/1", bitcoin: "m/86'/0'/0'/0/1", solana: "m/44'/501'/1'/0'" }, always_ask: true, last_signer: null,
+  };
+  const hdSign = {
+    ...standardSignRequest,
+    id: 'vrq_hd',
+    secret_name: 'AGENT_WALLET',
+    delivery: {
+      digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable', derivation: { chain: 'evm', account: 1 },
+      signing_context: { type: 'evm-transaction', chain_id: 11155111 },
+    },
+    card: { request_type: 'sign', secret_name: 'AGENT_WALLET', kind: 'keypair', protection: 'standard', derivation: { chain: 'evm', account: 1 }, account: snapshot },
+  } as unknown as VaultRequest;
+
+  it('shows the stored account and path, signs as its address, and approves with chain, account and context', async () => {
+    // The live row has moved on (other addresses): the card must not use it.
+    api.listVaultSecrets.mockResolvedValue({ secrets: [{ name: 'AGENT_WALLET', signing_addresses: { eth: '0xLIVE' } }] });
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    const onResolved = vi.fn();
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={hdSign} onResolved={onResolved} onCancel={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText('#1')).toBeTruthy();
+    expect(screen.getByText('trading')).toBeTruthy();
+    expect(screen.getByText(en.vaults.approval.path.replace('{{path}}', "m/44'/60'/0'/0/1"))).toBeTruthy();
+    expect(screen.getByText(snapshot.eth)).toBeTruthy();
+    expect(screen.queryByText('0xLIVE')).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: i18n.t('vaults.approval.sign'), exact: true })); });
+    await vi.waitFor(() => expect(api.signVaultDigest).toHaveBeenCalledExactlyOnceWith({
+      name: 'AGENT_WALLET', request_id: 'vrq_hd', digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable',
+      chain: 'evm', account: 1, signing_context: { type: 'evm-transaction', chain_id: 11155111 },
+    }));
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+  });
+});
+

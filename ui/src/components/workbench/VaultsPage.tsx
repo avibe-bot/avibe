@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Clock, Copy, ExternalLink, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { AlertTriangle, ChevronRight, Clock, Copy, ExternalLink, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -10,6 +10,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { AccountIndex, HdWalletBadges, isHdWallet, useAccountName, VaultHdWalletDialog } from '../ui/vault-hd-wallet-detail';
 import { VaultLockIndicator } from '../ui/vault-lock-indicator';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { cn } from '../../lib/utils';
@@ -92,13 +93,17 @@ const SecretRow: React.FC<{
   onRevealFieldChange: (field: string) => void;
   canManage: boolean;
   canUse: boolean;
+  /** Opens a seed-phrase wallet's accounts. */
+  onOpenWallet: (secret: VaultSecret) => void;
   menuOpen: boolean;
   onMenuOpenChange: (open: boolean) => void;
   /** The open menu's reveal context or sandbox client is not ready yet. */
   revealPreparing: boolean;
-}> = ({ secret: s, terms, now, selected, onToggleTag, onEdit, onDelete, onReveal, revealField, onRevealFieldChange, canManage, canUse, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
+}> = ({ secret: s, terms, now, selected, onToggleTag, onEdit, onDelete, onReveal, revealField, onRevealFieldChange, canManage, canUse, onOpenWallet, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
+  const isWallet = isHdWallet(s);
+  const accountName = useAccountName();
   const isProtected = s.protection === 'protected';
   // Reveal is only meaningful for a protected static secret: its plaintext lives sealed and can be
   // shown in-sandbox. Standard values aren't sandbox-sealed, and a keypair has no plaintext value.
@@ -120,17 +125,17 @@ const SecretRow: React.FC<{
           isKeypair ? 'bg-violet/10 text-violet-ink' : 'bg-accent/10 text-accent-ink'
         }`}
       >
-        {isKeypair ? <Wallet className="size-4" /> : <KeyRound className="size-4" />}
+        {isWallet ? <WalletCards className="size-4" /> : isKeypair ? <Wallet className="size-4" /> : <KeyRound className="size-4" />}
       </div>
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono text-sm font-semibold"><SearchHighlight text={s.name} terms={terms} /></span>
-          {isProtected ? (
+          {isWallet ? <HdWalletBadges count={s.accounts?.length ?? 0} /> : isProtected ? (
             <Badge variant="warning">{t('vaults.protected')}</Badge>
           ) : (
             <Badge variant="secondary">{t('vaults.standard')}</Badge>
           )}
-          {isKeypair ? (
+          {isKeypair && !isWallet ? (
             <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet-ink">
               <Wallet className="size-3" />
               {t('vaults.signing')}
@@ -144,7 +149,21 @@ const SecretRow: React.FC<{
         {s.fields_state === 'corrupt' ? (
           <span role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</span>
         ) : null}
-        {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
+        {isWallet ? (
+          // A wallet's accounts at a glance; their addresses are one click away, in the accounts dialog.
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {[...(s.accounts ?? [])].sort((a, b) => a.account - b.account).map((account) => (
+              <span key={account.account} className="inline-flex items-center gap-1.5 rounded-lg border border-edge bg-field py-0.5 pl-0.5 pr-2 text-[12px] text-foreground">
+                <AccountIndex index={account.account} />
+                {accountName(account)}
+              </span>
+            ))}
+            <Button type="button" variant="secondary" size="xs" onClick={() => onOpenWallet(s)}>
+              {t('vaults.hd.wallet.open')}
+              <ChevronRight className="size-3.5" />
+            </Button>
+          </div>
+        ) : isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
         {isKeypair && isProtected && s.signing_addresses?.btc_legacy ? (
           <span role="note" className="mt-1 text-xs text-gold-ink">{t('vaults.addresses.protectedBitcoinWarning')}</span>
         ) : null}
@@ -612,6 +631,10 @@ export const VaultsPage: React.FC = () => {
   const canReadVaultState = canUseVaultSecrets;
   const [searchParams, setSearchParams] = useSearchParams();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
+  // The seed-phrase wallet whose accounts dialog is open, by name: it shows the listed secret, so an
+  // account change the server answers with replaces the row and the dialog together.
+  const [walletName, setWalletName] = useState<string | null>(null);
+  const openWallet = walletName ? secrets.find((secret) => secret.name === walletName) ?? null : null;
   const [grants, setGrants] = useState<VaultGrant[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1083,6 +1106,7 @@ export const VaultsPage: React.FC = () => {
               onRevealFieldChange={setMenuField}
               canManage={canManageVaultSecrets}
               canUse={canUseVaultSecrets}
+              onOpenWallet={(secret) => setWalletName(secret.name)}
               menuOpen={s.name === menuSecret}
               revealPreparing={s.name === menuRevealKey?.name && revealPreparing}
               onMenuOpenChange={(open) => {
@@ -1173,6 +1197,14 @@ export const VaultsPage: React.FC = () => {
           </div>
         ) : null}
       </ConfirmDialog>
+      {openWallet && isHdWallet(openWallet) ? (
+        <VaultHdWalletDialog
+          secret={openWallet}
+          open
+          onOpenChange={(open) => { if (!open) setWalletName(null); }}
+          onChanged={(next) => setSecrets((prev) => prev.map((secret) => (secret.name === next.name ? next : secret)))}
+        />
+      ) : null}
     </div>
   );
 };

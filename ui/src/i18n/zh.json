@@ -6489,7 +6489,9 @@
         "missingDigest": "该签名请求缺少摘要。",
         "missingMessage": "该签名请求缺少消息。",
         "missingMaterial": "无法获取用于签名的保护层密钥材料，请重新加载后重试。"
-      }
+      },
+      "account": "账户",
+      "path": "派生路径 {{path}}"
     },
     "request": {
       "provide": "填写",

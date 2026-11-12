@@ -6489,7 +6489,9 @@
         "missingDigest": "This sign request is missing its digest.",
         "missingMessage": "This sign request is missing its message.",
         "missingMaterial": "Protected key material wasn't available to sign. Reload and try again."
-      }
+      },
+      "account": "Account",
+      "path": "Derivation path {{path}}"
     },
     "request": {
       "provide": "provide",

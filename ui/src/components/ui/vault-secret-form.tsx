@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
-  ArrowLeft,
   Asterisk,
   Check,
   Eye,
@@ -18,7 +17,6 @@ import {
   SlidersHorizontal,
   TriangleAlert,
   UploadCloud,
-  WalletCards,
   X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -75,7 +73,7 @@ import {
 import { HintLine, KeySourceTabs } from './vault-key-builder-parts';
 import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import {
-  HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdNotice, HdStepper, makeQuiz, quizPassed, type HdQuestion,
+  HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdNotice, HdStepFooter, HdStepper, makeQuiz, quizPassed, type HdQuestion,
 } from './vault-hd-wallet-steps';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
@@ -1489,29 +1487,16 @@ export const VaultSecretForm: React.FC<{
               <HdCheckStep quiz={hdQuiz} chosen={hdChosen} onChoose={(position, word) => setHdChosen((prev) => ({ ...prev, [position]: word }))} />
             ) : null}
             {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
-            <div className="mt-1 flex items-center justify-end gap-2">
-              <Button
-                type="button"
-                variant="ghost"
-                className="mr-auto"
-                disabled={submitting}
-                onClick={() => {
-                  setHdChosen({});
-                  setHdStep(hdStep === 'check' ? 'backup' : 'setup');
-                }}
-              >
-                <ArrowLeft className="size-4" />
-                {hdStep === 'check' ? t('vaults.hd.check.again') : t('vaults.hd.back')}
-              </Button>
-              {hdStep === 'backup' ? (
-                <Button type="button" onClick={() => setHdStep('check')}>{t('vaults.hd.backup.done')}</Button>
-              ) : (
-                <Button type="submit" disabled={submitting || !quizPassed(hdQuiz, hdChosen)}>
-                  {submitting ? <Loader2 className="size-4 animate-spin" /> : <WalletCards className="size-4" />}
-                  {t('vaults.hd.createCta')}
-                </Button>
-              )}
-            </div>
+            <HdStepFooter
+              step={hdStep === 'check' ? 'check' : 'backup'}
+              submitting={submitting}
+              canCreate={quizPassed(hdQuiz, hdChosen)}
+              onBack={() => {
+                setHdChosen({});
+                setHdStep(hdStep === 'check' ? 'backup' : 'setup');
+              }}
+              onNext={() => setHdStep('check')}
+            />
           </>
         )}
       </form>

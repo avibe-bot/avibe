@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react';
 import type { ComponentType, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowUpCircle, Bot, Check, ChevronDown, ChevronRight, CircleCheck, Copy, Eye, EyeOff, X,
+  AlertTriangle, ArrowLeft, ArrowUpCircle, Bot, Check, ChevronDown, ChevronRight, CircleCheck, Copy, Eye, EyeOff, Loader2, WalletCards, X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -384,5 +384,33 @@ export function HdAvaultOld({ version, installed, onOpenDependencies }: { versio
         ) : null}
       </div>
     </HdNotice>
+  );
+}
+
+/** The footer of the backup and check steps: back, and on to the check or to creating the wallet. */
+export function HdStepFooter({ step, onBack, onNext, canCreate, submitting }: {
+  step: 'backup' | 'check';
+  onBack: () => void;
+  /** Backup only: on to the check. On the check step the button submits the form. */
+  onNext?: () => void;
+  canCreate?: boolean;
+  submitting?: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="mt-1 flex items-center justify-end gap-2">
+      <Button type="button" variant="ghost" className="mr-auto" disabled={submitting} onClick={onBack}>
+        <ArrowLeft className="size-4" />
+        {step === 'check' ? t('vaults.hd.check.again') : t('vaults.hd.back')}
+      </Button>
+      {step === 'backup' ? (
+        <Button type="button" onClick={onNext}>{t('vaults.hd.backup.done')}</Button>
+      ) : (
+        <Button type="submit" disabled={submitting || !canCreate}>
+          {submitting ? <Loader2 className="size-4 animate-spin" /> : <WalletCards className="size-4" />}
+          {t('vaults.hd.createCta')}
+        </Button>
+      )}
+    </div>
   );
 }

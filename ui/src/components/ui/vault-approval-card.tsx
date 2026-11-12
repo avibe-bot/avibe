@@ -6,6 +6,7 @@ import { vaultErrorMessage } from '@/lib/vaultErrors';
 import {
   useApi,
   type SigningAddresses,
+  type VaultHdAccount,
   type VaultAgentBindingsBatchResult,
   type VaultGrantDuration,
   type VaultRequest,
@@ -28,6 +29,7 @@ import { cn, copyTextToClipboard } from '@/lib/utils';
 import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
+import { AccountIndex, useAccountName } from './vault-hd-wallet-detail';
 import { Button } from './button';
 import { ConfirmDialog } from './confirm-dialog';
 import { SegmentedRadio } from './segmented';
@@ -265,7 +267,15 @@ export const VaultApprovalCard: React.FC<{
     signingContext?: Record<string, unknown>;
     // The daemon-signed sign context (protocol v2 §6.2); the sandbox renders + verifies it.
     operation_context?: VaultSignedOperationContext;
+    /** A seed-phrase wallet's chain and account, chosen when the Agent asked (server-created). */
+    derivation?: { chain: 'evm' | 'bitcoin' | 'solana'; account: number };
   };
+  // A seed-phrase wallet's request carries the account as it was when the Agent asked: the card
+  // shows that snapshot, never the wallet's current row (docs/plans/vault-hd-wallets.md).
+  const hdAccount = (card as { account?: VaultHdAccount } | null)?.account ?? null;
+  const hdDerivation = (card as { derivation?: { chain: 'evm' | 'bitcoin' | 'solana'; account: number } } | null)?.derivation
+    ?? delivery.derivation ?? null;
+  const accountName = useAccountName();
   const isSign = (card?.request_type ?? request.request_type) === 'sign';
   // What this request signs: the exact message for `ed25519` (it may be empty), else a digest.
   const signsMessage = delivery.scheme === 'ed25519';
@@ -525,7 +535,14 @@ export const VaultApprovalCard: React.FC<{
         }));
       } else {
         // Standard keypair: avault signs; we only relay the approved request.
-        failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, ...signed, scheme }));
+        // A wallet's approval repeats the stored chain, account and any stored signing context exactly;
+        // the daemon refuses an approval that would sign with another account or key.
+        const persistedContext = delivery.signing_context ?? delivery.signingContext;
+        failIfNotOk(await api.signVaultDigest({
+          name, request_id: request.id, ...signed, scheme,
+          ...(delivery.derivation ? { chain: delivery.derivation.chain, account: delivery.derivation.account } : {}),
+          ...(delivery.derivation && persistedContext ? { signing_context: persistedContext } : {}),
+        }));
       }
       setResolved(true);
       onResolved({ kind: 'approved', requestType: 'sign' });
@@ -659,7 +676,27 @@ export const VaultApprovalCard: React.FC<{
             </DetailRow>
           );
         })}
-        {isSign ? <VaultSigningIdentity scheme={delivery.scheme} addresses={signAddresses} protectedKey={isProtected && isKeypair} /> : null}
+        {isSign && hdDerivation ? (
+          <DetailRow label={t('vaults.approval.account')}>
+            <span className="flex min-w-0 flex-col gap-1">
+              <span className="flex min-w-0 items-center gap-2">
+                <AccountIndex index={hdDerivation.account} />
+                {hdAccount ? <span className="truncate text-[13px] font-semibold text-foreground">{accountName(hdAccount)}</span> : null}
+                <Badge variant="outline">{t(hdDerivation.chain === 'evm' ? 'vaults.addresses.eth' : hdDerivation.chain === 'bitcoin' ? 'vaults.addresses.btcTaproot' : 'vaults.addresses.solana')}</Badge>
+              </span>
+              {hdAccount?.paths?.[hdDerivation.chain] ? (
+                <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', { path: hdAccount.paths[hdDerivation.chain] })}</span>
+              ) : null}
+            </span>
+          </DetailRow>
+        ) : null}
+        {isSign ? (
+          <VaultSigningIdentity
+            scheme={delivery.scheme}
+            addresses={hdDerivation ? (hdAccount ? { eth: hdAccount.eth, btc_taproot: hdAccount.btc_taproot, solana: hdAccount.solana } : null) : signAddresses}
+            protectedKey={isProtected && isKeypair}
+          />
+        ) : null}
         {requestSession ? (
           <DetailRow label={t('vaults.approval.session')}>
             <VaultRequestSessionLink session={requestSession} className="text-foreground" textClassName="text-[13px]" />
