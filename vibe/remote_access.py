@@ -5282,9 +5282,9 @@ def _validate_pairing_response(result: Any) -> tuple[dict[str, Any] | None, str 
 
 def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
     path = _pending_pairing_path()
-    if not path.exists():
+    if not os.path.lexists(path):
         return None, None
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         return None, "pending pairing record is not a regular file"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -5314,6 +5314,22 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
             or not payload["session_secret"]
         ):
             return None, "pending pairing request fingerprint is invalid"
+    if "desktop_enrollment" in payload:
+        desktop = payload["desktop_enrollment"]
+        if not isinstance(desktop, dict) or any(
+            not isinstance(desktop.get(key), str) or not desktop[key]
+            for key in ("installation_id", "account_id")
+        ):
+            return None, "pending Desktop enrollment is invalid"
+        retry = payload.get("redeem_request")
+        if retry is not None and (
+            not isinstance(retry, dict)
+            or any(not isinstance(retry.get(key), str) or not retry[key] for key in (
+                "pairing_key", "redeem_request_id", "device_name", "local_version", "origin_service",
+            ))
+            or not _same_pairing_request(payload, payload.get("backend_url", ""), retry["pairing_key"])
+        ):
+            return None, "pending Desktop redemption request is invalid"
     if phase in {"redeemed", "applied"}:
         pairing = payload.get("pairing")
         target_identity = payload.get("target_identity")
@@ -5408,6 +5424,26 @@ def _pairing_failure_after_claim(
 ) -> dict[str, Any]:
     """Return a definitive failure after retiring its prepared claim."""
 
+    # Desktop's installation reservation survives a failed grant. A later grant
+    # for this same operation must not cause another cloud instance to be made.
+    candidate, _ = _read_pending_pairing_record()
+    if candidate and candidate.get("desktop_enrollment"):
+        try:
+            with _pairing_persist_lock():
+                record, error = _read_pending_pairing_record()
+                if (
+                    not error and record and record["operation_id"] == operation_id
+                    and record.get("desktop_enrollment") and record["phase"] == "prepared"
+                ):
+                    _write_pending_pairing_record({
+                        **record, "desktop_failure": str(result.get("error") or "pairing_failed"),
+                    })
+                    return result
+        except (OSError, _PairingLockUnavailable):
+            return {
+                "ok": False, "error": "pairing_retirement_failed",
+                "pairing": {"ok": False, "recoverable": True},
+            }
     retired, marker_persisted = _retire_prepared_pairing_claim(
         operation_id=operation_id,
         cause=str(result.get("error") or "pairing_failed"),
@@ -5514,6 +5550,10 @@ def pending_pairing_status(config: V2Config | None) -> dict[str, Any] | None:
         return None
     phase = record["phase"]
     can_resume = phase == "retirement_pending"
+    if config is not None and phase == "prepared" and record.get("redeem_request"):
+        can_resume = record["source_fingerprint"] == _pairing_identity_fingerprint(
+            _pairing_identity_from_cloud(config.remote_access.vibe_cloud)
+        )
     if config is not None and phase in {"redeemed", "applied"}:
         current_identity = _pairing_identity_from_cloud(config.remote_access.vibe_cloud)
         current_fingerprint = _pairing_identity_fingerprint(current_identity)
@@ -5756,9 +5796,31 @@ def complete_pairing_revocation(operation_id: str | None) -> bool:
     return True
 
 
-def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict[str, Any]:
+def pair(
+    pairing_key: str, backend_url: str, device_name: str = "avibe", *,
+    desktop_enrollment: Any = None,
+) -> dict[str, Any]:
+    from vibe import desktop_local_instance
+
     pairing_key = (pairing_key or "").strip()
+    if desktop_enrollment is not None:
+        try:
+            return _pair_desktop(pairing_key, backend_url, device_name, desktop_enrollment)
+        except desktop_local_instance.LocalInstanceError as exc:
+            return {"ok": False, "error": exc.code, "status": exc.status}
+        except (OSError, _PairingLockUnavailable):
+            return {"ok": False, "error": "pairing_local_write_unavailable", "status": 503}
     if not pairing_key:
+        # The existing recovery owner can resume a Desktop redemption after a
+        # process restart, without requiring the UI to retain its pairing key.
+        record, error = _read_pending_pairing_record()
+        if not error and record and record.get("redeem_request") and record["phase"] == "prepared":
+            try:
+                return _retry_desktop_claim(record)
+            except desktop_local_instance.LocalInstanceError as exc:
+                return {"ok": False, "error": exc.code, "status": exc.status}
+            except (OSError, _PairingLockUnavailable):
+                return {"ok": False, "error": "pairing_recovery_unavailable", "status": 503}
         return _persist_pairing(None, device_name=device_name)
     backend, backend_url_error = _normalize_pairing_backend_url(backend_url)
     if backend_url_error or backend is None:
@@ -5822,32 +5884,124 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
         return _persist_pairing(
             None, device_name=device_name, operation_id=duplicate_operation_id,
         )
+    return _redeem_pairing_claim(claim, backend, {
+        "pairing_key": pairing_key,
+        "device_name": device_name,
+        "local_version": "dev",
+        "origin_service": origin_service,
+    })
+
+
+def _pair_desktop(
+    pairing_key: str, backend_url: str, device_name: str, guard: Any,
+) -> dict[str, Any]:
+    from vibe import desktop_local_instance
+    from storage.importer import ensure_sqlite_state
+
+    backend, error = _normalize_pairing_backend_url(backend_url)
+    if error or backend is None:
+        return {"ok": False, "error": error or "invalid_pairing_backend_url"}
+    preflight_error = _pairing_local_write_preflight()
+    if preflight_error:
+        return {"ok": False, "error": "pairing_local_write_unavailable"}
+    _run_pending_deferred_context_migration()
+    ensure_sqlite_state()
+    with _pairing_persist_lock():
+        config = desktop_local_instance._config()
+        claim = desktop_local_instance._pending()
+        desktop_local_instance.validate_guard(guard, config, claim)
+        assert claim is not None
+        if claim["phase"] == "prepared":
+            if config.remote_access.vibe_cloud.instance_id:
+                raise desktop_local_instance.LocalInstanceError("local_binding_changed")
+            replace_expired_grant = (
+                claim.get("desktop_failure") == "pairing_key_expired"
+                and pairing_key
+                and not _same_pairing_request(claim, backend.base_url, pairing_key)
+            )
+            if claim.get("redeem_request") and not replace_expired_grant:
+                if pairing_key and not _same_pairing_request(claim, backend.base_url, pairing_key):
+                    raise desktop_local_instance.LocalInstanceError("local_instance_conflict")
+            else:
+                if not pairing_key or not isinstance(device_name, str) or not device_name.strip():
+                    raise desktop_local_instance.LocalInstanceError("invalid_request", 400)
+                claim = {
+                    **claim, "backend_url": backend.base_url, "device_name": device_name,
+                    "request_fingerprint": _pairing_request_fingerprint(
+                        backend.base_url, pairing_key, claim["session_secret"],
+                    ),
+                    "redeem_request": {
+                        "pairing_key": pairing_key,
+                        "redeem_request_id": secrets.token_urlsafe(32),
+                        "device_name": device_name,
+                        "local_version": "dev",
+                        "origin_service": origin_service_for_pairing(),
+                    },
+                }
+                claim.pop("desktop_failure", None)
+                _write_pending_pairing_record(claim)
+    if claim["phase"] in {"redeemed", "applied"}:
+        return _persist_pairing(None, device_name=device_name, operation_id=claim["operation_id"])
+    return _retry_desktop_claim(claim)
+
+
+def _retry_desktop_claim(claim: Mapping[str, Any]) -> dict[str, Any]:
+    from vibe import desktop_local_instance
+
+    with _pairing_persist_lock():
+        current, error = _read_pending_pairing_record()
+        config = desktop_local_instance._config()
+        if (
+            error or current != claim or claim["phase"] != "prepared"
+            or desktop_local_instance._installation_id() != claim["desktop_enrollment"]["installation_id"]
+            or _pairing_identity_fingerprint(_pairing_identity_from_cloud(
+                config.remote_access.vibe_cloud
+            )) != claim["source_fingerprint"]
+        ):
+            return {"ok": False, "error": "local_binding_changed", "status": 409}
+    backend, error = _normalize_pairing_backend_url(claim["backend_url"])
+    if error or backend is None:
+        return {"ok": False, "error": error or "invalid_pairing_backend_url"}
+    return _redeem_pairing_claim(claim, backend, claim["redeem_request"])
+
+
+def _redeem_pairing_claim(
+    claim: Mapping[str, Any], backend: Any, request_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Send only the exact request whose recovery inputs are already durable."""
+    origin_service = request_payload["origin_service"]
     try:
         result = _json_request(
             f"{backend.base_url}/api/v1/pairing/redeem",
-            {
-                "pairing_key": pairing_key,
-                "device_name": device_name,
-                "local_version": "dev",
-                "origin_service": origin_service,
-            },
+            dict(request_payload),
             connection_target=backend,
         )
     except BackendRequestError as exc:
         failure = {"ok": False, **exc.payload, "status": exc.status}
+        retry_after = exc.payload.get("retry_after_seconds")
+        if (
+            claim.get("redeem_request") and exc.status == 409
+            and exc.payload.get("error") == "pairing_redeem_pending"
+            and type(retry_after) is int and 1 <= retry_after <= 60
+        ):
+            return {
+                "ok": False, "error": "pairing_redeem_pending", "status": 409,
+                "retry_after_seconds": retry_after,
+                "pairing": {"ok": False, "recoverable": True, "cause": "pairing_redeem_pending"},
+            }
         if _is_definitive_pairing_redeem_failure(exc):
             return _pairing_failure_after_claim(claim["operation_id"], failure)
         return {
             **failure,
             "error": "pairing_redeem_indeterminate",
-            "pairing": {"ok": False, "recoverable": False, "cause": failure.get("error")},
+            "pairing": {"ok": False, "recoverable": bool(claim.get("redeem_request")), "cause": failure.get("error")},
         }
     except Exception as exc:
         return {
             "ok": False,
             "error": "pairing_redeem_indeterminate",
             "detail": str(exc),
-            "pairing": {"ok": False, "recoverable": False, "cause": "pairing_request_failed"},
+            "pairing": {"ok": False, "recoverable": bool(claim.get("redeem_request")), "cause": "pairing_request_failed"},
         }
     normalized_result, response_error = _validate_pairing_response(result)
     if response_error:
@@ -5872,7 +6026,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
     }
     return _persist_pairing(
         pairing_result,
-        device_name=device_name,
+        device_name=claim["device_name"],
         operation_id=claim["operation_id"],
     )
 
@@ -5942,6 +6096,12 @@ def _persist_pairing_impl(
                     "pairing": {"ok": False, "recoverable": False},
                 }
             return {"ok": False, "error": "missing_pairing_key"}
+
+        if record.get("desktop_enrollment"):
+            from vibe import desktop_local_instance
+
+            if desktop_local_instance._installation_id() != record["desktop_enrollment"]["installation_id"]:
+                return {"ok": False, "error": "local_binding_changed", "status": 409}
 
         if result is not None:
             if (
