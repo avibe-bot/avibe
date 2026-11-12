@@ -443,6 +443,26 @@ describe('VaultsPage list discovery', () => {
     expect(count()).toBe('1 / 1 secrets');
   });
 
+  it('shows a seed-phrase wallet by its accounts, and keeps one whose address check failed blocked until it is deleted', async () => {
+    const accounts = [0, 1].map((n) => ({
+      account: n, name: n ? 'Trading' : null, eth: `0xE${n}`, btc_taproot: `bc1pB${n}`, solana: `S${n}`,
+      paths: { evm: '', bitcoin: '', solana: '' }, always_ask: false, last_signer: null,
+    }));
+    api.listVaultSecrets.mockResolvedValue({ secrets: [makeSecret('AGENT_WALLET', { kind: 'keypair', signer_kind: 'hd-seed', accounts, account_limit: 20 })] });
+    renderPage();
+    await screen.findByText('AGENT_WALLET');
+    expect(screen.getByText('Trading')).toBeTruthy();
+    expect(screen.getByRole('button', { name: en.vaults.hd.wallet.open })).toBeTruthy();
+    cleanup();
+    localStorage.setItem('avibe.vault.hdAddressCheckFailed', JSON.stringify(['AGENT_WALLET']));
+    renderPage();
+    await screen.findByText('AGENT_WALLET');
+    expect(screen.getByText(en.vaults.hd.blocked)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.vaults.hd.wallet.open })).toBeNull();
+    expect(screen.queryByText('Trading')).toBeNull();
+    localStorage.clear();
+  });
+
   it('composes quick filters and sorting, most recent activity first by default, dates relative even beyond a week', async () => {
     api.listVaultSecrets.mockResolvedValue({ secrets: [...inventory, makeSecret('aardvark', { last_used_at: '2026-09-30T12:00:00Z' })] });
     const user = userEvent.setup();

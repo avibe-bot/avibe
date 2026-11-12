@@ -116,7 +116,8 @@ const taggedHash = (tag: string, ...parts: Uint8Array[]): Uint8Array => {
 export function taprootOutputKey(compressedInternal: Uint8Array): Uint8Array {
   const point = secp256k1.Point.fromBytes(compressedInternal);
   const xOnly = point.toBytes(true).slice(1);
-  const even = schnorr.utils.lift_x(secp256k1.Point.Fn.fromBytes(xOnly));
+  // x is a field element (mod p), not a scalar: a valid key may have n <= x < p.
+  const even = schnorr.utils.lift_x(secp256k1.Point.Fp.fromBytes(xOnly));
   const tweak = secp256k1.Point.Fn.fromBytes(taggedHash('TapTweak', xOnly));
   return even.add(secp256k1.Point.BASE.multiply(tweak)).toBytes(true).slice(1);
 }

@@ -46,6 +46,7 @@ import {
   type SolanaKeyImportFormat,
 } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
+import { blockHdWallet, unblockHdWallet } from '@/lib/vaultHdQuarantine';
 import {
   checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
 } from '@/lib/vaultHdWallet';
@@ -614,12 +615,31 @@ export const VaultSecretForm: React.FC<{
     if (!stored || !sameHdAddresses(stored, expected)) {
       // Logged by name only: never the words, the seed or an address the user could be steered to.
       console.error('[vault] seed-phrase wallet address check failed; the wallet is blocked', { name: secretName });
+      // Fail closed: block it in this browser first, then delete it. Only a confirmed delete unblocks.
+      blockHdWallet(secretName);
       setHdMismatch(true);
+      await deleteMismatched();
       return;
     }
     setHdCreated(stored);
     setHdStep('done');
     if (hdAsk) await applyHdAsk();
+  };
+
+  const [hdMismatchDeleted, setHdMismatchDeleted] = useState(false);
+  const deleteMismatched = async () => {
+    try {
+      const result = await api.deleteVaultSecret(secretName);
+      if (result?.ok) {
+        unblockHdWallet(secretName);
+        setHdMismatchDeleted(true);
+        setError(null);
+      } else {
+        setError(vaultErrorMessage(t, result, t('vaults.request.saveFailed')));
+      }
+    } catch (err: unknown) {
+      setError(vaultErrorMessage(t, err, t('vaults.request.saveFailed')));
+    }
   };
 
   // Account #0's ask-before-signing, set once the wallet exists (the create body may not carry it).
@@ -1489,30 +1509,27 @@ export const VaultSecretForm: React.FC<{
           <>
             <HdNotice tone="error" icon={TriangleAlert}>
               <span className="font-semibold text-destructive-ink">{t('vaults.hd.mismatch')}</span>
-              {t('vaults.hd.mismatchHint')}
+              <span>{hdMismatchDeleted ? t('vaults.hd.mismatchDeleted') : t('vaults.hd.mismatchHint')}</span>
             </HdNotice>
-            <div className="mt-1 flex justify-end gap-2">
-              <Button type="button" variant="ghost" disabled={submitting} onClick={() => onCreated(secretName, 'created')}>{t('vaults.dialog.cancel')}</Button>
-              <Button
-                type="button"
-                variant="destructive"
-                disabled={submitting}
-                onClick={() => {
-                  setSubmitting(true);
-                  // Only a confirmed delete dismisses the warning: the wrapper answers errors as { ok: false }.
-                  void api.deleteVaultSecret(secretName)
-                    .then((result) => {
-                      if (result?.ok) onCreated(secretName, 'created');
-                      else setError(vaultErrorMessage(t, result, t('vaults.request.saveFailed')));
-                    })
-                    .catch((err: unknown) => setError(vaultErrorMessage(t, err, t('vaults.request.saveFailed'))))
-                    .finally(() => setSubmitting(false));
-                }}
-              >
-                {t('vaults.hd.deleteWallet')}
-              </Button>
-            </div>
             {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
+            <div className="mt-1 flex justify-end gap-2">
+              {hdMismatchDeleted ? (
+                // Nothing was created: closing reports no success.
+                <Button type="button" onClick={onCancel}>{t('vaults.hd.close')}</Button>
+              ) : (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  disabled={submitting}
+                  onClick={() => {
+                    setSubmitting(true);
+                    void deleteMismatched().finally(() => setSubmitting(false));
+                  }}
+                >
+                  {t('vaults.hd.deleteWallet')}
+                </Button>
+              )}
+            </div>
           </>
         ) : hdStep === 'done' && hdCreated ? (
           <>
@@ -1583,6 +1600,8 @@ export const VaultSecretForm: React.FC<{
               setSolanaImport('');
               setSolanaImportFailed(false);
               setSigningError(null);
+              // A seed phrase, its passphrase and the backup check are dropped too, never kept hidden.
+              resetHd();
             } else {
               clearStaticValue();
               setFieldRows(null);

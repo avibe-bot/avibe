@@ -668,7 +668,7 @@ describe('seed-phrase wallet sign approval', () => {
     secret_name: 'AGENT_WALLET',
     delivery: {
       digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable', derivation: { chain: 'evm', account: 1 },
-      signing_context: { type: 'evm-transaction', chain_id: 11155111 },
+      signing_context: { kind: 'evm-transaction', digestAlgorithm: 'keccak256', chainId: 11155111 },
     },
     card: { request_type: 'sign', secret_name: 'AGENT_WALLET', kind: 'keypair', protection: 'standard', derivation: { chain: 'evm', account: 1 }, account: snapshot },
   } as unknown as VaultRequest;
@@ -689,7 +689,7 @@ describe('seed-phrase wallet sign approval', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: i18n.t('vaults.approval.sign'), exact: true })); });
     await vi.waitFor(() => expect(api.signVaultDigest).toHaveBeenCalledExactlyOnceWith({
       name: 'AGENT_WALLET', request_id: 'vrq_hd', digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable',
-      chain: 'evm', account: 1, signing_context: { type: 'evm-transaction', chain_id: 11155111 },
+      chain: 'evm', account: 1, signing_context: { kind: 'evm-transaction', digestAlgorithm: 'keccak256', chainId: 11155111 },
     }));
     await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
   });

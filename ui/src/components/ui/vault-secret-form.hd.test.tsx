@@ -161,21 +161,50 @@ it.each([
   expect(await screen.findByText(hd.done.verified)).toBeTruthy();
 });
 
-it('blocks a wallet whose stored #0 is not the address these words give: do not fund it', async () => {
+it.each([
+  ['eth'], ['btc_taproot'], ['solana'], ['missing #0'],
+] as const)('fails closed when the stored #0 differs (%s): deletes it, logs by name, reports no success', async (field) => {
   const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
-  await openWallet();
+  localStorage.clear();
+  const onCreated = await openWallet();
+  const onCancel = vi.fn();
   fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
   fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
   const other = storedFor('legal winner thank year wave sausage worth useful legal winner thank yellow'.split(' '));
-  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [{ ...storedFor(OFFICIAL.split(' ')), solana: other.solana }] } });
+  const own = storedFor(OFFICIAL.split(' '));
+  const accounts = field === 'missing #0' ? [{ ...own, account: 1 }] : [{ ...own, [field]: other[field] }];
+  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts } });
+  api.deleteVaultSecret.mockResolvedValueOnce({ ok: false, code: 'boom', message: 'nope' } as never);
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
   expect(await screen.findByText(hd.mismatch)).toBeTruthy();
   expect(screen.queryByText(hd.done.verified)).toBeNull();
   expect(api.updateVaultHdAccount).not.toHaveBeenCalled();
-  // It is logged, by name only, and the wallet can be deleted from here.
   expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('address check failed'), { name: 'AGENT_WALLET' });
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.deleteWallet })); });
+  // The automatic delete was refused: the wallet stays blocked in this browser, with no way to "finish".
   expect(api.deleteVaultSecret).toHaveBeenCalledWith('AGENT_WALLET');
+  expect(JSON.parse(localStorage.getItem('avibe.vault.hdAddressCheckFailed') ?? '[]')).toEqual(['AGENT_WALLET']);
+  expect(screen.queryByRole('button', { name: hd.done.finish })).toBeNull();
+  // Deleting again succeeds: unblocked, and closing reports nothing created.
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.deleteWallet })); });
+  expect(screen.getByText(hd.mismatchDeleted)).toBeTruthy();
+  expect(localStorage.getItem('avibe.vault.hdAddressCheckFailed')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: hd.close }));
+  expect(onCreated).not.toHaveBeenCalled();
+  void onCancel;
+});
+
+it('drops the phrase, passphrase and check when switching to a static value', async () => {
+  await openWallet();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${hd.import.passphrase.replace(/[()]/g, '\\$&')}`) }));
+  fireEvent.change(screen.getByLabelText(hd.import.passphrase), { target: { value: 'TREZOR' } });
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindStatic }));
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
+  fireEvent.click(screen.getByRole('radio', { name: hd.chainMnemonic }));
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe('');
+  expect(screen.queryByDisplayValue('TREZOR')).toBeNull();
 });
 
 it('names an unknown word and offers list words; refuses a bad checksum; never saves either', async () => {

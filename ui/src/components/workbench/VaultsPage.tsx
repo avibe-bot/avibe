@@ -11,6 +11,7 @@ import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { isHdWallet, useAccountName } from '@/lib/vaultHdAccounts';
+import { isHdWalletBlocked, pruneHdWalletBlocks, unblockHdWallet } from '@/lib/vaultHdQuarantine';
 import { AccountIndex, HdWalletBadges, VaultHdWalletDialog } from '../ui/vault-hd-wallet-detail';
 import { VaultLockIndicator } from '../ui/vault-lock-indicator';
 import { onPageReactivated } from '../../lib/pageActivity';
@@ -104,6 +105,8 @@ const SecretRow: React.FC<{
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isWallet = isHdWallet(s);
+  // A wallet whose post-save address check failed stays blocked here until it is deleted.
+  const walletBlocked = isWallet && isHdWalletBlocked(s.name);
   const accountName = useAccountName();
   const isProtected = s.protection === 'protected';
   // Reveal is only meaningful for a protected static secret: its plaintext lives sealed and can be
@@ -150,7 +153,9 @@ const SecretRow: React.FC<{
         {s.fields_state === 'corrupt' ? (
           <span role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</span>
         ) : null}
-        {isWallet ? (
+        {walletBlocked ? (
+          <span role="alert" className="mt-1 text-xs font-semibold text-destructive-ink">{t('vaults.hd.blocked')}</span>
+        ) : isWallet ? (
           // A wallet's accounts at a glance; their addresses are one click away, in the accounts dialog.
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             {[...(s.accounts ?? [])].sort((a, b) => a.account - b.account).map((account) => (
@@ -692,6 +697,7 @@ export const VaultsPage: React.FC = () => {
     try {
       const res = await api.listVaultSecrets();
       setSecrets(res.secrets ?? []);
+      pruneHdWalletBlocks((res.secrets ?? []).map((secret) => secret.name));
       setNow(Date.now());
     } catch (err: unknown) {
       setError(messageFromError(t, err));
@@ -932,6 +938,7 @@ export const VaultsPage: React.FC = () => {
     try {
       setError(null);
       await api.deleteVaultSecret(secret.name);
+      unblockHdWallet(secret.name);
       showToast(t('vaults.deleted', { name: secret.name }), 'success');
       refresh();
     } catch (err: unknown) {
@@ -1198,7 +1205,7 @@ export const VaultsPage: React.FC = () => {
           </div>
         ) : null}
       </ConfirmDialog>
-      {openWallet && isHdWallet(openWallet) ? (
+      {openWallet && isHdWallet(openWallet) && !isHdWalletBlocked(openWallet.name) ? (
         <VaultHdWalletDialog
           secret={openWallet}
           open

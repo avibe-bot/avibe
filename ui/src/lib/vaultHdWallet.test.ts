@@ -86,3 +86,13 @@ describe('the seed box', () => {
     expect(() => hdSeedImportBlindBoxContext('bad name')).toThrow();
   });
 });
+
+describe('Taproot boundary', () => {
+  it('tweaks a valid internal key whose x is at least the group order (x is a field element)', () => {
+    // x = n: a valid point (n < p) that a scalar decoder would refuse.
+    const internal = Uint8Array.from(Buffer.from('02fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141', 'hex'));
+    const out = taprootOutputKey(internal);
+    expect(out).toHaveLength(32);
+    expect(taprootAddress(out)).toMatch(/^bc1p/);
+  });
+});

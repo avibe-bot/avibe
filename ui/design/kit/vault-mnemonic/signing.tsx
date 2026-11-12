@@ -4,99 +4,18 @@
 // Protected tier: the sandbox window adds the account number and path, both from the record's
 // authenticated metadata. It never shows the user's account name, which the sandbox cannot vouch for.
 import type { ReactNode } from 'react';
-import { ChevronDown, ChevronRight, CircleCheck, Copy, Layers, Lock, PenTool } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { ChevronRight, CircleCheck, Lock } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { SigningAddressList } from '@/components/ui/signing-address-list';
-import { DetailRow } from '@/components/ui/vault-approval-card';
 import { cn } from '@/lib/utils';
 
 import { useDraft } from '../draft';
-import { CREATED_WORDS, IMPORTED_ADDRESSES, IMPORTED_WORDS, SOLANA_TRANSFER_BYTES, WALLET_ACCOUNTS, path } from './data';
-import { AccountIndex, WordGrid } from './parts';
+import { CREATED_WORDS, IMPORTED_ADDRESSES, IMPORTED_WORDS, WALLET_ACCOUNTS, path } from './data';
+import { WordGrid } from './parts';
 
 const account = WALLET_ACCOUNTS[1];
 
-/** The standard approval card for a wallet account (the shipped card's layout, plus the Account row). */
-export function WalletSignCard({ open = false }: { open?: boolean }) {
-  const { t } = useTranslation();
-  const d = useDraft();
-  const Chevron = open ? ChevronDown : ChevronRight;
-  const whole = 'min-w-0 break-all rounded-md bg-surface px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground';
-  return (
-    <div className="flex min-w-0 flex-col gap-4">
-      <div className="flex items-start gap-3">
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-violet/15 text-violet-ink">
-          <PenTool className="size-5" />
-        </div>
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[15px] font-semibold">{t('vaults.approval.signTitle')}</span>
-          <span className="text-xs text-muted-foreground">
-            {d('这个账户设置了「签名前问我」。', 'This account is set to ask before signing.')}
-          </span>
-        </div>
-      </div>
-      <div className="h-px bg-border" />
-      <div className="flex flex-col gap-3.5">
-        <DetailRow label={t('vaults.approval.key')}>
-          <span className="truncate font-mono text-[13px] font-semibold">AGENT_WALLET</span>
-          <Badge variant="secondary">{t('vaults.standard')}</Badge>
-          <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet-ink">
-            <Layers className="size-3" />
-            {d('助记词', 'Seed phrase')}
-          </Badge>
-        </DetailRow>
-        <DetailRow label={d('账户', 'Account')}>
-          <AccountIndex index={account.index} />
-          <span className="text-[13px] font-semibold text-foreground">{d(account.name, account.nameEn)}</span>
-        </DetailRow>
-        <DetailRow label={t('vaults.approval.signingAs')}>
-          <SigningAddressList addresses={{ solana: account.addresses.solana }} />
-        </DetailRow>
-        <DetailRow label={t('vaults.approval.session')}>
-          <span className="text-[13px] text-foreground">{d('网格交易', 'Grid trading')}</span>
-        </DetailRow>
-        <DetailRow label={t('vaults.approval.message')}>
-          <span className="text-[13px] text-foreground">{t('vaults.approval.messageBytes', { count: SOLANA_TRANSFER_BYTES })}</span>
-          <Badge variant="secondary">ed25519</Badge>
-          <button type="button" aria-label={t('vaults.approval.copyMessage')} className="ml-auto shrink-0 text-muted">
-            <Copy className="size-3.5" />
-          </button>
-        </DetailRow>
-        <div className="flex min-w-0 flex-col rounded-lg bg-surface-2">
-          <button type="button" aria-expanded={open} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
-            <Chevron className="size-3.5 text-muted" />
-            <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.approval.details')}</span>
-          </button>
-          {open ? (
-            <div className="flex min-w-0 flex-col gap-1.5 px-3 pb-3">
-              <span className="text-xs text-muted">{d('派生路径', 'Derivation path')}</span>
-              <code className={whole}>{path('solana', account.index)}</code>
-              <span className="mt-1 text-xs text-muted">{t('vaults.approval.detailsAddress')}</span>
-              <code className={whole}>{account.addresses.solana}</code>
-            </div>
-          ) : null}
-        </div>
-      </div>
-      <div className="h-px bg-border" />
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="secondary">{t('vaults.approval.deny')}</Button>
-        <Button type="button">
-          <PenTool className="size-4" />
-          {t('vaults.approval.sign')}
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-/**
- * The protected approval as the sandbox window draws it (vault-sandbox src/operationUi.ts and
- * src/signingReview.ts, design/signing.html), mirrored here in product tokens so the proposal can be
- * compared with the parent's card. Rows that exist today are unchanged; the Wallet account row is new.
- */
 /** The sandbox window's frame (vault-sandbox src/operationUi.ts), in product tokens. */
 function SandboxCard({ title, subtitle, children, actions }: { title: string; subtitle: string; children: ReactNode; actions: [string, string] }) {
   return (
