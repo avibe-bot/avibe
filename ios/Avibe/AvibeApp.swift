@@ -105,12 +105,33 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
 struct AvibeApp: App {
     @UIApplicationDelegateAdaptor(AvibeAppDelegate.self)
     private var appDelegate
-    @StateObject private var appModel = AppModel()
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environmentObject(appModel)
+            if AppTestHost.isIdle {
+                Color.clear
+            } else {
+                AppRoot()
+            }
         }
     }
+}
+
+/// The App's model and its root view. A view of its own so that a test host
+/// that shows nothing creates no model either.
+private struct AppRoot: View {
+    @StateObject private var appModel = AppModel()
+
+    var body: some View {
+        RootView()
+            .environmentObject(appModel)
+    }
+}
+
+enum AppTestHost {
+    // EXPERIMENT: idle only when asked, to compare.
+    static let isIdle =
+        ProcessInfo.processInfo.environment["AVIBE_EXPERIMENT_HOST"] == "idle"
+    static let hostsTests =
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 }

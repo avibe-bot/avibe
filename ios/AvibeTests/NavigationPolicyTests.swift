@@ -3975,3 +3975,60 @@ final class FormAccessoryBarTests: XCTestCase {
         )
     }
 }
+
+// EXPERIMENT: how long a fresh WebView takes to finish its first load, at the
+// start and the end of the suite.
+@MainActor
+private final class ProbeLoadDelegate: NSObject, WKNavigationDelegate {
+    var finished: CheckedContinuation<Void, Never>?
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
+        finished?.resume(); finished = nil
+    }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
+        finished?.resume(); finished = nil
+    }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation?, withError error: Error) {
+        finished?.resume(); finished = nil
+    }
+}
+
+@MainActor
+func probeFreshWebViewLoads(_ phase: String) async {
+    var samples: [Int] = []
+    for index in 0..<8 {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(frame: window.bounds, configuration: configuration)
+        let controller = UIViewController()
+        controller.view.addSubview(webView)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        let delegate = ProbeLoadDelegate()
+        webView.navigationDelegate = delegate
+        let clock = ContinuousClock()
+        let start = clock.now
+        await withCheckedContinuation { continuation in
+            delegate.finished = continuation
+            webView.loadHTMLString("<!doctype html><title>Probe \(index)</title><p>probe", baseURL: nil)
+        }
+        samples.append(Int((clock.now - start) / .milliseconds(1)))
+        window.isHidden = true
+    }
+    let env = ProcessInfo.processInfo.environment
+    print("PROBE \(phase) host=\(env["AVIBE_EXPERIMENT_HOST"] ?? "live") xctestConfig=\(env["XCTestConfigurationFilePath"] != nil) ms=\(samples)")
+}
+
+final class AAAWebContentProbeTests: XCTestCase {
+    @MainActor
+    func testProbeAtSuiteStart() async {
+        await probeFreshWebViewLoads("start")
+    }
+}
+
+final class ZZZWebContentProbeTests: XCTestCase {
+    @MainActor
+    func testProbeAtSuiteEnd() async {
+        await probeFreshWebViewLoads("end")
+    }
+}
