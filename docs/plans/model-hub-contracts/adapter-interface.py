@@ -928,6 +928,9 @@ class EngineAdapter(Protocol):
         altered-credential controls and public inventory cannot establish
         authentication. A shaped success can; a bare status cannot. Auto still
         requires response-backed proof; order alone never proves a protocol.
+        When the probes narrow a `custom` endpoint to one format, or show it
+        parses Chat Completions among others, the credential-gated model
+        listing may answer the key the model-less probes leave open.
         Explicit unverified API-key saving and completed Hub OAuth admission
         belong to Source creation, not this non-persisting evidence result.
         They retain a fixed protocol owner with verification pending and do

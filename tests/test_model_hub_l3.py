@@ -8086,6 +8086,111 @@ def test_declared_custom_anthropic_relay_verifies_from_its_models_listing(
         assert requests == [("POST", probe_path, stored_key)]
 
 
+# A relay that answers every format it speaks the way sub2api does: the key is
+# checked first, then each surface reports the missing model in its own envelope.
+_RELAY_MODEL_REQUIRED = {
+    "/v1/messages": {"type": "error", "error": {"type": "invalid_request_error", "message": "model is required"}},
+    "/v1/responses": {"error": {"code": "invalid_request_error", "message": "model is required"}},
+    "/v1/chat/completions": {"error": {"type": "invalid_request_error", "message": "model is required"}},
+}
+
+
+@pytest.mark.parametrize(
+    ("speaks", "stored_key", "listing_gated", "expected_protocol"),
+    [
+        # The reported relay: every format answers, and Chat Completions -- the
+        # add form's default, which saved and listed its models -- is named.
+        (("anthropic", "openai_responses", "openai_chat"), "relay-live-key", True, "openai_chat"),
+        (("openai_chat",), "relay-live-key", True, "openai_chat"),
+        (("anthropic",), "relay-live-key", True, "anthropic"),
+        # Two formats without Chat Completions name neither.
+        (("anthropic", "openai_responses"), "relay-live-key", True, None),
+        # A listing published to anyone attests to no key.
+        (("anthropic", "openai_responses", "openai_chat"), "relay-live-key", False, None),
+        (("anthropic", "openai_responses", "openai_chat"), "relay-wrong-key", True, None),
+    ],
+)
+def test_custom_auto_names_the_format_a_relay_answers_once_its_listing_accepts_the_key(
+    tmp_path: Path,
+    speaks: tuple[str, ...],
+    stored_key: str,
+    listing_gated: bool,
+    expected_protocol: str | None,
+) -> None:
+    """Auto on a relay whose model-less probes are all request errors.
+
+    Each answering path proves the format but not the key, exactly where a
+    declared interface's probe leaves it; the credential-gated listing answers
+    the key here as it does there. Before this, Auto stopped at the probes and
+    the add form reported a working relay as unrecognised.
+    """
+
+    live_key = "relay-live-key"
+    paths = {
+        "anthropic": "/v1/messages",
+        "openai_responses": "/v1/responses",
+        "openai_chat": "/v1/chat/completions",
+    }
+    spoken = {paths[protocol] for protocol in speaks}
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    adapter = CLIProxyEngineAdapter(supervisor=Mock(lifecycle=None, _published_release=None), state_store=state_store)
+
+    async def scenario() -> tuple[list[tuple[str, str]], object]:
+        requests: list[tuple[str, str]] = []
+
+        def supplied(request: web.Request) -> str:
+            return request.headers.get("Authorization", "").removeprefix("Bearer ")
+
+        async def relay_post(request: web.Request) -> web.Response:
+            requests.append((request.method, request.path))
+            if supplied(request) != live_key:
+                return web.json_response({"code": "INVALID_API_KEY", "message": "Invalid API key"}, status=401)
+            if request.path not in spoken:
+                return web.Response(status=404, text="404 page not found")
+            return web.json_response(_RELAY_MODEL_REQUIRED[request.path], status=400)
+
+        async def relay_models(request: web.Request) -> web.Response:
+            requests.append((request.method, request.path))
+            if listing_gated and supplied(request) != live_key:
+                return web.json_response({"code": "INVALID_API_KEY", "message": "Invalid API key"}, status=401)
+            return web.json_response({"object": "list", "data": [{"id": "claude-sonnet-4-5"}, {"id": "gpt-5"}]})
+
+        app = web.Application()
+        app.router.add_get("/v1/models", relay_models)
+        app.router.add_post("/{tail:.*}", relay_post)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        assert site._server is not None
+        base_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/v1"
+        credential_ref = state_store.store_api_key(
+            stored_key, vendor="custom", protocol="openai_chat", base_url=base_url,
+        )
+        try:
+            observed = await adapter.observe_source(
+                "custom", base_url, credential_ref, ("anthropic", "openai_responses", "openai_chat"),
+            )
+        finally:
+            await runner.cleanup()
+        return requests, observed
+
+    requests, observed = asyncio.run(scenario())
+
+    probes = [("POST", "/v1/messages"), ("POST", "/v1/responses"), ("POST", "/v1/chat/completions")]
+    assert requests[:3] == probes
+    assert observed.protocol == expected_protocol
+    if expected_protocol is not None:
+        assert observed.outcome.value == "observed"
+        assert observed.authenticated is True
+        assert observed.model_ids == ("claude-sonnet-4-5", "gpt-5")
+    elif stored_key != live_key:
+        assert observed.outcome.value == "authentication_failed"
+        assert requests == probes
+    else:
+        assert observed.outcome.value != "observed"
+
+
 def test_auth_setup_executable_scenarios_are_registered() -> None:
     root = Path(__file__).parent / "scenarios/auth_setup"
     catalog = yaml.safe_load((root / "catalog.yaml").read_text())
