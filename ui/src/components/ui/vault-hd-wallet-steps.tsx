@@ -9,7 +9,7 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import type { HdAccountAddresses, HdQuestion, PhraseCheck } from '@/lib/vaultHdWallet';
-import { cn } from '@/lib/utils';
+import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Button } from './button';
 import { Input } from './input';
 import { SigningAddressList } from './signing-address-list';
@@ -115,7 +115,8 @@ export function HdBackupStep({ words }: { words: string[] }) {
             variant="secondary"
             size="sm"
             onClick={() => {
-              void navigator.clipboard?.writeText(words.join(' ')).then(() => setCopied(true), () => undefined);
+              // Same fallback as other Vault copies (LAN HTTP has no Clipboard API); "copied" only on success.
+              void copyTextToClipboard(words.join(' ')).then((ok) => setCopied(ok));
             }}
           >
             <Copy className="size-3.5" />
