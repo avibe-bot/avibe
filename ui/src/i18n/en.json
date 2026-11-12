@@ -6376,7 +6376,7 @@
       "standardHelp": "The agent can use it on its own. Good for API keys, environment variables, and most secrets.",
       "alwaysAskSign": "Ask me before every signature",
       "alwaysAskSignHelp": "Standard keys can sign on their own. With this on, every signature needs your approval in the browser. It guards against mistakes, not against someone who already controls this computer; keep only amounts you can afford to lose in a Standard key.",
-      "alwaysAskSignLocked": "On. It can’t be turned off here for now; to turn it off, delete the key and create it again.",
+      "alwaysAskSignLocked": "On. It can’t be turned off here for now.",
       "alwaysAskSignOneWay": "Once saved, this can’t be turned off here for now.",
       "protectedCreatePending": "Protected web create is not available in this build yet. Choose Standard only for secrets the agent may need to use on its own.",
       "save": "Save",

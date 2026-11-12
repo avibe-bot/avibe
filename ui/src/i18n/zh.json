@@ -6376,7 +6376,7 @@
       "standardHelp": "AI 可以自行使用。适合 API Key、环境变量和大多数密钥。",
       "alwaysAskSign": "每次签名都要我确认",
       "alwaysAskSignHelp": "标准档密钥默认可以自己签名。打开后，每次签名都要你在浏览器里亲自批准。它防的是误操作，防不了已经控制这台电脑的人；标准档密钥里只放你能承受损失的金额。",
-      "alwaysAskSignLocked": "已打开。目前不能在这里关闭；如需关闭，请删除后重建。",
+      "alwaysAskSignLocked": "已打开。目前不能在这里关闭。",
       "alwaysAskSignOneWay": "保存后暂时不能在这里关闭。",
       "protectedCreatePending": "当前构建尚不支持保护档的 Web 创建。需要 Agent 自动取用的密钥请选标准档。",
       "save": "保存",
