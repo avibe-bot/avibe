@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +31,37 @@ def test_network_advice_is_exact_localized_and_value_free(monkeypatch, method, i
     assert "(including in mainland China)" in advice if language == "en" else "中国大陆" in advice
     assert ('$env:HTTPS_PROXY="' in advice) is windows
     assert (f'$env:{index}="' in advice) is windows
+
+
+@pytest.mark.parametrize("installer", ["install.sh", "install.ps1"])
+def test_bootstrap_honors_configured_python_download_sources(tmp_path, installer):
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is required for the offline bootstrap settings contract")
+    (tmp_path / "uv.toml").write_text(
+        'python-install-mirror = "https://configured.example/python"\n'
+        'python-downloads-json-url = "https://configured.example/python.json"\n', encoding="utf-8",
+    )
+    source = (ROOT / installer).read_text(encoding="utf-8")
+    if installer.endswith(".sh"):
+        invocation = re.search(r"uv run (.+?) python - ", source)[1]
+        arguments = shlex.split(invocation)
+        arguments[arguments.index("--python") + 1] = sys.executable
+    else:
+        invocation = re.search(r'"run", (.+), \$python,', source)[1]
+        arguments = re.findall(r'"([^"]+)"', invocation) + [sys.executable]
+    # Execute the actual preparation flags, without downloads or package code.
+    # This fails if either launcher drops uv configuration using --no-config.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("UV_")}
+    env["UV_CACHE_DIR"] = str(tmp_path / "cache")
+    result = subprocess.run(
+        [uv, "run", *arguments, "--offline", "--no-python-downloads", "--show-settings", "python", "-c", "pass"],
+        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    settings = result.stdout + result.stderr
+    assert '"https://configured.example/python"' in settings
+    assert '"https://configured.example/python.json"' in settings
 
 
 @pytest.mark.parametrize("surface", ["cli", "api"])

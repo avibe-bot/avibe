@@ -130,7 +130,8 @@ Install-Vibe
     installs = [item for item in commands if item["arguments"][:2] == ["tool", "install"]]
     assert len(preparation) == (2 if case == "python-cdn-retry" else 1)
     for item in preparation:
-        assert item["arguments"][1:3] == ["--no-project", "--no-config"]
+        assert item["arguments"][1] == "--no-project"
+        assert "--no-config" not in item["arguments"]
         # All helper/snapshot output is temporary and removed even on failure.
         assert not Path(item["arguments"][-1]).exists()
     if case in {"download", "python-cdn-retry"}:
@@ -142,7 +143,7 @@ Install-Vibe
             assert "--constraints" not in installs[0]["arguments"]
             assert "git+https://github.com/example/explicit-development.git" in installs[0]["arguments"]
         else:
-            assert installs[0]["constraints"] == "anyio==4.16.0\n"
+            assert installs[0]["constraints"].splitlines() == ["anyio==4.16.0"]
             assert str(wheel) in installs[0]["arguments"]
     if case == "arm64":
         assert "cpython-3.12-windows-x86_64-none" in preparation[0]["arguments"]

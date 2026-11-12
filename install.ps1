@@ -838,7 +838,7 @@ if __name__ == "__main__":
     if ($PythonInstallMirror) { $env:UV_PYTHON_INSTALL_MIRROR = $PythonInstallMirror }
     try {
         return Invoke-NativeCommand -FilePath "uv" -Arguments @(
-            "run", "--no-project", "--no-config", "--python", $python,
+            "run", "--no-project", "--python", $python,
             "python", $helperPath, $PackageSpec, $Destination
         )
     } finally {
@@ -903,7 +903,11 @@ function Install-VibeFromSources {
         }
         $result = Invoke-UvToolInstallAttempt -Arguments $arguments -PythonInstallMirror $PythonInstallMirror
         if ($result.Success) {
-            Write-Success "avibe-os installed successfully"
+            if ($customPackageSpec) {
+                Write-Success "avibe-os installed successfully (from custom package spec)"
+            } else {
+                Write-Success "avibe-os installed successfully"
+            }
             return $null
         }
         return "Failed to install or activate the selected Avibe release (exit code $($result.ExitCode)). The previous installation was retained."

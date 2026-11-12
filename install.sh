@@ -630,7 +630,7 @@ prepare_release_candidate() {
     # The embedded stdlib-only helper is generated from vibe/release_dependencies.py.
     # uv supplies Python on machines that have no system interpreter yet.
     env ${UV_INSTALL_PYTHON_MIRROR:+"UV_PYTHON_INSTALL_MIRROR=$UV_INSTALL_PYTHON_MIRROR"} \
-        uv run --no-project --no-config --python '>=3.10,<3.15' python - "$spec" "$destination" <<'AVIBE_RELEASE_DEPENDENCIES'
+        uv run --no-project --python '>=3.10,<3.15' python - "$spec" "$destination" <<'AVIBE_RELEASE_DEPENDENCIES'
 # BEGIN GENERATED RELEASE DEPENDENCIES
 """Resolve the *target* wheel and its release constraints before installation.
 
