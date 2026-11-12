@@ -103,7 +103,19 @@ PROVISION_SPEC_ALLOWED_KEYS = {
     "links",
     "fields",
     "default_field",
+    "generate",
 }
+PROVISION_GENERATION_ALLOWED_KEYS = {
+    "length",
+    "charset",
+    "lowercase",
+    "uppercase",
+    "digits",
+    "symbols",
+    "exclude_lookalikes",
+}
+PROVISION_GENERATION_GROUP_KEYS = ("lowercase", "uppercase", "digits", "symbols")
+MAX_PROVISION_GENERATED_SECRET_LENGTH = 512
 PROVISION_FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_SECRET_FIELDS = 32
 PROVISION_SPEC_ALLOWED_POLICY_KEYS = {"allowed_hosts", "auth"}
@@ -932,6 +944,9 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     if description:
         normalized["description"] = description
 
+    if "generate" in spec:
+        normalized["generate"] = _normalize_provision_generation_recipe(spec["generate"])
+
     tags = _string_list(spec.get("tags"), field="spec.tags") if "tags" in spec else []
     tags = _normalize_tags(tags)
 
@@ -976,6 +991,47 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
         normalized["tags"] = tags
 
     return normalized
+
+
+def _normalize_provision_generation_recipe(recipe: Any) -> dict[str, Any]:
+    if not isinstance(recipe, dict):
+        raise VaultServiceError("spec.generate must be an object")
+    extra_keys = set(recipe) - PROVISION_GENERATION_ALLOWED_KEYS
+    if extra_keys:
+        raise VaultServiceError(f"unsupported spec.generate fields: {', '.join(sorted(extra_keys))}")
+    length = recipe.get("length")
+    if type(length) is not int or not 1 <= length <= MAX_PROVISION_GENERATED_SECRET_LENGTH:
+        raise VaultServiceError(
+            f"spec.generate.length must be an integer between 1 and {MAX_PROVISION_GENERATED_SECRET_LENGTH}"
+        )
+    charset = recipe.get("charset")
+    if not isinstance(charset, str) or charset not in {"hex", "base64url", "custom"}:
+        raise VaultServiceError("spec.generate.charset must be hex, base64url, or custom")
+    exclude_lookalikes = recipe.get("exclude_lookalikes", False)
+    if type(exclude_lookalikes) is not bool:
+        raise VaultServiceError("spec.generate.exclude_lookalikes must be a boolean")
+
+    if charset != "custom":
+        if any(group in recipe for group in PROVISION_GENERATION_GROUP_KEYS):
+            raise VaultServiceError("spec.generate character groups require charset 'custom'")
+        if exclude_lookalikes:
+            raise VaultServiceError("spec.generate.exclude_lookalikes requires charset 'custom'")
+        return {"length": length, "charset": charset}
+
+    groups: dict[str, bool] = {}
+    for group in PROVISION_GENERATION_GROUP_KEYS:
+        enabled = recipe.get(group, False)
+        if type(enabled) is not bool:
+            raise VaultServiceError(f"spec.generate.{group} must be a boolean")
+        groups[group] = enabled
+    if not any(groups.values()):
+        raise VaultServiceError("spec.generate must enable at least one character group")
+    return {
+        "length": length,
+        "charset": "custom",
+        **groups,
+        **({"exclude_lookalikes": True} if exclude_lookalikes else {}),
+    }
 
 
 def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:

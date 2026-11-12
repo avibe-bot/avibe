@@ -6,7 +6,7 @@ import { VaultsPage } from '@/components/workbench/VaultsPage';
 
 import { frames } from '../../frame';
 import { consolePage } from '../workbench/fixtures';
-import { provisionRequest, vaultApi, vaultFixtures } from './fixtures';
+import { generatedProvisionRequest, provisionRequest, vaultApi, vaultFixtures } from './fixtures';
 
 const noop = () => {};
 const fixtures = vaultFixtures();
@@ -15,6 +15,9 @@ const quiet = vaultFixtures(vaultApi({ grants: [], requests: [] }));
 const create = () => <VaultSecretDialog open onOpenChange={noop} onCreated={noop} />;
 const provide = () => (
   <VaultSecretDialog open onOpenChange={noop} request={provisionRequest} onCancel={noop} onDeny={noop} onCreated={noop} />
+);
+const provideGenerated = () => (
+  <VaultSecretDialog open onOpenChange={noop} request={generatedProvisionRequest} onCancel={noop} onDeny={noop} onCreated={noop} />
 );
 const page = consolePage(<VaultsPage />);
 // Rows sort by name: AWS_DEPLOY, ETH_HOT_KEY, GITHUB_TOKEN, OPENAI_API_KEY, STRIPE_LIVE_KEY.
@@ -88,6 +91,15 @@ const designFrames = frames([
     status: 'shipped',
     fixtures,
     render: provide,
+  },
+  {
+    name: 'provide-generation',
+    title: 'Agent 请求 · 静态密钥生成选项',
+    width: 1000,
+    height: 1120,
+    status: 'shipped',
+    fixtures,
+    render: provideGenerated,
   },
   {
     name: 'edit',

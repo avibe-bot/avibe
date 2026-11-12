@@ -121,6 +121,12 @@ export const provisionRequest = request('vrq_provision', 'provision', 'ANTHROPIC
   spec: { description: 'Claude 备用通道', tags: ['ai'], policy: { allowed_hosts: ['api.anthropic.com'] } },
 }, { session: session('ses_relay', '中转节点限流') });
 
+export const generatedProvisionRequest = request('vrq_provision_generated', 'provision', 'DEPLOYMENT_ROOT_KEY', {
+  kind: 'static',
+  default_protection: 'standard',
+  spec: { protection: 'standard', generate: { length: 64, charset: 'hex' } },
+}, { session: session('ses_deploy', '部署密钥轮换') });
+
 /** An agent runs a command with an always-ask standard secret. */
 export const accessRequest = request('vrq_access', 'access', 'OPENAI_API_KEY', {
   kind: 'static',

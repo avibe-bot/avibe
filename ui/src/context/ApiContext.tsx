@@ -6,6 +6,7 @@ import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/a
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { accessDigestChanged, isAccessDigestChange, recordAccessDigest } from '../lib/accessDigest';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
+import type { StaticSecretGenerationRecipe } from '../lib/vaultSecretGeneration';
 import { clearLocalSnapshots, forgetLocalSnapshots } from '../lib/localSnapshots';
 import {
   type LocalStorePageRequest,
@@ -199,6 +200,7 @@ export type VaultRequestSpec = {
   kind?: 'static';
   default_field?: string;
   fields?: string[];
+  generate?: StaticSecretGenerationRecipe;
   protection?: 'standard' | 'protected';
   description?: string;
   /** May already include `skill:<name>` tags; `links.skills` is a bare-name convenience mirror. */

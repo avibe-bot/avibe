@@ -462,6 +462,54 @@ it('seals a protected replacement with its field record and drops its entered va
   expect(sealBlindBox).not.toHaveBeenCalled();
 });
 
+it('lets a protected field be regenerated before saving without exposing plaintext', async () => {
+  const firstEnvelope = { ciphertext: 'first-generated-ciphertext', nonce: 'generated-nonce', wrap_meta: '{}' };
+  const savedEnvelope = { ciphertext: 'saved-generated-ciphertext', nonce: 'generated-nonce', wrap_meta: '{}' };
+  vault.sealValue.mockReset();
+  vault.sealValue
+    .mockResolvedValueOnce({ envelope: firstEnvelope, establishingVmk: false })
+    .mockResolvedValueOnce({ envelope: savedEnvelope, establishingVmk: false });
+  renderEditor({ ...secret, protection: 'protected' });
+  fireEvent.change(screen.getByLabelText('Length'), { target: { value: '24' } });
+  const generate = screen.getByRole('button', { name: 'Generate value for username' });
+  fireEvent.click(generate);
+  await screen.findByText(en.vaults.dialog.generatedProtected);
+  await waitFor(() => expect((generate as HTMLButtonElement).disabled).toBe(false));
+  expect(api.updateVaultSecretField).not.toHaveBeenCalled();
+  fireEvent.click(generate);
+  await screen.findByText(en.vaults.dialog.generatedProtected);
+  await waitFor(() => expect(vault.sealValue).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect((generate as HTMLButtonElement).disabled).toBe(false));
+  expect(api.updateVaultSecretField).not.toHaveBeenCalled();
+  expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('');
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledWith(
+    'LOGIN', 'username', { record: 'LOGIN.username', sealed: savedEnvelope, expected_updated_at: 'version-1' }, { handleError: false },
+  ));
+  expect(vault.sealValue).toHaveBeenLastCalledWith('LOGIN.username', 'static', {
+    generate: { length: 24, charset: 'base64url' },
+  });
+  expect(sealBlindBox).not.toHaveBeenCalled();
+  expect(JSON.stringify(api.updateVaultSecretField.mock.calls[0][2])).not.toContain('plaintext');
+});
+
+it('regenerates a standard field in its input and waits for Save before writing', async () => {
+  renderEditor(secret);
+  fireEvent.change(screen.getByLabelText('Length'), { target: { value: '24' } });
+  const generate = screen.getByRole('button', { name: 'Generate value for username' });
+  fireEvent.click(generate);
+  const input = screen.getByLabelText('Value for username') as HTMLInputElement;
+  await waitFor(() => expect(input.value).toMatch(/^[A-Za-z0-9_-]{24}$/));
+  expect(api.updateVaultSecretField).not.toHaveBeenCalled();
+  fireEvent.click(generate);
+  await waitFor(() => expect(input.value).toMatch(/^[A-Za-z0-9_-]{24}$/));
+  const generated = input.value;
+  expect(api.updateVaultSecretField).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledOnce());
+  expect(sealBlindBox).toHaveBeenCalledWith(generated, expect.anything(), { purpose: 'seal', name: 'LOGIN.username' });
+});
+
 it('re-reads metadata and re-seals exactly once after a record mismatch', async () => {
   const renamed = { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' };
   api.updateVaultSecretField

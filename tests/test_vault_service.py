@@ -361,6 +361,41 @@ def test_provision_field_spec_contains_only_valid_distinct_labels():
             vs.normalize_provision_spec(invalid)
 
 
+def test_provision_generation_recipe_is_bounded_value_free_metadata():
+    assert vs.normalize_provision_spec({"generate": {"length": 64, "charset": "hex"}}) == {
+        "generate": {"length": 64, "charset": "hex"},
+    }
+    assert vs.normalize_provision_spec({"generate": {
+        "length": 32,
+        "charset": "custom",
+        "lowercase": True,
+        "digits": True,
+        "exclude_lookalikes": True,
+    }})["generate"] == {
+        "length": 32,
+        "charset": "custom",
+        "lowercase": True,
+        "uppercase": False,
+        "digits": True,
+        "symbols": False,
+        "exclude_lookalikes": True,
+    }
+
+    for invalid in [
+        {"generate": {"length": True, "charset": "hex"}},
+        {"generate": {"length": 0, "charset": "hex"}},
+        {"generate": {"length": 513, "charset": "hex"}},
+        {"generate": {"length": 12, "charset": "custom"}},
+        {"generate": {"length": 12, "charset": "custom", "digits": "true"}},
+        {"generate": {"length": 12, "charset": "hex", "lowercase": True}},
+        {"generate": {"length": 12, "charset": "hex", "exclude_lookalikes": True}},
+        {"generate": {"length": 12, "charset": "hex", "value": "plaintext"}},
+        {"value": "plaintext", "generate": {"length": 12, "charset": "hex"}},
+    ]:
+        with pytest.raises(vs.VaultServiceError):
+            vs.normalize_provision_spec(invalid)
+
+
 def test_fields_use_canonical_records_and_default_label_fallback(vault):
     _create(
         vault,

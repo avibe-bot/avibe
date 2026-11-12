@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context/ApiContext';
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
+import type { VaultSandboxSealResult } from '@/lib/vaultSandboxClient';
+import { DEFAULT_STATIC_SECRET_GENERATION_RECIPE, generateStaticSecret, normalizeStaticSecretGenerationRecipe, type StaticSecretGenerationRecipe } from '@/lib/vaultSecretGeneration';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { MAX_VAULT_FIELDS, vaultDefaultField, vaultFieldNameIssue, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
@@ -19,10 +21,17 @@ import {
   VaultFieldsHeader,
 } from './vault-field-list';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
+import { VaultSecretGenerationOptions } from './vault-secret-generation-options';
 
 type DraftReconciliation = {
   drafts: Map<string, string>;
   removed: string[];
+};
+
+type ProtectedGeneratedDraft = {
+  record: string;
+  recipe: StaticSecretGenerationRecipe;
+  sealed: VaultSandboxSealResult;
 };
 
 function reconcileDrafts(previous: VaultSecret, next: VaultSecret, drafts: ReadonlyMap<string, string>): DraftReconciliation {
@@ -76,14 +85,49 @@ export function VaultSecretFieldsEditor({
   const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
   const [saved, setSaved] = useState(false);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  const [generationRecipe, setGenerationRecipe] = useState<StaticSecretGenerationRecipe>({ ...DEFAULT_STATIC_SECRET_GENERATION_RECIPE });
+  const [protectedGeneratedDrafts, setProtectedGeneratedDrafts] = useState<Map<string, ProtectedGeneratedDraft>>(() => new Map());
+  const [generatingField, setGeneratingField] = useState<string | null>(null);
+  const generatedStandardFieldsRef = useRef(new Set<string>());
   const fields = vaultFieldNames(current);
   const defaultField = vaultDefaultField(current);
   const isProtected = current.protection === 'protected';
   const entryIssue = vaultEntryIssue();
   const locked = disabled || busy;
   const fieldsCorrupt = current.fields_state === 'corrupt';
-  const fieldMutationLocked = locked || fieldsCorrupt;
+  const fieldMutationLocked = locked || fieldsCorrupt || generatingField !== null;
   const canWriteValue = !isProtected || (!entryIssue && vault.status === 'unlocked');
+
+  const generatedDraftKey = (field: string, adding = false) => `${adding ? 'new' : 'field'}:${field}`;
+  const newGenerationKey = generatedDraftKey(newField ?? '', true);
+  const clearProtectedGeneratedDraft = (key: string) => {
+    setProtectedGeneratedDrafts((current) => {
+      if (!current.has(key)) return current;
+      const next = new Map(current);
+      next.delete(key);
+      return next;
+    });
+  };
+  const clearGeneratedDraft = (key: string) => {
+    generatedStandardFieldsRef.current.delete(key);
+    clearProtectedGeneratedDraft(key);
+  };
+  const changeGenerationRecipe = (nextRecipe: StaticSecretGenerationRecipe) => {
+    if (JSON.stringify(nextRecipe) !== JSON.stringify(generationRecipe)) {
+      const generated = [...generatedStandardFieldsRef.current];
+      if (generated.length > 0) {
+        const nextDrafts = new Map(draftsRef.current);
+        for (const key of generated) {
+          if (key.startsWith('field:')) nextDrafts.set(key.slice('field:'.length), '');
+          if (key.startsWith('new:')) setNewValue('');
+        }
+        updateDrafts(nextDrafts);
+        generatedStandardFieldsRef.current.clear();
+      }
+      setProtectedGeneratedDrafts(new Map());
+    }
+    setGenerationRecipe(nextRecipe);
+  };
 
   useEffect(() => {
     if (isProtected && !entryIssue) void refresh();
@@ -236,7 +280,13 @@ export function VaultSecretFieldsEditor({
     return accepted;
   };
 
-  const saveValue = (field: string, value: string, adding = false) => {
+  const saveValue = (
+    field: string,
+    value: string,
+    adding = false,
+    generatedDraft?: ProtectedGeneratedDraft,
+    generatedKey = generatedDraftKey(field, adding),
+  ) => {
     // Keep this one local copy only until the write settles. Protected sealing clears the
     // persistent input immediately through `clear`, while this copy permits exactly one
     // re-seal if the server reports that its record mapping changed.
@@ -258,14 +308,17 @@ export function VaultSecretFieldsEditor({
       if (adding ? exists : !exists) throw conflict();
       const record = vaultRecordName(secret.name, targetField, latestDefault);
       let cryptoFields: Omit<VaultFieldValuePayload, 'record' | 'expected_updated_at'>;
-      if (isProtected) {
+      if (isProtected && generatedDraft) {
+        const sealed = generatedDraft.record === record
+          ? generatedDraft.sealed
+          : await vault.sealValue(record, 'static', { generate: generatedDraft.recipe });
+        cryptoFields = { sealed: sealed.envelope };
+      } else if (isProtected) {
         const valueRef = { current: capturedValue };
         const sealed = await vault.sealValue(record, 'static', { valueRef, clear });
         cryptoFields = { sealed: sealed.envelope };
       } else {
-        cryptoFields = {
-          blind_box: await sealBlindBox(capturedValue, await api.getVaultPubkey(), standardCreateBlindBoxContext(record)),
-        };
+        cryptoFields = { blind_box: await sealBlindBox(capturedValue, await api.getVaultPubkey(), standardCreateBlindBoxContext(record)) };
       }
       try {
         return await api.updateVaultSecretField(secret.name, targetField, {
@@ -301,6 +354,7 @@ export function VaultSecretFieldsEditor({
         }
         if (result.ok && result.secret) {
           clear(savedField);
+          clearGeneratedDraft(generatedKey);
           if (adding) setNewField(null);
         }
         return result;
@@ -310,26 +364,70 @@ export function VaultSecretFieldsEditor({
     }, false, () => refetchedForRetry);
   };
 
+  const generateField = async (field: string, adding = false) => {
+    if (fieldMutationLocked || !canWriteValue) return;
+    try {
+      const recipe = normalizeStaticSecretGenerationRecipe(generationRecipe);
+      const key = generatedDraftKey(field, adding);
+      setError(null);
+      if (!isProtected) {
+        const value = generateStaticSecret(recipe);
+        clearGeneratedDraft(key);
+        if (adding) {
+          setNewValue(value);
+        } else {
+          const nextDrafts = new Map(draftsRef.current);
+          nextDrafts.set(field, value);
+          updateDrafts(nextDrafts);
+        }
+        generatedStandardFieldsRef.current.add(key);
+        return;
+      }
+
+      const currentSecret = currentRef.current;
+      const record = vaultRecordName(currentSecret.name, field, vaultDefaultField(currentSecret));
+      setGeneratingField(key);
+      try {
+        const sealed = await vault.sealValue(record, 'static', { generate: recipe });
+        const latestSecret = currentRef.current;
+        if (record !== vaultRecordName(latestSecret.name, field, vaultDefaultField(latestSecret))) {
+          setError(t('vaults.fields.recordConflict'));
+          return;
+        }
+        setProtectedGeneratedDrafts((current) => new Map(current).set(key, { record, recipe, sealed }));
+      } finally {
+        setGeneratingField(null);
+      }
+    } catch (generationError) {
+      setError(vaultErrorMessage(t, generationError, t('vaults.dialog.errors.generationFailed')));
+    }
+  };
+
   // One Save per row: the default row renames (metadata only) and then writes a typed value
   // under the renamed record; any other row writes its value.
   const saveRow = async (field: string) => {
     const value = draftsRef.current.get(field) ?? '';
+    const key = generatedDraftKey(field);
+    const generated = protectedGeneratedDrafts.get(key);
     if (field === defaultField && defaultLabel !== defaultField) {
       const renamed = await mutate(
         () => api.updateVaultSecret(current.name, { default_field: defaultLabel }, { handleError: false }),
         true,
       );
       // The rename carried the typed value over to the new label (reconcileDrafts).
-      if (renamed && value) saveValue(vaultDefaultField(currentRef.current), value);
+      if (renamed && (value || generated)) {
+        saveValue(vaultDefaultField(currentRef.current), value, false, generated, key);
+      }
       return;
     }
-    if (value) saveValue(field, value);
+    if (value || generated) saveValue(field, value, false, generated, key);
   };
   const removeSavedField = async (field: string) => {
     if (fieldsCorrupt) return;
     await mutate(() => api.deleteVaultSecretField(current.name, field, { expected_updated_at: current.updated_at }));
   };
   const discardNewField = () => {
+    clearGeneratedDraft(generatedDraftKey(newField ?? '', true));
     setNewField(null);
     setNewValue('');
     setNewNameTouched(false);
@@ -339,6 +437,7 @@ export function VaultSecretFieldsEditor({
   const newIssue = newField === null ? null : vaultFieldNameIssue(newField, fields);
   const focusedIssue = focusedName === 'default' ? labelIssue : focusedName === 'new' ? newIssue : null;
   const showNameRule = focusedName !== null && focusedIssue !== 'nameInvalid' && focusedIssue !== 'nameTaken';
+  const newProtectedGenerated = newField === null ? undefined : protectedGeneratedDrafts.get(newGenerationKey);
 
   return (
     <div className="flex flex-col gap-2" onKeyDown={(event) => {
@@ -352,6 +451,7 @@ export function VaultSecretFieldsEditor({
       {fieldsCorrupt && (
         <p role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</p>
       )}
+      <VaultSecretGenerationOptions recipe={generationRecipe} onChange={changeGenerationRecipe} disabled={fieldMutationLocked} />
       <VaultFieldList
         onAdd={() => setNewField('')}
         addDisabled={fieldMutationLocked || newField !== null || fields.length >= MAX_VAULT_FIELDS}
@@ -360,6 +460,8 @@ export function VaultSecretFieldsEditor({
           const isDefault = field === defaultField;
           const draft = drafts.get(field) ?? '';
           const renaming = isDefault && defaultLabel !== defaultField;
+          const generationKey = generatedDraftKey(field);
+          const generated = protectedGeneratedDrafts.get(generationKey);
           return (
             <VaultFieldRow
               key={field}
@@ -371,6 +473,7 @@ export function VaultSecretFieldsEditor({
                 label: t('vaults.fields.defaultName'),
                 onChange: (next) => {
                   defaultLabelDirtyRef.current = true;
+                  clearProtectedGeneratedDraft(generatedDraftKey(field));
                   setDefaultLabel(next);
                 },
                 onFocus: () => setFocusedName('default'),
@@ -381,19 +484,32 @@ export function VaultSecretFieldsEditor({
                 label: t('vaults.fields.value', { field }),
                 placeholder: t('vaults.fields.replacePlaceholder'),
                 onChange: (next) => {
+                  clearGeneratedDraft(generationKey);
                   const nextDrafts = new Map(draftsRef.current);
                   nextDrafts.set(field, next);
                   updateDrafts(nextDrafts);
                 },
               }}
-              action={draft || renaming ? (
-                <Button type="button" size="xs"
-                  aria-label={t('vaults.fields.saveNamed', { field })}
-                  disabled={fieldMutationLocked || (renaming && labelIssue !== null) || (Boolean(draft) && !canWriteValue)}
-                  onClick={() => void saveRow(field)}>
-                  {t('vaults.fields.save')}
-                </Button>
-              ) : null}
+              action={(
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(draft || renaming || generated) && (
+                    <Button type="button" size="xs"
+                      aria-label={t('vaults.fields.saveNamed', { field })}
+                      disabled={fieldMutationLocked || (renaming && labelIssue !== null) || ((Boolean(draft) || Boolean(generated)) && !canWriteValue)}
+                      onClick={() => void saveRow(field)}>
+                      {t('vaults.fields.save')}
+                    </Button>
+                  )}
+                  <Button type="button" size="xs" variant="secondary"
+                    aria-label={t('vaults.fields.generateNamed', { field })}
+                    disabled={fieldMutationLocked || !canWriteValue || labelIssue !== null || renaming}
+                    onClick={() => void generateField(field)}>
+                    {generatingField === generationKey ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                    {t('vaults.dialog.generateStatic')}
+                  </Button>
+                  {generated && <span role="status" className="text-[11px] text-mint-ink">{t('vaults.dialog.generatedProtected')}</span>}
+                </div>
+              )}
               remove={isDefault ? undefined : {
                 label: t('vaults.fields.remove', { field }),
                 confirm: <VaultFieldRemoveConfirm field={field} revokesGrants />,
@@ -412,7 +528,14 @@ export function VaultSecretFieldsEditor({
               editable: true,
               value: newField,
               label: t('vaults.fields.newName'),
-              onChange: setNewField,
+              onChange: (next) => {
+                const oldKey = newGenerationKey;
+                clearProtectedGeneratedDraft(oldKey);
+                if (generatedStandardFieldsRef.current.delete(oldKey)) {
+                  generatedStandardFieldsRef.current.add(generatedDraftKey(next, true));
+                }
+                setNewField(next);
+              },
               onFocus: () => setFocusedName('new'),
               onBlur: () => {
                 setFocusedName(null);
@@ -424,14 +547,26 @@ export function VaultSecretFieldsEditor({
               value: newValue,
               label: t('vaults.fields.newValue'),
               placeholder: t('vaults.dialog.valuePlaceholder'),
-              onChange: setNewValue,
+              onChange: (next) => {
+                clearGeneratedDraft(newGenerationKey);
+                setNewValue(next);
+              },
             }}
             action={(
-              <Button type="button" size="xs" aria-label={t('vaults.fields.saveNew')}
-                disabled={fieldMutationLocked || !canWriteValue || !newValue || newIssue !== null}
-                onClick={() => saveValue(newField, newValue, true)}>
-                {t('vaults.fields.save')}
-              </Button>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Button type="button" size="xs" aria-label={t('vaults.fields.saveNew')}
+                  disabled={fieldMutationLocked || !canWriteValue || (!newValue && !newProtectedGenerated) || newIssue !== null}
+                  onClick={() => saveValue(newField, newValue, true, newProtectedGenerated, newGenerationKey)}>
+                  {t('vaults.fields.save')}
+                </Button>
+                <Button type="button" size="xs" variant="secondary" aria-label={t('vaults.fields.generateNamed', { field: newField || t('vaults.fields.newName') })}
+                  disabled={fieldMutationLocked || !canWriteValue || newIssue !== null}
+                  onClick={() => void generateField(newField, true)}>
+                  {generatingField === newGenerationKey ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                  {t('vaults.dialog.generateStatic')}
+                </Button>
+                {newProtectedGenerated && <span role="status" className="text-[11px] text-mint-ink">{t('vaults.dialog.generatedProtected')}</span>}
+              </div>
             )}
             remove={{ label: t('vaults.fields.discardNew'), onRemove: discardNewField }}
             issue={newIssue === 'nameRequired' && !newNameTouched && !newValue ? null : newIssue}

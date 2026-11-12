@@ -57,7 +57,7 @@ beforeEach(async () => {
   api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.6' }] });
   api.createVaultSecret.mockResolvedValue({ ok: true });
   vault.sealValue.mockImplementation(async (_name, _kind, value) => {
-    value.clear();
+    if (typeof value === 'object' && value !== null && 'clear' in value && typeof value.clear === 'function') value.clear();
     return { envelope, establishingVmk: true, authzFactorRegistration: { challenge_id: 'setup' } };
   });
 });
@@ -162,6 +162,256 @@ it('keeps the legacy single-value create payload until fields are added', async 
   await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
   expect(api.createVaultSecret.mock.calls[0][0]).not.toHaveProperty('fields');
   expect(api.createVaultSecret.mock.calls[0][0]).not.toHaveProperty('default_field');
+});
+
+it('generates a standard static value only after an explicit click and persists only its blind box', async () => {
+  render(form(<VaultSecretForm fixedName="GENERATED_TOKEN" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.generateStatic }));
+  const input = await screen.findByPlaceholderText(en.vaults.dialog.valuePlaceholder) as HTMLInputElement;
+  await waitFor(() => expect(input.value).toMatch(/^[A-Za-z0-9_-]{32}$/));
+  const generated = input.value;
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+  fireEvent.click(submitButton());
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(sealBlindBox).toHaveBeenCalledWith(generated, expect.anything(), { purpose: 'seal', name: 'GENERATED_TOKEN' });
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload.blind_box).toEqual(blindBox);
+  expect(JSON.stringify(payload)).not.toContain(generated);
+});
+
+it('generates and saves a standard request recipe from one click', async () => {
+  render(form(<VaultSecretForm
+    fixedName="REQUEST_TOKEN"
+    provisionRequestId="request-standard-generated"
+    requestSpec={{ generate: { length: 32, charset: 'base64url' } }}
+    onCancel={vi.fn()}
+    onCreated={vi.fn()}
+  />));
+  const submit = screen.getByRole('button', { name: en.vaults.request.generateAndWake }) as HTMLButtonElement;
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  fireEvent.click(submit);
+
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(sealBlindBox).toHaveBeenCalledOnce();
+  const generated = sealBlindBox.mock.calls[0][0] as string;
+  expect(generated).toMatch(/^[A-Za-z0-9_-]{32}$/);
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload.provision_request_id).toBe('request-standard-generated');
+  expect(payload.blind_box).toEqual(blindBox);
+  expect(payload).not.toHaveProperty('generate');
+  expect(JSON.stringify(payload)).not.toContain(generated);
+});
+
+it.each([
+  ['en', en.vaults.request.generateAndWake],
+  ['zh', zh.vaults.request.generateAndWake],
+] as const)('localizes the one-click request action in %s', async (language, label) => {
+  await i18n.changeLanguage(language);
+  render(form(<VaultSecretForm
+    fixedName="REQUEST_TOKEN"
+    provisionRequestId={`request-${language}`}
+    requestSpec={{ generate: { length: 32, charset: 'hex' } }}
+    onCancel={vi.fn()}
+    onCreated={vi.fn()}
+  />));
+  expect(await screen.findByRole('button', { name: label })).toBeTruthy();
+});
+
+it('generates only missing standard request fields and preserves manually entered values', async () => {
+  const recipe = { length: 48, charset: 'hex' } as const;
+  render(form(<VaultSecretForm
+    fixedName="LOGIN"
+    provisionRequestId="request-standard-fields"
+    requestSpec={{
+      protection: 'standard',
+      fields: ['username', 'password'],
+      default_field: 'password',
+      generate: recipe,
+    }}
+    onCancel={vi.fn()}
+    onCreated={vi.fn()}
+  />));
+  await waitFor(() => expect(screen.getByLabelText('Value for username')).toBeTruthy());
+  change('Value for username', 'manual-user');
+  const submit = screen.getByRole('button', { name: en.vaults.request.generateAndWake }) as HTMLButtonElement;
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  fireEvent.click(submit);
+
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(sealBlindBox).toHaveBeenCalledTimes(2);
+  expect(sealBlindBox).toHaveBeenNthCalledWith(
+    1,
+    'manual-user',
+    { public_key: 'public', fingerprint: 'fingerprint' },
+    { purpose: 'seal', name: 'LOGIN.username' },
+  );
+  expect(sealBlindBox).toHaveBeenNthCalledWith(
+    2,
+    expect.stringMatching(/^[0-9a-f]{48}$/),
+    { public_key: 'public', fingerprint: 'fingerprint' },
+    { purpose: 'seal', name: 'LOGIN' },
+  );
+
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload).toMatchObject({
+    provision_request_id: 'request-standard-fields',
+    default_field: 'password',
+    blind_box: blindBox,
+    fields: [{ name: 'username', record: 'LOGIN.username', blind_box: blindBox }],
+  });
+  expect(payload).not.toHaveProperty('generate');
+  expect(JSON.stringify(payload)).not.toContain('manual-user');
+});
+
+it('uses a protected request recipe only on user action and submits the sandbox envelope', async () => {
+  render(form(<VaultSecretForm
+    fixedName="DEPLOYMENT_ROOT_KEY"
+    provisionRequestId="request-generated"
+    requestSpec={{ protection: 'protected', generate: { length: 64, charset: 'hex' } }}
+    onCancel={vi.fn()}
+    onCreated={vi.fn()}
+  />));
+  await waitFor(() => expect((screen.getByLabelText(en.vaults.dialog.generationLength) as HTMLInputElement).value).toBe('64'));
+  expect(vault.sealValue).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.generateStatic }));
+  await screen.findByText(en.vaults.dialog.generatedProtected);
+  expect(vault.sealValue).toHaveBeenCalledWith('DEPLOYMENT_ROOT_KEY', 'static', { generate: { length: 64, charset: 'hex' } });
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+  fireEvent.click(submitButton());
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload.sealed).toEqual(envelope);
+  expect(payload).not.toHaveProperty('generate');
+  expect(payload).not.toHaveProperty('value');
+  expect(JSON.stringify(payload)).not.toContain('plaintext');
+});
+
+it('generates only missing protected request fields and preserves manually entered values', async () => {
+  const recipe = { length: 48, charset: 'hex' } as const;
+  render(form(<VaultSecretForm
+    fixedName="LOGIN"
+    provisionRequestId="request-protected-fields"
+    requestSpec={{
+      protection: 'protected',
+      fields: ['username', 'password'],
+      default_field: 'password',
+      generate: recipe,
+    }}
+    onCancel={vi.fn()}
+    onCreated={vi.fn()}
+  />));
+  await waitFor(() => expect(screen.getByLabelText('Value for username')).toBeTruthy());
+  change('Value for username', 'manual-user');
+  const submit = screen.getByRole('button', { name: en.vaults.request.generateAndWake }) as HTMLButtonElement;
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  fireEvent.click(submit);
+
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(vault.sealValue).toHaveBeenCalledTimes(2);
+  expect(vault.sealValue).toHaveBeenCalledWith('LOGIN', 'static', { generate: recipe });
+  expect(vault.sealValue).toHaveBeenCalledWith('LOGIN.username', 'static', expect.objectContaining({
+    valueRef: expect.objectContaining({ current: 'manual-user' }),
+    clear: expect.any(Function),
+  }));
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload).toMatchObject({
+    provision_request_id: 'request-protected-fields',
+    default_field: 'password',
+    sealed: envelope,
+    fields: [{ name: 'username', record: 'LOGIN.username', sealed: envelope }],
+  });
+  expect(payload).not.toHaveProperty('generate');
+  expect(JSON.stringify(payload)).not.toContain('manual-user');
+});
+
+it('does not save after protected request generation fails and lets the user retry', async () => {
+  vault.sealValue.mockRejectedValueOnce(Object.assign(new Error('sandbox temporarily unavailable'), { code: 'sandbox_reset' }));
+  render(form(<VaultSecretForm
+    fixedName="REQUEST_TOKEN"
+    provisionRequestId="request-protected-retry"
+    requestSpec={{ protection: 'protected', generate: { length: 32, charset: 'hex' } }}
+    onCancel={vi.fn()}
+    onCreated={vi.fn()}
+  />));
+  const submit = screen.getByRole('button', { name: en.vaults.request.generateAndWake }) as HTMLButtonElement;
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  fireEvent.click(submit);
+  expect(await screen.findByText(en.errors.sandbox_reset)).toBeTruthy();
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  fireEvent.click(submit);
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(api.createVaultSecret.mock.calls[0][0].sealed).toEqual(envelope);
+});
+
+it('seals each protected generated field in the sandbox and reuses its field-bound envelope', async () => {
+  render(form(<VaultSecretForm fixedName="LOGIN" defaultProtection="protected" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  applyTemplate('Login');
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.generateNamed.replace('{{field}}', 'username') }));
+  await screen.findByText(en.vaults.dialog.generatedProtected);
+  change('Value for password', 'manual-password');
+  fireEvent.click(submitButton());
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(vault.sealValue).toHaveBeenCalledWith('LOGIN.username', 'static', { generate: { length: 32, charset: 'base64url' } });
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload.sealed).toEqual(envelope);
+  expect(payload.default_field).toBe('password');
+  expect(payload.fields).toEqual([{ name: 'username', record: 'LOGIN.username', sealed: envelope }]);
+  expect(JSON.stringify(payload)).not.toContain('manual-password');
+});
+
+it('moves a sandbox-generated single value onto the default row when creating fields', async () => {
+  render(form(<VaultSecretForm fixedName="LOGIN" defaultProtection="protected" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.generateStatic }));
+  await screen.findByText(en.vaults.dialog.generatedProtected);
+  applyTemplate('Login');
+  change('Value for username', 'alice');
+  fireEvent.click(submitButton());
+
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(vault.sealValue).toHaveBeenCalledWith('LOGIN', 'static', { generate: { length: 32, charset: 'base64url' } });
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload.sealed).toEqual(envelope);
+  expect(payload.default_field).toBe('password');
+  expect(payload.fields).toEqual([{ name: 'username', record: 'LOGIN.username', sealed: envelope }]);
+});
+
+it('discards a protected generation resolved after the record name changes', async () => {
+  let resolveSeal: (result: { envelope: typeof envelope; establishingVmk: boolean }) => void = () => {};
+  vault.sealValue.mockImplementationOnce(() => new Promise((resolve) => { resolveSeal = resolve; }));
+  const { container } = render(form(<VaultSecretForm defaultProtection="protected" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  const name = screen.getByRole('textbox', { name: `${en.vaults.dialog.name} ${en.vaults.dialog.nameHint}` });
+  fireEvent.change(name, { target: { value: 'LOGIN' } });
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.generateStatic }));
+  await waitFor(() => expect(vault.sealValue).toHaveBeenCalledOnce());
+  fireEvent.change(name, { target: { value: 'RENAMED' } });
+  fireEvent.change(name, { target: { value: 'LOGIN' } });
+  resolveSeal({ envelope, establishingVmk: false });
+
+  await waitFor(() => expect((screen.getByRole('button', { name: en.vaults.dialog.generateStatic }) as HTMLButtonElement).disabled).toBe(false));
+  expect(screen.queryByText(en.vaults.dialog.generatedProtected)).toBeNull();
+  expect((container.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(true);
+});
+
+it.each(['standard', 'protected'] as const)('invalidates generated %s field values when the recipe changes', async (protection) => {
+  render(form(<VaultSecretForm fixedName="LOGIN" defaultProtection={protection} onCancel={vi.fn()} onCreated={vi.fn()} />));
+  applyTemplate('Login');
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.generateNamed.replace('{{field}}', 'username') }));
+
+  if (protection === 'protected') {
+    await screen.findByText(en.vaults.dialog.generatedProtected);
+  } else {
+    await waitFor(() => expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toMatch(/^[A-Za-z0-9_-]{32}$/));
+  }
+
+  fireEvent.change(screen.getByLabelText(en.vaults.dialog.generationLength), { target: { value: '48' } });
+
+  if (protection === 'protected') {
+    await waitFor(() => expect(screen.queryByText(en.vaults.dialog.generatedProtected)).toBeNull());
+  } else {
+    await waitFor(() => expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe(''));
+  }
 });
 
 it('preserves a selected file instead of silently switching it to empty field rows', async () => {

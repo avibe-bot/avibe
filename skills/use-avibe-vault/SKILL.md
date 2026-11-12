@@ -42,13 +42,16 @@ Rules:
 
 Common commands:
 
-Request that the user add a missing static secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
+Request that the user add a missing static secret. `spec-json` may contain only non-secret prefill metadata and an optional bounded `generate` recipe. The user must click **Generate and save** or enter a value in the browser; the agent cannot set or read the value:
 `vibe vault request OPENAI_API_KEY --reason "Need OpenAI API access" --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`
+
+Request a protected 64-character hexadecimal value without passing plaintext through the agent or daemon:
+`vibe vault request DEPLOYMENT_ROOT_KEY --reason "Need a fresh deployment key" --spec-json '{"protection":"protected","generate":{"length":64,"charset":"hex"}}'`
 
 Request a multi-field login item with a password default. These are field names only, never values:
 `vibe vault request GITHUB_LOGIN --reason "Log in to GitHub" --spec-json '{"protection":"protected","fields":["username","password","totp"],"default_field":"password"}'`
 
-A `totp` field is ordinary stored secret material in this version, not a generated one-time code.
+A `totp` field is ordinary stored secret material in this version, not a generated one-time code. A `generate` recipe pre-fills the browser's generation options; the user must explicitly generate and save each field, including every field in a multi-field request.
 
 For a missing keypair/signing key, ask the user to create a keypair secret in the Vault UI; do not request or store private-key material as a static secret.
 

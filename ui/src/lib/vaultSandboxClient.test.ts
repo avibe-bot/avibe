@@ -35,6 +35,7 @@ type TestVaultSandboxClient = {
   setModalVisible: (visible: boolean) => void;
   startSurfaceRefresh: () => void;
   measureSurface: () => Promise<VaultConfirmSurface | null>;
+  seal: VaultSandboxClient['seal'];
   request: <T>(
     op: string,
     payload: unknown,
@@ -51,6 +52,50 @@ afterEach(() => {
 });
 
 describe('VaultSandboxClient interactive request surface', () => {
+  it('sends a value-free generation recipe to the sandbox', async () => {
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+
+    const client = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient;
+    Object.assign(client, {
+      iframe,
+      backdrop: null,
+      pending: new Map(),
+      readyPromise: Promise.resolve({}),
+      handshaken: true,
+      modalVisible: false,
+      interactiveRequests: new Set(),
+      surfaceRefreshTimer: null,
+    });
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+    const recipe = { length: 32, charset: 'hex' as const };
+    const sealed = {
+      envelope: { ciphertext: 'generated-ciphertext', nonce: 'generated-nonce', wrap_meta: '{}' },
+      establishingVmk: false,
+    };
+
+    const result = client.seal({ name: 'DEPLOYMENT_ROOT_KEY', kind: 'static', generate: recipe });
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
+
+    const [wire] = postMessage.mock.calls[0];
+    expect(wire).toMatchObject({
+      op: 'seal',
+      payload: {
+        name: 'DEPLOYMENT_ROOT_KEY',
+        kind: 'static',
+        inputMode: 'sandbox-generated',
+        generate: recipe,
+      },
+    });
+    expect(wire).not.toHaveProperty('payload.value');
+
+    const pending = client.pending.get((wire as { id: string }).id);
+    if (!pending) throw new Error('seal request was not registered');
+    window.clearTimeout(pending.timer);
+    pending.resolve(sealed);
+    await expect(result).resolves.toEqual(sealed);
+  });
+
   it('attests the expanded frame geometry and observer visibility', async () => {
     const iframe = document.createElement('iframe');
     document.body.appendChild(iframe);

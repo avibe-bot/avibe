@@ -21,6 +21,7 @@ import {
 import { type BlindBox, type ProtectedRecordEnvelope, type SignatureResult } from './vaultCrypto';
 import { assertVaultEntryAvailable, vaultEntryIssue } from './vaultEntry';
 import { invalidateVaultSandboxPolicy } from './vaultSandboxPolicy';
+import type { StaticSecretGenerationRecipe } from './vaultSecretGeneration';
 
 /**
  * Value-free protected material hydrated into UI approval cards. The parent app brokers it to the
@@ -33,10 +34,9 @@ export type ProtectedUnlockMaterial = {
   envelope: ProtectedRecordEnvelope;
 };
 
-type ParentStaticSealValue = {
-  valueRef: { current: string };
-  clear: () => void;
-};
+type ParentStaticSealValue =
+  | { valueRef: { current: string }; clear: () => void }
+  | { generate: StaticSecretGenerationRecipe };
 
 export type ProtectedVaultStatus = 'checking' | 'needs-setup' | 'locked' | 'unlocked' | 'error';
 
@@ -348,14 +348,15 @@ export function useProtectedVault() {
       let sealed: VaultSandboxSealResult;
       if (kind === 'static') {
         if (!parentStaticValue) throw new Error('protected-static-value-required');
-        // Hand the plaintext to the sandbox, then drop the parent-held copy IMMEDIATELY. `seal()`
-        // captures `value` into the request payload synchronously here, so we clear the persistent
-        // ref + revealed field right away rather than leaving plaintext in parent memory for the
-        // whole ceremony (R1 seal is silent while unlocked, but the value must not linger).
-        const sealing = sandbox.seal({ name, kind: 'static', value: parentStaticValue.valueRef.current, wrapMeta });
-        parentStaticValue.valueRef.current = '';
-        parentStaticValue.clear();
-        sealed = await sealing;
+        if ('generate' in parentStaticValue) {
+          sealed = await sandbox.seal({ name, kind: 'static', generate: parentStaticValue.generate, wrapMeta });
+        } else {
+          // Hand the plaintext to the sandbox, then drop the parent-held copy IMMEDIATELY.
+          const sealing = sandbox.seal({ name, kind: 'static', value: parentStaticValue.valueRef.current, wrapMeta });
+          parentStaticValue.valueRef.current = '';
+          parentStaticValue.clear();
+          sealed = await sealing;
+        }
       } else {
         // Keypair is generate-only: the key is born inside the sandbox and never crosses the
         // boundary; the parent receives only ciphertext + public key/addresses (protocol v2 §7.2).

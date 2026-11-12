@@ -1,4 +1,5 @@
 # Byte-exact generated resource and released-template migration fixture.
+ui/e2e/vault-integrity/release/** -text whitespace=cr-at-eol
 vibe/show_router.tsx text eol=lf
 tests/fixtures/show_pages/router-history-pre-ssr.tsx text eol=lf
 desktop/cua-driver/patches/*.patch text eol=lf

@@ -28,7 +28,9 @@ import {
   type VaultRequestSpec,
   type VaultSecret,
   type VaultCreatePayload,
+  type VaultWebAuthnRegistrationPayload,
 } from '@/context/ApiContext';
+import type { VaultSandboxSealResult } from '@/lib/vaultSandboxClient';
 import { cn } from '@/lib/utils';
 import { mergeTags, normalizeTagOrSkillEntry, partitionTags, toSkillTag } from '@/lib/vaultTags';
 import { buildMetadataPatch } from '@/lib/vaultPolicy';
@@ -44,6 +46,13 @@ import {
 } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
+import {
+  DEFAULT_STATIC_SECRET_GENERATION_RECIPE,
+  generateStaticSecret,
+  isStaticSecretGenerationRecipeValid,
+  normalizeStaticSecretGenerationRecipe,
+  type StaticSecretGenerationRecipe,
+} from '@/lib/vaultSecretGeneration';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
@@ -70,6 +79,7 @@ import { HintLine, KeySourceTabs } from './vault-key-builder-parts';
 import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
+import { VaultSecretGenerationOptions } from './vault-secret-generation-options';
 import { VaultSolanaKeyFields } from './vault-solana-key-fields';
 
 type VaultKind = 'static' | 'keypair';
@@ -150,7 +160,12 @@ function avaultP2Ready(dep: DependencyItem | null): boolean {
 /** Shared field label — 13px medium (ui/design: vault/secret-dialog/create). */
 const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
 
-/** The sandbox-sealed protected keypair the form holds between "Generate key" and submit. */
+/** A value generated and sealed in the protected sandbox before the form submits. */
+type ProtectedGeneratedSeal = VaultSandboxSealResult & { authzFactorRegistration?: VaultWebAuthnRegistrationPayload };
+type ProtectedStaticSeal = ProtectedGeneratedSeal & { record: string };
+type StaticSecretGenerationResult =
+  | { kind: 'standard'; value: string }
+  | { kind: 'protected'; seal: ProtectedStaticSeal };
 
 export const VaultSecretForm: React.FC<{
   fixedName?: string;
@@ -195,8 +210,17 @@ export const VaultSecretForm: React.FC<{
   const [focusedNameId, setFocusedNameId] = useState<number | null>(null);
   const [fieldEditBusy, setFieldEditBusy] = useState(false);
   const staticValueRef = useRef('');
+  const generatedStandardSingleRef = useRef(false);
+  const generatedStandardFieldIdsRef = useRef(new Set<number>());
+  const staticGenerationSequenceRef = useRef(0);
+  const [protectedGeneratedStatic, setProtectedGeneratedStatic] = useState<ProtectedStaticSeal | null>(null);
+  const [protectedGeneratedFields, setProtectedGeneratedFields] = useState<Map<number, ProtectedStaticSeal>>(() => new Map());
+  const [generatingStaticValue, setGeneratingStaticValue] = useState(false);
   const setStaticValue = useCallback((next: string) => {
+    staticGenerationSequenceRef.current += 1;
     staticValueRef.current = next;
+    generatedStandardSingleRef.current = false;
+    setProtectedGeneratedStatic(null);
     setValue(next);
   }, []);
   const [staticSource, setStaticSource] = useState<StaticSecretSource>('text');
@@ -234,6 +258,9 @@ export const VaultSecretForm: React.FC<{
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
   const [protection, setProtection] = useState<VaultProtection>(requestSpec?.protection ?? defaultProtection);
+  const [generationRecipe, setGenerationRecipe] = useState<StaticSecretGenerationRecipe>(() => ({
+    ...(requestSpec?.generate ?? DEFAULT_STATIC_SECRET_GENERATION_RECIPE),
+  }));
   // Standard signing keys sign headlessly; this opt-in writes `policy.always_ask` to force
   // per-use browser approval instead. Only meaningful for a standard keypair (see onSubmit).
   const [alwaysAsk, setAlwaysAsk] = useState(false);
@@ -318,6 +345,7 @@ export const VaultSecretForm: React.FC<{
     seededSpecRef.current = seedKey;
     if (requestSpec.kind) setKind(requestSpec.kind);
     if (requestSpec.protection) setProtection(requestSpec.protection);
+    setGenerationRecipe({ ...(requestSpec.generate ?? DEFAULT_STATIC_SECRET_GENERATION_RECIPE) });
     if (requestSpec.description) setDescription(requestSpec.description);
     const parts = partitionTags(requestSpec.tags);
     const specSkills = [...new Set([...parts.skills, ...(requestSpec.links?.skills ?? [])])];
@@ -360,6 +388,33 @@ export const VaultSecretForm: React.FC<{
   // Said once something is typed: an empty name is not yet an error.
   const nameInvalid = secretName.length > 0 && !secretNameValid;
   const protectedCreateReady = !entryIssue && protectedVault.status === 'unlocked';
+  const generationRecipeReady = isStaticSecretGenerationRecipeValid(generationRecipe);
+  const recordForField = (fieldName: string) =>
+    vaultRecordName(secretName, fieldName, fieldRows?.[defaultFieldIndex]?.name ?? fieldName);
+  const protectedFieldSeal = (row: FieldDraft) => {
+    const sealed = protectedGeneratedFields.get(row.id);
+    return sealed?.record === recordForField(row.name) ? sealed : null;
+  };
+  const clearGeneratedOutputs = () => {
+    staticGenerationSequenceRef.current += 1;
+    const clearSingle = generatedStandardSingleRef.current;
+    const clearFields = new Set(generatedStandardFieldIdsRef.current);
+    generatedStandardSingleRef.current = false;
+    generatedStandardFieldIdsRef.current.clear();
+    if (clearSingle) {
+      staticValueRef.current = '';
+      setValue('');
+    }
+    if (clearFields.size) {
+      setFieldRows((rows) => rows?.map((row) => clearFields.has(row.id) ? { ...row, value: '' } : row) ?? null);
+    }
+    setProtectedGeneratedStatic(null);
+    setProtectedGeneratedFields(new Map());
+  };
+  const changeGenerationRecipe = (next: StaticSecretGenerationRecipe) => {
+    if (JSON.stringify(next) !== JSON.stringify(generationRecipe)) clearGeneratedOutputs();
+    setGenerationRecipe(next);
+  };
   const isKeypair = kind === 'keypair';
   // A Solana key: avault creates it on the standard tier, the sandbox on the protected tier.
   const isSolanaKey = !editSecret && isKeypair && chain === 'solana';
@@ -417,9 +472,20 @@ export const VaultSecretForm: React.FC<{
   }, [signingKey, api]);
 
   const staticValueReady = fieldRows
-    ? fieldRows.every((field) => field.value && VAULT_FIELD_PATTERN.test(field.name)) &&
+    ? fieldRows.every((field) => (Boolean(field.value) || (protection === 'protected' && Boolean(protectedFieldSeal(field)))) && VAULT_FIELD_PATTERN.test(field.name)) &&
       new Set(fieldRows.map((field) => field.name)).size === fieldRows.length
-    : staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
+    : staticSource === 'file'
+      ? selectedFile != null && selectedFile.size > 0
+      : Boolean(value) || (protection === 'protected' && protectedGeneratedStatic?.record === secretName);
+  const requestRecipeCanGenerate = isProvision && Boolean(requestSpec?.generate) && generationRecipeReady && !isKeypair &&
+    (fieldRows
+      ? fieldRows.length > 0 &&
+        fieldRows.every((field) => VAULT_FIELD_PATTERN.test(field.name)) &&
+        new Set(fieldRows.map((field) => field.name)).size === fieldRows.length
+      : staticSource === 'text');
+  const requestNeedsGeneration = requestRecipeCanGenerate && (fieldRows
+    ? fieldRows.some((field) => !field.value && !(protection === 'protected' && protectedGeneratedFields.get(field.id)?.record === recordForField(field.name)))
+    : !value && !(protection === 'protected' && protectedGeneratedStatic?.record === secretName));
   const valueReady = isKeypair
     ? // A generated key, on any chain or tier, is made at submit, so it needs nothing here (owner
       // decision 2026-11-12: an address shown before saving could be noted and then lost to a second
@@ -429,11 +495,12 @@ export const VaultSecretForm: React.FC<{
       : isSolanaKey
         ? solanaImport.trim().length > 0
         : signingKey != null
-    : staticValueReady;
+    : staticValueReady || requestRecipeCanGenerate;
   const canSubmit = isEdit
     ? !submitting && !fieldEditBusy
     : Boolean(secretNameValid && valueReady) &&
       !submitting &&
+      !generatingStaticValue &&
       ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   const clearSelectedFile = useCallback(() => {
@@ -442,7 +509,12 @@ export const VaultSecretForm: React.FC<{
   }, []);
 
   const clearStaticValue = useCallback(() => {
+    staticGenerationSequenceRef.current += 1;
     staticValueRef.current = '';
+    generatedStandardSingleRef.current = false;
+    generatedStandardFieldIdsRef.current.clear();
+    setProtectedGeneratedStatic(null);
+    setProtectedGeneratedFields(new Map());
     setValue('');
     setFieldRows((rows) => rows?.map((row) => ({ ...row, value: '' })) ?? null);
     clearSelectedFile();
@@ -525,6 +597,63 @@ export const VaultSecretForm: React.FC<{
     return true;
   };
 
+  const patchFieldRow = (id: number, patch: Partial<FieldDraft>) => {
+    if ('value' in patch || 'name' in patch) staticGenerationSequenceRef.current += 1;
+    if ('value' in patch) generatedStandardFieldIdsRef.current.delete(id);
+    if ('value' in patch || 'name' in patch) {
+      setProtectedGeneratedFields((current) => {
+        if (!current.has(id)) return current;
+        const next = new Map(current);
+        next.delete(id);
+        return next;
+      });
+    }
+    setFieldRows((rows) => rows?.map((row) => (row.id === id ? { ...row, ...patch } : row)) ?? null);
+  };
+
+  const generateStaticValue = async (fieldId?: number): Promise<StaticSecretGenerationResult | null> => {
+    if (submitting || generatingStaticValue || !generationRecipeReady || !secretNameValid) return null;
+    const row = fieldId === undefined ? null : fieldRows?.find((field) => field.id === fieldId) ?? null;
+    if (fieldId !== undefined && (!row || !VAULT_FIELD_PATTERN.test(row.name))) return null;
+    const normalizedRecipe = normalizeStaticSecretGenerationRecipe(generationRecipe);
+    const record = row ? recordForField(row.name) : secretName;
+    const sequence = ++staticGenerationSequenceRef.current;
+    const targetProtection = protection;
+    setError(null);
+    setGeneratingStaticValue(true);
+    try {
+      if (targetProtection === 'protected') {
+        const sealed = await protectedVault.sealValue(record, 'static', { generate: normalizedRecipe });
+        if (sequence !== staticGenerationSequenceRef.current) return null;
+        const generated = { ...sealed, record };
+        if (row) {
+          patchFieldRow(row.id, { value: '' });
+          setProtectedGeneratedFields((current) => new Map(current).set(row.id, generated));
+        } else {
+          setStaticValue('');
+          setProtectedGeneratedStatic(generated);
+        }
+        return { kind: 'protected', seal: generated };
+      } else {
+        const generated = generateStaticSecret(normalizedRecipe);
+        if (sequence !== staticGenerationSequenceRef.current) return null;
+        if (row) {
+          patchFieldRow(row.id, { value: generated });
+          generatedStandardFieldIdsRef.current.add(row.id);
+        } else {
+          setStaticValue(generated);
+          generatedStandardSingleRef.current = true;
+        }
+        return { kind: 'standard', value: generated };
+      }
+    } catch (generationError) {
+      setError(vaultErrorMessage(t, generationError, t('vaults.dialog.errors.generationFailed')));
+      return null;
+    } finally {
+      setGeneratingStaticValue(false);
+    }
+  };
+
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
@@ -568,6 +697,30 @@ export const VaultSecretForm: React.FC<{
     setSolanaImportFailed(false);
     setNeedsAvaultAuthorization(false);
     try {
+      let submittedValue = value;
+      let submittedFieldRows = fieldRows;
+      let submittedProtectedGeneratedStatic = protectedGeneratedStatic;
+      const submittedProtectedGeneratedFields = new Map(protectedGeneratedFields);
+      if (requestRecipeCanGenerate) {
+        if (submittedFieldRows) {
+          submittedFieldRows = [...submittedFieldRows];
+          for (const row of submittedFieldRows) {
+            if (row.value || submittedProtectedGeneratedFields.get(row.id)?.record === recordForField(row.name)) continue;
+            const generated = await generateStaticValue(row.id);
+            if (!generated) return;
+            if (generated.kind === 'standard') {
+              submittedFieldRows = submittedFieldRows.map((field) => field.id === row.id ? { ...field, value: generated.value } : field);
+            } else {
+              submittedProtectedGeneratedFields.set(row.id, generated.seal);
+            }
+          }
+        } else if (!submittedValue && !(protection === 'protected' && submittedProtectedGeneratedStatic?.record === secretName)) {
+          const generated = await generateStaticValue();
+          if (!generated) return;
+          if (generated.kind === 'standard') submittedValue = generated.value;
+          else submittedProtectedGeneratedStatic = generated.seal;
+        }
+      }
       if (isEdit && editSecret) {
         // Value-free metadata edit: the shared validation above already ran; PATCH
         // description / tags / policy. Only the visible fetch policy (allowed_hosts + auth) is
@@ -665,23 +818,30 @@ export const VaultSecretForm: React.FC<{
         } else {
           cryptoFields = {};
         }
-      } else if (!isKeypair && fieldRows) {
+      } else if (!isKeypair && submittedFieldRows) {
         extraFields = [];
-        const defaultField = fieldRows[defaultFieldIndex].name;
+        const defaultField = submittedFieldRows[defaultFieldIndex].name;
         const pubkey = protection === 'standard' ? await api.getVaultPubkey() : null;
         let defaultCrypto: typeof cryptoFields | undefined;
-        for (const [index, row] of fieldRows.entries()) {
+        for (const [index, row] of submittedFieldRows.entries()) {
           const record = vaultRecordName(secretName, row.name, defaultField);
           let fieldCrypto: typeof cryptoFields;
           if (protection === 'protected') {
-            const valueRef = { current: row.value };
-            const sealed = await protectedVault.sealValue(record, 'static', {
-              valueRef,
-              clear: () => setFieldRows((rows) => rows?.map((field, i) => i === index ? { ...field, value: '' } : field) ?? null),
-            });
-            fieldCrypto = { sealed: sealed.envelope };
-            establishingVmk ||= sealed.establishingVmk;
-            authzFactorRegistration ??= sealed.authzFactorRegistration;
+              const generated = submittedProtectedGeneratedFields.get(row.id);
+              if (generated?.record === record) {
+                fieldCrypto = { sealed: generated.envelope };
+                establishingVmk ||= generated.establishingVmk;
+                authzFactorRegistration ??= generated.authzFactorRegistration;
+              } else {
+                const valueRef = { current: row.value };
+                const sealed = await protectedVault.sealValue(record, 'static', {
+                  valueRef,
+                  clear: () => setFieldRows((rows) => rows?.map((field, i) => i === index ? { ...field, value: '' } : field) ?? null),
+                });
+                fieldCrypto = { sealed: sealed.envelope };
+                establishingVmk ||= sealed.establishingVmk;
+                authzFactorRegistration ??= sealed.authzFactorRegistration;
+              }
           } else {
             fieldCrypto = { blind_box: await sealBlindBox(row.value, pubkey!, standardCreateBlindBoxContext(record)) };
           }
@@ -712,15 +872,21 @@ export const VaultSecretForm: React.FC<{
           // Protected static values are typed text only — the source toggle is hidden for protected
           // and reset to text (see the value field + the protection effect). No file/binary path
           // here: TextDecoder would corrupt non-UTF-8 bytes, so a file can't round-trip through the
-          // string-based parent-value contract. Handed to the sandbox once, at submit.
-          staticValueRef.current = value;
-          const sealed = await protectedVault.sealValue(secretName, 'static', {
-            valueRef: staticValueRef,
-            clear: clearStaticValue,
-          });
-          cryptoFields = { sealed: sealed.envelope };
-          establishingVmk = sealed.establishingVmk;
-          authzFactorRegistration = sealed.authzFactorRegistration;
+          // string-based parent-value contract. Generated values are already sealed in-sandbox.
+          if (submittedProtectedGeneratedStatic?.record === secretName) {
+            cryptoFields = { sealed: submittedProtectedGeneratedStatic.envelope };
+            establishingVmk = submittedProtectedGeneratedStatic.establishingVmk;
+            authzFactorRegistration = submittedProtectedGeneratedStatic.authzFactorRegistration;
+          } else {
+            staticValueRef.current = submittedValue;
+            const sealed = await protectedVault.sealValue(secretName, 'static', {
+              valueRef: staticValueRef,
+              clear: clearStaticValue,
+            });
+            cryptoFields = { sealed: sealed.envelope };
+            establishingVmk = sealed.establishingVmk;
+            authzFactorRegistration = sealed.authzFactorRegistration;
+          }
         }
       } else {
         // For a standard signing key the sealed value is the raw 32-byte private key
@@ -737,7 +903,7 @@ export const VaultSecretForm: React.FC<{
           }
           plaintext = fileBytesToWipe;
         } else {
-          plaintext = value;
+          plaintext = submittedValue;
         }
         const pubkey = await api.getVaultPubkey();
         cryptoFields = { blind_box: await sealBlindBox(plaintext, pubkey, standardCreateBlindBoxContext(secretName)) };
@@ -747,7 +913,7 @@ export const VaultSecretForm: React.FC<{
           ...base,
           ...(protectedPublicMeta ? { kind: 'keypair', signer_kind: 'local', public_meta: protectedPublicMeta } : {}),
           ...cryptoFields,
-          ...(!isKeypair && fieldRows ? { default_field: fieldRows[defaultFieldIndex].name, fields: extraFields } : {}),
+          ...(!isKeypair && submittedFieldRows ? { default_field: submittedFieldRows[defaultFieldIndex].name, fields: extraFields } : {}),
           ...(establishingVmk
             ? {
                 establishing_vmk: true,
@@ -832,41 +998,64 @@ export const VaultSecretForm: React.FC<{
         </div>
       )}
       {staticSource === 'text' ? (
-        <div className="flex items-start gap-2">
-          {showValue ? (
-            <Textarea
-              value={value}
-              onChange={(event) => setStaticValue(event.target.value)}
-              placeholder={t('vaults.dialog.valuePlaceholder')}
-              autoFocus={isProvision}
-              required
-              spellCheck={false}
-              autoComplete="off"
-              className="min-h-[76px] min-w-0 flex-1 resize-y font-mono text-xs leading-relaxed"
-            />
-          ) : (
-            <Input
-              type="password"
-              value={value}
-              onChange={(event) => setStaticValue(event.target.value)}
-              placeholder={t('vaults.dialog.valuePlaceholder')}
-              autoFocus={isProvision}
-              required
-              spellCheck={false}
-              autoComplete="off"
-              className="min-w-0 flex-1 font-mono text-xs"
-            />
-          )}
+        <>
+          <div className="flex items-start gap-2">
+            {showValue ? (
+              <Textarea
+                value={value}
+                onChange={(event) => setStaticValue(event.target.value)}
+                placeholder={t('vaults.dialog.valuePlaceholder')}
+                autoFocus={isProvision}
+                required={!requestRecipeCanGenerate && !(protection === 'protected' && protectedGeneratedStatic?.record === secretName)}
+                spellCheck={false}
+                autoComplete="off"
+                className="min-h-[76px] min-w-0 flex-1 resize-y font-mono text-xs leading-relaxed"
+              />
+            ) : (
+              <Input
+                type="password"
+                value={value}
+                onChange={(event) => setStaticValue(event.target.value)}
+                placeholder={t('vaults.dialog.valuePlaceholder')}
+                autoFocus={isProvision}
+                required={!requestRecipeCanGenerate && !(protection === 'protected' && protectedGeneratedStatic?.record === secretName)}
+                spellCheck={false}
+                autoComplete="off"
+                className="min-w-0 flex-1 font-mono text-xs"
+              />
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => setShowValue((current) => !current)}
+              aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
+            >
+              {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+            </Button>
+          </div>
+          <VaultSecretGenerationOptions
+            recipe={generationRecipe}
+            onChange={changeGenerationRecipe}
+            disabled={submitting || generatingStaticValue}
+          />
+          <p className="text-[11px] text-muted">
+            {protection === 'protected' ? t('vaults.dialog.generationProtectedHelp') : t('vaults.dialog.generationStandardHelp')}
+          </p>
           <Button
             type="button"
-            variant="ghost"
-            size="icon"
-            onClick={() => setShowValue((current) => !current)}
-            aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
+            variant="secondary"
+            className="self-start"
+            disabled={submitting || generatingStaticValue || !secretNameValid || !generationRecipeReady || (protection === 'protected' && !protectedCreateReady)}
+            onClick={() => void generateStaticValue()}
           >
-            {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+            {generatingStaticValue ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+            {t('vaults.dialog.generateStatic')}
           </Button>
-        </div>
+          {protection === 'protected' && protectedGeneratedStatic?.record === secretName && (
+            <p role="status" className="text-xs text-mint-ink">{t('vaults.dialog.generatedProtected')}</p>
+          )}
+        </>
       ) : (
         <div className="rounded-[10px] border border-dashed border-border-strong bg-surface p-3">
           <input
@@ -912,20 +1101,39 @@ export const VaultSecretForm: React.FC<{
   };
   const addFieldRow = () => {
     const added = fieldDraft('');
-    setFieldRows((rows) => [...(rows ?? [fieldDraft('value', value)]), added]);
+    const defaultRow = fieldDraft('value', value);
+    const wasGenerated = generatedStandardSingleRef.current;
+    const protectedGenerated = protectedGeneratedStatic?.record === secretName ? protectedGeneratedStatic : null;
+    setFieldRows((rows) => [...(rows ?? [defaultRow]), added]);
     setFocusField({ id: added.id, part: 'name' });
     leaveSingleValue();
+    if (wasGenerated) generatedStandardFieldIdsRef.current.add(defaultRow.id);
+    if (protectedGenerated) setProtectedGeneratedFields(new Map([[defaultRow.id, protectedGenerated]]));
   };
   const applyFieldTemplate = (fields: string[], defaultField: string) => {
     const rows = fields.map((field) => fieldDraft(field, field === defaultField ? value : ''));
+    const defaultRow = rows.find((row) => row.name === defaultField);
+    const wasGenerated = generatedStandardSingleRef.current;
+    const protectedGenerated = protectedGeneratedStatic?.record === secretName ? protectedGeneratedStatic : null;
     setFieldRows(rows);
     setDefaultFieldIndex(fields.indexOf(defaultField));
     setFocusField({ id: (rows.find((row) => !row.value) ?? rows[0]).id, part: 'value' });
     leaveSingleValue();
+    if (wasGenerated && defaultRow) generatedStandardFieldIdsRef.current.add(defaultRow.id);
+    if (protectedGenerated && defaultRow) setProtectedGeneratedFields(new Map([[defaultRow.id, protectedGenerated]]));
   };
-  const patchFieldRow = (id: number, patch: Partial<FieldDraft>) =>
-    setFieldRows((rows) => rows?.map((row) => (row.id === id ? { ...row, ...patch } : row)) ?? null);
   const removeFieldRow = (index: number) => {
+    staticGenerationSequenceRef.current += 1;
+    const removed = fieldRows?.[index];
+    if (removed) {
+      generatedStandardFieldIdsRef.current.delete(removed.id);
+      setProtectedGeneratedFields((current) => {
+        if (!current.has(removed.id)) return current;
+        const next = new Map(current);
+        next.delete(removed.id);
+        return next;
+      });
+    }
     setFieldRows((rows) => rows?.filter((_, i) => i !== index) ?? null);
     setDefaultFieldIndex((current) => (index < current ? current - 1 : current));
   };
@@ -939,14 +1147,24 @@ export const VaultSecretForm: React.FC<{
   const staticFields = fieldRows ? (
     <div className="flex flex-col gap-2">
       <VaultFieldsHeader count={fieldRows.length} />
+      <VaultSecretGenerationOptions
+        recipe={generationRecipe}
+        onChange={changeGenerationRecipe}
+        disabled={submitting || generatingStaticValue}
+      />
+      <p className="text-[11px] text-muted">
+        {protection === 'protected' ? t('vaults.dialog.generationProtectedHelp') : t('vaults.dialog.generationStandardHelp')}
+      </p>
       <VaultFieldList onAdd={addFieldRow} addDisabled={submitting || fieldRows.length >= MAX_VAULT_FIELDS}>
         {fieldRows.map((row, index) => {
           const label = row.name || String(index + 1);
           const nameIssue = fieldNameIssues[index];
+          const generatedSeal = protection === 'protected' ? protectedFieldSeal(row) : null;
+          const rowHasValue = Boolean(row.value || generatedSeal);
           // A blank name or value only counts as an error once the user has been there.
           const issue = nameIssue === 'nameRequired'
             ? (row.nameTouched || row.value ? nameIssue : null)
-            : nameIssue ?? (row.valueTouched && !row.value ? 'valueRequired' : null);
+            : nameIssue ?? (row.valueTouched && !rowHasValue ? 'valueRequired' : null);
           return (
             <VaultFieldRow
               key={row.id}
@@ -972,7 +1190,29 @@ export const VaultSecretForm: React.FC<{
                 onBlur: () => patchFieldRow(row.id, { valueTouched: true }),
                 autoFocus: focusField?.id === row.id && focusField.part === 'value',
               }}
-              onSetDefault={() => setDefaultFieldIndex(index)}
+              action={(
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="secondary"
+                    aria-label={t('vaults.fields.generateNamed', { field: label })}
+                    disabled={submitting || generatingStaticValue || !secretNameValid || !VAULT_FIELD_PATTERN.test(row.name) || nameIssue === 'nameTaken' || !generationRecipeReady || (protection === 'protected' && !protectedCreateReady)}
+                    onClick={() => void generateStaticValue(row.id)}
+                  >
+                    {generatingStaticValue ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                    {t('vaults.dialog.generateStatic')}
+                  </Button>
+                  {generatedSeal && <span role="status" className="text-[11px] text-mint-ink">{t('vaults.dialog.generatedProtected')}</span>}
+                </div>
+              )}
+              onSetDefault={() => {
+                if (index !== defaultFieldIndex) {
+                  staticGenerationSequenceRef.current += 1;
+                  setProtectedGeneratedFields(new Map());
+                }
+                setDefaultFieldIndex(index);
+              }}
               remove={{
                 label: t('vaults.fields.remove', { field: label }),
                 // Only a row that holds a value has something to lose.
@@ -1097,6 +1337,7 @@ export const VaultSecretForm: React.FC<{
               type="button"
               aria-pressed={selected}
               onClick={() => {
+                if (!selected) clearGeneratedOutputs();
                 setProtection(key);
                 // Switching tier invalidates a sandbox-sealed protected keypair (sealed under the
                 // protected tier); drop it so a stale envelope can't be submitted as standard.
@@ -1322,7 +1563,7 @@ export const VaultSecretForm: React.FC<{
           </Button>
           <Button type="submit" className="w-full sm:w-auto" disabled={!canSubmit}>
             {submitting ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
-            {t('vaults.request.saveAndWake')}
+            {t(requestNeedsGeneration ? 'vaults.request.generateAndWake' : 'vaults.request.saveAndWake')}
           </Button>
         </div>
       </form>
@@ -1370,7 +1611,10 @@ export const VaultSecretForm: React.FC<{
         <Input
           value={name}
           onChange={(event) => {
+            staticGenerationSequenceRef.current += 1;
             setName(event.target.value);
+            setProtectedGeneratedStatic(null);
+            setProtectedGeneratedFields(new Map());
             // The protected-keypair envelope AAD binds the name it was sealed under, so a rename
             // invalidates a pre-generated key — drop it and let the user regenerate.
           }}

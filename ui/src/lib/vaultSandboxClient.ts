@@ -45,6 +45,7 @@ import {
 import { assertVaultEntryAvailable } from './vaultEntry';
 import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
+import type { StaticSecretGenerationRecipe } from './vaultSecretGeneration';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
 import { buildVaultConfirmSurface, type VaultConfirmSurface } from './vaultConfirmSurface';
 
@@ -804,6 +805,7 @@ export class VaultSandboxClient {
   async seal(
     payload:
       | { name: string; kind: 'static'; value: string; wrapMeta?: string | null }
+      | { name: string; kind: 'static'; generate: StaticSecretGenerationRecipe; wrapMeta?: string | null }
       | { name: string; kind: 'keypair'; curve?: 'ed25519'; wrapMeta?: string | null },
   ): Promise<VaultSandboxSealResult> {
     // Static = parent-typed value handed in for sealing (the #842 concession). Keypair = generated
@@ -813,7 +815,9 @@ export class VaultSandboxClient {
     const solana = payload.kind === 'keypair' && payload.curve === 'ed25519';
     const wire =
       payload.kind === 'static'
-        ? { name: payload.name, kind: 'static', inputMode: 'parent-value', value: payload.value, wrapMeta: payload.wrapMeta }
+        ? ('generate' in payload
+          ? { name: payload.name, kind: 'static', inputMode: 'sandbox-generated', generate: payload.generate, wrapMeta: payload.wrapMeta }
+          : { name: payload.name, kind: 'static', inputMode: 'parent-value', value: payload.value, wrapMeta: payload.wrapMeta })
         : { name: payload.name, kind: 'keypair', ...(solana ? { curve: 'ed25519' } : {}), wrapMeta: payload.wrapMeta };
     const sealed = await this.request<VaultSandboxSealResult>('seal', wire, { timeoutMs: INTERACTIVE_TIMEOUT_MS });
     return solana ? assertEd25519Record(sealed) : sealed;
