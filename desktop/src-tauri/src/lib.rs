@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod app_windows;
+pub mod instance_store;
 mod native_frame;
 mod notifications;
 mod pet;

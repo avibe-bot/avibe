@@ -54,6 +54,8 @@ async-trait.workspace = true
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 
 [target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = "0.62"
 keyring = { version = "3.6", features = ["windows-native"] }
 # Match Tauri's Known Folder lookup without initializing the GUI.
 dirs = "7"
@@ -75,6 +77,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSAppleEventDescriptor",
   "NSAppleEventManager",
   "NSArray",
+  "NSDate",
+  "NSSet",
   "NSEnumerator",
   "NSError",
   "NSGeometry",
@@ -102,4 +106,6 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "WKNavigationAction",
   "WKNavigationDelegate",
   "WKWebView",
+  "WKWebViewConfiguration",
+  "WKWebsiteDataStore",
 ] }

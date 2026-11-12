@@ -60,8 +60,16 @@ calls Keychain. It projects the actual `__Host-vibe_remote_session` cookie name
 for an HTTPS host without making a network request to that host. Checks cover
 Secure/HttpOnly/SameSite, exact host (including rejecting a child domain),
 separate WebView stores, JavaScript HttpOnly exclusion through actual HTTP, and
-erasure. macOS debug execution passed; Windows and signed-package behavior are
-separate acceptance tiers. Failed runs and test homes are retained as evidence.
+erasure. An independent run of the first probe exposed that Tauri's
+`clear_all_browsing_data` returns after scheduling work, not after deletion.
+That initial green run is not erase acceptance. The product `instance_store`
+helper now stops loading, awaits the actual WebKit/WebView2 deletion callback,
+reads back empty cookies, and destroys the disposable window with a bounded
+terminal registry check. Failure also permanently retires that window.
+The probe calls this same helper and holds an actual HTTP cookie response until
+after retirement. The corrected macOS debug probe passed; Windows and signed
+package behavior are separate acceptance tiers. Previous failed logs and test
+homes are retained as evidence.
 
 Native HTTP uses the existing reqwest client with redirects/proxies disabled.
 The standard `cookie` and `cookie_store` crates retain cookie semantics rather

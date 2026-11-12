@@ -7,7 +7,7 @@ use std::{
     sync::mpsc,
     time::Duration,
 };
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 fn main() {
     let root = PathBuf::from(std::env::var_os("AVIBE_COOKIE_PROBE_ROOT").expect("explicit test root"));
@@ -17,7 +17,11 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (result_tx, result_rx) = mpsc::channel();
+    let (late_tx, late_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
     let fixture = std::thread::spawn(move || {
+        let mut release = Some(release_rx);
+        let mut delayed = None;
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -45,6 +49,20 @@ fn main() {
             }
             let text = String::from_utf8(request).unwrap();
             let path = text.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+            if path == "/late" {
+                let release = release.take().unwrap();
+                late_tx.send(()).unwrap();
+                let completed = late_tx.clone();
+                delayed = Some(std::thread::spawn(move || {
+                    if release.recv_timeout(Duration::from_secs(20)).is_ok() {
+                        // This actual response arrives after the old view was
+                        // retired. It may fail to write because Stop cancelled it.
+                        let _ = write!(stream, "HTTP/1.1 200 OK\r\nSet-Cookie: late=retired; Path=/; HttpOnly\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                    }
+                    let _ = completed.send(());
+                }));
+                continue;
+            }
             let body = if path.starts_with("/result") {
                 result_tx.send(text.clone()).unwrap();
                 "ok"
@@ -62,11 +80,16 @@ fn main() {
                 break;
             }
         }
+        if let Some(delayed) = delayed {
+            delayed.join().unwrap();
+        }
     });
     let app = tauri::Builder::default().build(tauri::generate_context!()).unwrap();
     let handle = app.handle().clone();
     let root_clone = root.clone();
     let mut result_rx = Some(result_rx);
+    let mut late_rx = Some(late_rx);
+    let mut release_tx = Some(release_tx);
     app.run(move |app, event| {
         if let tauri::RunEvent::Ready = event {
             let first = WebviewWindowBuilder::new(app, "probe-first", WebviewUrl::External("about:blank".parse().unwrap()))
@@ -75,6 +98,8 @@ fn main() {
                 .visible(false).incognito(true).data_directory(root_clone.join("second")).build().unwrap();
             let handle = handle.clone();
             let results = result_rx.take().unwrap();
+            let late = late_rx.take().unwrap();
+            let release = release_tx.take().unwrap();
             // These operations must run off the UI thread, especially on Windows.
             std::thread::spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -104,14 +129,18 @@ fn main() {
                     assert!(headers.starts_with("POST /result/first "));
                     assert!(headers.to_lowercase().contains("cookie: fixture_session=private-fixture"));
                     assert!(!body.contains("private-fixture"), "HttpOnly leaked into JavaScript");
+                    first.eval("fetch('/late').catch(() => {})").unwrap();
+                    late.recv_timeout(Duration::from_secs(10)).unwrap();
                     second.navigate(format!("http://{address}/second").parse().unwrap()).unwrap();
                     let text = results.recv_timeout(Duration::from_secs(20)).unwrap();
                     assert!(text.starts_with("POST /result/second "));
                     assert!(!text.to_lowercase().contains("cookie:"), "cookie crossed disposable stores");
-                    first.clear_all_browsing_data().unwrap();
-                    assert!(first.cookies().unwrap().is_empty());
+                    avibe_desktop_lib::instance_store::retire(&first).unwrap();
+                    assert!(handle.get_webview_window("probe-first").is_none());
+                    release.send(()).unwrap();
+                    late.recv_timeout(Duration::from_secs(10)).unwrap();
                     assert!(second.cookies().unwrap().is_empty());
-                    println!("cookie probe: __Host projection, Secure/HttpOnly/SameSite, exact host, isolated stores and erase passed");
+                    println!("cookie probe: __Host attributes, exact host, isolated stores, native erase completion, destruction and delayed response retirement passed");
                 }));
                 handle.exit(if outcome.is_ok() {0} else {1});
             });
