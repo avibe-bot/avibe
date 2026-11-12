@@ -1288,7 +1288,7 @@ class VibeyAgent(BaseAgent):
                     agent_events_service.append(
                         conn, scope_id=scope_id, session_id=session_id, platform=request.context.platform or "avibe",
                         event_type=event_type, content={"version": 1, "at": now, **data}, visibility="trace",
-                        backend=BACKEND, agent_name=request.vibe_agent_name,
+                        backend=BACKEND, agent_name=getattr(request, "vibe_agent_name", None),
                         turn_id=(request.context.platform_specific or {}).get("turn_token"),
                     )
         except Exception:
@@ -1953,7 +1953,7 @@ class VibeyAgent(BaseAgent):
         def build() -> list[RenderedPromptBlock]:
             # Every lookup runs here, off the loop: the enabled-Agent list and the Bot read SQLite.
             bot = bot_for_turn(
-                getattr(self.controller, "vibe_agent_store", None), agent_id=request.vibe_agent_id, cwd=cwd
+                getattr(self.controller, "vibe_agent_store", None), agent_id=getattr(request, "vibe_agent_id", None), cwd=cwd
             )
             return build_system_prompt_blocks(
                 bot=bot,
@@ -2432,9 +2432,16 @@ class VibeyAgent(BaseAgent):
         language = self._language()
         # Every route runs through the Model Hub: when it leaves Vibey no model (disabled, its gateway
         # off, no source), that explains the failure, and the supply refusal is the failure's cause.
-        supply = await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
+        supply = await asyncio.to_thread(
+            hub_supply_refusal,
+            self.controller,
+            BACKEND,
+            language,
+            agent_id=getattr(request, "vibe_agent_id", None),
+            agent_name=getattr(request, "vibe_agent_name", None),
+        )
         if supply is not None:
-            hold_refused_input(request.context)
+            hold_refused_input(request.context, fixed_in_models=supply.fixed_in_models)
         refusal = str(supply) if supply is not None else (
             launch_refusal_copy(self.controller, error) or error_text(None, language)
         )
