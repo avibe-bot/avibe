@@ -22,6 +22,7 @@ from config.v2_config import V2Config
 from vibe import direct_lifecycle as module, remote_access
 from vibe.direct_certificates import CertificateResult
 from vibe.direct_lifecycle import DirectAccessLifecycle
+from tests.test_direct_transport_runtime import published  # Shared inert published-release fixture.
 
 
 def _config(*, direct=True, public_url="https://alice-app.avibe.bot"):
@@ -229,6 +230,128 @@ async def test_product_without_binary_never_orders_even_with_fresh_permission(re
         assert rv.endpoint is None and rv.reason == "transport_not_installed"
 
 
+async def test_managed_install_reaches_publication_only_after_all_lifecycle_gates(reports, published, monkeypatch):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    config = _config(direct=False)
+    config.save()
+    persisted = paths.get_config_path().read_bytes()
+    manager = DirectTransportRuntimeManager()
+    assert manager.ensure()["ok"] is True
+    binary = manager.resolve_binary()
+    assert binary is not None
+    assert paths.get_config_path().read_bytes() == persisted
+    assert not (paths.get_state_dir() / "direct").exists()
+    entered, release = threading.Event(), threading.Event()
+    class WaitingCertificate(FakeCertificateClient):
+        def poll(self, **kwargs):
+            self.calls.append(kwargs)
+            entered.set()
+            assert release.wait(3)
+            return _ready()
+    try:
+        async with _owner(config, reports, cert=WaitingCertificate(), binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, cert, rv):
+            assert cert.calls == [] and rv.endpoint is None
+            config.remote_access.vibe_cloud.direct = True
+            owner.notify_config_changed(config)
+            await _wait(lambda: owner.status().state == "waiting-permission")
+            assert cert.calls == [] and rv.endpoint is None
+            await _permission(owner, config)
+            await _wait(entered.is_set)
+            assert rv.endpoint is None and "supervisor_start" not in calls
+            release.set()
+            await _wait(lambda: owner.status().state == "running")
+            assert rv.endpoint is not None
+            # Removing integrity approval, without changing pairing or permission,
+            # withdraws the ready answer. Repair resumes the normal gated path.
+            binary.write_bytes(b"tampered test fixture")
+            await _wait(lambda: owner.status().state == "transport-not-installed")
+            assert rv.endpoint is None and not owner.status().transport_running
+            assert manager.ensure()["ok"] is True
+            await _wait(lambda: owner.status().state == "running")
+            assert calls.count("supervisor_start") == 2
+    finally:
+        release.set()
+
+
+async def test_stalled_binary_verification_expires_without_blocking_loop_or_accumulating_workers(reports, monkeypatch):
+    config = _config()
+    monkeypatch.setattr(module, "CONFIG_POLL_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(module, "BINARY_OBSERVATION_MAX_AGE_SECONDS", 0.15)
+    entered, release = threading.Event(), threading.Event()
+    count = 0
+    loop_thread = threading.get_ident()
+    def resolver(config):
+        nonlocal count
+        assert threading.get_ident() != loop_thread
+        count += 1
+        if count == 2:
+            entered.set()
+            assert release.wait(3)
+        return "/test/verified-sidecar"
+    try:
+        async with _owner(config, reports, binary_resolver=resolver) as (owner, calls, cert, rv):
+            await _permission(owner, config)
+            await _wait(lambda: owner.status().state == "running")
+            await _wait(entered.is_set)
+            await _wait(lambda: owner.status().state == "transport-not-installed")
+            assert rv.endpoint is None and "supervisor_stop" in calls
+            assert count == 2
+            # Stop/start cannot abandon the synchronous worker and create another.
+            await asyncio.wait_for(owner.stop(), 0.3)
+            await owner.start()
+            await asyncio.sleep(0.05)
+            assert count == 2 and rv.endpoint is None
+            release.set()
+            await _wait(lambda: count >= 3 and owner.status().state == "running")
+    finally:
+        release.set()
+
+
+async def test_late_binary_observation_cannot_cross_off_on_generation(reports, monkeypatch):
+    config = _config()
+    monkeypatch.setattr(module, "CONFIG_POLL_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    old_entered, old_release = threading.Event(), threading.Event()
+    new_entered, new_release = threading.Event(), threading.Event()
+    count = 0
+    def resolver(config):
+        nonlocal count
+        count += 1
+        if count == 2:
+            old_entered.set()
+            assert old_release.wait(3)
+            return "/test/stale-sidecar"
+        if count == 3:
+            new_entered.set()
+            assert new_release.wait(3)
+        return "/test/current-sidecar"
+    try:
+        async with _owner(config, reports, binary_resolver=resolver) as (owner, calls, cert, rv):
+            await _permission(owner, config)
+            await _wait(lambda: owner.status().state == "running")
+            await _wait(old_entered.is_set)
+            config.remote_access.vibe_cloud.direct = False
+            owner.notify_config_changed(config)
+            await _wait(lambda: owner.status().state == "disabled")
+            config.remote_access.vibe_cloud.direct = True
+            owner.notify_config_changed(config)
+            await _wait(lambda: len(reports) == 3)
+            await _permission(owner, config)
+            old_release.set()
+            await _wait(new_entered.is_set)
+            assert owner._binary is None and rv.endpoint is None
+            assert calls.count("supervisor_start") == 1 and len(cert.calls) == 1
+            new_release.set()
+            await _wait(lambda: owner.status().state == "running")
+            assert owner._binary == "/test/current-sidecar"
+    finally:
+        old_release.set()
+        new_release.set()
+
+
 @pytest.mark.parametrize("url", ["https://custom.test", "http://alice-app.avibe.bot", "https://alice-app.avibe.bot:8443", "https://user@alice-app.avibe.bot"])
 async def test_hostname_gate_precedes_resolver_and_certificate(url, reports):
     config = _config(public_url=url)
@@ -310,7 +433,9 @@ async def test_off_on_drops_old_permission_ticket_even_same_pairing(reports):
         owner.submit_runtime_status_response(old, {"direct_access_allowed": True})
         await asyncio.sleep(0.12)
         assert cert.calls == []
-        assert owner.status().state == "waiting-permission"
+        # Opt-in needs a new off-loop installed-binary observation; it must
+        # still reject the previous opt-in's permission ticket once observed.
+        await _wait(lambda: owner.status().state == "waiting-permission")
         await _permission(owner, config)
         await _wait(lambda: owner.status().state == "running")
 

@@ -4617,6 +4617,46 @@ def test_remote_parser_accepts_direct_toggle_json():
     assert args.json is True
 
 
+@pytest.mark.parametrize("ok", [False, True])
+@pytest.mark.parametrize("offline", [False, True])
+def test_remote_direct_install_is_explicit_and_never_loads_or_changes_pairing(monkeypatch, capsys, ok, offline):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    installed = []
+    def install(manager):
+        installed.append(manager.offline)
+        return {"ok": ok, "changed": ok, "reason": None if ok else "direct-transport_runtime_unpublished"}
+    def forbidden(*args, **kwargs):
+        pytest.fail("Installing the optional binary must not read/change pairing or contact the service")
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", install)
+    monkeypatch.setattr(v2_config.V2Config, "load", forbidden)
+    monkeypatch.setattr(remote_access, "status", forbidden)
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", forbidden)
+    args = cli.build_parser().parse_args(
+        ["remote", "direct", "install", "--json", *(["--offline"] if offline else [])],
+    )
+    assert cli.cmd_remote_direct(args) == (0 if ok else 1)
+    assert installed == [offline]
+    result = json.loads(capsys.readouterr().out)
+    assert result["kind"] == "remote_direct_install"
+    assert result["ok"] is ok
+    assert "direct_setting_changed" not in result
+
+
+def test_remote_direct_status_loads_persisted_choice(monkeypatch, capsys):
+    config = v2_config.V2Config.default()
+    config.save()
+    loaded = []
+    def status(config):
+        loaded.append(config.remote_access.vibe_cloud.direct)
+        return {"ok": True, "direct": {"enabled": loaded[-1], "state": "disabled"}}
+    monkeypatch.setattr(remote_access, "status", status)
+    monkeypatch.setattr(remote_access, "live_direct_status", lambda *args, **kwargs: None)
+    assert cli.cmd_remote_direct(SimpleNamespace(direct_command="status", json=True)) == 0
+    assert loaded == [False]
+    assert json.loads(capsys.readouterr().out)["direct"]["enabled"] is False
+
+
 def test_remote_parser_accepts_status_json():
     parser = cli.build_parser()
     args = parser.parse_args(["remote", "status", "--json"])

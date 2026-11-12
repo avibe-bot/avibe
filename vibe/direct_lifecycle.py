@@ -29,6 +29,8 @@ from vibe.direct_rendezvous import DirectRendezvous, rendezvous as default_rende
 logger = logging.getLogger(__name__)
 PERMISSION_MAX_AGE_SECONDS = 15 * 60
 CONFIG_POLL_INTERVAL_SECONDS = 0.5
+BINARY_REFRESH_INTERVAL_SECONDS = 5.0
+BINARY_OBSERVATION_MAX_AGE_SECONDS = 15.0
 TICK_SECONDS = 0.1
 _MANAGED_HOSTNAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-app\.avibe\.bot$")
 DIRECT_STATES = frozenset({
@@ -69,9 +71,13 @@ class PermissionRequest:
 BinaryResolver = Callable[[V2Config], str | Path | None]
 
 
-def resolve_direct_transport_binary(_config: V2Config) -> None:
-    """No managed binary ships in I3; no env/config arbitrary-binary override."""
-    return None
+def resolve_direct_transport_binary(config: V2Config) -> Path | None:
+    """Worker-only: inspect the exact packaged pin; never install or run it."""
+    if not config.remote_access.vibe_cloud.direct or not _is_paired(config) or managed_direct_hostname(config) is None:
+        return None
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    return DirectTransportRuntimeManager().resolve_binary()
 
 
 def managed_direct_hostname(config: V2Config) -> str | None:
@@ -161,6 +167,11 @@ class DirectAccessLifecycle:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: asyncio.Task | None = None
         self._config_task: asyncio.Task | None = None
+        self._observation_task: asyncio.Task | None = None
+        self._binary: str | None = None
+        self._binary_valid_until = 0.0
+        self._next_binary_check = 0.0
+        self._binary_timer: asyncio.TimerHandle | None = None
         self._start_task: asyncio.Task | None = None
         self._poll_task: asyncio.Task | None = None
         self._preparation_task: asyncio.Task | None = None
@@ -195,6 +206,7 @@ class DirectAccessLifecycle:
             return
         self._loop = asyncio.get_running_loop()
         self._shutdown = False
+        self._next_binary_check = 0.0
         self._runner = asyncio.create_task(self._run(), name="direct-access-lifecycle")
         self._config_task = asyncio.create_task(self._watch_config(), name="direct-access-config")
 
@@ -214,6 +226,7 @@ class DirectAccessLifecycle:
         # work. Its generation is obsolete; its eventual result is discarded.
         if self._permission_timer is not None:
             self._permission_timer.cancel()
+        self._clear_binary()
         self._loop = None
         _unregister(self)
 
@@ -238,6 +251,8 @@ class DirectAccessLifecycle:
         if signature == self._signature:
             return
         previous = self._signature
+        self._next_binary_check = 0.0
+        self._clear_binary()
         self._invalidate()
         with self._state_lock:
             self._config = config
@@ -342,18 +357,79 @@ class DirectAccessLifecycle:
             # Do not cancel the stop: a timed-out writer must not leave a child.
             return False
 
+    def _load_observation(
+        self, generation: int, started: float, signature: tuple[Any, ...] | None, next_binary_check: float,
+    ) -> tuple[int, float, V2Config, str | None, bool]:
+        config = copy.deepcopy(self._config_loader())
+        check_binary = _config_signature(config) != signature or started >= next_binary_check
+        binary = None
+        if check_binary and config.remote_access.vibe_cloud.direct and _is_paired(config) and managed_direct_hostname(config) is not None:
+            try:
+                resolved = self._binary_resolver(config)
+                binary = str(resolved) if resolved else None
+            except Exception:
+                pass  # An unreadable optional runtime is unavailable, not a Web UI failure.
+        return generation, started, config, binary, check_binary
+
     async def _watch_config(self) -> None:
         while not self._shutdown:
             try:
-                generation = self._generation
-                config = await asyncio.to_thread(self._config_loader)
-                if generation == self._generation:
-                    self._observe_config(copy.deepcopy(config))
+                # One retained slot: cancelling a waiter does not kill a filesystem
+                # worker, including across stop/start on this owner object.
+                if self._observation_task is None:
+                    self._observation_task = asyncio.create_task(asyncio.to_thread(
+                        self._load_observation, self._generation, asyncio.get_running_loop().time(),
+                        self._signature, self._next_binary_check,
+                    ), name="direct-config-binary-observation")
+                    self._observation_task.add_done_callback(
+                        lambda done: done.exception() if not done.cancelled() else None,
+                    )
+                generation, started, config, binary, checked = await asyncio.shield(self._observation_task)
+                if generation == self._generation and not self._shutdown:
+                    self._observe_config(config)
+                    if checked:
+                        self._observe_binary(binary, started)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                pass  # Last permission still has its independent hard expiry.
+                pass  # Permission AND binary observations expire independently.
+            finally:
+                if self._observation_task is not None and self._observation_task.done():
+                    self._observation_task = None
             await asyncio.sleep(CONFIG_POLL_INTERVAL_SECONDS)
+
+    def _clear_binary(self) -> None:
+        self._binary = None
+        self._binary_valid_until = 0.0
+        if self._binary_timer is not None:
+            self._binary_timer.cancel()
+            self._binary_timer = None
+
+    def _observe_binary(self, binary: str | None, started: float) -> None:
+        loop = asyncio.get_running_loop()
+        valid_until = started + BINARY_OBSERVATION_MAX_AGE_SECONDS
+        self._next_binary_check = started + BINARY_REFRESH_INTERVAL_SECONDS
+        if valid_until <= loop.time():
+            binary = None
+        if binary != self._binary:
+            if self._binary is not None:
+                self._invalidate()
+            # A certificate result may have completed while the binary was
+            # unavailable. Its rejection must not strand future polling.
+            self._poll_at = 0.0
+        self._clear_binary()
+        self._binary = binary
+        if binary is not None:
+            self._binary_valid_until = valid_until
+            self._binary_timer = loop.call_at(valid_until, self._expire_binary)
+        self._wake.set()
+
+    def _expire_binary(self) -> None:
+        if not self._shutdown and self._binary is not None and self._loop.time() >= self._binary_valid_until:
+            self._clear_binary()
+            self._next_binary_check = 0.0
+            self._invalidate()
+            self._poll_at = 0.0
 
     def _gate(self) -> tuple[str, str, str | None]:
         config = self._config
@@ -365,10 +441,7 @@ class DirectAccessLifecycle:
             return "error", "pairing_changed" if self._pairing_suspended else "unpaired", None
         if managed_direct_hostname(config) is None:
             return "error", "hostname_not_direct", None
-        try:
-            binary = self._binary_resolver(config)
-        except Exception:
-            binary = None
+        binary = self._binary if self._loop is not None and self._loop.time() < self._binary_valid_until else None
         if not binary:
             return "transport-not-installed", "transport_not_installed", None
         if not _subprocess_loop_supported():

@@ -16514,10 +16514,21 @@ def cmd_remote_stop(args):
 
 
 def cmd_remote_direct(args):
-    from config.v2_config import update_config_fields
+    from config.v2_config import V2Config, update_config_fields
     from vibe import remote_access
 
     action = getattr(args, "direct_command", None)
+    if action == "install":
+        from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+        result = DirectTransportRuntimeManager(offline=bool(getattr(args, "offline", False))).ensure()
+        if getattr(args, "json", False):
+            _print_cli_payload("remote_direct_install", **result)
+        elif result.get("ok"):
+            print("Direct transport installed. The direct-path setting is unchanged.")
+        else:
+            print(f"Direct transport not installed: {result.get('reason') or 'install_failed'}", file=sys.stderr)
+        return 0 if result.get("ok") else 1
     if action in {"on", "off"}:
         enabled = action == "on"
 
@@ -19200,7 +19211,7 @@ def build_parser():
     )
     remote_direct_subparsers = remote_direct_parser.add_subparsers(
         dest="direct_command",
-        metavar="{on,off,status}",
+        metavar="{on,off,status,install}",
         required=True,
     )
     for direct_action, direct_help in (
@@ -19216,6 +19227,19 @@ def build_parser():
                 error_help_command=f"vibe remote direct {direct_action} --help",
             )
         )
+
+    direct_install_parser = remote_direct_subparsers.add_parser(
+        "install",
+        help="Install the published, pinned direct transport without changing its setting",
+        description=(
+            "Install only Avibe's packaged direct-transport pin. Does not enable direct paths, "
+            "change pairing or restart Avibe. An already opted-in owner may start it once "
+            "permission and certificate gates pass. Pending pins fail closed."
+        ),
+        error_help_command="vibe remote direct install --help",
+    )
+    direct_install_parser.add_argument("--offline", action="store_true", help="Use only the exact cached archive.")
+    _add_json_flag(direct_install_parser)
 
     autostart_parser = subparsers.add_parser(
         "autostart",
@@ -21170,6 +21194,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "direct", "on"): "owner",
     ("remote", "direct", "off"): "owner",
     ("remote", "direct", "status"): "member",
+    ("remote", "direct", "install"): "owner",
     # Launch at login writes a login item on this machine, outside the instance.
     ("autostart", "on"): "owner",
     ("autostart", "off"): "owner",
