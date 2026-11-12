@@ -14,6 +14,7 @@ import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { webFetchTool } from './webFetch';
 import { AddSearchServiceDialog } from './AddSearchServiceDialog';
 import { searchServicesActive, webSearchTool, builtinSearchSource } from './searchServices';
+import { AddModelsDialog } from './AddModelsDialog';
 import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { GatewayModule } from './GatewayModule';
@@ -27,7 +28,7 @@ import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { agentUsesHubRuntime, modelsSurfaceKindFromReads } from './modelHubSurfaceState';
 import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
-import { MODEL_HUB_MANAGE_PARAM, MODEL_HUB_SOURCE_PARAM } from './modelHubRoutes';
+import { MODEL_HUB_SOURCE_PARAM } from './modelHubRoutes';
 import { buildSupplyRelations } from './supplyRelations';
 import {
   emptySuspendedRouteAttempts,
@@ -504,6 +505,8 @@ export const SettingsModelsPage: React.FC = () => {
   const sourceDetailReturnFocusRef = React.useRef<(() => HTMLElement | null) | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
+  /** The backend whose 「Add model」 dialog is open: picks are saved at once. */
+  const [addBackend, setAddBackend] = React.useState<AgentBackend | null>(null);
   const [catalogFocus, setCatalogFocus] = React.useState<CatalogFocus | null>(null);
   // The route the catalog was opened from. Its action unmounted with the route
   // dialog, so closing the catalog returns focus to that model row instead.
@@ -580,26 +583,6 @@ export const SettingsModelsPage: React.FC = () => {
     unread: () => [],
     degraded: (staleData) => staleData,
   });
-  // `?manage=<backend>` is a model picker's 「Add model」 exit. Once the supply
-  // read can say whether that backend is on the Hub, open its catalog (or
-  // nothing, if it is not) and drop the parameter so a reload or Back does not
-  // open it again. The replace keeps the Settings overlay's origin in state.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const location = useLocation();
-  const requestedCatalogBackend = searchParams.get(MODEL_HUB_MANAGE_PARAM);
-  const supplyKnown = supplyRead.kind === 'ready' || supplyRead.kind === 'degraded';
-  React.useEffect(() => {
-    if (requestedCatalogBackend === null || !supplyKnown) return;
-    const requested = agents.find((agent) => agent.backend === requestedCatalogBackend && agent.mode === 'hub');
-    if (requested) {
-      catalogOriginRef.current = null;
-      setCatalogFocus(null);
-      setMenuBackend(requested.backend);
-    }
-    const next = new URLSearchParams(searchParams);
-    next.delete(MODEL_HUB_MANAGE_PARAM);
-    setSearchParams(next, { replace: true, state: location.state });
-  }, [agents, location.state, requestedCatalogBackend, searchParams, setSearchParams, supplyKnown]);
   const chains = foldRegionRead<ModelChainIndex, ModelChainIndex>(chainsRead, {
     loading: () => ({}),
     ready: (data) => data,
@@ -1201,6 +1184,8 @@ export const SettingsModelsPage: React.FC = () => {
   // front, with its repair (a replaced key, a sign-in) first in its actions. Once the
   // Source read can say whether it still exists, open it (or nothing) and drop the
   // parameter so a reload or Back does not open it again.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
   const requestedSourceId = searchParams.get(MODEL_HUB_SOURCE_PARAM);
   const sourcesKnown = sourcesRead.kind === 'ready' || sourcesRead.kind === 'degraded';
   React.useEffect(() => {
@@ -1754,7 +1739,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
+                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onAddModels={(agent) => setAddBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -1878,6 +1863,19 @@ export const SettingsModelsPage: React.FC = () => {
         if (result?.removed) focusRouteDestination(origin);
         else setRouteTarget(origin);
       }} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      {addBackend && (
+        <AddModelsDialog
+          open
+          backend={addBackend}
+          onClose={() => setAddBackend(null)}
+          track={(work) => agentWriteRegistry.track(addBackend, work)}
+          onAdded={async (ids, agent) => {
+            setAddBackend(null);
+            await agentSaved(agent);
+            if (aliveRef.current) showToast(t('settings.models.gateway.catalog.added', { count: ids.length, model: ids[0] }) as string, 'success');
+          }}
+        />
+      )}
       <RouteChainDialog
         selection={routeSelection}
         covered={orderBackend !== null}

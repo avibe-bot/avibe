@@ -1285,6 +1285,7 @@
         "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; unmatched models pass through to eligible API-key providers.",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
+        "addModel": "Add model",
         "switchToGateway": "Let Model Hub manage",
         "switchToDirect": "Use own login",
         "modeMenu": {
@@ -1389,7 +1390,9 @@
           "moved_other": "Moved {{model}} to position {{position}} of {{count}}.",
           "dropped_one": "Dropped {{model}} at position {{position}} of {{count}}.",
           "dropped_other": "Dropped {{model}} at position {{position}} of {{count}}.",
-          "grabCancelled": "Cancelled moving {{model}} and restored its original position."
+          "grabCancelled": "Cancelled moving {{model}} and restored its original position.",
+          "added_one": "Added {{model}}",
+          "added_other": "Added {{count}} models"
         },
         "picker": {
           "title": "Add {{backend}} models",

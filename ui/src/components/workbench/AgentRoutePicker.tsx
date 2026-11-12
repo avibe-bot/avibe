@@ -10,7 +10,8 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import { useBots } from '../../context/BotsContext';
 import { isSelectableAgent, liveBotAgentNames } from '../../lib/bots';
 import type { EffortMenu } from '../settings/models/types';
-import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer } from '../../lib/backendModels';
+import { useAddModelDialog } from '../../lib/useAddModelDialog';
 import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { useSourceNames } from '../../lib/useSourceNames';
 import {
@@ -344,7 +345,6 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const models = modelsByBackend[backend] ?? [];
   const modelLabels = modelLabelsByBackend[backend] ?? {};
   const backendReasoning = reasoningByBackend[backend] ?? EMPTY_REASONING_OPTIONS;
-  const openAddModel = useAddModelExit(backend, open);
   // Show the search field only when the list is long enough to warrant it, so
   // claude/codex (a handful of models) stay uncluttered.
   const showModelSearch = models.length > 8;
@@ -410,17 +410,31 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       model: agent.model ?? null,
       reasoning_effort: agent.reasoning_effort ?? null,
     });
-  const pickModel = (model: string) => {
+  const pickModel = (model: string, reasoning = backendReasoning) => {
     const patch: AgentRoutePatch = { model };
     // Switching to a model whose effort set no longer includes
     // the current effort: clear it in the same patch so the displayed
     // route matches what dispatches. Choosing the current model
     // again changes nothing, a refused saved effort included.
-    if (model !== currentModel && !isEffortSupported(backend, model, currentEffort, backendReasoning)) {
+    if (model !== currentModel && !isEffortSupported(backend, model, currentEffort, reasoning)) {
       patch.reasoning_effort = null;
     }
     applyPatch(patch);
   };
+  // Added in place, the new model is the one picked; the next open reads the
+  // list again, as every Hub open does.
+  const addModel = useAddModelDialog(backend, open, (model, catalog) => {
+    loadedModelBackendsRef.current.delete(backend);
+    // The list the add left is the catalog now: the new model's efforts decide
+    // whether the current effort survives the pick.
+    if (catalog) {
+      setModelsByBackend((prev) => ({ ...prev, [backend]: catalog.models }));
+      setModelLabelsByBackend((prev) => ({ ...prev, [backend]: catalog.modelLabels ?? {} }));
+      setReasoningByBackend((prev) => ({ ...prev, [backend]: catalog.reasoningOptions ?? {} }));
+      setEffortMenusByBackend((prev) => ({ ...prev, [backend]: catalog.effortMenus ?? {} }));
+    }
+    pickModel(model, catalog?.reasoningOptions ?? backendReasoning);
+  });
   const openNewAgent = () => {
     setOpen(false);
     onNavigateAway?.(); // close the create sheet before leaving, if any
@@ -428,10 +442,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     // that tab explicitly instead of resuming the remembered one.
     navigate('/agents?tab=definitions');
   };
-  const openAddModelExit = openAddModel
+  const openAddModelExit = addModel.open
     ? () => {
         setOpen(false);
-        openAddModel();
+        addModel.open?.();
       }
     : null;
   const effortLabel = (effort: string) => t(`chat.picker.effortOptions.${effort}`, { defaultValue: effort });
@@ -773,80 +787,84 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       </div>
     );
     return (
-      <ResponsiveMenu
-        open={open}
-        onOpenChange={(next) => {
-          setOpen(next);
-          if (!next) setAgentPage(false);
-        }}
-        trigger={triggerButton}
-        sheetTitle={t('chat.picker.sheetTitle')}
-        sheetCloseLabel={t('common.done')}
-        className="w-[320px] max-w-[92vw] overflow-hidden p-0"
-        align={align}
-        modal={modal}
-      >
-        {agentPage && !agentLocked ? agentList : routeMenu}
-      </ResponsiveMenu>
+      <>
+        <ResponsiveMenu
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (!next) setAgentPage(false);
+          }}
+          trigger={triggerButton}
+          sheetTitle={t('chat.picker.sheetTitle')}
+          sheetCloseLabel={t('common.done')}
+          className="w-[320px] max-w-[92vw] overflow-hidden p-0"
+          align={align}
+          modal={modal}
+        >
+          {agentPage && !agentLocked ? agentList : routeMenu}
+        </ResponsiveMenu>
+        {addModel.dialog}
+      </>
     );
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen} modal={modal}>
-      <PopoverTrigger asChild>
-        {triggerButton}
-      </PopoverTrigger>
-      <PopoverContent align={align} className="z-50 max-h-[70vh] w-[680px] max-w-[92vw] overflow-y-auto p-0">
-        {/* On phones the columns stack into one scrollable list; sm+ keeps the
-            side-by-side cascading menu. Model gets the widest track (long ids)
-            and Effort the narrowest (short labels). When the picked model states
-            no efforts the menu is a two-column cascade: an Effort column with a
-            heading and nothing under it would look like a list that failed. */}
-        <div
-          className={clsx(
-            'grid grid-cols-1 divide-y divide-border sm:divide-x sm:divide-y-0',
-            showEffortColumn ? 'sm:grid-cols-[1fr_1.35fr_0.7fr]' : 'sm:grid-cols-[1fr_1.35fr]',
-          )}
-        >
-          {/* Column 1 — Agent */}
-          <RouteColumn title={t('chat.picker.agent')}>
-            {agentLocked ? (
-              <div className="flex items-center gap-2 rounded bg-cyan/[0.10] px-2 py-1.5 text-[12px] text-cyan-ink">
-                {backend && <BackendAvatar backend={backend} className="size-3.5 shrink-0" />}
-                <span className="flex-1 truncate font-semibold">{agentLabel}</span>
-              </div>
-            ) : (
-            <>
-            {/* Default option: clears the route back to inherited defaults after
-                picking an explicit agent, without a page refresh. */}
-            {defaultLabel && (
-              <RouteItem
-                active={routeIsDefault}
-                onClick={pickDefault}
-              >
-                <Sparkles className="size-3.5 shrink-0 text-cyan-ink" />
-                <span className="flex-1 truncate font-semibold">{defaultLabel}</span>
-              </RouteItem>
+    <>
+      <Popover open={open} onOpenChange={setOpen} modal={modal}>
+        <PopoverTrigger asChild>
+          {triggerButton}
+        </PopoverTrigger>
+        <PopoverContent align={align} className="z-50 max-h-[70vh] w-[680px] max-w-[92vw] overflow-y-auto p-0">
+          {/* On phones the columns stack into one scrollable list; sm+ keeps the
+              side-by-side cascading menu. Model gets the widest track (long ids)
+              and Effort the narrowest (short labels). When the picked model states
+              no efforts the menu is a two-column cascade: an Effort column with a
+              heading and nothing under it would look like a list that failed. */}
+          <div
+            className={clsx(
+              'grid grid-cols-1 divide-y divide-border sm:divide-x sm:divide-y-0',
+              showEffortColumn ? 'sm:grid-cols-[1fr_1.35fr_0.7fr]' : 'sm:grid-cols-[1fr_1.35fr]',
             )}
-            {visibleAgents.length === 0 && (
-              <div className="px-2 py-3 text-center text-[11px] text-muted">{t('chat.noAgents')}</div>
-            )}
-            {Object.entries(grouped).map(([be, list]) => (
-              <div key={be} className="flex flex-col gap-0.5 pb-1">
-                <div className="px-2 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.12em] text-muted">{be}</div>
-                {list.map((agent) => (
-                  <RouteItem
-                    key={agent.id}
-                    active={!routeIsDefault && agent.name === currentAgent}
-                    onClick={() => pickAgent(agent)}
-                  >
-                    <span className="flex-1 truncate font-semibold">{agent.name}</span>
-                    {agent.model && <span className="truncate font-mono text-[9px] text-muted">{agent.model}</span>}
-                  </RouteItem>
-                ))}
-              </div>
-            ))}
-            <PickerExitButton label={t('chat.picker.newAgent')} onClick={openNewAgent} />
+          >
+            {/* Column 1 — Agent */}
+            <RouteColumn title={t('chat.picker.agent')}>
+              {agentLocked ? (
+                <div className="flex items-center gap-2 rounded bg-cyan/[0.10] px-2 py-1.5 text-[12px] text-cyan-ink">
+                  {backend && <BackendAvatar backend={backend} className="size-3.5 shrink-0" />}
+                  <span className="flex-1 truncate font-semibold">{agentLabel}</span>
+                </div>
+              ) : (
+              <>
+              {/* Default option: clears the route back to inherited defaults after
+                  picking an explicit agent, without a page refresh. */}
+              {defaultLabel && (
+                <RouteItem
+                  active={routeIsDefault}
+                  onClick={pickDefault}
+                >
+                  <Sparkles className="size-3.5 shrink-0 text-cyan-ink" />
+                  <span className="flex-1 truncate font-semibold">{defaultLabel}</span>
+                </RouteItem>
+              )}
+              {visibleAgents.length === 0 && (
+                <div className="px-2 py-3 text-center text-[11px] text-muted">{t('chat.noAgents')}</div>
+              )}
+              {Object.entries(grouped).map(([be, list]) => (
+                <div key={be} className="flex flex-col gap-0.5 pb-1">
+                  <div className="px-2 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.12em] text-muted">{be}</div>
+                  {list.map((agent) => (
+                    <RouteItem
+                      key={agent.id}
+                      active={!routeIsDefault && agent.name === currentAgent}
+                      onClick={() => pickAgent(agent)}
+                    >
+                      <span className="flex-1 truncate font-semibold">{agent.name}</span>
+                      {agent.model && <span className="truncate font-mono text-[9px] text-muted">{agent.model}</span>}
+                    </RouteItem>
+                  ))}
+                </div>
+              ))}
+              <PickerExitButton label={t('chat.picker.newAgent')} onClick={openNewAgent} />
             </>
             )}
           </RouteColumn>
@@ -917,6 +935,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         </div>
       </PopoverContent>
     </Popover>
+    {addModel.dialog}
+    </>
   );
 };
 
@@ -1005,8 +1025,8 @@ const ModelName: React.FC<{ label: string }> = ({ label }) => {
   if (cut < 0) return <>{label}</>;
   return (
     <>
-      <span className="text-muted">{label.slice(0, cut + 1)}</span>
-      {label.slice(cut + 1)}
+        <span className="text-muted">{label.slice(0, cut + 1)}</span>
+        {label.slice(cut + 1)}
     </>
   );
 };

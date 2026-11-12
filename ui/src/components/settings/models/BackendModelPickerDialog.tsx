@@ -98,7 +98,9 @@ export const BackendModelPickerDialog: React.FC<{
   choose?: 'many' | 'one';
   /** The search the dialog opens with: a search the model list already ran. */
   initialQuery?: string;
-}> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom, choose = 'many', initialQuery = '' }) => {
+  /** The add is being written: the dialog holds still until it settles. */
+  busy?: boolean;
+}> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom, choose = 'many', initialQuery = '', busy = false }) => {
   const { t } = useTranslation();
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [candidates, setCandidates] = React.useState<BackendModelCandidates | null>(null);
@@ -214,12 +216,13 @@ export const BackendModelPickerDialog: React.FC<{
     ...[...chosen.values()].filter((pick) => pick.row && !offeredIds.has(pick.candidate.id)),
   ];
   /** Adding what was typed needs no second step: it is the one thing left to do. */
-  const addTyped = () => onAdd(choose === 'one' ? [typedPick(typedId, backend)] : [...picks, typedPick(typedId, backend)]);
+  const addTyped = () => !busy && onAdd(choose === 'one' ? [typedPick(typedId, backend)] : [...picks, typedPick(typedId, backend)]);
 
   const typedAction = (prominent: boolean) => (
     <button
       type="button"
       className={cn('model-hub-picker-typed', prominent && 'model-hub-picker-typed--prominent')}
+      disabled={busy}
       onClick={addTyped}
     >
       <Plus aria-hidden="true" />
@@ -254,7 +257,7 @@ export const BackendModelPickerDialog: React.FC<{
   );
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>
+    <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
       <DialogContent
         mobileSheetHeight="tall"
         closeLabel={t('common.close') as string}
@@ -354,6 +357,7 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="ghost"
               className="model-hub-catalog-control shrink-0 rounded-md px-2.5 text-[12.5px] font-semibold text-muted-foreground max-sm:w-full"
+              disabled={busy}
               onClick={() => onCustom('')}
             >
               <Plus aria-hidden="true" />
@@ -365,6 +369,7 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="outline"
               className="model-hub-catalog-control flex-1 rounded-md px-5 text-[12.5px] font-semibold sm:flex-none"
+              disabled={busy}
               onClick={onCancel}
             >
               {t('settings.models.gateway.catalog.cancel')}
@@ -373,9 +378,10 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="brand"
               className="model-hub-catalog-control flex-1 rounded-md px-5 text-[12.5px] font-semibold sm:flex-none"
-              disabled={picks.length === 0}
+              disabled={picks.length === 0 || busy}
               onClick={() => onAdd(picks)}
             >
+              {busy && <LoaderCircle className="animate-spin" aria-hidden="true" />}
               {/* The empty state borrows the catalog's own action label rather
                   than a count of zero, so the footer keeps its width and the
                   button keeps naming what it does. */}

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Power, RefreshCw, Route, TriangleAlert } from 'lucide-react';
+import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Plus, Power, RefreshCw, Route, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -53,6 +53,17 @@ const ManageModelsButton: React.FC<{
     >
       <ListChecks aria-hidden="true" />
       {t('settings.models.gateway.manageModels')}
+    </Button>
+  );
+};
+
+/** The last row of a backend's model list: adding starts where the list is read. */
+const AddModelButton: React.FC<{ disabled: boolean; onClick: () => void; className?: string }> = ({ disabled, onClick, className }) => {
+  const { t } = useTranslation();
+  return (
+    <Button variant="outline" size="sm" className={cn('model-hub-add-model h-10 w-full rounded-md text-[12px] font-semibold', className)} onClick={onClick} disabled={disabled}>
+      <Plus aria-hidden="true" />
+      {t('settings.models.gateway.addModel')}
     </Button>
   );
 };
@@ -193,11 +204,12 @@ const AgentModelCard: React.FC<{
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
   onOpenModels: (agent: AgentSupply) => void;
+  onAddModels: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
   onOpenAgent?: (name: string) => void;
-}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent }) => {
+}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onAddModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent }) => {
   const { t } = useTranslation();
   const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
@@ -332,7 +344,7 @@ const AgentModelCard: React.FC<{
           ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToGateway')}</Button>}
         </div>
       </div>
-      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><ManageModelsButton disabled={pending} onClick={() => onOpenModels(agent)} /></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{(canCollapse || needsChainRepair) && <div className="flex h-6 w-full items-center">{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 flex-1 items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button>}{needsChainRepair && <button type="button" onClick={retryChains} className="model-hub-model-collapse model-hub-model-collapse--repair flex h-6 items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button>}</div>}</div>)}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><AddModelButton className="w-auto px-4" disabled={pending} onClick={() => onAddModels(agent)} /></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{(canCollapse || needsChainRepair) && <div className="flex h-6 w-full items-center">{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 flex-1 items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button>}{needsChainRepair && <button type="button" onClick={retryChains} className="model-hub-model-collapse model-hub-model-collapse--repair flex h-6 items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button>}</div>}<AddModelButton disabled={pending} onClick={() => onAddModels(agent)} /></div>)}
       {agent.mode === 'hub' && <AgentSupplyIssues agent={agent} onOpenAgent={onOpenAgent} />}
     </section>
   );
@@ -348,6 +360,7 @@ export const AgentCard: React.FC<{
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
   onOpenModels: (agent: AgentSupply) => void;
+  onAddModels: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;

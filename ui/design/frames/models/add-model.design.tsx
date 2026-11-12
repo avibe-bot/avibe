@@ -1,25 +1,17 @@
 // Adding a model where the models are listed.
 //
-// Every model list on Settings · Models ends in 添加模型 (approved, not shipped yet: it is drawn
-// with the kit row), and the dialog it opens is the shipped picker: it searches the providers and
-// the model catalog together, and a search that finds nothing adds what was typed as a custom model.
+// Every model list on Settings · Models ends in 添加模型, and the dialog it opens searches the
+// providers and the model catalog together; a search that finds nothing adds what was typed as a
+// custom model. Adding from the routes page or a model picker saves at once.
 import { BackendModelPickerDialog } from '@/components/settings/models/BackendModelPickerDialog';
 import { SettingsModelsPage } from '@/components/settings/models/SettingsModelsPage';
 import type { ModelsDevMatch, Source } from '@/components/settings/models/types';
 
 import { frames } from '../../frame';
-import { ModelListAddRow } from '../../kit/model-add';
-import { IntoPage } from '../../shell/IntoPage';
 import { settingsFixtures, settingsPage } from '../settings/fixtures';
 import { demoAgents, hubApi, ok, relayClaude, relayGpt, deepseek } from './fixtures';
 
-const page = settingsPage('models', (
-  <>
-    <SettingsModelsPage />
-    {/* The model list of each backend Model Hub serves. */}
-    <IntoPage selector="[data-agent-backend] > div.space-y-2"><ModelListAddRow /></IntoPage>
-  </>
-));
+const page = settingsPage('models', <SettingsModelsPage />);
 
 const supplier = (source: Source, model: string) => ({ source_id: source.id, source_name: source.display_name, model_id: model });
 const candidate = (id: string, display: string | null, suppliers: ReturnType<typeof supplier>[], origin: 'builtin' | 'provider' = 'provider') => ({
@@ -74,7 +66,7 @@ const designFrames = frames([
     title: '模型网关 · 每个后端的模型列表以「添加模型」结尾',
     width: 1440,
     height: 1900,
-    status: 'approved',
+    status: 'shipped',
     route: '/settings/models',
     fixtures: settingsFixtures(hubApi({ agents: demoAgents })),
     render: page,
