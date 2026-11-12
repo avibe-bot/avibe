@@ -1,6 +1,7 @@
 import type { TranslationKey } from '@/i18n/types';
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
 import {
   CircleX,
   LoaderCircle,
@@ -321,7 +322,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
         <DialogPrimitive.Content
           className="model-hub-add-key-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-edge bg-popover p-0 shadow-elevation-3 outline-none"
           onEscapeKeyDown={(event) => { if (!canCancel) event.preventDefault(); }}
-          onPointerDownOutside={(event) => { if (!canCancel) event.preventDefault(); }}
+          onPointerDownOutside={keepOpenOnOutsideClick}
         >
         <header className="model-hub-add-key-head flex flex-col border-b border-border px-5 py-4">
           <div className="flex items-center justify-between gap-3">

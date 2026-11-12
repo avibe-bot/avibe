@@ -312,7 +312,7 @@ export function McpLoginDialog({ name, project, callbackText, busy, onCallbackTe
   const { t } = useTranslation();
   return (
     <Dialog open={name !== null} onOpenChange={(open) => (!open ? onClose() : undefined)}>
-      <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
+      <DialogContent keepOnOutsideClick className="max-w-lg" closeLabel={t('common.close')}>
         <DialogTitle>{t('mcpHub.loginTitle')}</DialogTitle>
         <DialogDescription>{t('mcpHub.loginHint')}</DialogDescription>
         {name ? <LoginLink name={name} project={project} className={buttonVariants({ variant: 'outline' })} onActivate={onActivateLogin}>{t('mcpHub.openAuthorize')}</LoginLink> : null}
@@ -351,7 +351,7 @@ export function McpAddDialog({ open, project, text, error, result, busy, adding,
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
-      <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
+      <DialogContent keepOnOutsideClick className="max-w-lg" closeLabel={t('common.close')}>
         <DialogTitle>{t('mcpHub.addTitle')}</DialogTitle>
         <DialogDescription>
           {result ? t('mcpHub.addResultHint') : project ? t('mcpHub.addProjectSubtitle', { project: project.name }) : t('mcpHub.addSubtitle')}

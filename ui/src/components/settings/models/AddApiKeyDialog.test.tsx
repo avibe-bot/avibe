@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
@@ -206,6 +207,14 @@ afterEach(() => {
 });
 
 describe('AddApiKeyDialog · save reconciliation', () => {
+  it('stays open on a click outside, keeping the key being typed', async () => {
+    const { onClose } = renderDialog();
+    await userEvent.type(screen.getByLabelText('API key'), 'sk-typed');
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('API key') as HTMLInputElement).value).toBe('sk-typed');
+  });
+
   it('saves the visible protocol at once, without waiting for detection', async () => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
       .mockReturnValue(new Promise<never>(() => undefined));

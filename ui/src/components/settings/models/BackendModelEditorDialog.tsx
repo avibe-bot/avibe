@@ -407,7 +407,7 @@ export const BackendModelEditorDialog: React.FC<{
     <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
       <DialogContent
         onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-        onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+        keepOnOutsideClick
         mobileSheetHeight="tall"
         closeLabel={t('common.close') as string}
         className="model-hub-model-editor flex h-[min(660px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"

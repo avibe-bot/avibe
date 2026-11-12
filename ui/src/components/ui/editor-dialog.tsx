@@ -101,6 +101,7 @@ export const EditorDialog: React.FC<EditorDialogProps> = ({
     >
       <DialogContent
         className="flex h-[82vh] w-[92vw] max-w-[920px] flex-col gap-0 overflow-hidden p-0"
+        keepOnOutsideClick
         onInteractOutside={dismissable ? undefined : (e) => e.preventDefault()}
         onEscapeKeyDown={dismissable ? undefined : (e) => e.preventDefault()}
       >
