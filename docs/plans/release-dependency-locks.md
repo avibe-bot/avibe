@@ -16,10 +16,22 @@ preserving direct requirements and extras. This is necessary for an unmodified
 already obeys `Requires-Dist`. Source/editable developer dependencies retain
 their ranges. Rebuilding a released sdist must preserve the same pins.
 
-The lock's native extensions do not support CPython 3.15 (watchfiles' PyO3
-refuses it). This release bounds Python to >=3.10,<3.15 rather than publishing
-pins that select an unsupported default interpreter. Supported platform forks
-include Windows Claude SDK, Intel Mac cryptography and Python 3.10 SQLAlchemy.
+The runtime graph supports CPython 3.15 as well as 3.10–3.14. A metadata upper
+bound alone did not protect old upgraders or uv's default-interpreter selection:
+the previously locked pydantic-core/watchfiles native builds rejected 3.15.
+Upgrade only native dependency releases needed for compatible cp315 or abi3
+wheels (and their required companions); refresh the other wheel inventories
+without changing their versions. Preserve Windows Claude SDK, Intel Mac
+cryptography, Python 3.10 SQLAlchemy/Pillow and rpds-py compatibility forks.
+
+Acceptance installs the built wheel and its shipped constraints on a real 3.15
+interpreter and exercises the unmodified public 3.2.5 upgrader without new-client
+Python flags. New installers and upgrades enforce a Python >=3.10 floor without
+pinning an upper bound or a minor; Windows on Arm retains its explicit x64
+Python policy. Native dependency source builds are disallowed in the acceptance,
+except PyYAML 6.0.3 (no cp315 wheel, supported source build). The existing pure
+Python http-ece 1.2.1 also remains a source-only package. These exceptions are
+explicit build-input trust boundaries, not hash-verified or compiler-free claims.
 
 ## Trust and limitations
 
