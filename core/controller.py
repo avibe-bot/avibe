@@ -341,6 +341,8 @@ class Controller:
         # The single owner of Vibey's settlement outside a Turn.
         self.vibey_recovery = VibeyRecovery(self)
         self.trace_retention_task: Optional[asyncio.Task] = None
+        self._sqlite_optimizer_started = False
+        self._sqlite_optimizer_last_run_monotonic: Optional[float] = None
         self.web_ui_watchdog_task: Optional[asyncio.Task] = None
         self.mcp_discovery_task: Optional[asyncio.Task] = None
         self._trace_retention_executor: Optional[Any] = None
@@ -2359,6 +2361,32 @@ class Controller:
         return claude_timeout, codex_timeout
 
     _AGENT_EVENTS_RETENTION_CHECK_INTERVAL_SECONDS = 3600
+    _SQLITE_OPTIMIZE_INTERVAL_SECONDS = 24 * 3600
+
+    def _run_sqlite_optimizer_pass(self, engine, cancel_event: Optional[threading.Event] = None) -> dict[str, Any]:
+        """Run startup or daily planner maintenance on the retention worker.
+
+        SQLite optimizer work is deliberately kept off the controller event loop
+        and off per-connection setup. The first worker pass uses the all-table
+        startup mask because a fresh connection has no query history; later
+        passes use the normal optimize command at most once per day.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            return {"status": "cancelled"}
+
+        now = time.monotonic()
+        startup = not getattr(self, "_sqlite_optimizer_started", False)
+        last_run = getattr(self, "_sqlite_optimizer_last_run_monotonic", None)
+        if not startup and last_run is not None and now - last_run < self._SQLITE_OPTIMIZE_INTERVAL_SECONDS:
+            return {"status": "not_due"}
+
+        from storage import sqlite_optimizer
+
+        result = sqlite_optimizer.run(engine, startup=startup, cancel_event=cancel_event)
+        if result.get("status") == "ok":
+            self._sqlite_optimizer_started = True
+            self._sqlite_optimizer_last_run_monotonic = now
+        return result
 
     def _agent_events_retention_config(self) -> dict[str, Any] | None:
         """Read the retention window from the persisted V2 config, failing closed.
@@ -2408,6 +2436,12 @@ class Controller:
         # Skill privacy retention remains active when collection/tool retention
         # is disabled; both policies share this bounded maintenance worker.
         engine = get_cached_sqlite_engine()
+        try:
+            self._run_sqlite_optimizer_pass(engine, cancel_event)
+        except Exception:
+            # Planner maintenance is best effort and must not suppress the
+            # independent retention policies or make startup fail.
+            logger.warning("SQLite query-planner optimization failed", exc_info=True)
         agent_events_retention.run_skill_retention(engine, cancel_event=cancel_event)
         config = self._agent_events_retention_config()
         if config is None:

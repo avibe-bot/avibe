@@ -338,6 +338,57 @@ def test_retention_loop_shutdown_joins_executor(monkeypatch) -> None:
     assert controller._trace_retention_executor is None
 
 
+def test_optimizer_runs_when_retention_is_disabled(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    calls: list[str] = []
+    monkeypatch.setattr(Controller, "_run_sqlite_backup_expiry_pass", lambda *args, **kwargs: {})
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: object())
+    monkeypatch.setattr(
+        Controller,
+        "_run_sqlite_optimizer_pass",
+        lambda self, engine, cancel_event=None: calls.append("optimizer") or {"status": "ok"},
+    )
+    monkeypatch.setattr(real_module, "run_skill_retention", lambda *args, **kwargs: calls.append("skill"))
+    monkeypatch.setattr(Controller, "_agent_events_retention_config", lambda self: None)
+
+    assert controller._run_agent_events_retention_pass() == {"status": "disabled"}
+    assert calls == ["optimizer", "skill"]
+
+
+def test_optimizer_cadence_uses_startup_then_daily_pass(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    clock = iter((100.0, 101.0, 100.0 + Controller._SQLITE_OPTIMIZE_INTERVAL_SECONDS))
+    calls: list[bool] = []
+
+    monkeypatch.setattr("core.controller.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        "storage.sqlite_optimizer.run",
+        lambda engine, *, startup, cancel_event=None: calls.append(startup) or {"status": "ok"},
+    )
+
+    assert controller._run_sqlite_optimizer_pass(object()) == {"status": "ok"}
+    assert controller._run_sqlite_optimizer_pass(object()) == {"status": "not_due"}
+    assert controller._run_sqlite_optimizer_pass(object()) == {"status": "ok"}
+    assert calls == [True, False]
+
+
+def test_optimizer_failure_does_not_disable_other_maintenance(monkeypatch) -> None:
+    controller = Controller.__new__(Controller)
+    calls: list[str] = []
+    monkeypatch.setattr(Controller, "_run_sqlite_backup_expiry_pass", lambda *args, **kwargs: {})
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: object())
+    monkeypatch.setattr(
+        Controller,
+        "_run_sqlite_optimizer_pass",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("optimizer unavailable")),
+    )
+    monkeypatch.setattr(real_module, "run_skill_retention", lambda *args, **kwargs: calls.append("skill"))
+    monkeypatch.setattr(Controller, "_agent_events_retention_config", lambda self: None)
+
+    assert controller._run_agent_events_retention_pass() == {"status": "disabled"}
+    assert calls == ["skill"]
+
+
 def test_backup_expiry_is_independent_of_trace_retention_opt_out(monkeypatch) -> None:
     controller = Controller.__new__(Controller)
     calls = []
