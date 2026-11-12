@@ -15,6 +15,7 @@ import uuid
 import subprocess
 import threading
 import time
+from urllib.parse import urlsplit
 
 import pytest
 import requests
@@ -172,6 +173,39 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
         studio_log.close()
         log.close()
         print(f"native producer chain evidence: {tmp_path}")
+
+
+@pytest.fixture
+def local_held_chain(desktop_host, monkeypatch, tmp_path):
+    """Hold a successful actual local response; loopback bypasses the proxy."""
+    original_start = runtime_fixture.start
+    armed, entered, release = threading.Event(), threading.Event(), threading.Event()
+
+    def start(*args, **kwargs):
+        server, local = original_start(*args, **kwargs)
+        handler = server.RequestHandlerClass
+        original_end_headers = handler.end_headers
+
+        def end_headers(request):
+            if request.path == "/" and request.headers.get("Host") == urlsplit(local).netloc and armed.is_set():
+                armed.clear()
+                assert b"200" in request._headers_buffer[0]
+                entered.set()
+                assert release.wait(timeout=25)
+            return original_end_headers(request)
+
+        monkeypatch.setattr(handler, "end_headers", end_headers)
+        return server, local
+
+    monkeypatch.setattr(runtime_fixture, "start", start)
+    fixture = native_chain.__wrapped__(desktop_host, monkeypatch, tmp_path)
+    try:
+        value = next(fixture)
+        value["local_hold"] = (armed, entered, release)
+        yield value
+    finally:
+        release.set()
+        fixture.close()
 
 
 def login(f):
@@ -334,6 +368,130 @@ def studio_selector(f):
     state = f["state"](lambda state: state["account"]["status"] == "signed_in")["state"]
     name = next(item["name"] for item in state["catalog"]["instances"] if item["id"] == f["studio"]["id"])
     return "Array.from(document.querySelectorAll('main button')).find(button=>button.innerText.includes(" + json.dumps(name) + "))"
+
+
+@pytest.mark.parametrize("different_instance", [False, True])
+def test_recovered_account_window_and_delayed_event_keep_runtime_state_private(native_chain, different_instance):
+    # A normal remote build does not expose the bug: its initialization script
+    # was created with account=false. Exercise the actual rollback-created view
+    # and defer one real full-state WKWebView eval across its next navigation.
+    f = native_chain
+    extra = extra_log = None
+    try:
+        login(f)
+        selected = select_studio(f)
+        committed = selected["state"]["connection"]["committed"]
+        target = {"id": committed["instance_id"], "public_url": committed["canonical_origin"]}
+        if different_instance:
+            extra, extra_log, target = peer.start(f["root"] / "other-studio", f["info"], f["root"] / "mappings.json")
+        f["send"](action="present", view="instances")
+        f["wait"]("loaded", lambda event: "view=instances" in event["url"])
+        f["ready"]("return Boolean(window.__TAURI_INTERNALS__);")
+        generation = f["state"](lambda state: state["account"]["status"] == "signed_in")["state"]["generation"]
+        refreshed = f["js"]("return await window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                            + json.dumps({"version": 1, "request_id": "projection-refresh", "expected_generation": generation,
+                                          "action": {"type": "refresh_instances"}}) + "});")
+        assert refreshed["ok"]
+        catalog_target = next(row for row in refreshed["state"]["catalog"]["instances"] if row["id"] == target["id"])
+        f["document"].arm(catalog_target["host"], "/")
+        f["send"](action="eval", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                  + json.dumps({"version": 1, "request_id": "projection-select", "expected_generation": generation,
+                                "action": {"type": "select_instance", "instance_id": target["id"]}}) + "});")
+        if different_instance:
+            f["state"](lambda state: state["consent"] is not None)
+            f["ready"]("return document.body.innerText.includes('openid');")
+            f["js"]("document.querySelector('main button').click(); return true;")
+        assert f["document"].entered.wait(timeout=15)
+        f["send"](action="local_unavailable")
+        f["wait"]("local_unavailable")
+        f["wait"]("loaded", lambda event: "account/index.html" in event["url"])
+        restored = f["state"](lambda state: state["connection"]["pending"] is None)
+        assert restored["state"]["connection"]["committed"] == committed
+        f["document"].release.set()
+        control = f["js"]("return await window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                          + json.dumps({"version": 1, "request_id": "projection-account-control",
+                                        "expected_generation": restored["state"]["generation"], "action": {"type": "get_state"}}) + "});")
+        assert control["ok"] and len(control["state"]["catalog"]["instances"]) == (3 if different_instance else 2)
+        f["send"](action="hold_account_event")
+        f["wait"]("account_event_held")
+        f["send"](action="eval", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                  + json.dumps({"version": 1, "request_id": "projection-cancel",
+                                "expected_generation": restored["state"]["generation"], "action": {"type": "cancel"}}) + "});")
+        f["wait"]("loaded", lambda event: event["url"].startswith(committed["canonical_origin"]))
+        initial = f["js"]("window.fixtureStates=[]; window.addEventListener('avibe:desktop-client-state',e=>window.fixtureStates.push(e.detail)); return window.__AVIBE_DESKTOP_CLIENT_STATE__;")
+        assert not {"catalog", "enrollment", "consent"}.intersection(initial)
+        f["send"](action="release_account_event")
+        f["wait"]("account_event_released")
+        received = f["js"]("return window.fixtureStates;")
+        assert all(not {"catalog", "enrollment", "consent"}.intersection(state) for state in received), received
+        assert f["js"]("return location.origin;") == committed["canonical_origin"]
+    finally:
+        if extra is not None:
+            if extra.poll() is None:
+                extra.terminate()
+                extra.wait(timeout=10)
+            extra_log.close()
+
+
+@pytest.mark.parametrize("escape", ["sign_out", "return_local"])
+@pytest.mark.parametrize("interruption", ["disappear", "rebind", "explicit_escape"])
+def test_local_replacement_completes_under_current_presentation_owner(local_held_chain, escape, interruption):
+    # Offline-start tests never invalidate the already-created hidden local
+    # replacement. Hold its actual HTTP response before that terminal boundary.
+    f = local_held_chain
+    login(f)
+    select_studio(f)
+    f["send"](action="present", view="sign-out")
+    f["wait"]("loaded", lambda event: "view=sign-out" in event["url"])
+    f["ready"]("return document.querySelectorAll('main button').length === 2;")
+    armed, entered, release = f["local_hold"]
+    armed.set()
+    if escape == "sign_out":
+        f["send"](action="eval", script="document.querySelector('main button').click();")
+    else:
+        f["send"](action="escape")
+    assert entered.wait(timeout=15)
+    f["send"](action="runtime_offline")
+    f["wait"]("runtime_offline")
+    if interruption != "disappear":
+        f["send"](action="runtime_rebind")
+        f["wait"]("runtime_rebind")
+    if interruption == "explicit_escape":
+        f["send"](action="escape")
+    release.set()
+    destination = "tauri://localhost/" if interruption == "disappear" else f["local"] + "/"
+    f["ready"]("return location.href === " + json.dumps(destination) + ";")
+    final = f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")
+    deadline = time.monotonic() + 5
+    while not final["visible"] and time.monotonic() < deadline:
+        time.sleep(0.02)
+        final = f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")
+    assert final["visible"]
+    assert final["state"]["account"]["status"] == ("signed_out" if escape == "sign_out" else "signed_in")
+    assert final["credential_count"] == (0 if escape == "sign_out" else 1)
+    assert final["instance_stores"] == 0
+
+
+def test_rollback_retains_previous_material_across_two_window_interruptions(native_chain):
+    f = native_chain
+    login(f)
+    selected = select_studio(f)
+    committed = selected["state"]["connection"]["committed"]
+    f["send"](action="present", view="instances")
+    f["wait"]("loaded", lambda event: "view=instances" in event["url"])
+    selector = studio_selector(f)
+    f["ready"]("return Boolean(" + selector + ");")
+    f["send"](action="interrupt_windows", count=2)
+    f["wait"]("control_ready")
+    f["js"](selector + ".click(); return true;")
+    f["wait"]("window_lifecycle_interrupted", lambda event: event["remaining"] == 0)
+    f["wait"]("loaded", lambda event: "account/index.html" in event["url"])
+    final = f["state"](lambda state: state["connection"]["pending"] is None)
+    assert final["state"]["connection"]["committed"] == committed
+    assert final["credential_count"] == final["instance_stores"] == 1
+    f["ready"]("return Boolean(window.__TAURI_INTERNALS__);")
+    control = f["js"]("return await window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:{version:1,request_id:'twice-restored',expected_generation:0,action:{type:'get_state'}}});")
+    assert control["ok"] and control["state"]["connection"]["committed"] == committed
 
 
 @pytest.mark.parametrize("interruption", ["escape", "local_unavailable"])

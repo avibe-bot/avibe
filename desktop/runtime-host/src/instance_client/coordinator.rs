@@ -53,6 +53,7 @@ struct Inner {
     record: ConnectionRecord,
     restore_allowed: bool,
     committed_view_generation: Option<u64>,
+    action_generation: u64,
 }
 
 pub struct Coordinator {
@@ -85,6 +86,7 @@ impl Coordinator {
         view: Arc<dyn ClientView>,
     ) -> Self {
         let generation = Arc::new(AtomicU64::new(state.generation));
+        let action_generation = state.generation;
         let credential_ids = record.account_id.iter().cloned().collect();
         Self {
             inner: Mutex::new(Inner {
@@ -96,6 +98,7 @@ impl Coordinator {
                 record,
                 restore_allowed: true,
                 committed_view_generation: None,
+                action_generation,
             }),
             generation,
             operation: tokio::sync::Mutex::new(()),
@@ -117,6 +120,18 @@ impl Coordinator {
     }
     pub fn epoch(&self) -> Epoch {
         Epoch::new(self.generation.clone(), self.generation.load(Ordering::SeqCst))
+    }
+    /// A local lifecycle change interrupts callbacks but does not replace an
+    /// unfinished presentation. Accepted account/selection/escape actions do.
+    pub fn presentation_owner(&self) -> u64 {
+        self.inner.lock().expect("client state").action_generation
+    }
+    pub fn presentation_epoch(&self, owner: u64) -> Result<Epoch, ClientError> {
+        let inner = self.inner.lock().expect("client state");
+        if inner.action_generation != owner {
+            return Err(ClientError::new("stale_generation"));
+        }
+        Ok(Epoch::new(self.generation.clone(), inner.state.generation))
     }
     /// Receipt for the view selection that reached public state publication.
     /// Target equality cannot distinguish a reconnect to the same instance.
@@ -195,6 +210,7 @@ impl Coordinator {
         let value = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         inner.state.generation = value;
         inner.state.revision += 1;
+        inner.action_generation = value;
         drop(inner);
         self.view.invalidate(value);
         Ok(Epoch::new(self.generation.clone(), value))

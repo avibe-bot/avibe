@@ -328,3 +328,35 @@ checkpoint. Rust fmt, all-target Clippy, native tests and changed Python Ruff
 pass. Windows execution, signed-package acceptance, exact-head PR gates and
 Lead's independent full-chain run remain required; no package or live service
 was installed, signed or changed.
+
+### Second review: receiving document and interrupted presentation
+
+The reviewed head `2bd3305d97b019031ffdbbbf0b44c74d11c327e0` has two valid
+findings. The lifecycle continuation class recurred across two reviewed heads,
+so edits stopped for Lead diagnosis. Lead released the bounded repair in
+`s1-2bd3305-disposition.md`; findings-bearing heads remain two. Independent red
+consumers demonstrated account-only state reaching Runtime after rollback and
+Cancel, and hidden local replacements after both SignOut and ReturnLocal.
+Earlier passing eleven-case, cookie and startup results remain historical.
+
+Persistent initialization now contains only the Runtime projection. Full account
+events retain native caller checks and an exact receiving-document guard at
+JavaScript execution time. The existing trusted U1 get_state supplies its full
+initial account state. The fixture delays one actual WKWebView evaluation across
+navigation through a test-only Objective-C method interceptor; it does not alter
+the product event script or evaluation implementation.
+
+The existing serialized window owner retains previous-view material and local
+presentation intent until matching navigation and visibility complete. Only a
+local lifecycle change can continue that owner under a new epoch; explicit user
+actions supersede it. Production bootstrap navigation acquires the same window
+lock, or binds its validated origin for the current replacement owner. Exact
+selection receipts, per-window completion generations and store retirement
+remain authoritative. No public protocol or peer asset changes are involved.
+
+Added real consumers cover same/different-instance rollback, a delayed full event,
+SignOut/ReturnLocal disappearance and rebind, explicit escape supersession, and a
+second lifecycle change during rollback. These consumers are awaiting their first
+immutable repaired-candidate run. Local compilation, changed Python Ruff and nine
+existing coordinator consumers pass at this checkpoint; this is not a review or
+integration acceptance claim.

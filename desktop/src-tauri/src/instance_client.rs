@@ -21,6 +21,7 @@ pub(crate) struct Client {
     pub coordinator: Arc<Coordinator>,
     view: Arc<NativeView>,
 }
+#[derive(Clone)]
 struct PreviousView {
     remote: Option<Url>,
     route: Option<Url>,
@@ -33,6 +34,7 @@ struct Presentation {
     disposable: bool,
     staging: bool,
     pending_commit: Option<u64>,
+    local_owner: Option<u64>,
     remote: Option<Url>,
     route: Option<Url>,
 }
@@ -41,7 +43,7 @@ struct NativeView {
     bundle: Url,
     local_origin: Arc<Mutex<Option<LoopbackOrigin>>>,
     presentation: Mutex<Presentation>,
-    windows: tokio::sync::Mutex<()>,
+    windows: Arc<tokio::sync::Mutex<()>>,
     navigation: Mutex<Option<Navigation>>,
     store_directory: Mutex<Option<tempfile::TempDir>>,
 }
@@ -64,8 +66,17 @@ pub(crate) fn local_selected(app: &AppHandle) -> bool {
 pub(crate) fn foreground_local(app: &AppHandle) -> bool {
     app.try_state::<Client>().is_none_or(|client| {
         let state = client.view.presentation.lock().expect("presentation");
-        !state.account && state.remote.is_none()
+        !state.account && state.remote.is_none() && client.view.windows.try_lock().is_ok()
     })
+}
+/// Bootstrap may navigate an idle local window only while holding the same
+/// serialization as replacement/rollback. A busy owner receives the new local
+/// origin and finishes its own navigation and visibility under that origin.
+pub(crate) fn bootstrap_navigation(app: &AppHandle) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    let client = app.try_state::<Client>()?;
+    let guard = client.view.windows.clone().try_lock_owned().ok()?;
+    let state = client.view.presentation.lock().expect("presentation");
+    (!state.account && state.remote.is_none() && !state.staging && state.pending_commit.is_none()).then_some(guard)
 }
 pub(crate) fn epoch(app: &AppHandle) -> Option<u64> {
     app.try_state::<Client>()
@@ -196,10 +207,11 @@ pub fn attach(
             disposable: false,
             staging: false,
             pending_commit: None,
+            local_owner: None,
             remote: None,
             route: None,
         }),
-        windows: tokio::sync::Mutex::new(()),
+        windows: Arc::new(tokio::sync::Mutex::new(())),
         navigation: Mutex::new(None),
         store_directory: Mutex::new(None),
     });
@@ -239,7 +251,7 @@ pub(crate) fn updated(app: &AppHandle, update: serde_json::Value) {
 }
 pub fn initial_script(app: &AppHandle) -> Option<String> {
     let client = app.try_state::<Client>()?;
-    Some(client.view.script(true))
+    Some(client.view.script(true, None))
 }
 pub(crate) fn native_copy(key: &str) -> Option<String> {
     let chinese = sys_locale::get_locales()
@@ -351,6 +363,9 @@ pub fn caller_can_present(app: &AppHandle, label: &str, current: &Url) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
+    if client.view.windows.try_lock().is_err() {
+        return false;
+    }
     let view = client.view.presentation.lock().expect("presentation");
     if view.staging || view.pending_commit.is_some() {
         return false;
@@ -414,6 +429,9 @@ pub fn present(app: &AppHandle, view: &'static str) {
         if !epoch_matches(&app, generation) {
             return;
         }
+        let Ok(_windows) = native.windows.try_lock() else {
+            return;
+        };
         let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
             return;
         };
@@ -460,9 +478,13 @@ pub fn navigation(app: &AppHandle, label: &str, destination: &Url) -> Option<boo
 }
 
 impl NativeView {
-    fn script(&self, initial: bool) -> String {
+    fn script(&self, initial: bool, receiver: Option<&Url>) -> String {
         let state = self.presentation.lock().expect("presentation");
-        let value = if state.account {
+        // Initialization survives navigation for the lifetime of a WebView.
+        // It can never contain account-only state, even for an account build.
+        let account_receiver =
+            receiver.filter(|url| !initial && state.account && account_view(url, &self.bundle).is_some());
+        let value = if account_receiver.is_some() {
             serde_json::to_value(&state.state).expect("client state")
         } else {
             state.state.runtime_projection()
@@ -471,7 +493,16 @@ impl NativeView {
         if initial {
             format!("if (window.self === window.top) {{Object.defineProperty(window,'__AVIBE_DESKTOP_CLIENT_VERSION__',{{value:1}}); Object.defineProperty(window,'__AVIBE_DESKTOP_CLIENT_STATE__',{{value:Object.freeze({value})}}); {dispatch}}}")
         } else {
-            format!("if (window.self === window.top) {{{dispatch}}}")
+            // Native URL inspection precedes asynchronous eval. Check the actual
+            // execution receiver too; a queued full event must not cross a
+            // navigation back to Runtime, staging, bootstrap or another frame.
+            let receiver_guard = account_receiver.map_or(String::new(), |url| {
+                format!(
+                    " && window.location.href === {}",
+                    serde_json::to_string(url.as_str()).expect("receiver URL")
+                )
+            });
+            format!("if (window.self === window.top{receiver_guard}) {{{dispatch}}}")
         }
     }
     async fn remember_current(&self, epoch: &Epoch) -> Result<(), ClientError> {
@@ -499,28 +530,121 @@ impl NativeView {
         self.presentation.lock().expect("presentation").previous = Some(PreviousView { remote, route, cookies });
         Ok(())
     }
-    async fn restore_previous(&self, epoch: Epoch, previous: PreviousView, account: bool) -> Result<(), ClientError> {
-        self.retire_current().await?;
-        epoch.check()?;
-        let disposable = previous.remote.is_some();
-        let url = if account {
-            self.bundle.join("account/index.html").map_err(failure)?
-        } else {
-            previous
-                .route
-                .clone()
-                .or(previous.remote.clone())
-                .unwrap_or(self.local_url()?)
-        };
-        {
-            let mut state = self.presentation.lock().expect("presentation");
-            state.account = account;
-            state.pending_commit = None;
-            state.remote = previous.remote;
-            state.disposable = disposable;
-            state.route = previous.route;
+    fn presentation_epoch(&self, owner: u64) -> Result<Epoch, ClientError> {
+        self.app.state::<Client>().coordinator.presentation_epoch(owner)
+    }
+    fn lifecycle_retry(&self, owner: u64, epoch: &Epoch, result: &Result<(), ClientError>) -> bool {
+        result.as_ref().is_err_and(|error| error.code == "stale_generation")
+            && epoch.check().is_err()
+            && self.presentation_epoch(owner).is_ok()
+    }
+    async fn restore_previous(&self, owner: u64, previous: &PreviousView, account: bool) -> Result<(), ClientError> {
+        if previous.remote.is_none() && !account {
+            return self.restore_local(owner, previous.route.clone()).await;
         }
-        self.build(epoch, url, disposable, previous.cookies).await
+        // The caller holds windows for the whole obligation, including show.
+        // Keep the original material across repeated lifecycle invalidations;
+        // a later user action replaces the owner and stops this continuation.
+        loop {
+            let epoch = self.presentation_epoch(owner)?;
+            let result = async {
+                self.retire_current().await?;
+                epoch.check()?;
+                let disposable = previous.remote.is_some();
+                let url = if account {
+                    self.bundle.join("account/index.html").map_err(failure)?
+                } else {
+                    previous
+                        .route
+                        .clone()
+                        .or(previous.remote.clone())
+                        .unwrap_or(self.local_url()?)
+                };
+                {
+                    let mut state = self.presentation.lock().expect("presentation");
+                    state.account = account;
+                    state.pending_commit = None;
+                    state.remote = previous.remote.clone();
+                    state.disposable = disposable;
+                    state.route = previous.route.clone();
+                }
+                self.build(epoch.clone(), url.clone(), disposable, previous.cookies.clone())
+                    .await?;
+                self.show(epoch.clone(), &url).await?;
+                epoch.check()
+            }
+            .await;
+            if self.lifecycle_retry(owner, &epoch, &result) {
+                continue;
+            }
+            if result.is_ok() {
+                self.presentation.lock().expect("presentation").previous = None;
+            }
+            return result;
+        }
+    }
+    async fn restore_local(&self, owner: u64, route: Option<Url>) -> Result<(), ClientError> {
+        self.presentation_epoch(owner)?;
+        self.presentation.lock().expect("presentation").local_owner = Some(owner);
+        loop {
+            let epoch = self.presentation_epoch(owner)?;
+            let result = async {
+                self.retire_current().await?;
+                epoch.check()?;
+                let url = route
+                    .clone()
+                    .filter(|url| {
+                        self.local_origin
+                            .lock()
+                            .ok()
+                            .and_then(|origin| origin.clone())
+                            .is_some_and(|origin| origin.matches_url_origin(url))
+                    })
+                    .unwrap_or(self.local_url()?);
+                {
+                    let mut state = self.presentation.lock().expect("presentation");
+                    state.account = false;
+                    state.pending_commit = None;
+                    state.remote = None;
+                    state.disposable = false;
+                    state.route = None;
+                }
+                self.build(epoch.clone(), url.clone(), false, vec![]).await?;
+                self.show(epoch.clone(), &url).await?;
+                epoch.check()
+            }
+            .await;
+            if self.lifecycle_retry(owner, &epoch, &result) {
+                continue;
+            }
+            if result.is_ok() {
+                self.presentation.lock().expect("presentation").previous = None;
+            }
+            return result;
+        }
+    }
+    async fn finish_commit(&self, owner: u64, receipt: u64) -> Result<(), ClientError> {
+        loop {
+            let epoch = self.presentation_epoch(owner)?;
+            let destination = {
+                let state = self.presentation.lock().expect("presentation");
+                if state.pending_commit != Some(receipt)
+                    || self.app.state::<Client>().coordinator.committed_view_generation() != Some(receipt)
+                {
+                    return Err(ClientError::new("stale_generation"));
+                }
+                state.remote.clone().ok_or_else(|| failure("missing target"))?
+            };
+            let result = self.show(epoch.clone(), &destination).await;
+            if self.lifecycle_retry(owner, &epoch, &result) {
+                continue;
+            }
+            result?;
+            let mut state = self.presentation.lock().expect("presentation");
+            state.previous = None;
+            state.pending_commit = None;
+            return Ok(());
+        }
     }
     async fn retire_current(&self) -> Result<(), ClientError> {
         let disposable = self.presentation.lock().expect("presentation").disposable;
@@ -617,19 +741,36 @@ impl NativeView {
         epoch.check()?;
         result
     }
-    fn show(&self, epoch: Epoch) {
+    async fn show(&self, epoch: Epoch, destination: &Url) -> Result<(), ClientError> {
         let app = self.app.clone();
-        let _ = self.app.run_on_main_thread(move || {
-            if epoch.check().is_ok() {
-                if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-                if app.try_state::<Shell>().is_some() {
-                    crate::refresh_native_controls(&app, None);
-                }
-            }
-        });
+        let bundle = self.bundle.clone();
+        let destination = destination.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.app
+            .run_on_main_thread(move || {
+                let result = (|| {
+                    epoch.check()?;
+                    let window = app.get_webview_window(MAIN_WINDOW).ok_or_else(|| failure("missing"))?;
+                    let actual = window.url().map_err(failure)?;
+                    let matches = if destination == bundle || account_view(&destination, &bundle).is_some() {
+                        actual == destination
+                    } else {
+                        actual.origin() == destination.origin()
+                    };
+                    if !matches {
+                        return Err(ClientError::new("instance_navigation_mismatch"));
+                    }
+                    window.show().map_err(failure)?;
+                    window.set_focus().map_err(failure)?;
+                    if app.try_state::<Shell>().is_some() {
+                        crate::refresh_native_controls(&app, None);
+                    }
+                    epoch.check()
+                })();
+                let _ = sender.send(result);
+            })
+            .map_err(failure)?;
+        receiver.await.map_err(failure)?
     }
     fn local_url(&self) -> Result<Url, ClientError> {
         if let Some(origin) = self.local_origin.lock().ok().and_then(|origin| origin.clone()) {
@@ -667,32 +808,53 @@ impl ClientView for NativeView {
         };
         let view = client.view.clone();
         let coordinator = client.coordinator.clone();
+        let owner = coordinator.presentation_owner();
         tauri::async_runtime::spawn(async move {
             let _windows = view.windows.lock().await;
-            if epoch.check().is_err() {
+            if epoch.check().is_err() || view.presentation_epoch(owner).is_err() {
                 return;
             }
             let committed = coordinator.committed_view_generation();
-            let (previous, committed_candidate) = {
-                let mut state = view.presentation.lock().expect("presentation");
+            let (previous, committed_candidate, local) = {
+                let state = view.presentation.lock().expect("presentation");
                 if state.pending_commit.is_some() && state.pending_commit == committed {
                     // Public commit won the lifecycle race after load completed.
-                    state.pending_commit = None;
-                    state.previous = None;
-                    (None, true)
+                    (None, state.pending_commit, false)
                 } else {
-                    (state.previous.take(), false)
+                    (
+                        state.previous.clone(),
+                        None,
+                        state.local_owner == Some(owner) && !state.account && state.remote.is_none(),
+                    )
                 }
             };
-            if let Some(previous) = previous {
-                if let Err(error) = view.restore_previous(epoch.clone(), previous, true).await {
-                    eprintln!("desktop client lifecycle restoration: {}", error.code);
+            let result = if let Some(previous) = previous {
+                view.restore_previous(owner, &previous, true).await
+            } else if let Some(receipt) = committed_candidate {
+                view.finish_commit(owner, receipt).await
+            } else if local {
+                // A completed local presentation can be invalidated just after
+                // its terminal show. Reconcile only the current local intent;
+                // an account page or committed remote is never displaced.
+                let expected = view.local_url();
+                let settled = expected.as_ref().is_ok_and(|expected| {
+                    view.app.get_webview_window(MAIN_WINDOW).is_some_and(|window| {
+                        window.is_visible().unwrap_or(false) && window.url().is_ok_and(|url| url == *expected)
+                    })
+                });
+                if settled {
+                    Ok(())
                 } else {
-                    view.show(epoch);
+                    view.restore_local(owner, None).await
                 }
-            } else if committed_candidate {
-                view.show(epoch);
+            } else {
+                Ok(())
+            };
+            if let Err(error) = result {
+                eprintln!("desktop client lifecycle restoration: {}", error.code);
             }
+            drop(_windows);
+            view.changed(&coordinator.state());
         });
     }
     fn changed(&self, state: &ClientState) {
@@ -708,37 +870,36 @@ impl ClientView for NativeView {
                 view.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
             }
         }
-        if let Some(window) = self.app.get_webview_window(MAIN_WINDOW) {
-            if window
-                .url()
-                .is_ok_and(|url| caller_can_present(&self.app, MAIN_WINDOW, &url))
-            {
-                let _ = window.eval(self.script(false));
+        // During creation WKWebView may not have a URL yet. The serialized
+        // owner publishes after completion; no eval can target that gap.
+        if self.windows.try_lock().is_ok() {
+            if let Some(window) = self.app.get_webview_window(MAIN_WINDOW) {
+                if let Ok(url) = window.url() {
+                    if caller_can_present(&self.app, MAIN_WINDOW, &url) {
+                        let _ = window.eval(self.script(false, Some(&url)));
+                    }
+                }
             }
         }
         self.auxiliaries();
     }
     fn committed(&self, epoch: Epoch) {
-        if epoch.check().is_ok() {
-            {
-                let mut view = self.presentation.lock().expect("presentation");
-                if let Some(pending) = view.pending_commit {
-                    if pending != epoch.value
-                        || self.app.state::<Client>().coordinator.committed_view_generation() != Some(pending)
-                    {
-                        return;
-                    }
+        let Some(client) = self.app.try_state::<Client>() else {
+            return;
+        };
+        let view = client.view.clone();
+        let coordinator = client.coordinator.clone();
+        tauri::async_runtime::spawn(async move {
+            let _windows = view.windows.lock().await;
+            let pending = view.presentation.lock().expect("presentation").pending_commit;
+            if pending == Some(epoch.value) {
+                if let Err(error) = view.finish_commit(epoch.value, epoch.value).await {
+                    eprintln!("desktop client committed presentation: {}", error.code);
                 }
-                view.previous = None;
-                view.pending_commit = None;
             }
-            // Publish the committed projection while the staged window is
-            // hidden, then make the new identity visible.
-            if let Some(client) = self.app.try_state::<Client>() {
-                self.changed(&client.coordinator.state());
-            }
-            self.show(epoch);
-        }
+            drop(_windows);
+            view.changed(&coordinator.state());
+        });
     }
     fn invalidate(&self, _: u64) {
         if let Some(navigation) = self.navigation.lock().expect("navigation").take() {
@@ -774,6 +935,7 @@ impl ClientView for NativeView {
                 let mut state = self.presentation.lock().expect("presentation");
                 state.account = false;
                 state.disposable = true;
+                state.local_owner = None;
                 state.remote = Some(url.clone());
                 state.route = Some(url.clone());
                 state.pending_commit = Some(epoch.value);
@@ -789,17 +951,17 @@ impl ClientView for NativeView {
         }
         .await;
         if result.is_err() && epoch.check().is_ok() {
-            let previous = self.presentation.lock().expect("presentation").previous.take();
+            let previous = self.presentation.lock().expect("presentation").previous.clone();
             if let Some(previous) = previous {
-                self.restore_previous(epoch.clone(), previous, true).await?;
-                self.show(epoch);
+                self.restore_previous(epoch.value, &previous, true).await?;
             }
         }
         result
     }
     async fn restore(&self, epoch: Epoch, target: ClientTarget) -> Result<(), ClientError> {
         let _windows = self.windows.lock().await;
-        epoch.check()?;
+        let owner = epoch.value;
+        self.presentation_epoch(owner)?;
         let previous = {
             let mut state = self.presentation.lock().expect("presentation");
             let matches_previous = state.previous.as_ref().is_some_and(|old| match &target {
@@ -810,50 +972,25 @@ impl ClientView for NativeView {
                     .is_some_and(|origin| origin.origin().ascii_serialization() == *canonical_origin),
             });
             if matches_previous {
-                state.previous.take()
+                state.previous.clone()
             } else {
                 state.previous = None;
                 None
             }
         };
         if let Some(previous) = previous {
-            self.restore_previous(epoch.clone(), previous, false).await?;
-            self.show(epoch);
-            return Ok(());
+            return self.restore_previous(owner, &previous, false).await;
         }
         let local = target.is_local();
-        let (disposable, route) = {
+        let route = {
             let state = self.presentation.lock().expect("presentation");
-            (state.disposable, state.route.clone())
+            state.route.clone()
         };
-        if local && (disposable || self.app.get_webview_window(MAIN_WINDOW).is_none()) {
-            self.retire_current().await?;
-            epoch.check()?;
-            {
-                let mut state = self.presentation.lock().expect("presentation");
-                state.account = false;
-                state.pending_commit = None;
-                state.remote = None;
-                state.disposable = false;
-                state.route = None;
-            }
-            self.build(epoch.clone(), self.local_url()?, false, vec![]).await?;
-            self.show(epoch);
-            return Ok(());
+        if local {
+            return self.restore_local(owner, route).await;
         }
-        let url = if local {
-            route
-                .filter(|url| {
-                    self.local_origin
-                        .lock()
-                        .ok()
-                        .and_then(|o| o.clone())
-                        .is_some_and(|o| o.matches_url_origin(url))
-                })
-                .unwrap_or(self.local_url()?)
-        } else {
-            route.ok_or_else(|| ClientError::new("instance_session_missing"))?
-        };
+        let url = route.ok_or_else(|| ClientError::new("instance_session_missing"))?;
+        let epoch = self.presentation_epoch(owner)?;
         let app = self.app.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.presentation.lock().expect("presentation").account = false;
@@ -868,8 +1005,14 @@ impl ClientView for NativeView {
             .map_err(failure)?;
         rx.await.map_err(failure)?
     }
-    async fn signed_out(&self, _: Epoch, _: ClientTarget) -> Result<(), ClientError> {
+    async fn signed_out(&self, epoch: Epoch, _: ClientTarget) -> Result<(), ClientError> {
         let _windows = self.windows.lock().await;
+        let owner = epoch.value;
+        if self.presentation_epoch(owner).is_err() && !self.presentation.lock().expect("presentation").disposable {
+            // A newer explicit local escape already retired the instance and
+            // presented its replacement. Do not erase that new local window.
+            return Ok(());
+        }
         // Erase even when another local escape superseded navigation.
         let retired = self.retire_current().await;
         {
@@ -881,14 +1024,13 @@ impl ClientView for NativeView {
             state.route = None;
             state.previous = None;
         }
-        // A local escape may supersede sign-out while erasure waits. New
-        // sign-in stays blocked until this method finishes, so restore local
-        // under the newest generation instead of leaving a destroyed window.
-        let epoch = self.app.state::<Client>().coordinator.epoch();
-        let restored = self.build(epoch.clone(), self.local_url()?, false, vec![]).await;
-        if restored.is_ok() {
-            self.show(epoch);
-        }
+        // A newer explicit escape owns its own queued restore. Lifecycle-only
+        // changes keep this owner and re-evaluate the local destination.
+        let restored = if self.presentation_epoch(owner).is_ok() {
+            self.restore_local(owner, None).await
+        } else {
+            Ok(())
+        };
         retired.and(restored)
     }
 }

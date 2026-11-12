@@ -18,7 +18,7 @@ use std::{
     io::BufRead,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -45,6 +45,18 @@ struct Controls {
     hold: Mutex<Option<(String, oneshot::Receiver<()>)>>,
     release: Mutex<Option<oneshot::Sender<()>>>,
     bad_csrf: AtomicBool,
+}
+struct Lifecycle {
+    remaining: AtomicUsize,
+    coordinator: Arc<avibe_runtime_host::instance_client::coordinator::Coordinator>,
+    local_origin: Arc<Mutex<Option<LoopbackOrigin>>>,
+    local: LoopbackOrigin,
+}
+impl Lifecycle {
+    fn change(&self, origin: Option<LoopbackOrigin>) {
+        *self.local_origin.lock().unwrap() = origin.clone();
+        self.coordinator.local_origin(origin);
+    }
 }
 #[async_trait]
 impl Transport for Wire {
@@ -167,7 +179,17 @@ fn main() {
         .plugin(tauri::plugin::Builder::<_,()>::new("instance-fixture")
             .on_webview_ready(|_view| {
                 #[cfg(target_os="macos")]
-                support::fixture_tls::install(&_view);
+                {
+                    support::fixture_tls::install(&_view);
+                    support::fixture_event::install(&_view);
+                }
+                if let Some(lifecycle) = _view.app_handle().try_state::<Lifecycle>() {
+                    if lifecycle.remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                        let next = lifecycle.local_origin.lock().unwrap().is_none().then(|| lifecycle.local.clone());
+                        lifecycle.change(next);
+                        emit(json!({"event":"window_lifecycle_interrupted","remaining":lifecycle.remaining.load(Ordering::SeqCst)}));
+                    }
+                }
             })
             .on_page_load(|view, payload| {
                 emit(json!({"event":"page_load","label":view.label(),"finished":payload.event()==tauri::webview::PageLoadEvent::Finished,"origin":payload.url().origin().ascii_serialization(),"path":payload.url().path()}));
@@ -211,7 +233,9 @@ fn main() {
                 bundle:bundle.clone(), state:ClientState::new("小明的 Mac".into(),"0.1.0".into(),json!({"phase":"idle","channel":"stable","prereleases":false,"interactive":false})),
                 record,store,local_origin:local_origin.clone(),
             },Arc::new(Wire { client:reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build()?,config:setup.clone(),controls:controls.clone() }),private.clone(),Arc::new(NoSystemPasskey));
-            coordinator.local_origin(Some(local));
+            coordinator.local_origin(Some(local.clone()));
+            app.manage(Lifecycle{remaining:AtomicUsize::new(0), coordinator:coordinator.clone(),
+                local_origin:local_origin.clone(),local});
             let mut window_config=app.config().app.windows[0].clone();
             window_config.url=WebviewUrl::External(bundle);
             WebviewWindowBuilder::from_config(app,&window_config)?
@@ -240,6 +264,18 @@ fn main() {
                             let choice=command["choice"].as_u64().map(|value|value as usize);
                             handle.run_on_main_thread(move || emit(support::fixture_dialog::inspect(choice))).unwrap();
                         },
+                        #[cfg(target_os="macos")]
+                        "hold_account_event"=> {
+                            let coordinator=coordinator.clone();
+                            handle.run_on_main_thread(move || {
+                                support::fixture_event::arm();
+                                coordinator.desktop_update(json!({"phase":"idle","channel":"stable","prereleases":false,"interactive":false}));
+                            }).unwrap();
+                        },
+                        #[cfg(target_os="macos")]
+                        "release_account_event"=> {
+                            handle.run_on_main_thread(support::fixture_event::release).unwrap();
+                        },
                         "escape"=> {
                             let coordinator=coordinator.clone();
                             tauri::async_runtime::spawn(async move {
@@ -256,6 +292,15 @@ fn main() {
                             *local_origin.lock().unwrap()=None;
                             coordinator.local_origin(None);
                             emit(json!({"event":"runtime_offline"}));
+                        },
+                        "runtime_rebind"=> {
+                            let lifecycle=handle.state::<Lifecycle>();
+                            lifecycle.change(Some(lifecycle.local.clone()));
+                            emit(json!({"event":"runtime_rebind"}));
+                        },
+                        "interrupt_windows"=> {
+                            handle.state::<Lifecycle>().remaining.store(command["count"].as_u64().unwrap() as usize,Ordering::SeqCst);
+                            emit(json!({"event":"control_ready"}));
                         },
                         "presentation_status"=> {
                             let window=handle.get_webview_window("main").unwrap();
@@ -296,6 +341,8 @@ fn main() {
 mod support {
     #[cfg(target_os = "macos")]
     pub mod fixture_dialog;
+    #[cfg(target_os = "macos")]
+    pub mod fixture_event;
     #[cfg(target_os = "macos")]
     pub mod fixture_tls;
 }

@@ -1529,7 +1529,9 @@ fn complete_workbench_handoff(
 /// Hands the window to the Workbench. Reached only from a `Ready` status, so the
 /// Runtime has already proved both UI and Controller readiness at this origin.
 fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<AtomicU8>) {
-    if instance_client::enabled(app) && !instance_client::foreground_local(app) {
+    let client_enabled = instance_client::enabled(app);
+    let _client_navigation = instance_client::bootstrap_navigation(app);
+    if client_enabled && _client_navigation.is_none() {
         if let Ok(origin) = LoopbackOrigin::parse(&ready.origin) {
             if set_active_origin(app, Some(origin.clone())) {
                 activity.store(ACTIVITY_MONITOR, Ordering::SeqCst);
@@ -1722,7 +1724,9 @@ fn return_to_bootstrap(app: &AppHandle) -> bool {
 /// Restores the exact bootstrap URL captured before the first navigation. It is
 /// a bundled Tauri page in production and the fixed Vite dev URL in development.
 fn restore_bootstrap_view(app: &AppHandle) -> bool {
-    if instance_client::enabled(app) && !instance_client::foreground_local(app) {
+    let client_enabled = instance_client::enabled(app);
+    let _client_navigation = instance_client::bootstrap_navigation(app);
+    if client_enabled && _client_navigation.is_none() {
         return set_active_origin(app, None);
     }
     let (Some(bootstrap_url), latest) = ({
