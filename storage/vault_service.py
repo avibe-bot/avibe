@@ -125,6 +125,15 @@ class DeliveryIdentity:
 
 
 @dataclass(frozen=True)
+class CapturedDelivery:
+    """One coherent opaque envelope and its non-secret authorization evidence."""
+
+    envelope: Sealed
+    identity: DeliveryIdentity
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class GrantApproval:
     grant_id: str
     members: list[str]
@@ -4252,17 +4261,50 @@ def get_signing_envelope(
     return get_key_envelope(conn, name, user_context=user_context)
 
 
-def capture_delivery_identities(conn: Connection, refs: list[str], *, user_context: Any = None) -> list[DeliveryIdentity]:
-    """Capture labels and ACL identity while the selected records still exist."""
-    identities: list[DeliveryIdentity] = []
-    snapshots: dict[str, dict[str, Any] | None] = {}
-    for ref in refs:
-        row, entry = _resolve_record_ref(conn, ref, user_context=user_context)
-        name = str(row["name"])
-        if name not in snapshots:
-            snapshots[name] = _build_audit_access_snapshot(conn, [name])
-        identities.append(DeliveryIdentity(str(row["id"]), name, str(entry["field"]), snapshots[name]))
-    return identities
+def capture_deliveries(conn: Connection, refs: list[str], *, user_context: Any = None) -> list[CapturedDelivery]:
+    """Read envelopes, identities and policies from one actual SQLite snapshot.
+
+    A bare SELECT does not start a transaction under sqlite3's legacy mode.
+    The savepoint pins all reads, without committing any caller-owned writes.
+    Callers that will reserve grants must reserve their writer before this read.
+    """
+    from storage import resource_access_service
+
+    deliveries: list[CapturedDelivery] = []
+    with conn.begin_nested():
+        for ref in refs:
+            row, entry = _resolve_record_ref(conn, ref, user_context=user_context)
+            name, secret_id = str(row["name"]), str(row["id"])
+            _reject_keypair_value_delivery(row, name)
+            snapshot = {"version": 1, "resources": [{
+                "name": name,
+                "resource_id": secret_id,
+                "policy": resource_access_service.get_resource_policy("vault_secret", secret_id, connection=conn),
+            }]}
+            deliveries.append(CapturedDelivery(
+                entry["envelope"],
+                DeliveryIdentity(secret_id, name, str(entry["field"]), snapshot),
+                _meta_payload(row),
+            ))
+    return deliveries
+
+
+def require_current_deliveries(conn: Connection, deliveries: list[CapturedDelivery]) -> None:
+    """Reject a changed preflight before selecting/reserving its grants.
+
+    The caller already holds the writer reservation. Check actual envelope,
+    identity and authorization facts, not a name or timestamp alone. Usage
+    counters and cosmetic metadata do not invalidate an otherwise equal capture.
+    """
+    refs = [f"{capture.identity.name}.{capture.identity.field}" for capture in deliveries]
+    for previous, current in zip(deliveries, capture_deliveries(conn, refs)):
+        identity = previous.identity
+        if (
+            current.identity != identity
+            or current.envelope != previous.envelope
+            or any(current.metadata[key] != previous.metadata[key] for key in ("kind", "protection", "policy"))
+        ):
+            raise SecretConflictError(f"secret {identity.name!r} changed while preparing delivery; retry before handoff")
 
 
 def record_deliveries(conn: Connection, identities: list[DeliveryIdentity], *, requester: Any = None, mode: str | None = None) -> None:

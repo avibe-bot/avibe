@@ -850,8 +850,8 @@ def test_delivery_use_count_is_per_secret_and_audit_lists_fields(vault):
     _create(vault, name="LOGIN", fields=[{"name": "username", "sealed": _sealed("username")}])
 
     with vault.begin() as conn:
-        identities = vs.capture_delivery_identities(conn, ["LOGIN", "LOGIN.username"])
-        vs.record_deliveries(conn, identities, mode="run")
+        captures = vs.capture_deliveries(conn, ["LOGIN", "LOGIN.username"])
+        vs.record_deliveries(conn, [capture.identity for capture in captures], mode="run")
         meta = vs.get_secret_meta(conn, "LOGIN")
         events = conn.execute(
             select(vs.vault_audit.c.delivery).where(

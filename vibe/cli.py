@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     )
     from core.watches import ManagedWatchStore, WatchRuntimeStateStore
     from storage.background import DefinitionWriteConflict, SQLiteBackgroundTaskStore
+    from storage.vault_service import CapturedDelivery
     from vibe import runtime
 
 logger = logging.getLogger(__name__)
@@ -10348,41 +10349,25 @@ def _vault_cli_delivery_context(args, *, mode: str, **extra) -> tuple[dict, dict
     return requester, delivery, session_id
 
 
-def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> dict[str, dict]:
+def _capture_vault_batch(engine, records: list[str]):
     from storage import vault_service
 
-    metas: dict[str, dict] = {}
+    refs = list(dict.fromkeys(records))
     with engine.connect() as conn:
-        for record in dict.fromkeys(mapping.values()):
-            name = _record_secret_name(record)
-            if name in metas:
-                continue
-            metas[name] = vault_service.get_secret_meta(conn, name)
-            if metas[name].get("kind") == "keypair":
-                raise vault_service.KeypairNotValueDeliverableError(
-                    f"{record} is a signing key; use vibe vault sign instead of value delivery"
-                )
-    return metas
+        captures = dict(zip(refs, vault_service.capture_deliveries(conn, refs)))
+    metas = {capture.identity.name: capture.metadata for capture in captures.values()}
+    return metas, captures
 
 
-def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
+@contextlib.contextmanager
+def _vault_delivery_transaction(engine, captures):
     from storage import vault_service
+    from storage.agent_session_rows import reserve_write_lock
 
-    metas: dict[str, dict] = {}
-    with engine.connect() as conn:
-        for record in dict.fromkeys(names):
-            name = _record_secret_name(record)
-            if name in metas:
-                continue
-            metas[name] = vault_service.get_secret_meta(conn, name)
-            if metas[name].get("kind") == "keypair":
-                raise vault_service.KeypairNotValueDeliverableError(
-                    f"{record} is a signing key; use vibe vault sign instead of value delivery"
-                )
-    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
-    if len(tiers) > 1:
-        raise TaskCliError("mixing protected and standard secrets in one vault inject is not wired yet", code="mixed_protection_tiers")
-    return metas
+    with engine.begin() as conn:
+        reserve_write_lock(conn)
+        vault_service.require_current_deliveries(conn, list(captures.values()))
+        yield conn
 
 
 class _AgentRunOutputBridge:
@@ -10751,17 +10736,6 @@ def _finish_one_shot_after_avault_error(
         _consume_after_possible_use(grants, reason=reason, engine=engine)
 
 
-def _capture_vault_delivery_identities(engine, names: list[str], grants):
-    from storage import vault_service
-
-    try:
-        with engine.connect() as conn:
-            return vault_service.capture_delivery_identities(conn, names)
-    except Exception:
-        _release_one_shot_reservations(engine, grants)
-        raise
-
-
 def _resolve_vault_run_delivery(
     engine,
     mapping: dict[str, str],
@@ -10775,7 +10749,8 @@ def _resolve_vault_run_delivery(
     requester, delivery, session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
     if source_selector:
         delivery["source_selector"] = source_selector
-    metas = _preflight_vault_run_batch(engine, mapping)
+    metas, captures = _capture_vault_batch(engine, list(mapping.values()))
+    audit_identities = [capture.identity for capture in captures.values()]
     protected_names = [
         name
         for name in dict.fromkeys(_record_secret_name(record) for record in mapping.values())
@@ -10784,7 +10759,7 @@ def _resolve_vault_run_delivery(
     standard_approval_error: TaskCliError | None = None
     approval_request_to_publish: dict | None = None
     if metas and not protected_names:
-        with engine.begin() as conn:
+        with _vault_delivery_transaction(engine, captures) as conn:
             standard_names = list(dict.fromkeys(_record_secret_name(record) for record in mapping.values()))
             approval_names = _always_ask_names(metas, standard_names)
             common_grant = vault_service.find_active_grant_for_secrets(
@@ -10799,11 +10774,11 @@ def _resolve_vault_run_delivery(
                     {
                         "name": record,
                         "env": env_name,
-                        "envelope": vault_service.get_envelope(conn, record),
+                        "envelope": captures[record].envelope,
                         "tier": "standard",
                     }
                     for env_name, record in mapping.items()
-                ]
+                ], audit_identities
             if approval_names and _source_selector_tags(source_selector):
                 req = vault_service.create_access_request(
                     conn,
@@ -10828,7 +10803,7 @@ def _resolve_vault_run_delivery(
     approval_error: TaskCliError | None = None
     resolved_by_name: dict[str, dict] = {}
     try:
-        with engine.begin() as conn:
+        with _vault_delivery_transaction(engine, captures) as conn:
             if protected_names:
                 needs_selector_set = _needs_protected_selector_set(protected_names, source_selector)
                 selector_standard_names = [
@@ -10853,7 +10828,6 @@ def _resolve_vault_run_delivery(
                                 "status": "standard",
                                 "secret": metas[standard_name],
                                 "grant": common_standard_grant,
-                                "envelope": vault_service.get_envelope(conn, standard_name),
                             }
                 grant = vault_service.find_active_grant_for_secrets(
                     conn,
@@ -10908,7 +10882,7 @@ def _resolve_vault_run_delivery(
                         {
                             "name": record,
                             "env": env_name,
-                            "envelope": vault_service.get_protected_envelope(conn, record),
+                            "envelope": captures[record].envelope,
                             "tier": "protected",
                         }
                     )
@@ -10941,7 +10915,7 @@ def _resolve_vault_run_delivery(
                     item = {
                         "name": record,
                         "env": env_name,
-                        "envelope": vault_service.get_envelope(conn, record),
+                        "envelope": captures[record].envelope,
                         "tier": "standard",
                     }
                     secrets.append(item)
@@ -10955,7 +10929,7 @@ def _resolve_vault_run_delivery(
         _publish_cli_vaults_updated(scope="request", request=approval_request_to_publish)
         _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
-    return grant, one_shot_grants, secrets
+    return grant, one_shot_grants, secrets, audit_identities
 
 
 def _resolve_single_vault_delivery(
@@ -10965,10 +10939,12 @@ def _resolve_single_vault_delivery(
     requester: dict,
     delivery: dict,
     purpose: str = "run",
-) -> tuple[dict | None, dict | None, object]:
+) -> tuple[dict | None, dict | None, CapturedDelivery]:
     from storage import vault_service
+    from storage.agent_session_rows import reserve_write_lock
 
     with engine.begin() as conn:
+        reserve_write_lock(conn)
         resolved = vault_service.resolve_secret_access(
             conn,
             name,
@@ -10976,6 +10952,10 @@ def _resolve_single_vault_delivery(
             requester=requester,
             delivery=delivery,
             reserve_one_shot=True,
+        )
+        captured = (
+            vault_service.capture_deliveries(conn, [name])[0]
+            if resolved["status"] in {"standard", "agent_delivery_ready"} else None
         )
     if resolved["status"] == "approval_required":
         req = resolved.get("request") or {}
@@ -10988,10 +10968,10 @@ def _resolve_single_vault_delivery(
         )
     if resolved["status"] == "standard":
         current_grant = resolved.get("grant")
-        return None, current_grant if isinstance(current_grant, dict) and current_grant.get("one_shot") is True else None, resolved["envelope"]
+        return None, current_grant if isinstance(current_grant, dict) and current_grant.get("one_shot") is True else None, captured
     if resolved["status"] == "agent_delivery_ready":
         current_grant = resolved["grant"]
-        return current_grant, current_grant if current_grant.get("one_shot") is True else None, resolved["envelope"]
+        return current_grant, current_grant if current_grant.get("one_shot") is True else None, captured
     raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
 
 
@@ -11009,13 +10989,16 @@ def _resolve_vault_inject_delivery(
     requester, delivery, session_id = _vault_cli_delivery_context(args, mode="inject", path=path, format=fmt)
     names = list(mapping.values())
     secret_names = list(dict.fromkeys(_record_secret_name(record) for record in names))
-    metas = _preflight_vault_inject_batch(engine, names)
+    metas, captures = _capture_vault_batch(engine, names)
+    audit_identities = [capture.identity for capture in captures.values()]
     if source_selector:
         delivery["source_selector"] = source_selector
     tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
+    if len(tiers) > 1:
+        raise TaskCliError("mixing protected and standard secrets in one vault inject is not wired yet", code="mixed_protection_tiers")
     if metas and tiers == {"protected"}:
         approval_request = None
-        with engine.begin() as conn:
+        with _vault_delivery_transaction(engine, captures) as conn:
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
                 secret_names,
@@ -11028,11 +11011,11 @@ def _resolve_vault_inject_delivery(
                     {
                         "name": record,
                         "key": env_name,
-                        "envelope": vault_service.get_protected_envelope(conn, record),
+                        "envelope": captures[record].envelope,
                         "tier": "protected",
                     }
                     for env_name, record in mapping.items()
-                ]
+                ], audit_identities
             if (
                 _needs_protected_selector_set(secret_names, source_selector)
                 and not _always_ask_names(metas, secret_names)
@@ -11057,12 +11040,12 @@ def _resolve_vault_inject_delivery(
     if metas and tiers == {"standard"}:
         approval_request = None
         approval_names = _always_ask_names(metas, secret_names)
-        with engine.begin() as conn:
+        with _vault_delivery_transaction(engine, captures) as conn:
             standard_secrets = [
                 {
                     "name": record,
                     "key": env_name,
-                    "envelope": vault_service.get_envelope(conn, record),
+                    "envelope": captures[record].envelope,
                     "tier": "standard",
                 }
                 for env_name, record in mapping.items()
@@ -11075,7 +11058,7 @@ def _resolve_vault_inject_delivery(
                 reserve_one_shot=True,
             )
             if isinstance(common_grant, dict) and common_grant.get("one_shot") is True:
-                return None, [common_grant], standard_secrets
+                return None, [common_grant], standard_secrets, audit_identities
             if approval_names and _source_selector_tags(source_selector):
                 approval_request = vault_service.create_access_request(
                     conn,
@@ -11100,7 +11083,7 @@ def _resolve_vault_inject_delivery(
     pre_delivery_error: TaskCliError | None = None
     resolved_by_name: dict[str, dict] = {}
     try:
-        with engine.begin() as conn:
+        with _vault_delivery_transaction(engine, captures) as conn:
             for env_name, record in mapping.items():
                 name = _record_secret_name(record)
                 resolved = resolved_by_name.get(name)
@@ -11132,7 +11115,7 @@ def _resolve_vault_inject_delivery(
                         {
                             "name": record,
                             "key": env_name,
-                            "envelope": vault_service.get_envelope(conn, record),
+                            "envelope": captures[record].envelope,
                             "tier": "standard",
                             "protected": False,
                         }
@@ -11155,7 +11138,7 @@ def _resolve_vault_inject_delivery(
                         {
                             "name": record,
                             "key": env_name,
-                            "envelope": vault_service.get_protected_envelope(conn, record),
+                            "envelope": captures[record].envelope,
                             "tier": "protected",
                             "protected": True,
                         }
@@ -11180,7 +11163,7 @@ def _resolve_vault_inject_delivery(
             code="mixed_protection_tiers",
         )
     selected = protected or standard
-    return grant, one_shot_grants, [{key: value for key, value in item.items() if key != "protected"} for item in selected]
+    return grant, one_shot_grants, [{key: value for key, value in item.items() if key != "protected"} for item in selected], audit_identities
 
 
 def cmd_vault_run(args):
@@ -11214,7 +11197,7 @@ def cmd_vault_run(args):
         waited_for_approval = False
         while True:
             try:
-                grant, one_shot_grants, secrets = _resolve_vault_run_delivery(
+                grant, one_shot_grants, secrets, audit_identities = _resolve_vault_run_delivery(
                     engine,
                     mapping,
                     command_argv,
@@ -11276,7 +11259,6 @@ def cmd_vault_run(args):
 
     handoff_started = False
     try:
-        audit_identities = _capture_vault_delivery_identities(engine, [str(secret["name"]) for secret in secrets], one_shot_grants)
         if grant is not None:
             secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
             with _AgentRunOutputBridge(
@@ -12063,43 +12045,39 @@ def _build_vault_fetch_request(
     headers: dict,
     body,
     help_command: str,
+    record_meta: dict | None = None,
 ) -> dict:
     from storage import vault_service
 
-    # Read policy in a read connection. The host check runs BEFORE handing the envelope to
-    # avault, so a disallowed target never even unwraps the secret. Callers run this both before
-    # and after an approval wait so a mid-wait metadata edit cannot leave a stale allowlist or auth
-    # injection policy in the egress frame.
-    with engine.connect() as conn:
-        record_meta = vault_service.get_secret_record_meta(conn, name)
-        secret_name = str(record_meta["name"])
-        policy = vault_service.get_secret_policy(conn, secret_name)
-        meta = record_meta
-        if meta.get("kind") == "keypair":
-            raise vault_service.KeypairNotValueDeliverableError(
-                f"{name} is a signing key; use vault_sign instead of value delivery"
-            )
-        allowed = policy.get("allowed_hosts") or []
-        if not allowed:
-            raise TaskCliError(
-                f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
-                "(configure allowed hosts in the Vaults UI)",
-                code="proxy_unbound",
-                help_command=help_command,
-            )
-        if not _host_allowed(host, allowed):
-            raise TaskCliError(
-                f"host {host!r} is not allowed for secret '{name}'",
-                code="host_not_allowed",
-                help_command=help_command,
-                details={"host": host, "allowed_hosts": allowed},
-            )
-        auth = policy.get("auth") or {"type": "bearer"}
-        if auth.get("type") == "header":
-            # Defensive: set-time validation blocks new Host auth-headers; this also guards
-            # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
-            # even unwraps the secret.
-            _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
+    # The pre-approval check is effect-free. The final check consumes metadata
+    # captured with the actual envelope/identity, never a later name lookup.
+    if record_meta is None:
+        with engine.connect() as conn:
+            record_meta = vault_service.get_secret_record_meta(conn, name)
+    policy = record_meta["policy"]
+    if record_meta.get("kind") == "keypair":
+        raise vault_service.KeypairNotValueDeliverableError(
+            f"{name} is a signing key; use vault_sign instead of value delivery"
+        )
+    allowed = policy.get("allowed_hosts") or []
+    if not allowed:
+        raise TaskCliError(
+            f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
+            "(configure allowed hosts in the Vaults UI)",
+            code="proxy_unbound",
+            help_command=help_command,
+        )
+    if not _host_allowed(host, allowed):
+        raise TaskCliError(
+            f"host {host!r} is not allowed for secret '{name}'",
+            code="host_not_allowed",
+            help_command=help_command,
+            details={"host": host, "allowed_hosts": allowed},
+        )
+    auth = policy.get("auth") or {"type": "bearer"}
+    if auth.get("type") == "header":
+        # Also guard legacy invalid Host-injection policies before handoff.
+        _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
 
     auth_type = auth.get("type") or "bearer"
     if auth_type == "header":
@@ -12297,7 +12275,7 @@ def cmd_vault_inject(args):
             selector_args,
             help_command=help_command,
         )
-        grant, one_shot_grants, secrets = _resolve_vault_inject_delivery(
+        grant, one_shot_grants, secrets, audit_identities = _resolve_vault_inject_delivery(
             engine,
             mapping,
             path=resolved_out,
@@ -12305,7 +12283,6 @@ def cmd_vault_inject(args):
             args=args,
             source_selector=source_selector,
         )
-        audit_identities = _capture_vault_delivery_identities(engine, [str(item["name"]) for item in secrets], one_shot_grants)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
         handoff_started = True
