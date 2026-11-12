@@ -86,7 +86,7 @@ presentation URL nor any Runtime action installs an update by itself.
 
 Local browser verification passed 25 account/shell cases and both real Wizard
 completion exits (27 total). Focused unit verification passed 141 tests in four
-files; UI/account builds, UI lint and focused TypeScript checks passed.
+files plus three exact native-fixture consumer tests; UI/account builds, UI lint and focused TypeScript checks passed.
 The browser suite covers passkey/TOTP/recovery and explicit sign-out confirmation.
 Wizard fixtures serve a usable Vibey model and confirm the durable setup write
 before intercepting OS protocol presentation. That interception prevents launching
@@ -115,3 +115,16 @@ names include `账号-fixture`, `小麦的 Mac`, `工作室 Studio` and `共享�
 Preserved local evidence: `/tmp/desktop-u1-sesuzge7suz9p/browser-evidence`,
 `setup-rerun`, `reference`, and build/test logs in the same directory. Initial
 failed runs remain available in `browser-first-failures` and `setup-final`.
+
+The final passing screenshot set is `/tmp/desktop-u1-sesuzge7suz9p/final-evidence`
+(27 cases). Menu captures wait for opacity 1 and disable screenshot animations.
+The initially translucent menu captures were taken during Radix entry animation;
+stable 880x600 Chinese dark and 1200x800 English light captures were inspected
+and have opaque surfaces. No product token change was needed. Earlier artifact
+directories are diagnostic history, not current acceptance evidence.
+
+Native samples are consumed byte-for-byte from S1 commit
+`d0d1ba4b5933837d9f8fb1803eead654b2d14566` in
+`ui/src/desktop/__fixtures__/instance-client-v1/`. Three tests exercise actual
+AccountApp/useAccountClient with those samples: UTF-8 catalog/opaque ID selection,
+consent before switching, and direct TOTP/recovery rendering and clearing.

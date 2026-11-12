@@ -1,0 +1,148 @@
+[
+  {
+    "version": 1,
+    "request_id": "request-1",
+    "expected_generation": 1,
+    "action": {
+      "type": "get_state"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-2",
+    "expected_generation": 1,
+    "action": {
+      "type": "request_otp",
+      "email": "xiaoming@example.test"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-3",
+    "expected_generation": 1,
+    "action": {
+      "type": "verify_otp",
+      "code": "123456"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-4",
+    "expected_generation": 1,
+    "action": {
+      "type": "verify_second_factor",
+      "method": "totp",
+      "code": "123456"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-5",
+    "expected_generation": 1,
+    "action": {
+      "type": "verify_second_factor",
+      "method": "recovery",
+      "code": "fixture-recovery"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-6",
+    "expected_generation": 1,
+    "action": {
+      "type": "verify_passkey"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-7",
+    "expected_generation": 1,
+    "action": {
+      "type": "begin_totp_enrollment"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-8",
+    "expected_generation": 1,
+    "action": {
+      "type": "finish_totp_enrollment",
+      "code": "123456"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-9",
+    "expected_generation": 1,
+    "action": {
+      "type": "refresh_instances"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-10",
+    "expected_generation": 1,
+    "action": {
+      "type": "retry_enrollment"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-11",
+    "expected_generation": 1,
+    "action": {
+      "type": "retry_local_remote_access"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-12",
+    "expected_generation": 1,
+    "action": {
+      "type": "select_instance",
+      "instance_id": "studio-1"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-13",
+    "expected_generation": 1,
+    "action": {
+      "type": "decide_consent",
+      "approve": true
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-14",
+    "expected_generation": 1,
+    "action": {
+      "type": "decide_consent",
+      "approve": false
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-15",
+    "expected_generation": 1,
+    "action": {
+      "type": "cancel"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-16",
+    "expected_generation": 1,
+    "action": {
+      "type": "return_local"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-17",
+    "expected_generation": 1,
+    "action": {
+      "type": "sign_out"
+    }
+  }
+]

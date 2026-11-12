@@ -52,14 +52,15 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       const box = await popup.boundingBox();
       expect(box!.x).toBe(16); expect(box!.y).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
       await expect(popup).toContainText('3.2.6rc9'); await expect(popup).not.toContainText('2.4.0');
-      await page.screenshot({ path: info.outputPath('update.png') });
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('update.png') });
       await page.keyboard.press('Escape');
       await expect(page.locator('[data-version-trigger]')).toBeFocused();
       await page.locator('[data-account-trigger]').click();
       await expect(page.locator('[data-instance-menu]')).toContainText('max@example.test');
       await expect(page.locator('[data-instance-menu]')).toContainText(lang === 'en' ? 'Phase 1' : '第一阶段');
       await expect(popup).toHaveCount(0);
-      await page.screenshot({ path: info.outputPath('account-menu.png') });
+      await expect(page.locator('[data-instance-menu]')).toHaveCSS('opacity', '1');
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('account-menu.png') });
       await page.keyboard.press('Escape');
       await expect(page.locator('[data-account-trigger]')).toBeFocused();
       expect(requests).toEqual([]); expect(denied).toEqual([]);
@@ -71,7 +72,7 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.goto(`${ACCOUNT}?theme=${theme}`);
       const field = page.locator('#desktop-auth-field');
       await expect(field).toBeVisible();
-      await page.screenshot({ path: info.outputPath('email.png') });
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('email.png') });
       await field.fill('max@example.test');
       await page.getByRole('button', { name: lang === 'en' ? 'Send verification code' : '发送验证码' }).click();
       await expect(page.getByRole('heading', { name: lang === 'en' ? 'Check your inbox' : '查看你的邮箱' })).toBeVisible();
@@ -81,10 +82,10 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.getByRole('button', { name: lang === 'en' ? 'View instances' : '查看实例', exact: true }).click();
       await expect(page.getByText('工作室 Studio', { exact: true })).toBeVisible();
       await expect(page.getByText('共享团队', { exact: true })).toBeVisible();
-      await page.screenshot({ path: info.outputPath('instances.png') });
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('instances.png') });
       await page.getByRole('button', { name: /工作室 Studio/ }).click();
       await expect(page.getByRole('heading', { name: /工作室 Studio/ })).toBeVisible();
-      await page.screenshot({ path: info.outputPath('consent.png') });
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('consent.png') });
       await page.getByRole('button', { name: lang === 'en' ? 'Allow and connect' : '允许并连接' }).click();
       await page.keyboard.press('Escape');
       await expect.poll(() => requests.at(-1)?.action.type).toBe('cancel');
@@ -102,11 +103,11 @@ test('AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transien
   await page.goto(ACCOUNT);
   await page.getByRole('button', { name: 'Add authenticator' }).click();
   await expect(page.getByText('JBSWY3DPEHPK3PXP', { exact: true })).toBeVisible();
-  await page.screenshot({ path: info.outputPath('totp-enrollment.png') });
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('totp-enrollment.png') });
   await page.getByLabel('Authenticator code', { exact: true }).fill('654321');
   await page.getByRole('button', { name: 'Verify and enable' }).click();
   await expect(page.getByRole('heading', { name: 'Save your recovery codes' })).toBeVisible();
-  await page.screenshot({ path: info.outputPath('recovery-codes.png') });
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('recovery-codes.png') });
   await page.getByRole('button', { name: 'I have saved these codes' }).click();
   await expect(page.getByText('fixture-recovery-one')).toHaveCount(0);
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('fixture-recovery');
@@ -120,7 +121,7 @@ for (const status of ['conflict', 'failed', 'paired_tunnel_unavailable'] as cons
   const requests = await installBridge(page, state); await page.goto(ACCOUNT);
   await expect(page.getByRole('button', { name: 'View other instances' })).toBeVisible();
   if (status === 'conflict') { await page.getByRole('button', { name: 'Review account change' }).click(); await expect(page.getByText(/Ask the current owner/)).toBeVisible(); }
-  await page.screenshot({ path: info.outputPath(`${status}.png`) });
+  await page.screenshot({ animations: 'disabled', path: info.outputPath(`${status}.png`) });
   await page.getByRole('button', { name: 'View other instances' }).click();
   await expect(page.getByText('工作室 Studio', { exact: true })).toBeVisible();
   expect(requests.map((request) => request.action.type)).toEqual(['get_state', 'refresh_instances']);
@@ -133,12 +134,12 @@ test('AUTH-SETUP-176 unreachable target retains local escape; setup invitation n
   state.remote_auxiliary = 'disabled_incomplete';
   const requests = await installBridge(page, state); await page.goto(ACCOUNT);
   await expect(page.getByRole('button', { name: 'Back to this Mac' })).toBeVisible();
-  await page.screenshot({ path: info.outputPath('offline.png') });
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('offline.png') });
   await page.getByRole('button', { name: 'Back to this Mac' }).click();
   await expect.poll(() => requests.at(-1)?.action.type).toBe('return_local');
   await page.goto(`${ACCOUNT}?view=setup-complete`);
   await expect(page.getByRole('heading', { name: 'This Mac is ready' })).toBeVisible();
-  await page.screenshot({ path: info.outputPath('setup-complete.png') });
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('setup-complete.png') });
   await page.getByRole('button', { name: 'Start using this Mac' }).click();
   await expect.poll(() => requests.at(-1)?.action.type).toBe('return_local');
 });
@@ -151,7 +152,7 @@ for (const method of ['totp', 'recovery', 'passkey'] as const) test(`AUTH-SETUP-
   else {
     if (method === 'recovery') await page.getByRole('button', { name: 'Use a recovery code' }).click();
     await page.getByLabel(method === 'totp' ? 'Authenticator code' : 'Recovery code', { exact: true }).fill(method === 'totp' ? '654321' : 'fixture-recovery');
-    await page.screenshot({ path: info.outputPath(`${method}.png`) });
+    await page.screenshot({ animations: 'disabled', path: info.outputPath(`${method}.png`) });
     await page.getByRole('button', { name: 'Verify', exact: true }).click();
   }
   await expect(page.getByRole('heading', { name: 'This Mac is now in your account' })).toBeVisible();
