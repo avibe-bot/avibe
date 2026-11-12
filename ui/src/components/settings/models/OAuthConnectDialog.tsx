@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { CopyButton } from '@/components/ui/copy-button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import type { TranslationKey } from '@/i18n/types';
@@ -814,6 +815,7 @@ export const OAuthConnectDialog: React.FC<{
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-add-sub-overlay fixed inset-0 z-50" />
           <DialogPrimitive.Content
+            onPointerDownOutside={keepOpenOnOutsideClick}
             className="model-hub-add-sub-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-y-auto border border-edge bg-popover p-0 shadow-elevation-3 outline-none"
             onOpenAutoFocus={(event) => {
               event.preventDefault();
@@ -936,7 +938,7 @@ export const OAuthConnectDialog: React.FC<{
   return (
     <>
       <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-        <DialogContent className="max-w-[520px] gap-5">
+        <DialogContent keepOnOutsideClick className="max-w-[520px] gap-5">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2.5 text-[17px] font-bold">
               <span className={cn('grid size-8 shrink-0 place-items-center rounded-lg', ACCENT_TILE[accent])}>

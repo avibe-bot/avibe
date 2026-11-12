@@ -6,6 +6,7 @@ import * as React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
+import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { ApiCallError, modelsApi, type OAuthResult } from './modelsApi';
@@ -68,6 +69,26 @@ const deferred = <T,>() => {
 };
 
 describe('add-subscription channel choice', () => {
+  it('stays open on a click outside, in the channel choice and with a code being pasted', async () => {
+    const onClose = vi.fn();
+    const choice = renderDialog({ onClose });
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    choice.unmount();
+
+    vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue({
+      flow_id: 'oaf_paste', intent: 'reauth', vendor: 'anthropic', channel: 'native_cli', state: 'awaiting_action',
+      presentation: { expects: 'paste_code', auth_url: 'https://provider.example/authorize' }, expires_at: '2099-01-01T00:00:00Z',
+    });
+    vi.spyOn(modelsApi, 'cancelOAuth').mockResolvedValue(undefined);
+    renderDialog({ onClose, reauth: subscription() });
+    const field = await screen.findByRole('textbox');
+    fireEvent.change(field, { target: { value: 'pasted-code' } });
+    await pressOutside();
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('pasted-code');
+  });
+
   it.each(['anthropic', 'openai'])('AUTH-SETUP-126: setup starts %s with Hub custody straight from its sign-in button', async (vendor) => {
     // The wizard's 「Sign in with …」 is the explicit choice; a one-option chooser in
     // front of it asked the person to confirm the only thing there was.
