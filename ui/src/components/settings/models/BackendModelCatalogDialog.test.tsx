@@ -420,6 +420,24 @@ describe('BackendModelCatalogDialog', () => {
     }));
   });
 
+  it('keeps the rows ticked in the picker when going on to write a custom model', async () => {
+    const user = userEvent.setup();
+    const catalog = [locked, model('alpha')];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered({ builtin: [candidate('beta', { origin: 'builtin' })] }));
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    renderDialog();
+
+    await user.click(await enabledAddModels());
+    await user.click(await screen.findByRole('checkbox', { name: 'beta' }));
+    await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
+    await user.type(screen.getByLabelText('Model'), 'added');
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+
+    expect(await screen.findByText('4 models')).toBeTruthy();
+    expect(screen.getByText('beta')).toBeTruthy();
+  });
+
   it('saves a catalog model no provider lists without promising its suppliers', async () => {
     // A provider may still supply it under a dated ID the server matches; only the
     // server can say, so the write states no expectation for it.
@@ -1336,13 +1354,11 @@ describe('BackendModelCatalogDialog', () => {
       expect(write).toHaveBeenCalledTimes(1);
     });
 
-    it('takes the custom-model door out of a re-ask as the same 「add none of these」', async () => {
+    it('takes the custom-model door out of a re-ask with the re-read row still ticked', async () => {
       const user = userEvent.setup();
-      // The third way out of a seeded re-ask, and the one that does not answer
-      // it: leaving by the editor confirms none of the seeded ids just as
-      // walking away does, so their refused projections have to be discharged
-      // on the way out. Kept, they are what the next Save would send — an
-      // agreement the server has already refused, granted by a door.
+      // Going on to write a custom model keeps what is ticked, as Add would.
+      // The seeded row is ticked on today's projection, so what joins the draft
+      // is the re-read agreement, never the one the server refused.
       vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(CATALOG));
       vi.spyOn(modelsApi, 'getAgentModelCandidates')
         .mockResolvedValueOnce(offered({ providers: [shown] }))
@@ -1361,19 +1377,16 @@ describe('BackendModelCatalogDialog', () => {
       await screen.findByRole('checkbox', { name: /Backup relay/ });
       await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
 
-      // The editor is open on a blank row, and the seeded one left with its
-      // promise: what remains is the list the server already holds, so there is
-      // nothing to save — the surest statement that the refused projection
-      // cannot go out again. Asked back at the catalog, since the door closed
-      // the picker on its way out; scoped to the editor, whose footer is the
-      // one control in it that carries this word.
       expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('');
       const leave = within(screen.getByRole('dialog', { name: 'Add model' }))
         .getByRole('button', { name: 'Cancel' });
       await user.click(leave);
-      await waitFor(() => expect(screen.queryByText('GLM 5.2')).toBeNull());
-      expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
-      expect(write).toHaveBeenCalledTimes(1);
+      expect(await screen.findByText('GLM 5.2')).toBeTruthy();
+
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+      const sent = write.mock.calls[1][1] as { models: Array<{ id: string }>; expected_suppliers?: Record<string, unknown> };
+      expect(sent.models.map((row) => row.id)).toContain('glm-5.2');
     });
 
   });

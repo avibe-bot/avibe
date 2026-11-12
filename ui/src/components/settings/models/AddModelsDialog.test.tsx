@@ -56,4 +56,33 @@ describe('AddModelsDialog', () => {
     await waitFor(() => expect(onAdded).toHaveBeenCalledWith(['opus-x'], supply));
     expect(write.mock.calls[1][1].expected_suppliers).toEqual({ 'opus-x': [{ source_id: 'src_b', model_id: 'opus-x' }] });
   });
+
+  it('keeps the ticked rows across the custom-model editor: saved with it, still ticked after Cancel', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(supply as never);
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offering('src_a', 'Relay A'));
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(supply as never);
+    const onAdded = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ToastContext.Provider value={{ showToast: vi.fn() }}>
+          <AddModelsDialog open backend="claude" onClose={vi.fn()} onAdded={onAdded} />
+        </ToastContext.Provider>
+      </I18nextProvider>,
+    );
+
+    await user.click(await screen.findByRole('checkbox', { name: /opus-x/ }));
+    await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
+    const editor = () => screen.getByRole('dialog', { name: 'Add model' });
+    await user.click(within(editor()).getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('checkbox', { name: /opus-x/ }).getAttribute('aria-checked')).toBe('true');
+
+    await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
+    await user.type(within(editor()).getByLabelText('Model'), 'my-finetune');
+    await user.click(within(editor()).getByRole('button', { name: 'Add model' }));
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalled());
+    expect(write.mock.calls[0][1].models.map((row: { id: string }) => row.id)).toEqual(['opus-x', 'my-finetune']);
+  });
 });

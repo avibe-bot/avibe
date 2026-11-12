@@ -43,7 +43,9 @@ export const AddModelsDialog: React.FC<{
   const { t } = useTranslation();
   const { showToast } = useToast();
   const [read, setRead] = React.useState<{ backend: AgentBackend; models: readonly BackendModel[] } | null>(null);
-  const [editing, setEditing] = React.useState<{ seedId: string } | null>(null);
+  /** The editor, over the picker, with the rows the picker had ticked: they are
+   *  saved with the written model, and still ticked if the editor is cancelled. */
+  const [editing, setEditing] = React.useState<{ seedId: string; picks: ChosenCandidate[] } | null>(null);
   const [busy, setBusy] = React.useState(false);
   /** A refused agreement about suppliers is asked again: the picker re-reads its
    *  candidates and opens with the same models picked, showing today's suppliers. */
@@ -84,7 +86,7 @@ export const AddModelsDialog: React.FC<{
   return (
     <>
       <BackendModelPickerDialog
-        open={open && editing === null}
+        open={open}
         backend={backend}
         listedIds={listed}
         busy={busy}
@@ -96,7 +98,7 @@ export const AddModelsDialog: React.FC<{
           onClose();
         }}
         onAdd={add}
-        onCustom={(seedId) => setEditing({ seedId })}
+        onCustom={(seedId, picks) => setEditing({ seedId, picks })}
       />
       {open && editing !== null && (
         <BackendModelEditorDialog
@@ -108,7 +110,7 @@ export const AddModelsDialog: React.FC<{
           effortSuggestions={effortSuggestions}
           busy={busy}
           onCancel={() => setEditing(null)}
-          onCommit={(row) => add([editedPick(row)])}
+          onCommit={(row) => add([...editing.picks.filter((pick) => pick.candidate.id !== row.id), editedPick(row)])}
         />
       )}
     </>
