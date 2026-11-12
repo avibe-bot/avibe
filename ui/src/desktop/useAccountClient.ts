@@ -34,7 +34,10 @@ export function useAccountClient() {
       if (reply.version !== 1 || reply.request_id !== request.request_id || !isClientState(reply.state)) {
         setError('bridge_incompatible'); return null;
       }
-      if (!accept(reply.state)) return null;
+      // Generation retires an operation; revision only orders its snapshot.
+      // A broadcast may overtake a direct reply carrying one-time recovery codes.
+      if (current.current && reply.state.generation < current.current.generation) return null;
+      accept(reply.state);
       if (!reply.ok) setError(reply.error.code);
       return reply;
     } catch {

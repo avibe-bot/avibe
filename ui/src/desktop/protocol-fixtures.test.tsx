@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it, vi } from 'vitest';
 import en from '../i18n/en.json';
 import { AccountApp } from './AccountApp';
-import type { DesktopClientRequest } from './bridge';
+import { DESKTOP_CLIENT_STATE_EVENT, type DesktopClientRequest } from './bridge';
 import states from './__fixtures__/instance-client-v1/states.json';
 import replies from './__fixtures__/instance-client-v1/replies.json';
 import requests from './__fixtures__/instance-client-v1/requests.json';
@@ -47,10 +47,15 @@ it('AUTH-SETUP-177 consumes native consent before switching and sends explicit a
   expect(invoke.mock.calls[1][1].request.action).toEqual(requests.find((entry) => entry.action.type === 'decide_consent' && entry.action.approve)!.action);
 });
 
-it('AUTH-SETUP-171 renders native direct TOTP and recovery results without projecting secrets', async () => {
+it.each([1, 2])('AUTH-SETUP-171 preserves direct recovery material only in the current generation (%s), independently of snapshot revision', async (generation) => {
+  let finish!: (reply: unknown) => void;
+  let finishRequest!: DesktopClientRequest;
   const invoke = mount(states.enroll, (request) => {
+    if (request.action.type === 'finish_totp_enrollment') {
+      finishRequest = request;
+      return new Promise((resolve) => { finish = resolve; });
+    }
     const sample = request.action.type === 'begin_totp_enrollment' ? replies.totp_enrollment
-      : request.action.type === 'finish_totp_enrollment' ? replies.totp_enrolled
       : { ...replies.success, state: states.enroll };
     return { ...sample, request_id: request.request_id };
   });
@@ -59,10 +64,19 @@ it('AUTH-SETUP-171 renders native direct TOTP and recovery results without proje
   expect(await screen.findByText(replies.totp_enrollment.result.secret)).toBeTruthy();
   fireEvent.change(screen.getByLabelText('Authenticator code'), { target: { value: '123456' } });
   fireEvent.click(screen.getByRole('button', { name: 'Verify and enable' }));
-  expect(await screen.findByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
+  await waitFor(() => expect(finishRequest).toBeDefined());
+  // A later nonsecret broadcast can overtake a direct result. It must win state
+  // ordering without losing one-time recovery codes from the still-current epoch.
+  const newer = { ...states.signed_in, generation, revision: 12, local: { ...states.signed_in.local, name: '最新的 Mac' } };
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: newer }));
+  await act(async () => finish({ ...replies.totp_enrolled, request_id: finishRequest.request_id, state: { ...states.signed_in, revision: 11 } }));
   expect(invoke.mock.calls.at(-1)![1].request.action).toEqual(requests.find((entry) => entry.action.type === 'finish_totp_enrollment')!.action);
-  fireEvent.click(screen.getByRole('button', { name: 'I have saved these codes' }));
+  if (generation === 1) {
+    expect(await screen.findByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'I have saved these codes' }));
+  }
   expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull();
+  expect(screen.getByText('This Mac · 最新的 Mac')).toBeTruthy();
   expect(JSON.stringify(window.__AVIBE_DESKTOP_CLIENT_STATE__)).not.toContain(replies.totp_enrollment.result.secret);
   expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain(replies.totp_enrolled.result.recoveryCodes[0]);
 });

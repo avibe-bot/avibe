@@ -86,7 +86,7 @@ presentation URL nor any Runtime action installs an update by itself.
 
 Local browser verification passed 25 account/shell cases and both real Wizard
 completion exits (27 total). Focused unit verification passed 141 tests in four
-files plus three exact native-fixture consumer tests; UI/account builds, UI lint and focused TypeScript checks passed.
+files plus four exact native-fixture consumer cases; UI/account builds, UI lint and focused TypeScript checks passed.
 The browser suite covers passkey/TOTP/recovery and explicit sign-out confirmation.
 Wizard fixtures serve a usable Vibey model and confirm the durable setup write
 before intercepting OS protocol presentation. That interception prevents launching
@@ -125,6 +125,25 @@ directories are diagnostic history, not current acceptance evidence.
 
 Native samples are consumed byte-for-byte from S1 commit
 `d0d1ba4b5933837d9f8fb1803eead654b2d14566` in
-`ui/src/desktop/__fixtures__/instance-client-v1/`. Three tests exercise actual
+`ui/src/desktop/__fixtures__/instance-client-v1/`. Four cases exercise actual
 AccountApp/useAccountClient with those samples: UTF-8 catalog/opaque ID selection,
 consent before switching, and direct TOTP/recovery rendering and clearing.
+
+## Review repair and scenario ownership
+
+First reviewed head `3190b9f81dad266d14c1ff263bee188a9a50d9f4` had two findings.
+A lower-revision direct reply was incorrectly discarded with its snapshot.
+The repair keeps revision ordering for snapshots while delivering correlated
+direct results in the current generation. The actual AccountApp regression
+first failed when revision 12 arrived before revision 11 recovery material; it
+passes after the repair. A contrasting generation change still discards secrets,
+and both cases retain the newer snapshot. No wire or persistence change is needed.
+
+Frozen contract section 5 assigns both `tests/scenarios/auth_setup/catalog.yaml`
+and `test_auth_setup_scenarios.py` exclusively to R1. R1 PR #3651 commit
+`5c5cd5b82f48bed21072b501614f2270597724a1` registers AUTH-SETUP-170..179 and
+adds `test_desktop_enrollment_recovery_and_relogin_closed_loop`. U1 must not
+duplicate those owner files. R1 maintains the integration-gap ledger against UI
+consumer evidence and the actual assembled chain. Lead's independently verified
+Runtime test result (27 passed) does not establish native/UI integration. Lead
+Run `50d475b4c7ee` confirms this ownership and requires the chain before Merge-ready.
