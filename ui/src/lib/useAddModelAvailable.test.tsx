@@ -1,19 +1,18 @@
 /* @vitest-environment jsdom */
 //
 // Who sees a model picker's "Add model" exit, and for how long. The answer is
-// only as good as the read behind it: Settings, which the exit opens, is also
-// where a backend is switched to Direct, so an answer from before a visit may
-// no longer hold and must not be shown while the next read is in flight.
+// only as good as the read behind it: Settings is where a backend is switched
+// to Direct, so an answer from before a visit may no longer hold and must not
+// be shown while the next read is in flight.
 import { act, renderHook } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentSupply } from '../components/settings/models/types';
 import { InstanceAuthorizationContext } from '../context/InstanceAuthorizationContext';
-import { useAddModelExit } from './backendModels';
+import { useAddModelAvailable } from './backendModels';
 import { RouteSurfaceActiveContext } from './routeSurfaceActivity';
-import { settingsOverlayOpenState, settingsOverlayOriginFromState } from './settingsOverlay';
 import { capabilitiesFor } from './testing/instanceRoleCapabilities';
 import type { InstanceRole } from './sessionInfo';
 
@@ -38,24 +37,19 @@ const land = async (agent: PickerAgent) => {
   await act(async () => reads.at(-1)!.answer(agent));
 };
 
-type Entry = string | { pathname: string; state: unknown };
-
-const setup = (initial: { backend: string; enabled?: boolean; surfaceActive?: boolean; role?: InstanceRole; entry?: Entry }) => {
+const setup = (initial: { backend: string; enabled?: boolean; surfaceActive?: boolean; role?: InstanceRole }) => {
   let surfaceActive = initial.surfaceActive ?? true;
   let role: InstanceRole = initial.role ?? 'owner';
   const wrapper = ({ children }: { children: ReactNode }) => (
     <InstanceAuthorizationContext.Provider
       value={{ remote: false, instanceKind: null, instanceRole: role, capabilities: capabilitiesFor(role) }}
     >
-      <RouteSurfaceActiveContext.Provider value={surfaceActive}>
-        <MemoryRouter initialEntries={[initial.entry ?? '/agents?tab=definitions']}>{children}</MemoryRouter>
-      </RouteSurfaceActiveContext.Provider>
+      <RouteSurfaceActiveContext.Provider value={surfaceActive}>{children}</RouteSurfaceActiveContext.Provider>
     </InstanceAuthorizationContext.Provider>
   );
   const view = renderHook(
     ({ backend, enabled }: { backend: string; enabled?: boolean }) => ({
-      exit: useAddModelExit(backend, enabled),
-      location: useLocation(),
+      exit: useAddModelAvailable(backend, enabled),
     }),
     { wrapper, initialProps: { backend: initial.backend, enabled: initial.enabled } },
   );
@@ -77,37 +71,12 @@ afterEach(() => {
   API.readModelHubAgentCatalogForModelPicker.mockClear();
 });
 
-describe('useAddModelExit', () => {
-  it("opens the Hub backend's own catalog once the read confirms the Hub supplies it", async () => {
+describe('useAddModelAvailable', () => {
+  it('shows the exit once the read confirms the Hub supplies the backend', async () => {
     const { result } = setup({ backend: 'codex' });
-    expect(result.current.exit).toBeNull();
-
+    expect(result.current.exit).toBe(false);
     await land(hub('codex'));
-    act(() => result.current.exit!());
-
-    const { pathname, search, state } = result.current.location;
-    expect(`${pathname}${search}`).toBe('/settings/models?manage=codex');
-    // A detour to come back from: the page it left, and any draft on it, stays
-    // mounted behind Settings, which a phone does not do for an ordinary visit.
-    expect(settingsOverlayOriginFromState(state)?.location).toMatchObject({
-      pathname: '/agents',
-      search: '?tab=definitions',
-    });
-  });
-
-  it('keeps the Settings visit it starts in coming back to the same place', async () => {
-    // The IM channel settings page is a Settings route over a session. A
-    // Settings route is never an origin, so the exit must carry the visit's.
-    const session = { pathname: '/chat/ses_1', search: '', hash: '', state: null, key: 'k1' };
-    const { result } = setup({
-      backend: 'codex',
-      entry: { pathname: '/settings/platforms/groups', state: settingsOverlayOpenState(session, null) },
-    });
-    await land(hub('codex'));
-    act(() => result.current.exit!());
-
-    expect(result.current.location.pathname).toBe('/settings/models');
-    expect(settingsOverlayOriginFromState(result.current.location.state)?.location.pathname).toBe('/chat/ses_1');
+    expect(result.current.exit).toBe(true);
   });
 
   it.each([
@@ -117,13 +86,13 @@ describe('useAddModelExit', () => {
   ])('shows no exit for %s', async (_case, agent) => {
     const { result } = setup({ backend: 'codex' });
     await land(agent);
-    expect(result.current.exit).toBeNull();
+    expect(result.current.exit).toBe(false);
   });
 
   it('does not ask for a viewer the owner-only Model Hub would send home', () => {
     const { result } = setup({ backend: 'codex', role: 'editor' });
     expect(API.readModelHubAgentCatalogForModelPicker).not.toHaveBeenCalled();
-    expect(result.current.exit).toBeNull();
+    expect(result.current.exit).toBe(false);
   });
 
   it('reads nothing until the picker enables it', () => {
@@ -136,16 +105,16 @@ describe('useAddModelExit', () => {
     await land(hub('codex'));
 
     view.cover(true);
-    expect(view.result.current.exit).toBeNull();
+    expect(view.result.current.exit).toBe(false);
 
     view.cover(false);
     // The earlier answer is not lent to the read now in flight.
     expect(API.readModelHubAgentCatalogForModelPicker).toHaveBeenCalledTimes(2);
-    expect(view.result.current.exit).toBeNull();
+    expect(view.result.current.exit).toBe(false);
 
     // The visit switched the backend to Direct.
     await land(direct('codex'));
-    expect(view.result.current.exit).toBeNull();
+    expect(view.result.current.exit).toBe(false);
   });
 
   it("does not lend one backend's answer to the next", async () => {
@@ -153,12 +122,12 @@ describe('useAddModelExit', () => {
     await land(hub('codex'));
 
     view.rerender({ backend: 'claude', enabled: undefined });
-    expect(view.result.current.exit).toBeNull();
+    expect(view.result.current.exit).toBe(false);
 
     // A late answer for the backend it has left changes nothing.
     await act(async () => reads[0].answer(hub('codex')));
-    expect(view.result.current.exit).toBeNull();
+    expect(view.result.current.exit).toBe(false);
     await land(hub('claude'));
-    expect(view.result.current.exit).not.toBeNull();
+    expect(view.result.current.exit).toBe(true);
   });
 });

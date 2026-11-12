@@ -16,7 +16,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
-import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
+import { SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
 
 // The page navigates to Agents when the user clicks an Agent that needs
@@ -510,11 +510,11 @@ describe('SettingsModelsPage surface branches', () => {
   });
 
   it.each([
-    ['opens the catalog of a Hub backend a model picker sent the user to', 'codex', true],
-    ['opens nothing for a backend that is not on the Hub', 'claude', false],
-  ])('%s, and drops the request from the address', async (_case, backend, opens) => {
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent, directAgent('claude')]);
+    ['opens the Source a failed turn named', 'src_retained', true],
+    ['opens nothing for a Source that is gone', 'src_removed', false],
+  ])('%s, and drops the request from the address', async (_case, sourceId, opens) => {
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(takeoverAgent);
@@ -526,7 +526,7 @@ describe('SettingsModelsPage surface branches', () => {
     render(
       <ToastProvider>
         <I18nextProvider i18n={i18n}>
-          <MemoryRouter initialEntries={[`/settings/models?manage=${backend}`]}>
+          <MemoryRouter initialEntries={[`/settings/models?source=${sourceId}`]}>
             <SettingsModelsRoute />
             <LocationProbe />
           </MemoryRouter>
@@ -534,10 +534,9 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    // A reload or Back must not open it again, so the request is consumed.
     await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/models'));
     if (opens) {
-      expect(await screen.findByRole('dialog', { name: /^Codex models$|^Codex 模型$/i })).toBeTruthy();
+      expect(await screen.findByRole('dialog', { name: retainedSource.display_name })).toBeTruthy();
     } else {
       expect(screen.queryByRole('dialog')).toBeNull();
     }
@@ -961,7 +960,7 @@ describe('SettingsModelsPage surface branches', () => {
     const sourceOpener = (await screen.findByText('Retained source')).closest('button') as HTMLButtonElement;
     await user.click(sourceOpener);
     const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
-    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i }));
     const manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
     const modelIdInput = within(manualDraft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i);
     await user.type(modelIdInput, 'draft-model');
@@ -997,8 +996,6 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
     const picker = await screen.findByRole('menu');
-    expect(within(picker).getByText(/Own login recommended|推荐由 Agent 管理/i)).toBeTruthy();
-    expect(within(picker).getByText(/Managed recommended|推荐由模型网关管理/i)).toBeTruthy();
     expect(within(picker).queryByText(/Claude Pro \/ Max|ChatGPT Plus \/ Pro/i)).toBeNull();
     await userEvent.click(within(picker).getByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
 
@@ -1006,7 +1003,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect((await screen.findByRole('dialog')).textContent).toMatch(/Add Claude subscription|添加 anthropic 订阅/i);
   });
 
-  it('lists every offered subscription vendor in frame 13 order, with a mark and only the badge it earns', async () => {
+  it('lists every offered subscription vendor in frame 13 order, with a mark and no badge', async () => {
     renderPage([retainedSource]);
 
     await screen.findByText('Retained source');
@@ -1024,10 +1021,9 @@ describe('SettingsModelsPage surface branches', () => {
       // Each row carries the vendor's mark, consistent with the api-key picker.
       expect(row.querySelector('svg'), `${row.textContent} has no mark`).toBeTruthy();
     }
-    // A hub-held vendor recommends nothing — its only custody is the hub — so it
-    // draws no recommendation badge, while the two with a channel choice do.
-    const badges = rows.map((row) => /Own login recommended|Managed recommended|推荐由/i.test(row.textContent ?? ''));
-    expect(badges).toEqual(SUBSCRIPTION_VENDORS.map(hasNativeSubscriptionCustody));
+    // Model Hub is the default everywhere (owner decision, 2026-11-11, item 2), so no
+    // row has a choice for a badge to rank.
+    expect(rows.every((row) => !/recommended|推荐/i.test(row.textContent ?? ''))).toBe(true);
   });
 
   it('opens a hub-only subscription straight into its flow, posted as a hub source', async () => {

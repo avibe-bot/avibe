@@ -60,6 +60,24 @@ Sources. This singleton ruling is **owner-vetoable (2026-08-08)**. The channel h
 remains a first-class product story, not an escape hatch or hidden pre-pass; §4.3 alone
 defines its exact runtime behavior.
 
+**Claude subscription amendment — owner 2026-11-11 (item 2 of the new-user review).**
+Supersedes the Claude half of the ruling above and the warning paragraph below.
+Vibey is what Avibe offers, and only a Model Hub-held subscription can supply it,
+so a Claude subscription now signs in to Model Hub by default, as ChatGPT already
+did:
+
+- The setup wizard's 「Sign in with Claude」 / 「Sign in with ChatGPT」 start the
+  Model Hub sign-in directly; the one-option chooser in between is gone.
+- The account-restriction warning becomes one grey line under that button:
+  “Anthropic's subscription terms cover only its own apps. Learn more” /
+  「Anthropic 的订阅条款只覆盖它自己的应用。了解更多」, linking to the Model Hub
+  docs. The owner chose this over removing it.
+- Settings › Models: Model Hub management (“Managed”) is the default and first
+  option for a Claude subscription; Claude Code's own login (“Own login”) stays
+  available second. The Recommended / Second choice badges, and the subscription
+  menu's recommendation badges, are removed.
+- The `native_cli` singleton and the channel handoff are unchanged.
+
 A user may explicitly add either subscription as a Gateway-held upstream, and a
 Gateway-held subscription may participate in a cross-vendor configured chain. The only
 warning is one factual sentence shown when the user chooses the Claude-as-Gateway

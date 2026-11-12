@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
@@ -22,6 +22,10 @@ const refusal = {
   metadata: { event: 'backend_failure', failure_id: 'failed', turn_id: 'turn-1', failure_next_step: 'models' },
 } as WorkbenchMessage;
 
+function ModelsPage() {
+  return <><p>Models page</p><output data-testid="models-search">{useLocation().search}</output></>;
+}
+
 type StepProps = Omit<Parameters<typeof FailureNextStep>[0], 'message'>;
 
 function mount(message: WorkbenchMessage, canManage: boolean, props: StepProps = {}) {
@@ -35,7 +39,7 @@ function mount(message: WorkbenchMessage, canManage: boolean, props: StepProps =
         <MemoryRouter initialEntries={['/chat/session']}>
           <Routes>
             <Route path="/chat/session" element={<FailureNextStep message={message} {...props} />} />
-            <Route path="/settings/models" element={<p>Models page</p>} />
+            <Route path="/settings/models" element={<ModelsPage />} />
           </Routes>
         </MemoryRouter>
       </InstanceAuthorizationContext.Provider>
@@ -50,6 +54,12 @@ describe('FailureNextStep', () => {
     mount(refusal, true);
     fireEvent.click(screen.getByRole('button', { name: 'Open Models' }));
     expect(screen.getByText('Models page')).toBeTruthy();
+  });
+
+  it('opens the Source the failure names, when it names one', () => {
+    mount({ ...refusal, metadata: { ...refusal.metadata, failure_source_id: 'src relay' } }, true);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Models' }));
+    expect(screen.getByTestId('models-search').textContent).toBe('?source=src%20relay');
   });
 
   it('tells anyone else who can fix it, with no link', () => {

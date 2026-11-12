@@ -723,8 +723,16 @@ def test_backend_failure_notify_passes_durable_web_push_gates(monkeypatch, tmp_p
     engine.dispose()
 
 
-def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
+@pytest.mark.parametrize("maintenance", ["none", "vacuum", "batch-rebuild"])
+@pytest.mark.parametrize(
+    "later_prompt_at",
+    ["2026-08-04T00:00:04.000000Z", "2026-08-04T00:00:02.500000Z"],
+    ids=["forward-clock", "backdated-later-prompt"],
+)
+def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path, later_prompt_at, maintenance):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    message_ids = iter(["msg_z_before", "msg_m_result", "msg_a_after"])
+    monkeypatch.setattr(messages_service, "_new_message_id", lambda: next(message_ids))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -762,6 +770,19 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
             message_type="user",
             text="accepted before result",
         )
+        result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_acceptance_owner",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="done",
+        )
+        # Deferred inputs are materialized in messages only on acceptance, so
+        # this later prompt must be inserted after the result even if its
+        # submission timestamp (or a stepped wall clock) precedes the result.
         after = messages_service.append(
             conn,
             scope_id=scope_id,
@@ -772,16 +793,6 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
             metadata={"_web_push_user_key": "remote:after"},
             message_type="user",
             text="accepted after result",
-        )
-        result = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id="ses_acceptance_owner",
-            platform="avibe",
-            author="agent",
-            source="agent",
-            message_type="result",
-            text="done",
         )
         conn.execute(
             messages.update()
@@ -796,7 +807,7 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
             .where(messages.c.id == after["id"])
             .values(
                 created_at="2026-08-04T00:00:02.000000Z",
-                delivered_at="2026-08-04T00:00:04.000000Z",
+                delivered_at=later_prompt_at,
             )
         )
         conn.execute(
@@ -804,6 +815,22 @@ def test_web_push_owner_uses_transcript_acceptance_order(monkeypatch, tmp_path):
             .where(messages.c.id == result["id"])
             .values(created_at="2026-08-04T00:00:03.000000Z")
         )
+
+    # The rowid is private to this query, not a persisted reference. Check its
+    # relative order through the maintenance operations that can renumber it,
+    # using message IDs whose lexical order is opposite to insertion order.
+    if maintenance == "vacuum":
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.exec_driver_sql("VACUUM")
+    elif maintenance == "batch-rebuild":
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from sqlalchemy import Column, Integer
+
+        with engine.begin() as conn:
+            operations = Operations(MigrationContext.configure(conn))
+            with operations.batch_alter_table("messages", recreate="always") as batch:
+                batch.add_column(Column("test_copy_marker", Integer, nullable=True))
 
     with engine.connect() as conn:
         assert web_push_notifications._web_push_user_keys_for_message(
@@ -1076,7 +1103,16 @@ def test_send_to_enabled_subscriptions_rejects_stale_instance_authorization_revi
     engine.dispose()
 
 
-def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "second_result_at",
+    [
+        "2026-08-04T00:00:00.020000Z",
+        "2026-08-04T00:00:00.000000Z",
+        "2026-08-03T23:59:59.900000Z",
+    ],
+    ids=["forward-clock", "tied-clock", "backward-clock"],
+)
+def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, tmp_path, second_result_at):
     """Personal notification authorization is isolated from Organization gates."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1090,6 +1126,8 @@ def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, 
         authorization_revision=41,
         instance_kind="personal",
     )
+    message_times = iter([now, "2026-08-04T00:00:00.010000Z", second_result_at])
+    monkeypatch.setattr(messages_service, "_utc_now_iso", lambda: next(message_times))
 
     with engine.begin() as conn:
         scope_id = upsert_scope(
@@ -1173,7 +1211,7 @@ def test_personal_policy_ignores_revision_state_and_refresh_cutoff(monkeypatch, 
     web_push_notifications._send_to_enabled_subscriptions(
         {"title": "Personal Push", "body": "Done again", "session_id": "ses_push_personal", "message_id": second_message}
     )
-    assert len(sends) == 2
+    assert len(sends) == 2, web_push_notifications.recent_delivery_dispositions()
     recent = web_push_notifications.recent_delivery_dispositions()
     assert all(
         entry["disposition"] == web_push_notifications.WEB_PUSH_DISPOSITION_SENT

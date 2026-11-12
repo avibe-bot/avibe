@@ -14,10 +14,11 @@ import {
   subscribeVaultStateEvents,
   type ApproveReleaseItem,
   type VaultSandboxSealResult,
+  type VaultSandboxSignScheme,
   type VaultSandboxSigningContext,
   type VaultStateEvent,
 } from './vaultSandboxClient';
-import { type BlindBox, type ProtectedRecordEnvelope, type SignatureResult, type SignatureScheme } from './vaultCrypto';
+import { type BlindBox, type ProtectedRecordEnvelope, type SignatureResult } from './vaultCrypto';
 import { assertVaultEntryAvailable, vaultEntryIssue } from './vaultEntry';
 import { invalidateVaultSandboxPolicy } from './vaultSandboxPolicy';
 
@@ -333,6 +334,8 @@ export function useProtectedVault() {
       name: string,
       kind: 'static' | 'keypair' = 'static',
       parentStaticValue?: ParentStaticSealValue,
+      /** A keypair is secp256k1 unless this asks for an Ed25519 (Solana) key. */
+      curve?: 'ed25519',
     ): Promise<
       VaultSandboxSealResult & {
         authzFactorRegistration?: VaultWebAuthnRegistrationPayload;
@@ -354,9 +357,9 @@ export function useProtectedVault() {
         parentStaticValue.clear();
         sealed = await sealing;
       } else {
-        // Keypair is generate-only: the secp256k1 key is born inside the sandbox and never crosses
-        // the boundary; the parent receives only ciphertext + public key/addresses (protocol v2 §7.2).
-        sealed = await sandbox.seal({ name, kind: 'keypair', wrapMeta });
+        // Keypair is generate-only: the key is born inside the sandbox and never crosses the
+        // boundary; the parent receives only ciphertext + public key/addresses (protocol v2 §7.2).
+        sealed = await sandbox.seal({ name, kind: 'keypair', ...(curve ? { curve } : {}), wrapMeta });
       }
       return {
         ...sealed,
@@ -391,7 +394,7 @@ export function useProtectedVault() {
     async (
       material: ProtectedUnlockMaterial,
       signingContext: VaultSandboxSigningContext,
-      scheme: SignatureScheme,
+      scheme: VaultSandboxSignScheme,
       context: VaultSignedOperationContext,
       authorizationWindow?: string,
     ): Promise<SignatureResult> => {

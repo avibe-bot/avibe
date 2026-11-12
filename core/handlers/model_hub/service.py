@@ -10767,11 +10767,13 @@ class ModelHubService:
             resolution=resolution,
             attempted_hop=(source_id, source_model_id),
             source_transition_persisted=source_transition_persisted,
-            last_upstream_failure=self._upstream_failure(source_label, outcome),
+            last_upstream_failure=self._upstream_failure(source_label, outcome, source_id=source_id),
         )
 
     @staticmethod
-    def _upstream_failure(source_label: str, outcome: RawCallOutcome) -> TurnUpstreamFailure | None:
+    def _upstream_failure(
+        source_label: str, outcome: RawCallOutcome, *, source_id: str = "",
+    ) -> TurnUpstreamFailure | None:
         if not outcome.upstream_detail and outcome.kind is not RawOutcomeKind.HTTP_ERROR:
             return None
         if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
@@ -10781,6 +10783,7 @@ class ModelHubService:
                 http_status=None,
                 detail=outcome.upstream_detail,
                 connection_error=True,
+                source_id=source_id,
             )
         status = outcome.http_status
         return TurnUpstreamFailure(
@@ -10791,6 +10794,7 @@ class ModelHubService:
                 else None
             ),
             detail=outcome.upstream_detail or "",
+            source_id=source_id,
         )
 
     @staticmethod
@@ -11995,7 +11999,7 @@ class ModelHubService:
                     recovery_request.non_retryable_failure = True
                 # The newest refusal wins even without text: an older message
                 # would name a response that did not end this request.
-                last_upstream_failure = self._upstream_failure(source.display_name, outcome)
+                last_upstream_failure = self._upstream_failure(source.display_name, outcome, source_id=source.id)
                 if recovery_request is not None:
                     recovery_request.last_upstream_failure = last_upstream_failure
                 event_reason, _persisted = await self._settle_fallback_source(
@@ -12117,7 +12121,9 @@ class ModelHubService:
                         return resolved
                     pending.start()
                     pending.reason = "server_error"
-                    pending.last_upstream_failure = self._upstream_failure(resolved.source_label, retry_outcome)
+                    pending.last_upstream_failure = self._upstream_failure(
+                        resolved.source_label, retry_outcome, source_id=resolved.source_id,
+                    )
                     if getattr(kwargs.get("request"), "pinned_hop", None) is not None:
                         # Never replay opaque continuation content on a different
                         # hop. Its caller owns re-rendering the portable request.

@@ -1,12 +1,14 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { useState } from 'react';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { ToastContext } from '../../context/ToastContext';
+import { modelsApi } from '../settings/models/modelsApi';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { NewAgentDialog } from './NewAgentDialog';
@@ -97,6 +99,7 @@ const submit = () => fireEvent.click(screen.getByRole('button', { name: /agents\
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   apiRef.current = null;
   modelCatalog = { models: [] };
   modelCatalogReads = 0;
@@ -159,14 +162,25 @@ describe('NewAgentDialog', () => {
     })));
   });
 
-  it("keeps the form while the user adds a model in the Model Hub catalog", async () => {
-    // Settings hides the page this dialog sits in; closing it would clear the
-    // Agent the user was halfway through defining.
+  it("adds a model in place, keeps the form, and uses the model it added", async () => {
+    // The add dialog opens over this one; closing it would clear the Agent the
+    // user was halfway through defining.
     modelCatalog = { models: ['opus'] };
     apiRef.current = {
       createVibeAgent: vi.fn(),
       readModelHubAgentCatalogForModelPicker: vi.fn().mockResolvedValue({ backend: 'claude', mode: 'hub' }),
     };
+    const supply = { backend: 'claude', mode: 'hub', menu_kind: 'fixed', cli_present: true, catalog_models: [] };
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(supply as never);
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue({ builtin: [], providers: [], in_list: [] });
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    // The list the add saves: the typed model reasons, at `high` only.
+    const saved = { ...supply, catalog_models: [{
+      id: 'my-finetune', display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
+      input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: true,
+      reasoning_efforts: ['high'], locked: false, routeable: true,
+    }] };
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(saved as never);
     const onClose = vi.fn();
     const LocationProbe = () => {
       const location = useLocation();
@@ -176,10 +190,12 @@ describe('NewAgentDialog', () => {
       <InstanceAuthorizationContext.Provider
         value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}
       >
-        <MemoryRouter>
-          <NewAgentDialog open onClose={onClose} onCreated={vi.fn()} />
-          <LocationProbe />
-        </MemoryRouter>
+        <ToastContext.Provider value={{ showToast: vi.fn() }}>
+          <MemoryRouter>
+            <NewAgentDialog open onClose={onClose} onCreated={vi.fn()} />
+            <LocationProbe />
+          </MemoryRouter>
+        </ToastContext.Provider>
       </InstanceAuthorizationContext.Provider>,
     );
     fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
@@ -187,9 +203,19 @@ describe('NewAgentDialog', () => {
     fireEvent.click(screen.getByRole('combobox'));
     fireEvent.click(await screen.findByText('chat.picker.addModel'));
 
-    expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=claude');
+    const added = within(await screen.findByRole('dialog', { name: /^settings\.models\.gateway\.picker\.title/ }));
+    await waitFor(() => expect((added.getByLabelText('settings.models.gateway.picker.search') as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(added.getByLabelText('settings.models.gateway.picker.search'), { target: { value: 'my-finetune' } });
+    fireEvent.click(await added.findByRole('button', { name: /settings\.models\.gateway\.picker\.customFromQuery/ }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /^settings\.models\.gateway\.picker\.title/ })).toBeNull());
+    expect(write).toHaveBeenCalledWith('claude', expect.objectContaining({ models: [expect.objectContaining({ id: 'my-finetune', origin: 'manual' })] }));
+    expect(screen.getByTestId('location').textContent).toBe('/');
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByDisplayValue('router')).toBeTruthy();
+    expect(screen.getByRole('combobox').textContent).toContain('my-finetune');
+    // The effort menu is the saved row's, not the ladder from before the add.
+    expect(screen.getByRole('button', { name: 'high' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'medium' })).toBeNull();
   });
 
   it('reads the model list again when Settings uncovers the open dialog', () => {

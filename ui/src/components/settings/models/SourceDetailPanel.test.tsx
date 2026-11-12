@@ -261,7 +261,7 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByRole('button', { name: /Advanced settings|高级设置/ })).toBeNull();
     expect(row.querySelector('[data-tier-provenance]')).toBeNull();
     expect(within(row as HTMLElement).getByRole('button', { name: /Remove|移除/ })).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i }));
     const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i).closest('[data-manual-model-draft]')!;
     expect(within(draft as HTMLElement).getAllByRole('textbox')).toHaveLength(1);
     expect(update).not.toHaveBeenCalled();
@@ -885,12 +885,12 @@ describe('SourceDetailPanel', () => {
 
   it('opens the manual model draft in the table and keeps Add disabled while blank', async () => {
     renderPanel();
-    await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
+    await userEvent.click(screen.getAllByRole('button', { name: /^Add model ID$|^补充模型 ID$/i })[0]);
     const input = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i);
     expect(input).toBeTruthy();
     const draft = input.closest('[data-manual-model-draft]');
     expect(draft).toBeTruthy();
-    const add = within(draft as HTMLElement).getByRole('button', { name: /^Add model$|^添加模型$/i });
+    const add = within(draft as HTMLElement).getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i });
     expect((add as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -902,11 +902,11 @@ describe('SourceDetailPanel', () => {
   it('places every manual-draft cell without column arithmetic in the markup', async () => {
     vi.spyOn(modelsApi, 'addCustomModel').mockRejectedValueOnce(new Error('write failed'));
     renderPanel();
-    await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
+    await userEvent.click(screen.getAllByRole('button', { name: /^Add model ID$|^补充模型 ID$/i })[0]);
     const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i)
       .closest('[data-manual-model-draft]') as HTMLElement;
     await userEvent.type(within(draft).getByPlaceholderText(/^Model ID$|^模型 ID$/i), 'model-b');
-    await userEvent.click(within(draft).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await userEvent.click(within(draft).getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i }));
     // The failure line is the third cell, and the only one that has to be
     // waited for; the count is what proves the band is fully seeded.
     await waitFor(() => { expect(draft.children.length).toBe(3); });
@@ -1025,10 +1025,10 @@ describe('SourceDetailPanel', () => {
     vi.spyOn(modelsApi, 'addCustomModel').mockResolvedValueOnce(echoed);
     renderEchoPanel();
 
-    await userEvent.click(screen.getAllByRole('button', { name: /^Add model$|^添加模型$/i })[0]);
+    await userEvent.click(screen.getAllByRole('button', { name: /^Add model ID$|^补充模型 ID$/i })[0]);
     const draft = screen.getByPlaceholderText(/^Model ID$|^模型 ID$/i).closest('[data-manual-model-draft]');
     await userEvent.type(within(draft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i), 'model-b');
-    await userEvent.click(within(draft as HTMLElement).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await userEvent.click(within(draft as HTMLElement).getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i }));
 
     expect(await screen.findByText('model-b')).toBeTruthy();
   });

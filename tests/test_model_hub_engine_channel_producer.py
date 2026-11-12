@@ -541,11 +541,11 @@ class Signing:
         return producer.sign_from_ledger(
             self.ledger, operation, now=now, roots=roots or self.roots, verifier=LocalVerifier(), sign=self.avault,
             key_name="MODEL_HUB_ENGINE_CHANNEL_KEY", key_envelope=KEY_ENVELOPE, published=self.published,
-            qualified_baselines=baselines,
+            rehearsal_baselines=baselines,
         )
 
     def promote(self, build: int, **options) -> bytes:
-        """Promote one more build, qualified against every release these tests ever list."""
+        """Promote one more build, with the ledger's concrete baseline context."""
 
         return self.sign(Promote(manifest_bytes(build=build), "3.2.6"), baselines=DIGESTS, **options)
 
@@ -925,7 +925,7 @@ def test_a_raised_shipped_floor_moves_the_next_sequence_up_and_never_down(tmp_pa
 
 
 @needs_directory_flush
-def test_a_candidate_is_promoted_only_if_it_was_qualified_against_every_release_the_ledger_lists(tmp_path) -> None:
+def test_a_promotion_requires_current_concrete_baseline_context_for_every_live_ledger_release(tmp_path) -> None:
     signing = _listed(Signing(tmp_path))
     signing.sign(Promote(manifest_bytes(build=3), "3.2.6"),
                  baselines={V1: hashlib.sha256(manifest_bytes(build=1)).hexdigest(),
@@ -937,7 +937,7 @@ def test_a_candidate_is_promoted_only_if_it_was_qualified_against_every_release_
 
     # The published index the qualification read was older, or was replaced: a listed release is missing.
     for baselines in (None, {}, {V1: digests[V1]}, {**digests, V2: "0" * 64}):
-        with pytest.raises(ProducerError, match="not qualified against every release"):
+        with pytest.raises(ProducerError, match="rehearsal context does not cover every release"):
             signing.sign(candidate, baselines=baselines)
     assert signing.state_bytes() == before and len(signing.avault.requests) == requests
 
@@ -1270,7 +1270,7 @@ def test_the_finalizer_is_dispatch_only_serialized_and_starts_with_no_token_scop
     assert workflow["jobs"]["authorize"]["if"] == (
         "github.repository == 'avibe-bot/avibe' && github.ref == 'refs/heads/master'"
     )
-    assert "environment" not in workflow["jobs"]["authorize"] and "environment" not in workflow["jobs"]["qualify"]
+    assert "environment" not in workflow["jobs"]["authorize"] and "environment" not in workflow["jobs"]["prepare"]
 
 
 def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_touches_the_ledgers_existence() -> None:
@@ -1278,7 +1278,7 @@ def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_
     inputs = workflow[True]["workflow_dispatch"]["inputs"]
 
     assert inputs["operation"]["options"] == list(producer.OPERATION_POLICY)
-    assert set(inputs) == {"operation", "asset_release_tag", "qualification_run_id", "rollback_to", "reason"}
+    assert set(inputs) == {"operation", "asset_release_tag", "rehearsal_run_id", "rollback_to", "reason"}
     # Creating a ledger is owner commissioning, run by hand; no step of this workflow reaches it.
     scripts = "\n".join(step.get("run", "") for job in workflow["jobs"].values() for step in job["steps"])
     for forbidden in ("initialize", "--first-sequence", "first_publication", "recover"):
@@ -1331,7 +1331,7 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
     }
     assert not mentions("sign", "secrets.") and not mentions("sign", "AWS_")
     assert mentions("sign", "MODEL_HUB_ENGINE_CHANNEL_LEDGER") and mentions("sign", "--ledger")
-    for name in ("authorize", "qualify", "release", "publish"):
+    for name in ("authorize", "prepare", "release", "publish"):
         assert not mentions(name, "LEDGER") and not mentions(name, "KEY_ENVELOPE")
         assert not mentions(name, "model_hub_engine_channel.py sign") and jobs[name]["runs-on"] == "ubuntu-latest"
     # The channel's bucket credential is not the release mirror's.
@@ -1342,9 +1342,8 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
                       "contents\": \"write"):
         assert forbidden not in sign_text
     assert all(job.get("permissions", {}).get("contents") != "write" for name, job in jobs.items() if name != "release")
-    # What the hosted qualification read from the published index reaches the signer as data, to check against its ledger.
-    assert jobs["qualify"]["outputs"] == {"baselines": "${{ steps.receipt.outputs.baselines }}"}
-    assert mentions("sign", "needs.qualify.outputs.baselines") and mentions("sign", "--qualified-baselines")
+    assert jobs["prepare"]["outputs"] == {"baselines": "${{ steps.context.outputs.baselines }}"}
+    assert mentions("sign", "needs.prepare.outputs.baselines") and mentions("sign", "--rehearsal-baselines")
 
 
 def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -> None:
@@ -1352,6 +1351,9 @@ def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -
 
     produced = (WORKFLOW.parent / "model-hub-engine-qualification.yml").read_text(encoding="utf-8")
 
-    for artifact in (qualification.RECEIPT_ARTIFACT, qualification.ASSETS_ARTIFACT, "qualification-released-"):
-        assert f"name: {artifact}" in produced
-        assert artifact in json.dumps(_jobs()["jobs"]["qualify"])
+    for artifact in (qualification.UNTRUSTED_REHEARSAL_ARTIFACT, qualification.UNTRUSTED_ASSETS_ARTIFACT):
+        assert artifact in produced
+        assert artifact in json.dumps(_jobs()["jobs"]["prepare"])
+    assert "qualification-released-" in produced
+    assert qualification.TRUSTED_ASSETS_ARTIFACT in json.dumps(_jobs()["jobs"]["prepare"])
+    assert "verify-untrusted-rehearsal" in json.dumps(_jobs()["jobs"]["prepare"])

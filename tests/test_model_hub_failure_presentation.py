@@ -20,6 +20,7 @@ from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
+    TurnSupplyBlocker,
     TurnSupplyFacts,
     TurnUpstreamFailure,
     render_turn_outcome_copy,
@@ -343,7 +344,7 @@ def test_request_incompatible_copy_preserves_nonfallback_guidance(language):
         detail=detail,
     )
     assert (
-        "switching Sources will not help" in text
+        "switching providers will not help" in text
         if language == "en"
         else "切换模型供应商也无法解决" in text
     )
@@ -384,7 +385,7 @@ def test_http_200_sse_failure_is_presented_as_upstream_error(language):
     ) not in text
     assert "HTTP 200" not in text
     assert (
-        "switching Sources will not help" not in text
+        "switching providers will not help" not in text
         if language == "en"
         else "切换模型供应商也无法解决" not in text
     )
@@ -528,3 +529,36 @@ async def test_a_route_refusal_points_to_models_only_when_its_copy_sends_the_rea
 
     text, metadata = _notice(controller)
     assert (text, metadata.get("failure_next_step")) == (copy, "models" if pointed else None)
+
+
+@pytest.mark.parametrize(
+    ("blockers", "upstream", "opened"),
+    [
+        # The last upstream refusal is the Source the copy names first...
+        ((TurnSupplyBlocker(source="Relay", reason="auth_failed", source_id="src_relay"),),
+         TurnUpstreamFailure(source="Backup", http_status=401, detail="", source_id="src_backup"), "src_backup"),
+        # ...else the first Source that blocked the route...
+        ((TurnSupplyBlocker(source="", reason="route_unconfigured"),
+          TurnSupplyBlocker(source="Relay", reason="auth_failed", source_id="src_relay")), None, "src_relay"),
+        # ...and a refusal that names no Source opens Models itself.
+        ((), None, None),
+    ],
+)
+async def test_the_models_step_names_the_source_that_failed(blockers, upstream, opened):
+    from core.handlers.model_hub.service import ModelHubError
+
+    outcome = TurnOutcomeProjectionInput(
+        outcome="no_candidate",
+        discriminator="blocked_supply_state",
+        supply_facts=TurnSupplyFacts(
+            backend="claude", model="claude-opus-5-5", supply_state="interrupted", blockers=blockers,
+        ),
+        last_upstream_failure=upstream,
+    )
+    refused = ModelHubError("no_candidate", turn_outcome=outcome)
+    controller = _next_step_controller("en", public_url=None)
+
+    await emit_backend_failure(controller, _WORKBENCH, "claude", str(refused), display_text="❌ refused", cause=refused)
+
+    _text, metadata = _notice(controller)
+    assert (metadata.get("failure_next_step"), metadata.get("failure_source_id")) == ("models", opened)

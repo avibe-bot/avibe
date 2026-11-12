@@ -31,6 +31,7 @@ const vault = vi.hoisted(() => ({
   status: 'locked',
   refresh: vi.fn(),
   approveProtectedRelease: vi.fn(),
+  signProtectedRequest: vi.fn(),
 }));
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
@@ -238,6 +239,63 @@ describe('VaultApprovalCard signing-address contract', () => {
     expect(screen.queryByText(en.vaults.approval.protectedWarning) !== null).toBe(
       protection === 'protected' && scheme !== 'schnorr-secp256k1-bip341-keypath',
     );
+  });
+});
+
+// The sandbox signs a protected request against the daemon-signed operation context, and the
+// daemon then settles it. An exact-message (Ed25519) completion is checked against the context the
+// request stored, so dropping it from the completion makes every protected Solana signature fail.
+describe('VaultApprovalCard protected signing completion', () => {
+  const operationContext = { v: 2, purpose: 'sign', requestId: 'vrq_protected_sign' };
+  const material = { name: 'SIGNING_KEY', kind: 'keypair', envelope };
+  const protectedSign = (delivery: Record<string, unknown>): VaultRequest => ({
+    ...protectedAccess,
+    id: 'vrq_protected_sign',
+    request_type: 'sign',
+    secret_name: 'SIGNING_KEY',
+    delivery: { ...delivery, operation_context: operationContext },
+    card: { request_type: 'sign', secret_name: 'SIGNING_KEY', kind: 'keypair', protection: 'protected', secret_unlock_material: material },
+  });
+  const solanaContext = { kind: 'solana-transaction-v1', messageHex: solanaMessage };
+  const evmContext = { kind: 'evm-transaction', chainId: '1', unsignedTransaction: {}, digestAlgorithm: 'keccak256', digest: '00'.repeat(32) };
+
+  it.each([
+    {
+      label: 'an Ed25519 message, with its exact signing context',
+      delivery: { scheme: 'ed25519', message_hex: solanaMessage, signing_context: solanaContext },
+      result: { scheme: 'ed25519', signature: 'ab'.repeat(64), recovery_id: null },
+      completion: { message_hex: solanaMessage, scheme: 'ed25519', signature: { signature: 'ab'.repeat(64) }, signing_context: solanaContext },
+    },
+    {
+      label: 'a secp256k1 digest, unchanged',
+      delivery: { scheme: 'ecdsa-secp256k1-recoverable', digest: '00'.repeat(32), signing_context: evmContext },
+      result: { scheme: 'ecdsa-secp256k1-recoverable', signature: 'cd'.repeat(64), recovery_id: 1 },
+      completion: { digest: '00'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable', signature: { signature: 'cd'.repeat(64), recovery_id: 1 } },
+    },
+  ])('settles $label', async ({ delivery, result, completion }) => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    vault.signProtectedRequest.mockResolvedValue(result);
+    const { open } = openWindow();
+    const onResolved = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard request={protectedSign(delivery)} onResolved={onResolved} onCancel={vi.fn()} />
+      </I18nextProvider>,
+    );
+    const sign = screen.getByRole('button', { name: en.vaults.approval.sign }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(sign.disabled).toBe(false));
+    fireEvent.click(sign);
+
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+    expect(open).toHaveBeenCalledOnce();
+    const [sentMaterial, sentContext, scheme, sentOperation, windowId] = vault.signProtectedRequest.mock.calls[0];
+    expect(sentMaterial).toEqual(material);
+    expect(sentContext).toEqual(delivery.signing_context);
+    expect(scheme).toBe(delivery.scheme);
+    expect(sentOperation).toEqual(operationContext);
+    expect(windowId).toMatch(/^[a-f0-9]{32}$/);
+    expect(api.signVaultDigest).toHaveBeenCalledExactlyOnceWith({ name: 'SIGNING_KEY', request_id: 'vrq_protected_sign', ...completion });
   });
 });
 

@@ -1285,6 +1285,7 @@
         "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; unmatched models pass through to eligible API-key providers.",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
+        "addModel": "Add model",
         "switchToGateway": "Let Model Hub manage",
         "switchToDirect": "Use own login",
         "modeMenu": {
@@ -1366,6 +1367,7 @@
           "guardSubtitleInUse": "Agents still use these models. They cannot run until you choose another model for them.",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
+          "searchAdd": "Search providers and the model catalog for \"{{query}}\"",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
           "baselineUnavailable": "This backend's model list could not be read.",
           "save": "Save",
@@ -1388,7 +1390,9 @@
           "moved_other": "Moved {{model}} to position {{position}} of {{count}}.",
           "dropped_one": "Dropped {{model}} at position {{position}} of {{count}}.",
           "dropped_other": "Dropped {{model}} at position {{position}} of {{count}}.",
-          "grabCancelled": "Cancelled moving {{model}} and restored its original position."
+          "grabCancelled": "Cancelled moving {{model}} and restored its original position.",
+          "added_one": "Added {{model}}",
+          "added_other": "Added {{count}} models"
         },
         "picker": {
           "title": "Add {{backend}} models",
@@ -1400,12 +1404,17 @@
           "groupBuiltin": "{{backend}} built-in",
           "groupProviders": "From your providers",
           "groupListed": "Already in the list",
-          "noMatch": "No model matches.",
+          "noMatch": "Neither your providers nor the model catalog has this model.",
           "unavailable": "The models you can add could not be read.",
-          "customFromQuery": "Add \"{{query}}\" as a custom model…",
+          "customFromQuery": "Add \"{{query}}\" as a custom model",
           "custom": "Add custom model…",
           "confirm_one": "Add {{count}} model",
-          "confirm_other": "Add {{count}} models"
+          "confirm_other": "Add {{count}} models",
+          "groupCatalog": "Model catalog",
+          "catalogNote": "No provider lists these. Once added, the ID is sent to your provider as is; the chat tells you if the provider doesn't serve it.",
+          "notListed": "Not listed by a provider",
+          "customFromQueryNote": "Uses the ID exactly as typed, with default parameters. You can change them later in Manage models.",
+          "searchingCatalog": "Searching the model catalog"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · Model list",
@@ -1541,10 +1550,6 @@
           "gemini": "Gemini",
           "kimi": "Kimi",
           "xai": "xAI"
-        },
-        "recommendation": {
-          "native": "Own login recommended",
-          "gateway": "Managed recommended"
         }
       },
       "sources": {
@@ -1894,10 +1899,8 @@
         "filters": {
           "source": "Provider",
           "model": "Model",
-          "all": "All {{label}}",
           "selected_one": "{{label}} · {{count}} selected",
           "selected_other": "{{label}} · {{count}} selected",
-          "search": "Search {{label}}",
           "noMatch": "No matching options",
           "hint": "Multi-select updates the report",
           "reset": "Reset filters",
@@ -1906,7 +1909,9 @@
           "sourceCount_one": "{{count}} provider",
           "sourceCount_other": "{{count}} providers",
           "modelCount_one": "{{count}} model",
-          "modelCount_other": "{{count}} models"
+          "modelCount_other": "{{count}} models",
+          "searchSources": "Search providers",
+          "searchModels": "Search models"
         },
         "stats": {
           "tokens": "All tokens",
@@ -2260,17 +2265,14 @@
           "hub": {
             "label": "Add as a Model Hub provider",
             "desc": {
-              "claude": "Hand this subscription to Model Hub so it can supply Codex, OpenCode and other Agents.",
+              "claude": "Model Hub manages this subscription, so Vibey, Codex, OpenCode and others can use it.",
               "chatgpt": "Model Hub supplies it to Codex and other Agents, with usage, quota and takeover all visible."
             }
           }
         },
-        "badge": {
-          "recommended": "Recommended",
-          "secondary": "Second choice"
-        },
         "tos": {
-          "claude": "The subscription terms authorize only you, inside Claude's official clients. Supplying it to other Agents is out-of-scope use and the account may be restricted."
+          "claude": "Anthropic's subscription terms cover only its own apps.",
+          "learnMore": "Learn more"
         },
         "hint": {
           "claude": "You can have both — add them one at a time."
@@ -2479,7 +2481,7 @@
         "summary_other": "{{host}} · {{count}} models",
         "action": {
           "refetch": "Refetch",
-          "addModel": "Add model"
+          "addModel": "Add model ID"
         },
         "manage": {
           "label": "Manage {{source}}",
@@ -3303,7 +3305,8 @@
     "provider_unavailable": "The provider is unavailable.",
     "provider_error": "The provider rejected the request.",
     "endpoint_not_configured": "The provider endpoint is not configured.",
-    "avault_upgrade_required": "This needs a newer avault. Update it under Settings → Dependencies first."
+    "avault_upgrade_required": "This needs a newer avault. Update it under Settings → Dependencies first.",
+    "sandbox_curve_unsupported": "This Avibe's secure sandbox can't create Solana keys yet. Nothing was saved. Update Avibe, then try again."
   },
   "modelHub": {
     "errors": {
@@ -5671,6 +5674,10 @@
       "sheetTitle": "Agent & model",
       "model": "Model",
       "effort": "Effort",
+      "effortDefault": "Default",
+      "effortDefaultHint": "The model's own setting",
+      "effortDefaultNamed": "Default ({{effort}})",
+      "effortDefaultAgentHint": "The Agent's setting",
       "effortNotOn": "Not on {{sources}}",
       "effortNotOnSome": "Not on some providers",
       "effortRefused": "No provider accepts it now · clear it under Models → Providers & routing",
@@ -5827,9 +5834,9 @@
           "image_not_saved": "The image could not be saved.",
           "image_no_store": "Nothing here can keep a generated image.",
           "executor_no_image": "The proxy executor returned no image.",
-          "gateway_unreachable": "Couldn't reach the model gateway.",
-          "gateway_refused": "The model gateway refused the call.",
-          "gateway_no_result": "The model gateway returned no result.",
+          "gateway_unreachable": "Couldn't reach Model Hub.",
+          "gateway_refused": "Model Hub refused the call.",
+          "gateway_no_result": "Model Hub returned no result.",
           "image_param_unsupported": "The chosen image model doesn't take one of the arguments.",
           "image_model_unavailable": "The chosen image model isn't available.",
           "image_argument_invalid": "The image call had an argument it can't send.",
@@ -5926,9 +5933,9 @@
         "nativeInterrupted": "Native search was interrupted; switched to {{provider}}.",
         "interruption": {
           "message": "Model response interrupted: {{reason}}",
-          "overloaded": "upstream overloaded",
+          "overloaded": "provider overloaded",
           "disconnected": "stream disconnected",
-          "upstream": "upstream error",
+          "upstream": "provider error",
           "retried": "retried automatically",
           "retriedLabel": "· retried automatically"
         },
@@ -6347,7 +6354,8 @@
       "solanaGenerateHint": "A new key is created when you save. Its address appears once the key is saved.",
       "solanaImportPlaceholder": "Paste a Solana CLI keypair (a JSON array of 64 numbers) or a base58 secret key",
       "solanaImportHelp": "The key is encrypted in this browser for avault, which checks it. Its address appears once the key is saved. Recovery phrases are not supported.",
-      "solanaProtectedUnavailable": "Protected isn't available for Solana keys yet. Choose Standard to create this key.",
+      "solanaProtectedHelp": "A new Solana key is generated inside the sandbox and sealed there. Only the ciphertext and the key's public key (its address) reach Avibe; the private key never leaves the sandbox.",
+      "solanaProtectedBornHint": "The private key was born inside the sandbox and never entered this app.",
       "checkingAvault": "Checking avault…",
       "p2Unavailable": "Browser-side vault create requires avault {{version}} or newer. Installed: {{installed}}. Install a compatible avault release before saving standard secrets.",
       "browserSealingPending": "Browser-side sealing requires a compatible avault release. This UI never sends plaintext values to Python.",

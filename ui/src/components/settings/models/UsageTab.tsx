@@ -140,12 +140,17 @@ const metricLabel = (metric: UsageMetric, t: UsageTranslate): string =>
 
 function MultiFilter({
   label,
+  allLabel,
+  searchLabel,
   icon,
   options,
   selected,
   onChange,
 }: {
   label: string;
+  /** The trigger and the menu row with nothing picked, as a whole phrase per locale. */
+  allLabel: string;
+  searchLabel: string;
   icon: React.ReactNode;
   options: FilterOption[];
   selected: readonly string[];
@@ -184,7 +189,7 @@ function MultiFilter({
       || option.detail?.toLocaleLowerCase().includes(query.toLocaleLowerCase())
   ));
   const buttonLabel = selected.length === 0
-    ? t('settings.models.usage.filters.all', { label })
+    ? allLabel
     : selected.length === 1
       ? options.find((option) => option.key === selected[0])?.label ?? label
       : t('settings.models.usage.filters.selected', { label, count: selected.length });
@@ -216,8 +221,8 @@ function MultiFilter({
             <input
               autoFocus
               value={query}
-              aria-label={t('settings.models.usage.filters.search', { label }) as string}
-              placeholder={t('settings.models.usage.filters.search', { label }) as string}
+              aria-label={searchLabel}
+              placeholder={searchLabel}
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
@@ -229,7 +234,7 @@ function MultiFilter({
             onClick={() => onChange([])}
           >
             <Checkbox checked={selected.length === 0} presentational />
-            {t('settings.models.usage.filters.all', { label })}
+            {allLabel}
           </button>
           <div className="model-hub-usage-filter-divider" />
           {visibleOptions.map((option) => (
@@ -1128,6 +1133,8 @@ export const UsageTab: React.FC<{
         <Filter aria-hidden className="size-3.5 text-muted" />
         <MultiFilter
           label={t('settings.models.usage.filters.source') as string}
+          allLabel={t('settings.models.usage.filters.allSources') as string}
+          searchLabel={t('settings.models.usage.filters.searchSources') as string}
           icon={<Network aria-hidden className="size-3.5" />}
           options={sourceOptions}
           selected={selection.sourceIds}
@@ -1135,6 +1142,8 @@ export const UsageTab: React.FC<{
         />
         <MultiFilter
           label={t('settings.models.usage.filters.model') as string}
+          allLabel={t('settings.models.usage.filters.allModels') as string}
+          searchLabel={t('settings.models.usage.filters.searchModels') as string}
           icon={<Cpu aria-hidden className="size-3.5" />}
           options={modelOptions}
           selected={selection.modelKeys}

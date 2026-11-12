@@ -13,8 +13,8 @@
     "staleLoginSession": "Avibe is still running in a macOS login session that has ended. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again. Do not retry this operation.",
     "outsideGuiSession": "Avibe is running outside your desktop session, so credentials kept in the Keychain (GitHub CLI, Vault) are unavailable. Restart Avibe from a terminal on this Mac's desktop.",
     "modelHubDisabled": "Model Hub is disabled on this instance, so {backend} has no model to run on.",
-    "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Open Models and click Retry, then choose a model.",
-    "modelSourceRequired": "{backend} has no model source yet. Add an API key or a subscription in Models.",
+    "modelGatewayOff": "Model Hub is off, so {backend} has no model to run on. Open Models and click Retry, then choose a model.",
+    "modelSourceRequired": "{backend} has no model provider yet. Add an API key or a subscription in Models.",
     "modelsNextStepImUrl": "Someone who manages this Avibe can fix it in Models: {url}",
     "modelsNextStepIm": "Someone who manages this Avibe can fix it in Models, in the Avibe Workbench.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route.",
@@ -769,7 +769,7 @@
     "setup": {
       "starting": "Starting {backend} setup...",
       "unsupportedBackend": "Backend `{backend}` does not support setup yet.",
-      "builtinBackend": "{backend} gets its models from Model Hub and needs no sign-in. Add or manage model sources in Models.",
+      "builtinBackend": "{backend} gets its models from Model Hub and needs no sign-in. Add or manage model providers in Models.",
       "codeUsage": "Usage: `/setup code <value>` or `/setup code <backend> <value>`",
       "claudeMethodUsage": "Usage: `/setup claude <claudeai|console>`",
       "noActiveFlow": "There is no active setup flow for this channel.",
@@ -1087,12 +1087,12 @@
   },
   "modelHub": {
     "errors": {
-      "source_not_found": "Model source not found.",
+      "source_not_found": "Model provider not found.",
       "flow_not_found": "Authorization flow not found.",
       "flow_expired": "Authorization flow expired.",
       "submission_rejected": "That is not the authorization callback address. Paste the full address shown after authorizing.",
       "submission_rejected_other_attempt": "That address answers an earlier sign-in link. Sign in with the link in this dialog, then paste the address it leads to.",
-      "discovery_failed": "Could not validate or discover this source.",
+      "discovery_failed": "Could not validate or discover this provider.",
       "ambiguous_source": "Connected, but we could not identify the model interface.",
       "inventory_unavailable": "The interface was confirmed, but its model list is unavailable.",
       "source_unreachable": "Could not reach this address. Check the address and retry.",
@@ -1101,9 +1101,9 @@
       "adapter_error": "We could not confirm whether the service is reachable. Retry the connection.",
       "credential_replacement_unverified": "The new key could not be verified yet. Your old key is unchanged; please try again later.",
       "native_login_in_progress": "Another native login is already in progress. Finish or cancel it, then retry.",
-      "native_subscription_exists": "This vendor already has a native subscription source.",
+      "native_subscription_exists": "This vendor already has a subscription on its own login.",
       "source_timeout": "The connection timed out. Check the network and retry.",
-      "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
+      "invalid_source_order": "The provider order contains an unavailable, ineligible, or duplicate provider.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "backend_model_catalog_invalid": "The backend model list contains invalid fields.",
       "backend_model_id_invalid": "This backend model ID is invalid.",
@@ -1115,22 +1115,22 @@
       "candidate_suppliers_changed": "The available suppliers changed. Reload the model choices and confirm again.",
       "models_dev_unavailable": "models.dev is unavailable. Enter the model metadata manually or retry later.",
       "codex_catalog_unavailable": "Codex could not prepare the local Model Hub catalog. Retry this turn.",
-      "hosted_content_unpinned": "This request carries hosted-tool content that is not pinned to the Source it was rendered for, so no Source may receive it.",
+      "hosted_content_unpinned": "This request carries hosted-tool content that is not pinned to the provider it was rendered for, so no provider may receive it.",
       "request_too_large": "This request exceeds Avibe's local {limit_mib} MiB request limit. Reduce the images or conversation context and retry.",
-      "engine_down": "The local model gateway is unavailable.",
+      "engine_down": "Model Hub is unavailable on this machine.",
       "engine_withdrawn": "The engine serving this operation was withdrawn. The operation was stopped and was not replayed.",
-      "engine_down_streamed": "The local model gateway is unavailable. This turn's output may be incomplete.",
-      "migration_item_conflict": "This migration item conflicts with the current model gateway state.",
-      "stream_interrupted": "The upstream stream was interrupted.",
-      "upstream_protocol_error": "The upstream response did not match the expected protocol.",
-      "upstream_request_invalid": "The upstream service rejected the request.",
-      "upstream_unauthorized": "The upstream service rejected authorization after refresh.",
-      "upstream_error": "The upstream service returned an error."
+      "engine_down_streamed": "Model Hub is unavailable on this machine. This turn's output may be incomplete.",
+      "migration_item_conflict": "This migration item conflicts with the current Model Hub state.",
+      "stream_interrupted": "The provider's stream was interrupted.",
+      "upstream_protocol_error": "The provider's response did not match the expected protocol.",
+      "upstream_request_invalid": "The provider rejected the request.",
+      "upstream_unauthorized": "The provider rejected authorization after refresh.",
+      "upstream_error": "The provider returned an error."
     },
     "hostedTools": {
       "noExecutor": {
-        "web_search": {"one": "No provider can run web search right now. Add an API key from {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "several": "No provider can run web search right now. Add an API key from one of {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "refused": "{sources} refused web search, so no Source can run it right now. Clear the refusal in Models › Tools to try again."},
-        "x_search": {"one": "No provider can run X search right now. Add an API key from {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "several": "No provider can run X search right now. Add an API key from one of {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "refused": "{sources} refused X search, so no Source can run it right now. Clear the refusal in Models › Tools to try again."}
+        "web_search": {"one": "No provider can run web search right now. Add an API key from {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "several": "No provider can run web search right now. Add an API key from one of {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "refused": "{sources} refused web search, so no provider can run it right now. Clear the refusal in Models › Tools to try again."},
+        "x_search": {"one": "No provider can run X search right now. Add an API key from {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "several": "No provider can run X search right now. Add an API key from one of {vendors} as a provider in Models › Providers & routing; a key stored in Vaults is not used for this.", "refused": "{sources} refused X search, so no provider can run it right now. Clear the refusal in Models › Tools to try again."}
       },
       "noSearchSource": "No provider can run web search. Add a search service in Models › Tools or an API key from a vendor that offers web search in Models › Providers & routing.",
       "queryLimit": "The query exceeds {limit} characters. Shorten it and try again.",
@@ -1153,7 +1153,7 @@
       "imageAlternatives": "Available: {models}."
     },
     "events": {
-      "sourceFallback": "source",
+      "sourceFallback": "provider",
       "switch": "{from_source}: {reason} -> switched to {to_source}",
       "cooldown": "{from_source}: {reason}; cooling down",
       "recover": "{to_source}: recovered and available",
@@ -1165,7 +1165,7 @@
       "reason": {
         "quota_exhausted": "quota exhausted",
         "rate_limited": "rate limited",
-        "server_error": "upstream server unavailable",
+        "server_error": "provider server unavailable",
         "network": "network unavailable",
         "recovery": "recovered",
         "manual": "manual change",
@@ -1177,12 +1177,12 @@
         "account_banned": "account unavailable",
         "plan_excludes_product": "plan excludes this product",
         "spend_limit_reached": "usage limit reached",
-        "unclassified_error": "unclassified source error",
-        "no_enabled_source": "no source is enabled",
-        "no_eligible_source": "no source is eligible",
+        "unclassified_error": "unclassified provider error",
+        "no_enabled_source": "no provider is enabled",
+        "no_eligible_source": "no provider is eligible",
         "route_unconfigured": "the route is not configured",
-        "source_missing": "the configured source no longer exists",
-        "model_unsupported": "the configured source no longer supplies this model",
+        "source_missing": "the configured provider no longer exists",
+        "model_unsupported": "the configured provider no longer supplies this model",
         "native_cli_unavailable": "CLI login is not available in this process"
       }
     },
@@ -1198,13 +1198,13 @@
       "waiting_without_retry": "This request could not complete. Automatic recovery has ended. You can retry model {model} or choose another model.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
-      "last_upstream_failure": "Last upstream error ({source}, HTTP {status}): {detail}",
-      "last_upstream_failure_without_status": "Last upstream error ({source}): {detail}",
+      "last_upstream_failure": "Last provider error ({source}, HTTP {status}): {detail}",
+      "last_upstream_failure_without_status": "Last provider error ({source}): {detail}",
       "last_connection_failure": "Last connection error ({source}): {detail}",
       "passthrough_model_unlisted": "The provider doesn't list {model}; try another model.",
       "model_unlisted": "Model {model} is not in the {backend} model list. Choose another model to continue.",
-      "request_incompatible": "This request is incompatible; switching Sources will not help.",
-      "request_incompatible_detail": "This request was rejected upstream and switching Sources will not help. Upstream said: {detail}"
+      "request_incompatible": "This request is incompatible; switching providers will not help.",
+      "request_incompatible_detail": "The provider rejected this request, and switching providers will not help. The provider said: {detail}"
     }
   },
   "remote_access": {
@@ -1664,11 +1664,11 @@
       "stepTooLarge": "The latest step is too large for this model's context window. Ask for the work in smaller steps, or switch to a model with a larger context.",
       "rateLimit": "The model provider is rate-limiting requests. Try again in a moment.",
       "overloaded": "The model provider is overloaded. Try again in a moment.",
-      "network": "The model provider could not be reached. Check the network and the Model Hub source.",
+      "network": "The model provider could not be reached. Check the network and the provider in Model Hub.",
       "stalled": "The model provider sent no new data for more than {minutes} minutes, so this turn was stopped. Try again, or choose another model.",
       "server": "The model provider returned a server error. Try again in a moment.",
       "streamInterrupted": "The model provider's response broke off before it finished. Try again.",
-      "auth": "The model provider rejected the credentials of this route. Check the Model Hub source.",
+      "auth": "The model provider rejected the credentials of this route. Check the provider in Model Hub.",
       "invalidRequest": "The model provider rejected the request.",
       "modelError": "The model stopped with an error.",
       "toolsUnsupported": "The selected model does not support tools, which {backend} needs. Choose another model.",
@@ -1700,9 +1700,9 @@
       "image_not_saved": "the image could not be saved",
       "image_no_store": "nothing here can keep a generated image",
       "executor_no_image": "the proxy executor returned no image",
-      "gateway_unreachable": "couldn't reach the model gateway",
-      "gateway_refused": "the model gateway refused the call",
-      "gateway_no_result": "the model gateway returned no result",
+      "gateway_unreachable": "couldn't reach Model Hub",
+      "gateway_refused": "Model Hub refused the call",
+      "gateway_no_result": "Model Hub returned no result",
       "image_param_unsupported": "the chosen image model doesn't take one of the arguments",
       "image_model_unavailable": "the chosen image model isn't available",
       "image_argument_invalid": "the image call had an argument it can't send",
@@ -1833,9 +1833,9 @@
     "switch": "{failed}; switched to {provider}",
     "interruption": {
       "message": "Model response interrupted: {reason}",
-      "overloaded": "upstream overloaded",
+      "overloaded": "provider overloaded",
       "disconnected": "stream disconnected",
-      "upstream": "upstream error"
+      "upstream": "provider error"
     },
     "status": {
       "failed": "failed: {error}",

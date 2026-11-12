@@ -100,6 +100,8 @@ def test_release_cannot_publish_before_all_targets_and_signed_verification():
     assert 'desktop-packages' in jobs['stage-desktop']['needs']
     assert "needs.desktop-packages.result == 'success'" in jobs['stage-desktop']['if']
     assert "needs.resolve-desktop-release.outputs.enabled == 'true'" in jobs['stage-desktop']['if']
+    assert 'desktop-packages' in jobs['certum-windows-sign']['needs']
+    assert "needs.desktop-packages.result == 'success'" in jobs['certum-windows-sign']['if']
     package = workflow('desktop-package.yml')['package']
     assert package['environment'] == 'desktop-updater'
     steps = package['steps']

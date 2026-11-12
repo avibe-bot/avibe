@@ -268,7 +268,7 @@ test.describe('hermetic UsageTab', () => {
       await expect(rowNames.last()).toHaveText('Removed providers');
       await expect(rowNames.filter({ hasText: 'Removed providers' })).toHaveCount(1);
 
-      await page.getByRole('button', { name: 'All Provider' }).click();
+      await page.getByRole('button', { name: 'All providers' }).click();
       await expect(page.getByRole('option', { name: /Removed providers/ })).toBeVisible();
       await expect(body).not.toContainText('src_');
       await expect(body).not.toContainText('Unknown model');

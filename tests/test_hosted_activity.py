@@ -265,9 +265,9 @@ def test_a_source_no_browser_should_open_is_named_but_not_linked():
 @pytest.mark.parametrize(
     ("error", "category", "en", "zh"),
     [
-        ("Our servers are currently overloaded. Please try again later.", "overloaded", "upstream overloaded", "上游服务过载"),
+        ("Our servers are currently overloaded. Please try again later.", "overloaded", "provider overloaded", "供应商服务过载"),
         ("stream disconnected before completion", "disconnected", "stream disconnected", "连接中断"),
-        ("private upstream error: https://secret.invalid/?token=private", "upstream", "upstream error", "上游服务异常"),
+        ("private upstream error: https://secret.invalid/?token=private", "upstream", "provider error", "供应商服务异常"),
     ],
 )
 def test_pending_native_search_explains_response_interruption_without_a_provider_subject(error, category, en, zh):
@@ -562,7 +562,7 @@ def test_the_im_line_escapes_the_quoted_subject_for_its_destination():
     ("code", "lang", "line"),
     [
         ("gateway_unreachable", "zh", "🔎 X 搜索 “from:xai” · 失败：无法连接模型网关"),
-        ("gateway_unreachable", "en", "🔎 X search “from:xai” · failed: couldn't reach the model gateway"),
+        ("gateway_unreachable", "en", "🔎 X search “from:xai” · failed: couldn't reach Model Hub"),
         # A code from a newer producer reads as its English reason, as a provider's own reason does.
         ("gateway_overheated", "zh", "🔎 X 搜索 “from:xai” · 失败：the gateway could not run the call (ConnectError)"),
     ],

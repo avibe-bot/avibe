@@ -1285,6 +1285,7 @@
         "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用匹配的供应商；未匹配时向符合条件的 API Key 供应商透传。",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
+        "addModel": "添加模型",
         "switchToGateway": "交给模型网关管理",
         "switchToDirect": "改为 Agent 管理",
         "modeMenu": {
@@ -1366,6 +1367,7 @@
           "guardSubtitleInUse": "仍有 Agent 在使用这些模型。移除后，需要为这些 Agent 改选其他模型才能继续运行。",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
+          "searchAdd": "在供应商和模型目录里搜索「{{query}}」",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
           "baselineUnavailable": "没能读取这个后端的模型列表。",
           "save": "保存",
@@ -1388,7 +1390,9 @@
           "moved_other": "已把 {{model}} 移到第 {{position}} / {{count}} 位。",
           "dropped_one": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
           "dropped_other": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
-          "grabCancelled": "已取消移动 {{model}}，位置已还原。"
+          "grabCancelled": "已取消移动 {{model}}，位置已还原。",
+          "added_one": "已添加 {{model}}",
+          "added_other": "已添加 {{count}} 个模型"
         },
         "picker": {
           "title": "添加 {{backend}} 模型",
@@ -1400,12 +1404,17 @@
           "groupBuiltin": "{{backend}} 内置",
           "groupProviders": "来自你的供应商",
           "groupListed": "已在列表中",
-          "noMatch": "没有匹配的模型。",
+          "noMatch": "你的供应商和模型目录里都没有这个模型。",
           "unavailable": "没能读取可添加的模型。",
-          "customFromQuery": "把「{{query}}」添加为自定义模型…",
+          "customFromQuery": "把「{{query}}」添加为自定义模型",
           "custom": "添加自定义模型…",
           "confirm_one": "添加 {{count}} 个模型",
-          "confirm_other": "添加 {{count}} 个模型"
+          "confirm_other": "添加 {{count}} 个模型",
+          "groupCatalog": "模型目录",
+          "catalogNote": "你的供应商没有列出这些模型。添加后按原 ID 发给供应商；供应商不支持时，对话里会告诉你。",
+          "notListed": "供应商未列出",
+          "customFromQueryNote": "模型 ID 按你输入的原样使用，参数取默认值，以后可以在「管理模型」里改。",
+          "searchingCatalog": "正在搜索模型目录"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · 模型列表",
@@ -1541,10 +1550,6 @@
           "gemini": "Gemini",
           "kimi": "Kimi",
           "xai": "xAI"
-        },
-        "recommendation": {
-          "native": "推荐由 Agent 管理",
-          "gateway": "推荐由模型网关管理"
         }
       },
       "sources": {
@@ -1894,10 +1899,8 @@
         "filters": {
           "source": "供应商",
           "model": "模型",
-          "all": "全部{{label}}",
           "selected_one": "{{label}} · 已选 {{count}} 个",
           "selected_other": "{{label}} · 已选 {{count}} 个",
-          "search": "搜索{{label}}",
           "noMatch": "没有匹配项",
           "hint": "多选会同步更新整份报表",
           "reset": "重置筛选",
@@ -1906,7 +1909,9 @@
           "sourceCount_one": "{{count}} 个供应商",
           "sourceCount_other": "{{count}} 个供应商",
           "modelCount_one": "{{count}} 个模型",
-          "modelCount_other": "{{count}} 个模型"
+          "modelCount_other": "{{count}} 个模型",
+          "searchSources": "搜索供应商",
+          "searchModels": "搜索模型"
         },
         "stats": {
           "tokens": "全部 Tokens",
@@ -2260,17 +2265,14 @@
           "hub": {
             "label": "添加为模型供应商",
             "desc": {
-              "claude": "由模型网关管理这个订阅，让 Codex、OpenCode 等其他 Agent 使用。",
+              "claude": "由模型网关管理这个订阅，Vibey、Codex、OpenCode 等都能用。",
               "chatgpt": "由模型网关管理这个订阅，让 Codex 和其他 Agent 使用；用量、额度和自动切换都能看到。"
             }
           }
         },
-        "badge": {
-          "recommended": "推荐",
-          "secondary": "次选"
-        },
         "tos": {
-          "claude": "订阅条款只授权你本人在 Claude 官方客户端里使用。转供其他 Agent 属于超范围使用，账号可能被限制。"
+          "claude": "Anthropic 的订阅条款只覆盖它自己的应用。",
+          "learnMore": "了解更多"
         },
         "hint": {
           "claude": "两条都要也可以，分两次添加。"
@@ -2479,7 +2481,7 @@
         "summary_other": "{{host}} · {{count}} 个模型",
         "action": {
           "refetch": "重新拉取",
-          "addModel": "添加模型"
+          "addModel": "补充模型 ID"
         },
         "manage": {
           "label": "管理 {{source}}",
@@ -3303,7 +3305,8 @@
     "provider_unavailable": "提供商不可用。",
     "provider_error": "提供商拒绝了请求。",
     "endpoint_not_configured": "尚未配置提供商端点。",
-    "avault_upgrade_required": "这需要更新的 avault。请先在「设置 → 依赖」中更新。"
+    "avault_upgrade_required": "这需要更新的 avault。请先在「设置 → 依赖」中更新。",
+    "sandbox_curve_unsupported": "当前 Avibe 的安全沙箱还不能创建 Solana 密钥，没有保存任何内容。请更新 Avibe 后重试。"
   },
   "modelHub": {
     "errors": {
@@ -5671,6 +5674,10 @@
       "sheetTitle": "Agent 与模型",
       "model": "模型",
       "effort": "思考强度",
+      "effortDefault": "默认",
+      "effortDefaultHint": "使用模型自己的设置",
+      "effortDefaultNamed": "默认（{{effort}}）",
+      "effortDefaultAgentHint": "使用 Agent 的设置",
       "effortNotOn": "{{sources}} 不支持",
       "effortNotOnSome": "部分供应商不支持",
       "effortRefused": "当前没有供应商支持 · 可在模型 → 供应商中清除",
@@ -5926,9 +5933,9 @@
         "nativeInterrupted": "自带搜索中断，已改用 {{provider}}。",
         "interruption": {
           "message": "模型回复中断：{{reason}}",
-          "overloaded": "上游服务过载",
+          "overloaded": "供应商服务过载",
           "disconnected": "连接中断",
-          "upstream": "上游服务异常",
+          "upstream": "供应商服务异常",
           "retried": "已自动重试",
           "retriedLabel": "· 已自动重试"
         },
@@ -6347,7 +6354,8 @@
       "solanaGenerateHint": "保存时生成新密钥，保存后会显示地址。",
       "solanaImportPlaceholder": "粘贴 Solana CLI 密钥对（64 个数字的 JSON 数组）或 base58 私钥",
       "solanaImportHelp": "私钥在浏览器中加密后交给 avault 校验，保存后会显示地址。不支持助记词。",
-      "solanaProtectedUnavailable": "Solana 密钥暂不支持保护档。改选标准档即可创建这把密钥。",
+      "solanaProtectedHelp": "在沙箱内新生成一把 Solana 密钥并就地封存。只有密文和这把密钥的公钥（即它的地址）会到达 Avibe，私钥绝不离开沙箱。",
+      "solanaProtectedBornHint": "私钥在沙箱内生成，从未进入本应用。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。请先安装兼容的 avault 发布版，再保存标准密钥。",
       "browserSealingPending": "浏览器侧封箱需要兼容的 avault 发布版。这个 UI 永远不会把明文值发送给 Python。",

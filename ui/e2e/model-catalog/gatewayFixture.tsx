@@ -48,7 +48,7 @@ export function GatewayFixture() {
   return <main className="model-hub-shell model-hub-overview mx-auto min-w-0 max-w-3xl p-4">
     <AgentCard agents={[agent]} sources={[source]} chains={chains} runtime={runtime}
       pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null}
-      onConnectHub={() => {}} onSwitchDirect={() => {}} onOpenModels={() => {}}
+      onConnectHub={() => {}} onSwitchDirect={() => {}} onOpenModels={() => {}} onAddModels={() => {}}
       onOpenOrder={() => {}} onOpenRoute={() => {}} onProbeSettled={() => {}} />
   </main>;
 }
