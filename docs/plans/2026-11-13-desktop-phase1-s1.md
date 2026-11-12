@@ -76,3 +76,35 @@ The standard `cookie` and `cookie_store` crates retain cookie semantics rather
 than using a custom parser; `keyring` supplies platform credential storage.
 `uuid` identifies the native profile and `tempfile` atomically writes only the
 nonsecret connection record. Their dependencies are explicit in Cargo manifests.
+
+## Actual B2/R1 enrollment boundary
+
+`desktop/runtime-host/tests/test_enrollment_producers.py` joins the real built
+B2 routes, Cloudflare HTTP adapter and isolated fake provider with the real R1
+prepare/pair handlers and private journal/config persistence. The transport maps
+only the canonical backend socket; response loss/delay and a mismatched outbound
+digest are deliberate faults, never fabricated backend responses. Connector
+startup is stubbed so no tunnel or local service is started.
+
+Create separate clean, detached B2 and R1 test checkouts at the reported heads.
+Build B2 with a disposable HOME/XDG environment and no `.env` files. Run from
+the R1 checkout with its existing test environment:
+
+```sh
+DESKTOP_B2_CHECKOUT=<absolute-built-B2-checkout> \
+DESKTOP_B2_HEAD=<exact-B2-commit> DESKTOP_R1_HEAD=<exact-R1-commit> \
+PYTHONPATH=<absolute-R1-checkout> <R1-python> -m pytest -p tests.conftest \
+  --rootdir <absolute-R1-checkout> \
+  <absolute-S1-checkout>/desktop/runtime-host/tests/test_enrollment_producers.py -q
+```
+
+The test starts and terminates only its own B2 process, uses test-owned cookies
+and homes, and checks both producer/consumer source heads. Five cases cover A2
+pending/exact replay and all four A3 requirements: expired-unused renewal,
+consumed/missing receipt, digest mismatch, and two actual old expiry replies
+delivered around a lost replacement reply. UTF-8 device `小明的 Mac` is preserved.
+The first run found a test adapter using the wrong config port field; it never
+reached the held provider path. The corrected setup asserts the real Runtime
+origin before testing pending and all five cases passed. The failed log is
+retained. This is enrollment boundary evidence, not the full native/UI chain;
+rerun with the final coordinated candidate heads after peer reviews settle.
