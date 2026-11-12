@@ -1704,7 +1704,11 @@ fn install_in_generation(
                 eprintln!("desktop update install: {error}");
                 if error == "stale_desktop_generation" {
                     set_state(&app, Phase::Available, None);
-                    settle_update(&app, None, Settlement::Completed);
+                    if let Some(remote) = &remote {
+                        settle_update(&app, Some(remote), Settlement::Failed("install_failed"));
+                    } else {
+                        settle_update(&app, None, Settlement::Completed);
+                    }
                     return;
                 }
                 if error.strip_prefix("remote_request_gate:").is_some() {

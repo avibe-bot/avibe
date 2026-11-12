@@ -19,13 +19,19 @@ const ERASE_TIMEOUT: Duration = Duration::from_secs(10);
 pub fn project(window: &WebviewWindow, cookies: &[cookie::Cookie<'static>], epoch: &Epoch) -> Result<(), ClientError> {
     for cookie in cookies {
         epoch.check()?;
-        let mut projected = cookie.clone();
-        if projected.http_only() == Some(false) {
-            projected.set_http_only(None);
-        }
-        if projected.secure() == Some(false) {
-            projected.set_secure(None);
-        }
+        #[cfg(target_os = "macos")]
+        let projected = {
+            let mut projected = cookie.clone();
+            if projected.http_only() == Some(false) {
+                projected.set_http_only(None);
+            }
+            if projected.secure() == Some(false) {
+                projected.set_secure(None);
+            }
+            projected
+        };
+        #[cfg(not(target_os = "macos"))]
+        let projected = cookie.clone();
         window
             .set_cookie(projected)
             .map_err(|_| ClientError::new("instance_cookie_projection_failed"))?;

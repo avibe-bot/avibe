@@ -423,6 +423,9 @@ pub fn present(app: &AppHandle, view: &'static str) {
         url.set_query(Some(&format!("view={view}")));
         {
             let mut state = native.presentation.lock().expect("presentation");
+            if state.staging || state.pending_commit.is_some() {
+                return;
+            }
             if !state.account {
                 state.route = window.url().ok();
             }

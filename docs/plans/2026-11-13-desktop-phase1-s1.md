@@ -231,9 +231,11 @@ in the existing shell, and this change does not add one.
 The runnable updater fixture build is
 `desktop/src-tauri/tests/instance_chain/build_native_probe.py`. It archives the
 specified native commit into a separate test-only directory, embeds the pinned
-U1 account archive, and records binary/source hashes. Its only source adaptation
-is the updater HTTP client's exact fixture proxy and certificate trust; the
-build uses the existing repository public test key. Production key configuration,
+U1 account archive, and records binary/source hashes. Source adaptations are the
+updater HTTP client's exact fixture proxy and certificate trust, plus recording
+automatic OS notification and popover nudges inside the fixture process. Explicit
+CTA dispatch, native dialogs, remote mailbox ownership and installation gates
+remain actual. The build uses the existing repository public test key. Production key configuration,
 signing files, user trust stores and installation paths are untouched. Discovery,
 manifest verification, the actual native three-choice dialog and the generation
 checks execute the candidate implementation. The signed artifact is the existing
@@ -262,3 +264,67 @@ Phase 1 trusted confirmation now attaches the existing three-choice dialog to
 its current main window, so window retirement also owns its presentation. Legacy
 startup/menu presentation is unchanged; the callback and download retain the
 same generation fence. The fixture inspects only this process's modal/sheet.
+
+### First review repair and immutable validation inputs
+
+The first reviewed head is `5babee38cad5deebed62db5bc7786ab44a6b9e19`.
+Its three findings concern startup restore continuation, AwaitingHost approval
+ownership, and exact bundled bootstrap completion. Lead approved their repair
+together with the same-target pending-view race. This remains one findings-bearing
+review head; the repair is not yet an exact-head review pass.
+
+Startup restoration can continue only after local lifecycle invalidation.
+Cancel, ReturnLocal, sign-out, account replacement and failed erasure preserve
+their fences. The startup owner retains its initial remembered target across
+an interrupted credential read or remote selection. A table-driven regression
+first failed with `stale_generation`; all nine coordinator tests now pass,
+including the ten held-read/session lifecycle and explicit-cancellation cases.
+
+View publication now requires the exact selection generation's commit receipt.
+Per-window completion captures its generation because Tauri Webview equality
+compares reused labels. Pending or staging views cannot present account pages
+through page requests or native menu presentation. Exact owned bootstrap URLs
+can finish offline escape without broadening remote navigation authority.
+
+AwaitingHost confirmation retains the existing request, ticket and target.
+The existing dispatcher expiry and claim transition remain authoritative.
+Late download completion settles that exact remote request as failed and never
+reaches the installer after generation invalidation. Ordinary footer confirmation
+continues through the existing three-choice native dialog.
+
+The actual held-window consumer exposed a native cookie restoration defect:
+Wry 0.57.0 exports explicit false Secure/HttpOnly flags as Foundation string
+properties, whose presence enables the flag. Projection omits false properties
+only on macOS and verifies the full cookie tuple after the write. Windows retains
+explicit boolean setters. The native cookie probe uses the same production
+projection and retirement helpers, including a CSRF cookie read/project roundtrip.
+Lead independently confirmed the Foundation behavior. The initial erase failure
+and all failed full-chain logs are preserved.
+
+Current immutable peer inputs are B1
+`690445a02491a2aeb4f73b66eef5a23a45000b00`, B2
+`510b36652ff046fb8e820645dcd8efaceb7bc8aa`, Runtime
+`1f9870f0ccf6e7af922e0625246c85d4919274d0`, and U1
+`f22da3cd5178529ca588e5ff8242ffaf88b4908a`.
+The single-server backend assembly is
+`8fc3608f0a2135d86c15b375d3827978692389c8`, based on B2 plus B1's original
+delta; only their CI test lists required an assembly conflict resolution.
+Lead independently passed all five actual B2/Runtime A2/A3 cases at these pins.
+Earlier backend and Runtime pins above are historical checkpoints.
+
+The reusable `desktop/src-tauri/tests/instance_chain/run_native_chain.py` accepts
+explicit backend/Runtime heads, checkouts, Runtime UI directory, immutable native
+binary and log path. It records the binary hash, command and retained isolated
+HOME/XDG/TMP/Avibe state. Add `--updater` for the real footer and AwaitingHost
+cases. Build that binary with the adjacent `build_native_probe.py` and the pinned
+U1 account archive. Its provenance lists every fixture source adaptation.
+
+The `8463ad1` native run passed eight of eleven cases. It exposed an actual
+remote-ticket settlement omission after a fenced download, now repaired, and
+two fixture waits that missed events already consumed before their terminal
+reply. Those waits now observe the actual destination or preserve event order.
+The corrected full eleven-case run and final cookie probe are pending at this
+checkpoint. Rust fmt, all-target Clippy, native tests and changed Python Ruff
+pass. Windows execution, signed-package acceptance, exact-head PR gates and
+Lead's independent full-chain run remain required; no package or live service
+was installed, signed or changed.

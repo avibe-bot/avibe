@@ -447,12 +447,15 @@ def test_remote_escape_without_local_runtime_finishes_visible_owned_bootstrap(na
     if escape == "return_local":
         f["send"](action="escape")
         assert f["wait"]("escaped")["ok"] is True
+        # The load event precedes the completed escape reply and was consumed
+        # while awaiting it. Observe the actual destination after completion.
+        assert f["js"]("return location.href;") == "tauri://localhost/"
     else:
         f["send"](action="present", view="sign-out")
         f["wait"]("loaded", lambda event: "view=sign-out" in event["url"])
         f["ready"]("return document.querySelectorAll('main button').length === 2;")
         f["send"](action="eval", script="document.querySelector('main button').click();")
-    f["wait"]("loaded", lambda event: event["url"] == "tauri://localhost/")
+        f["wait"]("loaded", lambda event: event["url"] == "tauri://localhost/")
     final = f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")
     deadline = time.monotonic() + 5
     while not final["visible"]:
@@ -481,6 +484,11 @@ def test_pending_remote_document_cannot_present_until_public_commit(native_chain
     pending = f["wait"]("presentation_status")
     assert pending["url"].startswith(target["canonical_origin"])
     assert pending["allowed"] is False
+    f["send"](action="present", view="account")
+    f["send"](action="presentation_status")
+    retained = f["wait"]("presentation_status")
+    assert retained["url"] == pending["url"]
+    assert retained["allowed"] is False
     f["document"].release.set()
     f["wait"]("loaded", lambda event: event["url"].startswith(target["canonical_origin"]))
     deadline = time.monotonic() + 10
@@ -519,8 +527,8 @@ def test_awaiting_remote_update_keeps_exact_ticket_through_native_host_approval(
     elif boundary == "expired":
         request["state"] = "expired"
         f["send"](action="remote_update", request=request)
-        f["wait"]("remote_dispatched")
         f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "expired")
+        f["wait"]("remote_dispatched")
     f["send"](action="dialog", choice=buttons.index("Download and Install"))
     f["wait"]("dialog")
     if boundary == "accept":
