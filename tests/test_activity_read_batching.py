@@ -8,7 +8,7 @@ from sqlalchemy import event, select
 
 from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
 from storage import agent_activity_service, tool_activity_service
-from storage.models import agent_events, messages
+from storage.models import agent_events, media_objects, messages
 from tests.agent_core.fakes import assistant
 from tests.test_tool_activity_projection import _mark, _store
 from tests.test_vibey_agent import SESSION, engine, session  # noqa: F401 -- isolated store fixtures
@@ -158,3 +158,40 @@ async def test_activity_delivery_lookup_is_message_keyed_for_full_window(engine,
                for plan in plans), plans
     assert not any("SCAN message_deliveries" in plan or "recovery_owner" in plan or "TEMP B-TREE" in plan
                    for plan in plans), plans
+
+
+async def test_media_batches_seek_tokens_not_session_history(engine, session, monkeypatch):
+    store = await _store(engine)
+    response = await store.append_response(SESSION, assistant(""), final=False, metadata=_mark())
+    with engine.begin() as conn:
+        source = dict(conn.execute(select(messages).where(messages.c.id == response.row_id)).mappings().one())
+        images = [{"path": f"image-{i}"} for i in range(65)]
+        tokens = {image["path"]: f"token-{i}" for i, image in enumerate(images)}
+        conn.execute(media_objects.insert(), [
+            {"token": token, "session_id": SESSION, "scope_id": source["scope_id"],
+             "kind": "image", "source": "agent_context", "local_path": path,
+             "created_at": source["created_at"]}
+            for path, token in tokens.items()
+        ])
+    projected = {"session_id": SESSION, "scope_id": source["scope_id"], "platform": "avibe",
+                 "content": {"hosted": {"images": images}}, "_media_tokens": tokens}
+    monkeypatch.setattr(tool_activity_service, "project_response", lambda *args, **kwargs: [projected])
+    statements = []
+    def capture(_conn, _cursor, statement, parameters, _context, _many):
+        if "FROM media_objects" in statement:
+            statements.append((statement, parameters))
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            [step] = tool_activity_service.response_steps(conn, session_id=SESSION, response_ids=[response.row_id])
+            assert all(image["media_url"] == f"/api/media/{tokens[image['path']]}"
+                       for image in step["content"]["hosted"]["images"])
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert len(statements) == 2
+    with engine.connect() as conn:
+        plans = [row[3] for sql, parameters in statements
+                 for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, parameters)]
+    assert len(plans) == 2
+    assert all("SEARCH media_objects USING INDEX sqlite_autoindex_media_objects_1 (token=?)" == plan
+               for plan in plans), plans

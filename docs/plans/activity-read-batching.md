@@ -36,9 +36,13 @@ no optional statistics job or new migration is required.
   `response_results` (next response + result interval) and `_media_urls` (one read per image).
 - Search indexing is independent. Planner-statistics work was deferred after the actual
   500-ID lookup retained the unsuitable state-keyed plan; this PR no longer depends on it.
-- Focused Activity and projection coverage: 97 passing tests, including full-window delivery
+- Focused Activity and projection coverage: 98 passing tests, including full-window delivery
   EXPLAIN checks with and without ANALYZE. A 129-response fixture needs eight projection
   SELECTs, versus two per response plus the window/Turn reads before batching.
+- Review caught the same nonunique-index trap on batched media: the Session predicate
+  could select its historical media index. Fetch only by unique token and retain the
+  existing Session/scope/revocation validation before attaching a URL. A 65-token,
+  two-batch no-statistics EXPLAIN regression pins both reads to the token primary key.
 - Final no-statistics acceptance on a 922,296,320-byte synthetic database (55,699 messages,
   452 Sessions, 7,302 Deliveries; SQLite 3.45.1, local Incus) used the full 500-message/
   2,000-trace Activity window, including 300 canonical tool-calling responses.

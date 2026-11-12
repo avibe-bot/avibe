@@ -145,9 +145,11 @@ def response_steps(conn, *, session_id: str, response_ids: Iterable[str]) -> lis
     })
     media_by_token = {}
     for start in range(0, len(tokens), _READ_BATCH_SIZE):
+        # Query only the unique token key. Adding a Session predicate lets SQLite
+        # prefer its nonunique Session index for an IN batch and walk all historical
+        # media. _media_urls still checks Session, scope and revocation before use.
         media_by_token.update({row["token"]: row for row in conn.execute(select(media_objects).where(
             media_objects.c.token.in_(tokens[start:start + _READ_BATCH_SIZE]),
-            media_objects.c.session_id == session_id, media_objects.c.revoked_at.is_(None),
         )).mappings()})
     return [_media_urls(event, media_by_token) for event in result]
 
