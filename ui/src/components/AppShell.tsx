@@ -1,3 +1,6 @@
+import { DesktopAccountRow } from '../desktop/DesktopAccountRow';
+import { DesktopClientPresentation } from '../desktop/useDesktopClient';
+import { hasDesktopClient } from '../desktop/bridge';
 import { DesktopDragRegion } from './DesktopDragRegion';
 import { DesktopWindowChrome } from './DesktopWindowChrome';
 import { desktopDragRegion, isNativeAppWindow } from '../lib/desktopShell';
@@ -156,7 +159,20 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
   );
 };
 
-export const AppShell: React.FC = () => {
+/** The real sidebar footer layout, shared with design consumers. */
+export function AppShellFooter({ tools, children }: { tools: React.ReactNode; children: React.ReactNode }) {
+  return <div data-sidebar-footer className="relative flex shrink-0 flex-col gap-2">
+    <div className="flex h-[39px] items-stretch gap-2">{tools}</div>
+    {children}
+  </div>;
+}
+
+export type AppShellProps = {
+  /** Replace the footer view while retaining the real Apps/Settings controls. */
+  footer?: (slots: { tools: React.ReactNode; defaultView: React.ReactNode }) => React.ReactNode;
+};
+
+export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
   useNativeOuterScrollLock();
   const { t, i18n } = useTranslation();
   const { status } = useStatus();
@@ -386,6 +402,7 @@ export const AppShell: React.FC = () => {
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
           <DesktopSettingsCommand />
+          <DesktopClientPresentation />
           <Outlet />
         </SettingsOverlayNavigationBoundary>
       </ShellSidebarContext.Provider>
@@ -450,6 +467,7 @@ export const AppShell: React.FC = () => {
     <WebPushReconciler />
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <DesktopSettingsCommand />
+    <DesktopClientPresentation />
     <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>
     <WindowManagerProvider standalone={standaloneAppTab} onWindowForeground={leaveSettingsForWindow}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
@@ -501,8 +519,8 @@ export const AppShell: React.FC = () => {
             then version on the left and the live service status on the right.
             AppsLauncher keeps its layout slot here while its interactive surface
             floats above app windows. */}
-        <div className="relative flex shrink-0 flex-col gap-2">
-          <div className="flex h-[39px] items-stretch gap-2">
+        {(() => {
+          const tools = <>
             {/* Retires with the column it sits in, like every other control here:
                 a live sidebar keeps its controls. The window layer it opens into
                 IS hidden under inline Settings (see below), but that makes
@@ -542,10 +560,8 @@ export const AppShell: React.FC = () => {
               >
                 <Settings className="size-[18px] text-muted group-hover:text-foreground" />
               </Link>
-            )}
-          </div>
-
-          {/* Version row — version on the LEFT, run state on the RIGHT. */}
+            )}</>;
+          const defaultView = hasDesktopClient() ? <DesktopAccountRow /> : (
           <div className="flex items-center justify-between gap-2 px-1 py-0.5">
             {capabilities.can_read_instance ? <VersionBadge openUpward /> : <span />}
             <span className="flex items-center gap-1.5 text-[10px] text-muted">
@@ -557,8 +573,9 @@ export const AppShell: React.FC = () => {
                 )}
               />
             </span>
-          </div>
-        </div>
+          </div>);
+          return footer ? footer({ tools, defaultView }) : <AppShellFooter tools={tools}>{defaultView}</AppShellFooter>;
+        })()}
 
         {/* Out of flow, so it neither joins the column nor takes any of its gap.
             Desktop-only like the tree above it: below md the shell has no sidebar

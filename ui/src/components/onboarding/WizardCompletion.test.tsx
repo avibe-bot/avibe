@@ -8,7 +8,7 @@ import { Wizard } from '../Wizard';
 import { CONTRACT_VERSION, type AgentBackend, type AgentSupply, type NamedAgentSupply, type RuntimeDependency, type Source } from '../settings/models/types';
 import en from '../../i18n/en.json';
 
-const mock = vi.hoisted(() => ({ control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, apiFetch: vi.fn(), api: {
+const mock = vi.hoisted(() => ({ presentDesktop: vi.fn(), control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, apiFetch: vi.fn(), api: {
   saveSettings: vi.fn(), discordAuthTest: vi.fn(), discordGuilds: vi.fn(), slackManifest: vi.fn(), slackAuthTest: vi.fn(), getConfig: vi.fn(), detectCli: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(),
   readModelHubAgentCatalogForModelPicker: vi.fn(), listVibeAgents: vi.fn(), getVibeAgent: vi.fn(), updateVibeAgent: vi.fn(), setDefaultVibeAgent: vi.fn(), mutateConfig: vi.fn(),
 },
@@ -19,6 +19,7 @@ const mock = vi.hoisted(() => ({ control: vi.fn(), toast: vi.fn(), permission: v
   // than a direct mount of the third screen.
   models: { listSources: vi.fn(), listAgents: vi.fn(), refreshAgentPresence: vi.fn(), scanMigration: vi.fn(), getRuntimeStatus: vi.fn(), createApiKeySource: vi.fn(), getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn() },
 }));
+vi.mock('../../desktop/bridge', async (original) => ({ ...await original<typeof import('../../desktop/bridge')>(), presentDesktopClient: mock.presentDesktop }));
 vi.mock('../../context/ApiContext', async (importOriginal) => ({ ...await importOriginal<typeof import('../../context/ApiContext')>(), useApi: () => mock.api }));
 vi.mock('@/lib/apiFetch', async (importOriginal) => ({ ...await importOriginal<typeof import('@/lib/apiFetch')>(), apiFetch: mock.apiFetch }));
 vi.mock('../settings/models/modelsApi', async (importOriginal) => {
@@ -162,7 +163,7 @@ beforeEach(() => {
   mock.models.scanMigration.mockResolvedValue({ items: [] });
   mock.models.getRuntimeStatus.mockResolvedValue(RUNTIME_OK);
 });
-afterEach(async () => { cleanup(); await i18n.changeLanguage('en'); });
+afterEach(async () => { cleanup(); vi.unstubAllGlobals(); await i18n.changeLanguage('en'); });
 /** The registered journey, not a direct mount of the last screen: the second screen is
  *  in the sequence, so every completion case below reaches the third one through it. */
 async function arriveAtProviders() {
@@ -1095,5 +1096,49 @@ describe('AUTH-SETUP-161 set up later', () => {
   it('AUTH-SETUP-161 is not offered once a provider is there to continue with', async () => {
     await arriveAtProviders();
     expect(screen.queryByRole('button', { name: en.onboarding.providers.later })).toBeNull();
+  });
+});
+
+// Existing completion tests end at the router. This protects the new handoff boundary:
+// both exits must confirm the persisted write before presenting native account UI.
+describe('AUTH-SETUP-170 Desktop completion handoff', () => {
+  const seeds = () => mock.apiFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
+  function desktop(kind: 'local' | 'remote' = 'local') {
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', {
+      version: 1, revision: 1, generation: 1, account: { status: 'signed_out', identity: null },
+      connection: { status: kind === 'local' ? 'local' : 'remote_connected', committed: { kind, name: 'Fixture', instance_id: null }, pending: null },
+      local: { name: 'Fixture', remote_access: 'off' }, desktop: { version: 'fixture', update: { phase: 'idle' } }, remote_auxiliary: 'local',
+    });
+  }
+  it.each(['normal', 'later'] as const)('hands off %s only after confirmed completion and never seeds twice', async (exit) => {
+    desktop();
+    let button: HTMLElement;
+    if (exit === 'normal') button = await setup();
+    else {
+      mock.models.listSources.mockResolvedValue([]); mount();
+      fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+      button = await screen.findByRole('button', { name: en.onboarding.providers.later });
+    }
+    const seedCount = seeds().length;
+    let confirmRead!: (response: Response) => void;
+    mock.api.mutateConfig.mockImplementation(async (mutations) => {
+      persistConfig(mutations);
+      serveFreshOnly(() => new Promise<Response>((resolve) => { confirmRead = resolve; }));
+      return {};
+    });
+    fireEvent.click(button); fireEvent.click(button);
+    await waitFor(() => expect(confirmRead).toBeDefined());
+    expect(mock.presentDesktop).not.toHaveBeenCalled();
+    await act(async () => confirmRead(jsonResponse({ ...served, setup_completed: true })));
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(mock.presentDesktop).toHaveBeenCalledExactlyOnceWith('setup-complete');
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
+    expect(seeds()).toHaveLength(seedCount);
+  });
+  it('keeps a remote Runtime completion local to that Runtime', async () => {
+    desktop('remote'); fireEvent.click(await setup());
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(mock.presentDesktop).not.toHaveBeenCalled();
   });
 });

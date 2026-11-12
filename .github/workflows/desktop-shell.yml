@@ -80,6 +80,10 @@ jobs:
       - name: Install bootstrap UI dependencies
         run: npm ci
 
+      - name: Install shared account UI dependencies
+        working-directory: ui
+        run: npm ci
+
       - name: Verify bootstrap localization contract
         run: npm run test:i18n
 
