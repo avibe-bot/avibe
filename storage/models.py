@@ -728,6 +728,26 @@ skill_usage_daily = Table(
 # identity is scoped to its conversation because some platforms reuse message
 # ids across chats. ``read_at`` drives unread counts for the
 # Inbox; legacy IM platforms ignore it.
+# Ordinary, migration-owned search bookkeeping. The optional FTS virtual table
+# is deliberately absent: it is initialized only by post-readiness maintenance.
+message_search_dirty = Table(
+    "message_search_dirty", metadata,
+    Column("message_id", Text, primary_key=True, nullable=False),
+)
+message_search_documents = Table(
+    "message_search_documents", metadata,
+    Column("id", Integer, primary_key=True, nullable=False),
+    Column("message_id", Text, nullable=False, unique=True),
+    Column("oversized", Integer, nullable=False, server_default="0"),
+    Index("ix_message_search_documents_oversized", "oversized"),
+)
+message_search_state = Table(
+    "message_search_state", metadata,
+    Column("id", Integer, primary_key=True, nullable=False),
+    Column("cursor", Text, nullable=True),
+    Column("ready", Integer, nullable=False, server_default="0"),
+)
+
 messages = Table(
     "messages",
     metadata,

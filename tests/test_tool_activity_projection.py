@@ -387,7 +387,8 @@ async def test_projection_updates_do_not_publish_from_a_retired_runtime(engine, 
 
 
 @pytest.mark.parametrize("mode", ["proxy", "direct"])
-async def test_hosted_images_use_the_exact_canonical_registration_without_a_trace(engine, session, tmp_path, mode):
+@pytest.mark.parametrize("invalid", ["revoked", "session", "scope", "missing"])
+async def test_hosted_images_use_the_exact_canonical_registration_without_a_trace(engine, session, tmp_path, mode, invalid):
     """Trace suppression must not be the operation that used to mint a usable URL.
 
     A later registration at the same path (or in another Session) cannot replace
@@ -405,7 +406,7 @@ async def test_hosted_images_use_the_exact_canonical_registration_without_a_trac
     link = tmp_path / "image-link.png"
     link.symlink_to(image_path)
     image = HostedImage(path=str(link), mime="image/png")
-    record = HostedRecord(status="completed", images=(image,))
+    record = HostedRecord(status="completed", images=(image, image))
     response = await store.append_response(SESSION, assistant("", calls=(ToolCallBlock("image", "image_generate", {"prompt": "a square"}),)), final=False, metadata=_mark())
     await store.append_tool_result(SESSION, ToolResultMessage("image", "image_generate", (text("saved"),), hosted=HostedResult(
         record=record, execution=ProxyExecution(executor_origin=ORIGIN, executor_source_id="src_image0001", executor_billing="metered", mode=mode),
@@ -417,15 +418,34 @@ async def test_hosted_images_use_the_exact_canonical_registration_without_a_trac
         image_path.write_bytes(_png(b"\x03\x04\x05"))
         replacement = media_service.register(conn, session_id=SESSION, scope_id=registered["scope_id"], kind="image", source="agent_reply", local_path=str(image_path))
         assert replacement != registered["token"]
-    with engine.connect() as conn:
-        before = conn.connection.driver_connection.total_changes
-        [step] = tool_activity_service.response_steps(conn, session_id=SESSION, response_ids=(response.row_id,))
-        [shown] = step["content"]["hosted"]["images"]
-        assert shown["media_url"].split("?")[0] == f"/api/media/{registered['token']}"
-        assert conn.connection.driver_connection.total_changes == before
-        assert conn.execute(select(agent_events.c.id).where(agent_events.c.event_type == "tool_call")).first() is None
-    with engine.begin() as conn:
-        conn.execute(media_objects.update().where(media_objects.c.token == registered["token"]).values(revoked_at="2026-11-08T00:00:00Z"))
-    with engine.connect() as conn:
-        [step] = tool_activity_service.response_steps(conn, session_id=SESSION, response_ids=(response.row_id,))
-        assert "media_url" not in step["content"]["hosted"]["images"][0]
+    media_reads = []
+    def capture(_conn, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT") and "FROM media_objects" in statement:
+            media_reads.append(statement)
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.begin() as conn:
+            before = conn.connection.driver_connection.total_changes
+            [step] = tool_activity_service.response_steps(conn, session_id=SESSION, response_ids=(response.row_id,))
+            shown = step["content"]["hosted"]["images"]
+            assert len(shown) == 2
+            assert all(image["media_url"].split("?")[0] == f"/api/media/{registered['token']}" for image in shown)
+            assert len(media_reads) == 1  # Repeated tokens are read once per projection.
+            assert conn.connection.driver_connection.total_changes == before
+            assert conn.execute(select(agent_events.c.id).where(agent_events.c.event_type == "tool_call")).first() is None
+            if invalid == "missing":
+                conn.execute(media_objects.delete().where(media_objects.c.token == registered["token"]))
+            else:
+                fields = {
+                    "revoked": {"revoked_at": "2026-11-08T00:00:00Z"},
+                    "session": {"session_id": None},
+                    "scope": {"scope_id": None},
+                }[invalid]
+                assert registered["session_id"] is not None and registered["scope_id"] is not None
+                conn.execute(media_objects.update().where(media_objects.c.token == registered["token"]).values(**fields))
+            # No cached capability survives into a second read on this connection.
+            [step] = tool_activity_service.response_steps(conn, session_id=SESSION, response_ids=(response.row_id,))
+            assert len(media_reads) == 2
+            assert all("media_url" not in image for image in step["content"]["hosted"]["images"])
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)

@@ -1,13 +1,13 @@
 """Prepare immutable Vault audit snapshot references without changing writers.
 
-Revision ID: 20261112_0086
-Revises: 20261112_0085
+Revision ID: 20261112_0087
+Revises: 20261112_0086
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "20261112_0086"
-down_revision = "20261112_0085"
+revision = "20261112_0087"
+down_revision = "20261112_0086"
 branch_labels = None
 depends_on = None
 MIGRATION_SAFETY = "additive"

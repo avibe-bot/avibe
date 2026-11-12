@@ -6280,7 +6280,7 @@ def _load_audit_access_snapshots(conn: Connection, rows: list[dict[str, Any]]) -
             )
         }
     except OperationalError as exc:
-        # A pre-0086 database has no reference table. References are never
+        # A pre-0087 database has no reference table. References are never
         # written by this reader-first release, but an accidental reference
         # must fail closed rather than fall back to current ACL state.
         if "no such table" in str(exc).lower() and "vault_audit_access_snapshots" in str(exc).lower():

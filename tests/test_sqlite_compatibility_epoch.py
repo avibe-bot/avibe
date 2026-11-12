@@ -37,6 +37,10 @@ def bridge_graph(tmp_path, monkeypatch):
     graph = tmp_path / "bridge-alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     script = ScriptDirectory.from_config(migrations.alembic_config(tmp_path / "historical.sqlite"))
+    from storage.migration_policy import classify_migration
+
+    for revision in script.iterate_revisions("head", "20261108_0083"):
+        assert classify_migration(Path(revision.path)).permitted == "additive"
     omitted = script.get_revision("20261108_0083")
     (graph / "versions" / Path(omitted.path).name).unlink()
     for revision in script.walk_revisions():

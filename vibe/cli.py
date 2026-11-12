@@ -46,6 +46,7 @@ from core.caller_context import (
 from core.watch_protocol import DEFAULT_RETRY_EXIT_CODE, NO_EVENT_EXIT_CODE, NO_EVENT_MARKER
 from vibe import __version__
 from vibe.i18n import t as i18n_t
+from vibe.logging_config import RedactingFormatter, configure_library_logging
 from vibe.restart_state import RestartState
 from vibe.launcher_path import CURRENT_VIBE_EXECUTABLE_ENV, cache_running_vibe_path
 from vibe.package_shape import CORE_PACKAGE_NAME as PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME as LEGACY_PACKAGE_NAME
@@ -20999,7 +21000,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     return 0
 
 
-class _InstallerRetentionFormatter(logging.Formatter):
+class _InstallerRetentionFormatter(RedactingFormatter):
     """Show an optional collection failure without an installation traceback."""
 
     def format(self, record: logging.LogRecord) -> str:
@@ -21048,6 +21049,7 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
     # Keep best-effort retention decisions visible even when activation succeeds.
     from vibe.install_generations import logger as retention_logger
 
+    configure_library_logging()
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(_InstallerRetentionFormatter())
     previous_level = retention_logger.level

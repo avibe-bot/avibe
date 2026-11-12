@@ -15,12 +15,13 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import quote, urlparse
 
 import aiohttp
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
+from core.agent_core.ai.errors import sanitize_endpoint_text
 from modules.im.download_target import open_download_target
 
 from modules.im.wechat_api import (
@@ -38,7 +39,6 @@ _AES_BLOCK_BITS = 128
 _AES_BLOCK_BYTES = 16
 # Maximum retry attempts for CDN upload
 _UPLOAD_MAX_RETRIES = 3
-_CDN_ERROR_BODY_LIMIT = 500
 
 
 class _CdnUploadStatusError(RuntimeError):
@@ -137,7 +137,7 @@ def parse_aes_key(aes_key_b64: str) -> bytes:
         except (UnicodeDecodeError, ValueError):
             pass
     raise ValueError(
-        f"aes_key must decode to 16 raw bytes or 32-char hex string, got {len(decoded)} bytes (base64={aes_key_b64!r})"
+        f"aes_key must decode to 16 raw bytes or 32-char hex string, got {len(decoded)} bytes"
     )
 
 
@@ -168,45 +168,9 @@ def _extract_upload_full_url(upload_resp: Dict[str, Any]) -> Optional[str]:
 def _upload_url_host(upload_url: str) -> str:
     """Return the upload URL host for diagnostics."""
     try:
-        return urlparse(upload_url).netloc or "(unknown)"
+        return urlparse(upload_url).hostname or "(unknown)"
     except Exception:
         return "(invalid)"
-
-
-def _upload_url_for_log(upload_url: str) -> str:
-    """Return a diagnostic upload URL without credential-bearing query values."""
-    try:
-        parsed = urlparse(upload_url)
-        redacted_query = urlencode([(key, "<redacted>") for key, _value in parse_qsl(parsed.query, keep_blank_values=True)])
-        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, redacted_query, ""))
-    except Exception:
-        return "(invalid)"
-
-
-def _truncate_cdn_error_body(body: str) -> str:
-    body = (body or "").strip()
-    if len(body) <= _CDN_ERROR_BODY_LIMIT:
-        return body
-    return f"{body[:_CDN_ERROR_BODY_LIMIT]}...(truncated)"
-
-
-def _cdn_error_message(resp: aiohttp.ClientResponse, body: str) -> str:
-    header_msg = (resp.headers.get("x-error-message") or "").strip()
-    body_msg = _truncate_cdn_error_body(body)
-    if header_msg and body_msg:
-        return f"{header_msg}; body={body_msg}"
-    if header_msg:
-        return header_msg
-    if body_msg:
-        return body_msg
-    return f"status {resp.status}"
-
-
-async def _read_cdn_error_body(resp: aiohttp.ClientResponse) -> str:
-    try:
-        return await resp.text()
-    except Exception as exc:
-        return f"(failed to read response body: {type(exc).__name__})"
 
 
 def _resolve_cdn_upload_url(cdn_base_url: str, upload_resp: Dict[str, Any], filekey: str, label: str) -> str:
@@ -227,9 +191,8 @@ def _resolve_cdn_upload_url(cdn_base_url: str, upload_resp: Dict[str, Any], file
         return fallback_url
 
     logger.error(
-        "%s: getUploadUrl returned neither upload_param nor upload_full_url, resp=%s",
+        "%s: getUploadUrl returned neither upload_param nor upload_full_url",
         label,
-        upload_resp,
     )
     raise RuntimeError(f"{label}: getUploadUrl returned no upload target")
 
@@ -263,7 +226,7 @@ async def upload_buffer_to_cdn(
     """
     ciphertext = aes_ecb_encrypt(data, aes_key)
     upload_host = _upload_url_host(upload_url)
-    upload_log_url = _upload_url_for_log(upload_url)
+    upload_log_url = sanitize_endpoint_text(upload_url)
     logger.debug(
         "CDN upload: POST host=%s url=%s raw_size=%d ciphertext_size=%d",
         upload_host,
@@ -285,8 +248,7 @@ async def upload_buffer_to_cdn(
                     headers={"Content-Type": "application/octet-stream"},
                 ) as resp:
                     if 400 <= resp.status < 500:
-                        body = await _read_cdn_error_body(resp)
-                        err_msg = _cdn_error_message(resp, body)
+                        err_msg = f"HTTP {resp.status}"
                         logger.error(
                             "CDN client error attempt=%d status=%d host=%s url=%s raw_size=%d ciphertext_size=%d err=%s",
                             attempt,
@@ -303,8 +265,7 @@ async def upload_buffer_to_cdn(
                             retryable=False,
                         )
                     if resp.status != 200:
-                        body = await _read_cdn_error_body(resp)
-                        err_msg = _cdn_error_message(resp, body)
+                        err_msg = f"HTTP {resp.status}"
                         logger.warning(
                             "CDN server error attempt=%d status=%d host=%s url=%s raw_size=%d ciphertext_size=%d err=%s",
                             attempt,
@@ -423,7 +384,7 @@ async def download_and_decrypt(
     """
     key = parse_aes_key(aes_key_b64)
     url = _build_cdn_download_url(cdn_base_url, encrypted_query_param)
-    logger.debug("CDN download: GET %s", url[:80])
+    logger.debug("CDN download: GET %s", sanitize_endpoint_text(url))
 
     timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -565,7 +526,7 @@ async def download_plain(
     """Download raw CDN bytes without decryption."""
 
     url = _build_cdn_download_url(cdn_base_url, encrypted_query_param)
-    logger.debug("CDN plain download: GET %s", url[:80])
+    logger.debug("CDN plain download: GET %s", sanitize_endpoint_text(url))
 
     timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:

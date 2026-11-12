@@ -213,13 +213,13 @@ def test_additive_migration_preserves_audit_bytes_and_epoch(tmp_path):
         assert conn.execute("SELECT * FROM vault_audit_access_snapshots").fetchall() == []
         # Old omitted-column writes still work after upgrading (no restamping).
         conn.execute("INSERT INTO vault_audit (id, ts, event) VALUES ('old-writer', 'timestamp', 'proxied')")
-    source = Path(migrations.__file__).parent / "alembic/versions/20261112_0086_vault_audit_snapshots.py"
+    source = Path(migrations.__file__).parent / "alembic/versions/20261112_0087_vault_audit_snapshots.py"
     assert classify_migration(source).permitted == "additive"
 
 
 def test_snapshot_migration_downgrade_preserves_audit_rows_and_recreates_empty_table(tmp_path):
     db = tmp_path / "downgrade.sqlite"
-    migrations.run_migrations(db, revision="20261112_0085")
+    migrations.run_migrations(db, revision="20261112_0086")
     original = _row("downgrade-audit", {"version": 1, "resources": []})
     with sqlite3.connect(db) as conn:
         conn.execute(
@@ -228,18 +228,18 @@ def test_snapshot_migration_downgrade_preserves_audit_rows_and_recreates_empty_t
         )
         before = conn.execute("SELECT * FROM vault_audit").fetchall()
 
-    migrations.run_migrations(db, revision="20261112_0086")
+    migrations.run_migrations(db, revision="20261112_0087")
     with sqlite3.connect(db) as conn:
         conn.execute(
             "INSERT INTO vault_audit_access_snapshots (id, snapshot) VALUES (1, ?)",
             (json.dumps({"version": 1, "resources": []}),),
         )
-    command.downgrade(migrations.alembic_config(db), "20261112_0085")
+    command.downgrade(migrations.alembic_config(db), "20261112_0086")
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT * FROM vault_audit").fetchall() == before
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", ("vault_audit_access_snapshots",)).fetchone() is None
 
-    migrations.run_migrations(db, revision="20261112_0086")
+    migrations.run_migrations(db, revision="20261112_0087")
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT * FROM vault_audit").fetchall() == before
         assert conn.execute("SELECT * FROM vault_audit_access_snapshots").fetchall() == []
