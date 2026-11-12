@@ -30,6 +30,7 @@ import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
 import { useAccountName } from '@/lib/vaultHdAccounts';
+import { isHdWalletBlocked } from '@/lib/vaultHdQuarantine';
 import { AccountIndex } from './vault-hd-wallet-detail';
 import { Button } from './button';
 import { ConfirmDialog } from './confirm-dialog';
@@ -592,7 +593,9 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const approveDisabled = busy || preparing || entryBlocked || !canApprove || (isDelete && !canManageDelete) || (!isSign && !isDelete && !option);
+  // A wallet whose address check failed in this browser is not signed with from here either.
+  const walletBlocked = isSign && Boolean(hdDerivation) && Boolean(card?.secret_name) && isHdWalletBlocked(card?.secret_name ?? '');
+  const approveDisabled = busy || preparing || entryBlocked || walletBlocked || !canApprove || (isDelete && !canManageDelete) || (!isSign && !isDelete && !option);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -677,6 +680,7 @@ export const VaultApprovalCard: React.FC<{
             </DetailRow>
           );
         })}
+        {walletBlocked ? <span role="alert" className="text-xs font-semibold text-destructive-ink">{t('vaults.hd.blocked')}</span> : null}
         {isSign && hdDerivation ? (
           <DetailRow label={t('vaults.approval.account')}>
             <span className="flex min-w-0 flex-col gap-1">

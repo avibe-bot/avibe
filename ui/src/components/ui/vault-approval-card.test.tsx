@@ -700,3 +700,19 @@ it('says plainly that a standard raw hash with no context is a blind signature',
   render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={standardSignRequest} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
   expect(screen.getByText(en.vaults.approval.rawDigestNote)).toBeTruthy();
 });
+
+it('does not sign with a wallet this browser blocked after a failed address check', async () => {
+  const { blockHdWallet, unblockHdWallet } = await import('@/lib/vaultHdQuarantine');
+  api.listVaultSecrets.mockResolvedValue({ secrets: [] });
+  blockHdWallet('AGENT_WALLET');
+  const request = {
+    ...standardSignRequest, id: 'vrq_hd_blocked', secret_name: 'AGENT_WALLET',
+    delivery: { digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable', derivation: { chain: 'evm', account: 0 } },
+    card: { request_type: 'sign', secret_name: 'AGENT_WALLET', kind: 'keypair', protection: 'standard', derivation: { chain: 'evm', account: 0 } },
+  } as unknown as VaultRequest;
+  render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+  expect(screen.getByText(en.vaults.hd.blocked)).toBeTruthy();
+  expect((screen.getByRole('button', { name: i18n.t('vaults.approval.sign'), exact: true }) as HTMLButtonElement).disabled).toBe(true);
+  unblockHdWallet('AGENT_WALLET');
+});
+
