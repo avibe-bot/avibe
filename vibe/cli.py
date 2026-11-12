@@ -17786,6 +17786,7 @@ def cmd_upgrade():
         launcher_is_current_process,
         restart_is_pending,
         should_skip_show_runtime_prepare,
+        upgrade_download_help,
         verify_upgrade_candidate,
     )
 
@@ -17942,6 +17943,7 @@ def cmd_upgrade():
             return 0
         else:
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
+            print(upgrade_download_help(plan.method))
             return 1
     except Exception as e:
         if plan.activation is not None:
@@ -17961,6 +17963,7 @@ def cmd_upgrade():
             )
             return 0
         print(f"\033[31mUpgrade failed: {e}\033[0m")
+        print(upgrade_download_help(plan.method))
         return 1
 
 

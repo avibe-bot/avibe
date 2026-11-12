@@ -65,7 +65,7 @@ function Invoke-NativeCommand {
     param([string]$FilePath, [string[]]$Arguments)
     $record = @{ file = $FilePath; arguments = @($Arguments); mirror = $env:UV_PYTHON_INSTALL_MIRROR }
     if ($FilePath -eq "uv" -and $Arguments[0] -eq "tool") {
-        $constraintAt = [array]::IndexOf($Arguments, "--constraint")
+        $constraintAt = [array]::IndexOf($Arguments, "--constraints")
         if ($constraintAt -ge 0) {
             $record.constraints = [System.IO.File]::ReadAllText($Arguments[$constraintAt + 1])
         }
@@ -139,7 +139,7 @@ Install-Vibe
     else:
         assert len(installs) == 1
         if case == "custom-source":
-            assert "--constraint" not in installs[0]["arguments"]
+            assert "--constraints" not in installs[0]["arguments"]
             assert "git+https://github.com/example/explicit-development.git" in installs[0]["arguments"]
         else:
             assert installs[0]["constraints"] == "anyio==4.16.0\n"

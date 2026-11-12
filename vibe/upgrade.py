@@ -125,6 +125,23 @@ class UpgradePlan:
     release_spec_index: int | None = None
 
 
+def upgrade_download_help(method: str, language: str = "en") -> str:
+    """Actionable, value-free recovery advice shared by CLI and Web failures."""
+    from vibe.i18n import t
+
+    index_variable = "PIP_INDEX_URL" if method == "pip" else "UV_DEFAULT_INDEX"
+    if os.name == "nt":
+        proxy_command = '$env:HTTPS_PROXY="http://127.0.0.1:7890"; vibe upgrade'
+        index_command = f'$env:{index_variable}="https://your-trusted-index.example/simple"; vibe upgrade'
+    else:
+        proxy_command = "HTTPS_PROXY=http://127.0.0.1:7890 vibe upgrade"
+        index_command = f"{index_variable}=https://your-trusted-index.example/simple vibe upgrade"
+    return t(
+        "update.downloadHelp", language,
+        proxyCommand=proxy_command, indexCommand=index_command,
+    )
+
+
 def execute_upgrade_plan(
     plan: UpgradePlan,
     *,

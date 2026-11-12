@@ -899,7 +899,7 @@ function Install-VibeFromSources {
         }
         $arguments = @($resolvedSpec, "--force", "--refresh")
         if ($constraints) {
-            $arguments += @("--constraint", $constraints)
+            $arguments += @("--constraints", $constraints)
         }
         $result = Invoke-UvToolInstallAttempt -Arguments $arguments -PythonInstallMirror $PythonInstallMirror
         if ($result.Success) {

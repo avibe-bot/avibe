@@ -580,6 +580,7 @@
     "checkFailed": "Update check failed. Please try again later.",
     "infoUnavailable": "Update information unavailable. Please try again later.",
     "upgradeFailed": "Upgrade failed. Please check logs.",
+    "downloadHelp": "If PyPI or its dependency downloads are unreachable (including in mainland China), retry from a terminal with an HTTPS proxy: {proxyCommand}\nOr explicitly choose an index you trust: {indexCommand}\nReplace the example addresses with your actual proxy or trusted index. These variables must be set in the terminal running the upgrade, not only in a browser. Exact version pins do not authenticate dependency bytes.",
     "upgradeFailedShort": "Upgrade failed",
     "upgradeFailedSlack": "❌ *Upgrade Failed*\n\nPlease check the logs for details.",
     "stableLauncherRepairInstruction": "run `{repairCommand}` from the activated launcher",

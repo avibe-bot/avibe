@@ -5,7 +5,7 @@
 Release Python environments must use the runtime graph selected by `uv.lock`,
 including its Python/platform marker forks. A release carries the same exported
 constraints in its wheel, sdist and `dependency-constraints.txt` GitHub asset.
-A new installer/upgrade reads **the target wheel's** constraints before running
+A new installer (`install.sh` or `install.ps1`)/upgrade reads **the target wheel's** constraints before running
 its resolver; it never applies the currently running release's lock to a newer
 one. Direct source/editable/custom development specifications remain explicit
 escape hatches, not locked-release installs.
@@ -40,9 +40,9 @@ selected versions through 3.2.5 (including their prereleases) retain their legac
 downgrade. Existing generation activation and retirement rules are unchanged.
 No live service or user configuration is modified by development verification.
 
-## Mainland access: owner decision required
+## Mainland access policy
 
-The proposed patch removes the **automatic** Tsinghua-index fallback and moving
+The installers remove the **automatic** Tsinghua-index fallback and moving
 Git HEAD fallback. It does not erase user-supplied package-manager configuration.
 
 A mainland user without a proxy follows these steps:
@@ -68,10 +68,20 @@ convenience and prevent version drift, but it would still trust same-version
 replacement bytes and build-time dependencies from that mirror, because uv tool
 ignores the exported hashes. This does not satisfy a hash-pinned-mirror policy.
 
-Recommendation: remove automatic trust switching, explicitly disclose the access
-regression, and obtain owner approval before merge. If no-proxy zero-configuration
-continuity is mandatory, this PR needs a first-party dependency mirror/wheelhouse
-or a genuinely hash-verifying install path; do not call mainland acceptance passed.
+The selected policy removes automatic trust switching and explicitly discloses
+the access trade-off. Install/upgrade failures show literal, shell-appropriate
+`HTTPS_PROXY` examples and `UV_DEFAULT_INDEX` (uv) or `PIP_INDEX_URL` (pip)
+alternatives; the examples never print configured credentials. Web upgrade advice
+is localized, and directs the user to retry from a terminal so its environment
+actually reaches the installer. A custom index does not replace the official
+core-wheel source, and does not supply a proxy for inaccessible release metadata.
+
+No-proxy zero-configuration continuity would require a first-party dependency
+mirror/wheelhouse or a genuinely hash-verifying install path; it is not claimed.
+The standard uv path stages the new environment separately. Tests keep a
+test-owned process alive and verify failed metadata/download/timeout paths never
+activate, restart, or alter the old launcher and discard only the candidate.
+This is not a promise of transactional rollback for arbitrary in-place pip errors.
 
 ## Show Runtime
 
@@ -98,4 +108,5 @@ installation. This consumer PR alone does not fix the producer.
 - No automatic third-party dependency index or moving Git source retry.
 - npm lifecycle scripts do not execute, package/lock mismatch fails and retained
   runtime remains available on a failed reinstall.
-- Owner approves the mainland-access trade-off and supply-chain boundary before merge.
+- Literal proxy/trusted-index recovery instructions appear on install and upgrade
+  failures on both shell families; failed uv downloads preserve the live generation.
