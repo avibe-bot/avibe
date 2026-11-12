@@ -34,13 +34,25 @@ def short_path(path: Path) -> str:
     return buffer.value
 
 
+def windows_env(root: Path, uv: str) -> dict[str, str]:
+    env = isolated_env(root, uv)
+    # CI invokes this from the installer's uv environment. uv tool install
+    # excludes virtualenv interpreters when resolving the ARM x64-Python policy;
+    # expose the already-installed base Python without sharing managed state or
+    # enabling downloads. Keep the test's own stable launcher first on PATH.
+    entries = env["PATH"].split(os.pathsep)
+    base = Path(getattr(sys, "_base_executable", sys.executable)).parent
+    env["PATH"] = os.pathsep.join([entries[0], str(base), *entries[1:]])
+    return env
+
+
 def acceptance(wheel: Path, root: Path) -> None:
     if os.name != "nt":
         raise RuntimeError("This acceptance requires native Windows")
     uv = shutil.which("uv")
     if not uv:
         raise RuntimeError("uv must be installed before running this acceptance")
-    env = isolated_env(root, uv)
+    env = windows_env(root, uv)
     with zipfile.ZipFile(wheel) as archive:
         metadata_name, = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
         version = message_from_bytes(archive.read(metadata_name))["Version"]

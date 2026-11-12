@@ -45,7 +45,10 @@ process. The helper protocol and activation lock remain unchanged.
 
 `scripts/windows_launcher_upgrade_regression.py` separately installs the candidate
 wheel and invokes its actual `vibe.exe upgrade` on native Windows x64 and Windows
-on Arm (the latter retains x64 Python). It advertises a future version and stages
+on Arm (the latter retains x64 Python). The fixture exposes its invoking interpreter's
+already-installed base Python on PATH, since uv ignores virtualenv interpreters
+for tool resolution; managed-install/cache/home directories remain isolated and
+Python downloads stay disabled. It advertises a future version and stages
 the same CI fixture wheel into a different environment: this proves future-client
 self-replacement, not a released 3.2.5 console-path success or a published future
 version. It requires deferred activation, waits only on the post-replace generation
