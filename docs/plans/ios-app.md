@@ -240,12 +240,13 @@ A shell can carry the instance origin's connections through a local proxy that c
   - It says only what the shell will try first for the calling document's next connections, never where an existing connection runs.
   - It is `"direct"` only for the selected instance's origin. For every other caller, and in a shell with no direct transport, it is always `"tunnel"`.
 - **`closure`** is a non-negative integer for the calling document's instance host.
-  - It grows by one each time the shell closes connections for that host because their path was lost or its local port was recovered.
+  - It grows by one each time the shell closes connections for that host because their path was lost, because the App went to the background, or because its local port was recovered.
+  - A closure caused by the background is published only on return to the foreground, once the shell's local proxy is ready again.
   - It never decreases while the shell process lives, and starts at 0.
   - Each increase asks the Web UI to act once.
 - **`sequence`** grows with every change of either value while the shell process lives, and orders `preferred` only.
 
-The shell emits `direct.transportChanged({preferred, sequence, closure})` after any change of `preferred` or increase of `closure`. A shell with no direct transport never emits it. It goes to the current runtime's instance-origin documents only, the primary main frame and instance-origin child windows, and its script checks the origin of the document it runs in.
+The shell emits `direct.transportChanged({preferred, sequence, closure})` after any change of `preferred` or increase of `closure`, and once more with the current state when it returns to the foreground and its local proxy is ready. A shell with no direct transport never emits it. A document that misses an event catches up at its next status read. It goes to the current runtime's instance-origin documents only, the primary main frame and instance-origin child windows, and its script checks the origin of the document it runs in.
 
 The Web UI keeps two values per document, separately:
 

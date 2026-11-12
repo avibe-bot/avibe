@@ -98,7 +98,8 @@ Rules:
 - **A route points at the current port epoch's P.** It changes only when a host is added, or when R1 moves every route to a new epoch (section 9).
 - **A store's host list only grows while the store lives** (candidate; whether adding a host takes effect is cells Q2 and Q3). No host is removed and no route is cleared: clearing is unreliable (section 2). A host the user no longer uses is relayed only to its public origin (section 6), never on the direct backend. The host list lives and dies with the store and the process, and is bounded by the allowlist.
 - **A host is added before the first load of that host in that store.** The listener is bound and checked first. The App's own load waits for both, with a bound; past it, the load goes ahead without a route, on WebKit's normal path. The bound is a proposal, set from measurement.
-- **A failed or ignored write leaves that host on WebKit's normal path.** That path is the instance's public origin. Within one epoch, every route points at the same P. So a write that WebKit applies to some connections and not others sends each connection either to the listener or to the normal path, never to a third place.
+- **A failed or ignored write that adds a host leaves that host on WebKit's normal path.** This applies only to adding a host that no route listed before, within an unchanged port epoch. That path is the instance's public origin. Within one epoch every route points at the same P, so such a write, applied to some connections and not others, sends each connection either to the listener or to the normal path, never to a third place.
+- **A failed or ignored rewrite in R1 is different.** That rewrite moves routes from P to P2 (section 9). If WebKit does not apply it, its connections may keep going to the old port, which may be stale or held by another process. That is not the normal path: the state stays recovery-unknown, governed by Q4 and `recovery-not-qualified`.
 
 | When | What is written | Status |
 | --- | --- | --- |
@@ -181,9 +182,13 @@ A **selection** is one opened runtime, between the App's `openRuntime` and `stop
 
 A transport report counts only for the selection it was made for, and is dropped after that selection ends. Before direct is authorized, the controller checks the lease with `MobileSessionCoordinator.isCurrentRuntime`, as the App's own route and WebView registration do. Within a selection, a rendezvous generation that a newer one replaced is never accepted again.
 
-**Every relay records its backend, its selection, and the path generation it was opened on.** The path generation advances on each event below. A late report or callback that carries an older selection or generation changes nothing. These events close committed direct relays and cancel uncommitted candidates of either backend (section 6). Committed public relays have their own close reasons, in the last column.
+**Every relay records its backend, its selection, and the path generation it was opened on.** The path generation advances on each event below.
 
-| Event | New CONNECTs | Direct relays opened before the event | Public relays |
+- **Advancing the generation does two things only.** It cancels uncommitted candidates of either backend (section 6), and it makes late reports, callbacks and candidates from an older selection or generation ineffective.
+- **It closes no committed relay by itself.** A committed direct or public relay is closed only where the table below says Closed.
+- **A relay's own end is separate.** A relay whose own connection ends, by EOF, failure or a half-close timeout, terminates as usual, whatever generation it was opened on. An old opening generation alone never marks a healthy relay as stale.
+
+| Event | New CONNECTs | Committed direct relays | Committed public relays |
 | --- | --- | --- | --- |
 | The transport reports the path `lost` (its connection closed or failed) | Public | Closed | Kept |
 | A network change callback | Public, until the transport validates the path again | Kept | Kept |
@@ -191,7 +196,7 @@ A transport report counts only for the selection it was made for, and is dropped
 | Validation succeeds on the same transport connection | Direct again | Kept: healthy, and never reported as moved | Kept |
 | The rendezvous generation changes (a new instance endpoint key or addresses) | Public until `usable` on the new one | Closed | Kept |
 | The selection ends (instance switch, picker, registration exit) | Public for that host | Closed | Kept |
-| The App enters the background | Public | Closed, and the transport stops | Left to the system |
+| The App enters the background | Public | Closed, and the transport stops | Kept by the App (the system may end them) |
 | An account transition (sign-in, sign-out, switch, store rotation) | Public | Closed | **Closed**: nothing of the old account is kept |
 | Port recovery R1 (section 9) | Public, on the new port | Closed | Closed |
 | The listener stops for good (no transport any more, process exit) | Not accepted | Closed | Closed |
@@ -233,7 +238,7 @@ Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one conn
   - App-owned navigation on resume, such as a push tap or the shell's own reload, waits for the re-bind and check, with a bound.
   - WebKit's own resumed connections cannot be ordered.
 
-Either way, the background closes every direct relay and stops the transport (section 7). Public relays left open may be ended by the system.
+Either way, the background closes every committed direct relay and stops the transport (section 7). If that closed any relay for a host, one closure for that host is held as pending and published after the listener is ready again on the foreground (section 10). The App keeps committed public relays, though the system may end them while the App is suspended.
 
 **Port loss is an error state, never a steady one** (rule). It covers three cases: P cannot be re-bound exclusively, the ownership check fails, or the listener's socket fails. A route that points at a port the App does not hold is never treated as an accepted state.
 
@@ -275,10 +280,16 @@ If Q4 shows that R1 does not recover the occupied cases, there is no safe in-pro
 The contract is in [`ios-app.md`](ios-app.md) section 4. Two kinds of information cross it, and they are kept apart because they are used differently.
 
 - **`preferred`** is the backend that the calling document's **new** connections will try first: `"direct"` or `"tunnel"`. It is never a claim about where an existing connection runs, and only the latest value matters.
-- **`closure`** is a counter of closures. It is a non-negative integer, kept per instance host, that grows by one each time the listener closes relays for that host because their path was lost or the port was recovered. That means: a transport `lost`, a failed validation, a rendezvous generation change, or R1. It counts at most once per path generation, never decreases while the shell process lives, and starts at 0. Each increase asks the Web UI to act, so an increase must never be lost behind a later preference change.
+- **`closure`** is a counter of closures, a non-negative integer kept per instance host. It starts at 0 and never decreases while the shell process lives.
+  - **What counts.** It grows by one for each section 7 event in which the App closed at least one committed relay for that host: a transport `lost`, a failed validation, a rendezvous generation change, the background, or R1.
+  - **What does not need counting.** A selection end or an account transition destroys the documents that could act on it, and later documents take a new baseline.
+  - **Background closures are published on return.** A closure caused by the background is held as pending. It is added to `closure` only on the return to the foreground, after the listener is ready again (re-bound and checked, section 9). So no document acts on it while new connections cannot reach the listener.
+  - **Why it is separate.** Each increase asks the Web UI to act, so an increase must never be lost behind a later preference change.
 - **`sequence`** grows with every change of either value in the shell process, and orders `preferred`.
 
 `direct.status()` answers `{preferred, sequence, closure}` for the calling document's origin. `direct.transportChanged({preferred, sequence, closure})` carries the same three fields. It is emitted after the change, whenever `preferred` changes or `closure` grows, to the current runtime's instance-origin documents.
+
+**Events missed while suspended.** A suspended document may miss an event. After the foreground listener is ready, the shell emits the current state once more. A document that misses that too catches up at its next status read: the higher `closure` is acted on once, whichever arrives first.
 
 **What the Web UI keeps, per document:**
 
@@ -299,10 +310,15 @@ It does not touch anything that could lose server-side state or repeat an action
 - the listener table in section 4, against real loopback sockets;
 - exclusive bind, the ownership check, and a stand-in that occupies P;
 - backend choice: the direct stand-in failing at open, refusing, or stalling before `200`; the hedge; early bytes held and never forwarded to the loser; the early-byte bound; a backend failing after `200` closes the relay with no redial;
-- path generations: each row of section 7 closes exactly the relays it should, and a late report for an older selection or generation changes nothing;
+- path generations: each row of section 7 closes exactly the relays it marks Closed and no others; advancing a generation cancels candidates without closing committed relays; a relay's own EOF or failure ends it whatever its generation; a late report for an older selection or generation changes nothing;
 - authorization: an ended selection's tags and late reports never authorize direct; a host that is not the current selection's gets only the public backend; committed public relays close only for their own reasons (section 7); an account transition closes relays of both backends. Store or caller attribution is not tested; a CONNECT cannot carry it (section 4);
 - the route owner: written once per host and never cleared, counted at WebKit's real setter, and nothing without a transport;
-- the bridge: emission rules; `preferred` ordered by `sequence`; `closure` per host and monotonic; delivery only to current instance-origin documents. Web UI cases interleave a preference change, a closure, and a status read in every order. They also cover duplicate and late events, a status read that shows a closure before its event arrives, and a closure during page load, runtime creation, or a new child window, before and after the document's baseline read.
+- the bridge: emission rules; `preferred` ordered by `sequence`; `closure` per host and monotonic; delivery only to current instance-origin documents. Web UI cases interleave a preference change, a closure, and a status read in every order. They also cover:
+
+- duplicate and late events;
+- a status read that shows a closure before its event arrives;
+- a closure during page load, runtime creation, or a new child window, before and after the document's baseline read;
+- background, then resume on the same port: the pending closure is published only after the listener is ready, a surviving document reconnects once (from the event or from a status read), and a document that was destroyed does nothing.
 
 **WebKit behaviour.** It is qualified by the measurement harness in `packaging/webkit-proxy-change/`, not by App tests. The cells this design needs:
 
