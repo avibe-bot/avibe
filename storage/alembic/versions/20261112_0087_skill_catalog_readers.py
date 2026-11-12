@@ -21,11 +21,9 @@ def upgrade() -> None:
         "skill_catalogs",
         sa.Column("digest", sa.Text(), primary_key=True, nullable=False),
         sa.Column("entries_json", sa.Text(), nullable=False),
+        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    raise RuntimeError(
-        "Select an older same-epoch binary without downgrading or restamping; "
-        "preserve Skill catalog snapshots for forward readers."
-    )
+    op.drop_table("skill_catalogs")
