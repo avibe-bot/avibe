@@ -212,6 +212,10 @@ const installDirectShell = (capabilities: Record<string, number> = { direct: 1 }
       answers[index]({ preferred: 'tunnel', sequence, closure });
       await vi.advanceTimersByTimeAsync(0);
     },
+    malformed: async (index: number) => {
+      answers[index]({ preferred: 'direct' });
+      await vi.advanceTimersByTimeAsync(0);
+    },
     emit: (payload: { preferred: 'tunnel' | 'direct'; sequence: number; closure: number }) =>
       deliver(payload),
   };
@@ -586,12 +590,50 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(plain.call).not.toHaveBeenCalled();
   });
 
-  it('opens the first stream after a bounded wait when the baseline never answers', async () => {
-    installDirectShell();
-    await mountDirectPage();
-    await vi.advanceTimersByTimeAsync(1_499);
+  it('opens no stream while the baseline is unavailable, and opens once when the held answer comes', async () => {
+    const shell = installDirectShell();
+    const states: string[] = [];
+    vi.resetModules();
+    const fresh = await import('./ApiContext');
+    const Watcher = () => {
+      const api = fresh.useApi();
+      useEffect(
+        () => api.connectWorkbenchEvents({ onConnected, onConnectionState: (state) => states.push(state) }),
+        [api],
+      );
+      return null;
+    };
+    render(
+      <fresh.ApiProvider>
+        <Watcher />
+      </fresh.ApiProvider>,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(states.at(-1)).toBe('reconnecting');
+
+    // The shell holds its answer past the wait: unavailable, still no stream,
+    // and the reconnect loop's own attempts open nothing either.
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(FakeEventSource.instances).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(1);
+    expect(shell.statusCalls()).toBe(1);
+    expect(states.at(-1)).toBe('reconnecting');
+
+    await shell.answer(0, 2);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    await shell.answer(0, 2);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('opens nothing after a malformed baseline, until a visible return reads a valid one', async () => {
+    const shell = installDirectShell();
+    await mountDirectPage();
+    await shell.malformed(0);
+    expect(FakeEventSource.instances).toHaveLength(0);
+
+    setVisibility('hidden');
+    setVisibility('visible');
+    expect(shell.statusCalls()).toBe(2);
+    await shell.answer(1, 0);
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 

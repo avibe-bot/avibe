@@ -27,7 +27,11 @@ import { mcpPath } from '../lib/mcpPath';
 import { parseHomePreferences, type HomePreferences } from '../lib/homePreferences';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
-import { nativeDirectBaseline, onNativeDirectClosure } from '../lib/native';
+import {
+  nativeDirectBaselineState,
+  onNativeDirectClosure,
+  subscribeNativeDirectBaseline,
+} from '../lib/native';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
@@ -2749,7 +2753,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const resumeWorkbenchEventsRef = useRef<PageReactivationListener>(() => {});
   const rebuildWorkbenchEventsRef = useRef<() => void>(() => {});
-  const awaitingDirectBaselineRef = useRef(false);
+  const openWorkbenchEventsRef = useRef<() => void>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
@@ -3237,20 +3241,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventHandlersRef.current.size === 0 ||
       document.visibilityState !== 'visible'
     ) return;
-    // Inside a native shell with the `direct` capability, the first stream of
-    // this document waits for its direct baseline (bounded), so a closure from
-    // before the stream existed is not taken for one to act on. Without the
-    // capability there is nothing to wait for.
-    const directBaseline = nativeDirectBaseline();
-    if (directBaseline) {
-      if (awaitingDirectBaselineRef.current) return;
-      awaitingDirectBaselineRef.current = true;
-      void directBaseline.then(() => {
-        awaitingDirectBaselineRef.current = false;
-        openWorkbenchEventSource();
-      });
-      return;
-    }
+    // Inside a native shell with the `direct` capability, no stream opens
+    // until this document has a valid direct baseline: a closure from before
+    // the stream existed must not be taken for one to act on, and the shell
+    // may not be ready for new connections yet. Until then the connection
+    // state stays `reconnecting`, the same not-live state as any outage, and
+    // the stream opens when the baseline becomes ready (subscribed below).
+    // Without the capability there is nothing to wait for.
+    const directState = nativeDirectBaselineState();
+    if (directState === 'pending' || directState === 'unavailable') return;
 
     let source: EventSource;
     try {
@@ -3645,6 +3644,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWorkbenchEventReconnectLoop().wake();
   };
   rebuildWorkbenchEventsRef.current = rebuildWorkbenchEventsAfterClosure;
+  openWorkbenchEventsRef.current = () => {
+    if (nativeDirectBaselineState() === 'ready') ensureWorkbenchEventSource();
+  };
 
   useEffect(() => {
     const wakeIfVisible: PageReactivationListener = (awaySince) => {
@@ -3659,10 +3661,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeFromNetwork);
     const stopDirectClosures = onNativeDirectClosure(() => rebuildWorkbenchEventsRef.current());
+    const stopDirectBaseline = subscribeNativeDirectBaseline(() => openWorkbenchEventsRef.current());
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       stopReactivation();
       stopDirectClosures();
+      stopDirectBaseline();
       window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();
     };

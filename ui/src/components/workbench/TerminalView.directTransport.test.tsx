@@ -1,10 +1,12 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // xterm draws to a canvas jsdom does not have. The terminal's rendering is not
 // under test here; its socket lifecycle is.
+// The most recent terminal's input callback: what a keystroke reaches.
+const typed = vi.hoisted(() => ({ current: null as ((data: string) => void) | null }));
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols = 80;
@@ -13,8 +15,13 @@ vi.mock('@xterm/xterm', () => ({
     loadAddon() {}
     attachCustomKeyEventHandler() {}
     open() {}
-    onData() {
-      return { dispose() {} };
+    onData(callback: (data: string) => void) {
+      typed.current = callback;
+      return {
+        dispose() {
+          if (typed.current === callback) typed.current = null;
+        },
+      };
     }
     write() {}
     paste() {}
@@ -43,10 +50,13 @@ vi.mock('@/lib/remoteAuth', () => ({
 }));
 
 class FakeWebSocket {
+  static readonly CONNECTING = 0;
   static readonly OPEN = 1;
   static instances: FakeWebSocket[] = [];
 
-  readyState = FakeWebSocket.OPEN;
+  // A new socket is still connecting, as a real one is.
+  readyState = FakeWebSocket.CONNECTING;
+  readonly sent: string[] = [];
   binaryType = '';
   closed = false;
   onopen: (() => void) | null = null;
@@ -57,7 +67,15 @@ class FakeWebSocket {
     FakeWebSocket.instances.push(this);
   }
 
-  send(): void {}
+  send(data: Uint8Array): void {
+    this.sent.push(new TextDecoder().decode(data));
+  }
+
+  /** The connection opened. */
+  open(): void {
+    this.readyState = FakeWebSocket.OPEN;
+    this.onopen?.();
+  }
 
   close(): void {
     this.closed = true;
@@ -228,15 +246,58 @@ describe('TerminalView when the native shell closes connections on a lost path',
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
-  it('sends nothing typed while there was no open socket', async () => {
+  it('drops what is typed while the replacement connects, and sends what is typed after', async () => {
     const first = await mountTerminal();
+    act(() => first.open());
     act(() => first.frame({ type: 'ready', persistent: true }));
-    const sent = vi.spyOn(FakeWebSocket.prototype, 'send');
+    act(() => typed.current?.('before'));
+    expect(first.sent).toEqual(['before']);
 
     closeLostPath();
     const second = FakeWebSocket.latest();
+    expect(second).not.toBe(first);
+    expect(second.readyState).toBe(FakeWebSocket.CONNECTING);
+    // Typed in the gap: no socket is open, so it goes nowhere.
+    act(() => typed.current?.('lost in the gap'));
+
+    act(() => second.open());
     act(() => second.frame({ type: 'ready', persistent: true }));
-    expect(sent).not.toHaveBeenCalled();
+    expect(first.sent).toEqual(['before']);
+    expect(second.sent).toEqual([]);
+
+    // The positive control: input after the reattach is sent.
+    act(() => typed.current?.('after'));
+    expect(second.sent).toEqual(['after']);
+  });
+
+  it('keeps a confirmed persistent session eligible while its replacement has not attached yet', async () => {
+    const first = await mountTerminal();
+    act(() => first.frame({ type: 'ready', persistent: true }));
+
+    closeLostPath();
+    const second = FakeWebSocket.latest();
+    // The replacement is lost before its own ready frame.
+    act(() => second.drop(1006));
+    closeLostPath();
+    expect(FakeWebSocket.instances).toHaveLength(3);
+
+    // A duplicate of that closure reattaches nothing more.
+    act(() => deliver({ preferred: 'tunnel', sequence, closure }));
+    expect(FakeWebSocket.instances).toHaveLength(3);
+
+    // A later closure while the third is still connecting reattaches again.
+    closeLostPath();
+    expect(FakeWebSocket.instances).toHaveLength(4);
+  });
+
+  it('forgets that eligibility when the server says the session is not persistent', async () => {
+    const first = await mountTerminal();
+    act(() => first.frame({ type: 'ready', persistent: true }));
+    closeLostPath();
+    // The reattach landed on a plain shell: the session it had is gone.
+    act(() => FakeWebSocket.latest().frame({ type: 'ready', persistent: false }));
+    closeLostPath();
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
   it('waits for the baseline before its first socket, and not at all without the capability', async () => {
@@ -256,5 +317,92 @@ describe('TerminalView when the native shell closes connections on a lost path',
     await mountTerminal();
     expect(FakeWebSocket.instances).toHaveLength(1);
     expect(statusAnswers).toHaveLength(0);
+  });
+
+  it('shows its error and opens no socket while the baseline is unavailable; Reconnect asks once', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.resetModules();
+      const { TerminalView } = await import('./TerminalView');
+      const onStatus = vi.fn();
+      render(<TerminalView sessionId="term-1" onStatus={onStatus} />);
+      expect(onStatus).toHaveBeenLastCalledWith('connecting', null);
+
+      // The first read never settles.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      expect(FakeWebSocket.instances).toHaveLength(0);
+      expect(onStatus).toHaveBeenLastCalledWith('error', null);
+
+      // The user's Reconnect asks for a baseline; a second click while that
+      // read is out asks for nothing more.
+      const button = screen.getByRole('button', { name: /apps\.terminal\.reconnect/ });
+      act(() => fireEvent.click(button));
+      expect(statusAnswers).toHaveLength(2);
+      expect(onStatus).toHaveBeenLastCalledWith('connecting', null);
+      expect(screen.queryByRole('button', { name: /apps\.terminal\.reconnect/ })).toBeNull();
+      expect(FakeWebSocket.instances).toHaveLength(0);
+
+      await act(async () => {
+        statusAnswers[1]({ preferred: 'tunnel', sequence: 0, closure: 0 });
+      });
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      // The first read answers after all: one baseline, one socket.
+      await act(async () => {
+        statusAnswers[0]({ preferred: 'tunnel', sequence: 0, closure: 0 });
+      });
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('opens when a held answer arrives after the wait, and opens nothing once unmounted', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.resetModules();
+      const { TerminalView } = await import('./TerminalView');
+      const view = render(<TerminalView sessionId="term-1" />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      expect(FakeWebSocket.instances).toHaveLength(0);
+      await act(async () => {
+        statusAnswers[0]({ preferred: 'tunnel', sequence: 0, closure: 0 });
+      });
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      view.unmount();
+
+      // A second page whose terminal is gone before its baseline arrives.
+      FakeWebSocket.instances = [];
+      statusAnswers = [];
+      vi.resetModules();
+      const again = await import('./TerminalView');
+      const gone = render(<again.TerminalView sessionId="term-2" />);
+      gone.unmount();
+      await act(async () => {
+        statusAnswers[0]({ preferred: 'tunnel', sequence: 0, closure: 0 });
+      });
+      expect(FakeWebSocket.instances).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts a new session without the old one\'s persistence', async () => {
+    vi.resetModules();
+    const { TerminalView } = await import('./TerminalView');
+    const view = render(<TerminalView sessionId="term-1" />);
+    await act(async () => {
+      statusAnswers[0]({ preferred: 'tunnel', sequence, closure });
+    });
+    act(() => FakeWebSocket.latest().frame({ type: 'ready', persistent: true }));
+
+    view.rerender(<TerminalView sessionId="term-2" />);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    // The new session has not been confirmed persistent: nothing reattaches.
+    closeLostPath();
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 });

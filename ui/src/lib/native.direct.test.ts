@@ -100,9 +100,12 @@ describe('native direct closure watermark', () => {
     const addListener = vi.spyOn(document, 'addEventListener');
     const native = await load();
 
-    expect(native.nativeDirectBaseline()).toBeNull();
+    expect(native.nativeDirectBaselineState()).toBe('absent');
     const handler = vi.fn();
+    const listener = vi.fn();
     native.onNativeDirectClosure(handler)();
+    native.subscribeNativeDirectBaseline(listener)();
+    native.retryNativeDirectBaseline();
     hideAndShow();
     await settle();
 
@@ -110,21 +113,28 @@ describe('native direct closure watermark', () => {
     expect(shell.on).not.toHaveBeenCalled();
     expect(addListener).not.toHaveBeenCalledWith('visibilitychange', expect.anything());
     expect(handler).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
   });
 
-  it('takes one baseline per document, shared by every consumer', async () => {
+  it('takes one baseline per document, shared by every consumer, and is ready only on a valid answer', async () => {
     const shell = installShell();
     const native = await load();
+    const listener = vi.fn();
 
-    const first = native.nativeDirectBaseline();
-    const second = native.nativeDirectBaseline();
+    expect(native.nativeDirectBaselineState()).toBe('pending');
+    native.subscribeNativeDirectBaseline(listener);
+    expect(native.nativeDirectBaselineState()).toBe('pending');
     native.onNativeDirectClosure(() => {});
-    expect(first).toBe(second);
+    native.retryNativeDirectBaseline();
     expect(shell.statusCalls()).toBe(1);
 
+    // An event is not a baseline.
+    shell.emit(status(1));
+    expect(native.nativeDirectBaselineState()).toBe('pending');
+
     await shell.answer(0, status(3));
-    await expect(first).resolves.toBeUndefined();
-    expect(native.nativeDirectBaseline()).toBeNull();
+    expect(native.nativeDirectBaselineState()).toBe('ready');
+    expect(listener).toHaveBeenCalledTimes(1);
     expect(shell.statusCalls()).toBe(1);
   });
 
@@ -133,7 +143,6 @@ describe('native direct closure watermark', () => {
     const native = await load();
     const handler = vi.fn();
     native.onNativeDirectClosure(handler);
-    native.nativeDirectBaseline();
 
     // An event arrives while the baseline read is still out: no stream of this
     // document is open yet, so there is nothing to reconnect.
@@ -211,6 +220,40 @@ describe('native direct closure watermark', () => {
     expect(handler).toHaveBeenCalledTimes(2);
   });
 
+  it('reconciles on the first visible return of a document that was installed while hidden', async () => {
+    // The page loaded in the background: the hidden edge happened before the
+    // module existed.
+    visibility = 'hidden';
+    const shell = installShell();
+    const native = await load();
+    const handler = vi.fn();
+    native.onNativeDirectClosure(handler);
+    await shell.answer(0, status(0));
+
+    // Both closure emissions are dropped; only the real lifecycle runs.
+    visibility = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+    pageshowFromCache();
+    expect(shell.statusCalls()).toBe(2);
+    await shell.answer(1, status(1));
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles once on a back-forward-cache return reported by pagehide and pageshow alone', async () => {
+    const shell = installShell();
+    const native = await load();
+    const handler = vi.fn();
+    native.onNativeDirectClosure(handler);
+    await shell.answer(0, status(0));
+
+    window.dispatchEvent(new Event('pagehide'));
+    pageshowFromCache();
+    pageshowFromCache();
+    expect(shell.statusCalls()).toBe(2);
+    await shell.answer(1, status(1));
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it('acts on a closure seen first in a status read, and not again when its event follows', async () => {
     const shell = installShell();
     const native = await load();
@@ -246,47 +289,121 @@ describe('native direct closure watermark', () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  it('opens without a baseline when the read fails, and still acts on every later closure', async () => {
+  it('is unavailable after a failed or malformed read, and ready only after a valid one', async () => {
     const shell = installShell();
     const native = await load();
     const handler = vi.fn();
     native.onNativeDirectClosure(handler);
-    const baseline = native.nativeDirectBaseline();
 
     // An event shows closure 2 before the read fails.
     shell.emit(status(2));
     await shell.fail(0);
-    await expect(baseline).resolves.toBeUndefined();
-    expect(native.nativeDirectBaseline()).toBeNull();
+    expect(native.nativeDirectBaselineState()).toBe('unavailable');
+    // Events alone never make it ready, and nothing acts on them.
+    shell.emit(status(3));
+    expect(native.nativeDirectBaselineState()).toBe('unavailable');
     expect(handler).not.toHaveBeenCalled();
 
-    // Nothing was made up: the watermark is the closure that was observed.
+    native.retryNativeDirectBaseline();
+    expect(native.nativeDirectBaselineState()).toBe('pending');
+    await shell.answer(1, { preferred: 'direct', sequence: 4 });
+    expect(native.nativeDirectBaselineState()).toBe('unavailable');
+
+    native.retryNativeDirectBaseline();
+    await shell.answer(2, status(3));
+    expect(native.nativeDirectBaselineState()).toBe('ready');
+    expect(handler).not.toHaveBeenCalled();
+    shell.emit(status(4));
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('becomes unavailable when the read is held past the wait, and ready when its valid answer comes', async () => {
+    vi.useFakeTimers();
+    const shell = installShell();
+    const native = await load();
+    const handler = vi.fn();
+    native.onNativeDirectClosure(handler);
+
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(native.nativeDirectBaselineState()).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(native.nativeDirectBaselineState()).toBe('unavailable');
+
+    // The shell was only holding its answer. It counts, as the baseline.
+    await shell.answer(0, status(2));
+    expect(native.nativeDirectBaselineState()).toBe('ready');
+    expect(handler).not.toHaveBeenCalled();
     shell.emit(status(2));
     expect(handler).not.toHaveBeenCalled();
     shell.emit(status(3));
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  it('opens after a bounded wait when the read does not answer, and applies a late answer once', async () => {
+  it('lets a user retry start one new attempt when the first read never settles', async () => {
     vi.useFakeTimers();
     const shell = installShell();
     const native = await load();
     const handler = vi.fn();
     native.onNativeDirectClosure(handler);
-    const baseline = native.nativeDirectBaseline();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(native.nativeDirectBaselineState()).toBe('unavailable');
 
-    await vi.advanceTimersByTimeAsync(1_499);
-    expect(native.nativeDirectBaseline()).toBe(baseline);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(native.nativeDirectBaseline()).toBeNull();
+    native.retryNativeDirectBaseline();
+    native.retryNativeDirectBaseline();
+    expect(shell.statusCalls()).toBe(2);
+    expect(native.nativeDirectBaselineState()).toBe('pending');
+
+    await shell.answer(1, status(1));
+    expect(native.nativeDirectBaselineState()).toBe('ready');
+    // The first read fails late: it cannot take ready away.
+    await shell.fail(0);
+    expect(native.nativeDirectBaselineState()).toBe('ready');
     expect(handler).not.toHaveBeenCalled();
+    native.retryNativeDirectBaseline();
+    expect(shell.statusCalls()).toBe(2);
+  });
 
-    // The answer arrives after the streams opened: an ordinary observation.
-    // This is the cost of the bound: possibly one extra reconnect.
-    await shell.answer(0, status(2));
+  it('lets the next visible return start one new attempt when the first read never settles', async () => {
+    vi.useFakeTimers();
+    const shell = installShell();
+    const native = await load();
+    const handler = vi.fn();
+    native.onNativeDirectClosure(handler);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(native.nativeDirectBaselineState()).toBe('unavailable');
+
+    hideAndShow();
+    pageshowFromCache();
+    expect(shell.statusCalls()).toBe(2);
+
+    // The old read answers first, then the new one: one baseline, no action.
+    await shell.answer(0, status(1));
+    expect(native.nativeDirectBaselineState()).toBe('ready');
+    await shell.answer(1, status(1));
+    expect(handler).not.toHaveBeenCalled();
+    // A newer reply with a higher closure is a real closure after the baseline.
+    hideAndShow();
+    await shell.answer(2, status(2));
     expect(handler).toHaveBeenCalledTimes(1);
-    shell.emit(status(2));
-    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let an old attempt end a newer one', async () => {
+    vi.useFakeTimers();
+    const shell = installShell();
+    const native = await load();
+    expect(native.nativeDirectBaselineState()).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(native.nativeDirectBaselineState()).toBe('unavailable');
+    native.retryNativeDirectBaseline();
+    expect(shell.statusCalls()).toBe(2);
+    expect(native.nativeDirectBaselineState()).toBe('pending');
+
+    // The first attempt fails late, while the second is still out.
+    await shell.fail(0);
+    expect(native.nativeDirectBaselineState()).toBe('pending');
+    // Only the second attempt's own wait can make it unavailable.
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(native.nativeDirectBaselineState()).toBe('unavailable');
   });
 
   it('stops calling a handler once it unsubscribes', async () => {
