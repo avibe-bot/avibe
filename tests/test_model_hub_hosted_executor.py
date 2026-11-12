@@ -994,7 +994,7 @@ async def test_a_call_whose_executors_refused_the_tool_names_them_instead_of_ask
     assert status == 200
     assert answer == {"record": {
         "status": "failed", "sources": [],
-        "error": "xAI key refused web search, so no Source can run it right now. "
+        "error": "xAI key refused web search, so no provider can run it right now. "
                  "Clear the refusal in Models › Tools to try again.",
     }}
     assert service.adapter.invocations == []

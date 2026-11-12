@@ -14,7 +14,7 @@
     "outsideGuiSession": "Avibe 运行在桌面会话之外，钥匙串里的凭据（GitHub CLI、Vault）不可用。请在这台 Mac 桌面的终端里重启 Avibe。",
     "modelHubDisabled": "本实例已停用模型网关，{backend} 没有可用的模型。",
     "modelGatewayOff": "模型网关已关闭，{backend} 没有可用的模型。请前往「模型」页点击「重试」，然后选择模型。",
-    "modelSourceRequired": "{backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。",
+    "modelSourceRequired": "{backend} 还没有模型供应商。请在「模型」页添加 API Key 或订阅。",
     "modelsNextStepImUrl": "管理这个 Avibe 的人可以在「模型」页处理：{url}",
     "modelsNextStepIm": "管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。",
     "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。",
@@ -769,7 +769,7 @@
     "setup": {
       "starting": "正在启动 {backend} 的登录修复流程...",
       "unsupportedBackend": "后端 `{backend}` 暂不支持 setup。",
-      "builtinBackend": "{backend} 通过模型网关获取模型，无需单独登录。请在「模型」页添加或管理模型来源。",
+      "builtinBackend": "{backend} 通过模型网关获取模型，无需单独登录。请在「模型」页添加或管理模型供应商。",
       "codeUsage": "用法：`/setup code <value>` 或 `/setup code <backend> <value>`",
       "claudeMethodUsage": "用法：`/setup claude <claudeai|console>`",
       "noActiveFlow": "当前频道没有正在进行的 setup 流程。",
@@ -1115,10 +1115,10 @@
       "candidate_suppliers_changed": "可用供应商已发生变化，请刷新模型选项后重新确认。",
       "models_dev_unavailable": "models.dev 当前不可用，请手动填写模型参数或稍后重试。",
       "codex_catalog_unavailable": "Codex 无法准备本地模型网关目录，请重试本回合。",
-      "hosted_content_unpinned": "此请求携带的托管工具内容未固定到其渲染所针对的来源，因此不能发送给任何来源。",
+      "hosted_content_unpinned": "此请求携带的托管工具内容未固定到其渲染所针对的供应商，因此不能发送给任何供应商。",
       "request_too_large": "请求超过 Avibe 本地网关的 {limit_mib} MiB 大小上限。请减少图片或对话上下文后重试。",
-      "engine_down": "本地模型网关不可用。",
-      "engine_down_streamed": "本地模型网关不可用。本回合输出可能不完整。",
+      "engine_down": "本机的模型网关不可用。",
+      "engine_down_streamed": "本机的模型网关不可用。本回合输出可能不完整。",
       "migration_item_conflict": "此迁移项与当前模型网关状态冲突。",
       "stream_interrupted": "供应商响应已中断。",
       "upstream_protocol_error": "供应商响应不符合预期协议。",
@@ -1193,17 +1193,17 @@
     },
     "launch": {
       "retry": "已自动切换到备用供应商，直接重试即可",
-      "waiting": "本次请求未完成：{source} 暂时无法提供模型 {model}，且没有可用备用源。自动恢复已结束，你可以稍后重试或切换模型。",
+      "waiting": "本次请求未完成：{source} 暂时无法提供模型 {model}，且没有可用的备用供应商。自动恢复已结束，你可以稍后重试或切换模型。",
       "waiting_without_retry": "本次请求未完成，自动恢复已结束。你可以重试模型 {model} 或切换模型。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
-      "last_upstream_failure": "上游最后一次报错（{source}，HTTP {status}）：{detail}",
-      "last_upstream_failure_without_status": "上游最后一次报错（{source}）：{detail}",
+      "last_upstream_failure": "供应商最后一次报错（{source}，HTTP {status}）：{detail}",
+      "last_upstream_failure_without_status": "供应商最后一次报错（{source}）：{detail}",
       "last_connection_failure": "最后一次连接错误（{source}）：{detail}",
       "passthrough_model_unlisted": "供应商的模型列表里没有 {model}，换一个模型试试。",
       "model_unlisted": "模型 {model} 不在 {backend} 的模型列表中。请选择其他模型后继续。",
       "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
-      "request_incompatible_detail": "上游拒绝了此请求，切换模型供应商也无法解决。上游返回：{detail}"
+      "request_incompatible_detail": "供应商拒绝了此请求，切换模型供应商也无法解决。供应商返回：{detail}"
     }
   },
   "remote_access": {
@@ -1662,11 +1662,11 @@
       "stepTooLarge": "最新的一步对当前模型的上下文窗口来说太大。请让它分成更小的步骤来做，或换用上下文更大的模型。",
       "rateLimit": "模型服务商正在限流，请稍后重试。",
       "overloaded": "模型服务商当前过载，请稍后重试。",
-      "network": "无法连接模型服务商。请检查网络和 Model Hub 来源。",
+      "network": "无法连接模型供应商。请检查网络和模型网关中的供应商。",
       "stalled": "模型服务商超过 {minutes} 分钟没有返回新数据，本轮已中止。可以重试，或换一个模型。",
       "server": "模型服务商返回了服务器错误，请稍后重试。",
       "streamInterrupted": "模型服务商的回复中途断开了。可以重试。",
-      "auth": "模型服务商拒绝了此路由的凭据。请检查 Model Hub 来源。",
+      "auth": "模型供应商拒绝了此路由的凭据。请检查模型网关中的供应商。",
       "invalidRequest": "模型服务商拒绝了这个请求。",
       "modelError": "模型因错误而停止。",
       "toolsUnsupported": "所选模型不支持工具，而 {backend} 需要工具。请换一个模型。",
@@ -1831,9 +1831,9 @@
     "switch": "{failed}，已改用 {provider}",
     "interruption": {
       "message": "模型回复中断：{reason}",
-      "overloaded": "上游服务过载",
+      "overloaded": "供应商服务过载",
       "disconnected": "连接中断",
-      "upstream": "上游服务异常"
+      "upstream": "供应商服务异常"
     },
     "status": {
       "failed": "失败：{error}",

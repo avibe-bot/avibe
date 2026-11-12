@@ -162,7 +162,7 @@ describe('UsageTab', () => {
     expect(names()).toEqual(['Live supplier', 'Removed providers']);
     await userEvent.click(screen.getByRole('button', { name: 'Model' }));
     expect(container.querySelector('.model-hub-usage-legend')?.textContent).toContain('Removed providers');
-    await userEvent.click(screen.getByRole('button', { name: 'All Provider' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All providers' }));
     expect(screen.getByRole('option', { name: /Removed providers/ })).toBeTruthy();
     for (const hidden of ['src_vanished01', vanishedModelId, 'glm-5.3', 'Unknown model']) {
       expect(container.textContent).not.toContain(hidden);
@@ -188,7 +188,7 @@ describe('UsageTab', () => {
       buckets: [bucket('00', rows)],
     });
     const { container, rerender } = render(page(before));
-    await userEvent.click(screen.getByRole('button', { name: 'All Provider' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All providers' }));
     await userEvent.click(screen.getByRole('option', { name: /Doomed supplier/ }));
     await userEvent.keyboard('{Escape}');
     await userEvent.click(screen.getByRole('button', { name: 'By provider' }));
@@ -215,20 +215,20 @@ describe('UsageTab', () => {
       buckets: [bucket('00', [row(), row({ source_id: 'src_gone01', model_id: 'model-g' })])],
     };
     const { container, rerender } = render(page(withRemoved));
-    await userEvent.click(screen.getByRole('button', { name: 'All Provider' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All providers' }));
     await userEvent.click(screen.getByRole('option', { name: /Removed providers/ }));
     await userEvent.keyboard('{Escape}');
     expect(screen.getByRole('button', { name: 'Reset filters' })).toBeTruthy();
 
     rerender(page(live));
-    expect(screen.getByRole('button', { name: 'All Provider' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'All providers' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Reset filters' })).toBeNull();
     expect(container.querySelector('.model-hub-usage-empty-state')).toBeNull();
     expect(within(screen.getByRole('table')).getAllByText('Shared label · Shared model').length).toBeGreaterThan(0);
 
     // Dropped means gone: a later report offering it again does not bring it back.
     rerender(page(withRemoved));
-    expect(screen.getByRole('button', { name: 'All Provider' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'All providers' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Reset filters' })).toBeNull();
   });
 
@@ -280,7 +280,7 @@ describe('UsageTab', () => {
     const labels = ['Supplier · removed-model', 'Supplier · Historisches Modell', 'Supplier · Model'];
     for (const label of labels) expect(within(screen.getByRole('table')).getByText(label)).toBeTruthy();
     expect(within(screen.getByRole('table')).getAllByText('Supplier · Entfernt')).toHaveLength(2);
-    await userEvent.click(screen.getByRole('button', { name: 'All Model' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All models' }));
     for (const label of labels) expect(screen.getByRole('option', { name: new RegExp(label) })).toBeTruthy();
     fireEvent.pointerDown(document.body);
     await userEvent.click(screen.getByRole('button', { name: 'Model' }));
@@ -656,12 +656,12 @@ describe('UsageTab', () => {
     expect(details.queryByText(/Exa key|Removed providers/)).toBeNull();
     // Exports and the model filter are model usage only; a tool-only Source is a Source.
     expect(buildUsageCsv(value, { sourceIds: [], modelKeys: [] }, null, CSV_HEADERS, 'Unknown model')).not.toContain('search');
-    await userEvent.click(screen.getByRole('button', { name: 'All Provider' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All providers' }));
     const options = (label: string) => within(screen.getByRole('listbox', { name: label })).getAllByRole('option').map((option) => option.textContent);
-    expect(options('Provider')).toEqual(['All Provider', 'Claude', 'Relay', 'Exa key', 'Removed providers']);
+    expect(options('Provider')).toEqual(['All providers', 'Claude', 'Relay', 'Exa key', 'Removed providers']);
     await userEvent.keyboard('{Escape}');
-    await userEvent.click(screen.getByRole('button', { name: 'All Model' }));
-    expect(options('Model')).toEqual(['All Model', 'Claude · Opus', 'Relay · Relay model']);
+    await userEvent.click(screen.getByRole('button', { name: 'All models' }));
+    expect(options('Model')).toEqual(['All models', 'Claude · Opus', 'Relay · Relay model']);
     await userEvent.click(screen.getByRole('option', { name: 'Claude · Opus' }));
     expect(services.getByText('No matching usage')).toBeTruthy();
     expect(stats.textContent).toContain('$0.50');

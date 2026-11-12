@@ -1805,8 +1805,8 @@ async def test_interrupted_native_search_emits_immediately_and_only_web_projects
     stored = step["content"]["hosted"]
     line = step["text"]
     assert stored["interruption"] == "overloaded" and "retried" not in stored
-    assert line == ("🔎 Web search · Model response interrupted: upstream overloaded" if language == "en"
-                    else "🔎 网页搜索 · 模型回复中断：上游服务过载")
+    assert line == ("🔎 Web search · Model response interrupted: provider overloaded" if language == "en"
+                    else "🔎 网页搜索 · 模型回复中断：供应商服务过载")
     if platform == "telegram":
         assert harness.controller.im_client.sent.count(line) == 1
     else:
