@@ -147,3 +147,8 @@ duplicate those owner files. R1 maintains the integration-gap ledger against UI
 consumer evidence and the actual assembled chain. Lead's independently verified
 Runtime test result (27 passed) does not establish native/UI integration. Lead
 Run `50d475b4c7ee` confirms this ownership and requires the chain before Merge-ready.
+
+The account HTML includes `<meta name="avibe-desktop-client-version" content="1">`,
+verified in the built `desktop/dist/account/index.html`. S1 reads packaged asset
+bytes to enable compatibility; DOM/window markers are never native authority.
+This internal build check was accepted in Lead Run `7cf166eba9e0`.
