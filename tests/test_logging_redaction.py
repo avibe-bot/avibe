@@ -9,6 +9,8 @@ from __future__ import annotations
 import io
 import json
 import logging
+import subprocess
+import sys
 from unittest.mock import AsyncMock
 
 import httpx
@@ -232,6 +234,23 @@ def test_invalid_cdn_key_is_not_echoed_in_tracebacks(log_output):
     for text in output():
         assert "CDN key rejected" in text
         assert encoded not in text
+
+
+def test_long_non_url_diagnostic_finishes_without_blocking_formatter():
+    # A scheme scan that retries at every character is quadratic. A separate,
+    # bounded process makes that regression fail without hanging the test run.
+    script = """
+import logging
+from vibe.logging_config import RedactingFormatter
+payload = 'a' * 40_000
+url = 'https://user:private-password@example.test/path?key=private-query'
+record = logging.makeLogRecord({'msg': 'status=503 %s %s', 'args': (payload, url)})
+text = RedactingFormatter('%(message)s').format(record)
+assert text == 'status=503 ' + payload + ' https://example.test/path'
+print('ok')
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=5, check=True)
+    assert result.stdout == "ok\n"
 
 
 def test_installer_retention_formatter_redacts_without_mutating_exception():

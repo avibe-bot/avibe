@@ -92,7 +92,11 @@ _CREDENTIAL_KEY_RE = re.compile(
 _QUOTED_CREDENTIAL_VALUE_RE = re.compile(r""""(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'""")
 _LINE_END_RE = re.compile(r"[\r\n]")
 _AUTH_SCHEME_RE = re.compile(r"(?i)(Bearer|Basic|Digest|Token|AWS4-HMAC-SHA256)[ \t]+\S")
-_DIAGNOSTIC_URL_RE = re.compile(r"""(?:[a-z][a-z0-9+.-]*:)?//[^\s"'<>\\]+""", re.IGNORECASE)
+# A scheme starts only at a boundary. Retrying its unbounded character class at
+# every position in a long non-URL string would make all diagnostic redaction O(n²).
+_DIAGNOSTIC_URL_RE = re.compile(
+    r"""(?<![a-z0-9+.-])(?:[a-z][a-z0-9+.-]*:)?//[^\s"'<>\\]+""", re.IGNORECASE,
+)
 # ASGI access/WebSocket logs contain request targets, not absolute URLs.
 _DIAGNOSTIC_PATH_RE = re.compile(r"""(?<![\w/:])/(?!/)[^\s"'<>\\]+""")
 _CREDENTIAL_PATH_RE = re.compile(
