@@ -4167,8 +4167,8 @@ class ConsolidatedMessageDispatcher:
 
         # The row above is the only copy of an intermediate message that carries a
         # sidecar. Everything left below is what the channel is shown - the concise
-        # status line, the consolidated log, the hidden-type log preview - so write
-        # the citations into ``text`` once here rather than at each of them.
+        # status line or consolidated log - so write the citations into ``text``
+        # once here rather than at each of them.
         text = materialize_citations(text, citations)
 
         if decision.im is ImDelivery.NONE:
@@ -4180,12 +4180,11 @@ class ConsolidatedMessageDispatcher:
                     self._get_platform(target_context),
                 )
             elif decision.reason == "hidden":
-                preview = text if len(text) <= 500 else f"{text[:500]}…"
                 logger.info(
-                    "Skipping %s message for settings %s (hidden). Preview: %s",
+                    "Skipping %s message for settings %s (hidden); chars=%d",
                     canonical_type,
                     settings_key,
-                    preview,
+                    len(text),
                 )
             return None
 

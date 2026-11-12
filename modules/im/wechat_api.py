@@ -130,13 +130,6 @@ def _build_headers(token: Optional[str] = None, body_bytes: Optional[bytes] = No
     return headers
 
 
-def _redact_token(token: Optional[str]) -> str:
-    """Redact token for safe logging."""
-    if not token:
-        return "(none)"
-    return f"{token[:8]}...{token[-4:]}" if len(token) > 16 else "***"
-
-
 # ---------------------------------------------------------------------------
 # Core fetch wrapper
 # ---------------------------------------------------------------------------
@@ -163,19 +156,19 @@ async def _api_fetch(
     headers = _build_headers(token=token, body_bytes=body_bytes)
 
     timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000.0)
-    logger.debug("POST %s body=%s", url, body_str[:200])
+    logger.debug("POST %s body_bytes=%d", url, len(body_bytes))
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, data=body_bytes, headers=headers) as resp:
             raw_text = await resp.text()
             logger.debug(
-                "%s status=%d raw=%s",
+                "%s status=%d response_chars=%d",
                 endpoint,
                 resp.status,
-                raw_text[:300] if raw_text else "(empty)",
+                len(raw_text),
             )
             if not resp.ok:
-                raise RuntimeError(f"{endpoint} {resp.status}: {raw_text}")
+                raise RuntimeError(f"{endpoint} HTTP {resp.status}")
             return json.loads(raw_text)
 
 
@@ -212,9 +205,8 @@ async def get_updates(
 
     timeout = aiohttp.ClientTimeout(total=(timeout_ms + DEFAULT_LONG_POLL_TIMEOUT_GRACE_MS) / 1000.0)
     logger.debug(
-        "get_updates: POST %s token=%s timeout=%dms buf_len=%d",
+        "get_updates: POST %s timeout=%dms buf_len=%d",
         url,
-        _redact_token(token),
         timeout_ms,
         len(get_updates_buf),
     )
@@ -224,13 +216,12 @@ async def get_updates(
             async with session.post(url, data=body_bytes, headers=headers) as resp:
                 raw_text = await resp.text()
                 logger.debug(
-                    "getUpdates: status=%d body_len=%d raw=%s",
+                    "getUpdates: status=%d response_chars=%d",
                     resp.status,
-                    len(raw_text) if raw_text else 0,
-                    raw_text[:300] if raw_text else "(empty)",
+                    len(raw_text),
                 )
                 if not resp.ok:
-                    raise RuntimeError(f"getUpdates {resp.status}: {raw_text}")
+                    raise RuntimeError(f"getUpdates HTTP {resp.status}")
                 return json.loads(raw_text)
     except (aiohttp.ServerTimeoutError, asyncio.TimeoutError, TimeoutError):
         logger.debug(
@@ -422,14 +413,8 @@ async def get_bot_qrcode(
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, data=body, headers=_build_headers(body_bytes=body)) as resp:
             if not resp.ok:
-                body = await resp.text()
-                logger.error(
-                    "QR code fetch failed: %d %s body=%s",
-                    resp.status,
-                    resp.reason,
-                    body[:200],
-                )
-                raise RuntimeError(f"Failed to fetch QR code: {resp.status} {resp.reason}")
+                logger.error("QR code fetch failed: status=%d", resp.status)
+                raise RuntimeError(f"Failed to fetch QR code: HTTP {resp.status}")
             # iLink API may return application/octet-stream instead of application/json
             return await resp.json(content_type=None)
 
@@ -468,12 +453,12 @@ async def get_qrcode_status(
             async with session.get(url, headers=headers) as resp:
                 raw_text = await resp.text()
                 logger.debug(
-                    "pollQRStatus: HTTP %d body=%s",
+                    "pollQRStatus: HTTP %d response_chars=%d",
                     resp.status,
-                    raw_text[:200],
+                    len(raw_text),
                 )
                 if not resp.ok:
-                    raise RuntimeError(f"Failed to poll QR status: {resp.status} {resp.reason}")
+                    raise RuntimeError(f"Failed to poll QR status: HTTP {resp.status}")
                 return json.loads(raw_text)
     except (aiohttp.ServerTimeoutError, TimeoutError):
         logger.debug(
