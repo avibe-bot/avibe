@@ -1,7 +1,7 @@
 """Prepare Skill catalog readers without changing any observation writes.
 
 Revision ID: 20261112_0087
-Revises: 20261108_0083
+Revises: 20261112_0084
 
 Independent empty table only: no history scan, backfill, or epoch transition.
 """
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "20261112_0087"
-down_revision = "20261108_0083"
+down_revision = "20261112_0084"
 branch_labels = None
 depends_on = None
 MIGRATION_SAFETY = "additive"
