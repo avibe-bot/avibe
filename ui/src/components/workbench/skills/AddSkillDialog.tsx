@@ -252,6 +252,7 @@ export function AddSkillDialogView({
   return (
     <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogContent
+        keepOnOutsideClick
         closeLabel={t('common.close')}
         // A card near the top on a phone, not a bottom sheet: it grows in place.
         mobilePresentation="card"

@@ -33,6 +33,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { DialogOverlay } from '@/components/ui/dialog';
+import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
 import { ApiKeySourceForm } from '@/components/settings/models/ApiKeySourceForm';
 import {
   apiKeySourceCreate,
@@ -406,7 +407,7 @@ export const AddSourceDialog: React.FC<{
         <DialogPrimitive.Content
           className="setup-add-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col outline-none"
           onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-          onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          onPointerDownOutside={keepOpenOnOutsideClick}
         >
           <header className="setup-add-head">
             <div className="flex items-start justify-between gap-3">

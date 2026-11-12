@@ -19,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { DialogOverlay } from '@/components/ui/dialog';
+import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
 import { ApiKeyField } from '@/components/settings/models/ApiKeySourceForm';
 import type { GuardPlan } from '@/components/settings/models/GuardImpact';
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from '@/components/settings/models/guardedWrite';
@@ -149,7 +150,7 @@ export const SourceKeyDialog: React.FC<{
           className="setup-add-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col outline-none"
           data-size="compact"
           onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-          onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          onPointerDownOutside={keepOpenOnOutsideClick}
         >
           <header className="setup-add-head">
             <div className="flex items-start justify-between gap-3">

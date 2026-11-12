@@ -751,7 +751,7 @@ export const BackendModelCatalogDialog: React.FC<{
           closeLabel={t('common.close') as string}
           className="model-hub-catalog-dialog flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
           onEscapeKeyDown={(event) => { if (busy || grabbedId) event.preventDefault(); }}
-          onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          keepOnOutsideClick
         >
           <DialogHeader className="model-hub-catalog-head shrink-0 justify-center border-b border-border">
             <DialogTitle className="model-hub-catalog-title">
