@@ -102,6 +102,9 @@ class CacheTracker:
 
     def __init__(self) -> None:
         self.latest: dict[tuple[str, str], Mapping[str, Any]] = {}
+        # A runtime checkpoint may omit edits of discarded results. Their
+        # diagnostic sequence still matters when returning to an older route.
+        self.change_seqs: dict[str, int] = {}
 
     def restore(self, rows: Sequence[ContextEntry], attempts: Sequence[Mapping[str, Any]]) -> None:
         for raw in [*(row.payload.get("cache") for row in rows if row.kind == "response"), *attempts]:
@@ -143,7 +146,9 @@ class CacheTracker:
             if previous.get("prefix") and record["prefix"][0][0] != previous["prefix"][0][0]:
                 record["causes"].append({"kind": "tools_changed"})
             for kind, cause in (("context_edit", "tool_results_cleared"), ("compaction", "checkpoint")):
-                if any(row.kind == kind and row.context_seq > previous["context_seq"] for row in rows):
+                if self.change_seqs.get(kind, 0) > previous["context_seq"] or any(
+                    row.kind == kind and row.context_seq > previous["context_seq"] for row in rows
+                ):
                     record["causes"].append({"kind": cause})
 
     def _expectation(self, record: dict[str, Any]) -> None:

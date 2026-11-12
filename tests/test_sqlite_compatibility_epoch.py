@@ -32,6 +32,7 @@ def bridge_graph(tmp_path, monkeypatch):
     Only the marker-only epoch-2 transition is omitted; dropping later additive
     revisions would leave today's required tables absent from these fixtures.
     Production epoch-2 behavior is exercised in test_tool_trace_suppression.
+    This source fixture is not evidence about a published historical binary.
     """
     graph = tmp_path / "bridge-alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))

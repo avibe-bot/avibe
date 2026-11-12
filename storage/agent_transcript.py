@@ -84,6 +84,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from core.agent_core.harness.fork import fork_point, latest_cut
 from core.agent_core.harness.projection import open_tool_calls
+from core.agent_core.harness.runtime import RunTranscript
 from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
@@ -254,6 +255,34 @@ class SQLiteTranscriptStore:
 
     async def load(self, session_id: str) -> Sequence[ContextEntry]:
         return await asyncio.to_thread(self._load, session_id)
+
+    async def load_for_run(self, session_id: str) -> RunTranscript:
+        """Read the checkpoint window and runtime facts, not the Session's lifetime.
+
+        A released checkpoint without derived metadata is certified once off-loop.
+        Publication compares the metadata read in that snapshot, so a concurrent
+        repair or unrelated metadata writer cannot be overwritten.
+        """
+        snapshot, publications = await asyncio.to_thread(self._load_runtime, session_id)
+        if publications:
+            def publish(conn: Connection) -> None:
+                for row_id, expected, updated in publications:
+                    conn.execute(
+                        agent_events.update()
+                        .where(agent_events.c.id == row_id, agent_events.c.metadata_json == expected)
+                        .values(metadata_json=updated)
+                    )
+
+            await self._write(session_id, publish)
+        return snapshot
+
+    def _load_runtime(self, session_id: str):
+        from storage.agent_runtime_transcript import read_runtime
+
+        with self._engine.begin() as conn:
+            if not conn.connection.dbapi_connection.in_transaction:
+                conn.exec_driver_sql("BEGIN")
+            return read_runtime(conn, session_id)
 
     async def load_turn(self, session_id: str, turn_id: str) -> Sequence[ContextEntry]:
         """Load one durable Turn's own context, excluding older history and fork ancestry."""

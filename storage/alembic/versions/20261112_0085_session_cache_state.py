@@ -1,13 +1,13 @@
 """Prepare per-Session cache prefix state without rewriting transcript history.
 
 Revision ID: 20261112_0085
-Revises: 20261108_0083
+Revises: 20261112_0084
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "20261112_0085"
-down_revision = "20261108_0083"
+down_revision = "20261112_0084"
 branch_labels = None
 depends_on = None
 MIGRATION_SAFETY = "additive"
