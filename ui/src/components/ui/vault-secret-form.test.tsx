@@ -16,6 +16,7 @@ const api = vi.hoisted(() => ({
   listVaultSecrets: vi.fn(async () => ({ secrets: [] })),
   listSkills: vi.fn(async () => ({ skills: [] })),
   createVaultSecret: vi.fn(),
+  updateVaultSecret: vi.fn(async () => ({ ok: true })),
   getVaultPubkey: vi.fn(async () => ({ public_key: 'public', fingerprint: 'fingerprint' })),
   deriveSigningAddresses: vi.fn(async () => ({ ok: true, addresses: {} })),
   connectWorkbenchEvents: vi.fn(() => vi.fn()),
@@ -484,4 +485,49 @@ it('shows the chain of a Solana key in Edit, where it cannot be changed', () => 
   expect(screen.queryByRole('radio', { name: en.vaults.dialog.chainSolana })).toBeNull();
   rerender(form(<VaultSecretForm editSecret={{ ...key, name: 'ETH_KEY', signing_curve: 'secp256k1' }} onCancel={vi.fn()} onCreated={vi.fn()} />));
   expect(screen.queryByText(en.vaults.dialog.chainSolana)).toBeNull();
+});
+
+const standardKey: VaultSecret = {
+  name: 'ETH_KEY', tags: [], kind: 'keypair', protection: 'standard', signer_kind: 'local', signing_curve: 'secp256k1',
+  source: 'user', policy: {}, last_used_at: null, use_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+};
+const askSwitch = () => screen.getByRole('switch', { name: en.vaults.dialog.alwaysAskSign }) as HTMLButtonElement;
+const save = () => fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.save }));
+
+it('lets Edit turn on ask-before-signing for a standard key, saying it cannot be turned off yet', async () => {
+  api.updateVaultSecret.mockClear();
+  render(form(<VaultSecretForm editSecret={standardKey} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+  expect(askSwitch().getAttribute('aria-checked')).toBe('false');
+  expect(screen.queryByText(en.vaults.dialog.alwaysAskSignOneWay)).toBeNull();
+  fireEvent.click(askSwitch());
+  expect(screen.getByText(en.vaults.dialog.alwaysAskSignOneWay)).toBeTruthy();
+  save();
+  await waitFor(() => expect(api.updateVaultSecret).toHaveBeenCalledOnce());
+  expect(api.updateVaultSecret.mock.calls[0][1]).toMatchObject({ always_ask: true });
+});
+
+it('does not send ask-before-signing when Edit leaves it off', async () => {
+  api.updateVaultSecret.mockClear();
+  render(form(<VaultSecretForm editSecret={standardKey} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+  save();
+  await waitFor(() => expect(api.updateVaultSecret).toHaveBeenCalledOnce());
+  expect(api.updateVaultSecret.mock.calls[0][1]).not.toHaveProperty('always_ask');
+});
+
+it('shows ask-before-signing locked on once it is on, and never sends it off', async () => {
+  api.updateVaultSecret.mockClear();
+  render(form(<VaultSecretForm editSecret={{ ...standardKey, policy: { always_ask: true } }} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+  expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+  expect(askSwitch().disabled).toBe(true);
+  expect(screen.getByText(en.vaults.dialog.alwaysAskSignLocked)).toBeTruthy();
+  save();
+  await waitFor(() => expect(api.updateVaultSecret).toHaveBeenCalledOnce());
+  expect(api.updateVaultSecret.mock.calls[0][1]).not.toHaveProperty('always_ask');
+});
+
+it('offers no ask-before-signing edit for protected keys or static secrets', () => {
+  const { rerender } = render(form(<VaultSecretForm editSecret={{ ...standardKey, protection: 'protected' }} onCancel={vi.fn()} onCreated={vi.fn()} />));
+  expect(screen.queryByRole('switch', { name: en.vaults.dialog.alwaysAskSign })).toBeNull();
+  rerender(form(<VaultSecretForm editSecret={{ ...standardKey, name: 'API_KEY', kind: 'static', signer_kind: null, fields: ['value'], default_field: 'value' } as VaultSecret} onCancel={vi.fn()} onCreated={vi.fn()} />));
+  expect(screen.queryByRole('switch', { name: en.vaults.dialog.alwaysAskSign })).toBeNull();
 });

@@ -387,6 +387,7 @@ export const VaultSecretForm: React.FC<{
     setFetchAuthMode(pol.auth?.type ?? 'bearer');
     setFetchAuthName(pol.auth?.name ?? '');
     setAdvancedOpen(Boolean(pol.allowed_hosts?.length || pol.auth));
+    setAlwaysAsk((editSecret.policy as { always_ask?: unknown } | undefined)?.always_ask === true);
   }, [editSecret]);
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
@@ -414,6 +415,14 @@ export const VaultSecretForm: React.FC<{
   }, [isHd, signingSource, hdCheck, hdPassphrase]);
   const isProvision = Boolean(fixedName);
   const isEdit = Boolean(editSecret);
+  // Editing an ordinary standard keypair may turn ask-before-signing on, never off: turning it
+  // off will need a Passkey confirmation that is not built yet (docs/plans/vault-signing-policy.md).
+  const editAskWasOn = (editSecret?.policy as { always_ask?: unknown } | undefined)?.always_ask === true;
+  const editAskEditable =
+    Boolean(editSecret) &&
+    editSecret?.kind === 'keypair' &&
+    editSecret?.protection === 'standard' &&
+    (editSecret?.signer_kind == null || editSecret?.signer_kind === 'local');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
@@ -781,7 +790,11 @@ export const VaultSecretForm: React.FC<{
           fetchAuthName,
           preserveBearerAuth: existingPolicy.auth?.type === 'bearer',
         });
-        const result = await api.updateVaultSecret(editSecret.name, patch, { handleError: false });
+        const result = await api.updateVaultSecret(
+          editSecret.name,
+          editAskEditable && alwaysAsk && !editAskWasOn ? { ...patch, always_ask: true } : patch,
+          { handleError: false },
+        );
         if (!result.ok) {
           setError(vaultErrorMessage(t, result, t('vaults.dialog.errors.updateFailed')));
           return;
@@ -1447,6 +1460,28 @@ export const VaultSecretForm: React.FC<{
         </label>
 
         {tagsField}
+
+        {editAskEditable ? (
+          <div className="flex flex-col gap-1.5 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 shadow-elevation-0">
+            <div className="flex items-center gap-3">
+              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span className="text-[13px] font-semibold text-foreground">{t('vaults.dialog.alwaysAskSign')}</span>
+                <InfoHint hover content={t('vaults.dialog.alwaysAskSignHelp')} label={t('vaults.dialog.moreInfo')} />
+              </span>
+              <Switch
+                checked={alwaysAsk}
+                onCheckedChange={setAlwaysAsk}
+                disabled={submitting || editAskWasOn}
+                label={t('vaults.dialog.alwaysAskSign')}
+              />
+            </div>
+            {editAskWasOn ? (
+              <span className="text-[11px] text-muted">{t('vaults.dialog.alwaysAskSignLocked')}</span>
+            ) : alwaysAsk ? (
+              <span className="text-[11px] font-medium text-accent-ink">{t('vaults.dialog.alwaysAskSignOneWay')}</span>
+            ) : null}
+          </div>
+        ) : null}
 
         {!isKeypair && advancedSection}
 
