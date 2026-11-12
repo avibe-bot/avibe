@@ -3252,6 +3252,7 @@ def create_secret(
     source: str = "manual",
     policy: dict[str, Any] | None = None,
     public_meta: dict[str, Any] | None = None,
+    account0_always_ask: Any = _UNSET,
     fields: list[dict[str, Any]] | None = None,
     default_field: str | None = None,
     establishing_vmk: bool = False,
@@ -3269,7 +3270,14 @@ def create_secret(
 
     ``policy`` is a non-secret JSON dict (e.g. ``allowed_hosts`` + ``auth`` scheme for
     the brokered ``fetch`` mode); it never contains the value.
+    HD creators may opt account 0 into confirmation on the initial INSERT. This
+    does not grant any authority to edit an existing wallet's signing policy.
     """
+    if account0_always_ask is not _UNSET:
+        if signer_kind != vault_hd.SIGNER_KIND or kind != "keypair" or protection != "standard":
+            raise InvalidRequestError("account0_always_ask is only valid for standard HD seed imports")
+        if type(account0_always_ask) is not bool:
+            raise InvalidRequestError("account0_always_ask must be a boolean")
     if not vault_crypto.is_valid_secret_name(name):
         raise InvalidSecretNameError(name)
     if protection not in {"standard", "protected"}:
@@ -3337,6 +3345,11 @@ def create_secret(
             ])
             if accounts != expected:
                 raise ValueError("new HD wallets start with only account 0 enabled and default account settings")
+            # Apply only the explicit initial policy to canonical, fresh metadata,
+            # before the INSERT/audit/provision callbacks can observe this wallet.
+            if account0_always_ask is not _UNSET:
+                expected[0]["always_ask"] = account0_always_ask
+            public_meta["hd_accounts"] = expected
         except ValueError as exc:
             raise InvalidSigningKeyError(str(exc)) from exc
     elif "hd_accounts" in public_meta:

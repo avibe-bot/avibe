@@ -101,6 +101,169 @@ def test_create_stores_one_typed_row_with_avault_public_keys_only(custody):
     assert len(rows(vault_audit)) == 1
 
 
+@pytest.mark.parametrize("chain", ["evm", "bitcoin", "solana"])
+def test_create_policy_is_protected_before_audit_fulfilment_and_publication(custody, monkeypatch, chain):
+    observed = []
+    original_audit = vault_service.audit
+    original_fulfil = vault_service.fulfill_pending_provision_requests_for_secret
+
+    def assert_stored(conn, phase):
+        row = conn.execute(select(vault_secrets)).mappings().one()
+        accounts = json.loads(row["public_meta"])["hd_accounts"]
+        assert accounts[0]["always_ask"] is True
+        assert all(item["always_ask"] is False for item in accounts[1:])
+        observed.append(phase)
+
+    def audit(conn, event, **kwargs):
+        if event == "created":
+            assert_stored(conn, "audit")
+        return original_audit(conn, event, **kwargs)
+
+    def fulfil(conn, name, **kwargs):
+        assert_stored(conn, "fulfil")
+        return original_fulfil(conn, name, **kwargs)
+
+    def publish(**_kwargs):
+        if "publish" in observed:
+            return
+        observed.append("publish")
+        assert meta()["accounts"][0]["always_ask"] is True
+        # Reproduce the earliest post-commit consumer, before create returns.
+        custody.reply = signature(chain, 0)
+        pending = api.vault_sign(sign_input(chain))
+        assert pending["code"] == "approval_required"
+        assert pending["request"]["delivery"]["derivation"] == {"chain": chain, "account": 0}
+
+    monkeypatch.setattr(vault_service, "audit", audit)
+    monkeypatch.setattr(vault_service, "fulfill_pending_provision_requests_for_secret", fulfil)
+    monkeypatch.setattr(api, "_publish_vaults_updated", publish)
+    result = api.create_vault_secret({**copy.deepcopy(CREATE), "account0_always_ask": True,
+                                      "expected_account0": expected_account0()})
+    assert result["secret"]["accounts"][0]["always_ask"] is True
+    assert observed == ["audit", "fulfil", "publish"]
+    assert len(custody.calls) == 1 and custody.calls[0][0][0] == "keypair"
+    assert len(rows(vault_requests)) == 1
+    assert not any(row["event"] == "signed" for row in rows(vault_audit))
+    assert meta()["use_count"] == 0
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false", [], {}])
+def test_create_policy_rejects_non_boolean_before_custody(custody, value):
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret({**copy.deepcopy(CREATE), "account0_always_ask": value})
+    assert error.value.code == "invalid_hd_wallet"
+    assert custody.calls == []
+    assert rows(vault_secrets) == rows(vault_audit) == []
+
+
+@pytest.mark.parametrize("kind,protection", [("static", "standard"), ("static", "protected"),
+                                             ("keypair", "standard"), ("keypair", "protected")])
+@pytest.mark.parametrize("value", [False, True])
+def test_create_policy_non_hd_rejects_even_false(custody, kind, protection, value):
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret({"name": "ORDINARY", "kind": kind, "protection": protection,
+                                 "blind_box": BLIND_BOX, "account0_always_ask": value})
+    assert error.value.code == "invalid_hd_wallet"
+    assert custody.calls == []
+    assert rows(vault_secrets) == rows(vault_audit) == []
+
+
+@pytest.mark.parametrize("extra", [{}, {"account0_always_ask": False}])
+def test_create_policy_omitted_or_false_preserves_direct_signing(custody, extra):
+    result = api.create_vault_secret({**copy.deepcopy(CREATE), **extra})
+    assert result["secret"]["accounts"][0]["always_ask"] is False
+    custody.calls.clear()
+    custody.reply = signature("evm", 0)
+    assert api.vault_sign(sign_input())["signature"] == custody.reply
+    assert len(custody.calls) == 1
+    assert rows(vault_requests) == []
+
+
+def test_create_policy_creator_may_raise_initial_policy_but_not_edit_existing(custody):
+    editor = resource_access_service.ResourceUserContext(instance_role="editor", subject="creator", is_remote=True)
+    assert not editor.can_manage_instance
+    result = api.create_vault_secret({**copy.deepcopy(CREATE), "account0_always_ask": True}, user_context=editor)
+    assert result["secret"]["accounts"][0]["always_ask"] is True
+    with pytest.raises(api.VaultApiError) as error:
+        api.update_vault_hd_account(CREATE["name"], {"name": "Changed"}, account=0, user_context=editor)
+    assert error.value.status == 403
+    assert meta()["accounts"][0]["always_ask"] is True
+
+
+def test_create_policy_viewer_is_refused_before_custody(custody, monkeypatch):
+    publish = Mock()
+    monkeypatch.setattr(api, "_publish_vaults_updated", publish)
+    viewer = resource_access_service.ResourceUserContext(instance_role="viewer")
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret({**copy.deepcopy(CREATE), "account0_always_ask": True}, user_context=viewer)
+    assert error.value.status == 403
+    assert custody.calls == []
+    assert rows(vault_secrets) == rows(vault_audit) == []
+    publish.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_create_policy_storage_rejects_non_boolean_without_writes(custody, value):
+    with api._vault_engine().begin() as conn:
+        with pytest.raises(vault_service.InvalidRequestError, match="boolean"):
+            vault_service.create_secret(conn, name=CREATE["name"], kind="keypair", signer_kind="hd-seed",
+                                        sealed=Sealed(**FIXTURE["import_response"]["envelope"]),
+                                        account0_always_ask=value)
+        assert conn.execute(select(vault_secrets)).first() is None
+        assert conn.execute(select(vault_audit)).first() is None
+
+
+@pytest.mark.parametrize("value", [False, True])
+def test_create_policy_storage_rejects_non_hd_without_writes(custody, value):
+    with api._vault_engine().begin() as conn:
+        with pytest.raises(vault_service.InvalidRequestError, match="HD seed"):
+            vault_service.create_secret(conn, name="ORDINARY", sealed=Sealed("opaque", "opaque", "opaque"),
+                                        account0_always_ask=value)
+        assert conn.execute(select(vault_secrets)).first() is None
+
+
+def test_create_policy_fulfilment_failure_rolls_back_and_never_publishes(custody, monkeypatch):
+    before_policies = rows(resource_access_policies)
+    publish = Mock()
+    monkeypatch.setattr(api, "_publish_vaults_updated", publish)
+    monkeypatch.setattr(vault_service, "fulfill_pending_provision_requests_for_secret",
+                        Mock(side_effect=RuntimeError("synthetic fulfilment failure")))
+    with pytest.raises(RuntimeError, match="synthetic fulfilment failure"):
+        api.create_vault_secret({**copy.deepcopy(CREATE), "account0_always_ask": True})
+    assert rows(vault_secrets) == rows(vault_audit) == []
+    assert rows(resource_access_policies) == before_policies
+    publish.assert_not_called()
+
+
+def test_create_policy_lost_response_retains_protection(custody, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(api, "_publish_vaults_updated", Mock(side_effect=RuntimeError("synthetic lost response")))
+        with pytest.raises(RuntimeError, match="synthetic lost response"):
+            api.create_vault_secret({**copy.deepcopy(CREATE), "account0_always_ask": True})
+    custody.calls.clear()
+    assert meta()["accounts"][0]["always_ask"] is True
+    assert api.vault_sign(sign_input())["code"] == "approval_required"
+    assert custody.calls == []
+    # A retry cannot clear the committed policy by omitting the initial setting.
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret(copy.deepcopy(CREATE))
+    assert error.value.code == "secret_exists"
+    assert meta()["accounts"][0]["always_ask"] is True
+
+
+def test_create_policy_http_response_is_protected_without_followup_patch(custody):
+    from vibe.ui_server import app
+
+    client = app.test_client()
+    response = client.post("/api/vault/secrets", json={**copy.deepcopy(CREATE), "account0_always_ask": True},
+                           headers=csrf_headers(client))
+    assert response.status_code == 200
+    assert response.get_json()["secret"]["accounts"][0]["always_ask"] is True
+    custody.calls.clear()
+    assert api.vault_sign(sign_input())["code"] == "approval_required"
+    assert custody.calls == []
+
+
 @pytest.mark.parametrize("change", [
     {"protection": "protected"}, {"kind": "static"}, {"signer_kind": "local"},
     {"keypair": {"type": "hd-seed", "source": "generate", "format": "raw-seed"}},
