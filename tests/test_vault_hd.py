@@ -1,0 +1,477 @@
+"""HD custody consumer contracts, at real storage/API/CLI boundaries.
+
+A fixed public-only avault master fixture supplies keys/signatures independently
+of this implementation. Existing single-key tests pin the legacy wire behavior;
+these cases protect the new account routing, per-use binding and atomic import.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import os
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+from sqlalchemy import select
+
+from storage import resource_access_service, vault_hd, vault_service
+from storage.models import vault_audit, vault_requests, vault_secrets
+from storage.vault_crypto import Sealed
+from tests.ui_server_test_helpers import csrf_headers
+from vibe import api, cli
+
+FIXTURE = json.loads((Path(__file__).parent / "fixtures/vault_signing/hd-seed-wallet.json").read_text())
+BLIND_BOX = {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "test-enc", "ct": "test-ct"}
+CREATE = {
+    "name": "HD_TEST_WALLET", "kind": "keypair", "signer_kind": "hd-seed", "protection": "standard",
+    "keypair": {"type": "hd-seed", "source": "import", "format": "raw-seed"}, "blind_box": BLIND_BOX,
+}
+DIGEST = "01" * 32
+MESSAGE = "deadbeef"
+
+
+@pytest.fixture
+def custody(monkeypatch):
+    fake = SimpleNamespace(version="0.1.11", calls=[], reply=copy.deepcopy(FIXTURE["import_response"]), hook=None)
+
+    def run(args, *, stdin=None, **_kwargs):
+        fake.calls.append((list(args), json.loads(stdin) if stdin else None))
+        if fake.hook:
+            fake.hook()
+        return SimpleNamespace(returncode=0, stdout=json.dumps(fake.reply), stderr="")
+
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": fake.version})
+    monkeypatch.setattr(api, "_run_avault", run)
+    monkeypatch.setattr(api, "_notify_vault_request_created", Mock())
+    monkeypatch.setattr(cli, "_publish_cli_vaults_updated", Mock())
+    return fake
+
+
+def create(custody):
+    result = api.create_vault_secret(copy.deepcopy(CREATE))["secret"]
+    custody.calls.clear()
+    return result
+
+
+def rows(table):
+    with api._vault_engine().connect() as conn:
+        return [dict(row) for row in conn.execute(select(table)).mappings()]
+
+
+def meta():
+    with api._vault_engine().connect() as conn:
+        return vault_service.get_secret_meta(conn, "HD_TEST_WALLET")
+
+
+def sign_input(chain="evm", account=0):
+    return {"name": "HD_TEST_WALLET", "chain": chain, "account": account, **(
+        {"message_hex": MESSAGE} if chain == "solana" else {"digest": DIGEST}
+    )}
+
+
+def signature(chain, account):
+    return next(item["signature"] for item in FIXTURE["signatures"] if item["chain"] == chain and item["account"] == account)
+
+
+def test_create_stores_one_typed_row_with_avault_public_keys_only(custody):
+    result = api.create_vault_secret(copy.deepcopy(CREATE))["secret"]
+    assert custody.calls == [(
+        ["keypair", "import", "--name", "HD_TEST_WALLET", "--type", "hd-seed", "--format", "raw-seed", "--blind-box"],
+        BLIND_BOX,
+    )]
+    row, = rows(vault_secrets)
+    assert (row["kind"], row["signer_kind"], row["protection"]) == ("keypair", "hd-seed", "standard")
+    assert {key: row[key] for key in ("ciphertext", "nonce", "wrap_meta")} == FIXTURE["import_response"]["envelope"]
+    accounts = json.loads(row["public_meta"])["hd_accounts"]
+    assert len(accounts) == 20
+    assert [item["account"] for item in accounts if item["enabled"]] == [0]
+    assert result["account_limit"] == 20
+    assert result["per_use_sign"] and not result["access_grantable"]
+    assert result["accounts"][0]["name"] is None
+    assert result["accounts"][0]["last_signer"] is None
+    assert {key: result["accounts"][0][key] for key in ("account", "eth", "btc_taproot", "solana")} == FIXTURE["expected_addresses"][0]
+    assert "public_key" not in json.dumps(result)
+    assert len(rows(vault_audit)) == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"protection": "protected"}, {"kind": "static"}, {"signer_kind": "local"},
+    {"keypair": {"type": "hd-seed", "source": "generate", "format": "raw-seed"}},
+    {"keypair": None}, {"blind_box": None}, {"seed": "not-accepted"},
+    {"public_meta": {"hd_accounts": []}}, {"public_meta": {"signing_public_key": {}}},
+    {"policy": {"always_ask": True}}, {"sealed": {}},
+])
+def test_import_rejects_fallbacks_and_client_keys_before_custody(custody, change):
+    with pytest.raises(api.VaultApiError):
+        api.create_vault_secret({**copy.deepcopy(CREATE), **change})
+    assert custody.calls == []
+    assert rows(vault_secrets) == []
+    assert rows(vault_audit) == []
+
+
+@pytest.mark.parametrize("case", ["short", "duplicate", "wrong-key", "wrong-type", "wrong-envelope", "wrong-ciphertext"])
+def test_malformed_custody_response_leaves_no_partial_row(custody, case):
+    if case == "short":
+        custody.reply["accounts"].pop()
+    elif case == "duplicate":
+        custody.reply["accounts"][1]["account"] = 0
+    elif case == "wrong-key":
+        custody.reply["accounts"][19]["bitcoin"] = "00" * 33
+    elif case == "wrong-type":
+        custody.reply["type"] = "secp256k1"
+    elif case == "wrong-envelope":
+        wrap = json.loads(custody.reply["envelope"]["wrap_meta"])
+        wrap["scheme"] = "machine-aesgcm-v1"
+        custody.reply["envelope"]["wrap_meta"] = json.dumps(wrap)
+    else:
+        custody.reply["envelope"]["ciphertext"] = "AA=="
+    with pytest.raises(api.VaultApiError, match="malformed"):
+        api.create_vault_secret(copy.deepcopy(CREATE))
+    assert rows(vault_secrets) == []
+    assert rows(vault_audit) == []
+
+
+def test_duplicate_create_never_calls_custody_again(custody):
+    create(custody)
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret(copy.deepcopy(CREATE))
+    assert error.value.code == "secret_exists"
+    assert custody.calls == []
+    assert len(rows(vault_secrets)) == 1
+
+
+@pytest.mark.parametrize("entrypoint", ["create", "inline", "request", "cli"])
+@pytest.mark.parametrize("version", ["0.1.10", None])
+def test_hd_version_floor_fails_before_custody_or_pending_request(custody, capfd, entrypoint, version):
+    if entrypoint != "create":
+        create(custody)
+        api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": True}, account=0)
+    custody.version = version
+    if entrypoint == "cli":
+        args = cli.build_parser().parse_args(["vault", "sign", "HD_TEST_WALLET", "--chain", "evm", "--digest", DIGEST])
+        assert cli.cmd_vault_sign(args) == 1
+        assert json.loads(capfd.readouterr().err)["code"] == "avault_upgrade_required"
+    else:
+        fn = {"create": api.create_vault_secret, "inline": api.vault_sign, "request": api.request_vault_sign}[entrypoint]
+        with pytest.raises(api.VaultApiError) as error:
+            fn(copy.deepcopy(CREATE) if entrypoint == "create" else sign_input())
+        assert error.value.code == "avault_upgrade_required"
+        assert "0.1.11" in str(error.value)
+    assert custody.calls == []
+    assert rows(vault_requests) == []
+    if entrypoint == "create":
+        assert rows(vault_secrets) == []
+
+
+def test_account_enable_edit_cap_and_search_are_public_metadata_only(custody):
+    create(custody)
+    enabled = api.update_vault_hd_account("HD_TEST_WALLET", {})["secret"]
+    assert [item["account"] for item in enabled["accounts"]] == [0, 1]
+    expected = FIXTURE["expected_addresses"][1]
+    assert {key: enabled["accounts"][1][key] for key in expected} == expected
+    api.update_vault_hd_account("HD_TEST_WALLET", {"name": "  Spending  ", "always_ask": True}, account=1)
+    assert meta()["accounts"][1]["name"] == "Spending"
+    assert meta()["accounts"][1]["always_ask"] is True
+    assert meta()["accounts"][0]["always_ask"] is False
+    api.update_vault_secret("HD_TEST_WALLET", {"description": "Test wallet"})
+    api.update_vault_hd_account("HD_TEST_WALLET", {"name": None}, account=1)
+    assert meta()["description"] == "Test wallet"
+    assert meta()["accounts"][1]["name"] is None
+    with api._vault_engine().connect() as conn:
+        assert len(vault_service.list_secrets(conn, query=expected["btc_taproot"])) == 1
+    for _ in range(18):
+        api.update_vault_hd_account("HD_TEST_WALLET", {})
+    assert meta()["accounts"][-1]["account"] == 19
+    with pytest.raises(api.VaultApiError, match="20"):
+        api.update_vault_hd_account("HD_TEST_WALLET", {})
+    assert custody.calls == []
+
+
+@pytest.mark.parametrize("account,changes", [
+    (1, {"name": "Disabled"}), (True, {"always_ask": True}), (20, {"name": "Bad"}),
+    (0, {"always_ask": "false"}), (0, {"name": " "}), (0, {"name": "x" * 81}),
+    (0, {"evm": "forged"}), (None, {"always_ask": True}), (0, {}),
+])
+def test_invalid_account_edits_do_not_mutate(custody, account, changes):
+    before = create(custody)
+    with pytest.raises(api.VaultApiError):
+        api.update_vault_hd_account("HD_TEST_WALLET", changes, account=account)
+    assert meta() == before
+    assert custody.calls == []
+
+
+def test_account_mutation_requires_management_and_serializes_enables(custody):
+    create(custody)
+    viewer = resource_access_service.ResourceUserContext(instance_role="viewer")
+    with pytest.raises(api.VaultApiError) as error:
+        api.update_vault_hd_account("HD_TEST_WALLET", {}, user_context=viewer)
+    assert error.value.status == 403
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: api.update_vault_hd_account("HD_TEST_WALLET", {}), range(2)))
+    assert sorted(len(result["secret"]["accounts"]) for result in results) == [2, 3]
+    assert [item["account"] for item in meta()["accounts"]] == [0, 1, 2]
+    assert custody.calls == []
+
+
+@pytest.mark.parametrize("chain", ["evm", "bitcoin", "solana"])
+@pytest.mark.parametrize("account", [0, 1])
+@pytest.mark.parametrize("approval", [False, True])
+def test_signs_only_selected_account_and_records_original_session(custody, chain, account, approval):
+    create(custody)
+    api.update_vault_hd_account("HD_TEST_WALLET", {})
+    api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": approval}, account=account)
+    custody.reply = signature(chain, account)
+    payload = {**sign_input(chain, account), "requester": {"session_id": "session-original"}}
+    if approval:
+        pending = api.vault_sign(payload)
+        assert pending["code"] == "approval_required"
+        request = pending["request"]
+        assert request["delivery"]["derivation"] == {"chain": chain, "account": account}
+        assert request["card"]["account"]["account"] == account
+        assert request["delivery"]["operation_context"]["release"]["derivation"] == {"chain": chain, "account": account}
+        assert custody.calls == []
+        payload = {**sign_input(chain, account), "request_id": request["id"], "requester": {"session_id": "approving-browser"}}
+    result = api.vault_sign(payload)
+    assert result["ok"] and result["signature"] == custody.reply
+    command, wire = custody.calls[0]
+    assert command == ["sign"]
+    assert wire == {
+        "name": "HD_TEST_WALLET", "key_envelope": FIXTURE["import_response"]["envelope"],
+        "scheme": vault_hd.SCHEMES[chain], "derivation": {"chain": chain, "account": account},
+        **({"message_hex": MESSAGE} if chain == "solana" else {"digest": DIGEST}),
+    }
+    account_meta = meta()["accounts"][account]
+    assert account_meta["last_signer"]["session_id"] == "session-original"
+    assert meta()["accounts"][1 - account]["last_signer"] is None
+    signed, = [row for row in rows(vault_audit) if row["event"] == "signed"]
+    assert json.loads(signed["delivery"])["derivation"] == {"chain": chain, "account": account}
+    assert json.loads(signed["requester"])["session_id"] == "session-original"
+    if approval:
+        with pytest.raises(api.VaultApiError):
+            api.vault_sign(payload)
+        assert len(custody.calls) == 1
+
+
+@pytest.mark.parametrize("chain", ["evm", "bitcoin", "solana"])
+def test_wrong_account_signature_never_delivered_or_audited(custody, chain):
+    create(custody)
+    custody.reply = signature(chain, 1)
+    with pytest.raises(api.VaultApiError):
+        api.vault_sign(sign_input(chain, 0))
+    assert meta()["use_count"] == 0
+    assert meta()["accounts"][0]["last_signer"] is None
+    assert not any(row["event"] == "signed" for row in rows(vault_audit))
+
+
+@pytest.mark.parametrize("change", [
+    {"chain": None}, {"chain": "ethereum"}, {"account": 1}, {"account": 20},
+    {"account": -1}, {"account": True}, {"account": "0"},
+    {"scheme": "schnorr-secp256k1-bip340"}, {"message_hex": MESSAGE},
+])
+def test_invalid_sign_selection_fails_before_custody_or_request(custody, change):
+    create(custody)
+    with pytest.raises(api.VaultApiError):
+        api.vault_sign({**sign_input(), **change})
+    assert custody.calls == []
+    assert rows(vault_requests) == []
+
+
+@pytest.mark.parametrize("mutation", ["account", "chain", "context", "key", "envelope", "identity"])
+def test_approval_cannot_switch_its_persisted_target(custody, mutation):
+    create(custody)
+    api.update_vault_hd_account("HD_TEST_WALLET", {})
+    api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": True}, account=0)
+    pending = api.vault_sign(sign_input())["request"]
+    payload = {**sign_input(), "request_id": pending["id"]}
+    if mutation in {"account", "chain", "context"}:
+        payload.update({"account": 1} if mutation == "account" else {"chain": "bitcoin"} if mutation == "chain" else {
+            "signing_context": {"kind": "evm-transaction", "digestAlgorithm": "keccak256", "chainId": "1", "unsignedTransaction": "0x01", "digest": DIGEST},
+        })
+    else:
+        with api._vault_engine().begin() as conn:
+            row = vault_service.require_secret_access(conn, "HD_TEST_WALLET")
+            if mutation == "key":
+                public = json.loads(row["public_meta"])
+                public["hd_accounts"][0]["evm"] = public["hd_accounts"][1]["evm"]
+                changes = {"public_meta": json.dumps(public)}
+            else:
+                changes = {"nonce": "other-envelope"} if mutation == "envelope" else {"id": "replacement-record"}
+            conn.execute(vault_secrets.update().where(vault_secrets.c.name == "HD_TEST_WALLET").values(**changes))
+    with pytest.raises(api.VaultApiError, match="does not match"):
+        api.vault_sign(payload)
+    assert custody.calls == []
+    assert rows(vault_requests)[0]["status"] == "pending"
+
+
+def test_failed_or_keychain_interrupted_approval_does_not_change_accounts(custody, monkeypatch):
+    create(custody)
+    api.update_vault_hd_account("HD_TEST_WALLET", {})
+    api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": True}, account=1)
+    payload = sign_input("solana", 1)
+    request = api.vault_sign(payload)["request"]
+    payload["request_id"] = request["id"]
+    original = api._run_avault
+
+    def no_authorization(*args, **kwargs):
+        raise api.AvaultAuthorizationRequiredBeforeHandoffError("authorization required")
+
+    monkeypatch.setattr(api, "_run_avault", no_authorization)
+    with pytest.raises(api.VaultApiError):
+        api.vault_sign(payload)
+    pending = rows(vault_requests)[0]
+    assert pending["status"] == "pending"
+    assert json.loads(pending["delivery"])["derivation"] == {"chain": "solana", "account": 1}
+    monkeypatch.setattr(api, "_run_avault", original)
+    custody.reply = signature("solana", 0)
+    with pytest.raises(api.VaultApiError):
+        api.vault_sign(payload)
+    assert rows(vault_requests)[0]["status"] == "failed"
+    assert meta()["accounts"][1]["last_signer"] is None
+
+
+@pytest.mark.parametrize("approval", [False, True])
+def test_record_replacement_during_signing_never_gets_old_signature_or_usage(custody, approval):
+    create(custody)
+    api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": approval}, account=0)
+    payload = sign_input("solana")
+    if approval:
+        payload["request_id"] = api.vault_sign(payload)["request"]["id"]
+    custody.reply = signature("solana", 0)
+
+    def replace_record():
+        with api._vault_engine().begin() as conn:
+            conn.execute(vault_secrets.update().where(vault_secrets.c.name == "HD_TEST_WALLET").values(id="replacement-record"))
+
+    custody.hook = replace_record
+    with pytest.raises(api.VaultApiError):
+        api.vault_sign(payload)
+    assert meta()["use_count"] == 0
+    assert not any(row["event"] == "signed" for row in rows(vault_audit))
+
+
+def test_hd_cannot_be_reclassified_rotated_revealed_or_value_delivered(custody):
+    create(custody)
+    with api._vault_engine().begin() as conn:
+        with pytest.raises(vault_service.VaultServiceError):
+            vault_service.get_envelope(conn, "HD_TEST_WALLET")
+        with pytest.raises(vault_service.InvalidRequestError):
+            vault_service.update_secret_classification(conn, "HD_TEST_WALLET", kind="static")
+        with pytest.raises(vault_service.InvalidRequestError):
+            vault_service.rotate_secret(conn, "HD_TEST_WALLET", Sealed(**FIXTURE["import_response"]["envelope"]))
+    with pytest.raises(api.VaultApiError):
+        api.create_vault_reveal_context("HD_TEST_WALLET")
+    assert custody.calls == []
+
+
+def test_cli_default_account_list_and_plain_keypair_option_refusal(custody, capfd):
+    create(custody)
+    custody.reply = signature("solana", 0)
+    parser = cli.build_parser()
+    assert cli.cmd_vault_sign(parser.parse_args(["vault", "sign", "HD_TEST_WALLET", "--chain", "solana", "--message-hex", MESSAGE])) == 0
+    result = json.loads(capfd.readouterr().out)
+    assert result["derivation"] == {"chain": "solana", "account": 0}
+    assert cli.cmd_vault_list(parser.parse_args(["vault", "list"])) == 0
+    listed = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert listed["signer_kind"] == "hd-seed"
+    assert set(listed["accounts"][0]) == {"account", "name", "eth", "btc_taproot", "solana"}
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PLAIN", kind="keypair", sealed=Sealed("ct", "nonce", "meta"))
+    before = len(custody.calls)
+    for options in (["--chain", "evm"], ["--account", "0"]):
+        assert cli.cmd_vault_sign(parser.parse_args(["vault", "sign", "PLAIN", "--digest", DIGEST, *options])) == 1
+        assert json.loads(capfd.readouterr().err)["code"] in {"invalid_request", "invalid_signing_key", "invalid_hd_wallet"}
+    assert len(custody.calls) == before
+
+
+def test_cli_reports_the_approval_when_account_policy_changes_after_its_preflight(custody, monkeypatch, capfd):
+    """The API owns the final policy check; a racing toggle cannot become null-signature success."""
+    create(custody)
+    original = api.vault_sign
+
+    def toggle_then_sign(payload):
+        api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": True}, account=0)
+        return original(payload)
+
+    monkeypatch.setattr(api, "vault_sign", toggle_then_sign)
+    args = cli.build_parser().parse_args([
+        "vault", "sign", "HD_TEST_WALLET", "--chain", "evm", "--digest", DIGEST,
+        "--session-id", "original-session", "--command", "verify and sign", "--no-callback",
+    ])
+    assert cli.cmd_vault_sign(args) == 0
+    result = json.loads(capfd.readouterr().out)
+    assert result["kind"] == "vault_sign_request"
+    assert result["request"]["status"] == "pending"
+    assert "signature" not in result
+    request, = rows(vault_requests)
+    requester = json.loads(request["requester"])
+    assert requester["session_id"] == "original-session"
+    assert requester["callback_disabled"] is True
+    assert json.loads(request["delivery"])["command"] == "verify and sign"
+    assert custody.calls == []
+
+
+def test_http_account_routes_use_real_storage_and_reject_nonobjects(custody):
+    from vibe.ui_server import app
+
+    create(custody)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    response = client.post("/api/vault/secrets/HD_TEST_WALLET/accounts", json={}, headers=headers)
+    assert response.status_code == 200
+    assert len(response.get_json()["secret"]["accounts"]) == 2
+    response = client.patch("/api/vault/secrets/HD_TEST_WALLET/accounts/1", json={"name": "Daily", "always_ask": True}, headers=headers)
+    assert response.status_code == 200
+    assert response.get_json()["secret"]["accounts"][1]["name"] == "Daily"
+    response = client.post("/api/vault/secrets/HD_TEST_WALLET/accounts", json=[], headers=headers)
+    assert response.status_code == 400
+    assert len(meta()["accounts"]) == 2
+    assert custody.calls == []
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.environ.get("AVIBE_HD_MASTER_TEST_DIR"), reason="requires an explicit isolated master-build fixture/store")
+def test_real_master_blindbox_import_and_three_chain_signing(monkeypatch):
+    """Opt-in consumer check before the release: only the version probe is overridden.
+
+    The supplied directory must be a test-owned master build with avault-test.sh
+    (env -i, HOME/XDG/AVAULT_HOME isolation, --store file) and the matching public
+    HD fixture. The wrapper, not Python, owns access to its disposable machine key.
+    No production path discovery, keychain access or plaintext seed is involved.
+    """
+    root = Path(os.environ["AVIBE_HD_MASTER_TEST_DIR"]).resolve()
+    fixture = json.loads((root / "hd-public-fixture.json").read_text())
+    assert fixture["name"] == "HD_TEST_WALLET"
+    assert fixture["source"]["commit"] == FIXTURE["source"]["commit"]
+    wrapper = root / "avault-test.sh"
+    wrapper_text = wrapper.read_text()
+    assert "env -i" in wrapper_text and "AVAULT_STORE=file" in wrapper_text and 'AVAULT_HOME="$ROOT/avault-home"' in wrapper_text
+
+    def run(args, *, stdin=None, **_kwargs):
+        return subprocess.run([str(wrapper), *args], input=stdin, capture_output=True, timeout=30, check=False)
+
+    actual_version = run(["--version"]).stdout.decode().strip()
+    assert actual_version == fixture["source"]["version"] == "avault 0.1.10"
+    monkeypatch.setattr(api, "_run_avault", run)
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.1.10"})
+    payload = {**CREATE, "blind_box": fixture["blindbox_import"]["blind_box"]}
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret(payload)
+    assert error.value.code == "avault_upgrade_required"
+    assert rows(vault_secrets) == []
+    # avault#49 deliberately did not bump/release 0.1.11; test the real contract
+    # without adding a development bypass to production code.
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.1.11"})
+    api.create_vault_secret(payload)
+    api.update_vault_hd_account("HD_TEST_WALLET", {})
+    for account in (0, 1):
+        for chain in ("evm", "bitcoin", "solana"):
+            result = api.vault_sign(sign_input(chain, account))
+            assert result["ok"]
+            assert len(result["signature"]["signature"]) == 128
+    assert meta()["use_count"] == 6
+    for index, account in enumerate(meta()["accounts"]):
+        assert {key: account[key] for key in ("account", "eth", "btc_taproot", "solana")} == fixture["expected_addresses"][index]
