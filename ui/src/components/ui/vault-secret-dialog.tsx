@@ -87,7 +87,8 @@ export const VaultSecretDialog: React.FC<{
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent>
+        {/* A form: a click outside must not throw away what was typed (owner, 2026-11-12). */}
+        <DialogContent keepOnOutsideClick>
           {/* Accessible name; the visible heading is the branded header below. */}
           <DialogTitle className="sr-only">{title}</DialogTitle>
           <div className="flex min-w-0 items-start gap-3 pr-6">
