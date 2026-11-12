@@ -823,6 +823,22 @@ describe('ChatPage send while the agent is busy', () => {
     expect(transcriptRowsOf('do this next')[0].getAttribute('data-message-id')).toBe('d1');
   });
 
+  it('drops a queued row from the strip once a turn has taken it into the transcript, before the queue is read again', async () => {
+    await openBusyChat();
+    const { post, result } = send('do this next');
+    const queued = serverRow(post, 'q1', { type: 'queued', state: 'queued' });
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [queued] });
+    await act(async () => post.reply.resolve(Response.json({ ...queued, queued: true }, { status: 201 })));
+    await act(async () => result);
+    expect(queueRowsOf('do this next')).toHaveLength(1);
+
+    // The turn took it: its Message arrives while the strip still holds the old read.
+    mocks.api.listSessionQueue.mockReturnValue(new Promise(() => {}));
+    act(() => mocks.events!.onMessageNew(serverRow(post, 'q1')));
+    expect(queueRowsOf('do this next')).toHaveLength(0);
+    expect(transcriptRowsOf('do this next')).toHaveLength(1);
+  });
+
   it('moves it into the transcript when the server started a turn after all, stream first', async () => {
     await openBusyChat();
     const { post } = send('do this next');

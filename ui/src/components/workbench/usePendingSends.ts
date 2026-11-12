@@ -78,7 +78,7 @@ export const transcriptRowKey = (message: WorkbenchMessage): string => clientMes
 export function usePendingSends(
   sessionId: string | undefined,
   liveMessages: WorkbenchMessage[],
-  liveQueue: WorkbenchMessage[],
+  serverQueue: WorkbenchMessage[],
   { steeringInTranscript = false }: { steeringInTranscript?: boolean } = {},
 ) {
   const [pending, setPending] = useState<PendingSend[]>([]);
@@ -115,6 +115,20 @@ export function usePendingSends(
     ));
   }, []);
 
+  // A queued message a turn has taken is in the transcript before the next queue read drops its row:
+  // drawn in one place, never both (a slow queue read showed it twice for over a second).
+  const liveQueue = useMemo(() => {
+    if (serverQueue.length === 0) return serverQueue;
+    const inTranscript = new Set<string>();
+    for (const row of liveMessages) {
+      if (row.type === 'queued') continue;
+      inTranscript.add(row.id);
+      const clientId = clientMessageIdOf(row);
+      if (clientId) inTranscript.add(clientId);
+    }
+    const kept = serverQueue.filter((row) => !inTranscript.has(row.id) && !inTranscript.has(clientMessageIdOf(row) ?? ''));
+    return kept.length === serverQueue.length ? serverQueue : kept;
+  }, [serverQueue, liveMessages]);
   // A Bot conversation's user rows being steered in are drawn in the transcript, once: not where
   // the Message they become (same client id) is already shown.
   const { messages, queue, steeringIds } = useMemo(() => {
