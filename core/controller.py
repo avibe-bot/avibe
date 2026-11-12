@@ -2477,9 +2477,14 @@ class Controller:
             if search_status == "unsupported" and getattr(self, "_message_search_last_status", None) != search_status:
                 logger.warning("Message search acceleration unavailable; using LIKE without accumulating an index journal")
             self._message_search_last_status = search_status
-        except Exception:
-            # The journal + legacy query remain authoritative if indexing fails.
-            logger.exception("Message search index maintenance failed")
+        except Exception as exc:
+            # Neither Message text nor SQL parameters belong in maintenance logs.
+            original = getattr(exc, "orig", exc)
+            code = getattr(original, "sqlite_errorcode", None)
+            logger.warning(
+                "Message search index maintenance failed (%s, sqlite_code=%s)",
+                type(original).__name__, code if type(code) is int else None,
+            )
         now = time.monotonic()
         if now < getattr(self, "_next_trace_retention_check", 0):
             return {"status": "not_due"}

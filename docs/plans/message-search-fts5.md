@@ -89,8 +89,9 @@ Readiness and the final query share a real SQLite read snapshot through a nested
 savepoint, preserving a caller's existing transaction. This matters when another
 runtime deactivates journaling: old readiness must not be combined with newer
 unjournaled Message writes. Corruption or failure of the derived candidate path
-logs the error and retries the original query once with the same filters. A
-failure of the authoritative query still propagates.
+logs only the error class and numeric SQLite code (never query text, Message
+content, SQL parameters or exception text) and retries the original query once
+with the same filters. A failure of the authoritative query still propagates.
 
 Only ASCII upper/lower equivalence is applied in Python, matching SQLite's
 built-in `lower`; no Unicode folding, accent removal or stemming is introduced.

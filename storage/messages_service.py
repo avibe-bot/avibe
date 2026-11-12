@@ -551,13 +551,17 @@ def search_messages(
 
     try:
         rows = load_rows(True)
-    except DatabaseError:
+    except DatabaseError as exc:
         if not index_attempt:
             raise
         # The accelerator is derived, never an availability gate for the ledger.
         # Retry once with exactly the same access predicates, after rolling back
         # only our savepoint. A failure of the original query still propagates.
-        logger.warning("Message search index failed; retrying authoritative LIKE search", exc_info=True)
+        code = getattr(exc.orig, "sqlite_errorcode", None)
+        logger.warning(
+            "Message search index failed (%s, sqlite_code=%s); retrying authoritative LIKE search",
+            type(exc.orig).__name__, code if type(code) is int else None,
+        )
         rows = load_rows(False)
 
     # Group by session, preserving the newest-match-first row order: the first

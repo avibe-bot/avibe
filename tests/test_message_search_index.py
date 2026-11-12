@@ -321,6 +321,32 @@ def test_unsupported_version_deactivates_journal_then_rebuilds_after_old_writes(
     assert "m0002" not in ids(search(engine))
 
 
+def test_index_failure_log_never_contains_search_text_or_sql_parameters(engine, caplog):
+    from sqlalchemy.exc import DatabaseError
+
+    private_query = "PRIVATE_QUERY_TOKEN_XY17"
+    seed(engine, count=1)
+    with engine.begin() as conn:
+        conn.execute(messages.update().values(content_text=private_query))
+    drain(engine)
+
+    def index_error(conn, cursor, statement, parameters, context, executemany):
+        if "message_search_fts MATCH" in statement:
+            # Both SQLite's message and SQLAlchemy's parameters may contain
+            # private query material; neither belongs in diagnostic logs.
+            raise DatabaseError(statement, parameters, sqlite3.DatabaseError(f"index failed for {private_query}"))
+
+    event.listen(engine, "before_cursor_execute", index_error)
+    try:
+        assert search(engine, private_query)["total"] == 1
+    finally:
+        event.remove(engine, "before_cursor_execute", index_error)
+    assert "retrying authoritative LIKE search" in caplog.text
+    assert private_query not in caplog.text
+    assert "message_search_fts MATCH" not in caplog.text
+    assert '"pri"' not in caplog.text
+
+
 def test_corrupt_ready_index_falls_back_to_same_authorized_results(engine, caplog):
     scope = seed(engine)
     expected = search(engine, scope_ids=[scope], hidden_session_ids=[])
