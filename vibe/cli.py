@@ -19997,12 +19997,10 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message with a keypair secret (standard signs inline; protected needs approval)",
         description=(
-            "Sign with a local keypair. secp256k1 schemes sign a 32-byte --digest. A Solana key signs "
-            "with --scheme ed25519 --message-hex: the exact serialized message bytes, not a digest, so "
-            "do not hash them first. Standard keys sign immediately via avault and return the public "
-            "signature inline. Protected keys — and standard keys marked always-ask — instead create a "
-            "pending per-use request you approve in the browser; then 'vibe vault await <request-id>' "
-            "returns the public signature. Protected Solana keys cannot sign yet."
+            "Sign with a keypair or HD wallet. secp256k1 uses --digest; Solana uses exact "
+            "--message-hex bytes, never a hash. HD wallets require --chain and an enabled account. "
+            "Protected/ask-first keys create browser approvals; read the result with "
+            "'vibe vault await REQUEST_ID' instead of signing again."
         ),
         epilog=(
             "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
