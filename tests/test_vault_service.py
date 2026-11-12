@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import concurrent.futures
 import json
 import threading
@@ -1447,6 +1448,45 @@ def test_webauthn_registration_user_handle_rollback_and_invalid_state_fail_close
     invalid_engine.dispose()
 
 
+
+
+@pytest.mark.parametrize("raw", (b"\x01", bytes(range(64))))
+def test_webauthn_user_handle_decoder_accepts_canonical_boundary_encodings(raw):
+    standard = vault_webauthn.b64encode(raw)
+    urlsafe = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    assert vault_webauthn.decode_user_handle(standard) == raw
+    assert vault_webauthn.decode_user_handle(urlsafe) == raw
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        None,
+        1,
+        [],
+        "",
+        "YQ=",
+        "YQ===",
+        "YR==",
+        vault_webauthn.b64encode(b"a" * 65),
+        vault_webauthn.b64encode(b"a" * 66),
+    ),
+)
+def test_webauthn_user_handle_decoder_rejects_malformed_or_oversized_values(value):
+    with pytest.raises(vault_webauthn.WebAuthnVerificationError):
+        vault_webauthn.decode_user_handle(value)
+
+
+def test_webauthn_user_handle_decoder_rejects_long_input_before_base64_decode(monkeypatch):
+    def unexpected_decode(*_args, **_kwargs):
+        raise AssertionError("base64 decoder must not receive an overlong user handle")
+
+    monkeypatch.setattr(vault_webauthn.base64, "b64decode", unexpected_decode)
+    with pytest.raises(vault_webauthn.WebAuthnVerificationError, match="user handle length"):
+        vault_webauthn.decode_user_handle("A" * 89)
+
+
 def test_webauthn_selected_factor_accepts_legacy_new_null_and_missing_user_handles(vault):
     with vault.begin() as conn:
         first, first_factor = _establish_protected_secret(conn, "HANDLE_ALIASES")
@@ -1483,7 +1523,7 @@ def test_webauthn_selected_factor_accepts_legacy_new_null_and_missing_user_handl
     register_second(b"legacy-handle", 4, user_handle=vault_webauthn.LEGACY_WEBAUTHN_USER_HANDLE)
     register_second(b"new-handle", 5, user_handle=current_handle)
 
-    for sign_count, user_handle in ((6, b"wrong-instance"), (7, b"not-valid-base64!")):
+    for sign_count, user_handle in ((6, b"wrong-instance"), (7, "not-valid-base64!")):
         second = WebAuthnTestCredential(credential_id=f"rejected-{sign_count}".encode())
         with pytest.raises(vs.InvalidProtectedAuthzError, match="user handle"):
             with vault.begin() as conn:

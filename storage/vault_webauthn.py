@@ -87,7 +87,11 @@ def b64decode(value: str) -> bytes:
 
 def decode_user_handle(value: Any) -> bytes:
     """Decode a serialized WebAuthn user handle without lossy coercion."""
-    if not isinstance(value, str) or not value or _USER_HANDLE_B64_RE.fullmatch(value) is None:
+    if not isinstance(value, str):
+        raise WebAuthnVerificationError("invalid WebAuthn user handle")
+    if len(value) > 88:
+        raise WebAuthnVerificationError("invalid WebAuthn user handle length")
+    if not value or _USER_HANDLE_B64_RE.fullmatch(value) is None:
         raise WebAuthnVerificationError("invalid WebAuthn user handle")
     standard_alphabet = "+" in value or "/" in value
     urlsafe_alphabet = "-" in value or "_" in value
@@ -108,6 +112,10 @@ def decode_user_handle(value: Any) -> bytes:
         raise WebAuthnVerificationError("invalid WebAuthn user handle") from exc
     if not 0 < len(decoded) <= WEBAUTHN_USER_HANDLE_MAX_BYTES:
         raise WebAuthnVerificationError("invalid WebAuthn user handle length")
+    canonical_standard = b64encode(decoded)
+    canonical_urlsafe = base64.urlsafe_b64encode(decoded).decode("ascii")
+    if value not in {canonical_standard, canonical_urlsafe, canonical_urlsafe.rstrip("=")}:
+        raise WebAuthnVerificationError("invalid WebAuthn user handle")
     return decoded
 
 
