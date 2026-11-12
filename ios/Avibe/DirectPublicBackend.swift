@@ -328,9 +328,14 @@ final class NWConnectionByteStream: DirectByteStream, @unchecked Sendable {
         self.notViableSeconds = notViableSeconds
     }
 
-    /// Starts the connection and returns once it is ready. Throws when it
-    /// fails, cannot proceed, or this task is cancelled; the connection is
-    /// then closed.
+    /// How long a connection waiting for a path waits before it tries again.
+    static let retrySeconds: TimeInterval = 0.25
+
+    /// Starts the connection and returns once it is ready. A connection that
+    /// is waiting (no usable path yet, or refused) keeps trying until it is
+    /// ready, fails, or this task is cancelled, as the caller's deadline
+    /// does. Throws when it fails or is cancelled; the connection is then
+    /// closed.
     func connect() async throws {
         let connection = connection
         let queue = queue
@@ -342,7 +347,16 @@ final class NWConnectionByteStream: DirectByteStream, @unchecked Sendable {
                     switch state {
                     case .ready:
                         answer.resolve(with: .success(()))
-                    case .failed(let error), .waiting(let error):
+                    case .waiting:
+                        // No usable path yet, or the address refused: not a
+                        // failure. Try again shortly; the caller's deadline
+                        // or cancellation ends the wait.
+                        queue.asyncAfter(deadline: .now() + Self.retrySeconds) {
+                            if case .waiting = connection.state {
+                                connection.restart()
+                            }
+                        }
+                    case .failed(let error):
                         connection.cancel()
                         answer.resolve(with: .failure(error))
                     case .cancelled:

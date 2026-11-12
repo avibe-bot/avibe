@@ -389,6 +389,11 @@ final class AppModel: ObservableObject {
             return
         }
         directListenerFault = true
+        // A child window is presented above the runtime's own view, which
+        // the reopen message covers; it goes, when the message covers it.
+        if let runtime = route.runtime, directFaultCovers(runtime) {
+            runtimeController?.discardPopupsForListenerFault()
+        }
         directFaultMarker.mark()
     }
 

@@ -473,6 +473,120 @@ final class DirectConnectListenerTests: XCTestCase {
         third.close()
     }
 
+    func testARelayCommittedAfterAnEventIsNotClosedByThatEventsLateClose() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(generation: 5)
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establish(client, fixture)
+
+        // An event of generation 5 asked for a close before this relay's
+        // plan existed; its close runs only now. The relay is kept.
+        let early = await fixture.listener.closeRelays(backend: .direct, before: 5)
+        XCTAssertEqual(early, [:])
+        XCTAssertFalse(stream.isCancelled)
+        // An event after the plan closes it, and counts it once.
+        let later = await fixture.listener.closeRelays(backend: .direct, before: 6)
+        XCTAssertEqual(later, [host: 1])
+        try await eventually { stream.isCancelled }
+        client.close()
+    }
+
+    func testAFencedConnectIsNeverPlannedAgainUnderAnotherSelectionOrAccount() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(current: false)
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+        // The selection changes before the first plan's candidate is ready.
+        fixture.plans.set(scope: DirectPlanScope(selection: 1, accountEpoch: 0))
+        stream.instanceSends(Data(established.utf8))
+        let answer = try await client.receiveUntilClosed()
+
+        XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 503 "))
+        XCTAssertEqual(fixture.plans.planCount, 2)
+        // The second plan was not raced: no second stream, no public dial.
+        XCTAssertEqual(fixture.direct.attempts, 1)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+    }
+
+    func testUncommittedWorkOfAnotherScopeEndsAndThatOfTheCurrentScopeGoesOn() async throws {
+        let fixture = try await makeListener()
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+
+        // The same scope: nothing ends.
+        await fixture.listener.cancelUncommitted(
+            outside: DirectPlanScope(selection: 0, accountEpoch: 0)
+        )
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(stream.isCancelled)
+
+        // Another selection: the CONNECT ends before any answer, and its
+        // candidate is closed.
+        await fixture.listener.cancelUncommitted(
+            outside: DirectPlanScope(selection: 1, accountEpoch: 0)
+        )
+        let answer = try await client.receiveUntilClosed()
+        XCTAssertEqual(answer, Data())
+        try await eventually { stream.isCancelled }
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+    }
+
+    func testAClientThatClosesBeforeTheAnswerEndsTheRaceAndFreesItsSlot() async throws {
+        let fixture = try await makeListener()
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+        let holding = await fixture.listener.connectionCount()
+        XCTAssertEqual(holding, 1)
+
+        // WebKit gives up on the CONNECT while the instance has not answered.
+        client.close()
+
+        try await eventually { stream.isCancelled }
+        try await eventually { await fixture.listener.connectionCount() == 0 }
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+        XCTAssertEqual(fixture.plans.directFailures, 0)
+    }
+
+    func testBytesSentSeparatelyBeforeTheAnswerAreHeldAndForwardedAfterIt() async throws {
+        let fixture = try await makeListener()
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+        try await client.send("EARLY2")
+        try await Task.sleep(for: .milliseconds(200))
+        // Nothing but the canonical head before the answer.
+        XCTAssertEqual(String(decoding: stream.written, as: UTF8.self), canonicalHead)
+
+        stream.instanceSends(Data(established.utf8))
+        _ = try await client.receive(count: established.utf8.count)
+        try await eventually {
+            String(decoding: stream.written, as: UTF8.self) == self.canonicalHead + "EARLY2"
+        }
+        try await client.send("ping")
+        try await eventually {
+            String(decoding: stream.written, as: UTF8.self).hasSuffix("EARLY2ping")
+        }
+        client.close()
+    }
+
+    func testBytesSentSeparatelyBeyondTheEarlyLimitCloseTheConnectionBeforeTheAnswer() async throws {
+        let fixture = try await makeListener(limits: limits(earlyBytes: 8))
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+
+        try await client.send(String(repeating: "E", count: 64))
+        let answer = try await client.receiveUntilClosed()
+
+        XCTAssertEqual(answer, Data())
+        try await eventually { stream.isCancelled }
+        XCTAssertEqual(String(decoding: stream.written, as: UTF8.self), canonicalHead)
+    }
+
     // MARK: Limits and lifecycle
 
     func testClosesAConnectionBeyondItsLimitAtOnce() async throws {
@@ -549,6 +663,49 @@ final class DirectConnectListenerTests: XCTestCase {
 
     func testTheSocketScanSeesListenersOnLoopbackAndWildcardAddressesOfBothFamilies() throws {
         try assertSocketScanSeesListeners()
+    }
+
+    func testStoppingDuringABindEndsThatBind() async throws {
+        for _ in 0..<5 {
+            let listener = DirectConnectListener(
+                limits: .patient,
+                planner: { _ in nil },
+                onListenerFailure: {}
+            )
+            let binding = Task {
+                try await listener.bind(port: nil)
+            }
+            await listener.stop()
+            let ended = Recorder<Bool>()
+            Task {
+                _ = await binding.result
+                ended.record(true)
+            }
+            try await eventually(timeout: .seconds(10)) { !ended.values.isEmpty }
+        }
+    }
+
+    func testAFailureOfAnEarlierSocketOfTheSameListenerIsStale() async throws {
+        let failures = Recorder<Bool>()
+        let listener = DirectConnectListener(
+            limits: .patient,
+            planner: { _ in nil },
+            onListenerFailure: { failures.record(true) }
+        )
+        addTeardownBlock {
+            await listener.stop()
+        }
+        let port = try await listener.bind(port: nil)
+        let earlier = await listener.bindGeneration
+        await listener.closeListeningSocket()
+        _ = try await listener.bind(port: port)
+        let current = await listener.bindGeneration
+        XCTAssertNotEqual(earlier, current)
+
+        await listener.socketDidFail(bindGeneration: earlier)
+        XCTAssertEqual(failures.values, [])
+        await listener.socketDidFail(bindGeneration: current)
+        XCTAssertEqual(failures.values, [true])
     }
 
     func testABindOnAPortSomeoneElseHoldsFails() async throws {
@@ -953,6 +1110,8 @@ final class StandInPlans: @unchecked Sendable {
     private var refuses = false
     private var plans = 0
     private var failures = 0
+    private var scope = DirectPlanScope(selection: 0, accountEpoch: 0)
+    private var generation = 0
 
     init(direct: StandInStreamSource, publicOrigin: StandInStreamSource) {
         self.direct = direct
@@ -967,8 +1126,20 @@ final class StandInPlans: @unchecked Sendable {
         lock.withLock { failures }
     }
 
-    func set(direct: Bool? = nil, current: Bool? = nil, refuse: Bool? = nil) {
+    func set(
+        direct: Bool? = nil,
+        current: Bool? = nil,
+        refuse: Bool? = nil,
+        scope: DirectPlanScope? = nil,
+        generation: Int? = nil
+    ) {
         lock.withLock {
+            if let scope {
+                self.scope = scope
+            }
+            if let generation {
+                self.generation = generation
+            }
             if let direct {
                 offersDirect = direct
             }
@@ -982,9 +1153,10 @@ final class StandInPlans: @unchecked Sendable {
     }
 
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
-        let (refuse, offerDirect) = lock.withLock { () -> (Bool, Bool) in
+        let (refuse, offerDirect, scope, generation) = lock.withLock {
+            () -> (Bool, Bool, DirectPlanScope, Int) in
             plans += 1
-            return (refuses, offersDirect)
+            return (refuses, offersDirect, self.scope, self.generation)
         }
         guard !refuse else {
             return nil
@@ -998,6 +1170,8 @@ final class StandInPlans: @unchecked Sendable {
             }
         }
         return DirectConnectPlan(
+            scope: scope,
+            generation: generation,
             openDirect: openDirect,
             openPublic: {
                 try await publicOrigin.open()

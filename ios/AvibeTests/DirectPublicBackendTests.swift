@@ -1,3 +1,4 @@
+import Network
 import XCTest
 @testable import Avibe
 
@@ -181,6 +182,67 @@ final class DirectPublicBackendTests: XCTestCase {
 
         try await eventually { dialer.streams.count == 1 }
         try await eventually { dialer.streams[0].isCancelled }
+    }
+
+    // MARK: The real dialer
+
+    /// A connection that is waiting (here: refused, as nothing listens yet)
+    /// is not a failure. It keeps trying until the address answers.
+    func testARealDialThatWaitsForItsAddressConnectsOnceTheAddressAnswers() async throws {
+        let probe = try ControlListener(family: AF_INET, address: "127.0.0.1")
+        let port = probe.socket.port
+        probe.close()
+        let address = try XCTUnwrap(DirectResolvedAddress(ipv4: [127, 0, 0, 1]))
+        let results = Recorder<Bool>()
+        let streams = Recorder<NWConnectionByteStream>()
+        let dialing = Task {
+            do {
+                let stream = try await NetworkPublicDialer().dial(address, port: port)
+                if let stream = stream as? NWConnectionByteStream {
+                    streams.record(stream)
+                }
+                results.record(true)
+            } catch {
+                results.record(false)
+            }
+        }
+        defer { dialing.cancel() }
+
+        try await Task.sleep(for: .milliseconds(800))
+        XCTAssertEqual(results.values, [], "The waiting dial ended before the address answered.")
+        let late = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port,
+            reuseAddress: true
+        )
+        defer { late.close() }
+
+        try await eventually(timeout: .seconds(10)) { !results.values.isEmpty }
+        XCTAssertEqual(results.values, [true])
+        streams.values.first?.cancel()
+    }
+
+    func testARealDialThatIsWaitingEndsWhenItsTaskIsCancelled() async throws {
+        let probe = try ControlListener(family: AF_INET, address: "127.0.0.1")
+        let port = probe.socket.port
+        probe.close()
+        let address = try XCTUnwrap(DirectResolvedAddress(ipv4: [127, 0, 0, 1]))
+        let results = Recorder<Bool>()
+        let dialing = Task {
+            do {
+                _ = try await NetworkPublicDialer().dial(address, port: port)
+                results.record(true)
+            } catch {
+                results.record(false)
+            }
+        }
+
+        try await Task.sleep(for: .milliseconds(500))
+        dialing.cancel()
+
+        try await eventually(timeout: .seconds(5)) { !results.values.isEmpty }
+        XCTAssertEqual(results.values, [false])
     }
 
     func testTheWholeOpenIsBounded() async throws {

@@ -295,9 +295,20 @@ enum DirectRelayBackend: Equatable, Sendable {
     case publicOrigin
 }
 
+/// The selection and account a plan was made under. A CONNECT whose plan
+/// was fenced is planned again only within the same scope.
+struct DirectPlanScope: Equatable, Sendable {
+    let selection: Int
+    let accountEpoch: Int
+}
+
 /// What the path controller decides for one CONNECT the listener accepted
 /// (docs/plans/remote-direct-ios.md section 6).
 struct DirectConnectPlan: Sendable {
+    let scope: DirectPlanScope
+    /// The path generation the plan was made under. A relay committed under
+    /// it is closed only by an event of a later generation.
+    let generation: Int
     /// Opens a direct stream. `nil` when direct is not authorized for this
     /// CONNECT.
     let openDirect: (@Sendable () async throws -> any DirectByteStream)?
@@ -322,8 +333,10 @@ typealias DirectConnectPlanner = @Sendable (DirectAuthority) async -> DirectConn
 actor DirectConnectListener {
     private struct Relay {
         let task: Task<Void, Never>
+        /// The scope of the relay's current plan, once it has one.
+        var scope: DirectPlanScope?
         /// Set at the commit point; until then the relay is a candidate.
-        var committed: (host: String, backend: DirectRelayBackend)?
+        var committed: (host: String, backend: DirectRelayBackend, generation: Int)?
     }
 
     private let limits: DirectConnectLimits
@@ -340,6 +353,9 @@ actor DirectConnectListener {
     private var isStopped = false
     /// The close of the previous listening socket, until it has finished.
     private var closing: Task<Void, Never>?
+    private var pendingBind: DirectOnceAnswer<UInt16>?
+    /// Advances with every bind.
+    private(set) var bindGeneration = 0
 
     init(
         limits: DirectConnectLimits = .standard,
@@ -413,40 +429,63 @@ actor DirectConnectListener {
                 await self.accept(connection)
             }
         }
-        let bound: UInt16 = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                listener.stateUpdateHandler = { [weak self, weak listener] state in
-                    switch state {
-                    case .ready:
-                        // From here on, a state change is the socket failing.
-                        listener?.stateUpdateHandler = { [weak self] state in
-                            if case .failed = state {
-                                Task {
-                                    await self?.listenerDidFail()
-                                }
-                            }
+        // Each bind has its own generation, so a failure reported by an
+        // earlier socket of this actor is recognised as stale.
+        bindGeneration += 1
+        let generation = bindGeneration
+        // Resolved by the socket's state, by cancellation of this task, or
+        // by `closeListeningSocket()` and `stop()`, which replace the state
+        // handler: a pending bind always returns.
+        let answer = DirectOnceAnswer<UInt16>()
+        pendingBind = answer
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            switch state {
+            case .ready:
+                // From here on, a state change is the socket failing.
+                listener?.stateUpdateHandler = { [weak self] state in
+                    if case .failed = state {
+                        Task {
+                            await self?.socketDidFail(bindGeneration: generation)
                         }
-                        if let port = listener?.port?.rawValue {
-                            continuation.resume(returning: port)
-                        } else {
-                            continuation.resume(throwing: CancellationError())
-                        }
-                    case .failed(let error), .waiting(let error):
-                        listener?.stateUpdateHandler = nil
-                        listener?.cancel()
-                        continuation.resume(throwing: error)
-                    case .cancelled:
-                        listener?.stateUpdateHandler = nil
-                        continuation.resume(throwing: CancellationError())
-                    default:
-                        break
                     }
                 }
-                listener.start(queue: queue)
+                if let port = listener?.port?.rawValue {
+                    answer.resolve(with: .success(port))
+                } else {
+                    answer.resolve(with: .failure(CancellationError()))
+                }
+            case .failed(let error), .waiting(let error):
+                listener?.cancel()
+                answer.resolve(with: .failure(error))
+            case .cancelled:
+                answer.resolve(with: .failure(CancellationError()))
+            default:
+                break
             }
-        } onCancel: {
-            // A cancelled bind ends in `.cancelled`, which resumes above.
+        }
+        listener.start(queue: queue)
+        let bound: UInt16
+        do {
+            bound = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    answer.wait(with: continuation)
+                }
+            } onCancel: {
+                listener.cancel()
+                answer.resolve(with: .failure(CancellationError()))
+            }
+        } catch {
+            if pendingBind === answer {
+                pendingBind = nil
+            }
+            if self.listener === listener {
+                self.listener = nil
+            }
             listener.cancel()
+            throw error
+        }
+        if pendingBind === answer {
+            pendingBind = nil
         }
         if self.listener !== listener {
             // Closed or stopped while binding.
@@ -461,8 +500,10 @@ actor DirectConnectListener {
     /// (B2 on background). Returns once the socket has closed, or after a
     /// second; `bind(port:)` also waits for it. Cancelling an `NWListener`
     /// closes its socket later: a bind of the same port straight after
-    /// `cancel()` failed with EADDRINUSE on the simulator.
+    /// `cancel()` failed with EADDRINUSE on the simulator. A bind still
+    /// pending ends with `CancellationError`.
     func closeListeningSocket() async {
+        endPendingBind()
         if let listener {
             self.listener = nil
             closing = Task {
@@ -497,6 +538,7 @@ actor DirectConnectListener {
             return
         }
         isStopped = true
+        endPendingBind()
         listener?.stateUpdateHandler = nil
         listener?.cancel()
         listener = nil
@@ -506,31 +548,47 @@ actor DirectConnectListener {
         relays.removeAll()
     }
 
-    /// Closes the committed relays on `backend` (`nil`: both), and cancels
-    /// every relay not yet committed. Returns, per host, how many committed
-    /// relays it closed. A relay this listener did not accept is never
-    /// touched.
-    func closeRelays(backend: DirectRelayBackend?) -> [String: Int] {
+    /// Closes the committed relays on `backend` (`nil`: both) whose plan was
+    /// made under a path generation before `generation`, and returns, per
+    /// host, how many it closed. A relay committed under a later plan,
+    /// after the event that asked for this close, is kept. Relays not yet
+    /// committed are left to their plan's fence. A relay this listener did
+    /// not accept is never touched.
+    func closeRelays(
+        backend: DirectRelayBackend?,
+        before generation: Int = .max
+    ) -> [String: Int] {
         var closed: [String: Int] = [:]
         for (id, relay) in relays {
-            if let committed = relay.committed {
-                guard backend == nil || committed.backend == backend else {
-                    continue
-                }
-                closed[committed.host, default: 0] += 1
+            guard
+                let committed = relay.committed,
+                backend == nil || committed.backend == backend,
+                committed.generation < generation
+            else {
+                continue
             }
+            closed[committed.host, default: 0] += 1
             relay.task.cancel()
             relays.removeValue(forKey: id)
         }
         return closed
     }
 
-    /// Cancels every relay not yet committed; committed ones are untouched.
-    func cancelUncommitted() {
-        for (id, relay) in relays where relay.committed == nil {
+    /// Ends every relay not yet committed whose plan was made under another
+    /// scope than `scope`: a new selection or account never takes over a
+    /// CONNECT planned for the old one. A relay still reading its head has
+    /// no scope yet and is kept.
+    func cancelUncommitted(outside scope: DirectPlanScope) {
+        for (id, relay) in relays
+        where relay.committed == nil && relay.scope != nil && relay.scope != scope {
             relay.task.cancel()
             relays.removeValue(forKey: id)
         }
+    }
+
+    /// How many connections this listener holds, committed or not.
+    func connectionCount() -> Int {
+        relays.count
     }
 
     /// How many relays are committed, per backend. For diagnostics and tests.
@@ -538,8 +596,16 @@ actor DirectConnectListener {
         relays.values.filter { $0.committed?.backend == backend }.count
     }
 
-    private func listenerDidFail() {
-        guard !isStopped, listener != nil else {
+    private func endPendingBind() {
+        pendingBind?.resolve(with: .failure(CancellationError()))
+        pendingBind = nil
+    }
+
+    /// The socket of bind `bindGeneration` failed. Reported only while that
+    /// socket is the current one: a failure of an earlier socket of this
+    /// listener, closed for the background and replaced, is stale.
+    func socketDidFail(bindGeneration generation: Int) {
+        guard !isStopped, listener != nil, generation == bindGeneration else {
             return
         }
         onListenerFailure()
@@ -580,13 +646,28 @@ actor DirectConnectListener {
         relays.removeValue(forKey: id)
     }
 
-    /// Records the commit point. `false` when the relay was closed meanwhile
-    /// (an account transition, a stop), so nothing may be forwarded.
-    private func commit(_ id: UUID, host: String, backend: DirectRelayBackend) -> Bool {
+    /// Records the scope of a relay's plan. `false` when the relay was
+    /// closed meanwhile.
+    private func planned(_ id: UUID, scope: DirectPlanScope) -> Bool {
         guard !isStopped, relays[id] != nil else {
             return false
         }
-        relays[id]?.committed = (host, backend)
+        relays[id]?.scope = scope
+        return true
+    }
+
+    /// Records the commit point. `false` when the relay was closed meanwhile
+    /// (an account transition, a stop), so nothing may be forwarded.
+    private func commit(
+        _ id: UUID,
+        host: String,
+        backend: DirectRelayBackend,
+        generation: Int
+    ) -> Bool {
+        guard !isStopped, relays[id] != nil else {
+            return false
+        }
+        relays[id]?.committed = (host, backend, generation)
         return true
     }
 
@@ -655,17 +736,44 @@ actor DirectConnectListener {
         guard earlyData.count <= limits.earlyBytes else {
             return
         }
+        // From here on every read of WebKit's side goes through the reader,
+        // so bytes read while the backends race are kept for the relay.
+        let reader = DirectClientReader(connection, maximumLength: limits.chunkBytes)
+        let held = DirectHeldBytes(earlyData)
 
-        // One fresh plan if the first one is fenced before its commit point:
-        // the selection, lease or path generation changed while it raced.
+        // One fresh plan if the first one is fenced before its commit point
+        // (the path generation changed while it raced), within the same
+        // selection and account only.
+        var scope: DirectPlanScope?
         for _ in 0..<2 {
-            guard !Task.isCancelled, let plan = await planner(authority) else {
+            guard
+                !Task.isCancelled,
+                let plan = await planner(authority),
+                scope == nil || plan.scope == scope,
+                let listener,
+                await listener.planned(id, scope: plan.scope)
+            else {
                 if !Task.isCancelled {
-                    await refuse(connection, status: 403, within: limits.headSeconds)
+                    await answerRefusal(connection, status: scope == nil ? 403 : 503)
+                    await awaitClose(reader, within: limits.headSeconds)
                 }
                 return
             }
-            switch await race(plan, authority: authority, limits: limits) {
+            scope = plan.scope
+            guard
+                let outcome = await raceWatchingClient(
+                    plan,
+                    authority: authority,
+                    limits: limits,
+                    reader: reader,
+                    held: held
+                )
+            else {
+                // WebKit closed its side, or sent too much, before a backend
+                // was chosen: nothing was dialled for nothing.
+                return
+            }
+            switch outcome {
             case .fenced:
                 continue
             case .failed(let status):
@@ -673,14 +781,18 @@ actor DirectConnectListener {
                     return
                 }
                 await answerRefusal(connection, status: status)
-                await awaitClose(connection, within: limits.headSeconds)
+                await awaitClose(reader, within: limits.headSeconds)
                 return
             case .won(let backend, let stream, let leftover):
                 // The commit point. Registered first, so an event that comes
                 // after the check below finds this relay and closes it.
                 guard
-                    let listener,
-                    await listener.commit(id, host: authority.host, backend: backend)
+                    await listener.commit(
+                        id,
+                        host: authority.host,
+                        backend: backend,
+                        generation: plan.generation
+                    )
                 else {
                     stream.cancel()
                     return
@@ -696,9 +808,10 @@ actor DirectConnectListener {
                 do {
                     try await connection.sendAll(DirectConnectWire.established)
                     try await relay(
-                        connection,
+                        reader,
+                        to: connection,
                         stream,
-                        earlyData: earlyData,
+                        earlyData: held.bytes,
                         leftover: leftover,
                         limits: limits
                     )
@@ -710,7 +823,72 @@ actor DirectConnectListener {
             }
         }
         await answerRefusal(connection, status: 503)
-        await awaitClose(connection, within: limits.headSeconds)
+        await awaitClose(reader, within: limits.headSeconds)
+    }
+
+    private enum WatchedRace {
+        case race(RaceOutcome)
+        /// WebKit's side ended, or sent more than the early bound.
+        case clientGone
+        /// The watch was stopped because the race ended.
+        case stopped
+    }
+
+    /// Races the plan's candidates while watching WebKit's side. If WebKit
+    /// closes its side, or sends more than the early bound, before a backend
+    /// is chosen, the race is cancelled and a stream it produced is closed:
+    /// `nil`. Bytes read meanwhile are added to `held`.
+    private static func raceWatchingClient(
+        _ plan: DirectConnectPlan,
+        authority: DirectAuthority,
+        limits: DirectConnectLimits,
+        reader: DirectClientReader,
+        held: DirectHeldBytes
+    ) async -> RaceOutcome? {
+        await withTaskGroup(of: WatchedRace.self) { group in
+            group.addTask {
+                .race(await race(plan, authority: authority, limits: limits))
+            }
+            group.addTask {
+                while true {
+                    do {
+                        guard let data = try await reader.read() else {
+                            return .clientGone
+                        }
+                        guard held.append(data, limit: limits.earlyBytes) else {
+                            return .clientGone
+                        }
+                    } catch {
+                        return Task.isCancelled ? .stopped : .clientGone
+                    }
+                }
+            }
+            var outcome: RaceOutcome?
+            var clientGone = false
+            while let next = await group.next() {
+                switch next {
+                case .race(let result):
+                    if clientGone {
+                        if case .won(_, let stream, _) = result {
+                            stream.cancel()
+                        }
+                    } else {
+                        outcome = result
+                        group.cancelAll()
+                    }
+                case .clientGone:
+                    clientGone = true
+                    if case .won(_, let stream, _) = outcome {
+                        stream.cancel()
+                    }
+                    outcome = nil
+                    group.cancelAll()
+                case .stopped:
+                    break
+                }
+            }
+            return clientGone ? nil : outcome
+        }
     }
 
     private enum Candidate {
@@ -810,7 +988,15 @@ actor DirectConnectListener {
                         group.cancelAll()
                     }
                 case .failed(let candidate, let error):
-                    guard candidate == .direct, winner == nil, !fenced, !(error is CancellationError) else {
+                    guard
+                        candidate == .direct,
+                        winner == nil,
+                        !fenced,
+                        // A race cancelled because WebKit went away is no
+                        // failure of the path.
+                        !Task.isCancelled,
+                        !(error is CancellationError)
+                    else {
                         continue
                     }
                     if case DirectConnectError.refused(let status) = error {
@@ -891,7 +1077,8 @@ actor DirectConnectListener {
     /// its next chunk only after the previous one was accepted, so a slow
     /// reader on one side slows the sender on the other.
     private static func relay(
-        _ connection: NWConnection,
+        _ reader: DirectClientReader,
+        to connection: NWConnection,
         _ stream: any DirectByteStream,
         earlyData: Data,
         leftover: Data,
@@ -907,17 +1094,11 @@ actor DirectConnectListener {
                     if !pending.isEmpty {
                         try await write(pending, to: stream)
                     }
-                    let chunk = try await connection.receiveChunk(
-                        maximumLength: limits.chunkBytes
-                    )
-                    pending = chunk.data
-                    if chunk.isComplete {
-                        if !pending.isEmpty {
-                            try await write(pending, to: stream)
-                        }
+                    guard let data = try await reader.read() else {
                         try await closeWrite(of: stream)
                         return
                     }
+                    pending = data
                 }
             }
             group.addTask {
@@ -969,6 +1150,16 @@ actor DirectConnectListener {
         _ = try? await directDeadline(0.25) {
             try await connection.sendAll(DirectConnectWire.refusal(status))
             try await connection.finishSending()
+        }
+    }
+
+    /// The same, once the reader owns WebKit's side.
+    private static func awaitClose(
+        _ reader: DirectClientReader,
+        within seconds: TimeInterval
+    ) async {
+        _ = try? await directDeadline(seconds) {
+            while try await reader.read() != nil {}
         }
     }
 
@@ -1127,6 +1318,137 @@ extension NWConnection {
             }
         } onCancel: {
             self.cancel()
+        }
+    }
+}
+
+/// Every read of WebKit's side of one connection after its request head.
+/// One receive is outstanding at most, and only while someone reads, so a
+/// slow consumer slows WebKit. A read that is cancelled leaves the
+/// connection open, and whatever its receive brings is kept for the next
+/// read: the pre-commit watch and the relay take turns without losing a
+/// byte.
+final class DirectClientReader: @unchecked Sendable {
+    private let connection: NWConnection
+    private let maximumLength: Int
+    private let lock = NSLock()
+    private var chunks: [Data] = []
+    private var ended = false
+    private var failure: Error?
+    private var receiving = false
+    private var waiter: CheckedContinuation<Data?, Error>?
+
+    init(_ connection: NWConnection, maximumLength: Int) {
+        self.connection = connection
+        self.maximumLength = maximumLength
+    }
+
+    /// The next bytes, or `nil` once WebKit has finished sending.
+    func read() async throws -> Data? {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let action: () -> Void = lock.withLock {
+                    if !chunks.isEmpty {
+                        let data = chunks.removeFirst()
+                        return { continuation.resume(returning: data) }
+                    }
+                    if ended {
+                        let failure = failure
+                        return {
+                            if let failure {
+                                continuation.resume(throwing: failure)
+                            } else {
+                                continuation.resume(returning: nil)
+                            }
+                        }
+                    }
+                    if Task.isCancelled {
+                        return { continuation.resume(throwing: CancellationError()) }
+                    }
+                    waiter = continuation
+                    guard !receiving else {
+                        return {}
+                    }
+                    receiving = true
+                    return { self.receive() }
+                }
+                action()
+            }
+        } onCancel: {
+            let waiting: CheckedContinuation<Data?, Error>? = lock.withLock {
+                let waiting = waiter
+                waiter = nil
+                return waiting
+            }
+            waiting?.resume(throwing: CancellationError())
+        }
+    }
+
+    private func receive() {
+        connection.receive(
+            minimumIncompleteLength: 1,
+            maximumLength: maximumLength
+        ) { [self] data, _, isComplete, error in
+            let action: () -> Void = lock.withLock {
+                receiving = false
+                if let data, !data.isEmpty {
+                    chunks.append(data)
+                }
+                if isComplete {
+                    ended = true
+                } else if let error {
+                    ended = true
+                    failure = error
+                }
+                guard let waiting = waiter else {
+                    return {}
+                }
+                if !chunks.isEmpty {
+                    waiter = nil
+                    let next = chunks.removeFirst()
+                    return { waiting.resume(returning: next) }
+                }
+                if ended {
+                    waiter = nil
+                    let failure = failure
+                    return {
+                        if let failure {
+                            waiting.resume(throwing: failure)
+                        } else {
+                            waiting.resume(returning: nil)
+                        }
+                    }
+                }
+                // Nothing yet, and not finished: keep waiting.
+                receiving = true
+                return { self.receive() }
+            }
+            action()
+        }
+    }
+}
+
+/// Bytes WebKit sent after its head and before the commit point.
+final class DirectHeldBytes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data: Data
+
+    init(_ initial: Data) {
+        data = initial
+    }
+
+    var bytes: Data {
+        lock.withLock { data }
+    }
+
+    /// Adds `more`. `false`, and nothing added, past `limit` bytes in all.
+    func append(_ more: Data, limit: Int) -> Bool {
+        lock.withLock {
+            guard data.count + more.count <= limit else {
+                return false
+            }
+            data.append(more)
+            return true
         }
     }
 }

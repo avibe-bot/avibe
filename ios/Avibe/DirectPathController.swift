@@ -231,7 +231,14 @@ final class DirectPathController {
     /// once the listener is ready again (or its recovery has failed).
     private var pendingClosureHosts: Set<String> = []
     /// Status answers held while the App returns from the background.
-    private var heldReplies: [(origin: WebOrigin, reply: @MainActor (DirectPathStatus?) -> Void)] = []
+    private struct HeldReply {
+        let origin: WebOrigin
+        let store: UUID
+        let runtime: MobileRuntimeContext?
+        let reply: @MainActor (DirectPathStatus?) -> Void
+    }
+
+    private var heldReplies: [HeldReply] = []
     private var isResuming = false
     /// Route preparations under way; the listener is kept while any is.
     private var preparations = 0
@@ -317,9 +324,26 @@ final class DirectPathController {
         reply: @escaping @MainActor (DirectPathStatus?) -> Void
     ) {
         if isResuming {
-            heldReplies.append((origin, reply))
+            heldReplies.append(
+                HeldReply(
+                    origin: origin,
+                    store: websiteDataStore.identifier,
+                    runtime: runtime,
+                    reply: reply
+                )
+            )
         } else {
             reply(answer(for: origin))
+        }
+    }
+
+    /// The runtime or the account the held answers were asked under has
+    /// ended: they are settled without a status.
+    private func settleHeldReplies() {
+        let held = heldReplies
+        heldReplies.removeAll()
+        for entry in held {
+            entry.reply(nil)
         }
     }
 
@@ -406,13 +430,18 @@ final class DirectPathController {
         // The listener accepts the host before WebKit can be routed to it.
         // Its list only grows: `plan(for:)` refuses a host no route lists.
         await listener.allowHost(authority.host)
+        guard stillWanted(), websiteDataStore.identifier == store else {
+            return
+        }
+        // The runtime loads now, with or without a route, so a host that
+        // gets none here never gets one on this store.
         guard
-            stillWanted(),
-            websiteDataStore.identifier == store,
             listenerState == .ready,
+            !isInBackground,
             self.listener === listener,
             self.listenerPort == listenerPort
         else {
+            routeOwner.exclude(authority.host, store: store)
             return
         }
         if !routeOwner.add(
@@ -439,6 +468,7 @@ final class DirectPathController {
     func runtimeDidStop() {
         let hadSelection = runtime != nil || target != nil
         runtime = nil
+        settleHeldReplies()
         deselect()
         guard hadSelection else {
             return
@@ -453,8 +483,10 @@ final class DirectPathController {
     /// kept. Not a closure: its documents are gone.
     func accountWillChange() {
         runtime = nil
+        settleHeldReplies()
         deselect()
         accountEpoch += 1
+        scopeDidChange()
         advanceGeneration()
         closeRelays(nil, countsAsClosure: false)
         updatePreference()
@@ -476,6 +508,7 @@ final class DirectPathController {
             return
         }
         selection += 1
+        scopeDidChange()
         let target = DirectTarget(
             selection: selection,
             runtime: runtime,
@@ -496,6 +529,9 @@ final class DirectPathController {
             return
         }
         target = nil
+        // Ending a selection is a new scope too.
+        selection += 1
+        scopeDidChange()
         transport.deselect()
     }
 
@@ -568,6 +604,8 @@ final class DirectPathController {
         // at its commit point; a public-only plan needs only the fence.
         let lease = directTag?.target.runtime
         return DirectConnectPlan(
+            scope: scope,
+            generation: pathGeneration,
             openDirect: openDirect,
             openPublic: {
                 try await publicBackend.open(authority)
@@ -584,6 +622,23 @@ final class DirectPathController {
                 }
             }
         )
+    }
+
+    /// The selection and account new plans are made under.
+    private var scope: DirectPlanScope {
+        DirectPlanScope(selection: selection, accountEpoch: accountEpoch)
+    }
+
+    /// A CONNECT planned under another selection or account is not carried
+    /// on: its uncommitted work ends, and it is never planned again.
+    private func scopeDidChange() {
+        guard let listener else {
+            return
+        }
+        let scope = scope
+        Task {
+            await listener.cancelUncommitted(outside: scope)
+        }
     }
 
     private func directStreamTag(for authority: DirectAuthority) -> DirectStreamTag? {
@@ -647,8 +702,11 @@ final class DirectPathController {
         guard let listener else {
             return
         }
+        // Only relays committed under a plan made before this event: one
+        // committed after it, by the time this task runs, is kept.
+        let generation = pathGeneration
         Task { [weak self] in
-            let closed = await listener.closeRelays(backend: backend)
+            let closed = await listener.closeRelays(backend: backend, before: generation)
             guard countsAsClosure else {
                 return
             }
@@ -712,6 +770,11 @@ final class DirectPathController {
         case .faulted, .closedForBackground:
             return false
         case .none:
+            // No bind in the background: a listening socket does not survive
+            // suspension reliably.
+            guard !isInBackground else {
+                return false
+            }
             listenerStart = startListener()
         case .binding, .rebinding:
             break
@@ -770,6 +833,16 @@ final class DirectPathController {
                     return false
                 }
                 self.listenerPort = port
+                if self.isInBackground {
+                    // The App went to the background while binding: park
+                    // the port as the background does, for the return to
+                    // re-bind. No route is written meanwhile.
+                    self.listenerState = .closedForBackground
+                    Task {
+                        await listener.closeListeningSocket()
+                    }
+                    return false
+                }
                 self.listenerState = .ready
                 return true
             }
@@ -939,8 +1012,16 @@ final class DirectPathController {
         }
         let held = heldReplies
         heldReplies.removeAll()
-        for (origin, reply) in held {
-            reply(answer(for: origin))
+        for entry in held {
+            // Answered only for the runtime and store it was asked under.
+            guard
+                entry.store == websiteDataStore.identifier,
+                entry.runtime == runtime
+            else {
+                entry.reply(nil)
+                continue
+            }
+            entry.reply(answer(for: entry.origin))
         }
         select()
         updatePreference()

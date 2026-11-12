@@ -1,6 +1,6 @@
 # Remote direct paths: the iOS App side
 
-Status: **Design, rewritten on 2026-11-12 for a persistent local proxy.** The owner chose this architecture after the WebKit measurement in section 2. It replaces the earlier design, in which the App switched WebKit between the tunnel and the direct path by changing the data store's proxy configuration. Nothing here is built: #3537 (Swift) and #3532 (Web UI) implement the earlier design and are reworked against this one after it lands. The iOS owner's review is requested after the fact, as before; the open items in section 13 stay his. This work does not raise the App's minimum iOS version (17.0), adds no capability or entitlement, and does not touch signing, TestFlight, or the notification service extension.
+Status: **Design, rewritten on 2026-11-12 for a persistent local proxy.** The owner chose this architecture after the WebKit measurement in section 2. It replaces the earlier design, in which the App switched WebKit between the tunnel and the direct path by changing the data store's proxy configuration. #3532 (Web UI) is merged against this design; #3537 (Swift) implements it, inactive without a transport, and is in review. The iOS owner's review is requested after the fact, as before; the open items in section 13 stay his. This work does not raise the App's minimum iOS version (17.0), adds no capability or entitlement, and does not touch signing, TestFlight, or the notification service extension.
 
 Statements about behaviour below are of three kinds, and say which: **measured** (with where), **candidate** (the design's choice, gated by a named qualification cell in section 11), or **rule** (what the code must do).
 
@@ -17,7 +17,7 @@ Both paths therefore share the hostname WebKit validates and the instance's own 
 
 ```text
 WKWebView on the account data store (runtime, child windows, hidden transports)
-  -> route (never cleared; changed only to add a host or move port): CONNECT proxy 127.0.0.1:P, matchDomains [exact instance hosts]
+  -> route (never cleared or moved; changed only to add a host): CONNECT proxy 127.0.0.1:P, one P per process, matchDomains [exact instance hosts]
   -> App listener on 127.0.0.1:P   CONNECT <allowed host>:443 only
        -> direct backend           transport stream; canonical CONNECT head; the instance's status; then bytes
        -> public backend           TCP to <same host>:443; then bytes

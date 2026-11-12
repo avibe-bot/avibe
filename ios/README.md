@@ -302,8 +302,13 @@ With a transport:
   ready candidate whose plan is still current wins; the others are closed
   having received nothing. The commit point is the `200` to WebKit: before
   it a failure falls back, after it a connection is never redialled or
-  replayed. Relays copy both directions with backpressure and half-close. At
-  most 64 connections; one more is closed at once.
+  replayed. If WebKit closes its side, or sends more than the early bound,
+  before a backend is chosen, the race is cancelled. A plan fenced by a newer
+  path generation is planned once more, and only under the same selection and
+  account; a new selection or account ends uncommitted CONNECTs of the old
+  one. An event closes only relays committed under plans made before it.
+  Relays copy both directions with backpressure and half-close. At most 64
+  connections; one more is closed at once.
 - `DirectPublicBackend.swift` resolves the host, keeps only public unicast
   addresses (IPv4-mapped and NAT64 addresses are judged as IPv4), and dials
   exactly those numeric addresses on port 443, with no proxy, within 10
@@ -319,7 +324,10 @@ With a transport:
   and an account change closes all relays, without a closure; validating a
   path again closes nothing. The background also closes the listening socket;
   the return re-binds the same port, publishes the closure, and only then
-  answers a held `direct.status()`.
+  answers a held `direct.status()`, and only for the runtime and store it was
+  asked under: a runtime stop or an account change settles held answers as
+  `failed`. Nothing is bound and no route is written in the background; a
+  bind that completes there is parked for the return.
 - **The listener fault** (accepted for the internal trial, 2026-11-12). A
   failure before any route exists only leaves that host on WebKit's normal
   path. Once a route exists, the listener's socket failing, or a failed

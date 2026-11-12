@@ -195,6 +195,66 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(marker.marks, 1)
     }
 
+    /// A child window is presented above the view the reopen message
+    /// covers; the fault takes it away.
+    @MainActor
+    func testTheListenerFaultTakesAwayAPresentedChildWindow() async throws {
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/child":
+                return .html(RuntimePage.listeningDocument(title: "Child"))
+            default:
+                return .html(
+                    RuntimePage.listeningDocument(
+                        title: "Instance",
+                        body: """
+                            <button id="open-child" onclick="window.open('/child', '_blank')">Open</button>
+                            """
+                    )
+                )
+            }
+        }
+        let url = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: url, requiresHTTPS: false))
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            navigationPolicy: NavigationPolicy(
+                instanceOrigins: [origin],
+                authenticationOrigins: []
+            ),
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.loadViewIfNeeded()
+        controller.view.frame = window.bounds
+        controller.view.layoutIfNeeded()
+        defer {
+            controller.presentedViewController?.dismiss(animated: false)
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let primary = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        try await eventually {
+            (try? await primary.evaluateJavaScript("document.title") as? String) == "Instance"
+        }
+        _ = try await primary.evaluateJavaScript(
+            "document.querySelector('#open-child').click(); true"
+        )
+        try await eventually { controller.presentedViewController != nil }
+
+        controller.discardPopupsForListenerFault()
+
+        try await eventually { controller.presentedViewController == nil }
+    }
+
     func testTheListenerFaultCoversTheRuntimeWithoutRetryOrSpinner() {
         XCTAssertEqual(
             BrowserOverlay(isLoading: true, failed: true, directFault: true),

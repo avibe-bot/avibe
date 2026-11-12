@@ -448,6 +448,77 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertTrue(harness.controller.faultCovers(try XCTUnwrap(harness.lastOpened)))
     }
 
+    @MainActor
+    func testHeldStatusAnswersEndWithTheRuntimeOrAccountTheyWereAskedUnder() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+
+        harness.enterBackground()
+        harness.enterForeground()
+        let held = harness.requestStatus("instance-1")
+        XCTAssertEqual(held.values, [])
+        // The runtime goes while the answer is held: no status reaches it.
+        harness.controller.runtimeDidStop()
+        XCTAssertEqual(held.values, [nil])
+        try await eventually { harness.controller.listenerState == .ready }
+
+        harness.enterBackground()
+        harness.enterForeground()
+        let heldAgain = harness.requestStatus("instance-1")
+        XCTAssertEqual(heldAgain.values, [])
+        // The account changes while the answer is held.
+        await harness.websiteDataStore.rotate()
+        XCTAssertEqual(heldAgain.values, [nil])
+    }
+
+    @MainActor
+    func testNoBindHappensInTheBackgroundAndABindThatEndsThereIsParked() async throws {
+        let listening = try listeningSockets()
+        let routeWrites = try ProxyConfigurationWrites.count()
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+
+        // In the background no listener is bound and no route is written:
+        // the host loads without one, so it never gets one on this store.
+        harness.enterBackground()
+        try await harness.select("instance-1")
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertEqual(try newListeners(since: listening), [])
+        XCTAssertEqual(harness.controller.listenerState, .none)
+        XCTAssertTrue(
+            harness.controller.routeOwner.isExcluded(one, store: harness.websiteDataStore.identifier)
+        )
+        harness.enterForeground()
+
+        // A bind under way when the App goes to the background ends parked:
+        // its socket closed, no route written.
+        _ = try harness.coordinator.selectInstance(id: "instance-2")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let coordinator = harness.coordinator
+        let controller = harness.controller
+        let preparing = Task {
+            await controller.prepareRoute(for: runtime) {
+                coordinator.isCurrentRuntime(runtime)
+            }
+        }
+        var yields = 0
+        while harness.controller.listenerState != .binding, yields < 10_000 {
+            await Task.yield()
+            yields += 1
+        }
+        XCTAssertEqual(harness.controller.listenerState, .binding)
+        harness.enterBackground()
+        await preparing.value
+
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertEqual(harness.controller.listenerState, .closedForBackground)
+        XCTAssertTrue(
+            harness.controller.routeOwner.isExcluded(two, store: harness.websiteDataStore.identifier)
+        )
+        try await eventually { try newListeners(since: listening).isEmpty }
+    }
+
     // MARK: Helpers
 
     @MainActor

@@ -1293,6 +1293,13 @@ final class WebViewController: UIViewController {
         rootRecord.navigationController.dismiss(animated: true)
     }
 
+    /// The direct listener faulted: the reopen message covers the runtime,
+    /// and a child window presented above it must not stay in front of it.
+    /// Its WebViews are released as an account transition releases them.
+    func discardPopupsForListenerFault() {
+        discardAllPopups(animated: false)
+    }
+
     private func discardAllPopups(animated: Bool) {
         let rootControllers: [UINavigationController]
         if let mainIdentifier = retainedWebView.map(ObjectIdentifier.init) {
