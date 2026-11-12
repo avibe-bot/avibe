@@ -92,6 +92,7 @@ from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
     APPLICATION_LOG_FORMAT,
     APPLICATION_LOG_MAX_BYTES,
+    RedactingFormatter,
     application_log_paths,
 )
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -145,7 +146,7 @@ def _configure_ui_logging(level: str = "INFO") -> None:
     configure_service_logging(
         build_handlers,
         log_level,
-        logging.Formatter(APPLICATION_LOG_FORMAT),
+        RedactingFormatter(APPLICATION_LOG_FORMAT),
     )
 
 
@@ -16425,10 +16426,9 @@ async def _run_show_event_dispatch(
     body = result.get("body") or {}
     if status != 202:
         logger.warning(
-            "show event dispatch failed for session %s: status=%s body=%s",
+            "show event dispatch failed for session %s: status=%s",
             session_id,
             status,
-            body,
         )
         _retire_show_event_reservation(
             event_payload,

@@ -310,7 +310,11 @@ async def test_adapter_diagnostics_redact_assignments_and_endpoint_credentials(
     error = events[-1]
     assert isinstance(error, ProviderError)
     assert secret not in error.message
-    assert "[redacted]" in error.message
+    if source == "relative_url":
+        # URL diagnostics now omit the entire query, not only credential values.
+        assert error.message == "no route for /v1/chat/completions"
+    else:
+        assert "[redacted]" in error.message
 
 
 @pytest.mark.asyncio

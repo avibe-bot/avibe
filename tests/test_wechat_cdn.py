@@ -119,10 +119,10 @@ class WeChatCdnTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("falling back to configured CDN host=novac2c.cdn.weixin.qq.com", "\n".join(captured.output))
 
-    async def test_upload_buffer_to_cdn_logs_5xx_body_and_host(self):
+    async def test_upload_buffer_to_cdn_logs_metadata_not_body_headers_or_credentials(self):
         class _Response:
             status = 500
-            headers = {}
+            headers = {"x-error-message": "opaque-header-credential"}
 
             async def __aenter__(self):
                 return self
@@ -147,22 +147,23 @@ class WeChatCdnTests(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs("modules.im.wechat_cdn", level="WARNING") as captured:
                 with self.assertRaises(RuntimeError):
                     await wechat_cdn.upload_buffer_to_cdn(
-                        upload_url="https://dynamic-cdn.weixin.qq.com/c2c/upload?x=1",
+                        upload_url="https://synthetic-user:synthetic-password@dynamic-cdn.weixin.qq.com/c2c/upload?x=synthetic-query",
                         data=b"xlsx-bytes",
                         aes_key=bytes.fromhex("22" * 16),
                     )
 
         logs = "\n".join(captured.output)
-        self.assertIn("gateway rejected large body", logs)
+        self.assertIn("status=500", logs)
         self.assertIn("host=dynamic-cdn.weixin.qq.com", logs)
         self.assertIn("raw_size=10", logs)
-        self.assertIn("x=%3Credacted%3E", logs)
-        self.assertNotIn("x=1", logs)
+        self.assertIn("url=https://dynamic-cdn.weixin.qq.com/c2c/upload", logs)
+        for sensitive in ("gateway rejected large body", "opaque-header-credential", "synthetic-user", "synthetic-password", "synthetic-query", "?x="):
+            self.assertNotIn(sensitive, logs)
 
     async def test_upload_buffer_to_cdn_retries_5xx_body_containing_client_error(self):
         class _Response:
             status = 500
-            headers = {}
+            headers = {"x-error-message": "opaque-header-credential"}
 
             async def __aenter__(self):
                 return self
