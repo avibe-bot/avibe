@@ -175,6 +175,8 @@ class WebAuthnTestCredential:
         sign_count: int = 2,
         cross_origin: bool = False,
         top_origin: str | None = None,
+        user_handle: bytes | str | None = None,
+        include_user_handle: bool = True,
     ) -> dict:
         client_data = _client_data(
             typ=vault_webauthn.WEBAUTHN_GET_TYPE,
@@ -189,6 +191,15 @@ class WebAuthnTestCredential:
             + sign_count.to_bytes(4, "big")
         )
         signature = self.private_key.sign(auth_data + hashlib.sha256(client_data).digest(), ec.ECDSA(hashes.SHA256()))
+        response = {
+            "clientDataJSON": _b64(client_data),
+            "authenticatorData": _b64(auth_data),
+            "signature": _b64(signature),
+        }
+        if include_user_handle:
+            response["userHandle"] = (
+                _b64(user_handle) if isinstance(user_handle, bytes) else user_handle
+            )
         return {
             "kind": "webauthn",
             "challenge_id": challenge_id,
@@ -197,11 +208,6 @@ class WebAuthnTestCredential:
                 "id": _b64url(self.credential_id),
                 "rawId": self.credential_id_b64,
                 "type": "public-key",
-                "response": {
-                    "clientDataJSON": _b64(client_data),
-                    "authenticatorData": _b64(auth_data),
-                    "signature": _b64(signature),
-                    "userHandle": None,
-                },
+                "response": response,
             },
         }

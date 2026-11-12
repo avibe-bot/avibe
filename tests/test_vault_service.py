@@ -1320,6 +1320,192 @@ def test_webauthn_factor_registration_stores_public_key(vault):
     assert json.loads(row["transports"]) == ["internal"]
 
 
+def test_webauthn_registration_user_handle_is_instance_scoped_and_persistent(tmp_path):
+    def registration_options(path):
+        engine = create_sqlite_engine(path)
+        metadata.create_all(engine)
+        try:
+            credential = WebAuthnTestCredential()
+            with engine.begin() as conn:
+                return vs.create_webauthn_registration_options(
+                    conn,
+                    rp_id=credential.rp_id,
+                    origin=credential.origin,
+                )
+        finally:
+            engine.dispose()
+
+    first = registration_options(tmp_path / "instance-a.sqlite")
+    second = registration_options(tmp_path / "instance-b.sqlite")
+    first_handle = vault_webauthn.decode_user_handle(first["webauthn"]["user"]["id"])
+    second_handle = vault_webauthn.decode_user_handle(second["webauthn"]["user"]["id"])
+
+    assert len(first_handle) == vs.WEBAUTHN_USER_HANDLE_BYTES
+    assert len(second_handle) == vs.WEBAUTHN_USER_HANDLE_BYTES
+    assert first_handle != second_handle
+    assert first["webauthn"]["user"]["id"] == vault_webauthn.b64encode(first_handle)
+    assert second["webauthn"]["user"]["id"] == vault_webauthn.b64encode(second_handle)
+
+    restarted = registration_options(tmp_path / "instance-a.sqlite")
+    assert restarted["webauthn"]["user"]["id"] == first["webauthn"]["user"]["id"]
+
+    engine = create_sqlite_engine(tmp_path / "instance-a.sqlite")
+    try:
+        with engine.connect() as conn:
+            stored = conn.execute(
+                select(state_meta.c.value_json).where(state_meta.c.key == vs.WEBAUTHN_USER_HANDLE_META_KEY)
+            ).scalar_one()
+        assert json.loads(stored) == first["webauthn"]["user"]["id"]
+    finally:
+        engine.dispose()
+
+
+def test_webauthn_registration_user_handle_initialization_is_atomic_under_concurrency(tmp_path):
+    path = tmp_path / "concurrent.sqlite"
+    seed = create_sqlite_engine(path)
+    metadata.create_all(seed)
+    seed.dispose()
+    barrier = threading.Barrier(2)
+
+    def register_once():
+        engine = create_sqlite_engine(path)
+        try:
+            credential = WebAuthnTestCredential()
+            with engine.begin() as conn:
+                barrier.wait(timeout=5)
+                return vs.create_webauthn_registration_options(
+                    conn,
+                    rp_id=credential.rp_id,
+                    origin=credential.origin,
+                )
+        finally:
+            engine.dispose()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: register_once(), range(2)))
+
+    handles = {result["webauthn"]["user"]["id"] for result in results}
+    assert len(handles) == 1
+    assert len(vault_webauthn.decode_user_handle(next(iter(handles)))) == vs.WEBAUTHN_USER_HANDLE_BYTES
+
+
+def test_webauthn_registration_user_handle_rollback_and_invalid_state_fail_closed(tmp_path, monkeypatch):
+    path = tmp_path / "rollback.sqlite"
+    engine = create_sqlite_engine(path)
+    metadata.create_all(engine)
+    monkeypatch.setattr(vs, "_new_challenge", lambda: ("challenge", "challenge-digest"))
+    candidates = iter(
+        (
+            b"a" * vs.WEBAUTHN_USER_HANDLE_BYTES,
+            b"b" * vs.WEBAUTHN_USER_HANDLE_BYTES,
+            b"c" * vs.WEBAUTHN_USER_HANDLE_BYTES,
+        )
+    )
+    monkeypatch.setattr(vs.secrets, "token_bytes", lambda _size: next(candidates))
+
+    with pytest.raises(RuntimeError):
+        with engine.begin() as conn:
+            vs.create_webauthn_registration_options(
+                conn,
+                rp_id="alex-app.avibe.bot",
+                origin="https://alex-app.avibe.bot",
+            )
+            raise RuntimeError("rollback registration options")
+
+    with engine.connect() as conn:
+        assert conn.execute(
+            select(state_meta.c.value_json).where(state_meta.c.key == vs.WEBAUTHN_USER_HANDLE_META_KEY)
+        ).scalar_one_or_none() is None
+
+    with engine.begin() as conn:
+        retried = vs.create_webauthn_registration_options(
+            conn,
+            rp_id="alex-app.avibe.bot",
+            origin="https://alex-app.avibe.bot",
+        )
+    assert retried["webauthn"]["user"]["id"] == vault_webauthn.b64encode(b"b" * vs.WEBAUTHN_USER_HANDLE_BYTES)
+    engine.dispose()
+
+    invalid_path = tmp_path / "invalid.sqlite"
+    invalid_engine = create_sqlite_engine(invalid_path)
+    metadata.create_all(invalid_engine)
+    with invalid_engine.begin() as conn:
+        conn.execute(
+            state_meta.insert().values(
+                key=vs.WEBAUTHN_USER_HANDLE_META_KEY,
+                value_json=json.dumps(vault_webauthn.b64encode(vault_webauthn.LEGACY_WEBAUTHN_USER_HANDLE)),
+                updated_at="2026-11-12T00:00:00Z",
+            )
+        )
+    with pytest.raises(vs.InvalidProtectedAuthzError, match="persisted WebAuthn user handle is invalid"):
+        with invalid_engine.begin() as conn:
+            vs.create_webauthn_registration_options(
+                conn,
+                rp_id="alex-app.avibe.bot",
+                origin="https://alex-app.avibe.bot",
+            )
+    invalid_engine.dispose()
+
+
+def test_webauthn_selected_factor_accepts_legacy_new_null_and_missing_user_handles(vault):
+    with vault.begin() as conn:
+        first, first_factor = _establish_protected_secret(conn, "HANDLE_ALIASES")
+
+    with vault.connect() as conn:
+        stored = conn.execute(
+            select(state_meta.c.value_json).where(state_meta.c.key == vs.WEBAUTHN_USER_HANDLE_META_KEY)
+        ).scalar_one()
+    current_handle = vault_webauthn.decode_user_handle(json.loads(stored))
+
+    def register_second(credential_id: bytes, sign_count: int, **assertion_options):
+        second = WebAuthnTestCredential(credential_id=credential_id)
+        with vault.begin() as conn:
+            options = vs.create_webauthn_registration_options(
+                conn,
+                rp_id=second.rp_id,
+                origin=second.origin,
+            )
+            payload = second.registration_payload(
+                challenge_id=options["challenge_id"],
+                challenge_b64=options["webauthn"]["challenge"],
+            )
+            payload["authz"] = first.assertion_authz(
+                challenge_id=options["authorization"]["challenge_id"],
+                factor_id=first_factor["id"],
+                challenge_b64=options["authorization"]["webauthn"]["challenge"],
+                sign_count=sign_count,
+                **assertion_options,
+            )
+            return vs.register_webauthn_factor(conn, payload, rp_id=second.rp_id, origin=second.origin)
+
+    register_second(b"missing-handle", 2, include_user_handle=False)
+    register_second(b"null-handle", 3)
+    register_second(b"legacy-handle", 4, user_handle=vault_webauthn.LEGACY_WEBAUTHN_USER_HANDLE)
+    register_second(b"new-handle", 5, user_handle=current_handle)
+
+    for sign_count, user_handle in ((6, b"wrong-instance"), (7, b"not-valid-base64!")):
+        second = WebAuthnTestCredential(credential_id=f"rejected-{sign_count}".encode())
+        with pytest.raises(vs.InvalidProtectedAuthzError, match="user handle"):
+            with vault.begin() as conn:
+                options = vs.create_webauthn_registration_options(
+                    conn,
+                    rp_id=second.rp_id,
+                    origin=second.origin,
+                )
+                payload = second.registration_payload(
+                    challenge_id=options["challenge_id"],
+                    challenge_b64=options["webauthn"]["challenge"],
+                )
+                payload["authz"] = first.assertion_authz(
+                    challenge_id=options["authorization"]["challenge_id"],
+                    factor_id=first_factor["id"],
+                    challenge_b64=options["authorization"]["webauthn"]["challenge"],
+                    sign_count=sign_count,
+                    user_handle=user_handle,
+                )
+                vs.register_webauthn_factor(conn, payload, rp_id=second.rp_id, origin=second.origin)
+
+
 def test_sandbox_cross_origin_webauthn_registration_and_assertion_accept_allowed_parent(vault):
     credential = WebAuthnTestCredential(rp_id="sandbox.avibe.bot", origin="https://sandbox.avibe.bot")
 
