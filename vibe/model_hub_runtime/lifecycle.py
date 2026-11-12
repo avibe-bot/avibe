@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from core.os_errors import local_os_errno
 from vibe.model_hub_runtime.journal import JournalError, read_document, write_document, write_durable
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -250,6 +251,15 @@ class EngineLifecycle:
                 yield
             finally:
                 self.manager._release_mutation_lock(lock)
+
+    @staticmethod
+    def _infrastructure_failure(error: BaseException) -> bool:
+        from vibe.model_hub_runtime.supervisor import EngineUnavailableError
+
+        return isinstance(error, JournalError) or local_os_errno(error) is not None or (
+            isinstance(error, EngineUnavailableError)
+            and error.reason in {"previous_engine_alive", "engine_untracked"}
+        )
 
     def _load(self) -> dict[str, Any] | None:
         try:
@@ -677,7 +687,7 @@ class EngineLifecycle:
         try:
             self.preflight(generation)
         except EngineUnavailableError as exc:
-            if exc.os_errno is None and exc.reason not in {"previous_engine_alive", "engine_untracked"}:
+            if not self._infrastructure_failure(exc):
                 with self.mutation():
                     value = self._load() or self.journal.empty()
                     self._quarantine(generation, value, "preflight_failed")
@@ -743,12 +753,7 @@ class EngineLifecycle:
             except Exception:
                 self.recovered = False
                 raise
-            from vibe.model_hub_runtime.supervisor import EngineUnavailableError
-
-            if isinstance(failure, JournalError) or (
-                isinstance(failure, EngineUnavailableError)
-                and (failure.os_errno is not None or failure.reason in {"previous_engine_alive", "engine_untracked"})
-            ):
+            if self._infrastructure_failure(failure):
                 self.recovered = False
                 raise
             value = self._load()
@@ -782,10 +787,7 @@ class EngineLifecycle:
                 except Exception:
                     self.recovered = False
                     raise
-                if previous is not None and not isinstance(rollback_failure, JournalError) and not (
-                    isinstance(rollback_failure, EngineUnavailableError)
-                    and (rollback_failure.os_errno is not None or rollback_failure.reason in {"previous_engine_alive", "engine_untracked"})
-                ):
+                if previous is not None and not self._infrastructure_failure(rollback_failure):
                     self._quarantine(previous, value, type(rollback_failure).__name__)
                 value.update(pending=None, launch=None, blocked="engine_rollback_failed")
                 self._save(value)

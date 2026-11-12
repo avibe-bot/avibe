@@ -282,6 +282,111 @@ def owner_fixture(tmp_path, monkeypatch, *, bundled_version="v8.0.30"):
     return owner, supervisor, staged
 
 
+def test_repeated_repairs_automatically_reclaim_retired_installations(tmp_path, monkeypatch):
+    owner, _supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
+    clean = owner.manager.clean
+    observed = []
+
+    def settled_clean(**kwargs):
+        value = owner.journal.load()
+        result = clean(**kwargs)
+        observed.append((value, result))
+        return result
+
+    monkeypatch.setattr(owner.manager, "clean", settled_clean)
+    generations = [baseline["generation"]]
+    for _ in range(5):
+        result = owner.stage_required(force=True)
+        assert result["ok"], result
+        assert observed, "byte-only staging must restore automatic post-install retention"
+        value, cleaned = observed[-1]
+        assert cleaned["ok"], cleaned  # the installer fence was released
+        assert result["generation"] in value["staged"]
+        for role in (value["active"], value["previous"], *value["staged"]):
+            if role is not None:
+                assert Path(role["install_dir"]).exists()
+        target = EngineGeneration.read(result["generation"], owner.manager.runtime_dir)
+        owner.activate(target, reason="required")
+        generations.append(target.document())
+    # The next ordinary required-file stage cleans roles retired by the last
+    # activation, without a user cleanup command or any execution change.
+    assert owner.stage_required()["ok"]
+    value = owner.journal.load()
+    protected = {g["install_dir"] for g in (value["active"], value["previous"], baseline["generation"])}
+    assert {g["install_dir"] for g in generations if Path(g["install_dir"]).exists()} == protected
+    assert owner.status()["legacy"]["install_dir"] == baseline["generation"]["install_dir"]
+
+
+@pytest.mark.parametrize("phase", ["preflight", "activation", "rollback"])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["direct", "cause"])
+def test_local_spawn_errors_never_quarantine_a_healthy_generation(tmp_path, monkeypatch, phase, wrapped):
+    import errno
+
+    from core.os_errors import local_os_errno
+    from vibe.model_hub_runtime.supervisor import EngineUnavailableError
+
+    owner, supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
+    owner.ensure_running()
+    candidate, _signer, _manifest, _envelope = signed_candidate(owner, tmp_path)
+
+    def environmental_failure():
+        if wrapped:
+            try:
+                raise OSError(errno.EAGAIN, "fixture process resource shortage")
+            except OSError as cause:
+                raise EngineUnavailableError("models.engine.start_failed") from cause
+        raise EngineUnavailableError("models.engine.start_failed", os_errno=errno.EAGAIN)
+
+    if phase == "preflight" and wrapped:
+        # Exercise the actual supervisor spawn wrapper, not just a fabricated
+        # exception: it keeps EAGAIN in __cause__ with os_errno unset.
+        from vibe.model_hub_runtime import lifecycle
+
+        monkeypatch.setattr(owner, "preflight", type(owner).preflight.__get__(owner))
+
+        def exhausted_spawn(command, **_kwargs):
+            assert command[0] == str(Path(candidate.install_dir) / candidate.bin_path)
+            raise OSError(errno.EAGAIN, "fixture process resource shortage")
+
+        monkeypatch.setattr(lifecycle.subprocess, "Popen", exhausted_spawn)
+    elif phase == "preflight":
+        monkeypatch.setattr(owner, "preflight", lambda _target: environmental_failure())
+    else:
+        start = supervisor.ensure_running
+        supervisor.fail_tag = candidate.asset_release_tag if phase == "rollback" else None
+
+        def start_or_fail():
+            target = getattr(owner._start_context, "generation", None)
+            failed_tag = candidate.asset_release_tag if phase == "activation" else baseline["generation"]["asset_release_tag"]
+            if target is not None and target.asset_release_tag == failed_tag:
+                environmental_failure()
+            return start()
+
+        monkeypatch.setattr(supervisor, "ensure_running", start_or_fail)
+    with pytest.raises(EngineUnavailableError) as failure:
+        owner.activate(candidate)
+    if phase != "rollback":
+        assert local_os_errno(failure.value) == errno.EAGAIN
+        if wrapped:
+            assert failure.value.os_errno is None
+    value = owner.journal.load()
+    assert baseline["generation"]["asset_release_tag"] not in value["quarantine"]
+    if phase == "rollback":
+        assert value["quarantine"] == {candidate.asset_release_tag: "EngineUnavailableError"}
+    else:
+        assert value["quarantine"] == {}
+    if phase == "preflight":
+        assert owner.recovered and supervisor.is_running()
+        assert candidate not in owner._preflight_passed
+    elif phase == "activation":
+        assert not owner.recovered and value["pending"] is not None
+        owner.recover()
+        assert owner.journal.load()["active"] == baseline["generation"]
+    else:
+        assert value["blocked"] == "engine_rollback_failed"
+        assert not supervisor.is_running()
+
+
 def test_concurrent_first_start_waits_for_the_owner_transaction(tmp_path, monkeypatch):
     owner, supervisor, _staged = owner_fixture(tmp_path, monkeypatch)
     entered = threading.Event()
@@ -792,12 +897,16 @@ def test_retired_bundled_repair_siblings_are_reclaimed_but_one_eligible_hint_sur
 
     owner, _supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
     generations = [baseline["generation"]]
-    for _ in range(4):
-        result = owner.stage_required(force=True)
-        assert result["ok"], result
-        generation = EngineGeneration.read(result["generation"], owner.manager.runtime_dir)
-        owner.activate(generation, reason="required")
-        generations.append(generation.document())
+    # Build a historical inventory for the explicit dry-run/cleanup contract;
+    # automatic settlement is covered by the repeated-repairs test above.
+    with monkeypatch.context() as setup:
+        setup.setattr(owner.manager, "_clean_after_successful_install", lambda: None)
+        for _ in range(4):
+            result = owner.stage_required(force=True)
+            assert result["ok"], result
+            generation = EngineGeneration.read(result["generation"], owner.manager.runtime_dir)
+            owner.activate(generation, reason="required")
+            generations.append(generation.document())
     chosen = generations[0 if hint == "canonical" else 1]
     manifest, archive = owner._manifest(EngineGeneration.read(chosen, owner.manager.runtime_dir))
     owner.manager._write_current_pointer(Path(chosen["install_dir"]), manifest, archive)
@@ -828,11 +937,14 @@ def test_each_lifecycle_role_pins_a_bundled_sibling_only_until_retirement(tmp_pa
 
     owner, _supervisor, _baseline = owner_fixture(tmp_path, monkeypatch)
     generations = []
-    for _ in range(4):
-        result = owner.stage_required(force=True)
-        generation = EngineGeneration.read(result["generation"], owner.manager.runtime_dir)
-        owner.activate(generation, reason="required")
-        generations.append(generation.document())
+    # Install the role-test inventory before enabling automatic retirement.
+    with monkeypatch.context() as setup:
+        setup.setattr(owner.manager, "_clean_after_successful_install", lambda: None)
+        for _ in range(4):
+            result = owner.stage_required(force=True)
+            generation = EngineGeneration.read(result["generation"], owner.manager.runtime_dir)
+            owner.activate(generation, reason="required")
+            generations.append(generation.document())
     pinned = generations[1]
     value = owner.journal.load()
     fingerprint = fingerprint_process_marker(new_process_identity_marker())
@@ -852,11 +964,11 @@ def test_each_lifecycle_role_pins_a_bundled_sibling_only_until_retirement(tmp_pa
             "fingerprint": fingerprint, "generation": pinned,
         }
     owner._save(value)
-    assert owner.manager.clean(keep_previous=0)["ok"]
+    assert owner.stage_required()["ok"]
     assert Path(pinned["install_dir"]).exists()
     value.update(staged=[], pending=None, launch=None, preflight=None)
     owner._save(value)
-    assert owner.manager.clean(keep_previous=0)["ok"]
+    assert owner.stage_required()["ok"]
     assert not Path(pinned["install_dir"]).exists()
     assert Path(value["active"]["install_dir"]).exists()
     assert Path(value["previous"]["install_dir"]).exists()

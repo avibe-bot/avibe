@@ -391,6 +391,13 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         )
         if result.get("ok") and staged is not None:
             result.update(state="staged", reason="waiting_for_controller", generation=staged.document())
+            # ensure(select=False) deliberately cannot clean through the bare
+            # stager. Its durable role now exists and the installer lock is
+            # released, so use this role-aware manager's normal retention.
+            try:
+                self._clean_after_successful_install()
+            except Exception:  # noqa: BLE001
+                logger.warning("Model Hub engine post-install retention cleanup failed", exc_info=True)
         elif result.get("ok"):
             raise JournalError("engine_stage_not_recorded")
         return result
