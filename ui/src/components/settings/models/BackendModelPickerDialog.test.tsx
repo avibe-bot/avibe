@@ -5,6 +5,7 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
+import { pressOutside } from '@/lib/testing/pressOutside';
 import type { ChosenCandidate } from './backendCatalog';
 import { BackendModelPickerDialog } from './BackendModelPickerDialog';
 import { modelsApi } from './modelsApi';
@@ -65,6 +66,23 @@ afterEach(() => {
 });
 
 describe('BackendModelPickerDialog', () => {
+  it('stays open on a click outside, keeping the search and the ticked rows', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(
+      read({ builtin: [candidate('gpt-6', { origin: 'builtin' }), candidate('gpt-6-mini', { origin: 'builtin' })] }),
+    );
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    const { onCancel } = renderPicker();
+    await user.click(await screen.findByRole('checkbox', { name: 'gpt-6' }));
+    await user.type(search(), 'gpt');
+
+    await pressOutside();
+
+    expect(onCancel).not.toHaveBeenCalled();
+    expect((search() as HTMLInputElement).value).toBe('gpt');
+    expect(screen.getByRole('checkbox', { name: 'gpt-6' }).getAttribute('aria-checked')).toBe('true');
+  });
+
   it('keeps the visible dialog unready until the candidate read completes', async () => {
     const user = userEvent.setup();
     let finishRead!: (value: BackendModelCandidates) => void;

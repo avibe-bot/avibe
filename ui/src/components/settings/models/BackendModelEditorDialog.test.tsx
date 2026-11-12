@@ -133,6 +133,32 @@ describe('BackendModelEditorDialog', () => {
     }
   });
 
+  it('closes only the suggestion list on the first Escape, and the editor on the next', async () => {
+    const { onCancel } = renderEditor();
+    const user = userEvent.setup();
+    await user.type(modelField(), 'qwen');
+    expect(await screen.findByRole('listbox')).toBeTruthy();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(modelField().value).toBe('qwen');
+
+    await user.keyboard('{Escape}');
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes only the custom effort field on Escape', async () => {
+    const { onCancel } = renderEditor({ model: { ...blankBackendModel(), id: 'reasoner', supports_reasoning: true } });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Custom effort' }));
+    const effort = screen.getByLabelText(i18n.t('settings.models.gateway.modelEditor.customEffort') as string);
+    await user.type(effort, 'ultra');
+    await user.keyboard('{Escape}');
+    expect(screen.queryByLabelText(i18n.t('settings.models.gateway.modelEditor.customEffort') as string)).toBeNull();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
   it('refuses an empty or already-taken model ID', async () => {
     const user = userEvent.setup();
     const { onCommit } = renderEditor({ takenIds: new Set(['taken']) });
