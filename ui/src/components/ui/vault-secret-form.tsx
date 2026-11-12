@@ -6,12 +6,14 @@ import {
   Eye,
   EyeOff,
   FileText,
+  KeyRound,
   Loader2,
   Lock,
   Plus,
   RefreshCw,
   Server,
   ShieldCheck,
+  Signature,
   SlidersHorizontal,
   UploadCloud,
   X,
@@ -26,9 +28,7 @@ import {
   type VaultRequestSpec,
   type VaultSecret,
   type VaultCreatePayload,
-  type VaultWebAuthnRegistrationPayload,
 } from '@/context/ApiContext';
-import type { VaultSandboxSealResult } from '@/lib/vaultSandboxClient';
 import { cn } from '@/lib/utils';
 import { mergeTags, normalizeTagOrSkillEntry, partitionTags, toSkillTag } from '@/lib/vaultTags';
 import { buildMetadataPatch } from '@/lib/vaultPolicy';
@@ -51,6 +51,7 @@ import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
 import { Button } from './button';
+import { InfoHint } from './info-hint';
 import { Input } from './input';
 import { SegmentedRadio } from './segmented';
 import { SigningAddressList } from './signing-address-list';
@@ -65,6 +66,7 @@ import {
   VaultFieldsHeader,
   VaultFieldTemplateMenu,
 } from './vault-field-list';
+import { HintLine, KeySourceTabs } from './vault-key-builder-parts';
 import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
@@ -149,7 +151,6 @@ function avaultP2Ready(dep: DependencyItem | null): boolean {
 const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
 
 /** The sandbox-sealed protected keypair the form holds between "Generate key" and submit. */
-type ProtectedKeypairSeal = VaultSandboxSealResult & { authzFactorRegistration?: VaultWebAuthnRegistrationPayload };
 
 export const VaultSecretForm: React.FC<{
   fixedName?: string;
@@ -212,13 +213,6 @@ export const VaultSecretForm: React.FC<{
   const [signingError, setSigningError] = useState<string | null>(null);
   const [signingAddresses, setSigningAddresses] = useState<SigningAddresses | null>(null);
   const [addressesLoading, setAddressesLoading] = useState(false);
-  // Protected keypair: the key is generated inside the sandbox up front (protocol v2 §7.2), so the
-  // parent only ever holds the returned ciphertext + public material — never a private key. Kept
-  // until submit; cleared on regenerate/cancel and whenever the name changes (the envelope AAD
-  // binds the name, so a stale envelope must not be submitted under a different name).
-  const [protectedKeypair, setProtectedKeypair] = useState<ProtectedKeypairSeal | null>(null);
-  const [generatingKeypair, setGeneratingKeypair] = useState(false);
-  const [keypairError, setKeypairError] = useState<string | null>(null);
   // A spec's `tags` may already carry `skill:<name>` entries; partition once so the seed
   // can fold in the `links.skills` bare-name mirror without duplicating (lib/vaultTags).
   const specParts = useMemo(() => partitionTags(requestSpec?.tags), [requestSpec]);
@@ -304,10 +298,6 @@ export const VaultSecretForm: React.FC<{
 
   const protectedVault = useProtectedVault();
   const entryIssue = vaultEntryIssue();
-  // The vault status the current protected keypair was generated under. A transition away from
-  // 'unlocked' (manual/auto lock, or an abandoned fresh setup that discards the VMK) means the
-  // held envelope is sealed to a VMK that's no longer active — see the render-phase reset below.
-  const [keypairSessionStatus, setKeypairSessionStatus] = useState(protectedVault.status);
   useEffect(() => {
     if (!editSecret && protection === 'protected' && !entryIssue) void protectedVault.refresh();
     // protectedVault.refresh is stable (useCallback); only re-check when the tier changes.
@@ -367,6 +357,8 @@ export const VaultSecretForm: React.FC<{
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim();
   const secretNameValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(secretName);
+  // Said once something is typed: an empty name is not yet an error.
+  const nameInvalid = secretName.length > 0 && !secretNameValid;
   const protectedCreateReady = !entryIssue && protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   // A Solana key: avault creates it on the standard tier, the sandbox on the protected tier.
@@ -429,22 +421,19 @@ export const VaultSecretForm: React.FC<{
       new Set(fieldRows.map((field) => field.name)).size === fieldRows.length
     : staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
   const valueReady = isKeypair
-    ? // A protected keypair, Solana or not, must be generated in-sandbox first (below). A standard
-      // Solana key is created by avault at submit: generating needs nothing, importing needs the
-      // pasted key. A standard EVM/Bitcoin keypair needs the locally built signing key.
-      protection === 'protected'
-      ? protectedKeypair != null
+    ? // A generated key, on any chain or tier, is made at submit, so it needs nothing here (owner
+      // decision 2026-11-12: an address shown before saving could be noted and then lost to a second
+      // Generate). A protected key is only generated, in the sandbox. An import needs the pasted key.
+      protection === 'protected' || signingSource === 'generate'
+      ? true
       : isSolanaKey
-        ? signingSource === 'generate' || solanaImport.trim().length > 0
+        ? solanaImport.trim().length > 0
         : signingKey != null
     : staticValueReady;
   const canSubmit = isEdit
     ? !submitting && !fieldEditBusy
     : Boolean(secretNameValid && valueReady) &&
       !submitting &&
-      // Block submit while a protected keypair is (re)generating in the sandbox, so the user can't
-      // submit the previous envelope mid-ceremony and persist a key they're actively replacing.
-      !generatingKeypair &&
       ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   const clearSelectedFile = useCallback(() => {
@@ -515,23 +504,6 @@ export const VaultSecretForm: React.FC<{
     setSigningAddresses(null);
   }, [protection, kind, clearStaticValue, clearSelectedFile, applySigningKey]);
 
-  // Monotonic token guarding the async generate: bumped on every clear/regenerate so a slow
-  // in-flight seal that resolves after the form moved on (rename, kind/tier switch, or a newer
-  // generate) is discarded instead of applied. Without it, an envelope sealed for the old name —
-  // whose AAD binds that name — could be submitted under a different name and be unopenable.
-  const keypairGenRef = useRef(0);
-
-  // Drop a pre-generated protected keypair and invalidate any in-flight generate. Only ciphertext +
-  // public data is held, so there is no private-key material to zero — but a stale envelope (bound
-  // to an old name/kind) must never be submitted, so callers clear it whenever the name, kind, or
-  // tier changes.
-  const clearProtectedKeypair = useCallback(() => {
-    keypairGenRef.current += 1;
-    setProtectedKeypair(null);
-    setKeypairError(null);
-    setGeneratingKeypair(false);
-  }, []);
-
   // Each chain builds its key differently, so nothing made or pasted for one may be submitted as the
   // other: drop a held secp256k1 private key, either pasted import, and a sandbox-sealed envelope.
   const switchChain = (next: KeyChain) => {
@@ -542,47 +514,7 @@ export const VaultSecretForm: React.FC<{
     setSolanaImport('');
     setSolanaImportFailed(false);
     setSigningError(null);
-    clearProtectedKeypair();
   };
-
-  // Generate the protected signing key inside the sandbox (protocol v2 §7.2): the key (secp256k1, or
-  // Ed25519 for a Solana key) is born in the sandbox, sealed under the VMK, and only its ciphertext
-  // + public addresses come back here. R1 semantics — silent while unlocked (the form's gate covers the locked case). Regenerate
-  // just calls again and discards the previous envelope.
-  const generateProtectedKeypair = async () => {
-    if (!secretNameValid || generatingKeypair) return;
-    const gen = (keypairGenRef.current += 1);
-    setGeneratingKeypair(true);
-    setKeypairError(null);
-    try {
-      const sealed = isSolanaKey
-        ? await protectedVault.sealValue(secretName, 'keypair', undefined, 'ed25519')
-        : await protectedVault.sealValue(secretName, 'keypair');
-      // The form moved on (rename / kind or tier switch / newer generate) — discard this result so a
-      // name-bound envelope can't be submitted under a name it wasn't sealed for.
-      if (gen !== keypairGenRef.current) return;
-      if (!sealed.publicKey) throw new Error(t('vaults.dialog.errors.invalidPublicKey'));
-      setProtectedKeypair(sealed);
-    } catch (err) {
-      if (gen !== keypairGenRef.current) return;
-      setProtectedKeypair(null);
-      setKeypairError(vaultErrorMessage(t, err, t('vaults.request.saveFailed')));
-    } finally {
-      if (gen === keypairGenRef.current) setGeneratingKeypair(false);
-    }
-  };
-
-  // React-sanctioned "adjust state during render": when the vault leaves the unlocked session the
-  // keypair was sealed under, discard the envelope. Critically this covers the first-ever protected
-  // secret — if the user generates a keypair, then locks/auto-locks before submit, the unpersisted
-  // fresh-setup VMK is dropped; re-setting-up mints a NEW VMK, and submitting the old envelope would
-  // bind the first persisted key to the abandoned VMK (unopenable). Runs once per transition (the
-  // `setKeypairSessionStatus` update makes the guard false on the next render), and `clearProtected-
-  // Keypair` bumps the generation token so any in-flight generate is invalidated too.
-  if (keypairSessionStatus !== protectedVault.status) {
-    setKeypairSessionStatus(protectedVault.status);
-    if (protectedVault.status !== 'unlocked') clearProtectedKeypair();
-  }
 
   // avault reports a key it could not import only as a general failure, with no reason the form could
   // name. For an import that is the likeliest cause, so the message says what to check beside the
@@ -597,6 +529,7 @@ export const VaultSecretForm: React.FC<{
     event.preventDefault();
     if (!canSubmit) return;
     let fileBytesToWipe: Uint8Array | null = null;
+    let generatedKey: SigningKeyMaterial | null = null;
     // Don't silently drop a half-typed chip the user can still see. Tags sit in the main body
     // (always visible); allowed hosts live in the Advanced collapsible in BOTH modes, so a host
     // draft only blocks submit while Advanced is open (collapsing clears hostsPending).
@@ -670,6 +603,12 @@ export const VaultSecretForm: React.FC<{
       }
       // Tags already hold `skill:<name>` entries inline; dedupe to the flat list the backend
       // stores, and mirror the bare skill names into links.skills.
+      // A generated EVM/Bitcoin key is made now, as it is saved; an imported one was built from the
+      // paste. Its private key is zeroed once sealed (finally, below).
+      if (isKeypair && !isSolanaKey && protection === 'standard' && signingSource === 'generate') {
+        generatedKey = generateSigningKey();
+      }
+      const keyToSave = generatedKey ?? signingKey;
       const mergedTags = mergeTags(tags, []);
       const skillLinks = partitionTags(tags).skills;
       const base = {
@@ -695,13 +634,13 @@ export const VaultSecretForm: React.FC<{
                   ? ({ curve: 'ed25519', source: 'import', format: solanaImportFormat(solanaImport) } as const)
                   : ({ curve: 'ed25519', source: 'generate' } as const),
             }
-          : isKeypair && protection === 'standard' && signingKey
+          : isKeypair && protection === 'standard' && keyToSave
             ? {
                 kind: 'keypair',
                 signer_kind: 'local',
                 // Chain-agnostic: only the compressed secp256k1 public key is pinned
                 // in the clear; the scheme is chosen at sign time, not here.
-                public_meta: { signing_public_key: { curve: 'secp256k1', public_key: signingKey.publicKey } },
+                public_meta: { signing_public_key: { curve: 'secp256k1', public_key: keyToSave.publicKey } },
               }
             : {}),
       };
@@ -752,9 +691,12 @@ export const VaultSecretForm: React.FC<{
         cryptoFields = defaultCrypto!;
       } else if (protection === 'protected') {
         if (isKeypair) {
-          // Keypair was already sealed in-sandbox by "Generate key" (protocol v2 §7.2). Submit the
-          // held envelope + public metadata; no second seal, and the private key never existed here.
-          if (!protectedKeypair?.publicKey) throw new Error(t('vaults.dialog.errors.invalidPublicKey'));
+          // The key is born in the sandbox now, under the name it is saved as (protocol v2 §7.2):
+          // only its ciphertext and public key come back, and the private key never exists here.
+          const protectedKeypair = isSolanaKey
+            ? await protectedVault.sealValue(secretName, 'keypair', undefined, 'ed25519')
+            : await protectedVault.sealValue(secretName, 'keypair');
+          if (!protectedKeypair.publicKey) throw new Error(t('vaults.dialog.errors.invalidPublicKey'));
           cryptoFields = { sealed: protectedKeypair.envelope };
           establishingVmk = protectedKeypair.establishingVmk;
           authzFactorRegistration = protectedKeypair.authzFactorRegistration;
@@ -785,8 +727,8 @@ export const VaultSecretForm: React.FC<{
         // (avault opens it back into a 32-byte signing key); for a static secret it is
         // the entered string.
         let plaintext: Uint8Array | string;
-        if (isKeypair && signingKey) {
-          plaintext = signingKey.privateKey;
+        if (isKeypair && keyToSave) {
+          plaintext = keyToSave.privateKey;
         } else if (staticSource === 'file' && selectedFile) {
           try {
             fileBytesToWipe = new Uint8Array(await selectedFile.arrayBuffer());
@@ -839,7 +781,6 @@ export const VaultSecretForm: React.FC<{
       setStaticSource('text');
       clearSelectedFile();
       applySigningKey(null);
-      clearProtectedKeypair();
       setImportHex('');
       setSolanaImport('');
       setSolanaImportFailed(false);
@@ -866,6 +807,7 @@ export const VaultSecretForm: React.FC<{
       }
     } finally {
       fileBytesToWipe?.fill(0);
+      generatedKey?.privateKey.fill(0);
       setSubmitting(false);
     }
   };
@@ -1139,12 +1081,30 @@ export const VaultSecretForm: React.FC<{
   // Protection selector — two cards (Standard / Protected); ui/design: vault/secret-dialog/create.
   const protectionCards = (
     <div className="flex flex-col gap-1.5">
-      <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
+      {/* One short line on each card; the full explanation of both levels is behind the ⓘ. */}
+      <span className="flex items-center gap-1.5">
+        <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
+        <InfoHint
+          hover
+          label={t('vaults.dialog.protectionInfo')}
+          contentClassName="w-72"
+          content={(
+            <span className="flex flex-col gap-2">
+              {(['standard', 'protected'] as const).map((tier) => (
+                <span key={tier} className="flex flex-col gap-0.5">
+                  <b className="font-semibold text-foreground">{t(`vaults.dialog.${tier}Protection`)}</b>
+                  <span>{t(`vaults.dialog.${tier}Help`)}</span>
+                </span>
+              ))}
+            </span>
+          )}
+        />
+      </span>
       <div className="grid grid-cols-2 gap-2.5">
         {(
           [
-            { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: t('vaults.dialog.standardHelp') },
-            { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: t('vaults.dialog.protectedHelp') },
+            { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: t('vaults.dialog.standardShort') },
+            { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: t('vaults.dialog.protectedShort') },
           ] as const
         ).map(({ key, icon: Icon, title, desc }) => {
           const selected = protection === key;
@@ -1157,7 +1117,6 @@ export const VaultSecretForm: React.FC<{
                 setProtection(key);
                 // Switching tier invalidates a sandbox-sealed protected keypair (sealed under the
                 // protected tier); drop it so a stale envelope can't be submitted as standard.
-                clearProtectedKeypair();
               }}
               className={cn(
                 'flex flex-col gap-1.5 rounded-[10px] border p-3 text-left transition-colors',
@@ -1182,11 +1141,11 @@ export const VaultSecretForm: React.FC<{
   // keys already always approve, so it isn't shown for them.
   const signApprovalToggle =
     isKeypair && protection === 'standard' ? (
-      <div className="flex items-start gap-3 rounded-[10px] border border-edge bg-surface-2 px-3 py-3 shadow-elevation-0">
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
+      <div className="flex items-center gap-3 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 shadow-elevation-0">
+        <span className="flex min-w-0 flex-1 items-center gap-1.5">
           <span className="text-[13px] font-semibold text-foreground">{t('vaults.dialog.alwaysAskSign')}</span>
-          <span className="text-[11.5px] leading-snug text-muted">{t('vaults.dialog.alwaysAskSignHelp')}</span>
-        </div>
+          <InfoHint hover content={t('vaults.dialog.alwaysAskSignHelp')} label={t('vaults.dialog.moreInfo')} />
+        </span>
         <Switch
           checked={alwaysAsk}
           onCheckedChange={setAlwaysAsk}
@@ -1411,13 +1370,13 @@ export const VaultSecretForm: React.FC<{
               setDefaultFieldIndex(0);
             }
             // A sandbox-sealed protected keypair is bound to its kind; switching kind invalidates it.
-            clearProtectedKeypair();
           }}
           disabled={submitting}
           ariaLabel={t('vaults.dialog.kindLabel')}
+          // Icons make the two kinds read at a glance (owner, 2026-11-12).
           options={[
-            { id: 'static', label: t('vaults.dialog.kindStatic') },
-            { id: 'keypair', label: t('vaults.dialog.kindKeypair') },
+            { id: 'static', label: t('vaults.dialog.kindStatic'), icon: KeyRound },
+            { id: 'keypair', label: t('vaults.dialog.kindKeypair'), icon: Signature },
           ]}
         />
       </div>
@@ -1431,13 +1390,17 @@ export const VaultSecretForm: React.FC<{
             setName(event.target.value);
             // The protected-keypair envelope AAD binds the name it was sealed under, so a rename
             // invalidates a pre-generated key — drop it and let the user regenerate.
-            clearProtectedKeypair();
           }}
           autoFocus
           required
-          className="font-mono"
+          aria-invalid={nameInvalid || undefined}
+          className={cn('font-mono', nameInvalid && 'border-destructive/60')}
         />
-        <span className="text-[11px] text-muted">{t('vaults.dialog.nameHint')}</span>
+        {nameInvalid ? (
+          <span role="alert" className="text-[11.5px] text-destructive-ink">{t('vaults.dialog.nameInvalid')}</span>
+        ) : (
+          <span className="text-[11.5px] text-muted">{t('vaults.dialog.nameHint')}</span>
+        )}
       </label>
 
       {/* Value (static) or signing-key builder (keypair) */}
@@ -1479,78 +1442,68 @@ export const VaultSecretForm: React.FC<{
       )}
 
       {isKeypair && !isSolanaKey && protection === 'standard' && (
-        <div className="flex flex-col gap-2.5 rounded-[10px] border border-edge bg-surface-2 px-3 py-3 shadow-elevation-0">
-          <span className="text-xs text-muted">{t('vaults.dialog.signingKeyHelp')}</span>
-          <div className="grid grid-cols-2 gap-2">
-            {(['generate', 'import'] as const).map((src) => (
-              <Button
-                key={src}
-                type="button"
-                size="sm"
-                variant={signingSource === src ? 'secondary' : 'ghost'}
-                disabled={submitting}
-                onClick={() => {
-                  setSigningSource(src);
-                  setSigningError(null);
-                  applySigningKey(null);
-                  setImportHex('');
-                }}
-              >
-                {src === 'generate' ? t('vaults.dialog.signingGenerate') : t('vaults.dialog.signingImport')}
-              </Button>
-            ))}
-          </div>
+        <div className="flex flex-col gap-2.5">
+          <KeySourceTabs
+            value={signingSource}
+            disabled={submitting}
+            onChange={(src) => {
+              setSigningSource(src);
+              setSigningError(null);
+              applySigningKey(null);
+              setImportHex('');
+            }}
+          />
 
+          {/* No Generate button (owner decision 2026-11-12): the key is made when the secret is
+              created, so an address shown before saving can never be replaced by a second Generate. */}
           {signingSource === 'generate' && (
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={submitting}
-              onClick={() => {
-                try {
-                  applySigningKey(generateSigningKey());
-                  setSigningError(null);
-                } catch (err) {
-                  setSigningError(err instanceof Error ? err.message : String(err));
-                }
-              }}
-            >
-              <RefreshCw className="size-4" />
-              {signingKey ? t('vaults.dialog.signingRegenerate') : t('vaults.dialog.signingGenerateCta')}
-            </Button>
+            <HintLine text={t('vaults.dialog.signingCreateHint')} info={t('vaults.dialog.signingKeyInfo')} />
           )}
 
           {signingSource === 'import' && (
-            <Input
-              value={importHex}
-              spellCheck={false}
-              autoComplete="off"
-              disabled={submitting}
-              placeholder={t('vaults.dialog.signingImportPlaceholder')}
-              className="font-mono"
-              onChange={(event) => {
-                const next = event.target.value;
-                setImportHex(next);
-                const trimmed = next.trim();
-                if (!trimmed) {
-                  applySigningKey(null);
-                  setSigningError(null);
-                  return;
-                }
-                try {
-                  applySigningKey(importSigningKey(trimmed));
-                  setSigningError(null);
-                } catch {
-                  applySigningKey(null);
-                  setSigningError(t('vaults.dialog.errors.invalidPrivateKey'));
-                }
-              }}
-            />
+            <>
+              <Input
+                value={importHex}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={submitting}
+                aria-label={t('vaults.dialog.signingImport')}
+                aria-invalid={Boolean(signingError) || undefined}
+                placeholder={t('vaults.dialog.signingImportPlaceholder')}
+                className={cn('font-mono text-xs', signingError && 'border-destructive/60')}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setImportHex(next);
+                  const trimmed = next.trim();
+                  if (!trimmed) {
+                    applySigningKey(null);
+                    setSigningError(null);
+                    return;
+                  }
+                  try {
+                    applySigningKey(importSigningKey(trimmed));
+                    setSigningError(null);
+                  } catch {
+                    applySigningKey(null);
+                    setSigningError(t('vaults.dialog.errors.invalidPrivateKey'));
+                  }
+                }}
+              />
+              {signingError ? (
+                <span role="alert" className="text-xs text-destructive-ink">{signingError}</span>
+              ) : !signingKey ? (
+                <HintLine text={t('vaults.dialog.signingImportHint')} info={t('vaults.dialog.signingImportInfo')} />
+              ) : null}
+            </>
           )}
 
+          {/* An imported key is the user's own, so its addresses can be checked before saving. */}
           {signingKey && (
-            <div className="flex min-w-0 flex-col gap-1.5">
-              <span className="text-xs font-medium text-muted">{t('vaults.dialog.signingAddresses')}</span>
+            <div className="flex min-w-0 flex-col gap-1.5 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 shadow-elevation-0">
+              <span className="flex items-center gap-1.5 text-xs font-medium text-muted">
+                {t('vaults.dialog.signingAddresses')}
+                <InfoHint content={t('vaults.dialog.signingAddressesInfo')} label={t('vaults.dialog.moreInfo')} hover />
+              </span>
               {addressesLoading ? (
                 <span className="flex items-center gap-1.5 text-xs text-muted">
                   <Loader2 className="size-3.5 animate-spin" />
@@ -1561,11 +1514,8 @@ export const VaultSecretForm: React.FC<{
               ) : (
                 <span className="text-xs text-muted">{t('vaults.dialog.signingAddressesUnavailable')}</span>
               )}
-              <span className="text-xs text-muted">{t('vaults.dialog.signingAddressesHint')}</span>
             </div>
           )}
-
-          {signingError && <span className="text-xs text-destructive-ink">{signingError}</span>}
 
           {!p2Ready && (
             <div className="rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-xs text-gold-ink">
@@ -1575,20 +1525,10 @@ export const VaultSecretForm: React.FC<{
         </div>
       )}
 
-      {/* Protected signing key — same shape as the standard tier (a Generate button + address
-          preview), but the key is born inside the sandbox and only ciphertext + public data comes
-          back (protocol v2 §7.2). Shown once the vault is unlocked; the gating panel below handles
-          the locked case. No import option — generate is the single path. */}
-      {isKeypair && protection === 'protected' && protectedCreateReady && (
-        <VaultProtectedKeyFields
-          chain={chain}
-          generated={protectedKeypair ?? undefined}
-          generating={generatingKeypair}
-          error={keypairError}
-          disabled={submitting || !secretNameValid}
-          onGenerate={() => void generateProtectedKeypair()}
-        />
-      )}
+      {/* Protected signing key: born inside the sandbox when the secret is created (protocol v2
+          §7.2), so there is nothing to choose; shown once the vault is unlocked, the gating panel
+          below handles the locked case. No import option. */}
+      {isKeypair && protection === 'protected' && protectedCreateReady && <VaultProtectedKeyFields chain={chain} />}
 
       {/* Description + Tags — core metadata, kept directly below the value (not buried under
           Advanced) so they're easy to set while creating a secret. */}

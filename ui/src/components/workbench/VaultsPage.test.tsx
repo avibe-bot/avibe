@@ -349,7 +349,8 @@ describe('VaultsPage list discovery', () => {
     expect(within(row).getByText(solana)).toBeTruthy();
     expect(within(row).getAllByRole('button', { name: /^Copy .* address$/ })).toHaveLength(1);
     expect(within(row).queryByRole('note')).toBeNull();
-    expect(within(rows()[1]).getByRole('note').textContent).toBe(en.vaults.addresses.standardBitcoinTaprootWarning);
+    // A standard Bitcoin key carries no signing-scheme note: that was developer detail (product, 2026-11-12).
+    expect(within(rows()[1]).queryByRole('note')).toBeNull();
 
     const search = screen.getByRole('textbox', { name: 'Search secrets' });
     await user.type(search, 'solana');

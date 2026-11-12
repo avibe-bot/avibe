@@ -66,7 +66,7 @@ const page = consolePage(<VaultsPage />);
 const phonePage = phoneShell('/vaults', <VaultsPage />);
 
 const solana = ['role=radio[name="{t:vaults.dialog.kindKeypair}"]', 'role=radio[name="{t:vaults.dialog.chainSolana}"]'];
-const importKey = [...solana, 'role=button[name="{t:vaults.dialog.signingImport}"]'];
+const importKey = [...solana, 'role=radio[name="{t:vaults.dialog.signingImport}"]'];
 const review = ['role=button[name="{t:vaults.requests.review}"]'];
 const details = [...review, 'role=button[name="{t:vaults.approval.details}"]'];
 
@@ -108,29 +108,16 @@ const designFrames = frames([
   },
   {
     name: 'create-protected',
-    title: '添加密钥 · 保护档 Solana 密钥 · 在沙箱内生成',
+    title: '添加密钥 · 保护档 Solana 密钥 · 创建时在沙箱内生成',
     width: 512,
-    height: 200,
+    height: 120,
     status: 'shipped',
     fixtures: listed,
     // The dialog reaches this builder only once the protected vault is unlocked in the sandbox, so
     // the builder is drawn on its own, at the width the dialog gives it.
     render: () => (
       <div className="p-6">
-        <VaultProtectedKeyFields chain="solana" generating={false} onGenerate={noop} />
-      </div>
-    ),
-  },
-  {
-    name: 'create-protected-generated',
-    title: '添加密钥 · 保护档 Solana 密钥 · 已在沙箱内生成',
-    width: 512,
-    height: 280,
-    status: 'shipped',
-    fixtures: listed,
-    render: () => (
-      <div className="p-6">
-        <VaultProtectedKeyFields chain="solana" generated={{ addresses: { solana: address } }} generating={false} onGenerate={noop} />
+        <VaultProtectedKeyFields chain="solana" />
       </div>
     ),
   },
