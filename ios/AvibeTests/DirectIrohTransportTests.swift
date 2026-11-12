@@ -672,7 +672,7 @@ final class DirectIrohTransportTests: XCTestCase {
     func testAStreamThatOpensAfterItsPathEndedIsAbandonedNotReturned() async throws {
         let harness = Harness()
         let connection = try await harness.bringUp(generation: "boot:1")
-        let gate = connection.holdOpens()
+        let gate = connection.holdNextOpen()
         // The probe's own stream is abandoned first.
         try await eventually("the probe's stream is abandoned") {
             harness.log.count(of: "reset") == 1
@@ -693,10 +693,111 @@ final class DirectIrohTransportTests: XCTestCase {
         }
     }
 
+    func testAStreamThatOpensAcrossANetworkChangeOfItsPathIsAbandoned() async throws {
+        let harness = Harness()
+        // What each stream reads first, in the order the streams open: the
+        // dial's probe, a relay, and the verification's probe. The held
+        // stream opens last.
+        let connection = try await harness.bringUp(
+            generation: "boot:1",
+            answers: [
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+            ]
+        )
+        try await eventually("the probe's stream is abandoned") {
+            harness.log.count(of: "reset") == 1
+        }
+        let relay = try await harness.transport.openStream(for: harness.tag("boot:1", path: 6))
+        let gate = connection.holdNextOpen()
+        let opening = Task<DirectIrohByteStream, Error> {
+            try await harness.transport.openStream(for: harness.tag("boot:1", path: 7))
+        }
+        try await eventually("the open reaches the binding") { harness.log.count(of: "open") == 3 }
+
+        // The network changes and the same path verifies again, all while
+        // the binding is still opening the stream.
+        harness.network.change()
+        XCTAssertTrue(harness.scheduler.fire(0.5))
+        try await eventually("the path is usable again") {
+            harness.reports == [
+                .usable(generation: "boot:1"),
+                .verifying,
+                .usable(generation: "boot:1"),
+            ]
+        }
+
+        // The stream was asked under a tag from before the change: it is
+        // abandoned although its path is usable again.
+        gate.resolve(())
+        let outcome = await directIrohOutcome(of: opening)
+        XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .stale)
+        try await eventually("the late stream is abandoned") {
+            harness.log.count(of: "reset") == 3
+        }
+        XCTAssertEqual(connection.streams.count, 4)
+        // The relay that was already there is untouched, and a tag from
+        // after the change opens.
+        try await relay.write(Data("x".utf8))
+        XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 8))
+    }
+
+    func testAStreamThatOpensAcrossTheRenewalOfItsAnswerIsAbandoned() async throws {
+        let harness = Harness()
+        // The dial's probe, a relay, and the probe after the renewal.
+        let connection = try await harness.bringUp(
+            generation: "boot:1",
+            answers: [
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+                DirectIrohFakeConnection.established,
+            ]
+        )
+        try await eventually("the probe's stream is abandoned") {
+            harness.log.count(of: "reset") == 1
+        }
+        let relay = try await harness.transport.openStream(for: harness.tag("boot:1", path: 6))
+        let gate = connection.holdNextOpen()
+        let opening = Task<DirectIrohByteStream, Error> {
+            try await harness.transport.openStream(for: harness.tag("boot:1", path: 7))
+        }
+        try await eventually("the open reaches the binding") { harness.log.count(of: "open") == 3 }
+
+        // The answer runs out and is renewed on the same connection, all
+        // while the binding is still opening the stream.
+        XCTAssertTrue(harness.scheduler.fire(300))
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:1", client: harness.engine.key.endpointID)
+        )
+        XCTAssertTrue(harness.scheduler.fire(240))
+        try await eventually("the path is usable again") {
+            harness.reports == [
+                .usable(generation: "boot:1"),
+                .verifying,
+                .usable(generation: "boot:1"),
+            ]
+        }
+        XCTAssertEqual(harness.log.count(of: "bind"), 1)
+
+        gate.resolve(())
+        let outcome = await directIrohOutcome(of: opening)
+        XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .stale)
+        try await eventually("the late stream is abandoned") {
+            harness.log.count(of: "reset") == 3
+        }
+        XCTAssertEqual(connection.streams.count, 4)
+        try await relay.write(Data("x".utf8))
+        XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 8))
+    }
+
     func testACancelledOpenEndsAtOnceAndItsLateStreamIsAbandoned() async throws {
         let harness = Harness()
         let connection = try await harness.bringUp(generation: "boot:1")
-        let gate = connection.holdOpens()
+        let gate = connection.holdNextOpen()
         // The probe's own stream is abandoned first.
         try await eventually("the probe's stream is abandoned") {
             harness.log.count(of: "reset") == 1

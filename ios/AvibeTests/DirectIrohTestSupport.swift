@@ -219,8 +219,8 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         lock.withLock { storedStreams }
     }
 
-    /// Makes the next opens wait, as a peer that grants no stream.
-    func holdOpens() -> DirectIrohPending<Void> {
+    /// Makes the next open wait, as a peer that grants no stream yet.
+    func holdNextOpen() -> DirectIrohPending<Void> {
         let gate = DirectIrohPending<Void>()
         lock.withLock {
             storedGate = gate
@@ -230,7 +230,11 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
 
     func openStream() async throws -> DirectIrohStreamHalves {
         log.add("open")
-        let gate = lock.withLock { storedGate }
+        let gate: DirectIrohPending<Void>? = lock.withLock {
+            let held = storedGate
+            storedGate = nil
+            return held
+        }
         if let gate {
             try await gate.wait()
         }

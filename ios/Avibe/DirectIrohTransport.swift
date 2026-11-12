@@ -186,12 +186,26 @@ final class DirectIrohTransport {
         /// The answer's lifetime passed without a renewed answer. Nothing
         /// new is opened or probed on the path until one arrives.
         var isExpired = false
+        /// How many times the path stopped being usable. A stream is
+        /// returned only if this did not change while it opened.
+        private(set) var suspensions = 0
         private var streams: [WeakStream] = []
 
         init(id: Int, offer: DirectRendezvousOffer, link: Link) {
             self.id = id
             self.offer = offer
             self.link = link
+        }
+
+        /// The path stops being usable for anything new. `true` if it was
+        /// usable until now.
+        func suspend() -> Bool {
+            guard isUsable else {
+                return false
+            }
+            isUsable = false
+            suspensions += 1
+            return true
         }
 
         func adopt(_ stream: DirectIrohByteStream) {
@@ -376,7 +390,7 @@ final class DirectIrohTransport {
             }
         )
         let stream = DirectIrohByteStream(halves)
-        guard await adopt(stream, sessionID: admitted.sessionID) else {
+        guard await adopt(stream, admitted) else {
             stream.cancel()
             throw DirectIrohError.stale
         }
@@ -388,6 +402,7 @@ final class DirectIrohTransport {
     private struct Admission: Sendable {
         let connection: any DirectIrohConnection
         let sessionID: Int
+        let suspensions: Int
     }
 
     private func admit(_ tag: DirectIrohStreamTag) throws -> Admission {
@@ -401,13 +416,24 @@ final class DirectIrohTransport {
             throw DirectIrohError.stale
         }
         pathHighWater = max(pathHighWater, tag.pathGeneration)
-        return Admission(connection: session.link.connection, sessionID: session.id)
+        return Admission(
+            connection: session.link.connection,
+            sessionID: session.id,
+            suspensions: session.suspensions
+        )
     }
 
-    /// `false` when the path the stream was opened on ended, or went back
-    /// to being verified, while the stream opened.
-    private func adopt(_ stream: DirectIrohByteStream, sessionID: Int) -> Bool {
-        guard let session, session.id == sessionID, session.isUsable else {
+    /// `false` when, while the stream opened, the path it was opened on
+    /// ended or stopped being usable, even if it is usable again by now:
+    /// every such event made the controller advance its path generation,
+    /// so the tag the stream was asked under is stale.
+    private func adopt(_ stream: DirectIrohByteStream, _ admitted: Admission) -> Bool {
+        guard
+            let session,
+            session.id == admitted.sessionID,
+            session.suspensions == admitted.suspensions,
+            session.isUsable
+        else {
             return false
         }
         session.adopt(stream)
@@ -580,8 +606,7 @@ final class DirectIrohTransport {
         cancelProbe()
         debounceTimer?.cancel()
         debounceTimer = nil
-        let wasUsable = session.isUsable
-        session.isUsable = false
+        let wasUsable = session.suspend()
         raiseFloor()
         if fetchStamp == nil, fetchTimer == nil {
             startFetch()
@@ -920,8 +945,7 @@ final class DirectIrohTransport {
                 return
             }
             cancelProbe()
-            let wasUsable = session.isUsable
-            session.isUsable = false
+            let wasUsable = session.suspend()
             raiseFloor()
             debounceTimer = scheduler.schedule(after: timing.networkDebounceSeconds) { [weak self] in
                 self?.debounceTimer = nil

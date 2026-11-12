@@ -96,7 +96,7 @@ Every piece of work (a request, a dial, a probe, a session) carries a stamp, and
 - the tag's rendezvous generation is the live session's;
 - that session is usable, not being verified.
 
-A stream that opens after any of these stopped holding is abandoned and the call throws. Ending a session cancels every stream opened on it.
+A stream that opens after any of these stopped holding is abandoned and the call throws, even if the same path is usable again by then: each time a path stops being usable the controller advances its path generation, so the tag the stream was asked under is stale. Ending a session cancels every stream opened on it.
 
 **Path generations.** The controller issues them and the transport cannot know the current one. It keeps the highest generation it has seen in a tag, and after each report that ends or suspends a path it refuses tags at or below that mark: the controller advances its generation on each such report, so those tags are stale. This catches only tags the transport has seen a successor of. The controller's own check at the commit point stays the authority.
 
@@ -119,7 +119,7 @@ In `ios-shell`, on the simulator:
 | Bounds, `deselect`, and late results | `testADialThatDoesNotAnswerEndsAtItsBoundAndALateConnectionIsClosed`, `testDeselectEndsADialAtOnceAndWhatArrivesLateIsClosed`, `testAnAnswerThatArrivesAfterDeselectChangesNothing` |
 | An answer is not used past its lifetime; only a newly accepted answer renews it; the span counts from the request; a late answer is not accepted | `testAnAnswerIsNotUsedPastItsLifetimeAndOnlyANewAnswerRenewsIt`, `testAnAnswerCountsFromWhenItWasAskedForAndOneThatArrivesTooLateIsNotAccepted`, `testAnAnswerThatRunsOutWhileItIsDialledIsGivenUp` |
 | Each other row of the table in section 5 | `testAClosedConnectionIsLostItsStreamsEndAndTheRendezvousIsAskedAgain`, `testANetworkChangeIsVerifyingThenUsableOnTheSamePathOrLost`, `testANetworkChangeBeforeAnyPathStartsOver`, `testAFailedCandidateProbesThePathAndOnlyADeadPathIsLost`, `testARefreshKeepsTheSameGenerationAndRetiresAReplacedOne`, `testFailuresBackOffAndAPageThatIsStillLoadingIsAskedAgainSoon` |
-| Stream fencing and late opens | `testAStreamOpensOnlyUnderCurrentTags`, `testAStreamThatOpensAfterItsPathEndedIsAbandonedNotReturned`, `testACancelledOpenEndsAtOnceAndItsLateStreamIsAbandoned` |
+| Stream fencing and late opens | `testAStreamOpensOnlyUnderCurrentTags`, `testAStreamThatOpensAfterItsPathEndedIsAbandonedNotReturned`, `testAStreamThatOpensAcrossANetworkChangeOfItsPathIsAbandoned`, `testAStreamThatOpensAcrossTheRenewalOfItsAnswerIsAbandoned`, `testACancelledOpenEndsAtOnceAndItsLateStreamIsAbandoned` |
 | Nothing lives in the background | `testNothingLivesInTheBackground`, `testATransportCreatedInTheBackgroundDoesNothingUntilTheForeground` |
 
 **Not shown by any of this:**
