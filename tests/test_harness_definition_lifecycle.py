@@ -25,7 +25,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import event, update
+from sqlalchemy import event, select, update
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -49,7 +49,7 @@ from storage.background import (
     definition_status_total,
 )
 from storage.db import create_sqlite_engine
-from storage.models import agent_sessions, run_definitions
+from storage.models import agent_runs, agent_sessions, run_definitions
 from storage.pagination import PageRequest
 from storage.settings_service import upsert_scope
 
@@ -246,6 +246,121 @@ def test_a_live_waiter_heartbeat_is_not_an_execution(store) -> None:
     assert watch["lifecycle_state"] == "waiting"
     assert watch["process_alive"] is True
     assert watch["runtime"]["pid"] == 4242
+
+
+@pytest.mark.parametrize("started_at", [NOW, None])
+def test_unchanged_watch_runtime_does_not_rewrite_rows(store, started_at) -> None:
+    """Snapshot timestamps and JSON key order are not process-state changes.
+
+    Lifecycle coverage checks the visible result, but cannot catch rewriting
+    every live heartbeat twice with that same result on each supervisor tick.
+    """
+    first = {
+        "running": True,
+        "pid": 42,
+        "started_at": started_at,
+        "updated_at": NOW,
+        "process_identity": {"pid": 42, "start_time": "identity"},
+    }
+    store.write_watch_runtime({"watches": {"steady": first}}, updated_at=NOW)
+    later = "2026-07-26T00:01:00+00:00"
+    statements = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _many):
+        statements.append((statement, parameters))
+
+    event.listen(store.engine, "before_cursor_execute", capture)
+    try:
+        store.write_watch_runtime(
+            {
+                "watches": {
+                    "steady": dict(reversed(list((first | {"updated_at": later}).items())))
+                }
+            },
+            updated_at=later,
+        )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture)
+
+    assert not [sql for sql, _ in statements if sql.startswith(("UPDATE", "INSERT", "DELETE"))]
+    assert store.load_watch_runtime() == {"watches": {"steady": first}}
+    # Pin the hot path to live rows or requested IDs, never all run history.
+    with store.engine.connect() as conn:
+        for statement, parameters in statements:
+            if statement.startswith("SELECT") and "agent_runs" in statement:
+                plan = conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters).all()
+                detail = " ".join(str(row[3]) for row in plan)
+                assert "SEARCH agent_runs" in detail
+                assert "SCAN agent_runs" not in detail
+                assert "USE TEMP B-TREE" not in detail
+
+
+@pytest.mark.parametrize(
+    ("change", "changed_columns"),
+    [
+        ({"pid": 43}, {"pid"}),
+        ({"process_identity": {"start_time": "new"}}, set()),
+        ({"started_at": "2026-07-26T00:00:30+00:00"}, {"started_at", "created_at"}),
+        ({"running": False}, {"status"}),
+    ],
+)
+def test_watch_runtime_updates_only_changed_rows_and_columns(store, change, changed_columns) -> None:
+    """One waiter changes without rewriting peers or their indexed run fields."""
+    first = {"running": True, "pid": 42, "started_at": NOW, "updated_at": NOW}
+    store.write_watch_runtime(
+        {"watches": {name: first for name in ("changed", "steady", "gone")}}, updated_at=NOW,
+    )
+    later = "2026-07-26T00:01:00+00:00"
+    changed = first | change | {"updated_at": later}
+    statements = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _many):
+        if statement.startswith("UPDATE agent_runs"):
+            statements.append((statement, parameters))
+
+    event.listen(store.engine, "before_cursor_execute", capture)
+    try:
+        store.write_watch_runtime(
+            {"watches": {"changed": changed, "steady": first | {"updated_at": later}}},
+            updated_at=later,
+        )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", capture)
+
+    expected = {"steady": first}
+    if changed["running"]:
+        expected["changed"] = changed
+    assert store.load_watch_runtime() == {"watches": expected}
+    assert len(statements) == 2
+    with store.engine.connect() as conn:
+        rows = {row["id"]: row for row in conn.execute(select(agent_runs)).mappings()}
+    assert rows["runtime:gone"]["status"] == "succeeded"
+    assert rows["runtime:gone"]["completed_at"] == later
+    assert rows["runtime:steady"]["updated_at"] == NOW
+    changed_sql = next(sql for sql, params in statements if "runtime:changed" in params)
+    assignments = changed_sql.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+    assert {assignment.split("=", 1)[0].strip() for assignment in assignments.split(",")} == (
+        changed_columns | {"updated_at", "metadata_json"}
+    )
+    # Absence is settled once, not on every subsequent empty snapshot.
+    store.write_watch_runtime({"watches": {}}, updated_at=later)
+    newest = "2026-07-26T00:02:00+00:00"
+    store.write_watch_runtime({"watches": {}}, updated_at=newest)
+    with store.engine.connect() as conn:
+        completed = dict(conn.execute(select(agent_runs.c.id, agent_runs.c.completed_at)).all())
+    assert completed == {
+        "runtime:gone": later,
+        "runtime:steady": later,
+        "runtime:changed": later if changed["running"] else None,
+    }
+    # Reusing a runtime row after recovery must clear its terminal stamp.
+    changed = changed | {"running": True}
+    store.write_watch_runtime({"watches": {"gone": changed}}, updated_at=newest)
+    with store.engine.connect() as conn:
+        recovered = conn.execute(select(agent_runs).where(agent_runs.c.id == "runtime:gone")).mappings().one()
+    assert recovered["status"] == "running"
+    assert recovered["completed_at"] is None
+    assert store.load_watch_runtime() == {"watches": {"gone": changed}}
 
 
 def test_process_alive_tells_a_dead_waiter_from_one_never_seen(store) -> None:
