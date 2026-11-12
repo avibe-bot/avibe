@@ -275,8 +275,8 @@ public edge; the shell adds no trust override and sees only ciphertext.
 **Nothing in this shell implements a transport, and `AvibeApp` passes none.**
 Without one, `AppModel` creates no `DirectPathController`: no listener, no
 `proxyConfigurations` write (not even a clear), no `direct` capability,
-`direct.status()` answers `unsupported`, no event, and a runtime opens exactly
-as before. The tests hold this from outside the App's code: they count every
+`direct.status()` answers `unsupported`, no event, no read or write of the
+listener-fault marker, and a runtime opens exactly as before. The tests hold this from outside the App's code: they count every
 call of WebKit's `proxyConfigurations` setter in the process, on any store,
 from before the App exists, and scan the process's listening sockets on any
 address of either family, across launch, opening and switching instances,
@@ -319,10 +319,21 @@ With a transport:
   and an account change closes all relays, without a closure; validating a
   path again closes nothing. The background also closes the listening socket;
   the return re-binds the same port, publishes the closure, and only then
-  answers a held `direct.status()`. A port that cannot be re-bound and checked
-  puts the controller in `recoveryNotQualified`: direct is never authorized
-  again in that process and no route is rewritten. That is an incomplete
-  recovery branch, not a qualified behaviour.
+  answers a held `direct.status()`.
+- **The listener fault** (accepted for the internal trial, 2026-11-12). A
+  failure before any route exists only leaves that host on WebKit's normal
+  path. Once a route exists, the listener's socket failing, or a failed
+  re-bind or ownership check on return, is terminal for the process: direct
+  is never authorized again and nothing is re-bound or rewritten. Each
+  runtime whose host is routed on the current store is covered by the
+  existing failure view with "Connection lost — reopen the app" (`zh-Hans`:
+  "连接中断，请重新打开 App") and no Retry; status reads get the bridge error
+  `failed` and no event follows. The fault writes one marker in the App's
+  preferences; the next launch with a transport consumes it in `AppModel.init`
+  and runs that whole launch without a path controller, on the public origin.
+  The launch after that uses the transport again. Reopening is the remedy for
+  this rare fault only: an ordinary loss of the direct path falls back to the
+  public origin for new connections, without a relaunch.
 - `DirectRouteOwner` is the only writer of `proxyConfigurations` on an
   account data store, which the runtime WebViews and the hidden account
   transport share. A store's route lists exact instance hosts (at most 16 per

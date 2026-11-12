@@ -172,6 +172,9 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
 
         XCTAssertEqual(harness.preferences, [.direct, .tunnel, .direct, .tunnel])
+        // Ordinary loss of the path is never the listener fault.
+        XCTAssertFalse(harness.controller.isFaulted)
+        XCTAssertEqual(harness.faults, 0)
         XCTAssertEqual(try ProxyConfigurationWrites.count(), afterRoute)
         XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one])
     }
@@ -323,21 +326,25 @@ final class DirectPathControllerTests: XCTestCase {
 
         harness.enterForeground()
         // A status request on the return is held until the listener is
-        // ready again, or its recovery has failed.
+        // ready again, or until the re-bind has failed.
         let replies = harness.requestStatus("instance-1")
         XCTAssertEqual(replies.values, [])
         try await eventually { replies.values.count == 1 }
-        XCTAssertEqual(replies.values.first??.closure, 1)
-        XCTAssertEqual(harness.status("instance-1").closure, 1)
 
         // Whether the same port can be re-bound with its old connections'
         // remains is not established. Either way the App never pretends.
-        if harness.controller.isRecoveryNotQualified {
-            print("B2 re-bind after background: recovery not qualified")
+        if harness.controller.isFaulted {
+            print("B2 re-bind after background: listener fault")
+            // The held answer is settled without a status.
+            XCTAssertEqual(replies.values, [nil])
+            XCTAssertEqual(harness.faults, 1)
             harness.transport.report(.usable(generation: "g1"), for: target)
             XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
         } else {
             print("B2 re-bind after background: listener ready")
+            XCTAssertEqual(replies.values.first??.closure, 1)
+            XCTAssertEqual(harness.status("instance-1").closure, 1)
+            XCTAssertEqual(harness.faults, 0)
             XCTAssertEqual(harness.controller.listenerState, .ready)
             // The return selects again, under a new selection.
             let reselected = try XCTUnwrap(harness.transport.selections.last)
@@ -375,17 +382,70 @@ final class DirectPathControllerTests: XCTestCase {
         let replies = harness.requestStatus("instance-1")
         XCTAssertEqual(replies.values, [])
 
-        try await eventually { harness.controller.isRecoveryNotQualified }
+        try await eventually { harness.controller.isFaulted }
         try await eventually { replies.values.count == 1 }
-        XCTAssertEqual(replies.values.first??.preferred, .tunnel)
+        // The held answer is settled without a status, and so is a new one.
+        XCTAssertEqual(replies.values, [nil])
+        XCTAssertEqual(harness.requestStatus("instance-1").values, [nil])
+        XCTAssertEqual(harness.faults, 1)
+        let announced = harness.announcements
         // No new selection, no direct preference, no direct candidate.
         XCTAssertEqual(harness.transport.selections.count, selections)
         harness.transport.report(.usable(generation: "g1"), for: target)
         XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
         XCTAssertNil(harness.controller.plan(for: try XCTUnwrap(DirectAuthority(host: one)))?.openDirect)
+
+        // Nothing undoes it in this process: not another background and
+        // return, not another failure callback.
+        squatter.close()
+        harness.enterBackground()
+        harness.enterForeground()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(harness.controller.isFaulted)
+        XCTAssertEqual(harness.transport.selections.count, selections)
+        if let listener = harness.controller.listener {
+            harness.controller.listenerDidFail(listener)
+        }
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertEqual(harness.announcements, announced)
+
         // No route is rewritten to another port, and no new host is added.
+        // The fault covers only a runtime whose host is routed.
         try await harness.select("instance-2")
         XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        let second = try XCTUnwrap(harness.lastOpened)
+        XCTAssertFalse(harness.controller.faultCovers(second))
+        XCTAssertEqual(harness.requestStatus("instance-2").values.first??.preferred, .tunnel)
+        try await harness.select("instance-1")
+        XCTAssertTrue(harness.controller.faultCovers(try XCTUnwrap(harness.lastOpened)))
+    }
+
+    @MainActor
+    func testAListenerSocketFailureAfterARouteIsOneTerminalFaultAndAStaleOneIsNothing() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let listener = try XCTUnwrap(harness.controller.listener)
+
+        // A listener this controller does not own fails: nothing happens.
+        let stranger = DirectConnectListener(planner: { _ in nil }, onListenerFailure: {})
+        harness.controller.listenerDidFail(stranger)
+        XCTAssertFalse(harness.controller.isFaulted)
+        XCTAssertEqual(harness.status("instance-1").preferred, .direct)
+
+        let announced = harness.announcements
+        harness.controller.listenerDidFail(listener)
+        harness.controller.listenerDidFail(listener)
+
+        XCTAssertTrue(harness.controller.isFaulted)
+        XCTAssertEqual(harness.faults, 1)
+        // No event presents anything after the fault.
+        XCTAssertEqual(harness.announcements, announced)
+        XCTAssertEqual(harness.requestStatus("instance-1").values, [nil])
+        XCTAssertNil(harness.controller.plan(for: try XCTUnwrap(DirectAuthority(host: one)))?.openDirect)
+        XCTAssertTrue(harness.controller.faultCovers(try XCTUnwrap(harness.lastOpened)))
     }
 
     // MARK: Helpers
@@ -436,6 +496,10 @@ private final class Harness {
     private let timing: DirectPathTiming
     /// `preferred` for instance-1 each time the controller announced a change.
     private(set) var preferences: [DirectPathStatus.Preference] = []
+    /// Every announcement, whatever changed.
+    private(set) var announcements = 0
+    /// How many times the controller reported the listener fault.
+    private(set) var faults = 0
     private(set) var lastOpened: MobileRuntimeContext?
 
     private(set) lazy var controller: DirectPathController = DirectPathController(
@@ -450,10 +514,14 @@ private final class Harness {
         notificationCenter: notifications,
         isInBackground: false,
         onStatusChanged: { [unowned self] in
+            self.announcements += 1
             let status = self.status("instance-1")
             if self.preferences.last != status.preferred {
                 self.preferences.append(status.preferred)
             }
+        },
+        onFault: { [unowned self] in
+            self.faults += 1
         }
     )
 

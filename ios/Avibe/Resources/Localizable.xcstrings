@@ -81,6 +81,22 @@
         }
       }
     },
+    "browser.direct_fault.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connection lost — reopen the app"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连接中断，请重新打开 App"
+          }
+        }
+      }
+    },
     "browser.error.body" : {
       "localizations" : {
         "en" : {

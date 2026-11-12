@@ -114,7 +114,13 @@ private struct BrowserScreen: View {
                     // is not the screen's, so the page starts there.
                     .ignoresSafeArea(.container, edges: [.top, .bottom])
 
-                    if isLoading && !failed {
+                    let overlay = BrowserOverlay(
+                        isLoading: isLoading,
+                        failed: failed,
+                        directFault: appModel.directFaultCovers(runtime)
+                    )
+
+                    if overlay == .loading {
                         ProgressView("browser.loading")
                             .padding(14)
                             .background(
@@ -124,7 +130,7 @@ private struct BrowserScreen: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
 
-                    if failed {
+                    if overlay == .loadFailure {
                         ContentUnavailableView {
                             Label(
                                 "browser.error.title",
@@ -149,6 +155,24 @@ private struct BrowserScreen: View {
                                 .ignoresSafeArea(.container, edges: .top)
                         )
                     }
+
+                    // Terminal for this process: no Retry or reload, which
+                    // would not reach a working listener. Reopening does.
+                    if overlay == .directFault {
+                        ContentUnavailableView {
+                            Label(
+                                "browser.direct_fault.title",
+                                systemImage: "wifi.exclamationmark"
+                            )
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(
+                            Color(uiColor: .systemBackground)
+                                .ignoresSafeArea(.container, edges: .top)
+                        )
+                        .contentShape(Rectangle())
+                        .accessibilityIdentifier("direct-listener-fault")
+                    }
                 }
             }
             .background(
@@ -165,6 +189,28 @@ private struct BrowserScreen: View {
                     appModel.showInstancePicker()
                 }
             }
+        }
+    }
+}
+
+/// What covers the runtime's WebView. The listener fault comes first: it is
+/// terminal for the process, so neither the spinner nor the load-failure
+/// view, whose Retry would not reach a working listener, is shown with it.
+enum BrowserOverlay: Equatable {
+    case none
+    case loading
+    case loadFailure
+    case directFault
+
+    init(isLoading: Bool, failed: Bool, directFault: Bool) {
+        if directFault {
+            self = .directFault
+        } else if failed {
+            self = .loadFailure
+        } else if isLoading {
+            self = .loading
+        } else {
+            self = .none
         }
     }
 }

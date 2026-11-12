@@ -338,6 +338,8 @@ actor DirectConnectListener {
     private var allowedHosts: Set<String> = []
     private var relays: [UUID: Relay] = [:]
     private var isStopped = false
+    /// The close of the previous listening socket, until it has finished.
+    private var closing: Task<Void, Never>?
 
     init(
         limits: DirectConnectLimits = .standard,
@@ -366,6 +368,8 @@ actor DirectConnectListener {
     /// share its address (`allowLocalEndpointReuse` is off), so a port held by
     /// anyone else fails the bind.
     func bind(port requested: UInt16?) async throws -> UInt16 {
+        // A listening socket still closing holds the port.
+        await closing?.value
         guard !isStopped, listener == nil else {
             throw CancellationError()
         }
@@ -454,11 +458,37 @@ actor DirectConnectListener {
     }
 
     /// Closes the listening socket and keeps every accepted connection
-    /// (B2 on background). `bind(port:)` may follow.
-    func closeListeningSocket() {
-        listener?.stateUpdateHandler = nil
-        listener?.cancel()
-        listener = nil
+    /// (B2 on background). Returns once the socket has closed, or after a
+    /// second; `bind(port:)` also waits for it. Cancelling an `NWListener`
+    /// closes its socket later: a bind of the same port straight after
+    /// `cancel()` failed with EADDRINUSE on the simulator.
+    func closeListeningSocket() async {
+        if let listener {
+            self.listener = nil
+            closing = Task {
+                await Self.cancelAndWait(listener)
+            }
+        }
+        await closing?.value
+    }
+
+    private static func cancelAndWait(_ listener: NWListener) async {
+        let closed = DirectOnceAnswer<Void>()
+        listener.stateUpdateHandler = { state in
+            if case .cancelled = state {
+                closed.resolve(with: .success(()))
+            }
+        }
+        listener.cancel()
+        _ = try? await directDeadline(1) {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    closed.wait(with: continuation)
+                }
+            } onCancel: {
+                closed.resolve(with: .failure(CancellationError()))
+            }
+        }
     }
 
     /// Stops for good: the listening socket and every connection.
@@ -467,7 +497,9 @@ actor DirectConnectListener {
             return
         }
         isStopped = true
-        closeListeningSocket()
+        listener?.stateUpdateHandler = nil
+        listener?.cancel()
+        listener = nil
         for relay in relays.values {
             relay.task.cancel()
         }

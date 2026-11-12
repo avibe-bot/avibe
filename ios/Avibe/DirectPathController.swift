@@ -168,11 +168,14 @@ enum DirectListenerState: Equatable, Sendable {
     /// Closed on background (B2); the same port is re-bound on return.
     case closedForBackground
     case rebinding
-    /// The port could not be re-bound exclusively, or the ownership check or
-    /// the socket failed. Direct is never authorized in this state, and no
-    /// recovery has been qualified (section 9). The routes still point at
-    /// the old port. It is not a steady state the design accepts.
-    case recoveryNotQualified
+    /// Terminal for this process: after a route was written, the listening
+    /// socket failed, or the same port could not be re-bound or did not
+    /// pass the ownership check. The routes still point at a port the App
+    /// may not hold, and nothing in the process can make WebKit leave it
+    /// (docs/plans/remote-direct-ios.md section 9). Direct is never
+    /// authorized again, no route is written, and the App asks the user to
+    /// reopen it; the next launch uses no listener at all.
+    case faulted
 }
 
 /// Decides, for each new CONNECT, whether direct may carry it, and keeps the
@@ -200,9 +203,11 @@ final class DirectPathController {
     private let timing: DirectPathTiming
     private let notificationCenter: NotificationCenter
     private let onStatusChanged: () -> Void
+    /// Called once, when the listener fault is entered.
+    private let onFault: () -> Void
     private var lifecycleObservers: [NSObjectProtocol] = []
 
-    private var listener: DirectConnectListener?
+    private(set) var listener: DirectConnectListener?
     private var listenerPort: UInt16?
     private(set) var listenerState: DirectListenerState = .none
     private var listenerStart: Task<Bool, Never>?
@@ -240,7 +245,8 @@ final class DirectPathController {
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
         isInBackground: Bool? = nil,
-        onStatusChanged: @escaping () -> Void
+        onStatusChanged: @escaping () -> Void,
+        onFault: @escaping () -> Void = {}
     ) {
         self.websiteDataStore = websiteDataStore
         self.transport = transport
@@ -253,6 +259,7 @@ final class DirectPathController {
         self.isInBackground = isInBackground
             ?? (UIApplication.shared.applicationState == .background)
         self.onStatusChanged = onStatusChanged
+        self.onFault = onFault
 
         websiteDataStore.onWillRotate = { [weak self] in
             self?.accountWillChange()
@@ -312,12 +319,34 @@ final class DirectPathController {
         if isResuming {
             heldReplies.append((origin, reply))
         } else {
-            reply(currentStatus(for: origin))
+            reply(answer(for: origin))
         }
     }
 
-    var isRecoveryNotQualified: Bool {
-        listenerState == .recoveryNotQualified
+    /// No status once the fault covers `origin`'s host: a page behind it is
+    /// never told anything that reads as ready.
+    private func answer(for origin: WebOrigin) -> DirectPathStatus? {
+        if isFaulted, routeOwner.routes(origin.host, store: websiteDataStore.identifier) {
+            return nil
+        }
+        return currentStatus(for: origin)
+    }
+
+    /// The listener fault is terminal for this process.
+    var isFaulted: Bool {
+        listenerState == .faulted
+    }
+
+    /// Whether the fault leaves `runtime`'s content behind a route to a port
+    /// the App may not hold: its host is routed on the current store.
+    func faultCovers(_ runtime: MobileRuntimeContext) -> Bool {
+        guard
+            isFaulted,
+            let authority = DirectAuthority(instanceURL: runtime.instance.url)
+        else {
+            return false
+        }
+        return routeOwner.routes(authority.host, store: websiteDataStore.identifier)
     }
 
     // MARK: Runtime and account
@@ -350,7 +379,7 @@ final class DirectPathController {
     ) async {
         guard
             let authority = DirectAuthority(instanceURL: runtime.instance.url),
-            listenerState != .recoveryNotQualified
+            listenerState != .faulted
         else {
             return
         }
@@ -644,6 +673,15 @@ final class DirectPathController {
             closures[host, default: 0] += 1
         }
         sequence += 1
+        notify()
+    }
+
+    /// Sends the state to the runtime's documents; never once faulted, so a
+    /// covered page is asked to start nothing.
+    private func notify() {
+        guard !isFaulted else {
+            return
+        }
         onStatusChanged()
     }
 
@@ -659,7 +697,7 @@ final class DirectPathController {
         }
         preferred = next
         sequence += 1
-        onStatusChanged()
+        notify()
     }
 
     // MARK: The listener
@@ -671,7 +709,7 @@ final class DirectPathController {
         switch listenerState {
         case .ready:
             return true
-        case .recoveryNotQualified, .closedForBackground:
+        case .faulted, .closedForBackground:
             return false
         case .none:
             listenerStart = startListener()
@@ -689,17 +727,24 @@ final class DirectPathController {
     }
 
     private func startListener() -> Task<Bool, Never> {
+        // The failure callback names the listener it came from, so one from
+        // a listener that was replaced or stopped does nothing.
+        let listenerBox = DirectListenerBox()
         let listener = DirectConnectListener(
             limits: limits,
             planner: { [weak self] authority in
                 await self?.plan(for: authority)
             },
-            onListenerFailure: { [weak self] in
+            onListenerFailure: { [weak self, listenerBox] in
                 Task { @MainActor in
-                    self?.listenerDidFail()
+                    guard let failed = listenerBox.listener else {
+                        return
+                    }
+                    self?.listenerDidFail(failed)
                 }
             }
         )
+        listenerBox.listener = listener
         self.listener = listener
         listenerState = .binding
         let rebindSeconds = timing.rebindSeconds
@@ -749,6 +794,10 @@ final class DirectPathController {
     }
 
     private func stopListener() async {
+        // A fault is never undone in its process.
+        guard listenerState != .faulted else {
+            return
+        }
         let listener = listener
         self.listener = nil
         listenerPort = nil
@@ -757,21 +806,38 @@ final class DirectPathController {
         await listener?.stop()
     }
 
-    private func listenerDidFail() {
-        guard listenerState == .ready else {
+    /// The listening socket of `failed` failed. Before any route exists this
+    /// is not a fault: the listener goes, and hosts keep WebKit's normal
+    /// path. After one, it is.
+    func listenerDidFail(_ failed: DirectConnectListener) {
+        guard failed === listener, listenerState == .ready else {
             return
         }
-        enterRecoveryNotQualified("the listening socket failed")
+        guard !routeOwner.allowedHosts.isEmpty else {
+            Task {
+                await self.stopListener()
+            }
+            return
+        }
+        enterFault("the listening socket failed")
     }
 
-    /// No new connection is authorized for direct from here on. Committed
-    /// relays are left as they are: the port loss closes none of them, and
-    /// it is not a closure.
-    private func enterRecoveryNotQualified(_ reason: String) {
-        Self.logger.error("Direct path: recovery not qualified: \(reason, privacy: .public)")
-        listenerState = .recoveryNotQualified
+    /// Terminal for this process, and entered once. No new connection is
+    /// authorized for direct, no route is written, held status answers are
+    /// settled without a status, and no event follows. Committed relays are
+    /// left as the close-and-keep table has them: the fault closes none of
+    /// them, and it is not a closure.
+    private func enterFault(_ reason: String) {
+        guard listenerState != .faulted else {
+            return
+        }
+        Self.logger.error("Direct path: listener fault: \(reason, privacy: .public)")
+        listenerState = .faulted
+        // The selection stays: deselecting would have the transport close
+        // its streams, and the fault closes no relay.
         advanceGeneration()
-        updatePreference()
+        preferred = .tunnel
+        onFault()
     }
 
     // MARK: Background and foreground
@@ -842,11 +908,18 @@ final class DirectPathController {
                 if ready {
                     self.listenerState = .ready
                     self.finishResume()
+                } else if self.routeOwner.allowedHosts.isEmpty {
+                    // No route points at the port: nothing is stranded, so
+                    // the listener goes and hosts keep WebKit's normal path.
+                    self.finishResume()
+                    Task {
+                        await self.stopListener()
+                    }
                 } else {
                     Task {
                         await listener.closeListeningSocket()
                     }
-                    self.enterRecoveryNotQualified("the port could not be re-bound and checked")
+                    self.enterFault("the port could not be re-bound and checked")
                     self.finishResume()
                 }
             }
@@ -867,10 +940,52 @@ final class DirectPathController {
         let held = heldReplies
         heldReplies.removeAll()
         for (origin, reply) in held {
-            reply(currentStatus(for: origin))
+            reply(answer(for: origin))
         }
         select()
         updatePreference()
-        onStatusChanged()
+        notify()
+    }
+}
+
+/// Lets a listener's failure callback, made before the listener exists,
+/// name that listener.
+private final class DirectListenerBox: @unchecked Sendable {
+    weak var listener: DirectConnectListener?
+}
+
+/// Remembers, until the next launch, that the listener faulted
+/// (docs/plans/remote-direct-ios.md section 9). Only touched when a direct
+/// transport is registered.
+protocol DirectFaultMarkerStoring: AnyObject {
+    /// Records the fault.
+    func mark()
+    /// Whether a fault was recorded, clearing it. Any stored value counts,
+    /// including one this version cannot read.
+    func take() -> Bool
+}
+
+/// The marker as one key in the App's preferences. It holds a version
+/// number and nothing else.
+final class UserDefaultsDirectFaultMarker: DirectFaultMarkerStoring {
+    static let key = "avibe.direct.listenerFault"
+    static let version = 1
+
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    func mark() {
+        defaults.set(Self.version, forKey: Self.key)
+    }
+
+    func take() -> Bool {
+        guard defaults.object(forKey: Self.key) != nil else {
+            return false
+        }
+        defaults.removeObject(forKey: Self.key)
+        return true
     }
 }

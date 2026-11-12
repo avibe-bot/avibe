@@ -62,9 +62,9 @@ What follows: **changing the route is not a way to switch paths**, and clearing 
 ## 4. The listener and its port
 
 - **One listener per App process** (rule), bound to `127.0.0.1`. It is not bound until a transport is registered and a route is about to be written.
-- **Port epochs.** The listener's port P is chosen by the system at the first bind. It keeps that port for as long as it can (section 9). If it must move to a new port, that starts a new port epoch, and every live route is rewritten to it (recovery R1, section 9). Within one epoch, every route points at the same P.
+- **One port per process.** The listener's port P is chosen by the system at the first bind and kept for the life of the process (section 9). Every route points at P. No route is ever moved to another port: moving it was measured not to recover WebKit's existing connections (cell Q4, section 2).
 - **Exclusive binding** (rule). P is bound without `SO_REUSEPORT`, so no other socket can share it while the listener holds it.
-- **The ownership check** (rule). After every bind, the App connects to P and sends a random nonce made for this launch; only the listener's own accept loop echoes it. This is a liveness and correlation check, to catch a listener that is not serving or a port that is not ours. It is not cryptographic authentication, and a hostile local process is not assumed unable to interfere with it. A failed check is a port loss (section 9).
+- **The ownership check** (rule). After every bind, the App connects to P and sends a random nonce made for this launch; only the listener's own accept loop echoes it. This is a liveness and correlation check, to catch a listener that is not serving or a port that is not ours. It is not cryptographic authentication, and a hostile local process is not assumed unable to interfere with it. A failed check before any route exists is an initial bind failure; after one, it is the listener fault (section 9).
 - **The allowlist** is the set of exact hosts written to any route in this process, on port 443 only (rule). It is bounded at 16 hosts. Past that bound no host is added to any route, and new hosts use WebKit's normal path. Being on the allowlist only lets a host be relayed. Whether the direct backend may carry it is decided per CONNECT by the live selection (section 6), and that decision shrinks immediately when the selection or account ends.
 
 | Request from WebKit | Answer |
@@ -95,11 +95,10 @@ The **route owner** is the only writer of `proxyConfigurations` (rule). A route 
 
 Rules:
 
-- **A route points at the current port epoch's P.** It changes only when a host is added, or when R1 moves every route to a new epoch (section 9).
+- **A route points at P.** It changes only when a host is added. It is never moved to another port (section 9).
 - **A store's host list only grows while the store lives** (candidate; whether adding a host takes effect is cells Q2 and Q3). No host is removed and no route is cleared: clearing is unreliable (section 2). A host the user no longer uses is relayed only to its public origin (section 6), never on the direct backend. The host list lives and dies with the store and the process, and is bounded by the allowlist.
 - **A host is added before the first load of that host in that store.** The listener is bound and checked first. The App's own load waits for both, with a bound; past it, the load goes ahead without a route, on WebKit's normal path. The bound is a proposal, set from measurement.
-- **A failed or ignored write that adds a host leaves that host on WebKit's normal path.** This applies only to adding a host that no route listed before, within an unchanged port epoch. That path is the instance's public origin. Within one epoch every route points at the same P, so such a write, applied to some connections and not others, sends each connection either to the listener or to the normal path, never to a third place.
-- **A failed or ignored rewrite in R1 is different.** That rewrite moves routes from P to P2 (section 9). If WebKit does not apply it, its connections may keep going to the old port, which may be stale or held by another process. That is not the normal path: the state stays recovery-unknown, governed by Q4 and `recovery-not-qualified`.
+- **A failed or ignored write that adds a host leaves that host on WebKit's normal path.** That path is the instance's public origin. Every route points at the same P, so such a write, applied to some connections and not others, sends each connection either to the listener or to the normal path, never to a third place.
 
 | When | What is written | Status |
 | --- | --- | --- |
@@ -198,7 +197,7 @@ A transport report counts only for the selection it was made for, and is dropped
 | The selection ends (instance switch, picker, registration exit) | Public for that host | Closed | Kept |
 | The App enters the background | Public | Closed, and the transport stops | Kept by the App (the system may end them) |
 | An account transition (sign-in, sign-out, switch, store rotation) | Public | Closed | **Closed**: nothing of the old account is kept |
-| Port recovery R1 (section 9) | Public, on the new port | Closed | Closed |
+| The listener fault (section 9) | Direct never again in the process; nothing is re-bound or rewritten | Kept (not closed to present the fault) | Kept |
 | The listener stops for good (no transport any more, process exit) | Not accepted | Closed | Closed |
 
 **A network callback alone is not proof of loss** (rule). It changes only what new connections prefer, until the transport validates the path.
@@ -224,9 +223,9 @@ Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one conn
 - **What is measured:** only HTTP/1.1 fetch on the 26.5 simulator, with nothing listening or with a refusing proxy (section 2). A stalling proxy did not fail over within the window.
 - **What is not measured** (cell Q6): navigation, HTTP/2, WebSocket, iOS 17, networks that allow only an HTTP proxy, and networks that block raw TCP.
 - **Stickiness is measured, not assumed.** Q6 measures whether WebKit, after failing over, keeps bypassing the route, and for how long. In the field it is unobserved (section 5). A bypass by WebKit is outside the listener's sight and is never counted as a `public` relay.
-- **Fallback position.** If Q6 shows failover is harmful or sticky, the value becomes `false`. A listener that cannot be reached then fails those loads until it is re-bound, and section 9 applies.
+- **Fallback position.** If Q6 shows failover is harmful or sticky, the value becomes `false`. A listener that cannot be reached then fails those loads until it is re-bound, or for the rest of the process after the listener fault (section 9).
 
-## 9. Lifetime: launch, background, resume, and port loss
+## 9. Lifetime: launch, background, resume, and the listener fault
 
 **Cold launch.** With a transport registered and a stored selection, the App first binds and checks the listener, then writes the route for that host. Only then does it let the store's first load (the bootstrap) begin. The wait has a bound, set from measurement. On a bind or check failure, or past the bound, no route is written in this launch, everything uses WebKit's normal path, and diagnostics record it.
 
@@ -240,38 +239,17 @@ Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one conn
 
 Either way, the background closes every committed direct relay and stops the transport (section 7). If that closed any relay for a host, one closure for that host is held as pending and published after the listener is ready again on the foreground (section 10). The App keeps committed public relays, though the system may end them while the App is suspended.
 
-**Port loss is an error state, never a steady one** (rule). It covers three cases: P cannot be re-bound exclusively, the ownership check fails, or the listener's socket fails. A route that points at a port the App does not hold is never treated as an accepted state.
+**Initial bind failure is not a fault** (rule). If the first bind, its ownership check, or the bound on waiting for them fails before any route exists in the process, no route is written: that host is excluded on that store, loads on WebKit's normal path (the public origin), and is never added to that store later. Nothing else changes.
 
-**Recovery candidate R1**, in-process and without a relaunch:
+**The listener fault** (decision, 2026-11-12, for the internal trial). Once any route exists, the listener's socket failing, a failed exclusive re-bind of P on the return to the foreground, or a failed ownership check after it is a **terminal fault for the process**. A route that points at a port the App may not hold cannot be repaired in-process: clearing or changing a route is unreliable (section 2), and moving routes to a new port did not recover WebKit's existing connections when the old port was held with a warm pool (cell Q4, measured; there the first operation on each store aborted after about 8 s). So, in that process:
 
-1. Close every relay the App holds.
-2. Bind a new port P2 with the same check. This starts a new port epoch.
-3. Rewrite every live route to P2, with the same hosts.
+- direct is never authorized again; nothing is re-bound, and no route is written, cleared, or moved;
+- committed relays follow section 7 (nothing is closed to present the fault);
+- the shell covers each runtime whose host is routed on the current store with its existing failure view, with the exact copy "Connection lost — reopen the app" (`zh-Hans`: "连接中断，请重新打开 App"), and no Retry or reload, since neither would reach a working listener;
+- held and new `direct.status()` answers for that host are the bridge error `failed`, and no `direct.transportChanged` follows. This is what the shell owns; it does not stop a page's own network activity;
+- the fault is entered once; a later or repeated callback, or one from an earlier listener, changes nothing.
 
-**Listener liveness is not runtime recovery.** After step 2 the App knows that P2 is bound and serving. It does not know whether WebKit's connections for every affected store and host now reach P2.
-
-- **Closing the App's own relays does not prove that WebKit's pool to the old port is gone.** If something else now holds P and accepts connections, WebKit may keep connections to it that the App cannot see or close.
-- **A CONNECT on P2 proves neither recovery nor its absence.** A CONNECT cannot be attributed to a store (section 4), so one arriving on P2 does not show that every affected store and host recovered, nor that no pool is stuck on P.
-
-Runtime recovery after R1 is therefore known only from qualification. Cell Q4 must show, on that runtime, that every affected store and host routes through P2 in all three variants:
-
-| Variant | The old port P |
-| --- | --- |
-| Cooperative | Every connection to P closed |
-| Occupied, new connections | P held by an independent process that accepts and stalls new connections |
-| Occupied, existing connections | P held by an independent process on which a warm pool survives |
-
-The probe order is an immediate `fetch`, then a unique navigation, then a `fetch`. A cooperative-only pass does not qualify R1.
-
-After R1 the controller is in a **recovery-not-qualified** state unless Q4 has qualified R1 for that runtime. In that state:
-
-- direct is not authorized, and new CONNECTs on P2 get the public backend;
-- diagnostics record it;
-- the shell's load-failure view stays available to the user.
-
-No single observation, a P2 CONNECT included, clears it.
-
-If Q4 shows that R1 does not recover the occupied cases, there is no safe in-process fallback. Whether to show a visible recovery, or to find another mechanism, is then a product decision. It is not decided here, and a relaunch is not the accepted answer.
+**The launch after a fault uses no listener.** The fault writes one versioned marker in the App's preferences, once per process. The next launch that has a transport consumes it while the App starts, before any controller, route, or first load, and runs that whole launch without the path controller: no `direct` capability, no listener, no route, everything on the public origin, with the same origin, store, cookies, and passkeys. An unreadable marker counts as a marker. The launch after that uses the transport again. This is the internal trial's conservative policy, a threshold of one fault and one launch: it is not a measured failure rate, does not disable direct for good, and does not claim that a fault cannot repeat. Reopening is accepted as the remedy for this rare fault during the internal trial. It is not the remedy for losing the direct path, which section 7 handles without a relaunch. The decision is revisited if internal use shows listener faults.
 
 **NetworkProcess restart.** With a constant route and a live listener, a restarted NetworkProcess receives the same route again (WebKit [24046](https://github.com/WebKit/WebKit/pull/24046)). On releases without that fix, the route can be lost, and the store then uses WebKit's normal path. Restarting the NetworkProcess is a test instrument only, never a shipping mechanism.
 
@@ -281,7 +259,7 @@ The contract is in [`ios-app.md`](ios-app.md) section 4. Two kinds of informatio
 
 - **`preferred`** is the backend that the calling document's **new** connections will try first: `"direct"` or `"tunnel"`. It is never a claim about where an existing connection runs, and only the latest value matters.
 - **`closure`** is a counter of closures, a non-negative integer kept per instance host. It starts at 0 and never decreases while the shell process lives.
-  - **What counts.** It grows by one for each section 7 event in which the App closed at least one committed relay for that host: a transport `lost`, a failed validation, a rendezvous generation change, the background, or R1.
+  - **What counts.** It grows by one for each section 7 event in which the App closed at least one committed relay for that host: a transport `lost`, a failed validation, a rendezvous generation change, or the background. The listener fault (section 9) is not a closure.
   - **What does not need counting.** A selection end or an account transition destroys the documents that could act on it, and later documents take a new baseline.
   - **Background closures are published on return.** A closure caused by the background is held as pending. It is added to `closure` only on the return to the foreground, after the listener is ready again (re-bound and checked, section 9). So no document acts on it while new connections cannot reach the listener.
   - **Why it is separate.** Each increase asks the Web UI to act, so an increase must never be lost behind a later preference change.
@@ -291,7 +269,7 @@ The contract is in [`ios-app.md`](ios-app.md) section 4. Two kinds of informatio
 
 **Resume reconciliation, independent of events.** A suspended document may miss every event, including the state the shell emits once more after the foreground listener is ready. So reconciliation does not depend on any event:
 
-- **Native side.** From the return to the foreground until the listener is ready again, and the pending background closure is published, the shell holds every `direct.status()` answer. If section 9's recovery path takes over instead, it holds the answers until that path has published its state. A status answer received after a resume therefore already reflects the published closure.
+- **Native side.** From the return to the foreground until the listener is ready again, and the pending background closure is published, the shell holds every `direct.status()` answer. If the re-bind fails instead, the listener fault (section 9) settles the held answers with the bridge error `failed`. A status answer received after a resume therefore already reflects the published closure.
 - **Web UI side.** Each document reads `direct.status()` once whenever it becomes visible again (`visibilitychange` to `visible`, and `pageshow` when restored from the back-forward cache). It applies the answer to its existing values: a higher `sequence` updates the preference, and a higher `closure` runs the reconnect action once. It never takes a new baseline on resume; the baseline is taken only once per document, before its first SSE stream or terminal.
 
 This is one read per resume, not polling.
@@ -314,6 +292,7 @@ It does not touch anything that could lose server-side state or repeat an action
 
 - the listener table in section 4, against real loopback sockets;
 - exclusive bind, the ownership check, and a stand-in that occupies P;
+- the listener fault: entered once and never left in the process, held and new status answers settled as `failed`, no event, coverage only for a routed host on the current store, and the next launch without a listener, consuming an injected marker;
 - backend choice: the direct stand-in failing at open, refusing, or stalling before `200`; the hedge; early bytes held and never forwarded to the loser; the early-byte bound; a backend failing after `200` closes the relay with no redial;
 - path generations: each row of section 7 closes exactly the relays it marks Closed and no others; advancing a generation cancels candidates without closing committed relays; a relay's own EOF or failure ends it whatever its generation; a late report for an older selection or generation changes nothing;
 - authorization: an ended selection's tags and late reports never authorize direct; a host that is not the current selection's gets only the public backend; committed public relays close only for their own reasons (section 7); an account transition closes relays of both backends. Store or caller attribution is not tested; a CONNECT cannot carry it (section 4);
@@ -334,7 +313,7 @@ It does not touch anything that could lose server-side state or repeat an action
 | Q1 | A new named store, routed before any load, after a relaunch with the App's real store: HTTP/1.1, HTTP/2, navigation, `fetch`, SSE, WebSocket | Simulator 17.0 and newest; device |
 | Q2 | A store that has loaded the control plane: a route for the instance host added before its first load, used? | Simulator 17.0 and newest; device |
 | Q3 | Within that store, a second host added (union) before its first load, with the first host's pool alive: used, and the first host unaffected? | Same |
-| Q4 | A route changed from P to P2, on two live stores with distinct hosts: does every store and host route through P2? Three variants: cooperative closure of P, an independent process holding P that accepts and stalls new connections, and one holding P with a warm pool surviving on it. Probe order: `fetch`, unique navigation, `fetch`. | Same |
+| Q4 | A route changed from P to P2, on two live stores with distinct hosts: does every store and host route through P2? Three variants: cooperative closure of P, an independent process holding P that accepts and stalls new connections, and one holding P with a warm pool surviving on it. Probe order: `fetch`, unique navigation, `fetch`. Measured (section 2): the occupied variant with a warm pool was negative, so the App never moves a route (section 9). Kept as history; nothing depends on it now. | Same |
 | Q5 | Suspension: B1 versus B2; does the kernel accept while suspended; is P free on resume; how often does re-binding P fail | Device |
 | Q6 | `allowFailover`: absent, refusing, and stalling listener for navigation, HTTP/2, and WebSocket; stickiness; proxy-only and raw-TCP-blocked networks | Simulator, then device |
 | Q7 | Loss detection and takeover by the public backend, end to end: Wi-Fi to cellular, cellular to Wi-Fi, blackhole, direct absent, refused, stalled. The 8–17 s detection measured with a desktop client against the instance's 6 s idle timeout and 1.5 s keep-alives is not a device bound. | Device |

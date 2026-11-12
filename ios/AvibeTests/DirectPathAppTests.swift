@@ -81,6 +81,156 @@ final class DirectPathAppTests: XCTestCase {
 
         XCTAssertEqual(firstStore.proxyConfigurations.count, 0)
         XCTAssertEqual(app.runtimeWebsiteDataStore.proxyConfigurations.count, 0)
+        // Nothing of the listener fault exists either: no marker in the
+        // App's (isolated) preferences, and no fault state.
+        XCTAssertFalse(app.directListenerFault)
+        XCTAssertNil(
+            try XCTUnwrap(appDefaults).object(forKey: UserDefaultsDirectFaultMarker.key)
+        )
+    }
+
+    // MARK: The listener fault
+
+    @MainActor
+    func testWithoutATransportTheFaultMarkerIsNeverReadOrWritten() async throws {
+        let marker = FaultMarkerSpy(marked: true)
+        let app = try await makeApp(directTransport: nil, directFaultMarker: marker)
+
+        _ = try await select("instance-1", in: app)
+
+        XCTAssertNil(app.directPaths)
+        XCTAssertEqual(marker.takes, 0)
+        XCTAssertEqual(marker.marks, 0)
+        XCTAssertTrue(marker.isMarked)
+    }
+
+    /// The launch after a fault is decided in `init`, before any route or
+    /// first load: no controller, so no capability, no listener, no route
+    /// write, and a runtime that opens at once. It consumes the marker, so
+    /// the launch after it uses the transport again.
+    @MainActor
+    func testTheLaunchAfterAFaultUsesNoListenerAndTheOneAfterThatUsesTheTransport() async throws {
+        try assertSocketScanSeesListeners()
+        let marker = FaultMarkerSpy(marked: true)
+        let transport = StandInDirectTransport()
+        let routeWrites = try ProxyConfigurationWrites.count()
+        var listening: Set<ListeningSocket> = []
+        let bypassed = try await makeApp(
+            directTransport: transport,
+            directFaultMarker: marker
+        ) {
+            listening = try listeningSockets()
+        }
+
+        XCTAssertNil(bypassed.directPaths)
+        XCTAssertNil(bypassed.directStatusProvider)
+        XCTAssertEqual(marker.takes, 1)
+        XCTAssertFalse(marker.isMarked)
+        _ = try bypassed.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        guard case .browser = bypassed.route else {
+            return XCTFail("The runtime did not open at once.")
+        }
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertEqual(try newListeners(since: listening), [])
+        XCTAssertEqual(transport.selections.count, 0)
+
+        // The next launch, with the same preferences, uses the transport.
+        let next = try await makeApp(
+            directTransport: transport,
+            directFaultMarker: marker
+        )
+        XCTAssertNotNil(next.directPaths)
+        XCTAssertEqual(marker.takes, 2)
+        _ = try await select("instance-1", in: next)
+        XCTAssertEqual(transport.selections.count, 1)
+    }
+
+    func testTheFaultMarkerIsOneVersionedKeyAndAnyStoredValueCounts() throws {
+        let suiteName = "DirectPathAppTests.marker.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let marker = UserDefaultsDirectFaultMarker(defaults: defaults)
+
+        XCTAssertFalse(marker.take())
+        marker.mark()
+        XCTAssertEqual(defaults.object(forKey: UserDefaultsDirectFaultMarker.key) as? Int, 1)
+        XCTAssertTrue(marker.take())
+        XCTAssertNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
+        XCTAssertFalse(marker.take())
+
+        // A value this version cannot read still means one launch without
+        // the listener, and is cleared.
+        defaults.set("unreadable", forKey: UserDefaultsDirectFaultMarker.key)
+        XCTAssertTrue(marker.take())
+        XCTAssertNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
+    }
+
+    @MainActor
+    func testAListenerFaultCoversOnlyARoutedRuntimeOnceAndIsMarkedOnce() async throws {
+        let marker = FaultMarkerSpy(marked: false)
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport, directFaultMarker: marker)
+        let first = try await select("instance-1", in: app)
+        let paths = try XCTUnwrap(app.directPaths)
+        let listener = try XCTUnwrap(paths.listener)
+        XCTAssertFalse(app.directFaultCovers(first))
+
+        paths.listenerDidFail(listener)
+        paths.listenerDidFail(listener)
+
+        XCTAssertTrue(app.directListenerFault)
+        XCTAssertEqual(marker.marks, 1)
+        XCTAssertTrue(app.directFaultCovers(first))
+        // A page behind the fault gets the bridge's `failed`, never a
+        // status that reads as ready.
+        let page = try await showRuntimePage(app, first)
+        let surface = try await page.directSurface()
+        XCTAssertEqual(surface, #"{"capability":1,"status":"failed"}"#)
+        page.close()
+
+        // An instance the fault left unrouted opens and is not covered.
+        let second = try await select("instance-2", in: app)
+        XCTAssertFalse(app.directFaultCovers(second))
+        XCTAssertTrue(app.directListenerFault)
+        XCTAssertEqual(marker.marks, 1)
+    }
+
+    func testTheListenerFaultCoversTheRuntimeWithoutRetryOrSpinner() {
+        XCTAssertEqual(
+            BrowserOverlay(isLoading: true, failed: true, directFault: true),
+            .directFault
+        )
+        XCTAssertEqual(
+            BrowserOverlay(isLoading: true, failed: false, directFault: true),
+            .directFault
+        )
+        XCTAssertEqual(
+            BrowserOverlay(isLoading: false, failed: true, directFault: false),
+            .loadFailure
+        )
+        XCTAssertEqual(
+            BrowserOverlay(isLoading: true, failed: false, directFault: false),
+            .loading
+        )
+        XCTAssertEqual(
+            BrowserOverlay(isLoading: false, failed: false, directFault: false),
+            .none
+        )
+    }
+
+    func testTheReopenMessageIsTheApprovedCopyInBothLocales() throws {
+        func localized(_ language: String) throws -> String {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
+            let bundle = try XCTUnwrap(Bundle(path: path))
+            return bundle.localizedString(
+                forKey: "browser.direct_fault.title",
+                value: "missing",
+                table: nil
+            )
+        }
+
+        XCTAssertEqual(try localized("en"), "Connection lost — reopen the app")
+        XCTAssertEqual(try localized("zh-Hans"), "连接中断，请重新打开 App")
     }
 
     // MARK: The App with a transport
@@ -597,6 +747,8 @@ final class DirectPathAppTests: XCTestCase {
     // MARK: Fixture
 
     private var storeIdentifiers: Set<UUID> = []
+    /// The isolated preferences of the last App `makeApp` built.
+    private var appDefaults: UserDefaults?
 
     /// An `AppModel` signed in through a local control plane, past its
     /// bootstrap. `nil` builds it exactly as the App does, with no
@@ -606,6 +758,7 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     private func makeApp(
         directTransport: DirectTransporting?,
+        directFaultMarker: DirectFaultMarkerStoring? = nil,
         pushHolds: [PushHold] = [],
         beforeTheAppExists: () throws -> Void = {}
     ) async throws -> AppModel {
@@ -656,6 +809,7 @@ final class DirectPathAppTests: XCTestCase {
         }
         let suiteName = "DirectPathAppTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        appDefaults = defaults
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
         }
@@ -667,7 +821,19 @@ final class DirectPathAppTests: XCTestCase {
 
         let controlPlane = MobileControlPlaneConfiguration(testBaseURL: baseURL)
         let app: AppModel
-        if let directTransport {
+        if let directFaultMarker {
+            app = AppModel(
+                defaults: defaults,
+                controlPlane: controlPlane,
+                directTransport: directTransport,
+                directFaultMarker: directFaultMarker,
+                pushKeychain: InMemoryPushKeychainStore(),
+                pushGenerationStore: InMemoryPushGenerationStore(),
+                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: SilentPushNotificationCenter(),
+                badgeCenter: SilentBadgeCenter()
+            )
+        } else if let directTransport {
             app = AppModel(
                 defaults: defaults,
                 controlPlane: controlPlane,
@@ -1057,4 +1223,26 @@ private final class SilentBadgeCenter: AppBadgeCentering {
     }
 
     func setBadgeCount(_ count: Int) async throws {}
+}
+
+/// The fault marker as a test sees it, in memory.
+private final class FaultMarkerSpy: DirectFaultMarkerStoring {
+    private(set) var isMarked: Bool
+    private(set) var marks = 0
+    private(set) var takes = 0
+
+    init(marked: Bool) {
+        isMarked = marked
+    }
+
+    func mark() {
+        marks += 1
+        isMarked = true
+    }
+
+    func take() -> Bool {
+        takes += 1
+        defer { isMarked = false }
+        return isMarked
+    }
 }

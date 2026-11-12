@@ -1459,7 +1459,15 @@ final class ControlListener {
         socket = ListeningSocket(address: address, port: port)
     }
 
+    private var isClosed = false
+
+    /// Closes the socket once; later calls do nothing, so a descriptor the
+    /// system has reused is never closed by mistake.
     func close() {
+        guard !isClosed else {
+            return
+        }
+        isClosed = true
         Darwin.close(descriptor)
     }
 }

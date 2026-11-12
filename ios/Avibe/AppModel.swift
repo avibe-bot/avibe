@@ -55,6 +55,9 @@ final class AppModel: ObservableObject {
     /// Advances each time a runtime opens, so the root builds a new runtime
     /// controller even when the same instance is selected again.
     @Published private(set) var runtimeIdentity = 0
+    /// The direct listener faulted in this process. One-way: only a new
+    /// launch clears it.
+    @Published private(set) var directListenerFault = false
 
     let websiteDataStore: AccountWebsiteDataStore
 
@@ -64,6 +67,7 @@ final class AppModel: ObservableObject {
     /// path controller: no `direct` capability, no listener, no route write,
     /// no event, and runtimes open exactly as they did before.
     private let directTransport: DirectTransporting?
+    private let directFaultMarker: DirectFaultMarkerStoring
     private let pushKeychain: PushKeychainStoring
     private let pushGenerationStore: PushGenerationStoring
     private let pushInstallationMarker: PushInstallationMarkerStoring
@@ -134,6 +138,9 @@ final class AppModel: ObservableObject {
                 },
                 onStatusChanged: { [weak self] in
                     self?.deliverDirectStatus()
+                },
+                onFault: { [weak self] in
+                    self?.directListenerDidFault()
                 }
             )
         }
@@ -175,6 +182,7 @@ final class AppModel: ObservableObject {
         controlPlane: MobileControlPlaneConfiguration =
             MobileControlPlaneConfiguration(),
         directTransport: DirectTransporting? = nil,
+        directFaultMarker: DirectFaultMarkerStoring? = nil,
         pushKeychain: PushKeychainStoring = PushKeychainStore(),
         pushGenerationStore: PushGenerationStoring =
             SharedPushGenerationStore(),
@@ -187,7 +195,19 @@ final class AppModel: ObservableObject {
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
-        self.directTransport = directTransport
+        let directFaultMarker = directFaultMarker
+            ?? UserDefaultsDirectFaultMarker(defaults: defaults)
+        self.directFaultMarker = directFaultMarker
+        // A launch after a listener fault uses no listener at all, decided
+        // here, before any route or first load: the user was asked to
+        // reopen the App, and this launch must work. It clears the marker,
+        // so the launch after it uses the transport again. Without a
+        // transport the marker is never read.
+        if directTransport != nil, directFaultMarker.take() {
+            self.directTransport = nil
+        } else {
+            self.directTransport = directTransport
+        }
         self.pushKeychain = pushKeychain
         self.pushGenerationStore = pushGenerationStore
         self.pushInstallationMarker = pushInstallationMarker
@@ -355,6 +375,21 @@ final class AppModel: ObservableObject {
             self.route = .browser(runtime)
             directPathController.runtimeDidOpen(runtime)
         }
+    }
+
+    /// Whether the listener fault covers `runtime`: its host is routed to a
+    /// port the App may not hold. Its content is then replaced by the
+    /// reopen message.
+    func directFaultCovers(_ runtime: MobileRuntimeContext) -> Bool {
+        directListenerFault && directPathController?.faultCovers(runtime) == true
+    }
+
+    private func directListenerDidFault() {
+        guard !directListenerFault else {
+            return
+        }
+        directListenerFault = true
+        directFaultMarker.mark()
     }
 
     /// Sends the current `direct` state to the runtime's documents.
