@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils';
 
 import { useDraft } from '../draft';
 import { IMPORTED_ADDRESSES, IMPORTED_WORDS } from './data';
-import { SourceCards, TypeRow, WalletDialogHeading } from './create';
+import { ChainRow, SourceCards, WalletDialogHeading } from './create';
 import { FIELD_LABEL, Notice, TierCards } from './parts';
 
 export type ImportState = 'empty' | 'valid' | 'unknown-word' | 'checksum' | 'avault-old';
@@ -129,12 +129,12 @@ export function ImportForm({ state, passphraseOpen = false, scrolled = false }: 
     <div className="flex min-w-0 flex-col gap-4">
       {scrolled ? (
         <span className="pr-8 text-[14px] font-semibold text-foreground">
-          {d('导入助记词钱包', 'Import a seed phrase wallet')} · <span className="font-mono">AGENT_WALLET</span>
+          {d('导入助记词', 'Import a seed phrase')} · <span className="font-mono">AGENT_WALLET</span>
         </span>
       ) : (
         <>
           <WalletDialogHeading />
-          <TypeRow picker="kind" />
+          <ChainRow />
           <label className="flex flex-col gap-1.5">
             <span className={FIELD_LABEL}>{t('vaults.dialog.name')}</span>
             <Input value="AGENT_WALLET" readOnly className="font-mono" />

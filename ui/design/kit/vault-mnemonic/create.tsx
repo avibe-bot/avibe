@@ -1,48 +1,29 @@
 // Creating a seed-phrase wallet in the Add dialog (ui/design: vault/mnemonic/create/*): set up,
 // write the words down, check them, done. The words are shown once: on the standard tier avault
 // never returns them, so the check is the one chance to catch a copying mistake.
-import { ArrowLeft, Bot, Check, Copy, EyeOff, FileDown, Lock, Plus, ShieldCheck, Sparkles, WalletCards, X } from 'lucide-react';
+import { ArrowLeft, Bot, Check, Copy, Download, EyeOff, KeyRound, Lock, Plus, ShieldCheck, Signature, Sparkles, WalletCards, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
+import { InfoHint } from '@/components/ui/info-hint';
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { SigningAddressList } from '@/components/ui/signing-address-list';
 import { Switch } from '@/components/ui/switch';
+
 import { cn } from '@/lib/utils';
 
 import { useDraft } from '../draft';
 import { CREATED_ADDRESSES, CREATED_WORDS } from './data';
-import { CommandLine, DialogHeading, FIELD_LABEL, Notice, Stepper, TierCards, WordGrid } from './parts';
+import { CommandLine, DialogHeading, FIELD_LABEL, HintLine, Notice, Stepper, TierCards, WordGrid } from './parts';
 
-export type TypePicker = 'kind' | 'chain';
 export type Source = 'create' | 'import';
 
-/** Where the wallet type sits: a third Type (A, recommended) or a third Chain (B). */
-export function TypeRow({ picker }: { picker: TypePicker }) {
+/** The signing key's chain selector with the wallet as its third option (owner decision 11-12: 1 = B).
+ *  The Kind row and the first two chains are the shipped ones, unchanged. */
+export function ChainRow() {
   const { t } = useTranslation();
   const d = useDraft();
-  if (picker === 'kind') {
-    return (
-      <div className="flex flex-col gap-1.5">
-        <span className={FIELD_LABEL}>{t('vaults.dialog.kindLabel')}</span>
-        <SegmentedRadio
-          value="mnemonic"
-          onChange={() => {}}
-          ariaLabel={t('vaults.dialog.kindLabel')}
-          options={[
-            { id: 'static', label: t('vaults.dialog.kindStatic') },
-            { id: 'keypair', label: t('vaults.dialog.kindKeypair') },
-            { id: 'mnemonic', label: d('助记词钱包', 'Seed phrase wallet') },
-          ]}
-        />
-        <span className="text-[11px] text-muted">
-          {d('一组助记词覆盖 EVM、Bitcoin、Solana，可在里面添加多个账户。', 'One phrase covers EVM, Bitcoin and Solana, with as many accounts as you add.')}
-        </span>
-      </div>
-    );
-  }
   return (
     <>
       <div className="flex flex-col gap-1.5">
@@ -52,8 +33,8 @@ export function TypeRow({ picker }: { picker: TypePicker }) {
           onChange={() => {}}
           ariaLabel={t('vaults.dialog.kindLabel')}
           options={[
-            { id: 'static', label: t('vaults.dialog.kindStatic') },
-            { id: 'keypair', label: t('vaults.dialog.kindKeypair') },
+            { id: 'static', label: t('vaults.dialog.kindStatic'), icon: KeyRound },
+            { id: 'keypair', label: t('vaults.dialog.kindKeypair'), icon: Signature },
           ]}
         />
       </div>
@@ -66,47 +47,46 @@ export function TypeRow({ picker }: { picker: TypePicker }) {
           options={[
             { id: 'evm-bitcoin', label: t('vaults.dialog.chainEvmBitcoin') },
             { id: 'solana', label: t('vaults.dialog.chainSolana') },
-            { id: 'mnemonic', label: d('助记词 · 多链', 'Seed phrase · all') },
+            { id: 'mnemonic', label: d('助记词 · 多链', 'Seed phrase') },
           ]}
         />
+        <span className="text-[11px] text-muted">
+          {d('一组助记词覆盖 EVM、Bitcoin、Solana，可在里面添加多个账户。', 'One phrase covers EVM, Bitcoin and Solana, with as many accounts as you add.')}
+        </span>
       </div>
     </>
   );
 }
 
-/** New words or words from another wallet: two cards, so the choice reads as two different jobs. */
+/** New words or words from another wallet: the 「密钥来源」 tabs of avibe#3626 (`KeySourceTabs`), with
+ *  one line under them. Switch to the shipped component once that PR lands. */
 export function SourceCards({ value }: { value: Source }) {
+  const { t } = useTranslation();
   const d = useDraft();
-  const cards = [
-    { key: 'create', icon: Sparkles, title: d('新建助记词', 'New phrase'), desc: d('生成 12 个词。推荐给 Agent 用的新钱包。', 'Generate 12 words. Best for a new wallet your Agents use.') },
-    { key: 'import', icon: FileDown, title: d('导入已有助记词', 'Import a phrase'), desc: d('从 MetaMask、Phantom 等钱包搬过来。', 'Bring one over from MetaMask, Phantom and others.') },
-  ] as const;
   return (
     <div className="flex flex-col gap-1.5">
-      <span className={FIELD_LABEL}>{d('助记词', 'Seed phrase')}</span>
-      <div className="grid grid-cols-2 gap-2.5">
-        {cards.map(({ key, icon: Icon, title, desc }) => {
-          const selected = value === key;
-          return (
-            <button
-              key={key}
-              type="button"
-              aria-pressed={selected}
-              className={cn(
-                'flex flex-col gap-1.5 rounded-[10px] border p-3 text-left',
-                selected ? 'border-[1.5px] border-mint bg-mint-soft' : 'border-edge bg-field',
-              )}
-            >
-              <span className="flex items-center gap-2">
-                <Icon className={cn('size-4', selected ? 'text-mint-ink' : 'text-muted')} />
-                <span className="flex-1 text-[13.5px] font-semibold text-foreground">{title}</span>
-                {selected && <Check className="size-4 text-mint-ink" />}
-              </span>
-              <span className="text-[11.5px] leading-snug text-muted">{desc}</span>
-            </button>
-          );
-        })}
-      </div>
+      <span className={FIELD_LABEL}>{d('密钥来源', 'Key source')}</span>
+      <SegmentedRadio<Source>
+        value={value}
+        onChange={() => {}}
+        tone="muted"
+        ariaLabel={d('密钥来源', 'Key source')}
+        options={[
+          { id: 'create', label: t('vaults.dialog.signingGenerate'), icon: Sparkles },
+          { id: 'import', label: t('vaults.dialog.signingImport'), icon: Download },
+        ]}
+      />
+      {value === 'create' ? (
+        <HintLine
+          text={d('下一步生成 12 个词，抄下来后点 3 个词核对。', 'Next you get 12 words; write them down, then tap 3 of them to check.')}
+          info={d('推荐给 Agent 用的新钱包。标准档的种子由这台电脑上的 avault 加密保存；保存后 Avibe 不会再显示这些词。', 'Best for a new wallet your Agents use. On Standard, avault on this computer keeps the seed encrypted; Avibe won’t show the words again after saving.')}
+        />
+      ) : (
+        <HintLine
+          text={d('粘贴后逐词检查，并显示账户 #0 的地址，可以先核对再创建。', 'Each word is checked as you paste, and account #0’s addresses show so you can compare before creating.')}
+          info={d('从 MetaMask、Phantom 等钱包搬过来：12 或 24 个英文单词，可选 BIP39 密码。助记词只在这台电脑上处理，不会进入聊天或模型。', 'Bring one over from MetaMask, Phantom and others: 12 or 24 English words, with an optional BIP39 passphrase. The phrase stays on this computer and never reaches a chat or a model.')}
+        />
+      )}
     </div>
   );
 }
@@ -124,14 +104,16 @@ function NameField({ value }: { value: string }) {
 function AskToggle({ checked }: { checked: boolean }) {
   const d = useDraft();
   return (
-    <div className="flex items-start gap-3 rounded-[10px] border border-edge bg-surface-2 px-3 py-3 shadow-elevation-0">
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="text-[13px] font-semibold text-foreground">{d('每次签名都要我确认', 'Ask me before every signature')}</span>
-        <span className="text-[11.5px] leading-snug text-muted">
-          {d('默认 Agent 可以直接签名。之后也能按账户单独设置。', 'By default Agents sign on their own. You can also set this per account later.')}
-        </span>
-      </div>
-      <Switch checked={checked} onCheckedChange={() => {}} label={d('每次签名都要我确认', 'Ask me before every signature')} />
+    <div className="flex items-center gap-3 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 shadow-elevation-0">
+      <span className="flex min-w-0 flex-1 items-center gap-1.5">
+        <span className="text-[13px] font-semibold text-foreground">{d('账户 #0 签名前问我', 'Ask before account #0 signs')}</span>
+        <InfoHint
+          hover
+          label={d('说明', 'More info')}
+          content={d('默认 Agent 可以直接签名。打开后，账户 #0 每次签名都要你在浏览器里批准。每个账户都能在钱包里单独设置。', 'By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser. Each account has its own setting in the wallet.')}
+        />
+      </span>
+      <Switch checked={checked} onCheckedChange={() => {}} label={d('账户 #0 签名前问我', 'Ask before account #0 signs')} />
     </div>
   );
 }
@@ -156,24 +138,19 @@ function Footer({ back, primary, disabled = false, primaryIcon }: { back?: strin
   );
 }
 
+/** The Add dialog's shipped header: the wallet is one more kind of signing key, not a dialog of its own. */
 export function WalletDialogHeading() {
-  const d = useDraft();
-  return (
-    <DialogHeading
-      icon={WalletCards}
-      title={d('添加助记词钱包', 'Add a seed phrase wallet')}
-      subtitle={d('一组助记词，多条链、多个账户。Agent 签名，你掌握备份。', 'One phrase for every chain and account. Agents sign; you keep the backup.')}
-    />
-  );
+  const { t } = useTranslation();
+  return <DialogHeading icon={KeyRound} title={t('vaults.dialog.title')} subtitle={t('vaults.dialog.subtitle')} />;
 }
 
 /** Step 1: the Add dialog with the wallet type chosen. */
-export function CreateSetup({ picker = 'kind', tier = 'standard' }: { picker?: TypePicker; tier?: 'standard' | 'protected' }) {
+export function CreateSetup({ tier = 'standard' }: { tier?: 'standard' | 'protected' }) {
   const d = useDraft();
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <WalletDialogHeading />
-      <TypeRow picker={picker} />
+      <ChainRow />
       <NameField value="AGENT_WALLET" />
       <SourceCards value="create" />
       <TierCards value={tier} />
@@ -261,7 +238,7 @@ const QUESTIONS = [
   { position: 12, options: ['yellow', 'year', 'winner'], answer: 'yellow' },
 ];
 
-/** Step 3, version A: three quick taps against the paper copy. */
+/** Step 3: three quick taps against the paper copy (owner decision 11-12: 2 = A). */
 export function CreateCheckQuiz({ state = 'empty' }: { state?: CheckState }) {
   const d = useDraft();
   const chosen = state === 'empty' ? [] : state === 'correct' ? ['thank', 'worth', 'yellow'] : ['thank', 'useful'];
@@ -288,27 +265,6 @@ export function CreateCheckQuiz({ state = 'empty' }: { state?: CheckState }) {
         disabled={state !== 'correct'}
         primaryIcon={<WalletCards className="size-4" />}
       />
-    </div>
-  );
-}
-
-/** Step 3, version B: one acknowledgement, as Phantom does. */
-export function CreateCheckAcknowledge({ checked = true }: { checked?: boolean }) {
-  const d = useDraft();
-  return (
-    <div className="flex min-w-0 flex-col gap-4">
-      <WalletDialogHeading />
-      <Stepper step={3} />
-      <div className="flex flex-col gap-1">
-        <span className="text-[15px] font-semibold text-foreground">{d('确认你已保存备份', 'Confirm your backup')}</span>
-        <span className="text-[12.5px] leading-snug text-muted">{d('保存后 Avibe 不会再显示这些词。', 'Avibe won’t show these words again after saving.')}</span>
-      </div>
-      <WordGrid words={CREATED_WORDS} hidden columns={3} />
-      <label className="flex items-start gap-2.5 rounded-[10px] border border-edge bg-surface-2 px-3 py-3">
-        <Checkbox checked={checked} presentational />
-        <span className="text-[13px] leading-snug text-foreground">{d('我已按顺序把 12 个词抄在安全的地方', 'I wrote all 12 words down, in order, somewhere safe')}</span>
-      </label>
-      <Footer back={d('再看一遍', 'See the words')} primary={d('创建钱包', 'Create wallet')} disabled={!checked} primaryIcon={<WalletCards className="size-4" />} />
     </div>
   );
 }
