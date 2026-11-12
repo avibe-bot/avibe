@@ -1054,9 +1054,30 @@ def _format_answered(evidence: _ProtocolEvidence) -> bool:
 
 
 # What Auto settles on when the endpoint parses several formats, Chat
-# Completions among them: any of them serves, and this is the one the add form
-# starts on, so detection never contradicts a default that would have worked.
+# Completions among them, and its models do not point at a native one: any of
+# them serves, and this is the one the add form starts on.
 _MULTI_FORMAT_PREFERENCE = "openai_chat"
+
+# The format a model family is native to, which keeps that provider's own
+# features (thinking, caching, Responses tools) that a translation would lose.
+_NATIVE_FORMAT_FAMILIES = (
+    ("anthropic", re.compile(r"(?:^|/)claude-", re.IGNORECASE)),
+    ("openai_responses", re.compile(r"(?:^|/)(?:gpt-|o\d)", re.IGNORECASE)),
+)
+
+
+def _native_format(answered: Sequence[str], models: Sequence[DiscoveredModel]) -> str | None:
+    """The format most of a multi-format relay's listed models are native to.
+
+    Only a format the relay itself answered on is named, and only when more than
+    half of the listed models belong to its family; mixed or other lists keep
+    Chat Completions.
+    """
+
+    for protocol, family in _NATIVE_FORMAT_FAMILIES:
+        if protocol in answered and models and sum(bool(family.search(model.id)) for model in models) * 2 > len(models):
+            return protocol
+    return None
 
 
 def _answered_format(
@@ -3220,7 +3241,9 @@ class CLIProxyEngineAdapter:
         and order never create a conclusion on their own; `custom` Auto still requires response-backed
         proof. When its paths' own request errors narrow it to one format, or
         show it parses Chat Completions among others, the credential-gated
-        listing answers the key as it does for a declaration; without that,
+        listing answers the key as it does for a declaration (a relay speaking
+        several formats is named by its listed models' native one, else Chat
+        Completions); without that,
         exhausting the path remains ambiguous.
         """
 
@@ -3464,6 +3487,11 @@ class CLIProxyEngineAdapter:
                 **scheme_options,
             )
             if witness.credential is _ModelsWitness.ACCEPTED:
+                if answered_protocol == _MULTI_FORMAT_PREFERENCE:
+                    answered_protocol = _native_format(
+                        [protocol for protocol in answering_protocols if protocol not in ruled_out_protocols],
+                        witness.models,
+                    ) or answered_protocol
                 return make_source_observation(
                     outcome=ObservationOutcome.OBSERVED,
                     reachable=True,
