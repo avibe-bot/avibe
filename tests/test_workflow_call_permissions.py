@@ -74,6 +74,16 @@ def repository_workflows():
     return {path.name: yaml.safe_load(path.read_text()) for path in WORKFLOWS.glob("*.yml")}
 
 
+def test_workflow_shell_steps_are_yaml_strings():
+    # A plain scalar containing `--only-binary=:all: ` prevented #3660 from
+    # starting at all. Parse the actual files, then reject mapping/bool steps.
+    for name, workflow in repository_workflows().items():
+        for job_id, job in workflow["jobs"].items():
+            for step in job.get("steps", []):
+                if "run" in step:
+                    assert isinstance(step["run"], str), f"{name}/{job_id}: run must be a string"
+
+
 def test_release_reusable_workflow_permissions_fit_the_actual_caller():
     # #3206 had dispatch-only jobs in a reusable file. Their false `if` did not
     # prevent a release startup failure: actions:read exceeded actions:none.

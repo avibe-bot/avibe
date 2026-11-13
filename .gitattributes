@@ -6,3 +6,5 @@ desktop/cua-driver/tools-v0.31.0.json text eol=lf
 tests/fixtures/computer_use/*.json text eol=lf
 # A reviewed engine candidate is identified by the digest of these exact bytes.
 patches/model-hub-engine-candidates/**/*.json text eol=lf
+# Sidecar release provenance compares the exact lock bytes on every target.
+direct-transport/Cargo.lock text eol=lf

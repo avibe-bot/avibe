@@ -180,6 +180,15 @@ GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 must include an installable wheel containing `ui/dist` and
 `vibe/show_runtime/*.tgz`, plus the source distribution.
 
+## Direct-transport sidecar artifacts
+
+`direct-transport-v<VERSION>-<N>` tags are auxiliary five-platform sidecar
+releases, not Avibe application updates or Apple XCFramework releases. The
+[publication contract](plans/direct-transport-publication.md) owns exact-source
+qualification, redistribution notices, explicit non-latest publication, public
+byte readback and separate consumer-pin promotion. Only the guarded manual
+workflow publishes; merging its code does not authorize dispatch or enablement.
+
 ## Python dependency artifacts
 
 Every new release ships `dependency-constraints.txt` as a GitHub asset and the
