@@ -143,3 +143,47 @@ fn unreadable_connection_record_is_preserved_instead_of_overwritten() {
     assert!(store.load("小明的 Mac").is_err());
     assert_eq!(std::fs::read(&path).unwrap(), b"{future-format");
 }
+
+// Instance order is a device-local preference beside the connection record.
+// A newer Desktop's file, or a damaged connection store, is never overwritten.
+#[test]
+fn instance_recency_is_per_account_and_preserves_newer_files() {
+    let newer = br#"{"schema_version":2,"accounts":{"account-a":[{"id":"one"}]}}"#;
+    for (existing, writable, replaced) in [
+        (None, true, true),
+        (Some(&b"{damaged"[..]), true, true),
+        (Some(&newer[..]), true, false),
+        (None, false, false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("instance-recency.json");
+        if let Some(bytes) = existing {
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let mut store = ConnectionStore::new(root.path().join("connection.json"));
+        if !writable {
+            store = store.read_only();
+        }
+        let mut recency = store.load_recency();
+        assert!(recency.for_account("account-a").is_empty());
+        for (account, instance) in [
+            ("account-a", "one"),
+            ("account-a", "two"),
+            ("account-b", "three"),
+            ("account-a", "one"),
+        ] {
+            recency.opened(account, instance);
+        }
+        assert_eq!(recency.for_account("account-a"), ["one", "two"]);
+        assert_eq!(recency.for_account("account-b"), ["three"]);
+        store.save_recency(&recency).unwrap();
+        let reloaded = ConnectionStore::new(root.path().join("connection.json")).load_recency();
+        if replaced {
+            assert_eq!(reloaded.for_account("account-a"), ["one", "two"]);
+            assert_eq!(reloaded.for_account("account-b"), ["three"]);
+        } else {
+            assert!(reloaded.for_account("account-a").is_empty());
+            assert_eq!(std::fs::read(&path).ok().as_deref(), existing);
+        }
+    }
+}

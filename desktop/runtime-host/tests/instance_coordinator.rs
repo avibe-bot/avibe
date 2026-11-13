@@ -156,7 +156,10 @@ struct Fixture {
     _root: tempfile::TempDir,
 }
 fn fixture(replies: Vec<(&'static str, Reply)>) -> Fixture {
-    let root = tempfile::tempdir().unwrap();
+    fixture_in(tempfile::tempdir().unwrap(), replies)
+}
+/// A relaunch: a new coordinator over the same Desktop profile directory.
+fn fixture_in(root: tempfile::TempDir, replies: Vec<(&'static str, Reply)>) -> Fixture {
     let store = ConnectionStore::new(root.path().join("connection.json"));
     let record = store.load("小明的 Mac").unwrap();
     let state = ClientState::new("小明的 Mac".into(), "0.1.0".into(), json!({}));
@@ -1106,4 +1109,207 @@ async fn recovery_codes_survive_catalog_failure_after_local_registration() {
     assert!(!serde_json::to_string(&*f.view.states.lock().unwrap())
         .unwrap()
         .contains("one-time-code"));
+}
+
+fn catalog(account: &str, ids: &[&str]) -> Value {
+    let instances: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            json!({
+                "id":id,"name":id,"host":format!("{id}.avibe.bot"),"url":format!("https://{id}.avibe.bot"),
+                "relationship":"owner","owner_email":null,"available":true
+            })
+        })
+        .collect();
+    json!({"account":{"id":account,"email":format!("{account}@example.test")},"instances":instances})
+}
+fn order(client: &Coordinator) -> Vec<String> {
+    client
+        .state()
+        .catalog
+        .instances
+        .into_iter()
+        .map(|instance| instance.id)
+        .collect()
+}
+async fn sign_in(f: &Fixture, session: Value) {
+    f.http.replies.lock().unwrap().extend(first_factor());
+    f.http.replies.lock().unwrap().push_back((
+        "/api/desktop/session",
+        Reply::Ready(response(
+            200,
+            session,
+            Some("avibe_session=private-account; Secure; HttpOnly; Path=/"),
+        )),
+    ));
+    let email = ClientAction::RequestOtp {
+        email: "order@example.test".into(),
+    };
+    assert!(action(&f.client, email).await.ok);
+    assert!(
+        action(&f.client, ClientAction::VerifyOtp { code: "123456".into() })
+            .await
+            .ok
+    );
+}
+/// Replies for one remote selection up to its readiness read, which is last.
+fn selection(session: &Value, id: &str, ready: Reply) -> Vec<(&'static str, Reply)> {
+    let mut redirect = response(302, json!({}), None);
+    redirect.headers.insert(
+        LOCATION,
+        format!(
+            "https://avibe.bot/oauth/authorize?state=owned&redirect_uri=https%3A%2F%2F{id}.avibe.bot%2Fauth%2Fcallback"
+        )
+        .parse()
+        .unwrap(),
+    );
+    vec![
+        ("/api/mobile/session", ok(session.clone())),
+        ("/auth/login", Reply::Ready(redirect)),
+        (
+            "/api/desktop/instance-authorization",
+            ok(json!({
+                "status":"authorized",
+                "redirect_url":format!("https://{id}.avibe.bot/auth/callback?code=fixture-code&state=owned")
+            })),
+        ),
+        (
+            "/auth/callback",
+            Reply::Ready(response(
+                302,
+                json!({}),
+                Some("__Host-vibe_remote_session=instance-only; Secure; HttpOnly; Path=/"),
+            )),
+        ),
+        ("/api/session", ready),
+    ]
+}
+fn ready(account: &str, id: &str) -> Response {
+    response(
+        200,
+        json!({
+            "remote":true,"authenticated":true,"authorization_state":"current",
+            "sub":account,"instance_id":id,"capabilities":{"can_read_instance":true}
+        }),
+        None,
+    )
+}
+async fn select(f: &Fixture, id: &str) -> ClientReply {
+    action(&f.client, ClientAction::SelectInstance { instance_id: id.into() }).await
+}
+
+// Desktop lists the current remote, then instances this account opened as the
+// selected runtime on this device, newest first, then avibe.bot's order. Only
+// a published selection counts: a failed or fenced one leaves order and file.
+#[tokio::test]
+async fn instance_order_follows_committed_opens_per_account_on_this_device() {
+    let session = catalog("account-a", &["one", "two", "three"]);
+    let f = fixture(vec![]);
+    sign_in(&f, session.clone()).await;
+    assert_eq!(order(&f.client), ["one", "two", "three"]);
+    for (id, expected) in [("three", ["three", "one", "two"]), ("two", ["two", "three", "one"])] {
+        f.http
+            .replies
+            .lock()
+            .unwrap()
+            .extend(selection(&session, id, Reply::Ready(ready("account-a", id))));
+        let reply = select(&f, id).await;
+        assert!(reply.ok, "{:?}", reply.error);
+        assert_eq!(order(&f.client), expected);
+    }
+    let recency = f._root.path().join("instance-recency.json");
+    let saved = std::fs::read(&recency).unwrap();
+
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .extend(selection(&session, "one", Reply::Ready(ready("account-a", "other"))));
+    assert_eq!(
+        select(&f, "one").await.error.unwrap().code,
+        "instance_identity_mismatch"
+    );
+    let (finish, held) = oneshot::channel();
+    let entered = Arc::new(Notify::new());
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .extend(selection(&session, "one", Reply::Held(held, entered.clone())));
+    let client = f.client.clone();
+    let fenced = tokio::spawn(async move {
+        action(
+            &client,
+            ClientAction::SelectInstance {
+                instance_id: "one".into(),
+            },
+        )
+        .await
+    });
+    entered.notified().await;
+    assert!(action(&f.client, ClientAction::Cancel).await.ok);
+    assert!(finish.send(ready("account-a", "one")).is_ok());
+    assert_eq!(fenced.await.unwrap().error.unwrap().code, "stale_generation");
+    assert_eq!(order(&f.client), ["two", "three", "one"]);
+    assert_eq!(std::fs::read(&recency).unwrap(), saved);
+
+    // The remainder follows avibe.bot's latest order once the local runtime is current.
+    assert!(action(&f.client, ClientAction::ReturnLocal).await.ok);
+    f.http.replies.lock().unwrap().push_back((
+        "/api/mobile/session",
+        ok(catalog("account-a", &["four", "one", "three", "two"])),
+    ));
+    assert!(action(&f.client, ClientAction::RefreshInstances).await.ok);
+    assert_eq!(order(&f.client), ["two", "three", "four", "one"]);
+    assert!(f.http.replies.lock().unwrap().is_empty());
+
+    // Relaunch on the same device: another account keeps server order, and
+    // this account keeps its own.
+    let Fixture { _root: root, .. } = f;
+    let other = fixture_in(root, vec![]);
+    sign_in(&other, catalog("account-b", &["one", "two", "three"])).await;
+    assert_eq!(order(&other.client), ["one", "two", "three"]);
+    let Fixture { _root: root, .. } = other;
+    let again = fixture_in(root, vec![]);
+    sign_in(&again, session).await;
+    assert_eq!(order(&again.client), ["two", "three", "one"]);
+}
+
+// Recency is bounded. An instance that falls out of it returns to avibe.bot's
+// order, even when the open (here, after consent) reuses an already ordered
+// catalog instead of a fresh one.
+#[tokio::test]
+async fn an_instance_dropped_from_recency_returns_to_server_order() {
+    let root = tempfile::tempdir().unwrap();
+    let mut opened: Vec<String> = (1..64).map(|n| format!("gone-{n}")).collect();
+    opened.push("three".into());
+    std::fs::write(
+        root.path().join("instance-recency.json"),
+        serde_json::to_vec(&json!({"schema_version":1,"accounts":{"account-a":opened}})).unwrap(),
+    )
+    .unwrap();
+    let session = catalog("account-a", &["one", "two", "three"]);
+    let f = fixture_in(root, vec![]);
+    sign_in(&f, session.clone()).await;
+    assert_eq!(order(&f.client), ["three", "one", "two"]);
+    // Inspect asks for consent first; approval then sends the authorized reply.
+    let mut replies = selection(&session, "two", Reply::Ready(ready("account-a", "two")));
+    replies.insert(
+        2,
+        (
+            "/api/desktop/instance-authorization",
+            ok(json!({
+                "status":"consent_required","scope":"openid",
+                "account":{"id":"account-a"},"instance":{"id":"two","host":"two.avibe.bot"}
+            })),
+        ),
+    );
+    f.http.replies.lock().unwrap().extend(replies);
+    assert!(select(&f, "two").await.ok);
+    assert!(f.client.state().consent.is_some());
+    assert_eq!(order(&f.client), ["three", "one", "two"]);
+    let reply = action(&f.client, ClientAction::DecideConsent { approve: true }).await;
+    assert!(reply.ok, "{:?}", reply.error);
+    assert_eq!(order(&f.client), ["two", "one", "three"]);
+    assert!(f.http.replies.lock().unwrap().is_empty());
 }

@@ -28,6 +28,9 @@ pub struct AccountFlow {
     provider_key: Option<String>,
     email: Option<String>,
     enrollment_token: Option<String>,
+    /// Instance ids in the order of the last catalog avibe.bot sent: pins,
+    /// then newest. Published order is derived from it, never replaces it.
+    server_order: Vec<String>,
     transport: Arc<dyn Transport>,
 }
 
@@ -51,6 +54,7 @@ impl AccountFlow {
             provider_key: None,
             email: None,
             enrollment_token: None,
+            server_order: vec![],
             transport,
         }
     }
@@ -153,15 +157,19 @@ impl AccountFlow {
             "access_token":string(&credentials,"access_token")?, "refresh_token":string(&credentials,"refresh_token")?,
         }))).await?;
         self.clear_transient();
-        Self::project(response, state)
+        self.project(response, state)
     }
 
     pub async fn discover(&mut self, state: &mut ClientState) -> Result<(), ClientError> {
         let response = self.session.request(Method::GET, "/api/mobile/session", None).await?;
-        Self::project(response, state)
+        self.project(response, state)
     }
 
-    fn project(response: Response, state: &mut ClientState) -> Result<(), ClientError> {
+    pub fn server_order(&self) -> &[String] {
+        &self.server_order
+    }
+
+    fn project(&mut self, response: Response, state: &mut ClientState) -> Result<(), ClientError> {
         if response.status == 200 {
             let result: SessionProjection =
                 serde_json::from_slice(&response.body).map_err(|_| ClientError::new("invalid_response"))?;
@@ -190,6 +198,7 @@ impl AccountFlow {
                 gate: None,
                 methods: vec![],
             };
+            self.server_order = result.instances.iter().map(|instance| instance.id.clone()).collect();
             state.catalog = CatalogState {
                 status: CatalogStatus::Ready,
                 instances: result.instances,
@@ -205,6 +214,7 @@ impl AccountFlow {
                 gate: Some(factor.gate),
                 methods: factor.methods,
             };
+            self.server_order.clear();
             state.catalog = CatalogState {
                 status: CatalogStatus::Idle,
                 instances: vec![],

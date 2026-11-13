@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -79,4 +79,29 @@ it.each([1, 2])('AUTH-SETUP-171 preserves direct recovery material only in the c
   expect(screen.getByText('This Mac · 最新的 Mac')).toBeTruthy();
   expect(JSON.stringify(window.__AVIBE_DESKTOP_CLIENT_STATE__)).not.toContain(replies.totp_enrollment.result.secret);
   expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain(replies.totp_enrolled.result.recoveryCodes[0]);
+});
+
+it('keeps the native instance order inside each section, with the current shared instance leading Shared', async () => {
+  // Native orders the catalog: current, then opened on this device, then avibe.bot.
+  // The page only splits it into Owned and Shared; it must not re-sort.
+  const instance = states.signed_in.catalog.instances[0];
+  const row = (id: string, relationship: 'owner' | 'shared') => ({
+    ...instance, id, name: id.toUpperCase(), host: `${id}.avibe.bot`, url: `https://${id}.avibe.bot`, relationship,
+  });
+  const state = {
+    ...states.signed_in,
+    connection: {
+      status: 'remote_connected', pending: null,
+      committed: { kind: 'remote', name: 'ZETA', instance_id: 'zeta', canonical_origin: 'https://zeta.avibe.bot' },
+    },
+    catalog: { status: 'ready', instances: [row('zeta', 'shared'), row('beta', 'owner'), row('alpha', 'owner'), row('gamma', 'shared')] },
+  };
+  mount(state, (request) => ({ ...replies.success, request_id: request.request_id, state }));
+  const names = (heading: string) => within(screen.getByRole('heading', { name: heading }).closest('section')!)
+    .getAllByRole('button').map((button) => button.textContent?.match(/[A-Z]+/)?.[0]);
+  await waitFor(() => expect(names('Your instances')).toEqual(['BETA', 'ALPHA']));
+  expect(names('Shared with you')).toEqual(['ZETA', 'GAMMA']);
+  const shared = within(screen.getByRole('heading', { name: 'Shared with you' }).closest('section')!).getAllByRole('button');
+  expect(within(shared[0]).getByLabelText('Current')).toBeTruthy();
+  expect(within(shared[1]).queryByLabelText('Current')).toBeNull();
 });

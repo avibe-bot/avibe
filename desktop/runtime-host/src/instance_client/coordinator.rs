@@ -15,7 +15,7 @@ use super::{
     enrollment::EnrollmentFlow,
     protocol::*,
     selection::Selection,
-    storage::{ConnectionRecord, ConnectionStore, Credentials},
+    storage::{ConnectionRecord, ConnectionStore, Credentials, InstanceRecency},
     transport::{Epoch, NativeSession, Transport},
 };
 use crate::LoopbackOrigin;
@@ -51,6 +51,7 @@ struct Inner {
     enrollment: EnrollmentFlow,
     selection: Option<Selection>,
     record: ConnectionRecord,
+    recency: InstanceRecency,
     restore_allowed: bool,
     committed_view_generation: Option<u64>,
 }
@@ -88,6 +89,7 @@ impl Coordinator {
         let generation = Arc::new(AtomicU64::new(state.generation));
         let action_generation = Arc::new(AtomicU64::new(state.generation));
         let credential_ids = record.account_id.iter().cloned().collect();
+        let recency = store.load_recency();
         Self {
             inner: Mutex::new(Inner {
                 state,
@@ -96,6 +98,7 @@ impl Coordinator {
                 enrollment: EnrollmentFlow::default(),
                 selection: None,
                 record,
+                recency,
                 restore_allowed: true,
                 committed_view_generation: None,
             }),
@@ -533,6 +536,7 @@ impl Coordinator {
         })
         .await
         .map_err(|_| ClientError::new("credentials_unavailable"))?;
+        let mut recency = None;
         let rollback_record = {
             let mut current = self.inner.lock().expect("client state");
             if epoch.check().is_err() {
@@ -551,10 +555,28 @@ impl Coordinator {
                 });
                 working.state.desktop = current.state.desktop.clone();
                 working.state.revision = current.state.revision + 1;
+                // The committed-view receipt changes only when this action
+                // published a new remote selection: the one moment it opens.
+                let opened = working.committed_view_generation != current.committed_view_generation;
+                if opened {
+                    if let (Some(account), ClientTarget::Remote { instance_id, .. }) =
+                        (&working.state.account.identity, &working.state.connection.committed)
+                    {
+                        working.recency.opened(&account.id, instance_id);
+                        recency = Some(working.recency.clone());
+                    }
+                }
+                order_catalog(working);
                 *current = working.clone();
                 None
             }
         };
+        if let Some(recency) = recency {
+            // Order is a local preference: a failed write keeps this run's
+            // order in memory and never fails the committed selection.
+            let store = self.store.clone();
+            let _ = tokio::task::spawn_blocking(move || store.save_recency(&recency)).await;
+        }
         if let Some(record) = rollback_record {
             // Keep credential_io through public commit or rollback. Escape
             // waits on this lock; cancellation cannot leave an unpublished
@@ -873,6 +895,30 @@ impl Drop for SignoutGuard<'_> {
             self.flag.store(false, Ordering::SeqCst);
         }
     }
+}
+
+/// Current remote first, then this account's instances opened on this device,
+/// most recent first, then avibe.bot's order (pins, then newest).
+fn order_catalog(inner: &mut Inner) {
+    let current = match &inner.state.connection.committed {
+        ClientTarget::Remote { instance_id, .. } => Some(instance_id.as_str()),
+        ClientTarget::Local { .. } => None,
+    };
+    let recent = inner
+        .state
+        .account
+        .identity
+        .as_ref()
+        .map_or(&[][..], |account| inner.recency.for_account(&account.id));
+    let server = inner.account.server_order();
+    let rank = |ids: &[String], id: &str| ids.iter().position(|item| item == id).unwrap_or(usize::MAX);
+    inner.state.catalog.instances.sort_by_cached_key(|instance| {
+        (
+            current != Some(instance.id.as_str()),
+            rank(recent, &instance.id),
+            rank(server, &instance.id),
+        )
+    });
 }
 
 fn committed_status(state: &ClientState) -> ConnectionStatus {
