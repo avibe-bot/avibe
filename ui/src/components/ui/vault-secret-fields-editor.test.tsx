@@ -160,6 +160,22 @@ it('is not valid while the default rename collides or a new field is incomplete'
   expect(lastState()).toEqual({ dirty: true, valid: true });
 });
 
+// A new field named like the default's drafted new name would be sealed as the default's record
+// and overwrite it on the server; it is a name collision, both ways round.
+it('rejects a new field named like the default field’s new name', async () => {
+  renderEditor();
+  change('Default field name', 'credential');
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  change('New field name', 'credential');
+  change('New field value', 'seed');
+  expect(screen.getAllByText("There's already a credential field").length).toBeGreaterThan(0);
+  expect(lastState().valid).toBe(false);
+  expect(await save()).toBe(false);
+  expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
+  change('New field name', 'note');
+  expect(lastState().valid).toBe(true);
+});
+
 // Entry gating must stop ciphertext writes, not metadata management.
 it('blocks protected value writes before refresh but permits a metadata-only rename on LAN HTTP', async () => {
   vi.stubGlobal('location', new URL('http://192.0.2.1:5123'));

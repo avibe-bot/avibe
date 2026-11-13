@@ -301,7 +301,7 @@ export function VaultSecretFieldsEditor({
         }
       }
       if (adding) {
-        if (names.includes(adding.field)) throw conflict();
+        if (names.includes(adding.field) || adding.field === finalDefault) throw conflict();
         entries.push([adding.field, adding.value]);
       }
       for (const [field, value] of entries) {
@@ -359,8 +359,11 @@ export function VaultSecretFieldsEditor({
     setNewNameTouched(false);
   };
 
-  const labelIssue = vaultFieldNameIssue(defaultLabel, fields.filter((field) => field !== defaultField));
-  const newIssue = newField === null ? null : vaultFieldNameIssue(newField, fields);
+  // Names are checked against the names the secret will have after Save: the default's new label,
+  // the other fields, and the field being added.
+  const extraNames = fields.filter((field) => field !== defaultField);
+  const labelIssue = vaultFieldNameIssue(defaultLabel, newField === null ? extraNames : [...extraNames, newField]);
+  const newIssue = newField === null ? null : vaultFieldNameIssue(newField, [...extraNames, defaultLabel]);
   const focusedIssue = focusedName === 'default' ? labelIssue : focusedName === 'new' ? newIssue : null;
   const showNameRule = focusedName !== null && focusedIssue !== 'nameInvalid' && focusedIssue !== 'nameTaken';
   const renaming = defaultLabel !== defaultField;
