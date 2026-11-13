@@ -402,3 +402,43 @@ replay commands, exact peer inputs and final logs. Fresh exact-head Codex review
 expected CI/CLEAN, zero all-head unresolved threads and Lead's independent real
 chain remain mandatory before Merge-ready. Original lane Watches and historical
 findings-bearing head count (two) remain unchanged.
+
+The next CI run rejected the fixture-only `AtomicUsize::fetch_update` call as
+deprecated on its newer Rust toolchain; local Rust 1.90 had accepted it. Both
+native jobs stopped at the same warning before their tests. The lifecycle
+interruption counter now uses the equivalent checked compare-exchange loop,
+which preserves zero and consumes each requested interruption exactly once on
+both toolchains. Product source and wire behavior are unchanged. Original CI
+logs and the fixed candidate's complete twenty-case/cookie evidence are retained;
+the repaired fixture must pass compilation and its actual lifecycle consumers
+before the next candidate is handed off.
+
+## Third review: production entry ownership
+
+Lead dispositions `78edfd340709` and `414b18b7f90e` release a bounded repair
+of the existing DeepLinks/NativeView admission and the shared local notification
+connection. Findings-bearing heads remain three (5bab, 2bd, 4fc).
+
+Frozen 4fc actual production callbacks reproduce repeated local replacement
+from both remote and account presentation. Actual Runtime update POST creates
+the request but times out awaiting the stopped Connection, with SSE and fallback
+poll configurations. The first attempt's CSRF/schema fixture failures are kept
+separately; the corrected red consumer uses `/api/csrf-token`, the actual isolated
+SQLite schema, actual ASGI SSE and the test-owned updater mailbox/status.
+
+DeepLinks now records one return attempt and the action receiving the input.
+Busy document callbacks hand off to the serialized NativeView completion.
+Native return uses the admission generation through the existing escape; escape
+acceptance and state mutation share the inner lock. A controlled invalidate gap
+reproduced an old return replacing a newer OTP state before this correction.
+Eleven coordinator consumers, including durable credential-wait precedence,
+and thirty notification consumers pass locally.
+
+Selection leaves the monitor-owned Connection alive. Ordinary notification and
+badge output capture a presentation generation before asynchronous reads and
+recheck it on the native main thread. Updater nudges keep the existing local
+connection generation, mailbox, confirmation and installation owner. The
+fixture adds shared production receive/Finished callbacks and an inert Shell;
+only final OS notification/badge/shortcut effects are intercepted. Installed
+Runtime bootstrap is unavailable and would panic if invoked. All new real-window
+consumers and fresh exact-head review/CI remain pending at this checkpoint.

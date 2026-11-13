@@ -53,6 +53,20 @@ struct Lifecycle {
     local: LoopbackOrigin,
 }
 impl Lifecycle {
+    fn take_interrupt(&self) -> bool {
+        let mut remaining = self.remaining.load(Ordering::SeqCst);
+        while let Some(next) = remaining.checked_sub(1) {
+            match self
+                .remaining
+                .compare_exchange(remaining, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return true,
+                Err(current) => remaining = current,
+            }
+        }
+        false
+    }
+
     fn change(&self, origin: Option<LoopbackOrigin>) {
         *self.local_origin.lock().unwrap() = origin.clone();
         self.coordinator.local_origin(origin);
@@ -184,7 +198,7 @@ fn main() {
                     support::fixture_event::install(&_view);
                 }
                 if let Some(lifecycle) = _view.app_handle().try_state::<Lifecycle>() {
-                    if lifecycle.remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                    if lifecycle.take_interrupt() {
                         let next = lifecycle.local_origin.lock().unwrap().is_none().then(|| lifecycle.local.clone());
                         lifecycle.change(next);
                         emit(json!({"event":"window_lifecycle_interrupted","remaining":lifecycle.remaining.load(Ordering::SeqCst)}));

@@ -69,6 +69,16 @@ pub(crate) fn foreground_local(app: &AppHandle) -> bool {
         !state.account && state.remote.is_none() && client.view.windows.try_lock().is_ok()
     })
 }
+pub(crate) fn presentation_owner(app: &AppHandle) -> Option<u64> {
+    app.try_state::<Client>()
+        .map(|client| client.coordinator.presentation_owner())
+}
+pub(crate) fn presentation_busy(app: &AppHandle) -> bool {
+    app.try_state::<Client>().is_some_and(|client| {
+        let view = client.view.presentation.lock().expect("presentation");
+        view.staging || view.pending_commit.is_some() || client.view.windows.try_lock().is_err()
+    })
+}
 /// Bootstrap may navigate an idle local window only while holding the same
 /// serialization as replacement/rollback. A busy owner receives the new local
 /// origin and finishes its own navigation and visibility under that origin.
@@ -289,19 +299,24 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
         return;
     };
     let coordinator = client.coordinator.clone();
+    let Some(ticket) = app
+        .state::<Mutex<crate::DeepLinks>>()
+        .lock()
+        .ok()
+        .and_then(|mut links| {
+            links.claim_local_return(coordinator.state().generation, coordinator.presentation_owner())
+        })
+    else {
+        return;
+    };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let reply = coordinator
-            .request(ClientRequest {
-                version: 1,
-                request_id: "native-local-link".into(),
-                expected_generation: coordinator.state().generation,
-                action: ClientAction::ReturnLocal,
-            })
-            .await;
-        if reply.ok {
-            crate::apply_pending_deep_link(&app);
+        let result = coordinator.return_local_if_current(ticket.expected_generation).await;
+        let succeeded = result.is_ok() && coordinator.presentation_epoch(ticket.expected_generation + 1).is_ok();
+        if let Ok(mut links) = app.state::<Mutex<crate::DeepLinks>>().lock() {
+            links.finish_local_return(&ticket, succeeded);
         }
+        crate::apply_pending_deep_link(&app);
     });
 }
 pub fn page_loaded(app: &AppHandle) {
@@ -786,20 +801,8 @@ impl NativeView {
         if self.app.try_state::<Shell>().is_none() {
             return;
         }
-        if local_selected(&self.app) {
-            if let Some(origin) = self
-                .app
-                .state::<Shell>()
-                .active_origin
-                .lock()
-                .ok()
-                .and_then(|origin| origin.clone())
-            {
-                crate::notifications::start(&self.app, origin);
-            }
-        } else {
-            crate::notifications::stop(&self.app);
-        }
+        // Runtime monitor owns the single local control connection. Selection
+        // only gates its user-facing output; it never stops or reopens it.
         crate::pet::reconcile(&self.app);
         crate::refresh_native_controls(&self.app, None);
     }
@@ -886,6 +889,9 @@ impl ClientView for NativeView {
             }
         }
         self.auxiliaries();
+        // Finished may arrive while this owner still holds the window lock.
+        // The owner's terminal publication is the deferred delivery handoff.
+        crate::apply_pending_deep_link(&self.app);
     }
     fn committed(&self, epoch: Epoch) {
         let Some(client) = self.app.try_state::<Client>() else {
@@ -911,7 +917,7 @@ impl ClientView for NativeView {
         }
         crate::app_windows::close_all(&self.app);
         if self.app.try_state::<crate::notifications::Notifications>().is_some() {
-            crate::notifications::stop(&self.app);
+            crate::notifications::clear_badge(&self.app);
         }
         crate::instance_passkeys::cancel(&self.app);
         crate::instance_downloads::invalidate(&self.app);

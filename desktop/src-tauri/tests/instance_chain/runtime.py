@@ -5,7 +5,9 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import socket
 import threading
+import time
 from urllib.parse import urlsplit
 import requests
 from config.v2_config import V2Config
@@ -66,12 +68,58 @@ def start(monkeypatch, info, mapping_file):
         return jwks(info["base"] + "/oauth/jwks.json")
 
     monkeypatch.setattr(remote_access, "PyJWKClient", mapped_jwks)
+    stream_server = None
+    stream_thread = None
+    broker = None
+    streams = {"connections": 0, "native_connections": 0, "closed": 0, "bytes": 0}
+    if os.environ.get("DESKTOP_CHAIN_SHELL") == "1":
+        import uvicorn
+        from config import paths
+        from storage.importer import ensure_sqlite_state
+        from vibe import sse_broker
+        assert paths.get_sqlite_state_path().resolve().is_relative_to(Path(os.environ["TMPDIR"]).resolve())
+        ensure_sqlite_state()
+        broker = sse_broker.SSEBroker()
+        monkeypatch.setattr(sse_broker, "broker", broker)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        stream_base = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        stream_server = uvicorn.Server(uvicorn.Config(
+            ui_server.app, lifespan="off", log_level="error", timeout_graceful_shutdown=1,
+        ))
+        stream_thread = threading.Thread(target=stream_server.run, kwargs={"sockets": [listener]}, daemon=True)
+        stream_thread.start()
+        deadline = time.monotonic() + 10
+        while not stream_server.started:
+            assert time.monotonic() < deadline, "fixture ASGI listener did not start"
+            time.sleep(0.01)
 
     class Runtime(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
 
         def route(self):
+            if self.path == "/api/events" and stream_server is not None:
+                if not runtime.sse_enabled:
+                    self.send_error(503)
+                    return
+                streams["connections"] += 1
+                if not self.headers.get("User-Agent"):
+                    streams["native_connections"] += 1
+                try:
+                    with requests.get(stream_base + self.path, headers=dict(self.headers), stream=True, timeout=20) as response:
+                        self.send_response(response.status_code)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.end_headers()
+                        for chunk in response.iter_content(chunk_size=1):
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                            streams["bytes"] += len(chunk)
+                except (BrokenPipeError, ConnectionResetError, requests.RequestException):
+                    pass
+                finally:
+                    streams["closed"] += 1
+                return
             host = self.headers["Host"]
             scheme = self.headers.get("X-Fixture-Scheme", "http")
             headers = {
@@ -110,6 +158,20 @@ def start(monkeypatch, info, mapping_file):
         do_DELETE = route
 
     runtime = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Runtime)
+    runtime.sse_enabled = os.environ.get("DESKTOP_CHAIN_SSE", "1") == "1"
+    runtime.streams = streams
+    runtime.broker = broker
+    stop_http = runtime.shutdown
+
+    def shutdown():
+        stop_http()
+        if stream_server is not None:
+            broker.close_all()
+            stream_server.should_exit = True
+            stream_thread.join(timeout=10)
+            assert not stream_thread.is_alive()
+
+    runtime.shutdown = shutdown
     local = f"http://127.0.0.1:{runtime.server_port}"
     publish_mapping(mapping_file, urlsplit(local).netloc, local)
     config = V2Config.load()

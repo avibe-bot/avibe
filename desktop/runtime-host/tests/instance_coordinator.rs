@@ -104,13 +104,20 @@ struct View {
     committed: Mutex<Vec<ClientTarget>>,
     restored: Mutex<Vec<ClientTarget>>,
     retirement_failure: AtomicBool,
+    invalidation: Mutex<Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 #[async_trait]
 impl ClientView for View {
     fn changed(&self, state: &ClientState) {
         self.states.lock().unwrap().push(state.clone());
     }
-    fn invalidate(&self, _: u64) {}
+    fn invalidate(&self, _: u64) {
+        let held = self.invalidation.lock().unwrap().take();
+        if let Some((entered, release)) = held {
+            let _ = entered.send(());
+            release.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        }
+    }
     async fn commit(
         &self,
         epoch: Epoch,
@@ -204,6 +211,74 @@ fn signed_in() -> Value {
     serde_json::from_str::<Value>(include_str!("../../contracts/instance-client-v1/transport.json")).unwrap()
         ["account_session"]
         .clone()
+}
+
+// Admission must reject obsolete native work without changing anything. Once
+// accepted, lifecycle can interrupt callbacks, but only a newer explicit
+// action may replace the accepted state/record. Existing credential tests hold
+// a later boundary; this holds invalidate between acceptance and publication.
+#[tokio::test]
+async fn native_return_admission_and_state_commit_keep_their_action_owner() {
+    for explicit in [false, true] {
+        let f = fixture(first_factor());
+        let record = std::fs::read(f._root.path().join("connection.json")).unwrap();
+        let before = f.client.state();
+        assert_eq!(
+            f.client
+                .return_local_if_current(before.generation + 1)
+                .await
+                .unwrap_err()
+                .code,
+            "stale_generation"
+        );
+        assert_eq!(
+            serde_json::to_value(f.client.state()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert!(f.view.states.lock().unwrap().is_empty());
+        assert!(f.view.restored.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read(f._root.path().join("connection.json")).unwrap(), record);
+        let (entered, reached) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *f.view.invalidation.lock().unwrap() = Some((entered, released));
+        let client = f.client.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let returning = tokio::task::spawn_blocking(move || runtime.block_on(client.return_local_if_current(0)));
+        reached.await.unwrap();
+        if explicit {
+            assert!(
+                action(
+                    &f.client,
+                    ClientAction::RequestOtp {
+                        email: "newer@example.test".into()
+                    }
+                )
+                .await
+                .ok
+            );
+        } else {
+            f.client.local_origin(Some(
+                avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
+            ));
+        }
+        let accepted = f.client.state();
+        release.send(()).unwrap();
+        let result = returning.await.unwrap();
+        if explicit {
+            assert_eq!(result.unwrap_err().code, "stale_generation");
+            assert_eq!(
+                serde_json::to_value(f.client.state()).unwrap(),
+                serde_json::to_value(accepted).unwrap()
+            );
+            assert!(f.view.restored.lock().unwrap().is_empty());
+            assert_eq!(std::fs::read(f._root.path().join("connection.json")).unwrap(), record);
+        } else {
+            assert!(result.is_ok());
+            assert!(f.client.state().connection.committed.is_local());
+            assert!(f.store.load("unused").unwrap().last_committed.is_local());
+            assert_eq!(f.view.restored.lock().unwrap().len(), 1);
+        }
+    }
 }
 
 // Initial binding may invalidate credential reads or discovery. Only that

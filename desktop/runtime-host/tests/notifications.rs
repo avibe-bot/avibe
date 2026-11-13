@@ -124,12 +124,12 @@ impl NotificationSink for FakeSink {
         }
     }
 
-    fn deliver(&self, intent: NotificationIntent, source: Option<String>) {
+    fn deliver(&self, intent: NotificationIntent, source: Option<String>, _: u64) {
         self.delivered.lock().unwrap().push(intent);
         self.sources.lock().unwrap().push(source);
     }
 
-    fn show_unread(&self, total: u64) {
+    fn show_unread(&self, total: u64, _: u64) {
         self.unread.lock().unwrap().push(total);
     }
 

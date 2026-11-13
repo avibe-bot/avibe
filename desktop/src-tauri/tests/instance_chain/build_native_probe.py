@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--bundle-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target-dir", type=Path, required=True)
+    parser.add_argument("--shell-consumers", action="store_true")
+    parser.add_argument("--shell-fixture", type=Path)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     source = args.output / "source"
@@ -71,6 +73,88 @@ def main():
         assert patched.count(call) == 1
         patched = patched.replace(call, 'eprintln!("fixture: automatic update notification deferred");')
     updater.write_text(patched)
+    shell_adaptations = {}
+    if args.shell_consumers:
+        support = source / "desktop/src-tauri/examples/support/fixture_shell.rs"
+        if args.shell_fixture:
+            shutil.copy2(args.shell_fixture, support)
+        shell_adaptations["support_sha256"] = hashlib.sha256(support.read_bytes()).hexdigest()
+        library = source / "desktop/src-tauri/src/lib.rs"
+        library_source = library.read_text()
+        shell_adaptations["library_original_sha256"] = hashlib.sha256(library.read_bytes()).hexdigest()
+        if "fn main_document_finished(" not in library_source:
+            # Frozen pre-fix red assembly: mechanically extract the actual
+            # callback bytes, exactly as in the production refactor.
+            start = library_source.index("                        // The native frame is independent of the Runtime UI version;")
+            end = library_source.index("\n                    }\n                })\n                .on_navigation", start)
+            body = library_source[start:end]
+            helper = "fn main_document_finished(webview: &tauri::Webview) {\n" + "".join(
+                line[20:] + "\n" for line in body.splitlines()
+            ) + "}\n\n"
+            library_source = library_source[:start] + "                        main_document_finished(webview);" + library_source[end:]
+            library_source = library_source.replace("fn receive_native_deep_link(", helper + "fn receive_native_deep_link(", 1)
+            shell_adaptations["extracted_frozen_finished_callback"] = True
+        library.write_text(library_source + '\n#[path = "../examples/support/fixture_shell.rs"]\npub mod fixture_shell;\n')
+        example = source / "desktop/src-tauri/examples/instance_client_probe.rs"
+        example_source = example.read_text()
+        replacements = {
+            "avibe_desktop_lib::updater::init(app.handle())?;":
+                "avibe_desktop_lib::fixture_shell::prepare(app.handle(), &setup.root);\n            avibe_desktop_lib::updater::init(app.handle())?;",
+            "let local_origin=Arc::new(Mutex::new(Some(local.clone())));":
+                "let local_origin=avibe_desktop_lib::fixture_shell::attach(app.handle(), local.clone(), &setup.root);",
+            "instance_client::page_loaded(view.app_handle());":
+                "avibe_desktop_lib::fixture_shell::finished(view);",
+            'instance_client::present(app.handle(),"account");':
+                'instance_client::present(app.handle(),"account");\n            avibe_desktop_lib::fixture_shell::start(app.handle());',
+            '                        "state"=>emit(':
+                '''                        "native_link"=> avibe_desktop_lib::fixture_shell::receive(&handle, command["url"].as_str().unwrap().into()),
+                        "shell_control"=> avibe_desktop_lib::fixture_shell::control(&handle, command.clone()),
+                        "shell_status"=> emit(avibe_desktop_lib::fixture_shell::status(&handle)),
+                        "state"=>emit(''',
+        }
+        for needle, replacement in replacements.items():
+            assert example_source.count(needle) == 1, needle
+            example_source = example_source.replace(needle, replacement)
+        example.write_text(example_source)
+        # Keep the production output gates. Only the final OS effects are
+        # recorded; no notification, badge or global shortcut reaches the user.
+        notifications = source / "desktop/src-tauri/src/notifications.rs"
+        notification_source = notifications.read_text()
+        notification_source = notification_source.replace("use tauri_plugin_notification::NotificationExt;\n", "")
+        needle = """            if sink
+                .app
+                .notification()
+                .builder()
+                .title(copy.title)
+                .body(copy.body)
+                .show()
+                .is_err()
+            {
+                eprintln!("The desktop notification could not be submitted to the operating system.");
+            }"""
+        assert notification_source.count(needle) == 1
+        notification_source = notification_source.replace(needle, '''            println!("{}", serde_json::json!({"event":"notification_output","title":copy.title,"body":copy.body}));''')
+        needle = "let _ = window.set_badge_count(badge_count(total));"
+        assert notification_source.count(needle) == 1
+        notification_source = notification_source.replace(needle, '''let _ = window;\n        println!("{}", serde_json::json!({"event":"badge_output","count":badge_count(total)}));''')
+        needle = "                    poll_sink.desktop_update_requested();"
+        assert notification_source.count(needle) == 1
+        notification_source = notification_source.replace(needle, '''                    println!("{}", serde_json::json!({"event":"mailbox_poll"}));
+                    poll_sink.desktop_update_requested();''')
+        notifications.write_text(notification_source)
+        stream = source / "desktop/runtime-host/src/notifications.rs"
+        stream_source = stream.read_text()
+        needle = '                    if frame.event == "desktop.update.requested" {\n                        sink.desktop_update_requested();'
+        assert stream_source.count(needle) == 1
+        stream.write_text(stream_source.replace(needle, '''                    if frame.event == "desktop.update.requested" {
+                        println!("{}", serde_json::json!({"event":"sse_update_nudge"}));
+                        sink.desktop_update_requested();'''))
+        pet = source / "desktop/src-tauri/src/pet.rs"
+        pet_source = pet.read_text()
+        needle = "        apply_shortcuts(&handle);\n        reconcile_now(&handle);"
+        assert pet_source.count(needle) == 1
+        pet.write_text(pet_source.replace(needle, "        reconcile_now(&handle);"))
+        shell_adaptations["recorded_peripheral_calls"] = ["notification.show", "window.set_badge_count", "pet.apply_shortcuts"]
     environment = {key: os.environ[key] for key in ("PATH", "LANG", "CARGO_HOME", "RUSTUP_HOME") if key in os.environ}
     environment.setdefault("CARGO_HOME", str(Path.home() / ".cargo"))
     environment.setdefault("RUSTUP_HOME", str(Path.home() / ".rustup"))
@@ -99,6 +183,7 @@ def main():
         "binary": str(executable), "source": str(source),
         "fixture_public_key": "desktop/runtime-host/tests/fixtures/updater/public-key.txt",
         "recorded_peripheral_calls": peripheral_calls,
+        "shell_adaptations": shell_adaptations,
     }
     (args.output / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record))

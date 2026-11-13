@@ -1559,11 +1559,10 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         if window_generation.load(Ordering::SeqCst) != observed_generation {
             continue;
         }
-        let Some(navigation) = app
-            .state::<Mutex<DeepLinks>>()
-            .lock()
-            .ok()
-            .and_then(|mut links| links.bootstrap_navigation(ready))
+        let Some(navigation) =
+            app.state::<Mutex<DeepLinks>>().lock().ok().and_then(|mut links| {
+                links.bootstrap_navigation_owned(ready, instance_client::presentation_owner(app))
+            })
         else {
             let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
             return;
@@ -2021,6 +2020,22 @@ fn focus_or_restore_main_window(app: &AppHandle) {
     }
 }
 
+fn main_document_finished(webview: &tauri::Webview) {
+    // The native frame is independent of the Runtime UI version;
+    // older adopted Workbench pages must not restore a title bar.
+    #[cfg(target_os = "macos")]
+    macos_title_bar::sync(webview);
+    instance_client::page_loaded(webview.app_handle());
+    apply_pending_deep_link(webview.app_handle());
+    if take_desktop_update_request(webview.app_handle()) && !open_desktop_updates(webview.app_handle()) {
+        updater::check(webview.app_handle().clone(), true);
+    }
+    // Settings become available the moment a Workbench is on
+    // screen, not at the monitor's first tick. The shared
+    // rule still decides, so a bootstrap page enables nothing.
+    refresh_native_controls(webview.app_handle(), None);
+}
+
 fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
     let mut updates_requested = false;
     let mut workbench_arguments = Vec::new();
@@ -2036,7 +2051,7 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
         request_desktop_updates(app);
     }
     if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
-        links.receive(workbench_arguments);
+        links.receive_owned(workbench_arguments, instance_client::presentation_owner(app));
     }
     if app.try_state::<Shell>().is_none() {
         return;
@@ -2049,13 +2064,16 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
 }
 
 fn apply_pending_deep_link(app: &AppHandle) {
+    if !app.try_state::<Mutex<DeepLinks>>().is_some_and(|links| {
+        links
+            .lock()
+            .is_ok_and(|links| links.pending_for_owner(instance_client::presentation_owner(app)))
+    }) || instance_client::presentation_busy(app)
+    {
+        return;
+    }
     if !instance_client::foreground_local(app) {
-        if app
-            .try_state::<Mutex<DeepLinks>>()
-            .is_some_and(|links| links.lock().is_ok_and(|links| links.has_pending()))
-        {
-            instance_client::return_local_for_link(app);
-        }
+        instance_client::return_local_for_link(app);
         return;
     }
     let Some(shell) = app.try_state::<Shell>() else {
@@ -2470,21 +2488,7 @@ pub fn run() {
                         pet::page_loading(webview.app_handle());
                     }
                     if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
-                        // The native frame is independent of the Runtime UI version;
-                        // older adopted Workbench pages must not restore a title bar.
-                        #[cfg(target_os = "macos")]
-                        macos_title_bar::sync(webview);
-                        instance_client::page_loaded(webview.app_handle());
-                        apply_pending_deep_link(webview.app_handle());
-                        if take_desktop_update_request(webview.app_handle())
-                            && !open_desktop_updates(webview.app_handle())
-                        {
-                            updater::check(webview.app_handle().clone(), true);
-                        }
-                        // Settings become available the moment a Workbench is on
-                        // screen, not at the monitor's first tick. The shared
-                        // rule still decides, so a bootstrap page enables nothing.
-                        refresh_native_controls(webview.app_handle(), None);
+                        main_document_finished(webview);
                     }
                 })
                 .on_navigation(|webview, url| {

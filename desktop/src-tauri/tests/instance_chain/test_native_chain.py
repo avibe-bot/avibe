@@ -69,6 +69,9 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
     update_config = tmp_path / "update-transport.json"
     update_config.write_text(json.dumps({"proxy": tunnel_url, "certificate": str(tmp_path / "certificate.pem")}))
     environment["AVIBE_FIXTURE_UPDATE_CONFIG"] = str(update_config)
+    if os.environ.get("DESKTOP_CHAIN_SHELL") == "1":
+        environment["AVIBE_FIXTURE_SHELL"] = "1"
+        environment["AVIBE_FIXTURE_AUTO_UPDATE"] = os.environ.get("DESKTOP_CHAIN_AUTO_UPDATE", "0")
     executable = Path(os.environ["DESKTOP_NATIVE_PROBE"]).resolve()
     native = subprocess.Popen(
         [str(executable), str(fixture)],
@@ -81,6 +84,7 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
     )
     events = queue.Queue()
     updates = []
+    history = []
     native_log = (tmp_path / "native.log").open("w")
 
     def collect():
@@ -89,6 +93,7 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
             native_log.flush()
             try:
                 value = json.loads(line)
+                history.append(value)
                 if value.get("event") == "update":
                     updates.append(value["state"])
                 events.put(value)
@@ -154,6 +159,8 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
             "updater": updater,
             "updates": updates,
             "document": document,
+            "runtime": runtime,
+            "history": history,
         }
     finally:
         document.release.set()
@@ -206,6 +213,212 @@ def local_held_chain(desktop_host, monkeypatch, tmp_path):
     finally:
         release.set()
         fixture.close()
+
+
+@pytest.fixture
+def production_shell_chain(desktop_host, monkeypatch, tmp_path, request):
+    """Run the shared production shell callbacks with inert RuntimeHost dependencies."""
+    options = getattr(request, "param", {})
+    monkeypatch.setenv("DESKTOP_CHAIN_SHELL", "1")
+    monkeypatch.setenv("DESKTOP_CHAIN_SSE", "1" if options.get("sse", True) else "0")
+    monkeypatch.setenv("DESKTOP_CHAIN_AUTO_UPDATE", "1" if options.get("automatic", False) else "0")
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("AVIBE_COMPUTER_USE_STATE_DIR", str(tmp_path / "home/Library/Application Support/bot.avibe.desktop"))
+    from vibe import internal_client
+
+    async def no_running_agents():
+        return {"body": {"agents": []}}
+
+    monkeypatch.setattr(internal_client, "list_running_agents", no_running_agents)
+    fixture = local_held_chain.__wrapped__(desktop_host, monkeypatch, tmp_path)
+    try:
+        value = next(fixture)
+        value["options"] = options
+        yield value
+    finally:
+        fixture.close()
+
+
+@pytest.mark.parametrize("presentation,interruption", [
+    ("remote", None), ("account", None),
+    ("remote", "lifecycle"), ("account", "new_link"), ("remote", "explicit"),
+])
+def test_production_deep_link_finished_defers_to_one_local_owner(production_shell_chain, presentation, interruption):
+    f = production_shell_chain
+    login(f)
+    select_studio(f)
+    if presentation == "account":
+        f["send"](action="present", view="instances")
+        f["wait"]("loaded", lambda event: "account/index.html" in event["url"])
+    before = f["state"](lambda _: True)["state"]["generation"]
+    armed, entered, release = f["local_hold"]
+    armed.set()
+    f["send"](action="native_link", url="avibe://settings/shortcuts")
+    f["wait"]("link_received")
+    assert entered.wait(timeout=10), "the production receive path did not start local replacement"
+    # The production Finished callback runs for the staging document while
+    # the local response is held. It must not admit another ReturnLocal.
+    for _ in range(3):
+        f["send"](action="shell_control", operation="finished")
+        f["wait"]("shell_control")
+    held = f["state"](lambda _: True)
+    assert held["state"]["generation"] == before + 1, held
+    target = f["local"] + "/settings/shortcuts"
+    expected = before + 1
+    if interruption == "lifecycle":
+        f["send"](action="local_unavailable")
+        f["wait"]("local_unavailable")
+        f["send"](action="shell_control", operation="rebind", origin=f["local"])
+        f["wait"]("shell_control")
+        expected += 2
+    elif interruption == "new_link":
+        target = f["local"] + "/settings/computer-use"
+        f["send"](action="native_link", url="avibe://settings/computer-use")
+        f["wait"]("link_received")
+    elif interruption == "explicit":
+        f["send"](action="escape")
+        expected += 1
+    release.set()
+    if interruption == "explicit":
+        f["wait"]("escaped")
+        target = f["local"] + "/"
+    else:
+        f["wait"]("loaded", lambda event: event["url"] == target, timeout=10)
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending"] is (interruption == "explicit")
+    current = f["state"](lambda _: True)
+    assert current["visible"] is True
+    assert current["state"]["generation"] == expected
+    assert f["js"]("return location.href;") == target
+    time.sleep(0.2)
+    assert f["js"]("return location.href;") == target
+
+
+@pytest.mark.skipif(os.environ.get("DESKTOP_FIXTURE_UPDATER") != "1", reason="requires signed updater transport fixture build")
+@pytest.mark.parametrize("production_shell_chain", [
+    {"sse": True, "automatic": False},
+    {"sse": False, "automatic": True},
+], indirect=True)
+def test_production_local_update_post_reaches_connection_while_remote(production_shell_chain):
+    f = production_shell_chain
+    login(f)
+    select_studio(f)
+    open_footer(f)
+    buttons = native_dialog(f)
+    f["send"](action="dialog", choice=buttons.index("Later"))
+    f["wait"]("dialog")
+    f["wait"]("update", lambda event: event["state"]["phase"] == "available")
+    f["send"](action="shell_status")
+    status = f["wait"]("shell_status")
+    assert Path(status["data"]).is_relative_to(f["root"])
+    assert status["notifications_enabled"] is True
+    assert status["mini_window"] is False
+    session = requests.Session()
+    session.trust_env = False
+    token = session.get(f["local"] + "/api/csrf-token", timeout=5).json()["csrf_token"]
+    response = session.post(
+        f["local"] + "/api/desktop/update/request",
+        json={"target_version": f["updater"]["version"], "confirm_interrupt": True},
+        headers={"Origin": f["local"], "X-Vibe-CSRF-Token": token},
+        timeout=15,
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["ok"] is True
+    assert result["delivery"] == ("install" if f["options"]["automatic"] else "prompt")
+    remote = f["wait"]("update", lambda event: (event["state"].get("remoteRequest") or {}).get("phase") in ("awaiting_host", "downloading"))
+    assert remote["state"]["remoteRequest"]["requestId"] == result["request_id"]
+    assert remote["state"]["remoteRequest"]["target"] == f["updater"]["version"]
+    if f["options"]["automatic"]:
+        assert f["updater"]["requested"].wait(timeout=5)
+        f["send"](action="escape")
+        assert f["wait"]("escaped")["ok"] is True
+        f["updater"]["release"].set()
+        f["wait"]("update", lambda event: (event["state"].get("remoteRequest") or {}).get("phase") == "failed")
+    else:
+        assert not f["updater"]["requested"].is_set()
+        assert any(event.get("event") == "sse_update_nudge" for event in f["history"])
+    assert not any(update["phase"] in ("installing", "installed") for update in f["updates"])
+
+
+def test_production_notification_output_is_fenced_without_retiring_local_control(production_shell_chain, monkeypatch):
+    """Actual SSE, actual detail response, native output gates and stop/rebind.
+
+    The old transport abort hid delayed output risks. Keep that transport alive
+    and prove a lookup cannot be revived by a later local presentation.
+    """
+    f = production_shell_chain
+    login(f)
+    f["state"](lambda state: state["account"]["status"] == "signed_in")
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    f["send"](action="shell_control", operation="hide")
+    f["wait"]("shell_control")
+    broker = f["runtime"].broker
+
+    def approval(identifier):
+        broker.publish("vaults.updated", {"request_id": identifier, "request_status": "pending"})
+
+    approval("positive-before")
+    f["wait"]("notification_output")
+    start = len(f["history"])
+    entered, release = threading.Event(), threading.Event()
+    handler = f["runtime"].RequestHandlerClass
+    original = handler.end_headers
+
+    def end_headers(request):
+        if request.path == "/api/harness/runs/fixture-delayed":
+            assert b"404" in request._headers_buffer[0]
+            entered.set()
+            assert release.wait(timeout=10)
+        return original(request)
+
+    monkeypatch.setattr(handler, "end_headers", end_headers)
+    broker.publish("runs.updated", {"run_id": "fixture-delayed", "status": "succeeded", "run_type": "watch"})
+    assert entered.wait(timeout=5)
+    began = time.monotonic()
+    try:
+        select_studio(f)
+        f["send"](action="shell_control", operation="hide")
+        f["wait"]("shell_control")
+        approval("suppressed-remote")
+        f["send"](action="shell_status")
+        status = f["wait"]("shell_status")
+        assert status["notifications_enabled"] is True
+        assert status["mini_window"] is False
+        f["send"](action="escape")
+        assert f["wait"]("escaped")["ok"]
+        f["send"](action="shell_control", operation="hide")
+        f["wait"]("shell_control")
+        # Stay inside the production five-second detail timeout so this
+        # specifically exercises late completion after returning local.
+        assert time.monotonic() - began < 4.5
+    finally:
+        release.set()
+    time.sleep(0.2)
+    approval("suppressed-remote")  # suppressed events are consumed, not queued
+    time.sleep(0.2)
+    assert not [event for event in f["history"][start:] if event.get("event") == "notification_output"]
+    approval("positive-after")
+    f["wait"]("notification_output")
+
+    select_studio(f)
+    f["send"](action="shell_control", operation="stop")
+    f["wait"]("shell_control")
+    stopped = sum(event.get("event") == "mailbox_poll" for event in f["history"])
+    time.sleep(5.2)
+    assert sum(event.get("event") == "mailbox_poll" for event in f["history"]) == stopped
+    connections = f["runtime"].streams["native_connections"]
+    for _ in range(3):
+        f["send"](action="shell_control", operation="rebind", origin=f["local"])
+        f["wait"]("shell_control")
+    deadline = time.monotonic() + 5
+    while f["runtime"].streams["native_connections"] == connections:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert f["runtime"].streams["native_connections"] == connections + 1
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["notifications_enabled"] is True
 
 
 def login(f):

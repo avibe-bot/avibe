@@ -201,6 +201,12 @@ impl Coordinator {
     }
     fn advance(&self, expected: Option<u64>, restoring: bool) -> Result<Epoch, ClientError> {
         let mut inner = self.inner.lock().expect("client state");
+        let epoch = self.advance_locked(&mut inner, expected, restoring)?;
+        drop(inner);
+        self.view.invalidate(epoch.value);
+        Ok(epoch)
+    }
+    fn advance_locked(&self, inner: &mut Inner, expected: Option<u64>, restoring: bool) -> Result<Epoch, ClientError> {
         if expected.is_some_and(|value| value != inner.state.generation) || (restoring && !inner.restore_allowed) {
             return Err(ClientError::new("stale_generation"));
         }
@@ -211,8 +217,6 @@ impl Coordinator {
         inner.state.generation = value;
         inner.state.revision += 1;
         self.action_generation.store(value, Ordering::SeqCst);
-        drop(inner);
-        self.view.invalidate(value);
         Ok(Epoch::new(self.generation.clone(), value))
     }
     fn reply(&self, id: String, result: Result<Option<DirectResult>, ClientError>) -> ClientReply {
@@ -232,6 +236,12 @@ impl Coordinator {
 
     pub async fn request(&self, request: ClientRequest) -> ClientReply {
         self.request_owned(request, false).await
+    }
+
+    /// A native link captures this authority before scheduling its local return.
+    /// User Cancel/ReturnLocal keep their unconditional escape semantics.
+    pub async fn return_local_if_current(&self, expected_generation: u64) -> Result<(), ClientError> {
+        self.escape(ClientAction::ReturnLocal, Some(expected_generation)).await
     }
 
     async fn request_owned(&self, request: ClientRequest, restoring: bool) -> ClientReply {
@@ -585,9 +595,12 @@ impl Coordinator {
             flag: &self.signing_out,
             active: signing_out,
         };
-        let epoch = self.advance(expected, false)?;
-        let (target, record, mut old_session) = {
+        let (epoch, target, record, mut old_session) = {
             let mut inner = self.inner.lock().expect("client state");
+            // Acceptance and state mutation share one owner/critical section.
+            // invalidate may call back or let a newer action run; it must not
+            // leave an older escape able to overwrite that action afterward.
+            let epoch = self.advance_locked(&mut inner, expected, false)?;
             inner.selection = None;
             inner.state.consent = None;
             inner.state.connection.pending = None;
@@ -635,8 +648,9 @@ impl Coordinator {
                 RemoteAuxiliary::DisabledIncomplete
             };
             inner.record.last_committed = target.clone();
-            (target, inner.record.clone(), old_session)
+            (epoch, target, inner.record.clone(), old_session)
         };
+        self.view.invalidate(epoch.value);
         self.view.changed(&self.state());
         let mut owned = self.credential_io.lock().await;
         let ids: Vec<_> = if signing_out {

@@ -83,9 +83,24 @@ impl DeepLinkNavigation {
     }
 }
 
+#[derive(Clone)]
+pub struct DeepLinkReturn {
+    delivery: Arc<DeepLinkTarget>,
+    pub expected_generation: u64,
+    action_owner: u64,
+}
+
+struct LocalReturn {
+    ticket: DeepLinkReturn,
+    in_flight: bool,
+    succeeded: bool,
+}
+
 #[derive(Default)]
 pub struct DeepLinks {
     pending: Option<Arc<DeepLinkTarget>>,
+    action_owner: Option<u64>,
+    local_return: Option<LocalReturn>,
     failed: bool,
 }
 
@@ -95,6 +110,12 @@ impl DeepLinks {
     }
 
     pub fn receive(&mut self, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
+        self.receive_owned(arguments, None);
+    }
+
+    /// Native input is authorized by the explicit action it interrupted.
+    /// Lifecycle callbacks never refresh this authority.
+    pub fn receive_owned(&mut self, arguments: impl IntoIterator<Item = impl AsRef<str>>, owner: Option<u64>) {
         if self.failed {
             return;
         }
@@ -103,6 +124,60 @@ impl DeepLinks {
             .find_map(|argument| parse_deep_link(argument.as_ref()))
         {
             self.pending = Some(Arc::new(target));
+            self.action_owner = owner;
+        }
+    }
+
+    pub fn pending_for_owner(&self, owner: Option<u64>) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            (self.action_owner.is_none() || self.action_owner == owner)
+                && !self.local_return.as_ref().is_some_and(|attempt| {
+                    !attempt.in_flight && !attempt.succeeded && Arc::ptr_eq(&attempt.ticket.delivery, pending)
+                })
+        })
+    }
+
+    /// One attempt per received link, and at most one native return in flight.
+    /// A failed/stale task retains the link without minting another action.
+    pub fn claim_local_return(&mut self, generation: u64, owner: u64) -> Option<DeepLinkReturn> {
+        if !self.pending_for_owner(Some(owner)) {
+            return None;
+        }
+        let delivery = self.pending.as_ref()?;
+        if self
+            .local_return
+            .as_ref()
+            .is_some_and(|previous| previous.in_flight || Arc::ptr_eq(&previous.ticket.delivery, delivery))
+        {
+            return None;
+        }
+        let ticket = DeepLinkReturn {
+            delivery: delivery.clone(),
+            expected_generation: generation,
+            action_owner: owner,
+        };
+        self.local_return = Some(LocalReturn {
+            ticket: ticket.clone(),
+            in_flight: true,
+            succeeded: false,
+        });
+        Some(ticket)
+    }
+
+    pub fn finish_local_return(&mut self, ticket: &DeepLinkReturn, succeeded: bool) {
+        let Some(current) = self
+            .local_return
+            .as_mut()
+            .filter(|current| Arc::ptr_eq(&current.ticket.delivery, &ticket.delivery))
+        else {
+            return;
+        };
+        current.in_flight = false;
+        current.succeeded = succeeded;
+        if succeeded && self.action_owner == Some(ticket.action_owner) {
+            // A newer link received during this same accepted transition can
+            // share its local presentation, but never a newer explicit action.
+            self.action_owner = Some(ticket.expected_generation + 1);
         }
     }
 
@@ -115,12 +190,27 @@ impl DeepLinks {
     }
 
     pub fn bootstrap_navigation(&mut self, status: &BootstrapStatus) -> Option<DeepLinkNavigation> {
+        self.bootstrap_navigation_owned(status, None)
+    }
+
+    pub fn bootstrap_navigation_owned(
+        &mut self,
+        status: &BootstrapStatus,
+        owner: Option<u64>,
+    ) -> Option<DeepLinkNavigation> {
         self.observe_bootstrap(status);
         if status.phase != BootstrapPhase::Ready {
             return None;
         }
         let origin = LoopbackOrigin::parse(&status.origin).ok()?;
-        Some(self.prepare_navigation(&origin))
+        Some(if self.pending_for_owner(owner) {
+            self.prepare_navigation(&origin)
+        } else {
+            DeepLinkNavigation {
+                destination: origin.navigation_url(),
+                delivery: None,
+            }
+        })
     }
 
     pub fn workbench_navigation(&self, origin: &LoopbackOrigin, current_url: &Url) -> Option<DeepLinkNavigation> {

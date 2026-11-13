@@ -189,11 +189,17 @@ struct NativeSink {
 }
 
 impl NotificationSink for NativeSink {
+    fn presentation_generation(&self) -> u64 {
+        crate::instance_client::epoch(&self.app).unwrap_or(0)
+    }
+
     fn gate(&self) -> NotificationGate {
         let window = self.app.get_webview_window(MAIN_WINDOW);
         NotificationGate {
             enabled: self.enabled.load(Ordering::SeqCst)
-                && self.generation.load(Ordering::SeqCst) == self.observed_generation,
+                && self.generation.load(Ordering::SeqCst) == self.observed_generation
+                && crate::instance_client::local_selected(&self.app)
+                && crate::instance_client::foreground_local(&self.app),
             focused: window
                 .as_ref()
                 .is_some_and(|window| window.is_focused().unwrap_or(true)),
@@ -203,10 +209,10 @@ impl NotificationSink for NativeSink {
         }
     }
 
-    fn deliver(&self, intent: NotificationIntent, source: Option<String>) {
+    fn deliver(&self, intent: NotificationIntent, source: Option<String>, presentation_generation: u64) {
         let sink = self.clone();
         let _ = self.app.run_on_main_thread(move || {
-            if !sink.gate().allows() {
+            if sink.presentation_generation() != presentation_generation || !sink.gate().allows() {
                 return;
             }
             let copy = native_catalog_for_locales(sys_locale::get_locales())
@@ -226,12 +232,16 @@ impl NotificationSink for NativeSink {
         });
     }
 
-    fn show_unread(&self, total: u64) {
+    fn show_unread(&self, total: u64, presentation_generation: u64) {
         let sink = self.clone();
         let _ = self.app.run_on_main_thread(move || {
             // A total read for a connection that has since stopped or moved to
             // another Runtime describes nothing on screen.
-            if sink.generation.load(Ordering::SeqCst) == sink.observed_generation {
+            if sink.generation.load(Ordering::SeqCst) == sink.observed_generation
+                && sink.presentation_generation() == presentation_generation
+                && crate::instance_client::local_selected(&sink.app)
+                && crate::instance_client::foreground_local(&sink.app)
+            {
                 paint_badge(&sink.app, total);
             }
         });
@@ -257,11 +267,13 @@ fn paint_badge(app: &AppHandle, total: u64) {
 }
 
 pub fn start(app: &AppHandle, origin: LoopbackOrigin) {
-    if !crate::instance_client::local_selected(app) {
-        stop(app);
-        return;
-    }
     app.state::<Notifications>().start(app, origin);
+}
+
+/// Presentation changes retire queued output, not the local control transport.
+pub fn clear_badge(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || paint_badge(&handle, 0));
 }
 
 fn dispatch(window: &WebviewWindow, enabled: bool) {
@@ -333,8 +345,7 @@ pub fn desktop_notifications_set_enabled(window: WebviewWindow, app: AppHandle, 
 /// behind any paint already dispatched, which the generation bump voids.
 pub fn stop(app: &AppHandle) {
     app.state::<Notifications>().stop();
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || paint_badge(&handle, 0));
+    clear_badge(app);
 }
 
 #[cfg(test)]
