@@ -24,7 +24,8 @@ def desktop(monkeypatch, tmp_path):
     payload = {
         "schema_version": 1, "current": "3.2.6", "latest": "3.2.7", "has_update": True,
         "phase": "available", "channel": "stable", "checked_at": "2026-11-13T08:00:00Z",
-        "host_actions": ["check", "prereleases"],
+        "auto_update": False,
+        "host_actions": ["check", "prereleases", "auto_update"],
     }
     status = tmp_path / "update-status.json"
     status.write_text(json.dumps(payload))
@@ -38,7 +39,9 @@ def post(client, action="check", payload=None, **kwargs):
     )
 
 
-@pytest.mark.parametrize("action,payload", [("check", {}), ("prereleases", {"enabled": True})])
+@pytest.mark.parametrize("action,payload", [
+    ("check", {}), ("prereleases", {"enabled": True}), ("auto-update", {"enabled": False}),
+])
 @pytest.mark.parametrize("role,expected", [("owner", 409), ("member", 409), ("editor", 403), ("viewer", 403)])
 def test_controls_keep_the_existing_instance_manager_role(monkeypatch, tmp_path, action, payload, role, expected):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -63,7 +66,9 @@ def test_controls_keep_the_existing_instance_manager_role(monkeypatch, tmp_path,
     assert not (tmp_path / "desktop" / "desktop-update-control.json").exists()
 
 
-@pytest.mark.parametrize("action,payload", [("check", {}), ("prereleases", {"enabled": True})])
+@pytest.mark.parametrize("action,payload", [
+    ("check", {}), ("prereleases", {"enabled": True}), ("auto-update", {"enabled": False}),
+])
 def test_controls_require_csrf_and_same_origin(desktop, action, payload):
     root, _, _ = desktop
     client = app.test_client()
@@ -84,6 +89,8 @@ def test_controls_require_csrf_and_same_origin(desktop, action, payload):
     ("check", {"enabled": True}), ("check", []), ("prereleases", {}),
     ("prereleases", {"enabled": 1}), ("prereleases", {"enabled": "true"}),
     ("prereleases", {"enabled": False, "target": "3.2.7"}),
+    ("auto-update", {}), ("auto-update", {"enabled": 1}), ("auto-update", {"enabled": "true"}),
+    ("auto-update", {"enabled": False, "target": "3.2.7"}),
 ])
 def test_controls_reject_ambiguous_payloads(desktop, action, payload):
     root, _, _ = desktop
@@ -93,7 +100,9 @@ def test_controls_reject_ambiguous_payloads(desktop, action, payload):
     assert not (root / "desktop-update-control.json").exists()
 
 
-@pytest.mark.parametrize("action,enabled", [("check", None), ("prereleases", False), ("prereleases", True)])
+@pytest.mark.parametrize("action,enabled", [
+    ("check", None), ("prereleases", False), ("prereleases", True), ("auto-update", False), ("auto-update", True)
+])
 @pytest.mark.parametrize("phase,code,expected", [("checking", None, 200), ("completed", None, 200),
                                                ("failed", "check_failed", 409), ("expired", "expired", 409)])
 def test_control_http_delivery_and_receipt_relay(monkeypatch, desktop, action, enabled, phase, code, expected):
@@ -165,6 +174,29 @@ def test_standalone_channel_is_transactional_and_checks_the_updated_preference(m
     assert before == after
     assert post(client).status_code == 200
     assert observed == [True, True]  # each explicit check calls the owner afresh
+
+
+def test_standalone_auto_update_reuses_the_runtime_policy(monkeypatch, tmp_path):
+    monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path, paired=True)
+    config.update.auto_update = True
+    config.save()
+    monkeypatch.setattr(
+        api,
+        "get_latest_version_info",
+        lambda current, *, prereleases: {
+            "current": current, "latest": None, "has_update": False, "error": None,
+        },
+    )
+    client = app.test_client()
+
+    response = post(client, "auto-update", {"enabled": False})
+
+    assert response.status_code == 200
+    assert response.get_json()["snapshot"]["auto_update"] is False
+    assert response.get_json()["snapshot"]["host_actions"] == ["check", "prereleases", "auto_update", "install"]
+    assert V2Config.load().update.auto_update is False
 
 
 def test_standalone_check_failure_is_not_reported_as_success(monkeypatch):

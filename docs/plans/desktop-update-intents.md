@@ -30,8 +30,9 @@ none of these parity changes ships in 3.2.6.
 3. **Automatic-update parity**: expose one `auto_update` setting and one
    capability across hosts. Standalone reuses its real update policy; Desktop
    adds a native-owned preference, scheduling/idle gates and automatic install.
-   The default is one constant, with migration preserving existing Desktop
-   manual behavior until the owner decides the new-install default.
+   The default is one native constant: Desktop-managed hosts default off for new
+   and existing installs, while standalone Runtime keeps its existing default
+   and stored value.
 4. **Trusted updates view**: remote-selected Runtime footers present the same
    panel in `account/index.html?view=updates`; only trusted account IPC may invoke
    the four update actions and every install remains exact-target and generation
@@ -64,10 +65,9 @@ partial panel release or version-number compatibility branch is allowed.
   checker/config preference. Install remains `/api/desktop/update/request` or
   `/api/upgrade` as appropriate, always with the exact target where the host
   supports it.
-- The Desktop auto-update default is a single native constant. Existing Desktop
-  installs must not turn the legacy `remote-install.json` delivery hint into
-  automatic-install authority; migration and new-install behavior are separate
-  decisions pending owner confirmation.
+- The Desktop auto-update default is a single native constant, currently off for
+  both new and existing Desktop-managed installs. Standalone Runtime preserves
+  its existing `update.auto_update` default and stored values.
 
 ## Control intent transport and lifecycle
 
@@ -123,18 +123,22 @@ editor/viewer or bypasses origin/CSRF protection.
 - The committed check/channel slice passed its focused Python, updater/platform,
   Rust, Clippy, exact-head CI/review and controlled credential-free Incus HTTP
   acceptance; it remains held for the complete 3.2.7 train.
-- The current uncommitted explicit-click slice has passed 156 focused Python
-  tests, 37 native updater tests, 11 Runtime control/status tests and 12 signed
-  updater fixture tests. It removes the new-shell preference commands, keeps the
-  legacy file untouched for downgrade, binds the clicked target, retains the
+- The explicit-click commit has passed its focused Python and Rust updater
+  tests. It removes the new-shell preference commands, keeps the legacy file
+  untouched for downgrade, binds the clicked target, retains the
   generation/installer-edge checks, and derives delivery from actual `install`
   capability with a legacy fallback.
+- The native automatic-update slice now adds the off-by-default Desktop
+  preference, `auto_update` control/receipt and capability mapping, idle/busy
+  scheduling, one-check grace before install, preference-disable fencing at the
+  installer edge, standalone policy mapping, and focused default/control/API
+  coverage. Controlled native lifecycle acceptance remains a separate gate.
 - Disposable macOS/Windows CI and exact-head Codex review for this new slice are
   still gates, not claimed results. No signed application replacement has been
   exercised in this step; controlled disposable native acceptance remains a
   separate gate.
-- The native auto-update policy and trusted updates view are not yet implemented;
-  they remain required before the held panels can enter the frozen merge window.
+- The trusted updates view remains owned by the UI lane and is required before
+  the held panels can enter the frozen merge window.
 
 ## Validation and acceptance gates
 

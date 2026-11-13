@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-update-auto-update-set"
+description = "Enables the desktop_update_auto_update_set command without any pre-configured scope."
+commands.allow = ["desktop_update_auto_update_set"]
+
+[[permission]]
+identifier = "deny-desktop-update-auto-update-set"
+description = "Denies the desktop_update_auto_update_set command without any pre-configured scope."
+commands.deny = ["desktop_update_auto_update_set"]

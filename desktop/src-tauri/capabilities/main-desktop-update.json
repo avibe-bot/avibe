@@ -14,6 +14,7 @@
     "allow-desktop-update-install",
     "allow-desktop-update-skip",
     "allow-desktop-update-prereleases-set",
+    "allow-desktop-update-auto-update-set",
     "allow-desktop-update-remote-decline"
   ]
 }

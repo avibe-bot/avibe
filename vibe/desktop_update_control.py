@@ -57,7 +57,7 @@ def parse_control_request(payload: object) -> dict[str, Any] | None:
         return None
     fields = {"schema_version", "request_id", "action", "state", "created_at", "expires_at"}
     action = payload.get("action")
-    if action == "prereleases":
+    if action in {"prereleases", "auto_update"}:
         fields.add("enabled")
         if type(payload.get("enabled")) is not bool:
             return None
@@ -129,8 +129,8 @@ def create_or_reuse_control_request(
     status_path: Path | None = None,
     now: datetime | None = None,
 ) -> ControlDecision:
-    if action not in {"check", "prereleases"} or (
-        type(enabled) is not bool if action == "prereleases" else enabled is not None
+    if action not in {"check", "prereleases", "auto_update"} or (
+        type(enabled) is not bool if action in {"prereleases", "auto_update"} else enabled is not None
     ):
         raise DesktopUpdateRequestError("invalid_request")
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -162,7 +162,7 @@ def create_or_reuse_control_request(
             "schema_version": 1, "request_id": str(uuid4()), "action": action, "state": "pending",
             "created_at": timestamp(moment), "expires_at": timestamp(moment + CONTROL_REQUEST_TTL),
         }
-        if action == "prereleases":
+        if action in {"prereleases", "auto_update"}:
             request["enabled"] = enabled
         _write(request, target)
         return ControlDecision(request, reused=False, needs_nudge=True)

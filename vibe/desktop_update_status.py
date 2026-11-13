@@ -44,6 +44,7 @@ class DesktopUpdateStatus(TypedDict):
     checked_at: str | None
     latest: str | None
     has_update: bool
+    auto_update: bool | None
     remote_install_allowed: bool
     remote_request: "RemoteDesktopUpdateStatus | None"
     host_actions: list[str]
@@ -99,6 +100,9 @@ def parse_desktop_update_status(payload: object) -> DesktopUpdateStatus | None:
     latest = (latest or "").strip() or None
     if has_update and latest is None:
         return None
+    auto_update = payload.get("auto_update")
+    if auto_update is not None and type(auto_update) is not bool:
+        auto_update = None
     remote_install_allowed = payload.get("remote_install_allowed", False)
     if not isinstance(remote_install_allowed, bool):
         remote_install_allowed = False
@@ -123,6 +127,7 @@ def parse_desktop_update_status(payload: object) -> DesktopUpdateStatus | None:
         "checked_at": _parse_timestamp(payload.get("checked_at")),
         "latest": latest,
         "has_update": has_update,
+        "auto_update": auto_update,
         "remote_install_allowed": remote_install_allowed,
         "remote_request": _parse_remote_request(payload.get("remote_request")),
         "host_actions": _parse_host_actions(payload.get("host_actions")),
@@ -143,7 +148,7 @@ def _parse_timestamp(value: object) -> str | None:
 def _parse_host_actions(payload: object) -> list[str]:
     if not isinstance(payload, list):
         return []
-    return [action for action in ("check", "prereleases", "install") if action in payload]
+    return [action for action in ("check", "prereleases", "auto_update", "install") if action in payload]
 
 
 def _parse_control_receipt(payload: object) -> dict[str, Any] | None:
@@ -155,10 +160,10 @@ def _parse_control_receipt(payload: object) -> dict[str, Any] | None:
             return None
     except ValueError:
         return None
-    if action not in ("check", "prereleases") or phase not in ("checking", "completed", "failed", "expired"):
+    if action not in ("check", "prereleases", "auto_update") or phase not in ("checking", "completed", "failed", "expired"):
         return None
     enabled = payload.get("enabled")
-    if (type(enabled) is not bool if action == "prereleases" else enabled is not None):
+    if (type(enabled) is not bool if action in ("prereleases", "auto_update") else enabled is not None):
         return None
     dates = {key: _parse_timestamp(payload.get(key)) for key in ("created_at", "expires_at", "updated_at")}
     if any(value is None for value in dates.values()):
@@ -271,6 +276,7 @@ def desktop_update_snapshot(runtime_version: str, path: Path | None = None) -> d
         "desktop_version": status["desktop_version"] if status else None,
         "prereleases": status["prereleases"] if status else None,
         "checked_at": status["checked_at"] if status else None,
+        "auto_update": status["auto_update"] if status else None,
         "remote_install_allowed": status["remote_install_allowed"] if status else False,
         "remote_request": status["remote_request"] if status else None,
         "host_actions": status["host_actions"] if status else [],

@@ -2620,6 +2620,7 @@ pub fn run() {
             notifications::desktop_notifications_state,
             notifications::desktop_notifications_set_enabled,
             updater::desktop_update_prereleases_set,
+            updater::desktop_update_auto_update_set,
             updater::desktop_update_remote_decline,
             pet::pet_ready,
             pet::pet_context_menu,

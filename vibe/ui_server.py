@@ -7620,6 +7620,10 @@ async def _run_update_control(action: str, enabled: bool | None = None):
             from config.v2_config import update_config_fields
 
             await asyncio.to_thread(update_config_fields, lambda config: setattr(config.update, "prereleases", enabled))
+        elif action == "auto_update":
+            from config.v2_config import update_config_fields
+
+            await asyncio.to_thread(update_config_fields, lambda config: setattr(config.update, "auto_update", enabled))
         snapshot = await asyncio.to_thread(api.get_version_info)
         if snapshot.get("error"):
             return jsonify({"ok": False, "error": "update_check_failed", "snapshot": snapshot}), 502
@@ -7663,6 +7667,14 @@ async def update_prereleases():
     if not isinstance(payload, dict) or set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
         return jsonify({"ok": False, "error": "invalid_request"}), 422
     return await _run_update_control("prereleases", payload["enabled"])
+
+
+@app.route("/api/update/auto-update", methods=["POST"])
+async def update_auto_update():
+    payload = request.json
+    if not isinstance(payload, dict) or set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    return await _run_update_control("auto_update", payload["enabled"])
 
 
 @app.route("/api/desktop/update/request", methods=["POST"])

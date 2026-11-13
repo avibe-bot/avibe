@@ -7579,6 +7579,9 @@ def get_version_info() -> dict:
             "latest": str | None,
             "has_update": bool,
             "error": str | None,
+            "prereleases": bool | None,
+            "auto_update": bool | None,
+            "host_actions": list[str],
             "build": {"kind": "package" | "source", ...},
             "managed_by": "desktop" | None
         }
@@ -7602,6 +7605,17 @@ def get_version_info() -> dict:
     result["build"] = build.as_dict()
     if managed_by:
         result["managed_by"] = managed_by
+    else:
+        result["prereleases"] = prerelease_updates_enabled()
+        try:
+            auto_update = bool(V2Config.load().update.auto_update)
+        except FileNotFoundError:
+            # A first-run standalone process has the same default as UpdateConfig.
+            auto_update = True
+        result["auto_update"] = auto_update
+        result["host_actions"] = ["check", "prereleases", "auto_update"]
+        if build.kind == "package":
+            result["host_actions"].append("install")
     return result
 
 

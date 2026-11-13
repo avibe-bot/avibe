@@ -12,6 +12,8 @@ pub const CONTROL_CHECK_TIMEOUT_SECONDS: u64 = 90;
 pub enum ControlAction {
     Check,
     Prereleases,
+    #[serde(rename = "auto_update")]
+    AutoUpdate,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -75,7 +77,7 @@ impl ControlRequest {
             || !valid_lifetime(&request.created_at, &request.expires_at)
             || match request.action {
                 ControlAction::Check => value.get("enabled").is_some(),
-                ControlAction::Prereleases => request.enabled.is_none(),
+                ControlAction::Prereleases | ControlAction::AutoUpdate => request.enabled.is_none(),
             }
             || time(&request.created_at).is_none_or(|created| created > chrono::DateTime::<chrono::Utc>::from(now))
         {
@@ -149,7 +151,7 @@ impl ControlStatus {
         valid_id(&self.request_id)
             && valid_lifetime(&self.created_at, &self.expires_at)
             && time(&self.updated_at).is_some()
-            && self.enabled.is_some() == (self.action == ControlAction::Prereleases)
+            && self.enabled.is_some() == matches!(self.action, ControlAction::Prereleases | ControlAction::AutoUpdate)
             && self
                 .error_code
                 .as_ref()
@@ -199,10 +201,11 @@ mod tests {
 
     #[test]
     fn check_and_channel_commands_are_not_legacy_installs() {
-        for enabled in [None, Some(false), Some(true)] {
+        for action in ["check", "prereleases", "auto_update"] {
+            let enabled = (action != "check").then_some(true);
             let mut value = request();
+            value["action"] = action.into();
             if let Some(enabled) = enabled {
-                value["action"] = "prereleases".into();
                 value["enabled"] = enabled.into();
             }
             let raw = serde_json::to_vec(&value).unwrap();
@@ -278,6 +281,7 @@ mod tests {
             Channel::Test,
             now(),
         )
+        .with_auto_update(Some(true))
         .with_control(Some(ControlStatus::new(&request, ControlPhase::Checking, None, now())));
         assert_eq!(serde_json::to_value(&status).unwrap(), fixture["status"]);
         for field in [

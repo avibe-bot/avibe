@@ -24,7 +24,7 @@ def request(action="check", **changes):
         "schema_version": 1, "request_id": str(uuid4()), "action": action, "state": "pending",
         "created_at": control.timestamp(NOW), "expires_at": control.timestamp(NOW + control.CONTROL_REQUEST_TTL),
     }
-    if action == "prereleases":
+    if action in {"prereleases", "auto_update"}:
         value["enabled"] = True
     return {**value, **changes}
 
@@ -59,11 +59,11 @@ def test_rust_control_fixture_is_readable_without_changing_the_legacy_offer():
     assert control.parse_control_request(fixture["request"]) == fixture["request"]
     parsed = parse_desktop_update_status(fixture["status"])
     assert parsed["control_request"] == fixture["status"]["control_request"]
-    assert parsed["host_actions"] == ["check", "prereleases", "install"]
+    assert parsed["host_actions"] == ["check", "prereleases", "auto_update", "install"]
     assert parsed["has_update"] and parsed["latest"] == "3.2.7"
 
 
-@pytest.mark.parametrize("action", ["check", "prereleases"])
+@pytest.mark.parametrize("action", ["check", "prereleases", "auto_update"])
 def test_controls_can_never_parse_as_legacy_installs(action):
     value = request(action)
     assert control.parse_control_request(value) == value
@@ -80,9 +80,10 @@ def test_invalid_control_requests_fail_closed(changes):
     assert control.parse_control_request(request(**changes)) is None
 
 
-@pytest.mark.parametrize("enabled", [None, 0, 1, "true", [], {}])
-def test_channel_requires_an_actual_boolean(enabled):
-    assert control.parse_control_request(request("prereleases", enabled=enabled)) is None
+@pytest.mark.parametrize("action", ["prereleases", "auto_update"])
+def test_channel_requires_an_actual_boolean(action):
+    for enabled in [None, 0, 1, "true", [], {}]:
+        assert control.parse_control_request(request(action, enabled=enabled)) is None
 
 
 def test_oversized_or_invalid_control_file_is_ignored(tmp_path):
@@ -175,7 +176,9 @@ def test_a_terminal_install_receipt_does_not_block_controls(tmp_path):
 
 @pytest.mark.parametrize("capabilities, expected", [
     (None, []), ("check", []), ({"check": True}, []),
-    (["check", "check", "future", None, {}], ["check"]), (["prereleases", "check"], ["check", "prereleases"]),
+    (["check", "check", "future", None, {}], ["check"]),
+    (["prereleases", "check"], ["check", "prereleases"]),
+    (["install", "auto_update", "check"], ["check", "auto_update", "install"]),
 ])
 def test_capabilities_degrade_without_erasing_the_offer(tmp_path, capabilities, expected):
     _, status = paths(tmp_path)

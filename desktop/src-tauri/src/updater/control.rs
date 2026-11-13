@@ -35,8 +35,12 @@ fn claim(state: &mut State, busy: &AtomicBool, request: &ControlRequest, now: Sy
 
 fn write_status(app: &AppHandle, state: &State) -> bool {
     let updater = app.state::<Updater>();
-    let record = base_status(app, state)
+    let Some(record) = base_status(app, state) else {
+        return false;
+    };
+    let record = record
         .with_remote(true, state.remote_request.clone())
+        .with_auto_update(Some(state.auto_update))
         .with_control(state.control_request.clone());
     if let Err(error) = updater.status.write(&record) {
         eprintln!("desktop update control status: {error}");
@@ -134,6 +138,25 @@ async fn run(app: AppHandle, path: PathBuf, request: ControlRequest) {
         finish(&app, &request, ControlPhase::Expired, Some(code));
         return;
     }
+    if request.action == ControlAction::AutoUpdate {
+        let enabled = request.enabled.expect("validated automatic-update intent");
+        let updater = app.state::<Updater>();
+        let saved = {
+            let mut state = updater.state.lock().expect("updater state");
+            persist_auto_update_preference(&updater.auto_update_path, enabled).map(|()| {
+                state.auto_update = enabled;
+            })
+        };
+        if let Err(error) = saved {
+            eprintln!("desktop auto-update control: {error}");
+            set_state(&app, Phase::Error, None);
+            finish(&app, &request, ControlPhase::Failed, Some("auto_update_save_failed"));
+            return;
+        }
+        emit_state(&app);
+        finish(&app, &request, ControlPhase::Completed, None);
+        return;
+    }
     if request.action == ControlAction::Prereleases {
         let channel = Channel::of(request.enabled.expect("validated channel intent"));
         let updater = app.state::<Updater>();
@@ -214,6 +237,7 @@ mod tests {
             channel: Channel::Stable,
             manifest: None,
             availability_interactive: false,
+            auto_update: false,
             remote_request: None,
             active_request: None,
             control_request: None,

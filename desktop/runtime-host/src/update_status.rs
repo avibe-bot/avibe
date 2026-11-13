@@ -121,7 +121,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(["check", "prereleases", "install"]
+    Ok(["check", "prereleases", "auto_update", "install"]
         .into_iter()
         .filter(|action| {
             value
@@ -144,6 +144,10 @@ pub struct UpdateStatusRecord {
     pub has_update: bool,
     /// RFC 3339 UTC.
     pub checked_at: String,
+    /// Whether this host will install discovered updates automatically; absent
+    /// on older records and on hosts that do not expose the policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
     /// Legacy delivery hint. New shells set this true when their direct
     /// explicit-request path exists; it is not a stored permission and never
     /// means automatic updates.
@@ -191,11 +195,25 @@ impl UpdateStatusRecord {
             channel,
             has_update: phase == UpdateStatusPhase::Available,
             checked_at: rfc3339(checked_at),
+            auto_update: None,
             remote_install_allowed: false,
             remote_request: None,
             host_actions: Vec::new(),
             control_request: None,
         }
+    }
+
+    pub fn with_auto_update(mut self, enabled: Option<bool>) -> Self {
+        self.auto_update = enabled;
+        if enabled.is_some() {
+            self.host_actions = vec![
+                "check".into(),
+                "prereleases".into(),
+                "auto_update".into(),
+                "install".into(),
+            ];
+        }
+        self
     }
 
     pub fn with_remote(mut self, remote_install_allowed: bool, remote_request: Option<RemoteRequestStatus>) -> Self {
@@ -207,7 +225,16 @@ impl UpdateStatusRecord {
     pub fn with_control(mut self, control_request: Option<ControlStatus>) -> Self {
         // Installation is an exact-target explicit request, not a persistent
         // remote-install permission. Older readers use the legacy bool hint.
-        self.host_actions = vec!["check".into(), "prereleases".into(), "install".into()];
+        self.host_actions = if self.auto_update.is_some() {
+            vec![
+                "check".into(),
+                "prereleases".into(),
+                "auto_update".into(),
+                "install".into(),
+            ]
+        } else {
+            vec!["check".into(), "prereleases".into(), "install".into()]
+        };
         self.remote_install_allowed = true;
         self.control_request = control_request;
         self
