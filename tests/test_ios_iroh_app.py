@@ -4,7 +4,10 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import zipfile
 
 
@@ -200,7 +203,60 @@ def test_archive_expansion_bound_is_checked_before_decompression(monkeypatch):
         raise AssertionError("oversized archive member was accepted")
 
 
-def test_xcode_module_boundary_keeps_iroh_out_of_the_notification_extension():
+
+def test_product_verifier_phase_propagates_pending_pin_failure(tmp_path):
+    checkout = tmp_path / "checkout"
+    scripts = checkout / "ios/scripts"
+    checker = checkout / "packaging/iroh-apple/check-private-apple-datapath.sh"
+    scripts.mkdir(parents=True)
+    checker.parent.mkdir(parents=True)
+    shutil.copyfile(SCRIPT, scripts / "prepare_iroh_app.py")
+    product_script = scripts / "verify_iroh_app_product.sh"
+    shutil.copyfile(SCRIPT.parent / "verify_iroh_app_product.sh", product_script)
+    product_script.chmod(0o755)
+
+    shutil.copyfile(
+        SCRIPT.parents[2] / "packaging/iroh-apple/check-private-apple-datapath.sh",
+        checker,
+    )
+    checker.chmod(0o755)
+    (checkout / "packaging/iroh-apple/release.json").write_text(json.dumps({
+        "schema_version": 1,
+        "release_state": "pending",
+    }))
+    result = subprocess.run(
+        [
+            str(scripts / "verify_iroh_app_product.sh"),
+            str(tmp_path / "staging"),
+            str(tmp_path / "Avibe"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "not published" in result.stderr
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python3"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    result = subprocess.run(
+        [
+            str(product_script),
+            str(tmp_path / "staging"),
+            str(tmp_path / "Avibe"),
+            str(tmp_path / "missing-debug.dylib"),
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Debug dylib does not exist" in result.stderr
+
     project = (Path(__file__).parents[1] / "ios/Avibe.xcodeproj/project.pbxproj").read_text()
     assert "name = IrohLib;" in project
     assert "PRODUCT_MODULE_NAME = IrohLib;" in project
@@ -213,7 +269,25 @@ def test_xcode_module_boundary_keeps_iroh_out_of_the_notification_extension():
     assert "$(SRCROOT)/../packaging/iroh-apple/release.json" in project
     assert "$(SRCROOT)/../packaging/iroh-apple/check-private-apple-datapath.sh" in project
     assert "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)" in project
-    assert "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib" in project
+    debug_config = project.split("C00000000000000000000003 /* Debug */ = {", 1)[1].split(
+        "C00000000000000000000004 /* Release */ = {", 1
+    )[0]
+    release_config = project.split("C00000000000000000000004 /* Release */ = {", 1)[1].split(
+        "C00000000000000000000005 /* Debug */ = {", 1
+    )[0]
+    assert 'ENABLE_DEBUG_DYLIB = YES;' in debug_config
+    assert 'IROH_DEBUG_DYLIB_INPUT = "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib";' in debug_config
+    assert 'IROH_DEBUG_DYLIB_PATH = "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib";' in debug_config
+    assert "ENABLE_DEBUG_DYLIB = NO;" in release_config
+    assert "IROH_DEBUG_DYLIB_INPUT = /dev/null;" in release_config
+    assert 'IROH_DEBUG_DYLIB_PATH = "";' in release_config
+    final_phase = project.split("D00000000000000000000003 /* Verify linked Iroh artifact */ = {", 1)[1].split(
+        "/* Begin PBXSourcesBuildPhase section */", 1
+    )[0]
+    assert "verify_iroh_app_product.sh" in final_phase
+    assert "IROH_DEBUG_DYLIB_INPUT" in final_phase
+    assert "IROH_DEBUG_DYLIB_PATH" in final_phase
+
     notification = project.split("500000000000000000000003 /* NotificationService */ = {", 1)[1].split(
         "500000000000000000000004 /* IrohLib */ = {", 1
     )[0]

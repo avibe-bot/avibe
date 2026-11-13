@@ -540,6 +540,7 @@
 			inputPaths = (
 				"$(SRCROOT)/../packaging/iroh-apple/release.json",
 				"$(SRCROOT)/scripts/prepare_iroh_app.py",
+				"$(SRCROOT)/scripts/verify_iroh_app_product.sh",
 				"$(SRCROOT)/Avibe/IrohLib/IrohLib.xcframework.zip",
 				"$(SRCROOT)/Avibe/IrohLib/IrohLib-support.zip",
 				"$(SRCROOT)/Avibe/IrohLib/IrohLib.swift",
@@ -580,6 +581,7 @@
 				"$(SRCROOT)/../packaging/iroh-apple/release.json",
 				"$(SRCROOT)/../packaging/iroh-apple/check-private-apple-datapath.sh",
 				"$(SRCROOT)/scripts/prepare_iroh_app.py",
+				"$(SRCROOT)/scripts/verify_iroh_app_product.sh",
 				"$(SRCROOT)/Avibe/IrohLib/IrohLib.xcframework.zip",
 				"$(SRCROOT)/Avibe/IrohLib/IrohLib-support.zip",
 				"$(SRCROOT)/Avibe/IrohLib/IrohLib.swift",
@@ -598,7 +600,7 @@
 				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/iroh_ffiFFI.h",
 				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap",
 				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
-				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib",
+				"$(IROH_DEBUG_DYLIB_INPUT)",
 			);
 			name = "Verify linked Iroh artifact";
 			outputFileListPaths = (
@@ -607,7 +609,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "python3 \"$SRCROOT/scripts/prepare_iroh_app.py\" verify-product --staging \"$SRCROOT/Avibe/IrohLib\" --product \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\"\nDEBUG_DYLIB=\"$TARGET_BUILD_DIR/$WRAPPER_NAME/$EXECUTABLE_NAME.debug.dylib\"\nif [ -f \"$DEBUG_DYLIB\" ]; then\n  bash \"$SRCROOT/../packaging/iroh-apple/check-private-apple-datapath.sh\" \"$DEBUG_DYLIB\"\nfi\n";
+			shellScript = "\"$SRCROOT/scripts/verify_iroh_app_product.sh\" \"$SRCROOT/Avibe/IrohLib\" \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\" \"$IROH_DEBUG_DYLIB_PATH\"\n";
 			showEnvVarsInLog = 0;
 		};
 
@@ -832,6 +834,9 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_DEBUG_DYLIB = YES;
+				IROH_DEBUG_DYLIB_INPUT = "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib";
+				IROH_DEBUG_DYLIB_PATH = "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Avibe/Resources/Info.plist;
@@ -861,6 +866,9 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_DEBUG_DYLIB = NO;
+				IROH_DEBUG_DYLIB_INPUT = /dev/null;
+				IROH_DEBUG_DYLIB_PATH = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Avibe/Resources/Info.plist;
