@@ -393,18 +393,21 @@ final class AppModel: ObservableObject {
     }
 
     /// Before the shell reloads `runtime` (Retry). With a transport, waits,
-    /// within the listener bound, while the listener is being bound or bound
-    /// again after the background, as the runtime's first load does. Returns
-    /// whether to reload: not when the listener fault covers the runtime,
-    /// whose reopen message stays. Without a transport, `true` at once.
+    /// within the bound, while the listener is being bound or bound again
+    /// after the background, as the runtime's first load does. Returns
+    /// whether to reload: only when the host is on WebKit's normal path or
+    /// its route points at a serving listener. Not under the listener
+    /// fault, whose reopen message stays, and not while a routed listener
+    /// still does not serve (the load-failure view stays; a later Retry
+    /// tries again). Without a transport, `true` at once.
     func prepareReload(of runtime: MobileRuntimeContext) async -> Bool {
         guard let directPathController else {
             return true
         }
-        await directPathController.prepareRoute(for: runtime) { [weak self] in
+        let disposition = await directPathController.prepareReload(of: runtime) { [weak self] in
             self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
         }
-        return !directFaultCovers(runtime)
+        return disposition == .reload
     }
 
     /// Sends the current `direct` state to the runtime's documents.

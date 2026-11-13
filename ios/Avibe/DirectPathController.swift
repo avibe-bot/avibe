@@ -507,6 +507,37 @@ final class DirectPathController {
         }
     }
 
+    /// What a shell-owned reload of `runtime` (Retry) should do, after
+    /// waiting, within the bound, for a listener being bound or bound again.
+    enum ReloadDisposition: Equatable {
+        /// Reload: the host is on WebKit's normal path, or its route points
+        /// at a listener that serves.
+        case reload
+        /// Do not rebuild: the host is routed and the listener does not
+        /// serve (the bound ran out, or the App left the foreground). The
+        /// load-failure view stays; a later Retry tries again.
+        case notReady
+        /// Do not rebuild: the listener fault covers the runtime.
+        case fault
+    }
+
+    func prepareReload(
+        of runtime: MobileRuntimeContext,
+        stillWanted: @escaping () -> Bool
+    ) async -> ReloadDisposition {
+        await prepareRoute(for: runtime, stillWanted: stillWanted)
+        if faultCovers(runtime) {
+            return .fault
+        }
+        guard
+            let authority = DirectAuthority(instanceURL: runtime.instance.url),
+            routeOwner.routes(authority.host, store: websiteDataStore.identifier)
+        else {
+            return .reload
+        }
+        return listenerState == .ready && !isInBackground ? .reload : .notReady
+    }
+
     /// A runtime opened, after its route was prepared.
     func runtimeDidOpen(_ runtime: MobileRuntimeContext) {
         self.runtime = runtime
@@ -870,7 +901,10 @@ final class DirectPathController {
     /// Waits, at most the listener bound, while the listener is being bound
     /// or bound again. Starts nothing.
     private func waitWhileListenerRecovers() async {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(timing.listenerWaitSeconds))
+        // A re-bind has its own bound; this wait covers it, plus the
+        // listener wait.
+        let seconds = timing.rebindSeconds + timing.listenerWaitSeconds
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
         while listenerState == .binding || listenerState == .rebinding,
               ContinuousClock.now < deadline
         {
@@ -1051,13 +1085,18 @@ final class DirectPathController {
         // would no longer be there to count.
         deselect(stoppingTransport: false)
         advanceGeneration()
-        // Serving, or being bound again by a return: out of service now,
-        // before the close runs. (A first bind still under way parks itself
-        // when it completes.)
-        if let listener, listenerState == .ready || listenerState == .rebinding {
-            listener.lifecycle.beginClose()
-            Task {
-                await listener.closeListeningSocket()
+        // Out of service now, before any close runs. A serving listener is
+        // closed here. A return's re-bind still running is closed by its own
+        // completion, which parks it or, if its bind already failed,
+        // settles that; a first bind still under way parks itself too.
+        if let listener {
+            if rebinds.inFlight {
+                listener.lifecycle.beginClose()
+            } else if listenerState == .ready {
+                listener.lifecycle.beginClose()
+                Task {
+                    await listener.closeListeningSocket()
+                }
             }
         }
         closeRelays(.direct, countsAsClosure: true) { [weak self] in
@@ -1150,6 +1189,29 @@ final class DirectPathController {
         // longer be confirmed or rejected.
         guard self.listener === listener, rebinds.end(attempt) else {
             return
+        }
+        // A bind that already failed (its lifecycle recorded it) is settled
+        // here, foreground or background: a failure after a route is the
+        // fault, delivered once; before one, the listener goes. Only a bind
+        // that can still be used is parked.
+        switch listener.lifecycle.phase {
+        case .failed:
+            Task {
+                await listener.closeListeningSocket()
+            }
+            enterFault("the port could not be re-bound and checked")
+            if !isInBackground {
+                finishResume()
+            }
+            return
+        case .rejected:
+            retireAndStop()
+            if !isInBackground {
+                finishResume()
+            }
+            return
+        default:
+            break
         }
         if isInBackground {
             // Back in the background meanwhile: parked; the next return

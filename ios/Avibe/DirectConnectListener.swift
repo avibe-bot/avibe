@@ -806,7 +806,14 @@ actor DirectConnectListener {
         generation: Int,
         race: DirectRaceHandle
     ) -> PlanAdmission {
-        guard !isStopped, relays[id] != nil, !scope.isOlder(than: retiredScope) else {
+        // The bind that admitted the relay must still serve: once the
+        // listener left serving, no plan is made for work admitted before.
+        guard
+            !isStopped,
+            let relay = relays[id],
+            lifecycle.serves(relay.generation),
+            !scope.isOlder(than: retiredScope)
+        else {
             return .refused
         }
         relays[id]?.plan = (scope, generation, race)
@@ -821,7 +828,15 @@ actor DirectConnectListener {
         backend: DirectRelayBackend,
         generation: Int
     ) -> Bool {
-        guard !isStopped, relays[id] != nil else {
+        // Ordered against a failure or close under the lifecycle's lock: a
+        // relay commits only while the bind that admitted it serves. One
+        // that commits first is a relay of before the transition, and is
+        // kept; after it, the candidate is refused and closed.
+        guard
+            !isStopped,
+            let relay = relays[id],
+            lifecycle.serves(relay.generation)
+        else {
             return false
         }
         relays[id]?.committed = (host, backend, generation)
@@ -2012,6 +2027,13 @@ final class DirectListenerLifecycle: @unchecked Sendable {
 
     func stop() {
         lock.withLock { current = .stopped }
+    }
+
+    /// Whether bind `g` serves now. Planning and the commit point of work
+    /// that bind admitted ask this, under the same lock as every failure and
+    /// close.
+    func serves(_ g: Int) -> Bool {
+        lock.withLock { current == .serving(generation: g) }
     }
 
     /// The only admission decision, made once per connection by the

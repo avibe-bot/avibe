@@ -626,6 +626,72 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNotEqual(harness.controller.listenerState, .rebinding)
     }
 
+    /// A routed re-bind's bind fails, and the App goes back to the
+    /// background before that attempt's completion runs: the fault is still
+    /// delivered, once, and the next return does not try to bind again.
+    @MainActor
+    func testAReBindThatFailedIsTheFaultEvenWhenItsCompletionArrivesInTheBackground() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let port = try harness.listenerPort(since: listening)
+        let selections = harness.transport.selections.count
+
+        harness.enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port.rawValue,
+            reuseAddress: true
+        )
+        defer { squatter.close() }
+        // Return, then leave again in the same turn: the re-bind's
+        // completion can only run afterwards, in the background.
+        harness.enterForeground()
+        harness.enterBackground()
+
+        try await eventually { harness.faults == 1 }
+        XCTAssertTrue(harness.controller.isFaulted)
+        harness.enterForeground()
+        let answer = harness.requestStatus("instance-1")
+        XCTAssertEqual(answer.values, [nil])
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertEqual(harness.transport.selections.count, selections)
+    }
+
+    /// Retry on a routed instance while the listener is bound again: the
+    /// App leaves the foreground before the re-bind settles, so the reload
+    /// is not allowed; once the listener serves again, it is.
+    @MainActor
+    func testRetryOnARoutedInstanceReloadsOnlyOnceTheListenerServes() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let controller = harness.controller
+
+        harness.enterBackground()
+        harness.enterForeground()
+        let reloading = Task { @MainActor in
+            await controller.prepareReload(of: runtime) { true }
+        }
+        harness.enterBackground()
+        let disposition = await reloading.value
+        XCTAssertEqual(disposition, .notReady)
+
+        harness.enterForeground()
+        let again = await controller.prepareReload(of: runtime) { true }
+        if controller.isFaulted {
+            XCTAssertEqual(again, .fault)
+        } else {
+            XCTAssertEqual(again, .reload)
+            XCTAssertEqual(controller.listenerState, .ready)
+        }
+    }
+
     /// Only the current re-bind attempt's completion settles the return: an
     /// older attempt completing after a newer one began, or after the return
     /// was settled by a failure, changes nothing.

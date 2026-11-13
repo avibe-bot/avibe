@@ -1351,6 +1351,56 @@ final class DirectConnectListenerTests: XCTestCase {
         }
     }
 
+    /// A candidate admitted while serving reaches its commit point after the
+    /// socket's failure was recorded (before the actor has heard of it):
+    /// the commit is refused, no `200` is sent, and the stream is closed. A
+    /// relay that committed before the failure stays usable.
+    func testACandidateThatReachesItsCommitPointAfterAFailureIsRefused() async throws {
+        let fixture = try await makeListener()
+        let controlClient = LoopbackClient(port: fixture.port)
+        let control = try await establish(controlClient, fixture)
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let candidate = try await fixture.direct.waitForStream(count: 2)
+
+        // What Network's queue records; the actor has not heard of it.
+        let lifecycle = await fixture.listener.lifecycle
+        XCTAssertEqual(lifecycle.socketFailed(1), .fallback)
+        candidate.instanceSends(Data(established.utf8))
+
+        let answer = try await client.receiveUntilClosed()
+        XCTAssertEqual(answer, Data())
+        try await eventually { candidate.isCancelled }
+        XCTAssertFalse(control.isCancelled)
+        try await controlClient.send("ping")
+        try await eventually {
+            String(decoding: control.written, as: UTF8.self).hasSuffix("ping")
+        }
+        controlClient.close()
+    }
+
+    /// A connection admitted while serving finishes its request head after
+    /// the failure was recorded: no plan is admitted for it, and nothing is
+    /// dialled.
+    func testWorkAdmittedBeforeAFailureIsNotPlannedAfterIt() async throws {
+        let fixture = try await makeListener()
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send("CONNECT instance.example:443 HTTP/1.1\r\n")
+        try await Task.sleep(for: .milliseconds(100))
+
+        let lifecycle = await fixture.listener.lifecycle
+        XCTAssertEqual(lifecycle.socketFailed(1), .fallback)
+        try await client.send("Host: instance.example:443\r\n\r\n")
+
+        let answer = try await client.receiveUntilClosed()
+        XCTAssertTrue(
+            answer.isEmpty || String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 503 "),
+            String(decoding: answer, as: UTF8.self)
+        )
+        XCTAssertEqual(fixture.direct.attempts, 0)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+    }
+
     func testABindOnAPortSomeoneElseHoldsFails() async throws {
         let control = try ControlListener(family: AF_INET, address: "127.0.0.1")
         defer { control.close() }
