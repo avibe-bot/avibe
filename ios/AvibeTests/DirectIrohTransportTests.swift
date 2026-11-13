@@ -710,25 +710,155 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(harness.scheduler.pending.filter { $0 == 300 }, [])
     }
 
-    func testADialThatEndsAfterItsLeaseRanOutIsClosedNotUsed() async throws {
-        let harness = Harness()
-        let endpoint = harness.engine.prepare()
-        harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
-        harness.select()
-        try await eventually("the instance is dialled") { endpoint.dials.count == 1 }
+    func testNoStageOfADialStartsAfterItsLeaseRanOut() async throws {
+        // In each case the clock passes the deadline while one stage is in
+        // the binding, and the lease's timer does not fire. The stage ends
+        // well, and the next one must not start.
 
-        // The clock passes the deadline with the dial still under way and
-        // the lease's timer not fired. Then the dial succeeds.
-        harness.clock.now += 300
-        endpoint.connection.resolve(
-            harness.makeConnection(answers: [DirectIrohFakeConnection.established])
-        )
-        try await eventually("the late path is closed") {
-            harness.log.count(of: "connection.close") == 1
-                && harness.log.count(of: "endpoint.close") == 1
+        // The bind ends late: no connect.
+        do {
+            let harness = Harness()
+            let gate = harness.engine.holdBinds()
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await eventually("the bind reaches the binding") { harness.log.count(of: "bind") == 1 }
+
+            harness.clock.now += 300
+            gate.resolve(())
+            try await eventually("the endpoint is closed") {
+                harness.log.count(of: "endpoint.close") == 1 && harness.scheduler.pending == [0.25]
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(harness.log.count(of: "connect"), 0)
+            XCTAssertEqual(harness.log.count(of: "open"), 0)
+            XCTAssertEqual(harness.reports, [])
         }
-        XCTAssertEqual(harness.reports, [])
-        XCTAssertEqual(harness.scheduler.pending, [0.25])
+        // The connect ends late: no probe is opened.
+        do {
+            let harness = Harness()
+            let endpoint = harness.engine.prepare()
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await eventually("the instance is dialled") { endpoint.dials.count == 1 }
+
+            harness.clock.now += 300
+            endpoint.connection.resolve(
+                harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+            )
+            try await eventually("the late path is closed") {
+                harness.log.count(of: "connection.close") == 1
+                    && harness.log.count(of: "endpoint.close") == 1
+                    && harness.scheduler.pending == [0.25]
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(harness.log.count(of: "open"), 0)
+            XCTAssertEqual(harness.log.count(of: "write"), 0)
+            XCTAssertEqual(harness.reports, [])
+        }
+        // The probe's stream opens late: no CONNECT is written on it.
+        do {
+            let harness = Harness()
+            let endpoint = harness.engine.prepare()
+            let connection = harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+            let gate = connection.holdNextOpen()
+            endpoint.connection.resolve(connection)
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await eventually("the probe's open reaches the binding") {
+                harness.log.count(of: "open") == 1
+            }
+
+            harness.clock.now += 300
+            gate.resolve(())
+            try await eventually("the late stream and the path are closed") {
+                harness.log.count(of: "reset") == 1
+                    && harness.log.count(of: "connection.close") == 1
+                    && harness.log.count(of: "endpoint.close") == 1
+                    && harness.scheduler.pending == [0.25]
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(harness.log.count(of: "write"), 0)
+            XCTAssertEqual(harness.log.count(of: "read"), 0)
+            XCTAssertEqual(harness.reports, [])
+        }
+    }
+
+    func testNoStageOfADialStartsAfterItWasWithdrawn() async throws {
+        // The instance withdraws its endpoint while the bind is in the
+        // binding. The bind ends well afterwards: nothing follows it.
+        do {
+            let harness = Harness()
+            let gate = harness.engine.holdBinds()
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await eventually("the bind reaches the binding") { harness.log.count(of: "bind") == 1 }
+
+            harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 90))
+            XCTAssertTrue(harness.scheduler.fire(240))
+            try await eventually("the instance's wait is kept") { harness.scheduler.pending == [90] }
+            gate.resolve(())
+            try await eventually("the late endpoint is closed") {
+                harness.log.count(of: "endpoint.close") == 1
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(harness.log.count(of: "connect"), 0)
+            XCTAssertEqual(harness.reports, [])
+            XCTAssertEqual(harness.scheduler.pending, [90])
+        }
+        // The selection ends while the bind is in the binding.
+        do {
+            let harness = Harness()
+            let gate = harness.engine.holdBinds()
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await eventually("the bind reaches the binding") { harness.log.count(of: "bind") == 1 }
+
+            harness.transport.deselect()
+            gate.resolve(())
+            try await eventually("the late endpoint is closed") {
+                harness.log.count(of: "endpoint.close") == 1
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(harness.log.count(of: "connect"), 0)
+            XCTAssertEqual(harness.scheduler.pending, [])
+        }
+    }
+
+    func testAProbeAndAnOpenThatWereDueStartNothingOnceTheLeaseRanOut() async throws {
+        // A probe that was set going, and has not reached the binding when
+        // the clock passes the deadline.
+        do {
+            let harness = Harness()
+            let connection = try await harness.bringUp(generation: "boot:1")
+            harness.network.change()
+            // The timer starts the probe's task; the clock moves before
+            // that task runs.
+            XCTAssertTrue(harness.scheduler.fire(0.5))
+            harness.clock.now += 300
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(connection.streams.count, 1)
+            XCTAssertEqual(harness.log.count(of: "open"), 1)
+            XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+            XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        }
+        // A stream that was admitted on the main actor, and whose open has
+        // not reached the binding when the clock passes the deadline: the
+        // admission reads the clock once, and the clock moves right after.
+        do {
+            let harness = Harness()
+            let connection = try await harness.bringUp(generation: "boot:1")
+            let relay = try await harness.transport.openStream(for: harness.tag("boot:1"))
+            XCTAssertEqual(connection.streams.count, 2)
+
+            harness.clock.advance(by: 300, afterReads: 1)
+            await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1")) }
+            XCTAssertEqual(harness.clock.now, 1_300)
+            XCTAssertEqual(connection.streams.count, 2)
+            XCTAssertEqual(harness.log.count(of: "open"), 2)
+            // The relay that was already there is untouched.
+            try await relay.write(Data("x".utf8))
+            XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        }
     }
 
     func testAProbeThatEndsAfterTheLeaseRanOutReportsNothing() async throws {
@@ -757,6 +887,9 @@ final class DirectIrohTransportTests: XCTestCase {
         gate.resolve(())
         try await eventually("the probe has ended") { harness.log.count(of: "reset") == 2 }
         try await Task.sleep(nanoseconds: 100_000_000)
+        // Its stream opened late, so no CONNECT was written on it: the
+        // only one is the dial's.
+        XCTAssertEqual(harness.log.count(of: "write"), 1)
         XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
         await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 9)) }
         XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
@@ -853,6 +986,9 @@ final class DirectIrohTransportTests: XCTestCase {
         }
         XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
         XCTAssertEqual(harness.log.count(of: "bind"), 2)
+        // The first dial never borrowed the second answer: it opened no
+        // probe of its own. The one open is the second dial's.
+        XCTAssertEqual(harness.log.count(of: "open"), 1)
         XCTAssertEqual(harness.scheduler.pending.sorted(), [30, 240, 300])
         _ = try await harness.transport.openStream(for: harness.tag("boot:1"))
     }
@@ -1230,7 +1366,7 @@ final class DirectIrohTransportTests: XCTestCase {
                 timing: timing,
                 notificationCenter: notifications,
                 isInBackground: isInBackground,
-                uptime: { clock.now }
+                uptime: { clock.read() }
             )
         }
 

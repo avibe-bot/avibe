@@ -327,6 +327,7 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
     private var prepared: [DirectIrohFakeEndpoint] = []
     private var storedBound: [DirectIrohFakeEndpoint] = []
     private var storedSecrets: [Data] = []
+    private var storedBindGate: DirectIrohPending<Void>?
 
     init(log: DirectIrohEventLog) {
         self.log = log
@@ -355,8 +356,21 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
         return key
     }
 
+    /// Makes the next binds wait, as a bind that has not completed.
+    func holdBinds() -> DirectIrohPending<Void> {
+        let gate = DirectIrohPending<Void>()
+        lock.withLock {
+            storedBindGate = gate
+        }
+        return gate
+    }
+
     func bind(secretKey: Data) async throws -> any DirectIrohEndpoint {
         log.add("bind")
+        let gate = lock.withLock { storedBindGate }
+        if let gate {
+            try await gate.wait()
+        }
         let fresh = DirectIrohFakeEndpoint(log: log)
         let endpoint: DirectIrohFakeEndpoint = lock.withLock {
             storedSecrets.append(secretKey)
@@ -418,10 +432,47 @@ final class DirectIrohManualScheduler: DirectIrohScheduling {
     }
 }
 
-/// The transport's clock, moved by hand.
-@MainActor
-final class DirectIrohManualClock {
-    var now: TimeInterval = 1_000
+/// The transport's clock, moved by hand. It is read from any thread, as
+/// the real one is, and never by a timer: what the clock says and when a
+/// callback runs are separate things in these tests.
+final class DirectIrohManualClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: TimeInterval = 1_000
+    private var jump: (afterReads: Int, seconds: TimeInterval)?
+
+    var now: TimeInterval {
+        get {
+            lock.withLock { current }
+        }
+        set {
+            lock.withLock { current = newValue }
+        }
+    }
+
+    /// What the transport reads. Counts the read.
+    func read() -> TimeInterval {
+        lock.withLock {
+            let value = current
+            if let pending = jump {
+                if pending.afterReads <= 1 {
+                    current += pending.seconds
+                    jump = nil
+                } else {
+                    jump = (pending.afterReads - 1, pending.seconds)
+                }
+            }
+            return value
+        }
+    }
+
+    /// Moves the clock forward once the transport has read it `reads`
+    /// more times: between two steps of one operation that no test can
+    /// otherwise get between.
+    func advance(by seconds: TimeInterval, afterReads reads: Int) {
+        lock.withLock {
+            jump = (reads, seconds)
+        }
+    }
 }
 
 @MainActor

@@ -282,6 +282,86 @@ func directIrohDeadline<Value: Sendable>(
     }
 }
 
+// MARK: The right to start something on the network
+
+/// The right to start a network action for one owner: a dial, a probe, or
+/// the streams of a live path.
+///
+/// Whoever is about to call the binding asks `allowsStart` in the same
+/// step, with no await between the answer and the call. That step is often
+/// in another task than the one that decided to do the work, and after
+/// earlier awaits of its own: a check made on the main actor before those
+/// says nothing about now. So the authority is checked where the action
+/// starts, on any thread, against the clock at that moment.
+///
+/// It ends in three ways, and never comes back for an action that was
+/// admitted before: the clock reaches the deadline, the owner is revoked
+/// (its selection ended, its answer was withdrawn or replaced, its path
+/// ended), or, for the streams of a path, the path stopped being usable
+/// since the action was admitted. Only a path's authority is ever renewed,
+/// by a newly accepted answer; a dial's and a probe's are fixed when they
+/// start, so an old one never borrows a newer answer's time.
+///
+/// An action that already started is not undone by any of this. It may end
+/// late; what it produced is closed by the step that finds the next action
+/// refused.
+final class DirectIrohAuthority: @unchecked Sendable {
+    private let lock = NSLock()
+    private let clock: @Sendable () -> TimeInterval
+    private var deadline: TimeInterval
+    private var isRevoked = false
+    private var suspensions = 0
+
+    init(deadline: TimeInterval, clock: @escaping @Sendable () -> TimeInterval) {
+        self.deadline = deadline
+        self.clock = clock
+    }
+
+    /// Whether a new network action may start at this moment.
+    var allowsStart: Bool {
+        let now = clock()
+        return lock.withLock {
+            !isRevoked && now < deadline
+        }
+    }
+
+    /// The same for an action admitted when the path had been suspended
+    /// `admittedSuspensions` times: `false` once it was suspended again,
+    /// even if it is usable again by now.
+    func allowsStart(admittedAt admittedSuspensions: Int) -> Bool {
+        let now = clock()
+        return lock.withLock {
+            !isRevoked && now < deadline && suspensions == admittedSuspensions
+        }
+    }
+
+    /// How many times the path stopped being usable.
+    var suspensionCount: Int {
+        lock.withLock { suspensions }
+    }
+
+    /// The owner is over. Final.
+    func revoke() {
+        lock.withLock {
+            isRevoked = true
+        }
+    }
+
+    /// The path stopped being usable: nothing admitted before starts.
+    func suspend() {
+        lock.withLock {
+            suspensions += 1
+        }
+    }
+
+    /// A newly accepted answer for the same path.
+    func renew(deadline: TimeInterval) {
+        lock.withLock {
+            self.deadline = deadline
+        }
+    }
+}
+
 // MARK: Time and the network
 
 /// Proposed bounds for the transport. None of them is a measurement
