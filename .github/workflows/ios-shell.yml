@@ -120,16 +120,29 @@ jobs:
 
       - name: Run XCTest on iPhone Simulator
         run: |
-          set -euo pipefail
-          xcodebuild \
-            -project ios/Avibe.xcodeproj \
-            -scheme Avibe \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
-            -parallel-testing-enabled NO \
-            -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
-            CODE_SIGNING_ALLOWED=NO \
-            test
+          set +e
+          run() {
+            variant="$1"
+            xcodebuild \
+              -project ios/Avibe.xcodeproj \
+              -scheme Avibe \
+              -configuration Debug \
+              -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+              -parallel-testing-enabled NO \
+              CODE_SIGNING_ALLOWED=NO \
+              -only-testing:AvibeTests/DirectPathAppTests/testAccountCoversTheRuntimeAndReturnsToItWhileAPushRequestRuns \\
+              -only-testing:AvibeTests/MobileOnboardingTests/testTheAccountPageReadsTheSessionWhileAPushRequestRuns \\
+              -only-testing:AvibeTests/MobileOnboardingTests/testInstancesListTheCurrentThenTheRecentlyOpenedThenAvibeBotsOrder \\
+              -only-testing:AvibeTests/MobileOnboardingTests/testAnEdgeSwipePressesTheShownBackAndNothingWithoutOne \
+              test 2>&1 | grep -E ": error:|Test Case .*(passed|failed)|\*\* TEST" | sed "s/^/[$variant] /"
+          }
+          run baseline
+          for m in m1-showAccount-needs-idle m2-read-refused-during-push m3-server-order-only m4-swipe-presses-nothing m5-transport-released-under-request; do
+            python3 ios/scripts/exp_mutate.py "$m"
+            git diff --stat | tail -1
+            run "$m"
+            git checkout -- ios/Avibe
+          done
 
       - name: Upload XCTest failure result bundle
         if: ${{ failure() }}
