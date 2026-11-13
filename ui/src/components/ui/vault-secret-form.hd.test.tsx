@@ -12,6 +12,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import en from '@/i18n/en.json';
 import type { VaultHdAccount } from '@/context/ApiContext';
+import { wordlist } from '@scure/bip39/wordlists/english.js';
 import { deriveAccounts, wordsToSeed } from '@/lib/vaultHdWallet';
 import { VaultSecretForm } from './vault-secret-form';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
@@ -35,7 +36,9 @@ const api = vi.hoisted(() => ({
   deriveSigningAddresses: vi.fn(async () => ({ ok: true, addresses: {} })),
   connectWorkbenchEvents: vi.fn(() => vi.fn()),
 }));
-const blindBox = vi.hoisted(() => ({ scheme: 'test', enc: 'enc', ct: 'ciphertext' }));
+// Hyphenated so no fixture value can ever be a BIP39 word: the no-leak check below treats any
+// posted value equal to a phrase word as a leak (a fixed "test" collided with generated words).
+const blindBox = vi.hoisted(() => ({ scheme: 'fixture-scheme', enc: 'fixture-enc', ct: 'fixture-ciphertext' }));
 // The plaintext the dialog hands to the sealer, copied before the dialog zeroes it.
 const sealed = vi.hoisted(() => ({ plaintext: null as Uint8Array | null, context: null as unknown }));
 const sealBlindBox = vi.hoisted(() => vi.fn(async (plaintext: Uint8Array, _key: unknown, context: unknown) => {
@@ -53,6 +56,8 @@ const i18n = createInstance();
 void i18n.use(initReactI18next).init({ lng: 'en', fallbackLng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false } });
 const hd = en.vaults.hd;
 const OFFICIAL = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+// A valid phrase whose first word is "test", the word that once collided with a fixture value.
+const WITH_TEST = 'test abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon absorb';
 
 const storedFor = (words: string[], passphrase = ''): VaultHdAccount => {
   const seed = wordsToSeed(words, passphrase);
@@ -373,3 +378,25 @@ it('always sends account #0 for the server to check, and shows nothing-saved whe
   expect(api.deleteVaultSecret).not.toHaveBeenCalled();
   expect(localStorage.getItem('avibe.vault.hdAddressCheckFailed') ?? '[]').toBe('[]');
 });
+
+it('never posts a fixed value that could pass for a phrase word, and finds no leak when a phrase holds "test"', async () => {
+  await openWallet();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: WITH_TEST } });
+  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [storedFor(WITH_TEST.split(' '))] } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  // Every string the form posts besides addresses is fixed text; none may be a BIP39 word, or the
+  // leak check would fail on whichever phrase happens to contain it.
+  const values: string[] = [];
+  const walk = (value: unknown) => {
+    if (typeof value === 'string') values.push(value);
+    else if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === 'object') Object.values(value).forEach(walk);
+  };
+  walk(postedPayload());
+  expect(values.filter((value) => wordlist.includes(value))).toEqual([]);
+  expectNoSecretsPosted(WITH_TEST.split(' '));
+  expect(bytesToHex(sealed.plaintext!)).toBe(bytesToHex(wordsToSeed(WITH_TEST.split(' '), '')));
+});
+
