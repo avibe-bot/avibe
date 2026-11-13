@@ -842,6 +842,18 @@ describe('one panel on a desktop-managed host', () => {
     expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
   });
 
+  it('follows a check another page asked for until the host answers it', async () => {
+    api.getVersion.mockResolvedValue(hostWith({ phase: 'checking', control_request: control('check', 'checking') }));
+    await openBrowserPopup('v3.2.6');
+    expect(screen.getByText(i18n.t('update.status.checking'))).toBeTruthy();
+    api.getVersion.mockResolvedValue(hostWith({
+      phase: 'available', latest: '3.2.7', has_update: true, checked_at: '2026-11-13T07:06:00Z',
+      control_request: control('check', 'completed'),
+    }));
+    expect(await screen.findByText(i18n.t('update.status.available'), undefined, { timeout: 4000 })).toBeTruthy();
+    expect(api.requestUpdateControl).not.toHaveBeenCalled();
+  });
+
   it('names a desktop app too old to take these, and still offers its install', async () => {
     api.getVersion.mockResolvedValue(hostWith({ phase: 'available', latest: '3.2.7', has_update: true, host_actions: undefined, auto_update: null }));
     await openBrowserPopup('v3.2.6');

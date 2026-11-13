@@ -214,8 +214,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       failControl(action, enabled, 'request_failed', restore);
     }
   };
+  // A request another page sent is followed here too, until the host answers it.
+  const liveControlId = versionInfo?.control_request?.phase === 'checking'
+    && versionInfo.control_request.request_id !== 'pending' ? versionInfo.control_request.request_id : null;
+  const followedControlId = controlRequestId ?? liveControlId;
   React.useEffect(() => {
-    if (!controlRequestId) return;
+    if (!followedControlId) return;
     let stopped = false;
     let timer: number | undefined;
     const deadline = Date.now() + CONTROL_REQUEST_TIMEOUT_MS;
@@ -225,7 +229,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         if (stopped) return;
         setVersionInfo(fresh);
         const receipt = fresh.control_request;
-        if (receipt?.request_id !== controlRequestId || receipt.phase !== 'checking') {
+        if (receipt?.request_id !== followedControlId || receipt.phase !== 'checking') {
           setControlRequestId(null);
           return;
         }
@@ -235,7 +239,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       if (stopped) return;
       if (Date.now() >= deadline) {
         // Unanswered in time: say so, and leave the action free to retry.
-        setVersionInfo((previous) => previous && previous.control_request?.request_id === controlRequestId
+        setVersionInfo((previous) => previous && previous.control_request?.request_id === followedControlId
           && previous.control_request.phase === 'checking'
           ? {
             ...previous,
@@ -253,7 +257,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [api, controlRequestId]);
+  }, [api, followedControlId]);
 
   const readDesktopUpdateState = async (): Promise<DesktopUpdateState | null> => {
     const actions = desktopActions;
@@ -652,9 +656,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   };
   const manager = capabilities.can_manage_instance;
   const settingsBusy = savingPrereleases || savingAutoUpdate || checking || upgrading || restarting
-    || Boolean(controlRequestId);
+    || Boolean(followedControlId);
   const panelActions: UpdatePanelActions = { close: () => setIsPopupOpen(false), settingsBusy };
-  const checkDisabled = checking || restarting || refreshBlockedByRemoteRequest || Boolean(controlRequestId);
+  const checkDisabled = checking || restarting || refreshBlockedByRemoteRequest || Boolean(followedControlId);
   if (nativeModel) {
     // The desktop app's own updater, over its IPC.
     const actions = desktopUpdateState.hostActions;

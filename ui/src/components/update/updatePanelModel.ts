@@ -181,12 +181,15 @@ export function modelFromDesktopRelay(
   const control = info.control_request;
   const controlSettled = control && control.phase !== 'checking'
     && !(info.checked_at && Date.parse(info.checked_at) > Date.parse(control.updated_at));
-  const controlStatus: UpdatePanelStatus | null = control?.phase === 'checking' || info.phase === 'checking'
+  // Turning automatic updates on or off checks nothing; a check, or a channel change, does.
+  const controlChecks = control?.phase === 'checking' && control.action !== 'auto_update';
+  const controlStatus: UpdatePanelStatus | null = controlChecks || info.phase === 'checking'
     ? { kind: 'checking' }
     : controlSettled && (control.phase === 'failed' || control.phase === 'expired')
-      ? control.action === 'check'
-        ? control.error_code === 'desktop_shell_unavailable' ? { kind: 'check-failed', reason: 'unreachable' } : { kind: 'check-failed' }
-        : { kind: 'update-failed', reason: control.error_code === 'desktop_shell_unavailable' ? 'unreachable' : 'setting' }
+      ? control.error_code === 'update_in_progress' ? { kind: 'update-failed', reason: 'busy' }
+        : control.action === 'check'
+          ? control.error_code === 'desktop_shell_unavailable' ? { kind: 'check-failed', reason: 'unreachable' } : { kind: 'check-failed' }
+          : { kind: 'update-failed', reason: control.error_code === 'desktop_shell_unavailable' ? 'unreachable' : 'setting' }
       : null;
   // The newer of an install request and a check or setting request speaks first.
   const controlFirst = Boolean(controlStatus && control
