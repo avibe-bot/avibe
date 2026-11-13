@@ -178,13 +178,29 @@ wrong curve/scheme or changed input/context refuses. Standard pending->signing->
 approved claim semantics, per-account policy and original-requester attribution
 are unchanged. Public-projection refresh cannot weaken approval policy.
 
+Every successful STANDARD HD Bitcoin sign result with an explicit address_type
+also returns `signing_public_key` alongside its existing signature and derivation:
+`{"curve":"secp256k1","public_key":"<lowercase 33-byte compressed SEC1 hex>"}`.
+This applies to explicit p2pkh, p2wpkh and p2tr selections. For p2tr the returned
+point is the selected internal BIP86 point, NOT its tweaked output key. It exposes
+no private material and does not add fields to public account/list projections.
+
+The returned point must be the same frozen selected key against which this
+signature was verified; never re-resolve it by wallet name after signing or
+accept a caller-supplied replacement point. Immediate headless results, persisted
+approved results, claim/await responses, CLI JSON and approval continuations retain
+that same public-key field. Omitted address_type and ordinary-key/EVM/Solana calls
+keep their existing result shape. Existing failure, atomic audit/usage and
+identity-change refusal rules still apply; a public result is not a new authority.
+
 Legacy and Native use the EXISTING low-S DER ECDSA primitive. The caller constructs
 the correct legacy or BIP143 digest; avault does not parse Bitcoin transactions.
 For the smallest tested spend use SIGHASH_ALL=0x01; append the sighash byte AFTER
 DER (not inside the signature API), and assemble Legacy scriptSig or Native
 witness with the selected compressed public key. BIP143 binds exact prevout amount
 and P2PKH scriptCode for the selected P2WPKH key. Verify the returned DER against
-the selected public key before transaction assembly/broadcast. Taproot retains
+the returned selected public key and independently check its HASH160 against the
+selected address/script before transaction assembly/broadcast. Taproot retains
 BIP341 tweaked-output verification and its existing bounded typed context.
 Raw-digest signing does not attest amounts, fees or transaction intent. Do not
 claim a new typed Legacy/Native transaction grammar or protected support.
@@ -198,7 +214,11 @@ Extend the owner's mnemonic acceptance and owning repository tests:
 - Displayed address = independent derivation = persisted public identity = key
   that verifies the actual signature; preserve all original EVM/Solana/Taproot.
 - New create exact five-address checks, #0 preview/ready state, and caller-built
-  legacy/BIP143 scripts/digests/witness and DER+sighash-byte verification.
+  legacy/BIP143 scripts/digests/witness and DER+sighash-byte verification. Build
+  Legacy scriptSig and Native witness using only ordinary consumer inputs and the
+  returned bound public key, not private DB reads, fixture-injected public points
+  or extra custody commands. Cover headless and approved/await/continuation output
+  retention, all three explicit selections, and unchanged omitted-call results.
 - Wrong type/account/scheme/non-BTC inputs, missing/changed approvals, cross-type
   signature substitution, corrupt envelope/point, old avault and unsupported tier
   refuse with no false successful use/audit.

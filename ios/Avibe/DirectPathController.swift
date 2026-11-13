@@ -309,6 +309,12 @@ final class DirectPathController {
         }
     }
 
+    /// The target the transport is working for, if any. Read only: the
+    /// controller alone selects and deselects.
+    var selectedTarget: DirectTarget? {
+        target
+    }
+
     private var runtime: MobileRuntimeContext?
     private var target: DirectTarget?
     private var selection = 0
@@ -337,6 +343,14 @@ final class DirectPathController {
 
     private var heldReplies: [HeldReply] = []
     private var isResuming = false
+    /// Relay closes decided on the main actor that the listener has not
+    /// issued yet: the relays not yet cancelled, their authority not yet
+    /// ended. Bookkeeping only; the claims decided what each close counts.
+    private var closesInFlight = 0
+    /// The current re-bind attempt's successful completion, kept while a
+    /// close is in flight (`rebindDidComplete`). The attempt stays current
+    /// and its episode open meanwhile.
+    private var completionAwaitingCloses: DirectRebindCompletion?
     /// Route preparations under way; the listener is kept while any is.
     private var preparations = 0
 
@@ -700,7 +714,18 @@ final class DirectPathController {
         case .lost:
             isUsable = false
             advanceGeneration()
+            // The preference is published before the closure, which is now
+            // published in this turn: no status says `direct` for a path
+            // that is gone.
+            updatePreference()
             closeRelays(.direct, countsAsClosure: true)
+        case .lostToBackground:
+            // The transport heard the background first. It is this App's
+            // background: entered here now, as the background observer
+            // would, so the closure waits for the return. The observer, when
+            // it comes, finds it entered.
+            applicationDidEnterBackground()
+            return
         }
         updatePreference()
     }
@@ -847,8 +872,17 @@ final class DirectPathController {
     /// counts as a closure, each host that lost at least one committed relay
     /// gets one closure, however many relays it lost. In the background the
     /// closure waits for the return.
-    /// `then` runs on the main actor once the close has run (at once when
-    /// there is no listener).
+    /// `then` runs on the main actor once the listener has closed them (at
+    /// once when there is no listener).
+    ///
+    /// Which relays this event closes, and the closure they make, are
+    /// decided here, in the event's own turn: their claims are taken before
+    /// anything that runs after it can end them. The transport may close
+    /// its streams right after reporting a loss, and a relay whose stream
+    /// ended before the close reached it would otherwise look as if it had
+    /// ended on its own, and its page would not be told. A closure made in
+    /// the foreground is published at once, while the listener closes the
+    /// relays.
     private func closeRelays(
         _ backend: DirectRelayBackend?,
         countsAsClosure: Bool,
@@ -859,18 +893,38 @@ final class DirectPathController {
             return
         }
         // Only relays committed under a plan made before this event: one
-        // committed after it, by the time this task runs, is kept.
+        // committed after it is kept.
         let generation = pathGeneration
+        let claimed = listener.lifecycle.claimForEvent(backend: backend, before: generation)
+        // Recorded in the same turn as the claim: a background closure is
+        // pending before the return can settle, so the first status after
+        // the return includes it.
+        if countsAsClosure {
+            recordClosure(hosts: claimed.filter { $0.value > 0 }.map(\.key))
+        }
+        // Until the listener has issued this close (cancelled the relays and
+        // ended their authority; not until every one has drained), a return
+        // is not confirmed: the closure it publishes is for connections
+        // that have been told to end.
+        closesInFlight += 1
         Task { [weak self] in
-            let closed = await listener.closeRelays(backend: backend, before: generation)
-            let hosts = closed.filter { $0.value > 0 }.map(\.key)
+            _ = await listener.closeRelays(backend: backend, before: generation)
             await MainActor.run {
-                if countsAsClosure {
-                    self?.recordClosure(hosts: hosts)
-                }
+                self?.closeDidIssue()
                 then?()
             }
         }
+    }
+
+    /// A close was issued. With none left, a kept completion is handled
+    /// again, from the start: whatever happened meanwhile is decided there.
+    private func closeDidIssue() {
+        closesInFlight -= 1
+        guard closesInFlight == 0, let kept = completionAwaitingCloses else {
+            return
+        }
+        completionAwaitingCloses = nil
+        rebindDidComplete(kept)
     }
 
     /// One closure per host for one event. While the App is in the
@@ -1062,6 +1116,7 @@ final class DirectPathController {
             listenerGeneration = nil
             listenerStart = nil
             rebinds.abandon()
+            completionAwaitingCloses = nil
             return listener
         case .failed:
             enterFault("the listener failed before it could be retired")
@@ -1109,6 +1164,7 @@ final class DirectPathController {
         disarmWatchdog()
         // Whatever return was under way is settled by this.
         rebinds.abandon()
+        completionAwaitingCloses = nil
         if let listener {
             // The socket goes, and the revoked work with it.
             Task {
@@ -1234,6 +1290,12 @@ final class DirectPathController {
                 retireAndStop()
             }
         }
+        // A return that waited only for closes is parked now, not when they
+        // are issued.
+        if let kept = completionAwaitingCloses {
+            completionAwaitingCloses = nil
+            rebindDidComplete(kept)
+        }
         closeRelays(.direct, countsAsClosure: true) { [weak self] in
             // Unless a new selection was made meanwhile: selecting already
             // stops the transport's work for the previous target.
@@ -1277,6 +1339,7 @@ final class DirectPathController {
     private func startRebind(_ listener: DirectConnectListener, port listenerPort: UInt16) {
         // Each attempt has its own identity: only the current attempt's
         // completion may settle anything.
+        completionAwaitingCloses = nil
         let attempt = rebinds.begin()
         let rebindSeconds = timing.rebindSeconds
         let nonce = listener.ownershipNonce
@@ -1304,35 +1367,49 @@ final class DirectPathController {
             let generation = bound.value
             await MainActor.run {
                 self?.rebindDidComplete(
-                    attempt,
-                    listener,
-                    port: listenerPort,
-                    generation: generation,
-                    ready: ready
+                    DirectRebindCompletion(
+                        attempt: attempt,
+                        listener: listener,
+                        port: listenerPort,
+                        generation: generation,
+                        ready: ready
+                    )
                 )
             }
         }
     }
 
-    private func rebindDidComplete(
-        _ attempt: Int,
-        _ listener: DirectConnectListener,
-        port listenerPort: UInt16,
-        generation: Int?,
-        ready: Bool
-    ) {
+    private func rebindDidComplete(_ completion: DirectRebindCompletion) {
+        let attempt = completion.attempt
+        let listener = completion.listener
+        let listenerPort = completion.port
+        let generation = completion.generation
+        let ready = completion.ready
         // Only the current attempt settles anything. A stale one (settled by
         // a failure, or replaced by a newer attempt) changes no state here;
         // the socket it bound, if any, is the listener's, which the newer
         // attempt closes before binding, and its generation can no longer
         // be confirmed or rejected.
-        guard self.listener === listener, rebinds.end(attempt) else {
+        guard self.listener === listener, rebinds.current == attempt else {
             return
         }
         // A bind that already failed (its lifecycle recorded it) is the
         // fault, in the foreground or the background: failure wins over
-        // parking.
+        // parking, and over waiting for closes.
         if deliverFault(of: listener, "the port could not be re-bound and checked") {
+            return
+        }
+        // Success waits until every relay close decided so far has been
+        // issued: the closure the return publishes is then for connections
+        // already told to end. The attempt stays current and the episode
+        // open, so its watchdog still bounds the wait; the last close
+        // handles this completion again (`closeDidIssue`), and a background
+        // handles it at once.
+        if ready, !isInBackground, closesInFlight > 0 {
+            completionAwaitingCloses = completion
+            return
+        }
+        guard rebinds.end(attempt) else {
             return
         }
         if isInBackground {
@@ -1467,6 +1544,15 @@ private final class DirectBindingBox: @unchecked Sendable {
     var value: Int? {
         lock.withLock { generation }
     }
+}
+
+/// What one re-bind attempt ended with.
+struct DirectRebindCompletion: Sendable {
+    let attempt: Int
+    let listener: DirectConnectListener
+    let port: UInt16
+    let generation: Int?
+    let ready: Bool
 }
 
 /// The controller's own bookkeeping of a return's re-bind attempts: which

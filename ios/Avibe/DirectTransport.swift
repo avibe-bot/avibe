@@ -97,6 +97,11 @@ enum DirectPathReport: Equatable, Sendable {
     /// stream that failed on its own before this report is not counted: its
     /// page already saw that connection fail, and no event closed it.
     case lost
+    /// The App went to the background: the transport stopped, and the path
+    /// it reported usable is gone. The App handles it as its own background
+    /// (`remote-direct-ios.md` section 9), whichever of the two heard the
+    /// background first, so its closure waits for the return.
+    case lostToBackground
 }
 
 /// One byte stream to the instance, as the strict ingress sees it

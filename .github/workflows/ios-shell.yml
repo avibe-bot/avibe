@@ -54,6 +54,9 @@ jobs:
           }
           xcrun --sdk iphonesimulator --show-sdk-version
 
+      - name: Prepare published iroh App artifact
+        run: python3 ios/scripts/prepare_iroh_app.py stage --staging ios/Avibe/IrohLib
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.23.4"
@@ -67,7 +70,7 @@ jobs:
           npm run build:mobile
 
       - name: Generate the App's license notices
-        run: python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp
+        run: python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp --support-zip ios/Avibe/IrohLib/IrohLib-support.zip
 
       - name: Verify bundled mobile UI
         run: ios/scripts/verify_mobile_bundle.sh ios/Avibe/Resources/MobileApp
@@ -81,8 +84,18 @@ jobs:
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/AvibeDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             build
+
+      - name: Verify linked iroh binary in the simulator product
+        run: |
+          set -euo pipefail
+          ios/scripts/verify_iroh_app_product.sh \
+            ios/Avibe/IrohLib \
+            "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe" \
+            "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib" \
+            YES
 
       - name: Select an available iPhone simulator
         run: |

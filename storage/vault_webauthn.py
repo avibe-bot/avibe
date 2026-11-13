@@ -260,8 +260,10 @@ def _client_data(client_data_json_b64: str, *, expected_type: str, expected_chal
     client_data_json = b64decode(client_data_json_b64)
     try:
         client_data = json.loads(client_data_json)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise WebAuthnVerificationError("invalid clientDataJSON") from exc
+    if not isinstance(client_data, dict):
+        raise WebAuthnVerificationError("clientDataJSON must be an object")
     if client_data.get("type") != expected_type:
         raise WebAuthnVerificationError("unexpected WebAuthn client data type")
     if client_data.get("origin") != expected_origin:
@@ -334,6 +336,15 @@ def _public_key_from_cose(public_key_cose: bytes):
         return rsa.RSAPublicNumbers(e, n).public_key(), alg
     except Exception as exc:
         raise WebAuthnVerificationError("invalid RS256 COSE public key") from exc
+
+
+def validate_stored_public_key(public_key: str, alg: int) -> None:
+    """Check registered public-factor readiness without invoking an authenticator."""
+    if not isinstance(public_key, str) or type(alg) is not int:
+        raise WebAuthnVerificationError("invalid stored WebAuthn public key")
+    _key, parsed_alg = _public_key_from_cose(b64decode(public_key))
+    if parsed_alg != alg:
+        raise WebAuthnVerificationError("WebAuthn public key algorithm mismatch")
 
 
 def verify_registration(

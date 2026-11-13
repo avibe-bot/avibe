@@ -555,6 +555,10 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         "cache-dependency-path": "ui/package-lock.json",
     }
 
+    prepare_index, prepare_step = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Prepare published iroh App artifact"
+    )
     bundle_index, bundle_step = next(
         (index, step) for index, step in enumerate(steps)
         if step.get("name") == "Build bundled mobile UI"
@@ -567,9 +571,12 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         (index, step) for index, step in enumerate(steps)
         if step.get("name") == "Generate the App's license notices"
     )
-    assert node_index < bundle_index < generate_index < verify_index
+    assert prepare_index < node_index < bundle_index < generate_index < verify_index
+    assert prepare_step["run"] == (
+        "python3 ios/scripts/prepare_iroh_app.py stage --staging ios/Avibe/IrohLib"
+    )
     assert generate_step["run"] == (
-        "python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp"
+        "python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp --support-zip ios/Avibe/IrohLib/IrohLib-support.zip"
     )
     assert bundle_step["working-directory"] == "ui"
     assert bundle_step["run"].splitlines() == ["npm ci", "npm run build:mobile"]
@@ -583,6 +590,15 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     ]
     assert len(app_builds) == 2
     assert all(verify_index < index for index in app_builds)
+    simulator_build = steps[app_builds[0]]["run"]
+    assert '-derivedDataPath "$RUNNER_TEMP/AvibeDerivedData"' in simulator_build
+    linked_check = next(step for step in steps if step.get("name") == "Verify linked iroh binary in the simulator product")
+    lines = linked_check["run"].splitlines()
+    assert lines[1] == "ios/scripts/verify_iroh_app_product.sh \\"
+    assert lines[2] == "  ios/Avibe/IrohLib \\"
+    assert lines[3].startswith('  "') and lines[3].endswith('Avibe.app/Avibe" \\')
+    assert lines[4].endswith('Avibe.app/Avibe.debug.dylib" \\')
+    assert lines[5] == "  YES"
 
     test_step, = [
         step for step in steps
@@ -1288,6 +1304,36 @@ WEB_FETCH_TESTS = (
     "tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py "
     "tests/test_desktop_runtime_bundle_builder.py -k not packaged_cli_survives"
 )
+
+
+@pytest.mark.parametrize("workflow,job_name,python_key", [
+    ("web-fetch-runtime.yml", "runtime", "${{ matrix.label }}"),
+    ("lint.yml", "model-hub-lifecycle-native", "py3.12-${{ matrix.python_arch }}"),
+])
+def test_native_dependency_downloads_are_cached_and_bounded(workflow, job_name, python_key) -> None:
+    job = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())["jobs"][job_name]
+    assert job["timeout-minutes"] == 15
+    assert {key: job["env"][key] for key in (
+        "UV_HTTP_CONNECT_TIMEOUT", "UV_HTTP_TIMEOUT", "UV_HTTP_RETRIES", "UV_CONCURRENT_DOWNLOADS",
+    )} == {
+        "UV_HTTP_CONNECT_TIMEOUT": "30", "UV_HTTP_TIMEOUT": "60",
+        "UV_HTTP_RETRIES": "3", "UV_CONCURRENT_DOWNLOADS": "4",
+    }
+    cache, = [step for step in job["steps"] if step.get("uses", "").startswith("actions/cache@")]
+    assert cache["with"]["path"] == "${{ env.UV_CACHE_DIR }}"
+    assert job["env"]["UV_CACHE_DIR"].startswith("${{ github.workspace }}/.ci-")
+    key = cache["with"]["key"]
+    for part in ("${{ runner.os }}", "${{ runner.arch }}", "uv-0.13.7", python_key,
+                 "${{ hashFiles('pyproject.toml', 'uv.lock') }}"):
+        assert part in key
+    assert "restore-keys" not in cache["with"]
+    commands = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "uv export --frozen --no-dev --no-emit-project" in commands or "uv sync --locked" in commands
+    # Cache only downloaded artifacts, not environments or test outcomes.
+    assert all(not step.get("continue-on-error") for step in job["steps"] if "pytest" in step.get("run", ""))
+    assert job["steps"].index(cache) < next(
+        index for index, step in enumerate(job["steps"]) if "uv==0.13.7" in step.get("run", "")
+    )
 
 
 @pytest.mark.parametrize("failing", [(), ("3.11", "3.13")])

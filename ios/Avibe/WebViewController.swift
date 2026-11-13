@@ -878,6 +878,13 @@ final class WebViewController: UIViewController {
         showAccount()
     }
 
+    /// The primary WebView while this runtime is live: `nil` before the
+    /// view is made and once the runtime is released for an account
+    /// transition. What the direct transport's rendezvous request runs in.
+    var livePrimaryWebView: WKWebView? {
+        isInvalidatedForAccountTransition ? nil : retainedWebView
+    }
+
     private func isPrimaryWebView(_ webView: WKWebView) -> Bool {
         !isInvalidatedForAccountTransition && webView === retainedWebView
     }

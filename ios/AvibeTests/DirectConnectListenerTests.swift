@@ -1197,7 +1197,7 @@ final class DirectConnectListenerTests: XCTestCase {
                 XCTAssertFalse(failed.confirm(g))
                 XCTAssertEqual(failed.admit(g, relay: id), .refused)
                 XCTAssertFalse(failed.publish(g) { true })
-                XCTAssertFalse(failed.grant(id, host: "instance.example", backend: .direct, generation: 0))
+                XCTAssertFalse(failed.grant(id, host: "instance.example", backend: .direct, generation: 0, claim: DirectRelayClaim()))
                 XCTAssertFalse(failed.beginClose())
                 failed.closeCompleted()
                 failed.stop()
@@ -1583,14 +1583,14 @@ final class DirectConnectListenerTests: XCTestCase {
         let candidate = UUID()
         XCTAssertEqual(lifecycle.admit(1, relay: granted), .relay)
         XCTAssertEqual(lifecycle.admit(1, relay: candidate), .relay)
-        XCTAssertTrue(lifecycle.grant(granted, host: host, backend: .direct, generation: 0))
+        XCTAssertTrue(lifecycle.grant(granted, host: host, backend: .direct, generation: 0, claim: DirectRelayClaim()))
         XCTAssertTrue(lifecycle.beginClose())
         lifecycle.closeCompleted()
         XCTAssertNotNil(lifecycle.beginEpisode(deadline: reached))
 
         XCTAssertEqual(lifecycle.relayIDs, [granted])
         XCTAssertEqual(lifecycle.phase, .failed(generation: 1))
-        XCTAssertFalse(lifecycle.grant(candidate, host: host, backend: .direct, generation: 0))
+        XCTAssertFalse(lifecycle.grant(candidate, host: host, backend: .direct, generation: 0, claim: DirectRelayClaim()))
         XCTAssertEqual(lifecycle.admit(1, relay: UUID()), .refused)
     }
 
@@ -1602,17 +1602,17 @@ final class DirectConnectListenerTests: XCTestCase {
         let lifecycle = makeLifecycle(in: "serving")
         let id = UUID()
         // Not admitted: nothing to grant.
-        XCTAssertFalse(lifecycle.grant(id, host: host, backend: .direct, generation: 3))
+        XCTAssertFalse(lifecycle.grant(id, host: host, backend: .direct, generation: 3, claim: DirectRelayClaim()))
         XCTAssertEqual(lifecycle.admit(1, relay: id), .relay)
         XCTAssertTrue(lifecycle.isCandidate(id))
         XCTAssertEqual(lifecycle.grants, [:])
 
-        XCTAssertTrue(lifecycle.grant(id, host: host, backend: .direct, generation: 3))
+        XCTAssertTrue(lifecycle.grant(id, host: host, backend: .direct, generation: 3, claim: DirectRelayClaim()))
         let granted = DirectListenerLifecycle.Grant(host: host, backend: .direct, generation: 3)
         XCTAssertEqual(lifecycle.grants, [id: granted])
         XCTAssertFalse(lifecycle.isCandidate(id))
         // Once: a second grant, with anything else, changes nothing.
-        XCTAssertFalse(lifecycle.grant(id, host: "other.example", backend: .publicOrigin, generation: 9))
+        XCTAssertFalse(lifecycle.grant(id, host: "other.example", backend: .publicOrigin, generation: 9, claim: DirectRelayClaim()))
         XCTAssertEqual(lifecycle.grants, [id: granted])
         // A retirement that comes after the grant leaves it alone.
         XCTAssertFalse(lifecycle.revoke(id))
@@ -1623,13 +1623,61 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(lifecycle.admit(1, relay: retired), .relay)
         XCTAssertTrue(lifecycle.revoke(retired))
         XCTAssertFalse(lifecycle.isCandidate(retired))
-        XCTAssertFalse(lifecycle.grant(retired, host: host, backend: .direct, generation: 3))
+        XCTAssertFalse(lifecycle.grant(retired, host: host, backend: .direct, generation: 3, claim: DirectRelayClaim()))
 
         lifecycle.end(id)
         XCTAssertEqual(lifecycle.grants, [:])
         XCTAssertEqual(lifecycle.relayIDs, [])
         // An ended relay is neither a candidate nor grantable again.
-        XCTAssertFalse(lifecycle.grant(id, host: host, backend: .direct, generation: 3))
+        XCTAssertFalse(lifecycle.grant(id, host: host, backend: .direct, generation: 3, claim: DirectRelayClaim()))
+    }
+
+    /// An event takes the claims of the granted relays it closes in its own
+    /// turn: each is counted once per host, only on the backend and before
+    /// the generation asked for, never one that ended on its own first, and
+    /// never again by a later event. The relays stay listed for the drain.
+    func testAnEventClaimsTheGrantedRelaysItClosesOnceInItsOwnTurn() {
+        let lifecycle = makeLifecycle(in: "serving")
+        func granted(
+            _ host: String,
+            _ backend: DirectRelayBackend,
+            generation: Int
+        ) -> (UUID, DirectRelayClaim) {
+            let id = UUID()
+            let claim = DirectRelayClaim()
+            XCTAssertEqual(lifecycle.admit(1, relay: id), .relay)
+            XCTAssertTrue(
+                lifecycle.grant(id, host: host, backend: backend, generation: generation, claim: claim)
+            )
+            return (id, claim)
+        }
+        let (first, firstClaim) = granted("one.example", .direct, generation: 2)
+        let (second, _) = granted("one.example", .direct, generation: 3)
+        let (third, _) = granted("two.example", .direct, generation: 3)
+        let (ended, endedClaim) = granted("two.example", .direct, generation: 3)
+        let (publicRelay, publicClaim) = granted("one.example", .publicOrigin, generation: 3)
+        let (later, laterClaim) = granted("one.example", .direct, generation: 5)
+        let candidate = UUID()
+        XCTAssertEqual(lifecycle.admit(1, relay: candidate), .relay)
+
+        // This one ended on its own before the event.
+        XCTAssertTrue(endedClaim.end())
+
+        XCTAssertEqual(
+            lifecycle.claimForEvent(backend: .direct, before: 5),
+            ["one.example": 2, "two.example": 1]
+        )
+        // Taken: an end that comes now does not count as its own.
+        XCTAssertFalse(firstClaim.end())
+        // Outside the event: another backend, and a later plan.
+        XCTAssertTrue(publicClaim.end())
+        XCTAssertTrue(laterClaim.closeByEvent())
+        // Nothing is counted twice, and nothing leaves the ledger here.
+        XCTAssertEqual(lifecycle.claimForEvent(backend: nil, before: .max), [:])
+        XCTAssertEqual(
+            lifecycle.relayIDs,
+            [first, second, third, ended, publicRelay, later, candidate]
+        )
     }
 
     /// Leaving `serving` (a failure, a close) revokes every candidate in
@@ -1642,7 +1690,7 @@ final class DirectConnectListenerTests: XCTestCase {
             let candidate = UUID()
             XCTAssertEqual(lifecycle.admit(1, relay: granted), .relay)
             XCTAssertEqual(lifecycle.admit(1, relay: candidate), .relay)
-            XCTAssertTrue(lifecycle.grant(granted, host: host, backend: .publicOrigin, generation: 0))
+            XCTAssertTrue(lifecycle.grant(granted, host: host, backend: .publicOrigin, generation: 0, claim: DirectRelayClaim()))
 
             switch transition {
             case "socket failed":
@@ -1660,7 +1708,7 @@ final class DirectConnectListenerTests: XCTestCase {
 
             XCTAssertFalse(lifecycle.isCandidate(candidate), transition)
             XCTAssertFalse(
-                lifecycle.grant(candidate, host: host, backend: .direct, generation: 0),
+                lifecycle.grant(candidate, host: host, backend: .direct, generation: 0, claim: DirectRelayClaim()),
                 transition
             )
             if transition == "stop" {

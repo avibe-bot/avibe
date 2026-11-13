@@ -57,7 +57,7 @@ def _establish_protected_secret(conn, name: str, credential: WebAuthnTestCredent
         conn,
         name=name,
         protection="protected",
-        sealed=_sealed(name.lower()),
+        sealed=Sealed(ciphertext="synthetic-record", nonce="synthetic-nonce", wrap_meta=json.dumps({**credential.wrap_meta(), "wrapped_dek": "synthetic-dek"})),
         establishing_vmk=True,
         authz_factor_registration=credential.registration_payload(
             challenge_id=options["challenge_id"],
@@ -850,8 +850,8 @@ def test_delivery_use_count_is_per_secret_and_audit_lists_fields(vault):
     _create(vault, name="LOGIN", fields=[{"name": "username", "sealed": _sealed("username")}])
 
     with vault.begin() as conn:
-        identities = vs.capture_delivery_identities(conn, ["LOGIN", "LOGIN.username"])
-        vs.record_deliveries(conn, identities, mode="run")
+        captures = vs.capture_deliveries(conn, ["LOGIN", "LOGIN.username"])
+        vs.record_deliveries(conn, [capture.identity for capture in captures], mode="run")
         meta = vs.get_secret_meta(conn, "LOGIN")
         events = conn.execute(
             select(vs.vault_audit.c.delivery).where(
@@ -1051,9 +1051,16 @@ def test_save_vault_settings_first_write_is_atomic_under_concurrency(vault):
     assert {result["last_grant_ttl"] for result in results}.issubset({300, 900})
 
 
-def test_protected_vault_establishment_is_atomic_under_concurrency(vault, monkeypatch):
+def test_protected_vault_establishment_is_atomic_under_concurrency(vault):
     init_lock_key = vs.PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY
-    monkeypatch.setattr(vs, "register_webauthn_factor", lambda *_args, **_kwargs: None)
+    candidates = []
+    for index in range(2):
+        credential = WebAuthnTestCredential(credential_id=f"setup-candidate-{index}".encode())
+        with vault.begin() as conn:
+            options = vs.create_webauthn_registration_options(conn, rp_id=credential.rp_id, origin=credential.origin)
+        candidates.append((credential, credential.registration_payload(
+            challenge_id=options["challenge_id"], challenge_b64=options["webauthn"]["challenge"],
+        )))
 
     lock_barrier = threading.Barrier(2)
     pre_guard_barrier = threading.Barrier(2)
@@ -1071,9 +1078,11 @@ def test_protected_vault_establishment_is_atomic_under_concurrency(vault, monkey
 
     def synchronize_before_guard(_conn, _cursor, statement, parameters, _context, _executemany):
         if is_init_lock(statement, parameters):
+            first_lock = not getattr(thread_state, "init_lock_seen", False)
             thread_state.init_lock_seen = True
             lock_seen.set()
-            lock_barrier.wait(timeout=5)
+            if first_lock:
+                lock_barrier.wait(timeout=5)
         else:
             if not getattr(thread_state, "init_lock_seen", False):
                 database_access_before_lock.set()
@@ -1090,15 +1099,17 @@ def test_protected_vault_establishment_is_atomic_under_concurrency(vault, monkey
     event.listen(vault, "after_cursor_execute", synchronize_after_guard)
 
     def establish(index: int):
+        credential, registration = candidates[index]
         try:
             with vault.begin() as conn:
                 return vs.create_secret(
                     conn,
                     name="CONCURRENT_PROTECTED",
-                    sealed=_sealed(f"concurrent-{index}"),
+                    sealed=Sealed(ciphertext=f"candidate-{index}", nonce="n", wrap_meta=json.dumps(credential.wrap_meta(marker=index + 1))),
                     protection="protected",
                     establishing_vmk=True,
-                    authz_factor_registration={},
+                    authz_factor_registration=registration,
+                    authz_factor_origin=credential.origin,
                 )
         except vs.VaultServiceError as exc:
             return exc

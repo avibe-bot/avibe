@@ -1,8 +1,8 @@
 # Remote direct paths: the App's iroh transport (A2)
 
-Status: **Core written and inactive; not linked, not registered, not qualified.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The pull request that adds this document holds the core and its tests against stand-ins for the iroh binding; the `ios-shell` result for its head is in that pull request, not here. No App build links an iroh binary (`packaging/iroh-apple/release.json` is `pending`), nothing in the App creates the transport, and `AvibeApp` registers none.
+Status: **Core and its join to the proxy seam written; inactive, not registered, not qualified.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The core and its tests against stand-ins for the iroh binding came with #3659; the join to the proxy seam (section 8, item 2) came after #3537 merged. The published Apple artifact is pinned (#3662); linking it into the App is tracked separately, in #3685. Nothing in the App creates the transport, and `AvibeApp` registers none.
 
-This is not the whole of A2. The binding adapter, the join to the proxy seam, the registration, and everything that runs real iroh are still to be implemented and qualified (section 8). A build that registers a transport is a separate gate with its own approval and evidence; nothing here grants it.
+This is not the whole of A2. The binding adapter, the registration, and everything that runs real iroh are still to be implemented and qualified (section 8). A build that registers a transport is a separate gate with its own approval and evidence; nothing here grants it.
 
 Statements below are **rule** (what the code does), **read** (taken from the pinned source, not run), or **proposal** (a bound to be set from measurement).
 
@@ -16,7 +16,7 @@ Statements below are **rule** (what the code does), **read** (taken from the pin
 | `DirectIrohByteStream.swift` | One stream over the binding: `read`, `write`, `closeWrite`, `cancel`. |
 | `DirectIrohTransport.swift` | The transport: `select`, `deselect`, `pathDidFail`, `openStream`, the probe, and the reports. |
 
-The persistent-proxy seam (`DirectTransporting`, `DirectByteStream`, `DirectTarget`, `DirectStreamTag`, `DirectPathReport`) is in #3537, which is not merged. This code therefore names its own small value types (`DirectIrohSelection`, `DirectIrohStreamTag`, `DirectIrohReport`) with the same content, and its methods have the seam's shapes. Section 8 has the two conformances that join them.
+The persistent-proxy seam (`DirectTransporting`, `DirectByteStream`, `DirectTarget`, `DirectStreamTag`, `DirectPathReport`) came with #3537. The core was written before that merged, so it names its own small value types (`DirectIrohSelection`, `DirectIrohStreamTag`, `DirectIrohReport`) with the same content, and its methods have the seam's shapes. Section 8, item 2, has the conformances that join them.
 
 ## 2. What the generated binding does (read)
 
@@ -202,17 +202,38 @@ In `ios-shell`, on the simulator:
 
 ## 8. Still to implement and qualify
 
-None of this is in this pull request, and none of it is done. Each item follows its dependency.
+Item 2 is done; items 1 and 3 are not. Each follows its dependency.
 
 1. **After A1 links the gated binary:** `DirectIrohBinding`, the `DirectIrohEngine` over the generated types. A1 compiles the unmodified generated wrapper in its own Swift module, `IrohLib`; the adapter imports it and qualifies every generated name, so none enters the App's namespace. With the adapter:
    - tests with two real endpoints in one process over loopback: bind (no relay, the ID from the key equals `endpoint.id()`), a wrong identity, and the stream mapping;
    - **resource bounds against the real binding**, which the stand-ins cannot show: repeated cancellation of `connect`, `openBi`, `read`, and `writeAll`; a stream that opens late; both halves blocked on a live connection; and the end of a session. Each must show that the binding's leftover calls end and that their number is bounded. If a cancelled stream on a live connection cannot be bounded without closing the connection, that trade-off goes to a decision with these measurements; it is not accepted here.
    - the interoperability test against the published sidecar.
-2. **After #3537 merges:**
-   - `extension DirectIrohByteStream: DirectByteStream {}` and `extension DirectIrohTransport: DirectTransporting`, which maps `DirectTarget`, `DirectStreamTag`, and `DirectPathReport` to this file's types;
-   - the rendezvous closure: the runtime's primary WebView for the target, only while that runtime is current and its store is the target's, passed to `DirectRendezvousFetcher`;
-   - `NSLocalNetworkUsageDescription` in both locales;
-   - the transport passed to `AppModel` by `AvibeApp`. This is the line that makes a build use a transport. It waits for its own approval and for the evidence above, and #3537's shipped-App test keeps passing until then.
+2. **The seam, done (#3537 is merged).** `DirectIrohTransport.swift` ends with the whole mapping: `DirectIrohSelection(_: DirectTarget)`, `DirectIrohStreamTag(_: DirectStreamTag)`, `DirectPathReport(_: DirectIrohReport)`, `extension DirectIrohByteStream: DirectByteStream {}`, and `extension DirectIrohTransport: DirectTransporting`.
+   - **Which target is current has one authority, the path controller.** It exposes it read only as `selectedTarget`.
+   - **The rendezvous request runs in `AppModel.directRendezvousWebView(for:)`.** That is the runtime controller's live primary WebView, handed out only if all of these hold:
+     - the selection equals the controller's current target in every field;
+     - the account's data store is the target's;
+     - the target's runtime is the account's current one, shown or covered by Account.
+
+     Otherwise it is `nil`, which the transport treats as a page that is not ready yet. The fetcher still checks the page's origin before and after its request.
+   - **`DirectRendezvousWebViewSource` is the one late-bound link.** The transport is made before `AppModel`, which takes it at init, so the source is bound to the model once both exist. Unbound, it answers `pageNotReady` and asks nothing of the network.
+   - **Tests:** `DirectPathAppTests` covers the hook against every field and route. It also runs the transport, over the stand-in engine, as the App's own transport: the controller's target, the primary WebView, the report reaching the page, a stream and a failed candidate through the seam, and sign-out.
+   - **A loss is reported between detaching the path and closing it.** This holds for the background, an `unavailable` answer, a replacement answer, a failed probe, and a connection that closed by itself.
+     - The transport first stops whatever needs no report and detaches the path. Then it reports `lost`, then cancels the path's streams and closes its connection.
+     - After the report it does nothing more if the report started new work, such as another selection or a return to the foreground. That work is the new owner's.
+     - In that same turn the controller takes the claims of the committed relays it closes (`DirectListenerLifecycle.claimForEvent`) and records the closure. In the foreground the closure is published at once. In the background it is pending.
+     - A return is confirmed only once the listener has issued every relay close decided so far. Issued means the relays are cancelled and their authority ended; it does not wait for them to drain. Until then the re-bind attempt's successful completion is kept, the attempt stays current, and the foreground episode and its watchdog stay armed, so the existing foreground bound still applies.
+       - The last close handles the completion again, from the start, and confirms in that same main-actor turn.
+       - A fault already recorded is delivered first, and a background parks the attempt at once.
+       - Settling (publishing pending closures, answering held status requests) never waits. So the first status a successful return settles includes the closure, for connections that have been told to end. A return that ends in the listener fault answers `failed` at once.
+     - So a relay that the App or the path ended is counted once per host for the event, and never as one that ended on its own. The listener still drains the relays asynchronously and keeps their slots until their tasks end.
+     - Lease run-out still closes nothing. Closes for a stopped runtime or an account change still count nothing.
+     - The background loss is reported as `lostToBackground`. If the transport hears the background before the controller does, the controller enters its own background handling on that report, so the closure stays pending until the listener is ready again on the return (`remote-direct-ios.md` sections 9 and 10). Its own observer then finds the background already entered. In the other order the late report belongs to an ended selection and changes nothing.
+   - **Still nothing creates the transport,** and #3537's shipped-App test is unchanged.
+3. **Registration, with its own approval and the evidence of item 1:**
+   - `NSLocalNetworkUsageDescription` in both locales, using the approved copy;
+   - in `AvibeApp`: `DirectIrohTransport(engine: DirectIrohBinding(), fetchRendezvous: source.fetch)` passed to `AppModel`, then `source.appModel = model`. This is the line that makes a build use a transport. `source.fetch` holds the source weakly, so the App must keep the source for as long as the transport lives; otherwise every request is `pageNotReady`;
+   - #3537's shipped-App test flipped to its positive control.
 
 ## 9. Open
 

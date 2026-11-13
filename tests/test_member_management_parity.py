@@ -160,7 +160,8 @@ def test_complete_registered_api_management_inventory():
     # + 2 Desktop local enrollment methods (Owner and direct-loopback-only).
     # + 3 host-owned update check/channel/auto-update methods (Member).
     # + 1 fresh controller idle probe (Member and direct-loopback-only).
-    assert len(endpoints) == 331
+    # + 3 shared Vault setup and exact-target policy authorization methods.
+    assert len(endpoints) == 334
     idle_policy = http_authorization_policy("GET", "/api/desktop/update/idle")
     assert idle_policy.minimum_role == "member"
     assert idle_policy.direct_loopback_only
@@ -192,6 +193,9 @@ def test_complete_registered_api_management_inventory():
     for method, path in (
         ("POST", "/api/vault/secrets/{name}/accounts"),
         ("PATCH", "/api/vault/secrets/{name}/accounts/{account}"),
+        ("POST", "/api/vault/setup"),
+        ("POST", "/api/vault/secrets/{name}/signing-policy"),
+        ("POST", "/api/vault/secrets/{name}/signing-policy/challenge"),
     ):
         assert (method, path) in endpoints
         assert http_authorization_policy(method, path).minimum_role == "editor"
