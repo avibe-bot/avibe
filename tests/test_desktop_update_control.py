@@ -197,9 +197,15 @@ def test_malformed_control_receipt_does_not_damage_other_fields(tmp_path, change
     assert parsed["has_update"] and parsed["phase"] == "available"
 
 
-def test_active_receipt_relays_checking_without_erasing_previous_offer_and_expires(tmp_path, monkeypatch):
+@pytest.mark.parametrize("action,enabled,expected_phase", [
+    ("check", None, "checking"), ("prereleases", True, "checking"), ("auto_update", True, "available"),
+])
+def test_active_receipt_relays_checking_without_erasing_previous_offer_and_expires(
+    tmp_path, monkeypatch, action, enabled, expected_phase,
+):
     _, status = paths(tmp_path)
-    write_status(status, control_request=receipt(request()))
+    changes = {} if enabled is None else {"enabled": enabled}
+    write_status(status, control_request=receipt(request(action, **changes)))
     class Clock(datetime):
         moment = NOW
         @classmethod
@@ -207,7 +213,7 @@ def test_active_receipt_relays_checking_without_erasing_previous_offer_and_expir
             return cls.moment
     monkeypatch.setattr("vibe.desktop_update_status.datetime", Clock)
     snapshot = desktop_update_snapshot("3.2.6", status)
-    assert snapshot["phase"] == "checking"
+    assert snapshot["phase"] == expected_phase
     assert snapshot["latest"] == TARGET and snapshot["has_update"]
     assert snapshot["checked_at"] == control.timestamp(NOW)
     Clock.moment = NOW + timedelta(minutes=3)

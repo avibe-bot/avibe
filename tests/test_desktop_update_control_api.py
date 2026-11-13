@@ -128,7 +128,9 @@ def test_control_http_delivery_and_receipt_relay(monkeypatch, desktop, action, e
     assert not (root / "update-channel.json").exists()
     snapshot = api.get_version_info()
     assert snapshot["control_request"]["phase"] == phase
-    assert snapshot["phase"] == ("checking" if phase == "checking" else "available")
+    assert snapshot["phase"] == ("checking" if phase == "checking" and action != "auto-update" else "available")
+    assert snapshot["checked_at"] == base["checked_at"]
+    assert snapshot["latest"] == base["latest"] and snapshot["has_update"]
     assert snapshot["latest"] == "3.2.7"
 
 

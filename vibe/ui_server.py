@@ -3694,6 +3694,20 @@ async def desktop_capabilities():
     return response_payload
 
 
+@app.route("/api/desktop/update/idle")
+async def desktop_update_idle():
+    """A fresh local-controller observation, never a cached install grant."""
+    from vibe import internal_client
+
+    try:
+        payload = await internal_client.desktop_update_idle()
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        return jsonify({"idle_seconds": 0}), 503
+    result = jsonify(payload)
+    result.headers["Cache-Control"] = "no-store"
+    return result
+
+
 @app.route("/api/desktop/computer-use/status")
 async def desktop_computer_use_status():
     """Read the shell/daemon status from the shared desktop state contract."""

@@ -738,6 +738,8 @@ def http_authorization_policy(
         return HttpAuthorizationPolicy(None)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
+    if path == "/api/desktop/update/idle":
+        return HttpAuthorizationPolicy("member", direct_loopback_only=True)
     if path in {"/api/desktop/local-instance", "/api/desktop/local-instance/prepare"}:
         # Owner policy alone is insufficient: the handlers additionally enforce
         # direct loopback, and prepare requires exact Origin plus shared CSRF.

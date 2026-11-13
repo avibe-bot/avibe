@@ -65,6 +65,9 @@ partial panel release or version-number compatibility branch is allowed.
   checker/config preference. Install remains `/api/desktop/update/request` or
   `/api/upgrade` as appropriate, always with the exact target where the host
   supports it.
+- Policy-only `auto_update` controls preserve the native phase, manifest, latest
+  offer and original `checked_at` on success, expiry and save failure. Their
+  control receipt is not a discovery/checking state on any surface.
 - The Desktop auto-update default is a single native constant, currently off for
   both new and existing Desktop-managed installs. Standalone Runtime preserves
   its existing `update.auto_update` default and stored values.
@@ -103,6 +106,33 @@ New Runtime never sends control commands without capability support. A stale
 capability snapshot can at worst produce an unavailable/expired request, not an
 install or legacy-file mutation.
 
+## Automatic-update inactivity
+
+Window/presentation idleness is not Runtime idleness. The native scheduler reads
+`GET /api/desktop/update/idle` on its lifecycle-owned local loopback origin, never
+the selected remote Runtime. This direct-loopback-only read reaches the live
+controller through the existing authenticated control IPC. Old controllers,
+missing owners, malformed replies, timeouts and readiness/generation changes
+refuse unattended installation; manual exact-target installation still works.
+
+The controller clock starts cold at startup and observes real turn/message
+activity plus shared Activity and runtime-generation binding boundaries. These
+synchronous signals catch short turns, detached task failure/stop, completed
+outputs, outside-turn request sequences and lease release between native polls.
+Signals only reset the quiet clock; they never grant idle authority. Each probe
+also reads live turn gates, sinks, backend ownership, retained Activities and
+pending teardown even after a backend is removed from routing, and rereads the
+clock after asynchronous probes finish. The native policy requires 30 quiet
+minutes and keeps its interval/offer grace and exclusive updater busy gate.
+
+Recheck inactivity before discovery, before download, after payload signature
+verification, and at the actual replacement handoff: after macOS extraction and
+codesign immediately before rename; on Windows after helper preparation and
+before the shell exits. A refused Windows handoff terminates and joins only its
+owned preparation helper. A deferral leaves the current application and offer
+intact. Generation/target/request-lifetime validation is repeated at those same
+installer boundaries. No production app replacement is implied by fixture tests.
+
 ## Authorization-policy follow-up
 
 The owner removed the remote-install setting, not installation validation. Keep
@@ -132,7 +162,9 @@ editor/viewer or bypasses origin/CSRF protection.
   preference, `auto_update` control/receipt and capability mapping, idle/busy
   scheduling, one-check grace before install, preference-disable fencing at the
   installer edge, standalone policy mapping, and focused default/control/API
-  coverage. Controlled native lifecycle acceptance remains a separate gate.
+  coverage. Follow-up review adds the controller-owned inactivity observation,
+  retained-work coverage, final platform handoff checks and policy-only state
+  preservation. Controlled native lifecycle acceptance remains a separate gate.
 - Disposable macOS/Windows CI and exact-head Codex review for this new slice are
   still gates, not claimed results. No signed application replacement has been
   exercised in this step; controlled disposable native acceptance remains a

@@ -1,4 +1,5 @@
 //! Desktop updater owned by the native shell and controlled by its Workbench popover.
+mod activity;
 mod control;
 
 use avibe_runtime_host::update_control::ControlStatus;
@@ -643,6 +644,10 @@ async fn auto_update_loop(app: AppHandle) {
             continue;
         }
         if !automatic_check_due(now, idle_since, next_check) {
+            continue;
+        }
+        if activity::ready(&app).await.is_err() {
+            idle_since = Instant::now();
             continue;
         }
         auto_update_tick(&app, &mut offered).await;
@@ -1308,13 +1313,22 @@ pub fn desktop_update_auto_update_set(window: WebviewWindow, app: AppHandle, ena
 
 fn set_auto_update(app: &AppHandle, enabled: bool) -> Result<bool, String> {
     let updater = app.state::<Updater>();
-    if updater.busy.load(Ordering::SeqCst) {
-        return Err("Automatic updates cannot change while an update is in progress.".to_owned());
+    {
+        let mut state = updater.state.lock().expect("updater state");
+        if updater.busy.load(Ordering::SeqCst) {
+            return Err("Automatic updates cannot change while an update is in progress.".to_owned());
+        }
+        persist_auto_update_preference(&updater.auto_update_path, enabled)
+            .map_err(|error| format!("The automatic-update preference could not be saved: {error}"))?;
+        state.auto_update = enabled;
+        // A policy save is not a check. Keep the offer and its original time;
+        // before the first check there is still no conclusion to publish.
+        if let Some(record) = updater.status.read().ok().flatten() {
+            if let Err(error) = updater.status.write(&record.with_auto_update(Some(enabled))) {
+                eprintln!("desktop automatic-update policy status: {error}");
+            }
+        }
     }
-    persist_auto_update_preference(&updater.auto_update_path, enabled)
-        .map_err(|error| format!("The automatic-update preference could not be saved: {error}"))?;
-    updater.state.lock().expect("updater state").auto_update = enabled;
-    publish_status(app);
     emit_state(app);
     Ok(enabled)
 }
@@ -1615,6 +1629,27 @@ fn auto_update_enabled(app: &AppHandle) -> bool {
     app.state::<Updater>().state.lock().expect("updater state").auto_update
 }
 
+/// Called only by the blocking installer, both after payload verification and
+/// after platform preparation immediately before replacement or shell exit.
+fn install_edge_current(
+    app: &AppHandle,
+    generation: Option<u64>,
+    remote: Option<&RemoteInstallContext>,
+    automatic: bool,
+) -> Result<(), String> {
+    if automatic {
+        tauri::async_runtime::block_on(activity::ready(app))?;
+    }
+    install_generation_current(app, generation)?;
+    if let Some(remote) = remote {
+        if let Err(error) = reread_remote_request(app, remote) {
+            let code = record_remote_gate_failure(app, remote, error);
+            return Err(format!("remote_request_gate:{code}"));
+        }
+    }
+    Ok(())
+}
+
 fn install_in_generation(
     app: AppHandle,
     manifest: Manifest,
@@ -1661,6 +1696,9 @@ fn install_in_generation(
     tauri::async_runtime::spawn(async move {
         let result = async {
             install_generation_current(&app, generation)?;
+            if automatic {
+                activity::ready(&app).await?;
+            }
             let artifact = manifest
                 .validate(manifest.channel, &manifest.tag, &manifest.source_sha, TARGET)?
                 .clone();
@@ -1705,16 +1743,7 @@ fn install_in_generation(
                 update::install_verified(download, &artifact, KEY, |data| {
                     // Verification/download may finish after the user leaves
                     // this account or instance. Recheck at the installer edge.
-                    if automatic && !auto_update_enabled(&handle) {
-                        return Err("auto_update_disabled".into());
-                    }
-                    install_generation_current(&handle, generation)?;
-                    if let Some(remote) = &install_remote {
-                        if let Err(error) = reread_remote_request(&handle, remote) {
-                            let code = record_remote_gate_failure(&handle, remote, error);
-                            return Err(format!("remote_request_gate:{code}"));
-                        }
-                    }
+                    install_edge_current(&handle, generation, install_remote.as_ref(), automatic)?;
                     set_state(&handle, Phase::Installing, None);
                     if let Some(remote) = &install_remote {
                         set_remote_phase(
@@ -1728,18 +1757,24 @@ fn install_in_generation(
                     }
                     let before_exit_remote = install_remote.clone();
                     let before_exit_app = handle.clone();
-                    super::update_install::install_with_before_exit(&handle, data, &install_version, move || {
-                        if let Some(remote) = before_exit_remote {
-                            set_remote_phase(
-                                &before_exit_app,
-                                &remote.request_id,
-                                &remote.target,
-                                RemoteRequestPhase::Restarting,
-                                None,
-                                None,
-                            );
-                        }
-                    })
+                    super::update_install::install_with_before_exit(
+                        &handle,
+                        data,
+                        &install_version,
+                        || install_edge_current(&handle, generation, install_remote.as_ref(), automatic),
+                        move || {
+                            if let Some(remote) = before_exit_remote {
+                                set_remote_phase(
+                                    &before_exit_app,
+                                    &remote.request_id,
+                                    &remote.target,
+                                    RemoteRequestPhase::Restarting,
+                                    None,
+                                    None,
+                                );
+                            }
+                        },
+                    )
                 })
             })
             .await
@@ -1769,7 +1804,7 @@ fn install_in_generation(
             }
             Err(error) => {
                 eprintln!("desktop update install: {error}");
-                if error == "auto_update_disabled" {
+                if matches!(error.as_str(), "auto_update_disabled" | "runtime_not_idle") {
                     set_state(&app, Phase::Available, None);
                     settle_update(&app, None, Settlement::Completed);
                     return;

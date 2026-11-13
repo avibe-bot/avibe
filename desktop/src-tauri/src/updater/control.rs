@@ -33,9 +33,41 @@ fn claim(state: &mut State, busy: &AtomicBool, request: &ControlRequest, now: Sy
     Claim::Start
 }
 
+fn phase_for_action(action: ControlAction, phase: Phase) -> Option<Phase> {
+    (action != ControlAction::AutoUpdate).then_some(phase)
+}
+
+fn set_discovery_phase(app: &AppHandle, request: &ControlRequest, phase: Phase) {
+    if let Some(phase) = phase_for_action(request.action, phase) {
+        set_state(app, phase, None);
+    }
+}
+
+fn status_for_action(
+    state: &State,
+    current: &str,
+    now: SystemTime,
+    previous: Option<UpdateStatusRecord>,
+) -> Option<UpdateStatusRecord> {
+    if state
+        .control_request
+        .as_ref()
+        .is_some_and(|request| request.action == ControlAction::AutoUpdate)
+    {
+        previous
+    } else {
+        status_for_publish(state, current, previous, now)
+    }
+}
+
 fn write_status(app: &AppHandle, state: &State) -> bool {
     let updater = app.state::<Updater>();
-    let Some(record) = base_status(app, state) else {
+    let Some(record) = status_for_action(
+        state,
+        &app.package_info().version.to_string(),
+        SystemTime::now(),
+        updater.status.read().ok().flatten(),
+    ) else {
         return false;
     };
     let record = record
@@ -120,11 +152,11 @@ pub(super) fn poll(app: &AppHandle) {
         record(app);
         return;
     }
-    set_state(app, Phase::Checking, None);
+    set_discovery_phase(app, &request, Phase::Checking);
     if !record(app) {
         // Without a durable acknowledgement the Runtime cannot know who owns
         // this request; do not perform its persistent channel mutation.
-        set_state(app, Phase::Error, None);
+        set_discovery_phase(app, &request, Phase::Error);
         finish(app, &request, ControlPhase::Failed, Some("status_unavailable"));
         return;
     }
@@ -134,7 +166,7 @@ pub(super) fn poll(app: &AppHandle) {
 
 async fn run(app: AppHandle, path: PathBuf, request: ControlRequest) {
     if let Err(code) = revalidate(&path, &request, SystemTime::now()) {
-        set_state(&app, Phase::Error, None);
+        set_discovery_phase(&app, &request, Phase::Error);
         finish(&app, &request, ControlPhase::Expired, Some(code));
         return;
     }
@@ -149,7 +181,6 @@ async fn run(app: AppHandle, path: PathBuf, request: ControlRequest) {
         };
         if let Err(error) = saved {
             eprintln!("desktop auto-update control: {error}");
-            set_state(&app, Phase::Error, None);
             finish(&app, &request, ControlPhase::Failed, Some("auto_update_save_failed"));
             return;
         }
@@ -190,7 +221,7 @@ async fn run(app: AppHandle, path: PathBuf, request: ControlRequest) {
     )
     .await;
     if let Err(code) = revalidate(&path, &request, SystemTime::now()) {
-        set_state(&app, Phase::Error, None);
+        set_discovery_phase(&app, &request, Phase::Error);
         finish(&app, &request, ControlPhase::Expired, Some(code));
         return;
     }
@@ -241,6 +272,48 @@ mod tests {
             remote_request: None,
             active_request: None,
             control_request: None,
+        }
+    }
+
+    #[test]
+    fn policy_only_control_keeps_the_offer_and_original_check_on_every_outcome() {
+        let mut request = request();
+        request.action = ControlAction::AutoUpdate;
+        request.enabled = Some(true);
+        for (outcome, code) in [
+            (ControlPhase::Completed, None),
+            (ControlPhase::Failed, Some("auto_update_save_failed")),
+            (ControlPhase::Failed, Some("status_unavailable")),
+            (ControlPhase::Expired, Some("expired")),
+        ] {
+            let mut state = state();
+            state.phase = Phase::Available;
+            state.latest = Some("3.1.2".into());
+            state.manifest = Some(
+                serde_json::from_str(include_str!(
+                    "../../../runtime-host/tests/fixtures/updater/stable-aarch64-apple-darwin.json"
+                ))
+                .unwrap(),
+            );
+            state.availability_interactive = true;
+            let original = check_record(&state, "3.1.1", SystemTime::UNIX_EPOCH).unwrap();
+            let busy = AtomicBool::new(false);
+            assert_eq!(claim(&mut state, &busy, &request, SystemTime::now()), Claim::Start);
+            for phase in [Phase::Checking, Phase::Error] {
+                assert_eq!(phase_for_action(request.action, phase), None);
+                assert_eq!(phase_for_action(ControlAction::Check, phase), Some(phase));
+                assert_eq!(phase_for_action(ControlAction::Prereleases, phase), Some(phase));
+            }
+            assert!(settle(&mut state, &busy, &request, outcome, code));
+            assert_eq!(state.phase, Phase::Available);
+            assert_eq!(state.latest.as_deref(), Some("3.1.2"));
+            assert_eq!(state.manifest.as_ref().unwrap().version, "3.1.2");
+            assert!(state.availability_interactive);
+            let record = status_for_action(&state, "3.1.1", SystemTime::now(), Some(original.clone())).unwrap();
+            assert_eq!(record.checked_at, original.checked_at);
+            assert_eq!(record.latest, original.latest);
+            assert_eq!(record.phase, original.phase);
+            assert!(status_for_action(&state, "3.1.1", SystemTime::now(), None).is_none());
         }
     }
 

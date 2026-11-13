@@ -264,7 +264,8 @@ def desktop_update_snapshot(runtime_version: str, path: Path | None = None) -> d
         created = datetime.fromisoformat(control["created_at"].replace("Z", "+00:00"))
         expires = datetime.fromisoformat(control["expires_at"].replace("Z", "+00:00"))
         if created <= now < expires:
-            phase = "checking"
+            if control["action"] != "auto_update":
+                phase = "checking"
         else:
             control = {**control, "phase": "expired", "error_code": "expired"}
     return {
