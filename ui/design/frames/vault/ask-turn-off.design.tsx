@@ -40,6 +40,7 @@ const designFrames = frames([
   edit('key-setup-required', '签名密钥 · 还没有 Passkey（说明在哪设置）', failed('setup_required')),
   edit('key-expired', '签名密钥 · 确认超时，没有关闭', failed('expired')),
   edit('key-clock-skew', '签名密钥 · 设备时间不准', failed('clock_skew')),
+  edit('key-not-visible', '签名密钥 · 确认窗口没完整显示', failed('not_visible')),
   edit('key-factor-unavailable', '签名密钥 · Passkey 现在不能用于确认', failed('factor_unavailable')),
   edit('key-legacy-registration', '签名密钥 · 较早版本设置的 Passkey，暂不能确认', failed('legacy_registration')),
   edit('key-changed', '签名密钥 · 在别处改过', failed('changed')),
