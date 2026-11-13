@@ -6,6 +6,7 @@ import { BotRosterProvider } from '@/context/BotRosterProvider';
 import { BotsProvider } from '@/context/BotsProvider';
 import { DockContext, type DockValue } from '@/context/DockContext';
 import { ShowPageDragContext, type ShowPageDragValue } from '@/context/showPageDrag';
+import { AskTurnOffStateOverride, type AskTurnOffState } from '@/lib/useAskTurnOff';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { StatusContext, type RuntimeStatus } from '@/context/StatusContext';
 import { ThemeContext } from '@/context/ThemeContext';
@@ -108,6 +109,8 @@ const showPageDrag = inert<ShowPageDragValue>({ active: false });
 /** The providers the Workbench surfaces read, served from fixtures. The API and Bots providers are the
  *  real ones, reading the frame's API fixtures through the network stub (`apiResponses`); the Bots
  *  provider publishes its roster to the real roster bridge the Inbox sorts by. */
+const UNAVAILABLE: AskTurnOffState = { phase: 'unavailable' };
+
 export function DesignShell({
   fixtures = {},
   route = '/',
@@ -140,6 +143,7 @@ export function DesignShell({
       <ToastProvider>
         <ApiProvider>
           <InstanceAuthorizationContext.Provider value={authorization}>
+          <AskTurnOffStateOverride.Provider value={fixtures.askTurnOff ?? UNAVAILABLE}>
             <UnsavedChangesContext.Provider value={{ setRegistration: () => {}, authorizeRouteAction: () => null }}>
               <WindowManagerContext.Provider value={inert<WindowManagerValue>({ windows: [], focusedId: null, gestureActive: false })}>
                 <WorkbenchInboxContext.Provider value={inbox}>
@@ -159,6 +163,7 @@ export function DesignShell({
                 </WorkbenchInboxContext.Provider>
               </WindowManagerContext.Provider>
             </UnsavedChangesContext.Provider>
+          </AskTurnOffStateOverride.Provider>
           </InstanceAuthorizationContext.Provider>
         </ApiProvider>
       </ToastProvider>
