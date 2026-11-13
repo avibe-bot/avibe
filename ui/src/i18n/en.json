@@ -3262,6 +3262,7 @@
     "pairing_recovery_not_ready": "There is no saved response to recover. Pairing may still be running or may have consumed the key. Check the cloud console and wait for any active attempt to finish before explicitly using a fresh key.",
     "pairing_recovery_revoked": "A local unpair operation invalidated this recovery record. Refresh the status; if you want to pair again, explicitly submit a fresh key.",
     "pairing_redeem_indeterminate": "The key may have been consumed, but no recoverable response is guaranteed. Do not reuse it. Check the cloud console and ensure no pairing is still running before explicitly using a fresh key.",
+    "pairing_redeem_pending": "This pairing attempt is still being processed. Wait briefly, then retry the same attempt. Keep its saved recovery information and do not create a new pairing key.",
     "pairing_superseded_after_redeem": "A newer local operation or identity change prevents this result from being applied. Refresh the status and keep the newer pairing if intended. Do not reuse the submitted key.",
     "pairing_reconciliation_failed": "The saved configuration and local identity could not be reconciled. Check local configuration and storage, refresh, then use the offered recovery action. Do not resubmit the one-time key.",
     "pairing_retirement_failed": "The local pairing record could not be cleaned up. Fix local storage and refresh, then use the offered resume or cleanup action. If none is available, check the cloud console before explicitly using a fresh key.",

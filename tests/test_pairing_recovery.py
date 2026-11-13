@@ -988,12 +988,12 @@ def test_duplicate_selection_cannot_resume_a_superseding_operation(pairing_host,
     persist = remote_access._persist_pairing
     later_record = []
 
-    def supersede_before_duplicate_resume(result, *, device_name, operation_id=None):
+    def supersede_before_duplicate_resume(result, *, device_name, operation_id=None, expected_claim=None):
         if result is None and operation_id:
             _fail_config_publication_once(monkeypatch)
             assert not remote_access.pair("key_B", "https://backend.test")["ok"]
             later_record.append((root / "state/pending-pairing.json").read_bytes())
-        return persist(result, device_name=device_name, operation_id=operation_id)
+        return persist(result, device_name=device_name, operation_id=operation_id, expected_claim=expected_claim)
 
     monkeypatch.setattr(remote_access, "_persist_pairing", supersede_before_duplicate_resume)
     result = remote_access.pair("key_A", "https://backend.test")

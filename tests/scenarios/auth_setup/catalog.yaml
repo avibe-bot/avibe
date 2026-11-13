@@ -1116,4 +1116,92 @@ scenarios:
       fresh-install Incus environment by sending a simulated redirect with a test
       code to localhost:1455 inside the instance, which the forwarder handed to the
       engine and the flow ended on the provider's refusal of that code, no paste.
+  - id: AUTH-SETUP-170
+    name: Desktop account invitation preserves confirmed local Setup completion across both exit choices
+    status: gap
+    kind: happy_path
+    layer: scenario
+    backend: desktop
+    reason: Bundled UI and native integration evidence is owned by the Phase 1 UI and native PRs.
+  - id: AUTH-SETUP-171
+    name: Desktop enrollment and remote access require full live account authentication including the second factor
+    status: gap
+    kind: authorization
+    layer: scenario
+    backend: desktop
+    reason: Actual backend session and native account producer-consumer evidence is pending.
+  - id: AUTH-SETUP-172
+    name: One Desktop installation retains one instance and device across concurrency, lost replies, and restart
+    status: partial
+    kind: retry
+    layer: scenario
+    backend: desktop
+    missing_layer: backend-native-producer-consumer
+    reason: Runtime recovery runs against a fixture redemption peer; backend atomic enrollment and real native transport need the assembled chain.
+    partial_evidence:
+      covers: Actual local handlers persist retry inputs before redemption and a fresh consumer recovers the identical request and binding.
+      test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_desktop_enrollment_recovery_and_relogin_closed_loop
+  - id: AUTH-SETUP-173
+    name: Desktop registration preserves foreign bindings and pending accounts under concurrent local changes
+    status: partial
+    kind: concurrency
+    layer: contract
+    backend: desktop
+    missing_layer: backend-native-producer-consumer
+    reason: Runtime compare-and-apply is covered; canonical cloud owner refusal remains a backend and native integration obligation.
+    partial_evidence:
+      covers: A delayed real pairing publication cannot overwrite a binding changed during redemption.
+      test: tests/test_desktop_local_instance.py::test_delayed_desktop_redeem_cannot_publish_over_new_binding
+    supporting_tests:
+      - tests/test_desktop_local_instance.py::test_concurrent_prepare_reserves_one_account
+  - id: AUTH-SETUP-174
+    name: First Desktop pairing enables remote access while later matching-owner login preserves Off
+    status: partial
+    kind: happy_path
+    layer: scenario
+    backend: desktop
+    missing_layer: native-producer-consumer
+    reason: Real Runtime config and stop intent are exercised with a fixture connector; native matching-owner login and readiness need integration.
+    partial_evidence:
+      covers: Pair enables and invokes start once, then a stopped Runtime remains stopped through local prepare.
+      test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_desktop_enrollment_recovery_and_relogin_closed_loop
+  - id: AUTH-SETUP-175
+    name: Desktop commits only a fresh authorized catalog tuple and current matching remote identity
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: desktop
+    missing_layer: native-producer-consumer
+    reason: Runtime projection is covered; fresh catalog resolution and atomic native selection remain native integration obligations.
+    partial_evidence:
+      covers: The real session endpoint projects instance_id only with current authorization, never in unavailable or revoked states.
+      test: tests/test_remote_authorization_revision.py::test_session_endpoint_only_adds_fields_to_its_released_shape
+  - id: AUTH-SETUP-176
+    name: Desktop switch, cancel, logout, and restart fence late callbacks while local work continues
+    status: gap
+    kind: concurrency
+    layer: scenario
+    backend: desktop
+    reason: Native coordinator and lifecycle integration evidence is pending.
+  - id: AUTH-SETUP-177
+    name: Remote and embedded documents gain no Desktop local capability or account credentials
+    status: gap
+    kind: authorization
+    layer: contract
+    backend: desktop
+    reason: Native caller admission, store isolation, and bundled UI integration evidence is pending.
+  - id: AUTH-SETUP-178
+    name: Desktop footer geometry and local updater scope hold across locale, theme, window size, and target
+    status: gap
+    kind: accessibility
+    layer: contract
+    backend: desktop
+    reason: Production UI geometry and bundled asset evidence is owned by the Phase 1 UI PR.
+  - id: AUTH-SETUP-179
+    name: Remote Phase 1 disables local Mini and notifications visibly and local return restores local sources
+    status: gap
+    kind: authorization
+    layer: scenario
+    backend: desktop
+    reason: Native auxiliary lifecycle and UI limitation evidence is pending.
 next_priority: []

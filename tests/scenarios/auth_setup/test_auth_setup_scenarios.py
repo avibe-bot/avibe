@@ -55,6 +55,8 @@ from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, CliCommandObservations, FakeProcess, save_direct_auth_config
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
+from tests.test_desktop_local_instance import desktop_host as desktop_host
+from tests.test_pairing_recovery import pairing_host as pairing_host
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
     CustodiedNativeOAuthScenarioHarness,
@@ -6052,3 +6054,72 @@ def test_avault_keychain_authorization_recovers_a_failed_vault_call(monkeypatch,
     assert retried.status_code == 200
     assert retried.get_json()["public_key"] == "pk"
     assert avault.calls().count("key authorize") == 1
+
+
+@pytest.mark.parametrize("first_outcome", ["lost_reply", "pending"])
+def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monkeypatch, first_outcome):
+    """AUTH-SETUP-172, AUTH-SETUP-174: lost reply -> recovered pair -> Off -> relogin.
+
+    The real HTTP/config/recovery owners run; the backend and connector are
+    fixture peers. Actual cross-product transport evidence belongs to S1.
+    """
+    from tests.test_desktop_local_instance import _prepare, _pair_body
+    from tests.test_pairing_recovery import _response
+
+    starts = []
+    def start(config):
+        starts.append(config.remote_access.vibe_cloud.instance_id)
+        assert config.remote_access.vibe_cloud.enabled
+        remote_access._connector_requested_path().touch()
+        return {"ok": True, "running": True}
+    monkeypatch.setattr(remote_access, "start", start)
+    prepared = _prepare(desktop_host).get_json()
+    calls = []
+
+    def redeem(_url, payload, **_kwargs):
+        saved, error = remote_access._read_pending_pairing_record()
+        assert error is None and saved["redeem_request"] == payload
+        calls.append(dict(payload))
+        if len(calls) == 1:
+            if first_outcome == "pending":
+                raise remote_access.BackendRequestError(409, {
+                    "error": "pairing_redeem_pending", "retry_after_seconds": 1,
+                })
+            raise OSError("fixture dropped reply after device creation")
+        return _response("唯一实例")
+
+    monkeypatch.setattr(remote_access, "_json_request", redeem)
+    first = desktop_host.post("/api/remote-access/vibe-cloud/pair",
+                              json=_pair_body(prepared), headers=csrf_headers(desktop_host))
+    assert first.get_json()["pairing"]["recoverable"] is True
+    assert first.status_code == 400
+    if first_outcome == "pending":
+        assert first.get_json() == {
+            "ok": False, "error": "pairing_redeem_pending", "status": 409,
+            "retry_after_seconds": 1,
+            "pairing": {"ok": False, "recoverable": True, "cause": "pairing_redeem_pending"},
+        }
+    snapshot = desktop_host.get("/api/desktop/local-instance").get_json()
+    assert snapshot["enrollment"]["state"] == "redeeming"
+    assert calls[0]["redeem_request_id"] not in json.dumps(snapshot)
+    assert calls[0]["pairing_key"] not in json.dumps(snapshot)
+    # No UI-provided key, no memory cache, and no recomputed device/origin inputs.
+    client = ui_server.app.test_client()
+    resumed = client.post("/api/remote-access/vibe-cloud/pair", json={"pairing_key": ""},
+                          headers=csrf_headers(client))
+    assert resumed.status_code == 200, resumed.get_json()
+    assert calls[0] == calls[1]
+    assert client.get("/api/desktop/local-instance").get_json()["pairing"]["instance_id"] == "唯一实例"
+    assert V2Config.load().remote_access.vibe_cloud.instance_secret == "fixture-secret-唯一实例"
+    assert not remote_access._pending_pairing_path().exists()
+
+
+    assert starts == ["唯一实例"]
+    # stop() owns durable intent. No connector was launched by this fixture.
+    assert remote_access.stop()["ok"]
+    before = V2Config.load().remote_access
+    relogin = _prepare(client).get_json()
+    assert relogin["operation_id"] is None
+    assert relogin["local"]["remote_access"]["requested"] is False
+    assert V2Config.load().remote_access == before
+    assert starts == ["唯一实例"]

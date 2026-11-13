@@ -110,6 +110,8 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("GET", "/api/desktop/local-instance"),
+    ("POST", "/api/desktop/local-instance/prepare"),
     ("POST", "/api/remote-access/direct/suspend"),
     ("POST", "/api/wechat/qr_login/start"),
     ("POST", "/api/wechat/qr_login/poll"),
@@ -145,7 +147,16 @@ def test_complete_registered_api_management_inventory():
     # + 1 direct lifecycle suspend (Owner, with an additional local-only token guard)
     # + 2 HD account metadata mutations (Editor, like other Vault metadata;
     # the service also requires resource-management authority).
-    assert len(endpoints) == 325
+    # + 2 Desktop local enrollment methods (Owner and direct-loopback-only).
+    assert len(endpoints) == 327
+    for method, path in (
+        ("GET", "/api/desktop/local-instance"),
+        ("POST", "/api/desktop/local-instance/prepare"),
+    ):
+        assert (method, path) in endpoints
+        policy = http_authorization_policy(method, path)
+        assert policy.minimum_role == "owner"
+        assert policy.direct_loopback_only
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):
@@ -211,6 +222,19 @@ def test_complete_registered_api_management_inventory():
                 if role is None:
                     assert not context.has_role(minimum), (method, raw)
     assert actual_read_roles == baseline_read_roles
+
+
+@pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer"])
+def test_desktop_local_enrollment_refuses_every_remote_role(management_http, role):
+    """Cloud ownership never authorizes a Desktop local enrollment mutation."""
+    request_http = management_http(role)
+    for method, path in (
+        ("GET", "/api/desktop/local-instance"),
+        ("POST", "/api/desktop/local-instance/prepare"),
+    ):
+        response = request_http(method, path, payload={} if method == "POST" else None)
+        assert response.status_code == 403
+        assert response.get_json() == {"ok": False, "error": "direct_loopback_required"}
 
 
 @pytest.mark.parametrize("role, status", [("editor", 403), ("member", 200), ("owner", 200)])
