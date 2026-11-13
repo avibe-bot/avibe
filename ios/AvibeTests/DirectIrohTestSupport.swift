@@ -439,6 +439,7 @@ final class DirectIrohManualClock: @unchecked Sendable {
     private let lock = NSLock()
     private var current: TimeInterval = 1_000
     private var jump: (afterReads: Int, seconds: TimeInterval)?
+    private var held: (reached: DirectIrohPending<Void>, release: DispatchSemaphore)?
 
     var now: TimeInterval {
         get {
@@ -451,7 +452,20 @@ final class DirectIrohManualClock: @unchecked Sendable {
 
     /// What the transport reads. Counts the read.
     func read() -> TimeInterval {
-        lock.withLock {
+        // A read that is being held stops here, where a network action's
+        // task asks whether it may start, before it starts anything.
+        let hold: (reached: DirectIrohPending<Void>, release: DispatchSemaphore)? = lock.withLock {
+            guard !Thread.isMainThread, let waiting = held else {
+                return nil
+            }
+            held = nil
+            return waiting
+        }
+        if let hold {
+            hold.reached.resolve(())
+            hold.release.wait()
+        }
+        return lock.withLock {
             let value = current
             if let pending = jump {
                 if pending.afterReads <= 1 {
@@ -463,6 +477,19 @@ final class DirectIrohManualClock: @unchecked Sendable {
             }
             return value
         }
+    }
+
+    /// Holds the next read made off the main thread, which is the one a
+    /// network action's task makes just before it would start: the task
+    /// was set going and has not reached the binding. `reached` resolves
+    /// when the task is there; `release` lets it go on.
+    func holdNextBackgroundRead() -> (reached: DirectIrohPending<Void>, release: () -> Void) {
+        let reached = DirectIrohPending<Void>()
+        let semaphore = DispatchSemaphore(value: 0)
+        lock.withLock {
+            held = (reached, semaphore)
+        }
+        return (reached, { semaphore.signal() })
     }
 
     /// Moves the clock forward once the transport has read it `reads`

@@ -256,7 +256,7 @@ final class DirectRendezvousFetcherTests: XCTestCase {
         let client = client
         do {
             let data: Data = try await directIrohDeadline(180) {
-                try await directIrohCall {
+                try await directIrohCall(allowed: { true }) {
                     try await DirectRendezvousFetcher.fetch(
                         in: webView,
                         origin: origin,

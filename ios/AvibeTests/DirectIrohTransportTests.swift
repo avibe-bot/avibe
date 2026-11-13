@@ -783,6 +783,183 @@ final class DirectIrohTransportTests: XCTestCase {
         }
     }
 
+    func testAStageThatWasSetGoingStartsNothingOnceItsDialHasEnded() async throws {
+        // In each case the bind's task is under way and has not reached
+        // the binding: it is held where it asks whether it may start. The
+        // dial ends meanwhile. The lease is still good for minutes, so only
+        // the dial's ending keeps the bind from starting.
+        var impatient = Harness.patientTiming
+        impatient.bindSeconds = 0.05
+
+        // The dial's own bound ends it, and then the instance withdraws.
+        do {
+            let harness = Harness(timing: impatient)
+            let hold = harness.clock.holdNextBackgroundRead()
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await hold.reached.wait()
+            try await eventually("the dial gives up and sets its retry") {
+                harness.scheduler.pending == [0.25]
+            }
+            harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 90))
+            XCTAssertTrue(harness.scheduler.fire(0.25))
+            try await eventually("the instance's wait is kept") { harness.scheduler.pending == [90] }
+
+            hold.release()
+            try await Task.sleep(nanoseconds: 150_000_000)
+            XCTAssertEqual(harness.log.all, ["key"])
+            XCTAssertEqual(harness.reports, [])
+            XCTAssertEqual(harness.scheduler.pending, [90])
+        }
+        // The dial's own bound ends it, and then the selection ends.
+        do {
+            let harness = Harness(timing: impatient)
+            let hold = harness.clock.holdNextBackgroundRead()
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await hold.reached.wait()
+            try await eventually("the dial gives up and sets its retry") {
+                harness.scheduler.pending == [0.25]
+            }
+            harness.transport.deselect()
+
+            hold.release()
+            try await Task.sleep(nanoseconds: 150_000_000)
+            XCTAssertEqual(harness.log.all, ["key"])
+            XCTAssertEqual(harness.scheduler.pending, [])
+        }
+        // The dial is still waiting for its bind when the instance
+        // withdraws, and when the App goes to the background.
+        do {
+            let harness = Harness()
+            let hold = harness.clock.holdNextBackgroundRead()
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await hold.reached.wait()
+            harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 90))
+            XCTAssertTrue(harness.scheduler.fire(240))
+            try await eventually("the instance's wait is kept") { harness.scheduler.pending == [90] }
+
+            hold.release()
+            try await Task.sleep(nanoseconds: 150_000_000)
+            XCTAssertEqual(harness.log.all, ["key"])
+            XCTAssertEqual(harness.reports, [])
+        }
+        do {
+            let harness = Harness()
+            let hold = harness.clock.holdNextBackgroundRead()
+            harness.rendezvous.answer(DirectIrohFixtures.ready(client: harness.engine.key.endpointID))
+            harness.select()
+            try await hold.reached.wait()
+            harness.notifications.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+
+            hold.release()
+            try await Task.sleep(nanoseconds: 150_000_000)
+            XCTAssertEqual(harness.log.all, ["key"])
+            XCTAssertEqual(harness.scheduler.pending, [])
+        }
+    }
+
+    func testARenewalWhileAProbeIsUnderWayReplacesTheProbeAndKeepsThePath() async throws {
+        // A probe for a failed candidate.
+        do {
+            let harness = Harness()
+            // What each stream reads first, in the order the streams open:
+            // the dial's probe, a relay, and the replacement probe. The
+            // first probe's stream opens last, and late.
+            let connection = try await harness.bringUp(
+                generation: "boot:1",
+                answers: [
+                    DirectIrohFakeConnection.established,
+                    DirectIrohFakeConnection.established,
+                    DirectIrohFakeConnection.established,
+                ]
+            )
+            try await eventually("the dial's probe is abandoned") {
+                harness.log.count(of: "reset") == 1
+            }
+            let relay = try await harness.transport.openStream(for: harness.tag("boot:1", path: 2))
+            let gate = connection.holdNextOpen()
+            harness.transport.pathDidFail(for: harness.tag("boot:1", path: 2))
+            try await eventually("the probe's open reaches the binding") {
+                harness.log.count(of: "open") == 3
+            }
+
+            // Inside the first lease, an answer of the same generation is
+            // accepted. The probe under way is retired with the lease it
+            // ran under, and the same question is asked under the new one.
+            harness.clock.now += 100
+            harness.rendezvous.answer(
+                DirectIrohFixtures.ready(generation: "boot:1", client: harness.engine.key.endpointID)
+            )
+            XCTAssertTrue(harness.scheduler.fire(240))
+            try await eventually("the replacement probe is answered") {
+                harness.log.count(of: "open") == 4 && harness.scheduler.pending.contains(1)
+            }
+
+            // The clock passes the first lease's deadline, inside the
+            // second. The first probe's stream opens at last: it is
+            // abandoned, nothing more of that probe starts, and its end is
+            // no verdict on the path.
+            harness.clock.now += 250
+            gate.resolve(())
+            try await eventually("the late stream is abandoned") {
+                harness.log.count(of: "reset") == 3
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(harness.log.count(of: "write"), 2)
+            XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+            XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+            try await relay.write(Data("x".utf8))
+            _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 2))
+        }
+        // A probe after a network change.
+        do {
+            let harness = Harness()
+            // The dial's probe, then the replacement probe.
+            let connection = try await harness.bringUp(
+                generation: "boot:1",
+                answers: [
+                    DirectIrohFakeConnection.established,
+                    DirectIrohFakeConnection.established,
+                ]
+            )
+            try await eventually("the dial's probe is abandoned") {
+                harness.log.count(of: "reset") == 1
+            }
+            let gate = connection.holdNextOpen()
+            harness.network.change()
+            XCTAssertTrue(harness.scheduler.fire(0.5))
+            try await eventually("the verification reaches the binding") {
+                harness.log.count(of: "open") == 2
+            }
+
+            harness.clock.now += 100
+            harness.rendezvous.answer(
+                DirectIrohFixtures.ready(generation: "boot:1", client: harness.engine.key.endpointID)
+            )
+            XCTAssertTrue(harness.scheduler.fire(240))
+            try await eventually("the replacement verification passes") {
+                harness.reports == [
+                    .usable(generation: "boot:1"),
+                    .verifying,
+                    .usable(generation: "boot:1"),
+                ]
+            }
+
+            harness.clock.now += 250
+            gate.resolve(())
+            try await eventually("the late stream is abandoned") {
+                harness.log.count(of: "reset") == 3
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(harness.reports.count, 3)
+            XCTAssertEqual(harness.log.count(of: "write"), 2)
+            XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+            XCTAssertEqual(connection.streams.count, 3)
+        }
+    }
+
     func testNoStageOfADialStartsAfterItWasWithdrawn() async throws {
         // The instance withdraws its endpoint while the bind is in the
         // binding. The bind ends well afterwards: nothing follows it.

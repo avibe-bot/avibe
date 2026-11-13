@@ -91,37 +91,36 @@ enum DirectIrohProbe {
     /// Throws unless the instance answers within `seconds`. The stream is
     /// abandoned either way: a probe carries nothing.
     ///
-    /// `authority` is asked in the step that starts each of the probe's
+    /// `lease` is asked in the step that starts each of the probe's
     /// network actions: the open, the CONNECT, and each read. An action it
-    /// refuses is not started, and the probe ends there.
+    /// refuses is not started, and the probe ends there with `stale`, which
+    /// says nothing about the path.
     static func run(
         on connection: any DirectIrohConnection,
         host: String,
         within seconds: TimeInterval,
-        authority: DirectIrohAuthority
+        lease: DirectIrohLeaseDeadline
     ) async throws {
         guard let head = connectHead(for: host) else {
             throw DirectIrohError.invalidHost
         }
+        let allowed: @Sendable () -> Bool = {
+            lease.allowsStart
+        }
         try await directIrohDeadline(seconds) {
             let halves = try await directIrohCall(
+                allowed: allowed,
                 discard: { (late: DirectIrohStreamHalves) -> Void in
                     DirectIrohByteStream.abort(late)
                 },
                 { () async throws -> DirectIrohStreamHalves in
-                    guard authority.allowsStart else {
-                        throw DirectIrohError.stale
-                    }
-                    return try await connection.openStream()
+                    try await connection.openStream()
                 }
             )
             defer {
                 DirectIrohByteStream.abort(halves)
             }
-            try await directIrohCall { () async throws -> Void in
-                guard authority.allowsStart else {
-                    throw DirectIrohError.stale
-                }
+            try await directIrohCall(allowed: allowed) { () async throws -> Void in
                 try await halves.send.writeAll(head)
             }
             let terminator = Data("\r\n\r\n".utf8)
@@ -131,11 +130,8 @@ enum DirectIrohProbe {
                 guard limit > 0 else {
                     throw DirectIrohError.probeRefused
                 }
-                let chunk = try await directIrohCall { () async throws -> Data in
-                    guard authority.allowsStart else {
-                        throw DirectIrohError.stale
-                    }
-                    return try await halves.receive.read(sizeLimit: limit)
+                let chunk = try await directIrohCall(allowed: allowed) { () async throws -> Data in
+                    try await halves.receive.read(sizeLimit: limit)
                 }
                 guard !chunk.isEmpty else {
                     throw DirectIrohError.probeRefused
@@ -163,10 +159,11 @@ enum DirectIrohProbe {
 ///   for one answer. Ending it closes its streams, its connection, and its
 ///   endpoint, which is also what ends every binding call left running.
 /// - **Nothing starts on the network without the right to, asked where it
-///   starts.** Each bind, connect, probe action, and stream open asks its
-///   owner's `DirectIrohAuthority` in the step that calls the binding: the
-///   lease's deadline against the clock, and whether the owner was
-///   withdrawn. A stage that ends late is followed by nothing.
+///   starts.** Each bind, connect, probe action, and stream open goes
+///   through `directIrohCall`, which starts it only if its caller has not
+///   left and its lease allows it at that moment. A dial or a probe that
+///   ended, however it ended, has no caller left to start anything; a
+///   stage that ends late is followed by nothing.
 /// - **Everything late is dropped.** Each piece of work carries a stamp;
 ///   a result whose stamp is no longer the current one changes nothing,
 ///   and whatever it produced is closed.
@@ -198,6 +195,18 @@ final class DirectIrohTransport {
 
     private struct WeakStream {
         weak var stream: DirectIrohByteStream?
+    }
+
+    /// How a probe ended.
+    private enum ProbeVerdict {
+        /// The instance answered.
+        case passed
+        /// It did not: the path is taken for lost.
+        case failed
+        /// One of the probe's actions was not allowed to start. That says
+        /// something about the probe's right to act, and nothing about the
+        /// path.
+        case refused
     }
 
     private enum ProbeReason {
@@ -284,13 +293,11 @@ final class DirectIrohTransport {
     private var fetchTask: Task<Void, Never>?
     private var dialStamp: Int?
     private var dialTask: Task<Void, Never>?
-    /// The dial's right to start its next stage: the deadline of the lease
-    /// it was started under, fixed, and revoked with the dial.
-    private var dialAuthority: DirectIrohAuthority?
     private var probeStamp: Int?
     private var probeTask: Task<Void, Never>?
-    /// The same for a probe of the live path.
-    private var probeAuthority: DirectIrohAuthority?
+    /// Why the probe under way was started, to start it again when a newly
+    /// accepted answer replaces the lease it runs under.
+    private var probeReason: ProbeReason?
     /// The next rendezvous request: a retry, or the refresh of a live path.
     private var fetchTimer: (any DirectIrohTimer)?
     /// The accepted answer in force: for the dial under way, or for the
@@ -301,7 +308,15 @@ final class DirectIrohTransport {
     private var debounceTimer: (any DirectIrohTimer)?
     private var stableTimer: (any DirectIrohTimer)?
     private var spacingTimer: (any DirectIrohTimer)?
-    private var session: Session?
+    /// The live path. Whenever this is cleared or replaced, the path's
+    /// authority is revoked.
+    private var session: Session? {
+        didSet {
+            if oldValue !== session {
+                oldValue?.authority.revoke()
+            }
+        }
+    }
 
     /// Consecutive failures: the index into the retry ladder.
     private var failures = 0
@@ -365,6 +380,10 @@ final class DirectIrohTransport {
         fetchTask?.cancel()
         dialTask?.cancel()
         probeTask?.cancel()
+        // Cancelling those tasks closes the gate of every action they were
+        // waiting on. An open is waited on by someone else: the path's
+        // authority is what refuses it.
+        session?.authority.revoke()
         session?.link.close()
     }
 
@@ -431,16 +450,17 @@ final class DirectIrohTransport {
         let admitted = try await admit(tag)
         let connection = admitted.connection
         let halves = try await directIrohCall(
+            // Asked again where the open starts: the admission was on the
+            // main actor, some awaits ago, and the path is not this
+            // caller's to keep.
+            allowed: {
+                admitted.authority.allowsStart(admittedAt: admitted.suspensions)
+            },
             discard: { (late: DirectIrohStreamHalves) -> Void in
                 DirectIrohByteStream.abort(late)
             },
             { () async throws -> DirectIrohStreamHalves in
-                // Asked again here, where the open starts: the admission
-                // was on the main actor, some awaits ago.
-                guard admitted.authority.allowsStart(admittedAt: admitted.suspensions) else {
-                    throw DirectIrohError.stale
-                }
-                return try await connection.openStream()
+                try await connection.openStream()
             }
         )
         let stream = DirectIrohByteStream(halves)
@@ -535,7 +555,10 @@ final class DirectIrohTransport {
             let result: Result<Data, Error>
             do {
                 let data: Data = try await directIrohDeadline(seconds) {
-                    try await directIrohCall { [weak self] () async throws -> Data in
+                    // No lease gives the right to ask: the request is sent
+                    // only if it is still the current one in the step
+                    // that sends it (`sendRequest`).
+                    try await directIrohCall(allowed: { true }) { [weak self] () async throws -> Data in
                         guard let self else {
                             throw DirectIrohError.stale
                         }
@@ -652,6 +675,12 @@ final class DirectIrohTransport {
                     // path answers a probe.
                     session.isExpired = false
                     startProbe(.renewal)
+                } else if let reason = probeReason, probeStamp != nil {
+                    // A probe is under way on the lease this answer
+                    // replaces. Its right to act ends with that lease and
+                    // is not extended: the probe is retired, and the same
+                    // question is asked again under the new lease.
+                    startProbe(reason)
                 }
                 return
             }
@@ -809,8 +838,9 @@ final class DirectIrohTransport {
         stamp += 1
         let token = stamp
         dialStamp = token
-        let authority = DirectIrohAuthority(deadline: accepted.deadline, clock: uptime)
-        dialAuthority = authority
+        // Fixed at the lease the dial starts under. A newer answer replaces
+        // the dial; it never lends this one its time.
+        let deadline = DirectIrohLeaseDeadline(deadline: accepted.deadline, clock: uptime)
         let engine = engine
         let timing = timing
         dialTask = Task { @MainActor [weak self] in
@@ -820,7 +850,7 @@ final class DirectIrohTransport {
                 host: host,
                 engine: engine,
                 timing: timing,
-                authority: authority
+                lease: deadline
             )
             // A dial that ends after its lease ran out is given up here,
             // before its result can be taken.
@@ -835,7 +865,6 @@ final class DirectIrohTransport {
             }
             self.dialStamp = nil
             self.dialTask = nil
-            self.dialAuthority = nil
             self.dialDidFinish(outcome, lease: accepted)
         }
     }
@@ -843,21 +872,26 @@ final class DirectIrohTransport {
     /// Binds an endpoint, dials the answer's endpoint at the admitted
     /// addresses, checks the peer's identity, and probes.
     ///
-    /// `authority` is asked in the step that starts each stage: the bind,
-    /// the connect, and each action of the probe. A stage that finds it
-    /// refused does not start, and closes what the stage before produced:
-    /// a bind or a connect that ends after the lease ran out, or after the
-    /// dial was withdrawn, is followed by nothing. On any failure, and when
-    /// its task is cancelled, everything the dial opened is closed; closing
-    /// the endpoint is what ends a dial the binding still runs.
+    /// Each stage starts through `directIrohCall` with the dial's lease: it
+    /// starts only if the lease allows it at that moment and the dial is
+    /// still waiting for it. A bind or a connect that ends after the lease
+    /// ran out is followed by nothing, and so is one whose dial was timed
+    /// out, withdrawn, or replaced in the meantime: the stage's task finds
+    /// nobody waiting. A stage that does not start closes what the stage
+    /// before produced. On any failure, and when its task is cancelled,
+    /// everything the dial opened is closed; closing the endpoint is what
+    /// ends a dial the binding still runs.
     private nonisolated static func dial(
         _ offer: DirectRendezvousOffer,
         key: DirectIrohLaunchKey,
         host: String,
         engine: any DirectIrohEngine,
         timing: DirectIrohTiming,
-        authority: DirectIrohAuthority
+        lease: DirectIrohLeaseDeadline
     ) async -> Result<Link, Error> {
+        let allowed: @Sendable () -> Bool = {
+            lease.allowsStart
+        }
         // An endpoint or a connection that arrives when nobody takes it any
         // more is closed, whichever step it was lost at: a call that was
         // left, or a deadline that was taken in the same instant.
@@ -873,12 +907,10 @@ final class DirectIrohTransport {
         do {
             endpoint = try await directIrohDeadline(timing.bindSeconds, discard: closeEndpoint) {
                 try await directIrohCall(
+                    allowed: allowed,
                     discard: closeEndpoint,
                     { () async throws -> any DirectIrohEndpoint in
-                        guard authority.allowsStart else {
-                            throw DirectIrohError.stale
-                        }
-                        return try await engine.bind(secretKey: key.secret)
+                        try await engine.bind(secretKey: key.secret)
                     }
                 )
             }
@@ -893,12 +925,10 @@ final class DirectIrohTransport {
                 discard: closeConnection
             ) {
                 try await directIrohCall(
+                    allowed: allowed,
                     discard: closeConnection,
                     { () async throws -> any DirectIrohConnection in
-                        guard authority.allowsStart else {
-                            throw DirectIrohError.stale
-                        }
-                        return try await endpoint.connect(
+                        try await endpoint.connect(
                             to: offer.endpointID,
                             addresses: addresses,
                             alpn: alpn
@@ -916,7 +946,7 @@ final class DirectIrohTransport {
                     on: connection,
                     host: host,
                     within: timing.probeSeconds,
-                    authority: authority
+                    lease: lease
                 )
             } catch {
                 connection.close()
@@ -958,11 +988,11 @@ final class DirectIrohTransport {
     }
 
     private func cancelDial() {
+        // Cancelling the task closes the gate of whatever stage it was
+        // waiting on, at once: a stage that has not started does not.
         dialTask?.cancel()
         dialTask = nil
         dialStamp = nil
-        dialAuthority?.revoke()
-        dialAuthority = nil
         if session == nil {
             // The answer that was being dialled is given up with its dial.
             dropLease()
@@ -1016,26 +1046,29 @@ final class DirectIrohTransport {
         let connection = session.link.connection
         let host = selection.host
         let seconds = timing.probeSeconds
-        // Fixed at the deadline of the lease in force now, and revoked with
-        // the probe. It is asked where each of the probe's actions starts,
-        // which is after this task was scheduled and after its own awaits.
-        let authority = DirectIrohAuthority(
+        // Fixed at the deadline of the lease in force now. It is asked
+        // where each of the probe's actions starts, which is after this
+        // task was scheduled and after its own awaits. A newer answer does
+        // not extend it: it retires this probe and starts another.
+        let deadline = DirectIrohLeaseDeadline(
             deadline: lease?.deadline ?? uptime(),
             clock: uptime
         )
-        probeAuthority = authority
+        probeReason = reason
         probeTask = Task { @MainActor [weak self] in
-            let passed: Bool
+            let verdict: ProbeVerdict
             do {
                 try await DirectIrohProbe.run(
                     on: connection,
                     host: host,
                     within: seconds,
-                    authority: authority
+                    lease: deadline
                 )
-                passed = true
+                verdict = .passed
+            } catch DirectIrohError.stale {
+                verdict = .refused
             } catch {
-                passed = false
+                verdict = .failed
             }
             // A probe that ends after the lease ran out reports nothing.
             self?.reconcileLease()
@@ -1044,17 +1077,26 @@ final class DirectIrohTransport {
             }
             self.probeStamp = nil
             self.probeTask = nil
-            self.probeAuthority = nil
-            self.probeDidFinish(passed: passed, reason: reason)
+            self.probeReason = nil
+            self.probeDidFinish(verdict, reason: reason)
         }
     }
 
-    private func probeDidFinish(passed: Bool, reason: ProbeReason) {
+    private func probeDidFinish(_ verdict: ProbeVerdict, reason: ProbeReason) {
         guard let session, !session.isExpired else {
             return
         }
-        guard passed else {
+        switch verdict {
+        case .passed:
+            break
+        case .failed:
             sessionDidEnd(retryNow: reason == .networkChange)
+            return
+        case .refused:
+            // The probe was not allowed to finish, and the lease in force
+            // has not run out: it is no verdict on the path. The question
+            // is asked again under the lease in force now.
+            startProbe(reason)
             return
         }
         switch reason {
@@ -1079,11 +1121,12 @@ final class DirectIrohTransport {
     }
 
     private func cancelProbe() {
+        // As for a dial: cancelling the task closes the gate of the action
+        // it was waiting on.
         probeTask?.cancel()
         probeTask = nil
         probeStamp = nil
-        probeAuthority?.revoke()
-        probeAuthority = nil
+        probeReason = nil
     }
 
     /// Closes the live path, if there is one: its streams, its connection,
@@ -1102,7 +1145,6 @@ final class DirectIrohTransport {
         }
         dropLease()
         self.session = nil
-        session.authority.revoke()
         raiseFloor()
         session.cancelStreams()
         session.link.close()

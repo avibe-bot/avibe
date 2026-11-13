@@ -317,9 +317,10 @@ final class DirectIrohByteStream: @unchecked Sendable {
                 calls[id] = { error in
                     call.fail(error)
                 }
-                // Started in the step that recorded it: the half is never
-                // left in a state no call will settle.
-                call.begin {
+                // Handed over in the step that recorded it, and run even if
+                // the caller has left by then: the half is never left in a
+                // state no call will settle.
+                call.begin(.always) {
                     let completion: Completion<Raw>
                     do {
                         completion = .value(try await bindingCall())

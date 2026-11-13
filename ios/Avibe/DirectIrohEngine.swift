@@ -41,7 +41,8 @@ enum DirectIrohError: Error, Equatable {
 //   behind a `writeAll` in progress, and `stop` behind a `read` in progress.
 //
 // `directIrohCall` and `DirectIrohByteStream` are how callers stay prompt
-// anyway.
+// anyway, and `directIrohCall` is also the one place where a network action
+// of the transport starts.
 
 /// This launch's endpoint key: 32 secret bytes, kept in memory only, and
 /// the endpoint ID that is their public half.
@@ -110,15 +111,36 @@ protocol DirectIrohReceiveHalf: AnyObject, Sendable {
 
 /// One call of an operation that may ignore task cancellation.
 ///
-/// `begin` starts the operation, and from then on the operation runs to its
-/// end whatever happens to its caller: the task `begin` creates owns it.
-/// `wait` gives the caller the result, or an error as soon as the caller's
-/// task is cancelled or `fail` is called. Exactly one outcome reaches the
-/// caller. A value the operation produces after the caller got an error
-/// goes to `discard`; an error it produces then goes nowhere.
+/// The operation runs in a task of its own, so its caller can leave at
+/// once: `wait` gives the caller the result, or an error as soon as the
+/// caller's task is cancelled or `fail` is called. Exactly one outcome
+/// reaches the caller. A value the operation produces after the caller got
+/// an error goes to `discard`; an error it produces then goes nowhere.
+///
+/// **The start gate.** That task does not run at once, and by the time it
+/// does its caller may be gone. `Start.whileAwaited` makes the call's own
+/// lock decide which came first: the task asks `enter()` as the last thing
+/// before the operation, and `enter()` succeeds only if the caller has not
+/// left. So either the caller left first and the operation never starts,
+/// or the operation started first and may end late, its value discarded.
+/// A caller leaves only by its wait ending, whatever the reason: a result,
+/// an error, a deadline that cancels the waiting task, or the cancellation
+/// of an owner. There is no list of reasons to keep complete.
 final class DirectIrohCall<Value: Sendable>: @unchecked Sendable {
+    /// When the operation may start.
+    enum Start {
+        /// Always, even if the caller has left: for a caller whose own
+        /// state depends on the operation settling it (a stream's half).
+        case always
+        /// Only while the caller has not left, and only if `allowed` says
+        /// so at that moment. `allowed` is asked first; the gate is the
+        /// last thing before the operation, with no await between them.
+        case whileAwaited(allowed: @Sendable () -> Bool)
+    }
+
     private enum State {
-        /// Begun, or not yet: no result and no waiting caller.
+        /// No result yet and no waiting caller: before `wait`, or the
+        /// operation has not finished.
         case running
         /// The result arrived before the caller asked for it.
         case finished(Result<Value, Error>)
@@ -133,8 +155,10 @@ final class DirectIrohCall<Value: Sendable>: @unchecked Sendable {
     private var state = State.running
     private var discard: @Sendable (Value) -> Void = { _ in }
 
-    /// Starts `operation`. Call it once.
+    /// Hands `operation` to its own task. Call it once. It never changes
+    /// what `fail` already decided.
     func begin(
+        _ start: Start,
         discard: @escaping @Sendable (Value) -> Void = { _ in },
         _ operation: @escaping @Sendable () async throws -> Value
     ) {
@@ -142,6 +166,16 @@ final class DirectIrohCall<Value: Sendable>: @unchecked Sendable {
             self.discard = discard
         }
         Task {
+            if case .whileAwaited(let allowed) = start {
+                guard allowed() else {
+                    self.settle(.failure(DirectIrohError.stale))
+                    return
+                }
+                guard self.enter() else {
+                    // The caller left first: nothing starts.
+                    return
+                }
+            }
             let result: Result<Value, Error>
             do {
                 result = .success(try await operation())
@@ -149,6 +183,19 @@ final class DirectIrohCall<Value: Sendable>: @unchecked Sendable {
                 result = .failure(error)
             }
             self.settle(result)
+        }
+    }
+
+    /// The gate: `true` unless the caller already has an error. Decided
+    /// under the same lock as `fail`, so one of the two comes first.
+    private func enter() -> Bool {
+        lock.withLock {
+            switch state {
+            case .running, .waiting:
+                return true
+            case .finished, .failed, .done:
+                return false
+            }
         }
     }
 
@@ -182,7 +229,8 @@ final class DirectIrohCall<Value: Sendable>: @unchecked Sendable {
     }
 
     /// Ends the caller's wait with `error`, unless the caller already has
-    /// its outcome. The operation is not touched.
+    /// its outcome, and closes the gate. An operation that has started is
+    /// not touched.
     func fail(_ error: Error) {
         let effect: Effect = lock.withLock {
             switch state {
@@ -241,17 +289,36 @@ final class DirectIrohCall<Value: Sendable>: @unchecked Sendable {
     }
 }
 
-/// Runs `operation`, which may ignore task cancellation, so that the caller
-/// still returns as soon as its own task is cancelled. Nothing is started
-/// for a caller that is already cancelled.
+/// Starts one network action of the binding, which may ignore task
+/// cancellation, so that the caller still returns as soon as its own task
+/// is cancelled.
+///
+/// Every bind, connect, probe action, and stream open goes through here,
+/// and through nothing else. The action starts only if, in the step that
+/// starts it:
+///
+/// - `allowed` says so. It has no default: each call names what gives it
+///   the right to act, a lease's deadline or a path's authority, read at
+///   that moment on whatever thread that is.
+/// - The caller has not left. The cancellation handler is in place before
+///   the action's task is scheduled and stays until the wait ends, so a
+///   caller that is cancelled at any moment, before the task runs
+///   included, closes the gate first. A deadline is such a cancellation,
+///   and so is everything that ends an owner.
+///
+/// What started may still end late: its value goes to `discard`.
 func directIrohCall<Value: Sendable>(
+    allowed: @escaping @Sendable () -> Bool,
     discard: @escaping @Sendable (Value) -> Void = { _ in },
     _ operation: @escaping @Sendable () async throws -> Value
 ) async throws -> Value {
-    try Task.checkCancellation()
     let call = DirectIrohCall<Value>()
-    call.begin(discard: discard, operation)
-    return try await call.wait()
+    return try await withTaskCancellationHandler {
+        call.begin(.whileAwaited(allowed: allowed), discard: discard, operation)
+        return try await call.wait()
+    } onCancel: {
+        call.fail(CancellationError())
+    }
 }
 
 /// Runs `operation` with a deadline. The operation must end promptly when
@@ -305,27 +372,31 @@ func directIrohDeadline<Value: Sendable>(
 
 // MARK: The right to start something on the network
 
-/// The right to start a network action for one owner: a dial, a probe, or
-/// the streams of a live path.
+/// A lease's deadline with the clock it is read on: what gives a dial or a
+/// probe the right to start its next network action. It is a value. It is
+/// fixed when the dial or the probe starts and has no state to revoke or
+/// renew: an old dial or probe never borrows a newer answer's time, and
+/// what ends it early is its caller leaving (see `directIrohCall`).
+struct DirectIrohLeaseDeadline: Sendable {
+    let deadline: TimeInterval
+    let clock: @Sendable () -> TimeInterval
+
+    /// Whether a new network action may start at this moment.
+    var allowsStart: Bool {
+        clock() < deadline
+    }
+}
+
+/// The right to open streams on a live path.
 ///
-/// Whoever is about to call the binding asks `allowsStart` in the same
-/// step, with no await between the answer and the call. That step is often
-/// in another task than the one that decided to do the work, and after
-/// earlier awaits of its own: a check made on the main actor before those
-/// says nothing about now. So the authority is checked where the action
-/// starts, on any thread, against the clock at that moment.
-///
-/// It ends in three ways, and never comes back for an action that was
-/// admitted before: the clock reaches the deadline, the owner is revoked
-/// (its selection ended, its answer was withdrawn or replaced, its path
-/// ended), or, for the streams of a path, the path stopped being usable
-/// since the action was admitted. Only a path's authority is ever renewed,
-/// by a newly accepted answer; a dial's and a probe's are fixed when they
-/// start, so an old one never borrows a newer answer's time.
-///
-/// An action that already started is not undone by any of this. It may end
-/// late; what it produced is closed by the step that finds the next action
-/// refused.
+/// A stream's open is asked for by a caller that does not own the path, so
+/// the path can end, or stop being usable, while that caller still waits.
+/// This is the one authority with state: the lease's deadline, renewed by
+/// a newly accepted answer of the same generation; how many times the path
+/// stopped being usable; and whether the path has ended. The transport is
+/// its only writer. An open asks it in the step that starts it, with the
+/// suspension count of its admission: it is refused once the path was
+/// suspended again, even if the path is usable again by then.
 final class DirectIrohAuthority: @unchecked Sendable {
     private let lock = NSLock()
     private let clock: @Sendable () -> TimeInterval
@@ -338,17 +409,8 @@ final class DirectIrohAuthority: @unchecked Sendable {
         self.clock = clock
     }
 
-    /// Whether a new network action may start at this moment.
-    var allowsStart: Bool {
-        let now = clock()
-        return lock.withLock {
-            !isRevoked && now < deadline
-        }
-    }
-
-    /// The same for an action admitted when the path had been suspended
-    /// `admittedSuspensions` times: `false` once it was suspended again,
-    /// even if it is usable again by now.
+    /// Whether an open admitted when the path had been suspended
+    /// `admittedSuspensions` times may start at this moment.
     func allowsStart(admittedAt admittedSuspensions: Int) -> Bool {
         let now = clock()
         return lock.withLock {
@@ -361,7 +423,7 @@ final class DirectIrohAuthority: @unchecked Sendable {
         lock.withLock { suspensions }
     }
 
-    /// The owner is over. Final.
+    /// The path has ended. Final.
     func revoke() {
         lock.withLock {
             isRevoked = true

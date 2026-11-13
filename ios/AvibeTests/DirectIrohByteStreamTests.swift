@@ -12,6 +12,7 @@ final class DirectIrohByteStreamTests: XCTestCase {
         let started = DirectIrohPending<Void>()
         let task = Task<Int, Error> {
             try await directIrohCall(
+                allowed: { true },
                 discard: { (late: Int) -> Void in
                     discarded.resolve(late)
                 },
@@ -41,7 +42,7 @@ final class DirectIrohByteStreamTests: XCTestCase {
             entered.resolve(())
             try? await proceed.wait()
             // The task is cancelled by now.
-            return try await directIrohCall {
+            return try await directIrohCall(allowed: { true }) {
                 ran.add("ran")
                 return 1
             }
@@ -55,11 +56,145 @@ final class DirectIrohByteStreamTests: XCTestCase {
         XCTAssertEqual(ran.all, [])
     }
 
+    func testAnOperationWhoseCallerLeftBeforeItStartedNeverStarts() async throws {
+        // The operation's task is under way but has not reached the gate:
+        // it is still asking whether it may start. The caller is cancelled
+        // meanwhile. The task then finds nobody waiting and starts nothing,
+        // although it is allowed to.
+        do {
+            let ran = DirectIrohEventLog()
+            let asking = DirectIrohPending<Void>()
+            let answer = DispatchSemaphore(value: 0)
+            let task = Task<Int, Error> {
+                try await directIrohCall(
+                    allowed: {
+                        asking.resolve(())
+                        answer.wait()
+                        return true
+                    },
+                    {
+                        ran.add("ran")
+                        return 1
+                    }
+                )
+            }
+            try await asking.wait()
+            task.cancel()
+            let outcome = await directIrohOutcome(of: task)
+            XCTAssertTrue(Self.failure(of: outcome) is CancellationError)
+
+            answer.signal()
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(ran.all, [])
+        }
+        // The same when what ends the caller is a deadline.
+        do {
+            let ran = DirectIrohEventLog()
+            let asking = DirectIrohPending<Void>()
+            let answer = DispatchSemaphore(value: 0)
+            let task = Task<Int, Error> {
+                try await directIrohDeadline(0.05) {
+                    try await directIrohCall(
+                        allowed: {
+                            asking.resolve(())
+                            answer.wait()
+                            return true
+                        },
+                        {
+                            ran.add("ran")
+                            return 1
+                        }
+                    )
+                }
+            }
+            try await asking.wait()
+            let outcome = await directIrohOutcome(of: task)
+            XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .timedOut)
+
+            answer.signal()
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(ran.all, [])
+        }
+        // A caller that is cancelled before the call is even made: the
+        // handler is in place before the operation's task is scheduled, so
+        // the gate is closed first however the two are ordered.
+        do {
+            let ran = DirectIrohEventLog()
+            let asked = DirectIrohEventLog()
+            let entered = DirectIrohPending<Void>()
+            let proceed = DirectIrohPending<Void>()
+            let task = Task<Int, Error> {
+                entered.resolve(())
+                try? await proceed.wait()
+                return try await directIrohCall(
+                    allowed: {
+                        asked.add("asked")
+                        return true
+                    },
+                    {
+                        ran.add("ran")
+                        return 1
+                    }
+                )
+            }
+            try await entered.wait()
+            task.cancel()
+            proceed.resolve(())
+            let outcome = await directIrohOutcome(of: task)
+            XCTAssertTrue(Self.failure(of: outcome) is CancellationError)
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(ran.all, [])
+        }
+    }
+
+    func testAnOperationThatIsNotAllowedDoesNotStartAndOneThatStartedFirstEndsLate() async throws {
+        // Not allowed: nothing starts, and the caller is told so.
+        let ran = DirectIrohEventLog()
+        let refused = Task<Int, Error> {
+            try await directIrohCall(
+                allowed: { false },
+                {
+                    ran.add("ran")
+                    return 1
+                }
+            )
+        }
+        let refusal = await directIrohOutcome(of: refused)
+        XCTAssertEqual(Self.failure(of: refusal) as? DirectIrohError, .stale)
+        XCTAssertEqual(ran.all, [])
+
+        // Started first, then the caller leaves: the operation is not
+        // touched, and its value is discarded exactly once.
+        let operation = DirectIrohPending<Int>()
+        let started = DirectIrohPending<Void>()
+        let discards = DirectIrohEventLog()
+        let task = Task<Int, Error> {
+            try await directIrohCall(
+                allowed: { true },
+                discard: { (late: Int) -> Void in
+                    discards.add("discarded \(late)")
+                },
+                {
+                    started.resolve(())
+                    return try await operation.wait()
+                }
+            )
+        }
+        try await started.wait()
+        task.cancel()
+        let outcome = await directIrohOutcome(of: task)
+        XCTAssertTrue(Self.failure(of: outcome) is CancellationError)
+        operation.resolve(9)
+        try await eventually("the late value is discarded") { discards.all == ["discarded 9"] }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(discards.all, ["discarded 9"])
+    }
+
     func testADeadlineEndsAnOperationThatNeverFinishes() async throws {
         let operation = DirectIrohPending<Int>()
         let task = Task<Int, Error> {
             try await directIrohDeadline(0.05) {
-                try await directIrohCall {
+                try await directIrohCall(allowed: { true }) {
                     try await operation.wait()
                 }
             }
@@ -68,7 +203,7 @@ final class DirectIrohByteStreamTests: XCTestCase {
         XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .timedOut)
 
         let value = try await directIrohDeadline(30) {
-            try await directIrohCall {
+            try await directIrohCall(allowed: { true }) {
                 42
             }
         }
@@ -76,7 +211,7 @@ final class DirectIrohByteStreamTests: XCTestCase {
 
         let failing = Task<Int, Error> {
             try await directIrohDeadline(30) {
-                try await directIrohCall {
+                try await directIrohCall(allowed: { true }) {
                     throw DirectIrohTestError.scripted
                 }
             }
