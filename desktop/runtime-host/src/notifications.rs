@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,6 +11,43 @@ use tokio::time::Instant;
 use url::Url;
 
 use crate::LoopbackOrigin;
+
+mod registry;
+pub use registry::{NotificationReceipt, NotificationRegistry, NotificationSnapshot};
+
+#[derive(Clone, Debug)]
+pub struct UnreadState {
+    pub total: u64,
+    /// None on an old server or a malformed/incomplete map. Badge painting is
+    /// independent; withdrawal must fail closed without a complete raw map.
+    pub by_session: Option<HashMap<String, u64>>,
+}
+
+impl UnreadState {
+    fn parse(inbox: &serde_json::Value) -> Option<Self> {
+        let total = inbox
+            .get("badge_total")
+            .or_else(|| inbox.get("unread_total"))?
+            .as_u64()?;
+        let by_session = (|| {
+            let values = inbox.get("unread_by_session")?.as_object()?;
+            let mut map = HashMap::new();
+            let mut sum = 0u64;
+            for (id, value) in values {
+                if id.is_empty() {
+                    return None;
+                }
+                let count = value.as_u64()?;
+                sum = sum.checked_add(count)?;
+                map.insert(id.clone(), count);
+            }
+            // Unlike the paged rows, this map covers all unread Sessions. Its
+            // raw total must agree: a partial map must not look like a read.
+            (inbox.get("unread_total")?.as_u64()? == sum).then_some(map)
+        })();
+        Some(Self { total, by_session })
+    }
+}
 
 pub const RETAINED_KEYS: usize = 512;
 pub const RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
@@ -167,9 +204,11 @@ struct RunPreferences {
     current: Arc<RwLock<NotificationPreferences>>,
     at_receipt: NotificationPreferences,
     presentation_generation: u64,
+    receipt: Arc<NotificationReceipt>,
 }
 
 pub trait NotificationSink: Send + Sync {
+    fn registry(&self) -> &Mutex<NotificationRegistry>;
     fn gate(&self) -> NotificationGate;
     /// Capture before asynchronous detail/badge reads. The sink rechecks this
     /// receipt at the final output boundary, including queued main-thread work.
@@ -178,7 +217,17 @@ pub trait NotificationSink: Send + Sync {
     }
     /// `source` names where a run happened ("Project · Session"), already
     /// sanitized by [`RunDetail::source`]; `None` keeps the generic copy.
-    fn deliver(&self, intent: NotificationIntent, source: Option<String>, presentation_generation: u64);
+    fn deliver(
+        &self,
+        intent: NotificationIntent,
+        source: Option<String>,
+        presentation_generation: u64,
+        receipt: Arc<NotificationReceipt>,
+    );
+    /// Recheck the presentation/connection generation at the native boundary,
+    /// then retire only this pre-request snapshot. Focus/preferences do not
+    /// gate reads: reading the visible Workbench must withdraw its old posts.
+    fn withdraw(&self, snapshot: NotificationSnapshot, unread: HashMap<String, u64>, presentation_generation: u64);
     /// The Runtime's badge total (loud-category unread), for the app icon.
     /// It is state rather than an interruption: no device/focus gate applies.
     fn show_unread(&self, total: u64, presentation_generation: u64);
@@ -277,6 +326,8 @@ impl RunTimestamps {
 pub struct RunDetail {
     #[serde(flatten)]
     pub stamps: RunTimestamps,
+    pub session_platform: Option<String>,
+    pub session_is_workbench: Option<bool>,
     pub session_project_name: Option<String>,
     pub session_label: Option<String>,
     pub definition_name: Option<String>,
@@ -348,6 +399,7 @@ impl RunDetail {
 #[derive(Deserialize)]
 struct RunEvent {
     run_id: String,
+    session_id: Option<String>,
     status: String,
     run_type: Option<String>,
     #[serde(flatten)]
@@ -358,6 +410,7 @@ enum Candidate {
     Approval,
     Run {
         run_id: String,
+        session_id: Option<String>,
         stamps: RunTimestamps,
         intent: NotificationIntent,
         /// Already background work by type or by the event's own stamps; the
@@ -405,6 +458,7 @@ impl NotificationFilter {
         let background = matches!(run.run_type.as_deref(), Some("scheduled" | "watch")) || run.stamps.is_long_running();
         (background || run.stamps.missing()).then_some(Candidate::Run {
             run_id: run.run_id,
+            session_id: run.session_id,
             stamps: run.stamps,
             intent,
             background,
@@ -424,7 +478,7 @@ pub struct StreamError;
 pub trait NotificationTransport: Send + Sync {
     async fn connect(&self) -> Result<Box<dyn EventStream>, StreamError>;
     async fn run_detail(&self, run_id: &str) -> Option<RunDetail>;
-    async fn unread_total(&self) -> Option<u64>;
+    async fn unread(&self) -> Option<UnreadState>;
     async fn preferences(&self) -> Option<NotificationPreferences>;
 }
 
@@ -513,7 +567,7 @@ impl NotificationTransport for HttpNotificationTransport {
 
     /// The same whole-account total the Workbench Inbox badges, counted by the
     /// Runtime: the shell never derives a count of its own.
-    async fn unread_total(&self) -> Option<u64> {
+    async fn unread(&self) -> Option<UnreadState> {
         let mut url = self.url("/api/inbox");
         url.query_pairs_mut()
             .append_pair("platform", "avibe")
@@ -526,7 +580,7 @@ impl NotificationTransport for HttpNotificationTransport {
         let inbox: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         // Fall back only when absent, not when malformed: an explicit zero
         // must never turn into the raw (possibly quiet-category) unread count.
-        inbox.get("badge_total").or_else(|| inbox.get("unread_total"))?.as_u64()
+        UnreadState::parse(&inbox)
     }
 
     async fn preferences(&self) -> Option<NotificationPreferences> {
@@ -638,23 +692,48 @@ pub async fn run_notifications(
                         None => {}
                         Some(Candidate::Approval) => {
                             if sink.gate().allows() {
-                                sink.deliver(NotificationIntent::ApprovalRequested, None, presentation_generation);
+                                let receipt = sink
+                                    .registry()
+                                    .lock()
+                                    .expect("notification registry lock")
+                                    .reserve(None);
+                                if let Some(receipt) = receipt {
+                                    sink.deliver(
+                                        NotificationIntent::ApprovalRequested,
+                                        None,
+                                        presentation_generation,
+                                        receipt,
+                                    );
+                                }
                             }
                         }
                         Some(Candidate::Run {
                             run_id,
+                            session_id,
                             stamps,
                             intent,
                             background,
                         }) => {
+                            let Some(receipt) = sink
+                                .registry()
+                                .lock()
+                                .expect("notification registry lock")
+                                .reserve(session_id)
+                            else {
+                                continue;
+                            };
                             while lookups.try_join_next().is_some() {}
                             if lookups.len() >= MAX_PENDING_LOOKUPS {
                                 // Overloaded: the backlog is bounded. Work the
                                 // event already qualifies notifies now with
                                 // generic copy; a run only its read could
                                 // qualify fails closed.
+                                sink.registry()
+                                    .lock()
+                                    .expect("notification registry lock")
+                                    .forget(receipt.id());
                                 if background && at_receipt.allows_run(None) && sink.gate().allows() {
-                                    sink.deliver(intent, None, presentation_generation);
+                                    sink.deliver(intent, None, presentation_generation, receipt);
                                 }
                                 continue;
                             }
@@ -663,6 +742,7 @@ pub async fn run_notifications(
                                 current: preferences.clone(),
                                 at_receipt,
                                 presentation_generation,
+                                receipt,
                             };
                             lookups.spawn(async move {
                                 // Queue behind the request limit rather than
@@ -707,8 +787,12 @@ async fn follow_unread(
     loop {
         changed.notified().await;
         let presentation_generation = sink.presentation_generation();
-        if let Some(total) = transport.unread_total().await {
-            sink.show_unread(total, presentation_generation);
+        let snapshot = sink.registry().lock().expect("notification registry lock").snapshot();
+        if let Some(unread) = transport.unread().await {
+            sink.show_unread(unread.total, presentation_generation);
+            if let Some(by_session) = unread.by_session {
+                sink.withdraw(snapshot, by_session, presentation_generation);
+            }
         }
         tokio::time::sleep(UNREAD_REFRESH_INTERVAL).await;
     }
@@ -730,18 +814,40 @@ async fn notify_run(
         .ok()
         .flatten();
     let source = detail.as_ref().and_then(RunDetail::source);
+    // The snapshot covers Avibe Sessions, not IM channels. Unknown/old-server
+    // details keep their notification instead of treating absence as a read.
+    if detail.as_ref().is_some_and(|detail| {
+        detail.session_is_workbench == Some(true) || detail.session_platform.as_deref() == Some("avibe")
+    }) {
+        preferences.receipt.confirm_workbench_session();
+    }
     let category = detail
         .as_ref()
         .and_then(|detail| detail.notification_category.as_deref());
     let current = preferences.current.read().await;
     if !preferences.at_receipt.allows_run(category) || !current.allows_run(category) {
+        sink.registry()
+            .lock()
+            .expect("notification registry lock")
+            .forget(preferences.receipt.id());
         return;
     }
     if let Some(detail) = detail {
         stamps.fill_missing(detail.stamps);
     }
-    if (background || stamps.is_long_running()) && sink.gate().allows() {
-        sink.deliver(intent, source, preferences.presentation_generation);
+    if (background || stamps.is_long_running()) && sink.gate().allows() && !preferences.receipt.retired() {
+        if !preferences.receipt.readable() {
+            sink.registry()
+                .lock()
+                .expect("notification registry lock")
+                .forget(preferences.receipt.id());
+        }
+        sink.deliver(intent, source, preferences.presentation_generation, preferences.receipt);
+    } else {
+        sink.registry()
+            .lock()
+            .expect("notification registry lock")
+            .forget(preferences.receipt.id());
     }
 }
 

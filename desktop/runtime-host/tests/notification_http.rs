@@ -149,7 +149,7 @@ async fn stream_and_detail_redirects_never_delegate_trust_to_another_origin() {
     let transport = server.transport();
     assert!(transport.connect().await.is_err());
     assert!(transport.run_detail("run").await.is_none());
-    assert!(transport.unread_total().await.is_none());
+    assert!(transport.unread().await.map(|unread| unread.total).is_none());
     assert!(transport.preferences().await.is_none());
     assert!(target.requests.lock().unwrap().is_empty());
     assert_eq!(server.requests.lock().unwrap().len(), 4);
@@ -171,7 +171,7 @@ async fn stream_requires_a_successful_sse_response_not_an_arbitrary_live_http_en
 async fn refetch_requires_the_requested_run_and_bounds_untrusted_detail_bodies() {
     let valid = json!({"ok": true, "run": {
         "id": "run", "started_at": "2026-09-10T12:00:00Z", "updated_at": "2026-09-10T12:00:30Z",
-        "notification_category": "bot",
+        "notification_category": "bot", "session_platform": null, "session_is_workbench": true,
         "session_project_name": "avibe-app", "session_label": "桌面版检查更新", "definition_name": null,
     }});
     let server = FakeServer::start([
@@ -192,6 +192,8 @@ async fn refetch_requires_the_requested_run_and_bounds_untrusted_detail_bodies()
     assert_eq!(detail.stamps.started_at, Some("2026-09-10T12:00:00Z".into()));
     assert_eq!(detail.stamps.updated_at, Some("2026-09-10T12:00:30Z".into()));
     assert_eq!(detail.notification_category.as_deref(), Some("bot"));
+    assert_eq!(detail.session_is_workbench, Some(true));
+    assert!(detail.session_platform.is_none());
     assert_eq!(detail.source(), Some("avibe-app · 桌面版检查更新".into()));
     for _ in 0..5 {
         assert!(transport.run_detail("run").await.is_none());
@@ -292,13 +294,13 @@ async fn unread_total_prefers_loud_badge_total_and_only_falls_back_when_absent()
         response("200 OK", "application/json", &vec![b' '; 300 * 1024]),
     ]);
     let transport = server.transport();
-    assert_eq!(transport.unread_total().await, Some(3));
-    assert_eq!(transport.unread_total().await, Some(2));
-    assert_eq!(transport.unread_total().await, Some(0));
-    assert_eq!(transport.unread_total().await, Some(4));
-    assert_eq!(transport.unread_total().await, Some(0));
+    assert_eq!(transport.unread().await.map(|unread| unread.total), Some(3));
+    assert_eq!(transport.unread().await.map(|unread| unread.total), Some(2));
+    assert_eq!(transport.unread().await.map(|unread| unread.total), Some(0));
+    assert_eq!(transport.unread().await.map(|unread| unread.total), Some(4));
+    assert_eq!(transport.unread().await.map(|unread| unread.total), Some(0));
     for _ in 0..8 {
-        assert_eq!(transport.unread_total().await, None);
+        assert_eq!(transport.unread().await.map(|unread| unread.total), None);
     }
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 13);
@@ -308,5 +310,47 @@ async fn unread_total_prefers_loud_badge_total_and_only_falls_back_when_absent()
         for forbidden in ["authorization:", "cookie:"] {
             assert!(!normalized.contains(forbidden));
         }
+    }
+}
+
+#[tokio::test]
+async fn unread_withdrawal_requires_a_complete_raw_map_independent_of_badges_or_paged_rows() {
+    let valid = [
+        serde_json::json!({"sessions":[], "unread_by_session":{"quiet":2,"explicit-zero":0}, "unread_total":2, "badge_total":0}),
+        serde_json::json!({"sessions":[{"session_id":"paged-row"}], "unread_by_session":{}, "unread_total":0, "badge_total":0}),
+    ];
+    let invalid = [
+        serde_json::json!({"unread_by_session":{"a":1}, "unread_total":2}), // omitted unread Session
+        serde_json::json!({"unread_by_session":{}, "unread_total":1}),
+        serde_json::json!({"unread_by_session":{"a":-1}, "unread_total":0}),
+        serde_json::json!({"unread_by_session":{"a":"1"}, "unread_total":1}),
+        serde_json::json!({"unread_by_session":{"a":null}, "unread_total":0}),
+        serde_json::json!({"unread_by_session":{"":1}, "unread_total":1}),
+        serde_json::json!({"unread_by_session":null, "unread_total":0}),
+        serde_json::json!({"unread_by_session":[], "unread_total":0}),
+        serde_json::json!({"unread_by_session":{}, "badge_total":0}), // no raw completeness witness
+        serde_json::json!({"unread_by_session":{"a":u64::MAX,"b":1}, "unread_total":0}),
+        serde_json::json!({"unread_total":0}), // old server
+    ];
+    let documents = valid
+        .iter()
+        .chain(invalid.iter())
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let server = FakeServer::start(
+        documents
+            .iter()
+            .map(|body| response("200 OK", "application/json", body.as_bytes())),
+    );
+    let transport = server.transport();
+    let first = transport.unread().await.unwrap();
+    assert_eq!(first.total, 0);
+    assert_eq!(
+        first.by_session.unwrap(),
+        std::collections::HashMap::from([("quiet".into(), 2), ("explicit-zero".into(), 0)])
+    );
+    assert!(transport.unread().await.unwrap().by_session.unwrap().is_empty());
+    for value in invalid {
+        assert!(transport.unread().await.unwrap().by_session.is_none(), "{value}");
     }
 }
