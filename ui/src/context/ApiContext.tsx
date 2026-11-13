@@ -2731,6 +2731,13 @@ export type WebPushTestResult = {
 // only seeing a human string. The AuthGuard relies on this to tell a policy
 // block (e.g. ``remote_access_host_mismatch``) apart from an unconfigured
 // instance.
+/**
+ * How long a cached Inbox read is shared. A cached answer's request went out
+ * less than this long before it was handed over, so `now - INBOX_READ_CACHE_TTL_MS`
+ * is a time its map is at least as recent as.
+ */
+export const INBOX_READ_CACHE_TTL_MS = 1500;
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string | null;
@@ -4695,7 +4702,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
       }
       const options = { handleError: params?.handleError };
-      return params?.cache === false ? getJson(path, options) : getCachedJson(path, 1500, options);
+      return params?.cache === false
+        ? getJson(path, options)
+        : getCachedJson(path, INBOX_READ_CACHE_TTL_MS, options);
     },
     listBots: async (params) => {
       const payload = params?.cache === false

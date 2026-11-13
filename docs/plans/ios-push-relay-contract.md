@@ -942,9 +942,21 @@ notifications delivered before the call arrived are removed: one delivered
 after it is news the zero did not cover. Pending requests, other instances,
 other accounts, the test notification, `harness:failure` notices (not part of
 the Inbox's unread total, so a zero says nothing about them), and undecrypted
-fallbacks (no thread, origin, or account) stay. A Session read while others
-remain unread keeps its notifications until the total reaches zero; the App
-cannot see which Session was read from the URL or the total alone.
+fallbacks (no thread, origin, or account) stay.
+
+A page that has the `notifications` capability names what is unread instead:
+with each whole unread map it reads from the server, it sends
+`notifications.reconcile({unreadSessions, asOf})`, where `asOf` is a device
+time at or before the request that returned the map went out. The app then
+removes, for that instance and the current account, the delivered `session:<id>`
+notifications whose id the map does not name and whose delivery date is at or
+before `asOf`, so a Session read while others remain unread, here or on
+another device, leaves Notification Center without waiting for zero. A
+notification delivered after `asOf` may describe a message the map did not
+see, so it stays. Once a runtime's page has sent it, that runtime's
+`badge.set({count: 0})` retires nothing: the explicit set outranks a total
+that is preference-filtered and carries no snapshot time
+(`docs/plans/ios-app.md` section 4).
 
 ## 8. Tap routing
 
