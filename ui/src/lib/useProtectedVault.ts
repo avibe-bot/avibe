@@ -278,8 +278,10 @@ export async function setupVaultDurably(
     .catch(() => ({ ok: false as const, code: 'network_error' }));
   if (!committed.ok) {
     if (committed.code === 'vault_already_initialized') {
-      // Another tab committed its own root first: drop this tab's uncommitted one, so the next
-      // discovery finds the durable root instead of offering a second.
+      // Another tab committed its own root first: drop this tab's uncommitted one, both here and in
+      // the sandbox (its iframe still holds the fresh root unlocked), so the next ceremony starts
+      // from a fresh handshake and discovery finds the durable root instead of offering a second.
+      resetVaultSandboxClient();
       clearUnlockState();
       notifyVaultLockChange();
     }

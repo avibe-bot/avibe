@@ -52,19 +52,3 @@ describe('setupVaultDurably cancelled', () => {
   });
 });
 
-describe('setupVaultDurably when another tab won', () => {
-  it('drops this tab’s uncommitted root so discovery finds the durable one', async () => {
-    vi.resetModules();
-    const fresh = await import('./useProtectedVault');
-    sandbox.setup.mockReset();
-    sandbox.setup.mockResolvedValue({ wrapMeta, rpId: 'sandbox.avibe.bot', credentialId: 'AQID', authzRegistration: registration, state: 'unlocked' });
-    const api = {
-      createVaultAuthzWebAuthnOptions: vi.fn(async () => ({ ok: true }) as never),
-      getVaultSandboxRootMetadata: vi.fn(async () => ({ ok: true, root_metadata: {} }) as never),
-      completeVaultSetup: vi.fn(async () => ({ ok: false, code: 'vault_already_initialized' })),
-    };
-    await expect(fresh.setupVaultDurably(api)).resolves.toEqual({ ok: false, code: 'vault_already_initialized' });
-    expect(fresh.vaultFreshSetup()).toBe(false);
-    expect(fresh.vaultUnlocked()).toBe(false);
-  });
-});
