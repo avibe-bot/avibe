@@ -1637,10 +1637,7 @@ export const VaultSecretForm: React.FC<{
         ) : (
           <>
             <HdStepper step={step} />
-            {hdStep === 'backup' && hdWords ? <HdBackupStep words={hdWords} /> : null}
-            {hdStep === 'backup' && hdWords && hdNewPassphrase ? (
-              <HdNotice tone="warning" icon={KeyRound}>{t('vaults.hd.passphrase.backupReminder')}</HdNotice>
-            ) : null}
+            {hdStep === 'backup' && hdWords ? <HdBackupStep words={hdWords} withPassphrase={hdNewPassphrase.length > 0} /> : null}
             {hdStep === 'check' ? (
               <HdCheckStep quiz={hdQuiz} chosen={hdChosen} onChoose={(position, word) => setHdChosen((prev) => ({ ...prev, [position]: word }))} />
             ) : null}

@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react';
 import type { ComponentType, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowLeft, ArrowUpCircle, Bot, Check, ChevronDown, ChevronRight, CircleCheck, Copy, Eye, EyeOff, Loader2, WalletCards, X,
+  AlertTriangle, ArrowLeft, ArrowUpCircle, Bot, Check, ChevronDown, ChevronRight, CircleCheck, Copy, Eye, EyeOff, KeyRound, Loader2, WalletCards, X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -100,7 +100,7 @@ export function WordGrid({ words, hidden, bad, onReveal }: { words: string[]; hi
 }
 
 /** Step 2: the words, hidden until asked for. */
-export function HdBackupStep({ words }: { words: string[] }) {
+export function HdBackupStep({ words, withPassphrase = false }: { words: string[]; withPassphrase?: boolean }) {
   const { t } = useTranslation();
   const [hidden, setHidden] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -132,6 +132,7 @@ export function HdBackupStep({ words }: { words: string[] }) {
           <span className="text-[11px] text-muted">{t('vaults.hd.backup.clipboard')}</span>
         </div>
       ) : null}
+      {withPassphrase ? <HdNotice tone="warning" icon={KeyRound}>{t('vaults.hd.passphrase.backupReminder')}</HdNotice> : null}
       <HdNotice tone="violet" icon={Bot}>{t('vaults.hd.backup.agentNote')}</HdNotice>
     </>
   );

@@ -4,10 +4,8 @@
 // changes, before the fields every key has. The typed states draw the shipped section on its own (a
 // frame cannot type); write-down and done are the shipped steps.
 import { VaultSecretDialog } from '@/components/ui/vault-secret-dialog';
-import { HdBackupStep, HdCreatePassphrase, HdDoneStep, HdNotice, HdStepFooter, HdStepper } from '@/components/ui/vault-hd-wallet-steps';
+import { HdBackupStep, HdCreatePassphrase, HdDoneStep, HdStepFooter, HdStepper } from '@/components/ui/vault-hd-wallet-steps';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
-import { KeyRound } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
 
 import { CREATED_ADDRESSES, CREATED_WORDS } from '../../../kit/vault-mnemonic/data';
 import { frames } from '../../../frame';
@@ -26,15 +24,10 @@ const typed = (value: string, again: string) => () => (
     <HdCreatePassphrase value={value} confirm={again} onChange={noop} onConfirmChange={noop} />
   </div>
 );
-const Reminder = () => {
-  const { t } = useTranslation();
-  return <HdNotice tone="warning" icon={KeyRound}>{t('vaults.hd.passphrase.backupReminder')}</HdNotice>;
-};
 const backup = () => (
   <form className="flex min-w-0 flex-col gap-4">
     <HdStepper step={2} />
-    <HdBackupStep words={CREATED_WORDS} />
-    <Reminder />
+    <HdBackupStep words={CREATED_WORDS} withPassphrase />
     <HdStepFooter step="backup" onBack={noop} onNext={noop} />
   </form>
 );
