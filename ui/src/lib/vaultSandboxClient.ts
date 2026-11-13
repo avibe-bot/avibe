@@ -52,7 +52,7 @@ import {
   POLICY_DOWNGRADE_OP,
   type PolicyDowngradeContext,
   type PolicyDowngradeResult,
-} from './vaultSigningPolicy';
+} from './vaultPolicyWire';
 
 const CHANNEL = 'avibe.vault.crypto';
 const VERSION = 2;

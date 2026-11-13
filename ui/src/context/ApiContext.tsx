@@ -1,4 +1,4 @@
-import type { PolicyDowngradeContext } from '../lib/vaultSigningPolicy';
+import type { PolicyDowngradeContext } from '../lib/vaultPolicyWire';
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import { createContext, Suspense, useCallback, useContext, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowRight, ExternalLink, KeyRound, LockKeyhole, PenTool, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -10,7 +10,7 @@ import { partitionTags } from '@/lib/vaultTags';
 import { Badge } from './badge';
 import { Button } from './button';
 import { VaultApprovalDialog } from './vault-approval-dialog';
-import { VaultSecretDialog } from './vault-secret-dialog';
+import { LazyVaultSecretDialog } from './vault-secret-dialog-lazy';
 
 type RequestType = 'access' | 'sign' | 'provision' | 'delete';
 
@@ -73,20 +73,22 @@ export const VaultProvisionDialogProvider: React.FC<{
     >
       {children}
       {activeRequest ? (
-        <VaultSecretDialog
-          open={!disabled}
-          onOpenChange={(open) => {
-            if (!open) setActiveRequestId(null);
-          }}
-          request={activeRequest}
-          onCancel={() => dismissProvisionDialog(activeRequest.id)}
-          onDeny={onProvisionRequestDenied ? () => denyProvisionDialog(activeRequest.id) : undefined}
-          onCreated={() => {
-            onProvisionRequestHidden?.(activeRequest.id);
-            setActiveRequestId(null);
-            onResolved();
-          }}
-        />
+        <Suspense fallback={null}>
+          <LazyVaultSecretDialog
+            open={!disabled}
+            onOpenChange={(open) => {
+              if (!open) setActiveRequestId(null);
+            }}
+            request={activeRequest}
+            onCancel={() => dismissProvisionDialog(activeRequest.id)}
+            onDeny={onProvisionRequestDenied ? () => denyProvisionDialog(activeRequest.id) : undefined}
+            onCreated={() => {
+              onProvisionRequestHidden?.(activeRequest.id);
+              setActiveRequestId(null);
+              onResolved();
+            }}
+          />
+        </Suspense>
       ) : null}
     </VaultProvisionDialogContext.Provider>
   );
@@ -100,6 +102,8 @@ export const VaultProvisionDialogProvider: React.FC<{
 export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () => void }> = ({ request, onResolved }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  // The secret dialog's code loads on the first open and then stays mounted (so it can animate out).
+  const [opened, setOpened] = useState(false);
   const type = useMemo(() => requestType(request), [request]);
   const provisionDialog = useContext(VaultProvisionDialogContext);
   const externallyOwnedProvision = type === 'provision' && provisionDialog !== null;
@@ -161,7 +165,10 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
           onClick={() => {
             if (reviewInBrowser) openVaultsInBrowser({ kind: 'request', requestId: request.id });
             else if (externallyOwnedProvision) provisionDialog.open(request);
-            else setOpen(true);
+            else {
+              setOpened(true);
+              setOpen(true);
+            }
           }}
         >
           {reviewInBrowser ? t('vaults.requests.reviewInBrowser') : meta.action}
@@ -170,15 +177,19 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
       </div>
 
       {type === 'provision' && !externallyOwnedProvision ? (
-        <VaultSecretDialog
-          open={open}
-          onOpenChange={setOpen}
-          request={request}
-          onCreated={() => {
-            setOpen(false);
-            onResolved();
-          }}
-        />
+        opened ? (
+          <Suspense fallback={null}>
+            <LazyVaultSecretDialog
+              open={open}
+              onOpenChange={setOpen}
+              request={request}
+              onCreated={() => {
+                setOpen(false);
+                onResolved();
+              }}
+            />
+          </Suspense>
+        ) : null
       ) : type !== 'provision' ? (
         <VaultApprovalDialog
           request={open ? request : null}

@@ -3,11 +3,12 @@
 import { createInstance } from 'i18next';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import en from '@/i18n/en.json';
 import type { VaultRequest } from '@/context/ApiContext';
 import { VaultProvisionDialogProvider, VaultRequestCard } from './vault-request-card';
+import { LazyVaultSecretDialog } from './vault-secret-dialog-lazy';
 
 vi.mock('./vault-secret-dialog', () => ({
   VaultSecretDialog: ({
@@ -65,14 +66,16 @@ const renderProvisionCard = (onProvisionRequestHidden = vi.fn(), onProvisionRequ
 );
 
 describe('VaultRequestCard provision dialog dismissal', () => {
+  // The dialog's code loads on a card's first open; have it here so each case opens it at once.
+  beforeAll(async () => { await LazyVaultSecretDialog.preload(); });
   afterEach(() => cleanup());
 
-  it('keeps the card after close and hides it after Ignore', () => {
+  it('keeps the card after close and hides it after Ignore', async () => {
     const onProvisionRequestHidden = vi.fn();
     renderProvisionCard(onProvisionRequestHidden);
 
     fireEvent.click(screen.getByRole('button', { name: /provide/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'close dialog' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'close dialog' }));
     expect(screen.getByText(request.secret_name)).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /provide/i }));
@@ -81,12 +84,12 @@ describe('VaultRequestCard provision dialog dismissal', () => {
     expect(onProvisionRequestHidden).toHaveBeenCalledWith(request.id);
   });
 
-  it('offers a terminal Deny action alongside the chat-only dismissal', () => {
+  it('offers a terminal Deny action alongside the chat-only dismissal', async () => {
     const onProvisionRequestDenied = vi.fn(() => true);
     renderProvisionCard(vi.fn(), onProvisionRequestDenied);
 
     fireEvent.click(screen.getByRole('button', { name: /provide/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Deny' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Deny' }));
 
     expect(onProvisionRequestDenied).toHaveBeenCalledWith(request.id);
   });
