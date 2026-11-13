@@ -328,6 +328,7 @@ final class WebViewFactory {
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let directStatus: DirectStatusProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -347,6 +348,7 @@ final class WebViewFactory {
         historyDidChange: historyDidChange,
         colorSchemeDidChange: colorSchemeDidChange,
         showAccount: showAccount,
+        directStatus: directStatus,
         pushStatus: { [weak self] vapidPublicKey, origin in
             guard let coordinator = self?.pushCoordinator else {
                 return ["state": "unavailable"]
@@ -389,6 +391,7 @@ final class WebViewFactory {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        directStatus: DirectStatusProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         pushCoordinator: NativePushCoordinator? = nil
@@ -399,6 +402,7 @@ final class WebViewFactory {
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.directStatus = directStatus
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.pushCoordinator = pushCoordinator
@@ -552,6 +556,15 @@ final class WebViewController: UIViewController {
     private(set) var pageColorScheme: PageColorScheme?
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
+    private let directStatus: DirectStatusProvider?
+    /// Whether this runtime's WebView may be loaded now; `nil` without a
+    /// direct transport, which loads as before.
+    private let directLoadGate: DirectLoadGateProvider?
+    /// An automatic load of the instance (the first load, or the reload
+    /// after the web content process ended) that met a held gate. One bit,
+    /// not a queue: repeated requests coalesce, and it is consumed before
+    /// the one load it stands for.
+    private var hasPendingAutoLoad = false
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -600,6 +613,7 @@ final class WebViewController: UIViewController {
             showAccount: { [weak self] in
                 self?.showAccountIfActive()
             },
+            directStatus: directStatus,
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
             },
@@ -628,6 +642,8 @@ final class WebViewController: UIViewController {
         pushCoordinator: NativePushCoordinator? = nil,
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
+        directStatus: DirectStatusProvider? = nil,
+        directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
@@ -640,6 +656,8 @@ final class WebViewController: UIViewController {
         self.websiteDataStore = websiteDataStore
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
+        self.directStatus = directStatus
+        self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])
         self.accountFallbackVisibilityChanged =
@@ -766,11 +784,41 @@ final class WebViewController: UIViewController {
         retainedWebViewFactory?.resetLockedContentOffsetsForKeyboardChange()
     }
 
+    /// Every load of the instance the shell itself starts: the first load,
+    /// and the reload after the web content process ended. With a direct
+    /// transport it passes the load gate here, in this same turn. Held (the
+    /// host has a route and the listener is closed or being bound again):
+    /// nothing is loaded against that port; one pending bit is kept, and
+    /// `directAvailabilityDidChange()` loads once when the gate opens.
+    /// Fault: nothing is loaded; the reopen message covers the runtime.
     private func loadConfiguredInstance() {
         guard !isInvalidatedForAccountTransition else {
+            hasPendingAutoLoad = false
             return
         }
-        retainedWebView?.load(URLRequest(url: instanceOrigin.url))
+        switch directLoadGate?() ?? .open {
+        case .open:
+            hasPendingAutoLoad = false
+            retainedWebView?.load(URLRequest(url: instanceOrigin.url))
+        case .held:
+            hasPendingAutoLoad = true
+        case .fault:
+            hasPendingAutoLoad = false
+        }
+    }
+
+    /// The load gate may have changed. A held automatic load is decided
+    /// again from the gate as it is now: loaded once when it is open (the
+    /// bit is consumed first), dropped under the fault, kept while held.
+    func directAvailabilityDidChange() {
+        guard hasPendingAutoLoad else {
+            return
+        }
+        guard !isInvalidatedForAccountTransition else {
+            hasPendingAutoLoad = false
+            return
+        }
+        loadConfiguredInstance()
     }
 
     func deliverPushOpened(id: String, path: String) {
@@ -800,11 +848,41 @@ final class WebViewController: UIViewController {
         )
     }
 
+    /// Tells every instance-origin document this runtime shows, the primary
+    /// and instance-origin child windows, the current `direct` state for this
+    /// runtime's instance origin: what new connections prefer, and how many
+    /// times connections were closed because their path was lost.
+    func deliverDirectTransportChanged(
+        statusFor status: (WebOrigin) -> DirectPathStatus
+    ) {
+        guard
+            !isInvalidatedForAccountTransition,
+            let script = status(instanceOrigin).eventScript(for: instanceOrigin)
+        else {
+            return
+        }
+        let webViews = [retainedWebView].compactMap { $0 }
+            + popupRecords.values.map(\.webView)
+        for webView in webViews
+        where webView.url.flatMap({
+            WebOrigin(url: $0, requiresHTTPS: false)
+        }) == instanceOrigin {
+            webView.evaluateJavaScript(script)
+        }
+    }
+
     private func showAccountIfActive() {
         guard !isInvalidatedForAccountTransition else {
             return
         }
         showAccount()
+    }
+
+    /// The primary WebView while this runtime is live: `nil` before the
+    /// view is made and once the runtime is released for an account
+    /// transition. What the direct transport's rendezvous request runs in.
+    var livePrimaryWebView: WKWebView? {
+        isInvalidatedForAccountTransition ? nil : retainedWebView
     }
 
     private func isPrimaryWebView(_ webView: WKWebView) -> Bool {
@@ -1018,6 +1096,7 @@ final class WebViewController: UIViewController {
                 + popupRecords.values.map(\.webView)
         )
         isInvalidatedForAccountTransition = true
+        hasPendingAutoLoad = false
         primaryNavigationInProgress = false
         blockedBackForwardNavigation = false
         accountFallbackWorkItem?.cancel()
@@ -1260,6 +1339,13 @@ final class WebViewController: UIViewController {
             record.controller.invalidateForAccountTransition()
         }
         rootRecord.navigationController.dismiss(animated: true)
+    }
+
+    /// The direct listener faulted: the reopen message covers the runtime,
+    /// and a child window presented above it must not stay in front of it.
+    /// Its WebViews are released as an account transition releases them.
+    func discardPopupsForListenerFault() {
+        discardAllPopups(animated: false)
     }
 
     private func discardAllPopups(animated: Bool) {

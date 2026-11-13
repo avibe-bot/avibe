@@ -6,7 +6,6 @@ service-exit path may wait for drain (and thus for slow/hung destinations).
 """
 from __future__ import annotations
 
-import atexit
 import logging
 import sys
 import threading
@@ -17,6 +16,7 @@ from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from queue import Full, Queue
 
 from vibe.logging_config import configure_library_logging
+from vibe.shutdown_diagnostics import register_shutdown_hook
 
 QUEUE_CAPACITY = 8192
 REPORT_INTERVAL_SECONDS = 30.0
@@ -240,4 +240,4 @@ def shutdown_service_logging() -> None:
 
 # Fallback for callers using setup outside main; main itself drains explicitly.
 # Registered after logging's hook so drain precedes logging.shutdown at exit.
-atexit.register(shutdown_service_logging)
+register_shutdown_hook("vibe.service_logging.shutdown_service_logging", shutdown_service_logging)

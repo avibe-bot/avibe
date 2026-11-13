@@ -9,6 +9,14 @@
 /* Begin PBXBuildFile section */
 		100000000000000000000001 /* AvibeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* AvibeApp.swift */; };
 		100000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* AppModel.swift */; };
+		1000000000000000000000F0 /* DirectConnectListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F0 /* DirectConnectListener.swift */; };
+		1000000000000000000000F1 /* DirectPathController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F1 /* DirectPathController.swift */; };
+		1000000000000000000000F2 /* DirectTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F2 /* DirectTransport.swift */; };
+		1000000000000000000000F3 /* DirectConnectListenerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F3 /* DirectConnectListenerTests.swift */; };
+		1000000000000000000000F4 /* DirectPathControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F4 /* DirectPathControllerTests.swift */; };
+		1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F5 /* DirectPathAppTests.swift */; };
+		1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F6 /* DirectPublicBackend.swift */; };
+		1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F7 /* DirectPublicBackendTests.swift */; };
 		100000000000000000000003 /* NavigationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* NavigationPolicy.swift */; };
 		100000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* RootView.swift */; };
 		100000000000000000000005 /* WebOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
@@ -42,6 +50,12 @@
 		100000000000000000000127 /* DirectIrohTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000127 /* DirectIrohTransportTests.swift */; };
 		100000000000000000000128 /* DirectRendezvousFetcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000128 /* DirectRendezvousFetcherTests.swift */; };
 		100000000000000000000129 /* DirectRendezvousTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000129 /* DirectRendezvousTests.swift */; };
+		100000000000000000000130 /* IrohLib.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000130 /* IrohLib.swift */; };
+		100000000000000000000131 /* Iroh.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000131 /* Iroh.xcframework */; };
+		100000000000000000000132 /* libIrohLib.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000132 /* libIrohLib.a */; };
+		100000000000000000000133 /* Iroh.xcframework in App Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000131 /* Iroh.xcframework */; };
+		100000000000000000000134 /* libIrohLib.a in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000132 /* libIrohLib.a */; };
+		100000000000000000000135 /* Iroh.xcframework in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000131 /* Iroh.xcframework */; };
 		1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A1 /* FormAccessoryBar.swift */; };
 		1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A2 /* NativePushCoordinator.swift */; };
 		1000000000000000000000A3 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
@@ -75,11 +89,33 @@
 			remoteGlobalIDString = 500000000000000000000003;
 			remoteInfo = NotificationService;
 		};
+		300000000000000000000003 /* IrohLib dependency proxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 400000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 500000000000000000000004;
+			remoteInfo = IrohLib;
+		};
+		300000000000000000000004 /* IrohLib test dependency proxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 400000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 500000000000000000000004;
+			remoteInfo = IrohLib;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		200000000000000000000001 /* AvibeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeApp.swift; sourceTree = "<group>"; };
 		200000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		2000000000000000000000F0 /* DirectConnectListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectConnectListener.swift; sourceTree = "<group>"; };
+		2000000000000000000000F1 /* DirectPathController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathController.swift; sourceTree = "<group>"; };
+		2000000000000000000000F2 /* DirectTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectTransport.swift; sourceTree = "<group>"; };
+		2000000000000000000000F3 /* DirectConnectListenerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectConnectListenerTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000F4 /* DirectPathControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathControllerTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000F5 /* DirectPathAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathAppTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000F6 /* DirectPublicBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackend.swift; sourceTree = "<group>"; };
+		2000000000000000000000F7 /* DirectPublicBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackendTests.swift; sourceTree = "<group>"; };
 		200000000000000000000003 /* NavigationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationPolicy.swift; sourceTree = "<group>"; };
 		200000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		200000000000000000000005 /* WebOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebOrigin.swift; sourceTree = "<group>"; };
@@ -116,6 +152,9 @@
 		200000000000000000000127 /* DirectIrohTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohTransportTests.swift; sourceTree = "<group>"; };
 		200000000000000000000128 /* DirectRendezvousFetcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectRendezvousFetcherTests.swift; sourceTree = "<group>"; };
 		200000000000000000000129 /* DirectRendezvousTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectRendezvousTests.swift; sourceTree = "<group>"; };
+		200000000000000000000130 /* IrohLib.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrohLib.swift; sourceTree = "<group>"; };
+		200000000000000000000131 /* Iroh.xcframework */ = {isa = PBXFileReference; explicitFileType = wrapper.xcframework; path = Iroh.xcframework; sourceTree = "<group>"; };
+		200000000000000000000132 /* libIrohLib.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libIrohLib.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		2000000000000000000000A1 /* FormAccessoryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormAccessoryBar.swift; sourceTree = "<group>"; };
 		2000000000000000000000A2 /* NativePushCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinator.swift; sourceTree = "<group>"; };
 		2000000000000000000000A3 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCrypto.swift; sourceTree = "<group>"; };
@@ -138,6 +177,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				100000000000000000000132 /* libIrohLib.a in Frameworks */,
+				100000000000000000000133 /* Iroh.xcframework in App Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -145,6 +186,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				100000000000000000000134 /* libIrohLib.a in Test Frameworks */,
+				100000000000000000000135 /* Iroh.xcframework in Test Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -152,6 +195,14 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		600000000000000000000004 /* IrohLib Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000131 /* Iroh.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -175,6 +226,10 @@
 				200000000000000000000001 /* AvibeApp.swift */,
 				200000000000000000000002 /* AppModel.swift */,
 				200000000000000000000019 /* Avibe.entitlements */,
+				2000000000000000000000F0 /* DirectConnectListener.swift */,
+				2000000000000000000000F1 /* DirectPathController.swift */,
+				2000000000000000000000F6 /* DirectPublicBackend.swift */,
+				2000000000000000000000F2 /* DirectTransport.swift */,
 				2000000000000000000000A1 /* FormAccessoryBar.swift */,
 				200000000000000000000011 /* MobileAccount.swift */,
 				200000000000000000000012 /* MobileAuthTransport.swift */,
@@ -196,6 +251,7 @@
 				200000000000000000000122 /* DirectIrohTransport.swift */,
 				200000000000000000000123 /* DirectRendezvous.swift */,
 				200000000000000000000124 /* DirectRendezvousFetcher.swift */,
+				700000000000000000000008 /* IrohLib */,
 				700000000000000000000003 /* Resources */,
 			);
 			path = Avibe;
@@ -217,6 +273,10 @@
 		700000000000000000000004 /* AvibeTests */ = {
 			isa = PBXGroup;
 			children = (
+				2000000000000000000000F3 /* DirectConnectListenerTests.swift */,
+				2000000000000000000000F5 /* DirectPathAppTests.swift */,
+				2000000000000000000000F4 /* DirectPathControllerTests.swift */,
+				2000000000000000000000F7 /* DirectPublicBackendTests.swift */,
 				20000000000000000000000C /* NavigationPolicyTests.swift */,
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
@@ -255,12 +315,22 @@
 			path = "../tests/fixtures/push";
 			sourceTree = "<group>";
 		};
+		700000000000000000000008 /* IrohLib */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000130 /* IrohLib.swift */,
+				200000000000000000000131 /* Iroh.xcframework */,
+			);
+			path = IrohLib;
+			sourceTree = "<group>";
+		};
 		700000000000000000000005 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				20000000000000000000000D /* Avibe.app */,
 				20000000000000000000000E /* AvibeTests.xctest */,
 				2000000000000000000000B6 /* NotificationService.appex */,
+				200000000000000000000132 /* libIrohLib.a */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -277,11 +347,13 @@
 				600000000000000000000001 /* Frameworks */,
 				A00000000000000000000001 /* Resources */,
 				E00000000000000000000001 /* Embed Foundation Extensions */,
+				D00000000000000000000003 /* Verify linked Iroh artifact */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				B00000000000000000000002 /* NotificationService dependency */,
+				B00000000000000000000003 /* IrohLib dependency */,
 			);
 			name = Avibe;
 			productName = Avibe;
@@ -300,6 +372,7 @@
 			);
 			dependencies = (
 				B00000000000000000000001 /* PBXTargetDependency */,
+				B00000000000000000000004 /* IrohLib test dependency */,
 			);
 			name = AvibeTests;
 			productName = AvibeTests;
@@ -322,6 +395,23 @@
 			productName = NotificationService;
 			productReference = 2000000000000000000000B6 /* NotificationService.appex */;
 			productType = "com.apple.product-type.app-extension";
+		};
+		500000000000000000000004 /* IrohLib */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000005 /* Build configuration list for PBXNativeTarget "IrohLib" */;
+			buildPhases = (
+				D00000000000000000000002 /* Verify IrohLib inputs */,
+				900000000000000000000004 /* IrohLib Sources */,
+				600000000000000000000004 /* IrohLib Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = IrohLib;
+			productName = IrohLib;
+			productReference = 200000000000000000000132 /* libIrohLib.a */;
+			productType = "com.apple.product-type.library.static";
 		};
 /* End PBXNativeTarget section */
 
@@ -362,6 +452,7 @@
 				500000000000000000000001 /* Avibe */,
 				500000000000000000000002 /* AvibeTests */,
 				500000000000000000000003 /* NotificationService */,
+				500000000000000000000004 /* IrohLib */,
 			);
 		};
 /* End PBXProject section */
@@ -438,7 +529,89 @@
 			shellScript = "AVIBE_MOBILE_BUNDLE_EXISTENCE_ONLY=1 /bin/sh \"$SRCROOT/scripts/verify_mobile_bundle.sh\" \"$SRCROOT/Avibe/Resources/MobileApp\"\n";
 			showEnvVarsInLog = 0;
 		};
-/* End PBXShellScriptBuildPhase section */
+		D00000000000000000000002 /* Verify IrohLib inputs */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../packaging/iroh-apple/release.json",
+				"$(SRCROOT)/scripts/prepare_iroh_app.py",
+				"$(SRCROOT)/scripts/verify_iroh_app_product.sh",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib.xcframework.zip",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib-support.zip",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib.swift",
+				"$(SRCROOT)/Avibe/IrohLib/manifest.json",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios.txt",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios-sim.txt",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-x86_64-apple-ios.txt",
+				"$(SRCROOT)/Avibe/IrohLib/verified.json",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/Info.plist",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/libiroh_ffi.a",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/Export.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/iroh_ffiFFI.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/module.modulemap",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/libiroh_ffi-ios-simulator.a",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/Export.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/iroh_ffiFFI.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap",
+			);
+			name = "Verify IrohLib inputs";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "python3 \"$SRCROOT/scripts/prepare_iroh_app.py\" verify --staging \"$SRCROOT/Avibe/IrohLib\"\n";
+			showEnvVarsInLog = 0;
+		};
+		D00000000000000000000003 /* Verify linked Iroh artifact */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/../packaging/iroh-apple/release.json",
+				"$(SRCROOT)/../packaging/iroh-apple/check-private-apple-datapath.sh",
+				"$(SRCROOT)/scripts/prepare_iroh_app.py",
+				"$(SRCROOT)/scripts/verify_iroh_app_product.sh",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib.xcframework.zip",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib-support.zip",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib.swift",
+				"$(SRCROOT)/Avibe/IrohLib/manifest.json",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios.txt",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios-sim.txt",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-x86_64-apple-ios.txt",
+				"$(SRCROOT)/Avibe/IrohLib/verified.json",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/Info.plist",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/libiroh_ffi.a",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/Export.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/iroh_ffiFFI.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/module.modulemap",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/libiroh_ffi-ios-simulator.a",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/Export.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/iroh_ffiFFI.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+				"$(IROH_DEBUG_DYLIB_INPUT)",
+			);
+			name = "Verify linked Iroh artifact";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/scripts/verify_iroh_app_product.sh\" \"$SRCROOT/Avibe/IrohLib\" \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\" \"$IROH_DEBUG_DYLIB_PATH\" \"$ENABLE_DEBUG_DYLIB\"\n";
+			showEnvVarsInLog = 0;
+		};
 
 /* Begin PBXSourcesBuildPhase section */
 		900000000000000000000001 /* Sources */ = {
@@ -447,6 +620,10 @@
 			files = (
 				100000000000000000000002 /* AppModel.swift in Sources */,
 				100000000000000000000001 /* AvibeApp.swift in Sources */,
+				1000000000000000000000F0 /* DirectConnectListener.swift in Sources */,
+				1000000000000000000000F1 /* DirectPathController.swift in Sources */,
+				1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */,
+				1000000000000000000000F2 /* DirectTransport.swift in Sources */,
 				1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */,
 				10000000000000000000000E /* MobileAccount.swift in Sources */,
 				10000000000000000000000F /* MobileAuthTransport.swift in Sources */,
@@ -477,6 +654,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1000000000000000000000F3 /* DirectConnectListenerTests.swift in Sources */,
+				1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */,
+				1000000000000000000000F4 /* DirectPathControllerTests.swift in Sources */,
+				1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */,
 				10000000000000000000000B /* NavigationPolicyTests.swift in Sources */,
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
@@ -503,6 +684,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		900000000000000000000004 /* IrohLib Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000130 /* IrohLib.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -515,6 +704,16 @@
 			isa = PBXTargetDependency;
 			target = 500000000000000000000003 /* NotificationService */;
 			targetProxy = 300000000000000000000002 /* PBXContainerItemProxy */;
+		};
+		B00000000000000000000003 /* IrohLib dependency */ = {
+			isa = PBXTargetDependency;
+			target = 500000000000000000000004 /* IrohLib */;
+			targetProxy = 300000000000000000000003 /* IrohLib dependency proxy */;
+		};
+		B00000000000000000000004 /* IrohLib test dependency */ = {
+			isa = PBXTargetDependency;
+			target = 500000000000000000000004 /* IrohLib */;
+			targetProxy = 300000000000000000000004 /* IrohLib test dependency proxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -635,6 +834,9 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_DEBUG_DYLIB = YES;
+				IROH_DEBUG_DYLIB_INPUT = "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib";
+				IROH_DEBUG_DYLIB_PATH = "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Avibe/Resources/Info.plist;
@@ -664,6 +866,9 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_DEBUG_DYLIB = NO;
+				IROH_DEBUG_DYLIB_INPUT = /dev/null;
+				IROH_DEBUG_DYLIB_PATH = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Avibe/Resources/Info.plist;
@@ -761,6 +966,40 @@
 			};
 			name = Release;
 		};
+		C00000000000000000000009 /* IrohLib Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEFINES_MODULE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACH_O_TYPE = staticlib;
+				PRODUCT_MODULE_NAME = IrohLib;
+				PRODUCT_NAME = IrohLib;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		C0000000000000000000000A /* IrohLib Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				DEFINES_MODULE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACH_O_TYPE = staticlib;
+				PRODUCT_MODULE_NAME = IrohLib;
+				PRODUCT_NAME = IrohLib;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -796,6 +1035,15 @@
 			buildConfigurations = (
 				C00000000000000000000007 /* Debug */,
 				C00000000000000000000008 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		800000000000000000000005 /* Build configuration list for PBXNativeTarget "IrohLib" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C00000000000000000000009 /* Debug */,
+				C0000000000000000000000A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

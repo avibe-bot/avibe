@@ -51,6 +51,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Prepare published iroh App artifact
+        run: python3 ios/scripts/prepare_iroh_app.py stage --staging ios/Avibe/IrohLib
+
       - name: Build bundled mobile UI
         working-directory: ui
         run: |
@@ -58,7 +61,7 @@ jobs:
           npm run build:mobile
 
       - name: Generate the App's license notices
-        run: python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp
+        run: python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp --support-zip ios/Avibe/IrohLib/IrohLib-support.zip
 
       - name: Verify bundled mobile UI
         run: ios/scripts/verify_mobile_bundle.sh ios/Avibe/Resources/MobileApp

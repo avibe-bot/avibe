@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import atexit
 import base64
 from collections import deque
 from contextlib import contextmanager
@@ -39,6 +38,7 @@ from config.atomic_io import write_atomic
 from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock, config_recovery_refusal
 from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
+from vibe.shutdown_diagnostics import register_shutdown_hook
 
 logger = logging.getLogger(__name__)
 
@@ -2896,7 +2896,7 @@ def _report_runtime_status_async(config: V2Config | None = None, event: str = "h
         holder["thread"] = thread
         _STATUS_REPORT_THREADS.add(thread)
         if not _STATUS_REPORT_ATEXIT_REGISTERED:
-            atexit.register(drain_runtime_status_reports)
+            register_shutdown_hook("vibe.remote_access.drain_runtime_status_reports", drain_runtime_status_reports)
             _STATUS_REPORT_ATEXIT_REGISTERED = True
         try:
             thread.start()

@@ -1,6 +1,7 @@
 import Foundation
 import os
 import UIKit
+import WebKit
 
 // The direct transport over iroh (rows A1 and A2 of
 // docs/plans/remote-direct-phase1.md; docs/plans/remote-direct-ios.md
@@ -41,6 +42,9 @@ enum DirectIrohReport: Equatable, Sendable {
     case verifying
     /// The path is gone, or its probe failed.
     case lost
+    /// The App went to the background: everything stopped, and the path is
+    /// gone.
+    case lostToBackground
 }
 
 /// Fetches the rendezvous answer for a selection, natively and on that
@@ -629,13 +633,11 @@ final class DirectIrohTransport {
             Self.logger.info("Direct transport: the instance offers no direct path")
             // The newest accepted answer speaks for the instance: whatever
             // an earlier one started, a dial under way included, ends.
-            let hadSession = session != nil
             cancelDial()
-            endSession()
-            scheduleFetch(after: TimeInterval(retryAfterSeconds))
-            if hadSession {
-                emit(.lost)
+            guard endSessionReportingLoss() else {
+                return
             }
+            scheduleFetch(after: TimeInterval(retryAfterSeconds))
         case .ready(let offer):
             // The instance issued the answer after the request was sent, so
             // a deadline counted from then is never later than the
@@ -687,13 +689,11 @@ final class DirectIrohTransport {
             // A new endpoint key or address set. The old path is retired
             // before the new one is dialled: new connections use the
             // public origin until the new path answers.
-            let hadSession = session != nil
-            endSession()
+            guard endSessionReportingLoss() else {
+                return
+            }
             startDial(under: accepted, key: key, host: selection.host)
             scheduleFetch(after: refresh)
-            if hadSession {
-                emit(.lost)
-            }
         }
     }
 
@@ -1017,11 +1017,13 @@ final class DirectIrohTransport {
         sessionDidEnd(retryNow: false)
     }
 
-    /// The path is gone. `lost` is reported after the next attempt is
-    /// arranged, so new connections are already on the public origin.
+    /// The path is gone: it is reported, closed, and the next attempt is
+    /// arranged.
     private func sessionDidEnd(retryNow: Bool) {
         Self.logger.info("Direct transport: lost")
-        endSession()
+        guard endSessionReportingLoss() else {
+            return
+        }
         cancelFetch()
         if retryNow {
             failures = 0
@@ -1030,7 +1032,6 @@ final class DirectIrohTransport {
         } else {
             scheduleRetry()
         }
-        emit(.lost)
     }
 
     private func startProbe(_ reason: ProbeReason) {
@@ -1132,6 +1133,16 @@ final class DirectIrohTransport {
     /// Closes the live path, if there is one: its streams, its connection,
     /// and its endpoint. Reports nothing.
     private func endSession() {
+        if let ending = detachSession() {
+            close(ending)
+        }
+    }
+
+    /// Detaches the live path, if there is one, and returns it: from here
+    /// nothing is opened, probed, or timed on it, and nothing of it is
+    /// left in this transport's state. Its streams and connection stay
+    /// open until `close(_:)`. Reports nothing.
+    private func detachSession() -> Session? {
         cancelProbe()
         debounceTimer?.cancel()
         debounceTimer = nil
@@ -1141,13 +1152,38 @@ final class DirectIrohTransport {
         spacingTimer = nil
         isSpacingFailureProbes = false
         guard let session else {
-            return
+            return nil
         }
         dropLease()
         self.session = nil
         raiseFloor()
+        return session
+    }
+
+    private func close(_ session: Session) {
         session.cancelStreams()
         session.link.close()
+    }
+
+    /// Ends the live path, if there is one, and reports its loss (`lost`, or
+    /// `report`) between detaching it and closing it. Whoever hears the report closes
+    /// and counts the relays the path carried in that same turn
+    /// (`DirectPathController` takes their claims there); a stream closed
+    /// before that would look to it as one that ended on its own, and its
+    /// page would not be told to reconnect. The path is closed whatever the
+    /// report led to. `false` when the report led to new work here (another
+    /// selection, a return to the foreground, a new attempt): that work is
+    /// its owner's, and the caller does nothing more.
+    private func endSessionReportingLoss(_ report: DirectIrohReport = .lost) -> Bool {
+        guard let ending = detachSession() else {
+            return true
+        }
+        let current = (selection: selection, stamp: stamp, isInBackground: isInBackground)
+        emit(report)
+        close(ending)
+        return selection == current.selection
+            && stamp == current.stamp
+            && isInBackground == current.isInBackground
     }
 
     private func stopWork() {
@@ -1219,12 +1255,16 @@ final class DirectIrohTransport {
             return
         }
         isInBackground = true
-        let hadSession = session != nil
-        stopWork()
+        // Everything that needs no report stops first, the path included,
+        // which is detached. Then the loss is reported, and after it only
+        // that path is closed: whatever the report led to (a return to the
+        // foreground, another selection) owns what it started.
+        fetchTimer?.cancel()
+        fetchTimer = nil
+        cancelFetch()
+        cancelDial()
         network.stop()
-        if hadSession {
-            emit(.lost)
-        }
+        _ = endSessionReportingLoss(.lostToBackground)
     }
 
     private func applicationWillEnterForeground() {
@@ -1239,5 +1279,108 @@ final class DirectIrohTransport {
         pageRetries = 0
         startNetworkWatch()
         startFetch()
+    }
+}
+
+// MARK: - The App's seam
+
+// What joins this transport to the local proxy's seam
+// (`DirectTransport.swift`). The transport keeps its own value types; this
+// is the whole mapping. Nothing in the App creates the transport yet.
+
+extension DirectIrohSelection {
+    /// The selection for a target the path controller issued. The
+    /// controller issues a new `selection` number for every target, so two
+    /// equal selections come from the same target.
+    init(_ target: DirectTarget) {
+        self.init(
+            number: target.selection,
+            instanceID: target.runtime.instance.id,
+            host: target.authority.host,
+            storeIdentifier: target.storeIdentifier
+        )
+    }
+}
+
+extension DirectIrohStreamTag {
+    init(_ tag: DirectStreamTag) {
+        self.init(
+            selection: DirectIrohSelection(tag.target),
+            rendezvousGeneration: tag.rendezvousGeneration,
+            pathGeneration: tag.pathGeneration
+        )
+    }
+}
+
+extension DirectPathReport {
+    init(_ report: DirectIrohReport) {
+        switch report {
+        case .usable(let generation):
+            self = .usable(generation: generation)
+        case .verifying:
+            self = .verifying
+        case .lost:
+            self = .lost
+        case .lostToBackground:
+            self = .lostToBackground
+        }
+    }
+}
+
+extension DirectIrohByteStream: DirectByteStream {}
+
+extension DirectIrohTransport: DirectTransporting {
+    func select(
+        _ target: DirectTarget,
+        report: @escaping @MainActor (DirectPathReport) -> Void
+    ) {
+        select(DirectIrohSelection(target)) { (irohReport: DirectIrohReport) in
+            report(DirectPathReport(irohReport))
+        }
+    }
+
+    func pathDidFail(for tag: DirectStreamTag) {
+        pathDidFail(for: DirectIrohStreamTag(tag))
+    }
+
+    nonisolated func openStream(for tag: DirectStreamTag) async throws -> any DirectByteStream {
+        let stream: DirectIrohByteStream = try await openStream(for: DirectIrohStreamTag(tag))
+        return stream
+    }
+}
+
+/// Where the transport's rendezvous request runs: the selected runtime's
+/// primary WebView, as `AppModel.directRendezvousWebView(for:)` hands it
+/// out, and nothing else.
+///
+/// The transport is made before the `AppModel`, which takes it at init, so
+/// this link is bound once both exist. While it is unbound, and once the
+/// model is gone, every request is `pageNotReady`: nothing is asked of the
+/// network.
+@MainActor
+final class DirectRendezvousWebViewSource {
+    weak var appModel: AppModel?
+
+    init() {}
+
+    func webView(for selection: DirectIrohSelection) -> WKWebView? {
+        appModel?.directRendezvousWebView(for: selection)
+    }
+
+    /// The transport's `fetchRendezvous`.
+    var fetch: DirectIrohRendezvousFetch {
+        { [weak self] selection, clientEndpointID in
+            guard
+                let webView = self?.webView(for: selection),
+                let origin = WebOrigin(scheme: "https", host: selection.host, port: nil)
+            else {
+                throw DirectRendezvousFetchError.pageNotReady
+            }
+            return try await DirectRendezvousFetcher.fetch(
+                in: webView,
+                origin: origin,
+                clientEndpointID: clientEndpointID
+            )
+        }
     }
 }

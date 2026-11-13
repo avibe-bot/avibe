@@ -1,4 +1,6 @@
-# Byte-compiled / optimized / DLL files
+# Generated published iroh Apple consumer staging; never commit downloaded artifacts.
+/ios/Avibe/IrohLib/
+
 __pycache__/
 *.py[cod]
 *$py.class

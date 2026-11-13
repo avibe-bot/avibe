@@ -762,6 +762,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.setAccountActionAvailable",
                 "app.showAccount",
                 "badge.set",
+                "direct.status",
                 "haptics.impact",
                 "haptics.notify",
                 "haptics.selection",

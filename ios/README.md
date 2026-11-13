@@ -231,11 +231,20 @@ The native bridge method surface is fixed:
 | `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
+| `direct: 1` | `direct.status()` | `{preferred: "tunnel" \| "direct", sequence, closure}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. Offered only when the App has a direct transport; this shell has none, so the capability is absent and the call answers `unsupported` |
 
 After a validated notification tap, the native shell emits
 `push.opened({url})` to the selected instance's primary WebView. The event
 contains only a same-origin path, query, and fragment; invalid, unavailable,
 or mismatched notification context opens the instance recovery surface.
+
+With a direct transport, the shell emits
+`direct.transportChanged({preferred, sequence, closure})` to every
+instance-origin document of the runtime, the primary and instance-origin child
+windows, when what new connections prefer changes or when it closed
+connections because their path was lost (`closure` grows). `sequence` orders
+the changes while the App process lives. This shell never emits it: see the
+next section.
 
 Covering the runtime instead of closing it did not change any capability
 number: `app.showAccount()` keeps its parameters and `null` result, and no Web
@@ -252,6 +261,172 @@ Unknown methods never expand the native surface.
 The production Supabase Auth origin is an explicit primary-navigation
 allowlist entry. If Avibe Cloud moves to another Supabase project, update that
 origin and its navigation test in the same change.
+
+## Remote direct path (inactive)
+
+The design is `docs/plans/remote-direct-ios.md`. With a direct transport, the
+App keeps the instance's origin and carries its connections over a direct
+path when one works, or over the instance's public origin (Cloudflare in
+Avibe's deployment) when not. WebKit's connections for routed instance hosts
+go to one loopback HTTP CONNECT proxy inside the App, which picks a backend
+for each new connection. TLS stays between WebKit and the instance or its
+public edge; the shell adds no trust override and sees only ciphertext.
+
+**Nothing in this shell implements a transport, and `AvibeApp` passes none.**
+Without one, `AppModel` creates no `DirectPathController`: no listener, no
+`proxyConfigurations` write (not even a clear), no `direct` capability,
+`direct.status()` answers `unsupported`, no event, no read or write of the
+listener-fault marker, and a runtime opens exactly as before. The tests hold this from outside the App's code: they count every
+call of WebKit's `proxyConfigurations` setter in the process, on any store,
+from before the App exists, and scan the process's listening sockets on any
+address of either family, across launch, opening and switching instances,
+background and foreground, and sign-out. The tests with a stand-in transport
+show that the same capability, count, and scan do move.
+
+With a transport:
+
+- `DirectTransport.swift` is the seam. `DirectTransporting` is told which
+  instance is selected, reports when its path is usable, being validated
+  again, or lost, and opens byte streams under a stream tag (the selection,
+  the rendezvous generation, and the path generation).
+- `DirectConnectListener.swift` is the one proxy per App process, bound
+  exclusively on `127.0.0.1` the first time a route is prepared, never at
+  launch, and checked with a nonce. It answers `CONNECT <allowed host>:443`
+  and refuses everything else: another host, a subdomain (which
+  `matchDomains`, a suffix match, also sends it), another port, no port,
+  userinfo, an IP literal, any other method, a body, and a head over 4 KiB or
+  slower than 5 seconds. Bytes WebKit sends after its head are held, up to
+  16 KiB, until a backend is chosen. For each connection it races a direct
+  candidate, when one is authorized, against the public origin, which is
+  dialled after a 500 ms head start or as soon as direct fails. The first
+  ready candidate whose plan is still current wins; the others are closed
+  having received nothing. The commit point is the grant: one main-actor
+  turn validates the plan for the last time and records the relay as
+  granted in the listener's authority, with no suspension between the two;
+  the `200` follows. Before the grant a failure falls back; nothing undoes
+  a grant, and after it a connection is never planned again, redialled, or
+  replayed. The early bound is counted where WebKit's bytes are received:
+  every byte delivered before the commit point counts, whoever was reading,
+  so no cancelled watcher lets more be held; past it the CONNECT is closed.
+  Bytes delivered after the commit point are the tunnel's, of any size. If WebKit
+  closes its side before a backend is chosen, the race is cancelled. Each
+  event of the path-generation table cancels races of plans made before it
+  at once, and the CONNECT is planned once more, only under the same
+  selection and account; a newer selection or account ends uncommitted
+  CONNECTs of older ones. These retirements carry the generation and scope
+  of their event, so one that runs late never touches newer work, and a plan
+  that arrives after its retirement is not raced. An event closes only relays
+  committed under plans made before it.
+  Relays copy both directions with backpressure and half-close. At most 64
+  connections; one more is closed at once.
+- `DirectPublicBackend.swift` resolves the host, keeps only public unicast
+  addresses (IPv4-mapped and NAT64 addresses are judged as IPv4), and dials
+  exactly those numeric addresses on port 443, with no proxy, within 10
+  seconds. A committed public connection that stays not viable for 5 seconds
+  is closed.
+- `DirectPathController.swift` decides each connection. Direct is authorized
+  only for the selected runtime's exact host, on the current store, while the
+  transport reports the current rendezvous generation usable, the account
+  coordinator still has the runtime, the listener is ready, and the App is in
+  the foreground. Each event closes what the close-and-keep table says: a
+  lost path, a new rendezvous generation, and the background close direct
+  relays and count one closure per host; a runtime stop closes direct relays
+  and an account change closes all relays, without a closure; validating a
+  path again closes nothing. Only relays an event itself closes are counted:
+  the background counts its closure before it tells the transport to stop
+  (which closes its streams), and a relay whose stream had already failed is
+  not counted by a later event.
+  The background also closes the listening socket;
+  the return re-binds the same port, publishes the closure, and only then
+  answers a held `direct.status()`, and only for the runtime and store it was
+  asked under: a runtime stop or an account change settles held answers as
+  `failed`. Nothing is bound and no route is written in the background; a
+  first bind under way there is retired (no route points at it), and a
+  return's re-bind that ends there is parked for the next return. That
+  re-bind of the same port is the only recovery in a process.
+- **One authority per listener** (`DirectListenerLifecycle`): the phase
+  (`idle`, `binding`, `verifying`, `serving`, `closing`, `closed`, `failed`,
+  `stopped`), one bind generation, a monotonic "a route was published" fact
+  that an account-store rotation does not reset, and the ledger of relays,
+  each a candidate or granted. Every admission, grant, route publication,
+  bind, ownership result, socket failure, close, and stop is one call under
+  its lock, made before any `await`; the listener actor keeps tasks and
+  connections, not a second record, and the controller's view of the
+  listener is derived from the phase. Only `serving` admits relays as
+  candidates, grants them, and publishes routes (the route write itself runs
+  under the lock and counts only if it wrote); `verifying` answers only the
+  ownership check. Leaving `serving` revokes every candidate in that same
+  step, so none is granted later, whether or not the actor's cleanup has
+  run; granted relays are kept by closes and by the fault, and end only by
+  themselves, by an event's close, or by `stop`. `closed` can bind again. A
+  listener a route was ever published to is never stopped or replaced;
+  retiring an unpublished one is one locked decision against a failure, and
+  a failure recorded first wins and is kept. A bind settles its own
+  generation however it ends: its answer is the one arbiter, and the phase
+  change that goes with an answer is made under the answer's lock, so a
+  bind that returns is `verifying` for the generation it hands to its
+  caller, and one that throws has failed unless a deliberate close or a
+  stop took it first. A real bind failure is recorded where Network reports
+  it. A relay this listener cancels (an event's close, a retirement, the
+  listener leaving `serving`) loses its authority at once but keeps its
+  record, and its slot against the limit of 64, until its task has ended.
+- **The foreground watchdog.** One stay in the foreground has one deadline,
+  5 seconds on the continuous clock from the start of the first bind or
+  from a return with the listener closed (a conservative proposal, not a
+  measurement). Attempts, bind generations, and close-to-bind handoffs
+  inside the stay do not move it; leaving the foreground ends it, and the
+  next stay has its own. The lifecycle applies the deadline at the start of
+  every decision it makes, so a listener still neither serving nor failed
+  at the deadline is failed for whoever asks next, a late confirmation
+  included; the controller's single wake-up only delivers that. It is a
+  backstop for a process that is running: it does nothing while the App is
+  suspended.
+- **The load gate** decides, synchronously and from the route table and
+  the phase alone, whether the shell may create or reload a runtime's
+  WebView: open with no route on the current store or a serving listener;
+  held while a routed listener is closed for the background or being bound
+  again; the fault once it failed. An open that meets a held gate stays on
+  the loading route in one slot owned by its runtime identity; Retry is
+  shown and acted on only while open; the WebView's own automatic loads
+  (its first load and the reload after its web content process ended) pass
+  the same gate where they are made, and one that meets a held gate is kept
+  as one pending bit, made once when the gate opens and dropped by the
+  fault or the controller's invalidation. The controller announces each
+  change that is not the fault (the background close, a settled return);
+  nothing waits on a timer.
+- **The listener fault** (accepted for the internal trial, 2026-11-12;
+  narrowed to one terminal failure, 2026-11-13). Any failure of the current
+  bind, of its ownership check, or of the listening socket, before or after
+  a route, is terminal for the process: direct is never authorized again,
+  no listener is made again, and nothing is re-bound or rewritten. A
+  deliberate close, a stale generation, or a replaced attempt is never a
+  failure, and an ordinary loss of the direct path is not one either: it
+  falls back to the public origin for new connections, without a relaunch.
+  Each runtime whose host is routed on the current store shows the existing
+  failure view with "Connection lost — reopen the app" (`zh-Hans`:
+  "连接中断，请重新打开 App") and no Retry; one opened under the fault gets no
+  WebView. Status reads for a routed host get the bridge error `failed` from
+  the moment the failure is recorded, and no event follows. A host with no
+  route keeps WebKit's normal path and is not interrupted. The fault writes
+  one marker in the App's preferences; the next launch with a transport
+  consumes it in `AppModel.init` and runs that whole launch without a path
+  controller, on the public origin. The launch after that uses the
+  transport again. The marker is written before the fault is shown, by
+  every path that delivers it; that a `mark()` call returned says nothing
+  about the disk. The cost: a single transient failure of the first bind
+  loses direct for that launch and the next one.
+- `DirectRouteOwner` is the only writer of `proxyConfigurations` on an
+  account data store, which the runtime WebViews and the hidden account
+  transport share. A store's route lists exact instance hosts (at most 16 per
+  process), points at the one listener, and has `allowFailover` on. It only
+  grows: no host is removed and no route is cleared or switched, because
+  WebKit does not reliably apply that. The route is written before the
+  runtime's first load; `AppModel` shows a loading state for at most one
+  second while the listener starts. A host whose runtime loaded without a
+  route is never added to that store later. A new account store starts with
+  none.
+
+The time bounds above are proposals for source and tests, not measurements.
 
 ## Mobile account onboarding
 
@@ -604,6 +779,7 @@ pinned to Xcode 26.6.
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
 | `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
+| `websiteDataStore.proxyConfigurations` | Never written by this shell, which has no direct transport. With one, `DirectRouteOwner` is the only writer: one HTTP CONNECT route per account store to the App's loopback proxy, listing exact instance hosts, written before a runtime's first load and never cleared or switched. | XCTest with and without a stand-in transport on real `WKWebsiteDataStore` objects, counting every setter call, including that no listening socket and no route exist without one. No WebKit load through the route is part of this suite. |
 | `userContentController` | The root installs the document-start `avibeNative` script and reply handler. Children receive WebKit's exact configuration through the shared WebView factory, preserving the same controller and `window.opener`; each message still repeats the main-frame and exact-origin check. | XCTest covers instance main-frame discovery and calls, child discovery, subframe absence, external-origin absence, and unknown-method rejection. |
 | `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
 | `allowsInlineMediaPlayback`, `mediaTypesRequiringUserActionForPlayback` | WebKit defaults. Phase 0a adds no media playback policy. | API ledger; playback is a device check. |
@@ -753,8 +929,21 @@ project:
 cd ui
 npm run build:mobile
 cd ..
-python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp
+python3 ios/scripts/prepare_iroh_app.py stage --staging ios/Avibe/IrohLib
+python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp --support-zip ios/Avibe/IrohLib/IrohLib-support.zip
 ```
+
+The generated `ios/Avibe/IrohLib` directory is ignored build input. The
+consumer script accepts only the `published` pin in
+`packaging/iroh-apple/release.json`, verifies the binary, generated wrapper,
+support archive, feature graphs and provenance as one release, and stages the
+iOS-only `Iroh.xcframework` plus the unmodified `IrohLib.swift` wrapper. The
+Xcode project compiles that wrapper in its own `IrohLib` Swift module over the
+`Iroh` C module; it links the module into the App and tests, never the
+notification service. The linked App is still dormant: no endpoint,
+transport registration, listener, route write or direct capability is created.
+Xcode rejects missing or stale staging and scans the final App code images for the
+private Apple datapath symbols.
 
 The generated `ios/Avibe/Resources/MobileApp` directory is ignored build
 output. Xcode verifies that `mobile.html`, the asset directory and
@@ -773,10 +962,11 @@ fails the build. The native notices come only from the published
 generator checks the asset's URL, size and SHA-256 against the pin, the pin's
 policy and collector hashes against this checkout, and every notice, MPL-2.0
 source offer, binding statement and Rust distribution text in the archive,
-which it reads in memory and never extracts. While the pin is `pending` nothing
-is downloaded and the page lists the bundled JavaScript only. Texts are grouped
-only when identical. Source links open in Safari through the external URL
-allowlist, which admits exactly the source URLs in the bundled data.
+which it reads in memory and never extracts. A pending pin is rejected rather
+than consumed; the current published pin supplies the native notices. Texts
+are grouped only when identical. Source links open in Safari through the
+external URL allowlist, which admits exactly the source URLs in the bundled
+data.
 
 Then open `ios/Avibe.xcodeproj` in Xcode, select an iPhone simulator, and run
 the shared `Avibe` scheme. The command-line build does not need an Apple

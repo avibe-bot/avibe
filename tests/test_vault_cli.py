@@ -1710,7 +1710,7 @@ def test_inject_resolver_uses_session_bound_protected_grant(tmp_path):
     grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli", purpose="inject")
     engine = cli._open_vault_engine()
 
-    resolved_grant, one_shot_grants, secrets = cli._resolve_vault_inject_delivery(
+    resolved_grant, one_shot_grants, secrets, _identities = cli._resolve_vault_inject_delivery(
         engine,
         {"PROTECTED_KEY": "PROTECTED_KEY"},
         path=str(tmp_path / "out.env"),

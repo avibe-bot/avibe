@@ -149,7 +149,8 @@ def test_complete_registered_api_management_inventory():
     # the service also requires resource-management authority).
     # + 2 Desktop local enrollment methods (Owner and direct-loopback-only).
     # + 1 HD Bitcoin public preparation mutation (Editor plus resource management).
-    assert len(endpoints) == 328
+    # + 3 shared Vault setup and exact-target policy authorization methods.
+    assert len(endpoints) == 331
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
@@ -179,6 +180,9 @@ def test_complete_registered_api_management_inventory():
         ("POST", "/api/vault/secrets/{name}/accounts"),
         ("POST", "/api/vault/secrets/{name}/bitcoin-address-types"),
         ("PATCH", "/api/vault/secrets/{name}/accounts/{account}"),
+        ("POST", "/api/vault/setup"),
+        ("POST", "/api/vault/secrets/{name}/signing-policy"),
+        ("POST", "/api/vault/secrets/{name}/signing-policy/challenge"),
     ):
         assert (method, path) in endpoints
         assert http_authorization_policy(method, path).minimum_role == "editor"

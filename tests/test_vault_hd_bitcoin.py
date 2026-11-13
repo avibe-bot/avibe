@@ -149,15 +149,25 @@ def test_extended_create_requires_exact_five_before_custody(runtime, expected_va
     assert runtime.calls == [] and rows(vault_secrets) == []
 
 
-def test_existing_wallet_preparation_preserves_seed_and_mutable_concurrent_changes(runtime):
+@pytest.mark.parametrize("lower_with_passkey", [False, True], ids=["raise", "fresh-passkey-lower"])
+def test_existing_wallet_preparation_preserves_seed_and_mutable_concurrent_changes(runtime, lower_with_passkey):
     before = create(runtime)
     original, = rows(vault_secrets)
+    concurrent_settings = {}
 
     def edit_while_custody_is_busy():
         runtime.hook = None
         # A separate connection can WRITE here: no custody-time writer reservation.
         api.update_vault_hd_account(NAME, {})
         api.update_vault_hd_account(NAME, {"name": "Preserved", "always_ask": True}, account=0)
+        if lower_with_passkey:
+            # A real synthetic policy proof, not a bypass flag: backfill must
+            # preserve both the concurrent decision and its storage-owned revision.
+            from tests.test_vault_policy_authorization import complete, enroll, issue, proof
+
+            credential, factor_id = enroll()
+            complete(proof(issue(account=0, name=NAME), credential, factor_id), name=NAME)
+        concurrent_settings.update(json.loads(rows(vault_secrets)[0]["public_meta"])["hd_accounts"][0])
         with api._vault_engine().begin() as conn:
             conn.execute(vault_secrets.update().where(vault_secrets.c.name == NAME).values(use_count=17))
 
@@ -172,7 +182,10 @@ def test_existing_wallet_preparation_preserves_seed_and_mutable_concurrent_chang
     assert row["use_count"] == 17
     assert result["accounts"][0]["btc_taproot"] == before["accounts"][0]["btc_taproot"]
     assert result["accounts"][0]["name"] == "Preserved"
-    assert result["accounts"][0]["always_ask"] is True
+    assert result["accounts"][0]["always_ask"] is not lower_with_passkey
+    prepared_settings = json.loads(row["public_meta"])["hd_accounts"][0]
+    assert len(concurrent_settings["_signing_policy_revision"]) == 32
+    assert {key: prepared_settings[key] for key in concurrent_settings} == concurrent_settings
     assert [item["account"] for item in result["accounts"]] == [0, 1]
     runtime.calls.clear()
     before_repeat = rows(vault_secrets)[0]
@@ -180,6 +193,12 @@ def test_existing_wallet_preparation_preserves_seed_and_mutable_concurrent_chang
     assert rows(vault_secrets)[0] == before_repeat
     assert len(runtime.calls) == 1 and runtime.calls[0][0] == ["keypair", "derive-public"]
     assert sum(row["event"] == "bitcoin-address-types-prepared" for row in rows(vault_audit)) == 1
+    if lower_with_passkey:
+        for kind in TYPES:
+            runtime.reply = sign_reply(kind)
+            signed = api.vault_sign(sign_input(kind))
+            assert signed["ok"] and signed["signature"] == runtime.reply
+            assert signed["signing_public_key"]["public_key"] == table()[0][vault_hd.BITCOIN_KEYS[kind]]
 
 
 @pytest.mark.parametrize("mutation", ["row-id", "envelope", "base-key", "delete"])

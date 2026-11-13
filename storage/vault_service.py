@@ -21,6 +21,7 @@ import re
 import secrets
 import threading
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -34,7 +35,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from storage import vault_crypto, vault_webauthn
-from storage import vault_bitcoin, vault_hd, vault_solana
+from storage import vault_bitcoin, vault_hd, vault_policy, vault_setup, vault_solana
 from storage.lock import LockHolderState, MigrationFileLock, probe_lock_holder, remove_unheld_lock
 from storage.models import (
     agent_sessions,
@@ -122,6 +123,15 @@ class DeliveryIdentity:
     name: str
     field: str
     access_snapshot: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class CapturedDelivery:
+    """One coherent opaque envelope and its non-secret authorization evidence."""
+
+    envelope: Sealed
+    identity: DeliveryIdentity
+    metadata: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -229,7 +239,16 @@ class InvalidRequestError(VaultServiceError):
 
 
 class SigningPolicyDowngradeUnavailableError(InvalidRequestError):
-    """Lowering ask-before-signing awaits the owner Passkey authorization flow."""
+    """Metadata alone cannot lower ask-before-signing."""
+
+
+class SigningPolicyError(VaultServiceError):
+    """Stable public failure contract for the dedicated policy ceremony."""
+
+    def __init__(self, code: str, message: str, *, status: int = 409):
+        super().__init__(message)
+        self.code = f"vault_policy_{code}"
+        self.status = status
 
 
 class InvalidSigningKeyError(InvalidRequestError):
@@ -2325,7 +2344,38 @@ def _require_signing_policy_transition(current: bool, requested: Any) -> None:
     if type(requested) is not bool:
         raise InvalidRequestError("always_ask must be a boolean")
     if current and not requested:
-        raise SigningPolicyDowngradeUnavailableError("Turning off ask-before-signing is not available yet")
+        raise SigningPolicyDowngradeUnavailableError("Turning off ask-before-signing requires fresh Passkey authorization")
+
+
+def _signing_policy_transition(
+    conn: Connection, row: dict[str, Any], requested: Any, *, account: int | None = None,
+    proof: dict[str, Any] | None = None, rp_id: str | None = None, origin: str | None = None,
+) -> dict[str, Any]:
+    """One transition owner: metadata may raise; lowering verifies the proof here.
+
+    The result is an updated storage-owned policy/account, not a caller-selected
+    bypass. Callers persist it and their audit in the same transaction.
+    """
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        try:
+            settings = dict(vault_hd.selected_account(_public_meta(row.get("public_meta")), vault_hd.derivation("evm", account)))
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+    elif row.get("kind") == "keypair" and row.get("signer_kind") in (None, "local") and account is None:
+        settings = dict(_secret_policy(row))
+    else:
+        raise InvalidRequestError("unsupported signing policy target")
+    current = bool(settings.get("always_ask"))
+    if proof is None:
+        _require_signing_policy_transition(current, requested)
+    else:
+        if requested is not False or not rp_id or not origin:
+            raise SigningPolicyError("state_changed", "Signing policy target changed")
+        _verify_signing_policy_downgrade(conn, row, account, proof, rp_id=rp_id, origin=origin)
+    if current != requested:
+        settings["always_ask"] = requested
+        settings[vault_policy.REVISION_KEY] = secrets.token_hex(16)
+    return settings
 
 
 def _secret_access_requestable(row: dict[str, Any]) -> bool:
@@ -2826,6 +2876,122 @@ def _register_created_secret_resource_policy(conn: Connection, secret_id: str, u
     )
 
 
+def _reserve_vault_setup(conn: Connection) -> None:
+    """The shared first-write owner for setup, registration and protected create."""
+    statement = sqlite_insert(state_meta).values(
+        key=PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY, value_json="{}", updated_at=_now(),
+    )
+    conn.execute(statement.on_conflict_do_update(
+        index_elements=[state_meta.c.key], set_={"updated_at": statement.excluded.updated_at},
+    ))
+
+
+def _read_vault_setup(conn: Connection) -> dict[str, Any] | None:
+    raw = conn.execute(select(state_meta.c.value_json).where(state_meta.c.key == vault_setup.META_KEY)).scalar_one_or_none()
+    if raw is None:
+        return None
+    try:
+        stored = json.loads(raw)
+        if not isinstance(stored, dict) or stored.get("v") != 1 or not isinstance(stored.get("wrap_meta"), str):
+            raise ValueError("invalid durable Vault setup")
+        vault_setup.base_wrap_meta(stored["wrap_meta"])
+        return stored
+    except (ValueError, TypeError) as exc:
+        raise SigningPolicyError("factor_unavailable", "Stored shared Vault setup is not usable") from exc
+
+
+def _persist_vault_setup(conn: Connection, base: dict[str, Any], **creation: Any) -> dict[str, Any]:
+    stored = {"v": 1, "wrap_meta": json.dumps(base, ensure_ascii=False), "created_at": _now(), **creation}
+    conn.execute(state_meta.insert().values(key=vault_setup.META_KEY, value_json=json.dumps(stored), updated_at=_now()))
+    return stored
+
+
+def _preserve_legacy_vault_setup(conn: Connection) -> dict[str, Any] | None:
+    """Keep a valid old root before deleting records, without declaring enrollment.
+
+    A factorless root stays factorless. Discovery/read does not promote; writers
+    hold the setup reservation and never replace an already durable root.
+    """
+    try:
+        stored = _read_vault_setup(conn)
+    except SigningPolicyError:
+        # An unreadable durable root must not reset enrollment or turn ordinary
+        # item deletion into a repair ceremony. Leave that root untouched.
+        return None
+    if stored is not None:
+        return stored
+    raw = _legacy_protected_vmk_wrap_meta(conn)
+    if raw is None:
+        return None
+    try:
+        base = vault_setup.base_wrap_meta(raw)
+    except vault_setup.SetupMetadataError:
+        return None  # Old/corrupt envelopes remain untouched; deletion stays ordinary.
+    return _persist_vault_setup(conn, base, factor_id=None, registration_sha256=None, source="legacy-record")
+
+
+def _establish_vault_setup(
+    conn: Connection, wrap_meta: Any, registration: dict[str, Any] | None, *, rp_id: str, origin: str,
+) -> dict[str, Any]:
+    """Called only after the first-write reservation, within the caller's transaction."""
+    try:
+        base = vault_setup.base_wrap_meta(wrap_meta)
+        if base.get("rp_id", rp_id) != rp_id:
+            raise vault_setup.SetupMetadataError("shared root RP does not match registration")
+    except vault_setup.SetupMetadataError as exc:
+        raise InvalidProtectedAuthzError(str(exc)) from exc
+    existing = _read_vault_setup(conn)
+    if existing is not None:
+        if vault_policy.canonical_json(base) != vault_policy.canonical_json(vault_setup.base_wrap_meta(existing["wrap_meta"])):
+            raise VaultAlreadyInitializedError("a different shared Vault root is already established")
+        # Same-root reuse needs a matching, active verifiable factor, never just
+        # an opaque root/credential ID. Legacy custody itself remains unaffected.
+        factors = _usable_webauthn_factor_rows(conn, rp_id=rp_id)
+        matching = [factor for factor in factors if vault_webauthn.b64decode(factor["credential_id"]) in vault_setup.credential_ids(base)]
+        if not matching:
+            raise SigningPolicyError("factor_unavailable", "The existing shared root has no active matching authorization factor")
+        try:
+            for factor in matching:
+                vault_webauthn.validate_stored_public_key(factor["public_key"], factor["alg"])
+        except (ValueError, TypeError) as exc:
+            raise SigningPolicyError("factor_unavailable", "The existing shared root factor is not usable") from exc
+        if registration is not None and (not isinstance(registration, dict)
+                or vault_setup.registration_digest(registration) != existing.get("registration_sha256")):
+            raise VaultAlreadyInitializedError("setup retry does not match the committed registration")
+        return existing
+    if _legacy_protected_vmk_wrap_meta(conn) is not None:
+        raise VaultAlreadyInitializedError("a protected Vault root already exists; unlock it instead of re-initializing")
+    if _has_any_webauthn_factor(conn):
+        raise SigningPolicyError("factor_unavailable", "Attaching a root to an existing authorization factor is not supported; no new credential was enrolled")
+    if not isinstance(registration, dict):
+        raise ProtectedAuthzSetupRequiredError("shared Vault setup requires a Passkey registration")
+    credential = registration.get("credential")
+    try:
+        credential_id = vault_webauthn.b64decode(credential["rawId"]) if isinstance(credential, dict) else b""
+        if not credential_id or credential_id not in vault_setup.credential_ids(base):
+            raise InvalidProtectedAuthzError("Passkey wrap copy does not match the registration credential")
+        registration_sha256 = vault_setup.registration_digest(registration)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise InvalidProtectedAuthzError("invalid setup credential binding") from exc
+    result = register_webauthn_factor(conn, registration, rp_id=rp_id, origin=origin, establishment=True)
+    stored = _persist_vault_setup(conn, base, factor_id=result["factor"]["id"], registration_sha256=registration_sha256,
+                                 source="setup", challenge_id=registration["challenge_id"])
+    audit(conn, "vault-setup-established", delivery={"factor_id": result["factor"]["id"]})
+    return stored
+
+
+def complete_vault_setup(
+    conn: Connection, payload: dict[str, Any], *, rp_id: str, origin: str, user_context: Any = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != {"wrap_meta", "authz_factor_registration"}:
+        raise InvalidRequestError("setup requires wrap_meta and authz_factor_registration only")
+    require_secret_create_access(user_context=user_context)
+    _reserve_vault_setup(conn)
+    with conn.begin_nested():
+        stored = _establish_vault_setup(conn, payload["wrap_meta"], payload["authz_factor_registration"], rp_id=rp_id, origin=origin)
+        return {"ok": True, "exists": True, "wrap_meta": stored["wrap_meta"]}
+
+
 def _new_challenge() -> tuple[str, str]:
     challenge = secrets.token_bytes(32)
     return vault_webauthn.b64encode(challenge), vault_webauthn.challenge_hash(challenge)
@@ -2934,7 +3100,6 @@ def _has_any_webauthn_factor(conn: Connection) -> bool:
             select(vault_auth_factors.c.id)
             .where(
                 vault_auth_factors.c.kind == "webauthn",
-                vault_auth_factors.c.disabled_at.is_(None),
             )
             .limit(1)
         ).first()
@@ -3092,6 +3257,171 @@ def _verify_webauthn_operation_authz(
     return factor_id, challenge
 
 
+def _reserve_signing_policy_target(conn: Connection, name: str) -> None:
+    # First access: reserve SQLite's writer before any target/factor snapshot.
+    conn.execute(vault_secrets.update().where(vault_secrets.c.name == name).values(updated_at=vault_secrets.c.updated_at))
+
+
+def _signing_policy_factors(conn: Connection, *, rp_id: str) -> list[dict[str, str]]:
+    factors = _usable_webauthn_factor_rows(conn, rp_id=rp_id)
+    if not factors:
+        history = conn.execute(select(vault_auth_factors.c.id).limit(1)).first()
+        root = latest_protected_vmk_wrap_meta(conn)
+        if history is None and root is None:
+            raise SigningPolicyError("setup_required", "Set up a Vault Passkey before changing this policy")
+        if history is None and root is not None:
+            raise SigningPolicyError("legacy_registration_missing", "This Vault Passkey has no verifiable registration; existing Vault access is unchanged")
+        raise SigningPolicyError("factor_unavailable", "No active Vault authorization factor is available for this origin")
+    descriptors = []
+    for factor in factors:
+        try:
+            vault_policy.credential_bytes(factor["credential_id"])
+        except vault_policy.PolicyContextError as exc:
+            raise SigningPolicyError("context_unsupported", str(exc)) from exc
+        try:
+            vault_webauthn.validate_stored_public_key(factor["public_key"], factor["alg"])
+            if type(factor.get("sign_count")) is not int or factor["sign_count"] < 0:
+                raise vault_webauthn.WebAuthnVerificationError("invalid stored signature counter")
+        except (vault_webauthn.WebAuthnVerificationError, ValueError, TypeError) as exc:
+            raise SigningPolicyError("factor_unavailable", "Stored authorization factor is not usable") from exc
+        descriptors.append({"factorId": factor["id"], "credentialId": factor["credential_id"]})
+    return sorted(descriptors, key=lambda factor: factor["factorId"])
+
+
+def create_signing_policy_challenge(
+    conn: Connection, name: str, payload: dict[str, Any], *, rp_id: str, origin: str,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    """Issue a public exact-target context; no VMK, PRF or custody operation."""
+    if (not isinstance(payload, dict) or set(payload) not in ({"always_ask"}, {"always_ask", "account"})
+            or payload.get("always_ask") is not False
+            or "account" in payload and (type(payload["account"]) is not int or not 0 <= payload["account"] < 20)):
+        raise InvalidRequestError("policy challenge requires always_ask:false and an optional integer account")
+    _reserve_signing_policy_target(conn, name)
+    row = _require_secret_resource_management(conn, _require_row(conn, name), user_context)
+    if (row.get("signer_kind") == vault_hd.SIGNER_KIND) != ("account" in payload):
+        raise InvalidRequestError("account is required only for an HD policy target")
+    try:
+        target, current, revision = vault_policy.target_state(row, payload.get("account"))
+    except vault_policy.PolicyContextError as exc:
+        raise SigningPolicyError("context_unsupported", str(exc)) from exc
+    if not current:
+        raise SigningPolicyError("state_changed", "Ask-before-signing is no longer enabled")
+    factors = _signing_policy_factors(conn, rp_id=rp_id)
+    now = datetime.now(timezone.utc)
+    context = {
+        "v": 1, "purpose": vault_policy.PURPOSE, "challengeId": _id("vop"),
+        "nonce": vault_webauthn.b64encode(secrets.token_bytes(32)),
+        "expiresAt": (now + timedelta(seconds=vault_policy.TTL_SECONDS)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "rpId": rp_id, "origin": origin, "target": target,
+        "change": {"field": "always_ask", "from": True, "to": False, "revision": revision}, "factors": factors,
+    }
+    try:
+        digest = vault_webauthn.challenge_hash(vault_policy.challenge_bytes(context))
+    except vault_policy.PolicyContextError as exc:
+        raise SigningPolicyError("context_unsupported", str(exc)) from exc
+    conn.execute(vault_operation_challenges.insert().values(
+        id=context["challengeId"], operation=vault_policy.OPERATION, secret_name=name, secret_id=row["id"],
+        secret_updated_at=row["updated_at"], challenge_hash=digest, rp_id=rp_id, origin=origin,
+        expires_at=context["expiresAt"], created_at=now.isoformat(),
+    ))
+    return {"ok": True, "context": context}
+
+
+def _verify_signing_policy_downgrade(
+    conn: Connection, row: dict[str, Any], account: int | None, proof: dict[str, Any], *, rp_id: str, origin: str,
+) -> None:
+    context, authorization = proof["context"], proof["authorization"]
+    try:
+        digest = vault_webauthn.challenge_hash(vault_policy.challenge_bytes(context))
+    except vault_policy.PolicyContextError as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    if (not isinstance(authorization, dict)
+            or set(authorization) != {"kind", "challenge_id", "factor_id", "assertion"}
+            or authorization.get("kind") != "webauthn"
+            or authorization.get("challenge_id") != context["challengeId"]
+            or not isinstance(authorization.get("factor_id"), str)):
+        raise SigningPolicyError("authz_invalid", "Invalid signing policy authorization", status=403)
+    try:
+        challenge = _challenge_row(conn, context["challengeId"], operation=vault_policy.OPERATION)
+    except InvalidProtectedAuthzError as exc:
+        raise SigningPolicyError("authz_invalid", str(exc), status=403) from exc
+    if challenge["consumed_at"] is not None:
+        raise SigningPolicyError("authz_used", "This policy authorization was already used")
+    expires_at = _parse_iso_datetime(challenge["expires_at"])
+    if expires_at is None or expires_at <= datetime.now(timezone.utc):
+        raise SigningPolicyError("authz_expired", "This policy authorization expired")
+    if (challenge["rp_id"] != rp_id or context["rpId"] != rp_id
+            or challenge["origin"] != origin or context["origin"] != origin
+            or challenge["expires_at"] != context["expiresAt"] or challenge["challenge_hash"] != digest):
+        raise SigningPolicyError("authz_invalid", "Policy context does not match the issued authorization", status=403)
+    try:
+        target, current, revision = vault_policy.target_state(row, account)
+    except vault_policy.PolicyContextError as exc:
+        raise SigningPolicyError("state_changed", "Signing policy target changed") from exc
+    if (target != context["target"] or not current or revision != context["change"]["revision"]
+            or challenge["secret_name"] != row["name"] or challenge["secret_id"] != row["id"]
+            or challenge["secret_updated_at"] != row["updated_at"]):
+        raise SigningPolicyError("state_changed", "Signing policy target changed")
+    descriptor = next((factor for factor in context["factors"] if factor["factorId"] == authorization["factor_id"]), None)
+    factor = conn.execute(select(vault_auth_factors).where(vault_auth_factors.c.id == authorization["factor_id"])).mappings().first()
+    assertion = authorization.get("assertion")
+    try:
+        if (descriptor is None or factor is None or factor["kind"] != "webauthn"
+                or factor["disabled_at"] is not None or factor["rp_id"] != rp_id
+                or not isinstance(assertion, dict) or assertion.get("type") != "public-key"
+                or vault_policy.credential_bytes(descriptor["credentialId"]) != vault_policy.credential_bytes(factor["credential_id"])
+                or vault_webauthn.b64decode(str(assertion.get("rawId") or "")) != vault_policy.credential_bytes(descriptor["credentialId"])):
+            raise InvalidProtectedAuthzError("Authorization factor is not in the frozen eligible set")
+        _verify_webauthn_operation_authz(conn, authorization, operation=vault_policy.OPERATION,
+                                       required_rp_id=rp_id, required_origin=origin)
+    except (vault_policy.PolicyContextError, vault_webauthn.WebAuthnVerificationError,
+            InvalidProtectedAuthzError, ProtectedAuthRequiredError, ValueError, TypeError) as exc:
+        raise SigningPolicyError("authz_invalid", "Passkey authorization could not be verified", status=403) from exc
+    if expires_at <= datetime.now(timezone.utc):
+        raise SigningPolicyError("authz_expired", "This policy authorization expired during verification")
+
+
+def complete_signing_policy_downgrade(
+    conn: Connection, name: str, payload: dict[str, Any], *, rp_id: str, origin: str,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    """Atomically verify, lower, rotate revision, consume proof and audit.
+
+    A savepoint protects callers that catch a failure inside their transaction.
+    The outer caller still owns commit; it must not return success before then.
+    """
+    if not isinstance(payload, dict) or set(payload) - {"context", "authorization"} or "context" not in payload:
+        raise InvalidRequestError("policy completion requires context and authorization only")
+    try:
+        context = vault_policy.validate_context(payload["context"])
+    except vault_policy.PolicyContextError as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    if payload.get("authorization") is None:
+        raise SigningPolicyError("authz_required", "Fresh Passkey authorization is required")
+    _reserve_signing_policy_target(conn, name)
+    with conn.begin_nested():
+        row = _require_secret_resource_management(conn, _require_row(conn, name), user_context)
+        account = context["target"]["account"]
+        # Route binding is checked independently of the supplied context digest.
+        if context["target"]["name"] != name or context["target"]["secretId"] != row["id"]:
+            raise SigningPolicyError("state_changed", "Signing policy target changed")
+        # Verify even for a now-false target so reuse reports the consumed proof.
+        settings = _signing_policy_transition(conn, row, False, account=account, proof=payload, rp_id=rp_id, origin=origin)
+        if row.get("signer_kind") == vault_hd.SIGNER_KIND:
+            meta = _public_meta(row.get("public_meta"))
+            vault_hd.stored_accounts(meta)[account].update(settings)
+            values = {"public_meta": json.dumps(meta), "updated_at": _next_updated_at(row["updated_at"])}
+        else:
+            values = {"policy": json.dumps(settings)}
+        conn.execute(vault_secrets.update().where(vault_secrets.c.id == row["id"]).values(**values))
+        audit(conn, "signing-policy-lowered", secret_name=name, delivery={
+            "account": account, "from": True, "to": False,
+            "challenge_id": context["challengeId"], "factor_id": payload["authorization"]["factor_id"],
+        })
+        return {"ok": True, "secret": _meta_payload(_require_row(conn, name))}
+
+
 def create_webauthn_registration_options(
     conn: Connection,
     *,
@@ -3162,6 +3492,7 @@ def register_webauthn_factor(
     origin: str | None = None,
     establishment: bool = False,
 ) -> dict[str, Any]:
+    _reserve_vault_setup(conn)
     if not isinstance(payload, dict):
         raise InvalidProtectedAuthzError("WebAuthn factor registration payload must be an object")
     challenge_id = str(payload.get("challenge_id") or "").strip()
@@ -3181,7 +3512,7 @@ def register_webauthn_factor(
             raise InvalidProtectedAuthzError("first WebAuthn factor can only be registered once during vault establishment")
     elif not existing_factors:
         raise ProtectedAuthzSetupRequiredError(
-            "first WebAuthn factor must be registered during protected vault establishment; re-create this protected vault"
+            "first WebAuthn factor must be registered through shared Vault setup; existing Vault data is unchanged"
         )
     else:
         _verify_webauthn_operation_authz(
@@ -3272,6 +3603,48 @@ def create_secret(
     provision_request_id: str | None = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
+    """Create an opaque record; first setup and the record are one atomic result.
+
+    Reserve before the savepoint so SQLite legacy transaction mode cannot commit
+    a released outermost savepoint independently of the caller's transaction.
+    A caller catching later record-validation/audit errors cannot retain a
+    registration or root from a failed first create.
+    """
+    establishing = establishing_vmk and protection == "protected"
+    if establishing:
+        require_secret_create_access(user_context=user_context)
+        _reserve_vault_setup(conn)
+    with conn.begin_nested() if establishing else nullcontext():
+        return _create_secret(conn, name=name, sealed=sealed, tags=tags, protection=protection, kind=kind,
+            signer_kind=signer_kind, description=description, source=source, policy=policy, public_meta=public_meta,
+            account0_always_ask=account0_always_ask,
+            fields=fields, default_field=default_field, establishing_vmk=establishing_vmk,
+            authz_factor_registration=authz_factor_registration, authz_factor_origin=authz_factor_origin,
+            provision_request_id=provision_request_id, user_context=user_context)
+
+
+def _create_secret(
+    conn: Connection,
+    *,
+    name: str,
+    sealed: Sealed,
+    tags: list[str] | None = None,
+    protection: str = "standard",
+    kind: str = "static",
+    signer_kind: str | None = None,
+    description: str | None = None,
+    source: str = "manual",
+    policy: dict[str, Any] | None = None,
+    public_meta: dict[str, Any] | None = None,
+    account0_always_ask: Any = _UNSET,
+    fields: list[dict[str, Any]] | None = None,
+    default_field: str | None = None,
+    establishing_vmk: bool = False,
+    authz_factor_registration: dict[str, Any] | None = None,
+    authz_factor_origin: str | None = None,
+    provision_request_id: str | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
     """Create a secret from a caller-supplied encrypted envelope; return masked metadata.
 
     For ``standard`` secrets, the envelope is produced by the avault client. For
@@ -3297,32 +3670,18 @@ def create_secret(
         raise VaultServiceError(f"invalid vault secret kind: {kind!r}")
     if kind != "keypair" and signer_kind is not None:
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
+    if policy is not None and (not isinstance(policy, dict) or vault_policy.REVISION_KEY in policy):
+        raise InvalidRequestError("policy revision is storage-owned")
+    context = require_secret_create_access(user_context=user_context)
     establishing_protected_vault = establishing_vmk and protection == "protected"
     if establishing_protected_vault:
-        # This must be the transaction's first database access: a deferred SQLite
-        # transaction cannot safely promote an older read snapshot after another
-        # initializer commits. The row is only a mutex; protected-secret existence
-        # remains the source of truth.
-        lock_updated_at = _now()
-        lock_stmt = sqlite_insert(state_meta).values(
-            key=PROTECTED_VAULT_ESTABLISHMENT_LOCK_META_KEY,
-            value_json="{}",
-            updated_at=lock_updated_at,
-        )
-        conn.execute(
-            lock_stmt.on_conflict_do_update(
-                index_elements=[state_meta.c.key],
-                set_={
-                    "value_json": lock_stmt.excluded.value_json,
-                    "updated_at": lock_stmt.excluded.updated_at,
-                },
-            )
-        )
-        if (
-            conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)).first()
-            is not None
-        ):
-            raise VaultAlreadyInitializedError("a protected vault already exists; unlock it instead of re-initializing")
+        _reserve_vault_setup(conn)
+        try:
+            authz_context = vault_webauthn.rp_context_from_origin(authz_factor_origin or "")
+        except vault_webauthn.WebAuthnVerificationError as exc:
+            raise InvalidProtectedAuthzError(str(exc)) from exc
+        _establish_vault_setup(conn, sealed.wrap_meta, authz_factor_registration,
+                               rp_id=authz_context.rp_id, origin=authz_context.origin)
 
     provision_row, _existing_secret = _preflight_secret_create_name(
         conn,
@@ -3330,11 +3689,6 @@ def create_secret(
         provision_request_id=provision_request_id,
     )
 
-    if establishing_protected_vault:
-        if not isinstance(authz_factor_registration, dict):
-            raise ProtectedAuthzSetupRequiredError("protected vault establishment requires a passkey authorization factor")
-
-    context = require_secret_create_access(user_context=user_context)
     secret_id = _id("vlt")
     now = _now()
     normalized_tags = _normalize_tags(tags)
@@ -3444,15 +3798,6 @@ def create_secret(
         raise SecretExistsError(name) from exc
     _register_created_secret_resource_policy(conn, secret_id, context)
     audit(conn, "created", secret_name=name)
-    if establishing_vmk and protection == "protected":
-        # Vestigial after protected-delete authz was removed: the sandbox still
-        # submits this registration until the setup-time authz flow is cleaned up.
-        register_webauthn_factor(
-            conn,
-            authz_factor_registration or {},
-            origin=authz_factor_origin,
-            establishment=True,
-        )
     decided_at = _now()
     if provision_row is not None:
         result = conn.execute(
@@ -3595,10 +3940,11 @@ def update_secret_metadata(
         if row.get("kind") != "keypair" or row.get("signer_kind") not in (None, "local"):
             raise InvalidRequestError("row-level always_ask editing requires an ordinary keypair")
         current_always_ask = _secret_always_ask(row)
-        _require_signing_policy_transition(current_always_ask, always_ask)
+        transitioned = _signing_policy_transition(conn, row, always_ask)
         if always_ask != current_always_ask:
             next_policy = (_loads(values["policy"]) or {}) if "policy" in values else _secret_policy(row)
-            next_policy["always_ask"] = always_ask
+            next_policy["always_ask"] = transitioned["always_ask"]
+            next_policy[vault_policy.REVISION_KEY] = transitioned[vault_policy.REVISION_KEY]
             values["policy"] = json.dumps(next_policy)
             fields.append("always_ask")
 
@@ -3799,7 +4145,7 @@ def update_hd_account(
         else:
             vault_hd.selected_account(meta, vault_hd.derivation("evm", account))
             if "always_ask" in changes:
-                _require_signing_policy_transition(accounts[account]["always_ask"], changes["always_ask"])
+                accounts[account].update(_signing_policy_transition(conn, row, changes["always_ask"], account=account))
             accounts[account].update(changes)
             event = "account-updated"
     except ValueError as exc:
@@ -3974,7 +4320,13 @@ def list_secret_tags(
 
 
 def latest_protected_vmk_wrap_meta(conn: Connection) -> str | None:
-    """Return the newest protected-tier VMK wrap metadata as opaque JSON text."""
+    """Durable shared root first; released record envelopes remain a fallback."""
+    setup = _read_vault_setup(conn)
+    return setup["wrap_meta"] if setup is not None else _legacy_protected_vmk_wrap_meta(conn)
+
+
+def _legacy_protected_vmk_wrap_meta(conn: Connection) -> str | None:
+    """Read only: do not make a newer arbitrary record replace a durable root."""
     return conn.execute(
         select(vault_secrets.c.wrap_meta)
         .where(vault_secrets.c.protection == "protected", vault_secrets.c.wrap_meta.is_not(None))
@@ -4151,23 +4503,6 @@ def remove_secret_field(
     return _meta_payload(_require_row(conn, secret_name))
 
 
-def _disable_webauthn_factors_if_vault_deestablished(conn: Connection) -> None:
-    protected_row = conn.execute(
-        select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)
-    ).first()
-    if protected_row is not None:
-        return
-    now = _now()
-    result = conn.execute(
-        vault_auth_factors.update()
-        .where(vault_auth_factors.c.kind == "webauthn", vault_auth_factors.c.disabled_at.is_(None))
-        .values(disabled_at=now, updated_at=now)
-    )
-    disabled_count = int(result.rowcount or 0)
-    if disabled_count:
-        audit(conn, "auth-factors-disabled", delivery={"reason": "vault-deestablished", "count": disabled_count})
-
-
 def delete_secret(
     conn: Connection,
     name: str,
@@ -4177,8 +4512,11 @@ def delete_secret(
 ) -> None:
     from storage import resource_access_service
 
+    _reserve_vault_setup(conn)
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
+    if row.get("protection") == "protected":
+        _preserve_legacy_vault_setup(conn)
     audit_snapshot = _build_audit_access_snapshot(conn, [name])
     pending_delete_ids: list[str] = []
     pending_rows = conn.execute(
@@ -4210,8 +4548,6 @@ def delete_secret(
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
     resource_access_service.delete_resource_policy(conn, "vault_secret", str(row["id"]))
-    if row.get("protection") == "protected":
-        _disable_webauthn_factors_if_vault_deestablished(conn)
     audit(conn, "deleted", secret_name=name, access_snapshot=audit_snapshot)
 
 
@@ -4356,17 +4692,50 @@ def get_signing_envelope(
     return get_key_envelope(conn, name, user_context=user_context)
 
 
-def capture_delivery_identities(conn: Connection, refs: list[str], *, user_context: Any = None) -> list[DeliveryIdentity]:
-    """Capture labels and ACL identity while the selected records still exist."""
-    identities: list[DeliveryIdentity] = []
-    snapshots: dict[str, dict[str, Any] | None] = {}
-    for ref in refs:
-        row, entry = _resolve_record_ref(conn, ref, user_context=user_context)
-        name = str(row["name"])
-        if name not in snapshots:
-            snapshots[name] = _build_audit_access_snapshot(conn, [name])
-        identities.append(DeliveryIdentity(str(row["id"]), name, str(entry["field"]), snapshots[name]))
-    return identities
+def capture_deliveries(conn: Connection, refs: list[str], *, user_context: Any = None) -> list[CapturedDelivery]:
+    """Read envelopes, identities and policies from one actual SQLite snapshot.
+
+    A bare SELECT does not start a transaction under sqlite3's legacy mode.
+    The savepoint pins all reads, without committing any caller-owned writes.
+    Callers that will reserve grants must reserve their writer before this read.
+    """
+    from storage import resource_access_service
+
+    deliveries: list[CapturedDelivery] = []
+    with conn.begin_nested():
+        for ref in refs:
+            row, entry = _resolve_record_ref(conn, ref, user_context=user_context)
+            name, secret_id = str(row["name"]), str(row["id"])
+            _reject_keypair_value_delivery(row, name)
+            snapshot = {"version": 1, "resources": [{
+                "name": name,
+                "resource_id": secret_id,
+                "policy": resource_access_service.get_resource_policy("vault_secret", secret_id, connection=conn),
+            }]}
+            deliveries.append(CapturedDelivery(
+                entry["envelope"],
+                DeliveryIdentity(secret_id, name, str(entry["field"]), snapshot),
+                _meta_payload(row),
+            ))
+    return deliveries
+
+
+def require_current_deliveries(conn: Connection, deliveries: list[CapturedDelivery]) -> None:
+    """Reject a changed preflight before selecting/reserving its grants.
+
+    The caller already holds the writer reservation. Check actual envelope,
+    identity and authorization facts, not a name or timestamp alone. Usage
+    counters and cosmetic metadata do not invalidate an otherwise equal capture.
+    """
+    refs = [f"{capture.identity.name}.{capture.identity.field}" for capture in deliveries]
+    for previous, current in zip(deliveries, capture_deliveries(conn, refs)):
+        identity = previous.identity
+        if (
+            current.identity != identity
+            or current.envelope != previous.envelope
+            or any(current.metadata[key] != previous.metadata[key] for key in ("kind", "protection", "policy"))
+        ):
+            raise SecretConflictError(f"secret {identity.name!r} changed while preparing delivery; retry before handoff")
 
 
 def record_deliveries(conn: Connection, identities: list[DeliveryIdentity], *, requester: Any = None, mode: str | None = None) -> None:

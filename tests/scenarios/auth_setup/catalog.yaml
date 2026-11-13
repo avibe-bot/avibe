@@ -1116,6 +1116,26 @@ scenarios:
       fresh-install Incus environment by sending a simulated redirect with a test
       code to localhost:1455 inside the instance, which the forwarder handed to the
       engine and the flow ended on the provider's refusal of that code, no paste.
+  - id: AUTH-SETUP-167
+    name: Shared Vault setup survives reload and last-item deletion while policy lowering requires a fresh exact-target assertion
+    status: covered
+    kind: recovery_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_vault_shared_setup_reload_policy_confirmation_and_last_delete_close_loop
+    reason: >-
+      Covered is the real management-HTTP and storage loop with synthetic
+      WebAuthn credentials: setup-required, durable setup without a protected
+      item, reload, fresh assertion, single-use lowering, raising, exact-root
+      create while seal still reports establishing, and last-item deletion
+      without losing setup or the factor. Verification and transactions are
+      real; no keychain, PRF, browser consent or custody operation is performed.
+      Actual popup, pinned successor and physical Passkey acceptance remain
+      separate authorized integration gates, as in AUTH-SETUP-136.
+    supporting_tests:
+      - tests/test_vault_setup.py
+      - tests/test_vault_policy_authorization.py
+      - tests/test_vault_policy_context.py
   - id: AUTH-SETUP-170
     name: Desktop account invitation preserves confirmed local Setup completion across both exit choices
     status: gap

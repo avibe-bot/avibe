@@ -124,6 +124,14 @@ class WebAuthnTestCredential:
         numbers = self.private_key.public_key().public_numbers()
         return self.es256_public_key_cose(numbers.x, numbers.y)
 
+    def wrap_meta(self, marker: int = 1) -> dict:
+        """Real-shaped synthetic opaque root copy; no decryptable secret material."""
+        return {"v": 1, "rp_id": self.rp_id, "copies": [{
+            "kind": "passkey", "kdf": "webauthn-prf-hkdf-sha256",
+            "credential_id": self.credential_id_b64, "prf_salt": _b64(bytes([marker]) * 32),
+            "nonce": _b64(bytes([marker]) * 12), "wrapped": _b64(bytes([marker]) * 48),
+        }]}
+
     def registration_payload(
         self,
         *,

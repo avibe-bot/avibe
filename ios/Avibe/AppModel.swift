@@ -55,11 +55,32 @@ final class AppModel: ObservableObject {
     /// Advances each time a runtime opens, so the root builds a new runtime
     /// controller even when the same instance is selected again.
     @Published private(set) var runtimeIdentity = 0
+    /// The direct listener faulted in this process. One-way: only a new
+    /// launch clears it.
+    @Published private(set) var directListenerFault = false
 
     let websiteDataStore: AccountWebsiteDataStore
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
+    /// The direct transport, when this build has one. Without it there is no
+    /// path controller: no `direct` capability, no listener, no route write,
+    /// no event, and runtimes open exactly as they did before.
+    private let directTransport: DirectTransporting?
+    private let directFaultMarker: DirectFaultMarkerStoring
+    /// A runtime whose open is held because its host has a route and the
+    /// listener does not serve yet. One slot, not a queue: a newer open, a
+    /// stop, or a sign-out clears it, and it is settled only for the
+    /// identity it was made under.
+    private var deferredOpen: (runtime: MobileRuntimeContext, identity: Int)?
+    /// The identity of a runtime opened while the listener fault covered
+    /// it: it shows only the reopen message, and no WebView is made for it.
+    /// (A runtime the fault reaches later keeps its WebView under the
+    /// message; the same gate value cannot tell the two apart.)
+    private var directFaultOnlyIdentity: Int?
+    /// A call of the fault marker's `mark()` has returned in this process.
+    /// That is all it says: not that the marker is on disk.
+    private var directFaultIsMarked = false
     private let pushKeychain: PushKeychainStoring
     private let pushGenerationStore: PushGenerationStoring
     private let pushInstallationMarker: PushInstallationMarkerStoring
@@ -120,8 +141,43 @@ final class AppModel: ObservableObject {
         }
     )
 
+    private lazy var directPathController: DirectPathController? =
+        directTransport.map { transport in
+            DirectPathController(
+                websiteDataStore: websiteDataStore,
+                transport: transport,
+                isCurrentRuntime: { [weak self] runtime in
+                    self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
+                },
+                onStatusChanged: { [weak self] in
+                    self?.deliverDirectStatus()
+                },
+                onFault: { [weak self] in
+                    self?.directListenerDidFault()
+                },
+                onAvailabilityChanged: { [weak self] in
+                    self?.directAvailabilityDidChange()
+                }
+            )
+        }
+
     var mobileSessionCoordinator: MobileSessionCoordinator {
         sessionCoordinator
+    }
+
+    /// Answers `direct.status` for the runtime's WebViews; `nil` without a
+    /// direct transport, so they offer no `direct` capability.
+    var directStatusProvider: DirectStatusProvider? {
+        guard directPathController != nil else {
+            return nil
+        }
+        return { [weak self] origin, reply in
+            guard let controller = self?.directPathController else {
+                reply(nil)
+                return
+            }
+            controller.status(for: origin, reply: reply)
+        }
     }
 
     var pushCoordinator: NativePushCoordinator {
@@ -136,6 +192,8 @@ final class AppModel: ObservableObject {
         defaults: UserDefaults = .standard,
         controlPlane: MobileControlPlaneConfiguration =
             MobileControlPlaneConfiguration(),
+        directTransport: DirectTransporting? = nil,
+        directFaultMarker: DirectFaultMarkerStoring? = nil,
         pushKeychain: PushKeychainStoring = PushKeychainStore(),
         pushGenerationStore: PushGenerationStoring =
             SharedPushGenerationStore(),
@@ -148,6 +206,19 @@ final class AppModel: ObservableObject {
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
+        let directFaultMarker = directFaultMarker
+            ?? UserDefaultsDirectFaultMarker(defaults: defaults)
+        self.directFaultMarker = directFaultMarker
+        // A launch after a listener fault uses no listener at all, decided
+        // here, before any route or first load: the user was asked to
+        // reopen the App, and this launch must work. It clears the marker,
+        // so the launch after it uses the transport again. Without a
+        // transport the marker is never read.
+        if directTransport != nil, directFaultMarker.take() {
+            self.directTransport = nil
+        } else {
+            self.directTransport = directTransport
+        }
         self.pushKeychain = pushKeychain
         self.pushGenerationStore = pushGenerationStore
         self.pushInstallationMarker = pushInstallationMarker
@@ -157,6 +228,7 @@ final class AppModel: ObservableObject {
         nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
         _ = nativePushCoordinator
+        _ = directPathController
 
         Task { [weak self] in
             await self?.bootstrap()
@@ -175,6 +247,11 @@ final class AppModel: ObservableObject {
                 controller.invalidateForAccountTransition()
             )
             if route == .browser(runtime) {
+                // This browser is abandoned without `stopRuntime()`, so the
+                // direct selection made for it ends here. A WebView that
+                // arrives late for an older runtime does not reach this
+                // branch and leaves the newer runtime's selection alone.
+                directPathController?.runtimeDidStop()
                 route = .onboarding(.instances)
             }
             return
@@ -252,6 +329,8 @@ final class AppModel: ObservableObject {
     }
 
     private func stopRuntime() {
+        deferredOpen = nil
+        directPathController?.runtimeDidStop()
         if let runtimeController {
             recordRuntimeReleaseBarrier(
                 runtimeController.invalidateForAccountTransition()
@@ -273,7 +352,193 @@ final class AppModel: ObservableObject {
         nativePushCoordinator.resumeAfterAccountActivation()
         stopRuntime()
         runtimeIdentity += 1
-        route = .browser(runtime)
+        guard let directPathController else {
+            route = .browser(runtime)
+            return
+        }
+        // The route for the instance's host must be in place before the
+        // runtime's first load (docs/plans/remote-direct-ios.md section 5).
+        // Preparing it waits at most the listener bound; an open that
+        // something newer replaced while it waited loads nothing. Whether
+        // the WebView may be made then is the load gate's decision.
+        let identity = runtimeIdentity
+        route = .loading
+        let stillWanted = { [weak self] () -> Bool in
+            guard let self else {
+                return false
+            }
+            return self.runtimeIdentity == identity
+                && self.route == .loading
+                && self.sessionCoordinator.isCurrentRuntime(runtime)
+        }
+        Task { [weak self] in
+            await directPathController.prepareRoute(
+                for: runtime,
+                stillWanted: stillWanted
+            )
+            guard let self, self.runtimeIdentity == identity, self.route == .loading else {
+                // Something newer took the route while this one waited.
+                return
+            }
+            guard self.sessionCoordinator.isCurrentRuntime(runtime) else {
+                // The selection ended underneath; do not leave the spinner.
+                self.route = .onboarding(.instances)
+                return
+            }
+            self.settleOpen(of: runtime, identity: identity)
+        }
+    }
+
+    /// The creation boundary of a runtime's WebView, decided synchronously
+    /// from the load gate. Open: the browser. Held (the host has a route
+    /// and the listener is closed or being bound again): the loading route
+    /// stays and the open waits in its slot for the return to settle.
+    /// Fault: the reopen message alone.
+    private func settleOpen(of runtime: MobileRuntimeContext, identity: Int) {
+        guard let directPathController else {
+            return
+        }
+        // About to act on the gate: a failure already recorded is delivered
+        // first, so the marker never lags behind what is shown.
+        directPathController.settleRecordedFault()
+        switch directPathController.loadGate(for: runtime) {
+        case .open:
+            deferredOpen = nil
+            route = .browser(runtime)
+            directPathController.runtimeDidOpen(runtime)
+        case .held:
+            deferredOpen = (runtime, identity)
+        case .fault:
+            deferredOpen = nil
+            directFaultOnlyIdentity = identity
+            route = .browser(runtime)
+        }
+    }
+
+    /// A load gate may have changed: the listener was closed for the
+    /// background, a return was settled, or the fault was entered. Nothing
+    /// is replayed from an earlier decision: the root reads the gate again,
+    /// a held open is decided again for its own identity, and the live
+    /// runtime's WebView is told, for an automatic load it is holding.
+    private func directAvailabilityDidChange() {
+        objectWillChange.send()
+        if let deferred = deferredOpen {
+            if runtimeIdentity != deferred.identity || route != .loading {
+                deferredOpen = nil
+            } else if !sessionCoordinator.isCurrentRuntime(deferred.runtime) {
+                // The selection ended underneath; do not leave the spinner.
+                deferredOpen = nil
+                route = .onboarding(.instances)
+            } else {
+                settleOpen(of: deferred.runtime, identity: deferred.identity)
+            }
+        }
+        runtimeController?.directAvailabilityDidChange()
+    }
+
+    /// Whether the shell may create or reload `runtime`'s WebView now
+    /// (`DirectPathController.loadGate`). Always open without a transport.
+    func directLoadGate(for runtime: MobileRuntimeContext) -> DirectLoadGate {
+        directPathController?.loadGate(for: runtime) ?? .open
+    }
+
+    /// The load gate for `runtime`'s WebView controller, which asks it at
+    /// every load of its own; `nil` without a direct transport, so the
+    /// controller loads exactly as it did before.
+    func directLoadGateProvider(
+        for runtime: MobileRuntimeContext
+    ) -> DirectLoadGateProvider? {
+        guard directPathController != nil else {
+            return nil
+        }
+        return { [weak self] in
+            // Asked where a load is about to be made, never in a view
+            // update: a failure already recorded is delivered first.
+            self?.directPathController?.settleRecordedFault()
+            return self?.directLoadGate(for: runtime) ?? .open
+        }
+    }
+
+    /// The WebView the direct transport's rendezvous request runs in: the
+    /// primary WebView of the runtime the path controller selected for the
+    /// transport, and only while all of this holds: `selection` is the
+    /// controller's current target, the account's data store is the
+    /// target's, the target's runtime is the account's current one, and it
+    /// is the runtime shown (or covered by Account). Otherwise `nil`, which
+    /// the transport takes as a page that is not ready yet. Always `nil`
+    /// without a transport.
+    func directRendezvousWebView(for selection: DirectIrohSelection) -> WKWebView? {
+        guard
+            let target = directPathController?.selectedTarget,
+            DirectIrohSelection(target) == selection,
+            target.storeIdentifier == websiteDataStore.identifier,
+            route.runtime == target.runtime,
+            sessionCoordinator.isCurrentRuntime(target.runtime),
+            let runtimeController
+        else {
+            return nil
+        }
+        return runtimeController.livePrimaryWebView
+    }
+
+    /// Whether the shell's own reload of `runtime` (Retry) may be offered
+    /// now. Synchronous and without side effects, for the view: only when
+    /// the host is on WebKit's normal path or its route points at a serving
+    /// listener. Never while the listener is closed or being bound again,
+    /// and never under the fault. Always `true` without a transport.
+    func mayReload(_ runtime: MobileRuntimeContext) -> Bool {
+        directLoadGate(for: runtime) == .open
+    }
+
+    /// The Retry tap itself: decides again, now, whether the reload may be
+    /// made, and delivers a failure already recorded first.
+    func authorizeReload(of runtime: MobileRuntimeContext) -> Bool {
+        directPathController?.settleRecordedFault()
+        return mayReload(runtime)
+    }
+
+    /// Whether the listener fault covers `runtime`: its host is routed to a
+    /// port the App may not hold. Its content is then replaced by the
+    /// reopen message.
+    func directFaultCovers(_ runtime: MobileRuntimeContext) -> Bool {
+        directLoadGate(for: runtime) == .fault
+    }
+
+    /// Whether `runtime` was opened under the fault: it has no WebView, only
+    /// the reopen message.
+    func presentsDirectFaultOnly(_ runtime: MobileRuntimeContext) -> Bool {
+        directFaultOnlyIdentity == runtimeIdentity && directFaultCovers(runtime)
+    }
+
+    private func directListenerDidFault() {
+        // The marker first, and whatever else happens: it is what makes the
+        // next launch work. Repeated only until one call has returned.
+        if !directFaultIsMarked {
+            directFaultMarker.mark()
+            directFaultIsMarked = true
+        }
+        guard !directListenerFault else {
+            return
+        }
+        directListenerFault = true
+        // A child window is presented above the runtime's own view, which
+        // the reopen message covers; it goes, when the message covers it.
+        if let runtime = route.runtime, directFaultCovers(runtime) {
+            runtimeController?.discardPopupsForListenerFault()
+        }
+        // A held open ends as the reopen message, and a held automatic
+        // load is dropped.
+        directAvailabilityDidChange()
+    }
+
+    /// Sends the current `direct` state to the runtime's documents.
+    private func deliverDirectStatus() {
+        guard let directPathController else {
+            return
+        }
+        runtimeController?.deliverDirectTransportChanged(
+            statusFor: directPathController.currentStatus(for:)
+        )
     }
 
     func didFinishRuntimeLoading() {
@@ -420,6 +685,9 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] {
         clearPendingPushOpened()
+        // A held open is ended here, with nothing left to settle it: its
+        // loading route must not stay.
+        let endsHeldOpen = deferredOpen != nil
         stopRuntime()
         switch route {
         case .browser:
@@ -427,7 +695,11 @@ final class AppModel: ObservableObject {
         case .accountOverBrowser:
             // The account page stays where it is; only the runtime goes.
             route = .onboarding(.account)
-        case .loading, .onboarding:
+        case .loading:
+            if endsHeldOpen {
+                route = .onboarding(.instances)
+            }
+        case .onboarding:
             break
         }
         let barriers = pendingRuntimeReleaseBarriers
