@@ -1046,6 +1046,24 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     return normalized
 
 
+def _generated_metadata(row: dict[str, Any]) -> list[dict[str, Any]]:
+    from storage.vault_generation import generated_metadata
+
+    return generated_metadata(row)
+
+
+def _clear_generated_field(meta: dict[str, Any], field: str) -> None:
+    from storage.vault_generation import clear_generated_field
+
+    clear_generated_field(meta, field)
+
+
+def _move_generated_field(meta: dict[str, Any], old: str, new: str) -> None:
+    from storage.vault_generation import move_generated_field
+
+    move_generated_field(meta, old, new)
+
+
 def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
     """Masked, value-free metadata for a secret row."""
     public_meta = _public_meta(row.get("public_meta"))
@@ -1068,6 +1086,9 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+    generated = _generated_metadata(row)
+    if generated:
+        payload["generated"] = generated
     pubkey_pin = public_meta.get("avault_pubkey_pin")
     if isinstance(pubkey_pin, dict):
         payload["avault_pubkey_pin"] = {
@@ -3730,6 +3751,8 @@ def _create_secret(
     now = _now()
     normalized_tags = _normalize_tags(tags)
     public_meta = dict(public_meta or {})
+    if "generated" in public_meta:
+        raise InvalidRequestError("generated provenance is storage-owned")
     if description:
         public_meta["description"] = description
     signing_metadata = public_meta.get("signing_public_key")
@@ -3938,6 +3961,7 @@ def update_secret_metadata(
                 raise FieldExistsError(f"field {normalized_default!r} already exists on {secret_name}")
             if public_meta is None:
                 public_meta = _public_meta(row.get("public_meta"))
+            _move_generated_field(public_meta, existing_default, normalized_default)
             if normalized_default == "value":
                 public_meta.pop("default_field", None)
             else:
@@ -4387,6 +4411,7 @@ def rotate_secret(
     _extra_field_rows(row, strict=True)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
+    _clear_generated_field(public_meta, _default_field_name(row))
     result = conn.execute(
         vault_secrets.update()
         .where(
@@ -4481,6 +4506,9 @@ def update_secret_field(
             op = "replace"
         values = {"fields": _stored_fields_json(extras)}
     values["updated_at"] = now
+    public_meta = _public_meta(row.get("public_meta"))
+    _clear_generated_field(public_meta, field_name)
+    values["public_meta"] = json.dumps(public_meta) if public_meta else None
     stmt = vault_secrets.update().where(
         vault_secrets.c.id == row["id"],
         vault_secrets.c.updated_at == snapshot_updated_at,
@@ -4666,13 +4694,17 @@ def remove_secret_field(
     if not any(str(item["name"]) == field_name for item in extras):
         raise FieldNotFoundError(f"field {field_name!r} not found on {secret_name}; fields: {', '.join(secret_field_names(row))}")
     extras = [item for item in extras if str(item["name"]) != field_name]
+    public_meta = _public_meta(row.get("public_meta"))
+    _clear_generated_field(public_meta, field_name)
     stmt = vault_secrets.update().where(
         vault_secrets.c.id == row["id"],
         vault_secrets.c.updated_at == snapshot_updated_at,
+        vault_secrets.c.public_meta == row.get("public_meta"),
     )
     result = conn.execute(
         stmt.values(
             fields=_stored_fields_json(extras),
+            public_meta=json.dumps(public_meta) if public_meta else None,
             updated_at=_next_updated_at(str(snapshot_updated_at or "")),
         )
     )

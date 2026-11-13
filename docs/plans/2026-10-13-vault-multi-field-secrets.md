@@ -322,7 +322,12 @@ secrets with fields work without it; protected secrets with fields need it.
 - Extra field names and the choice of default field cannot change after
   creation.
 - Standard values stay hidden in the UI.
-- The CLI cannot write fields; values enter only through the browser.
+- Ordinary CLI commands cannot replace or remove field values; values enter
+  through the browser. The narrow `vibe vault generate` exception creates only
+  a new random static Standard secret or an explicitly named new field, with
+  generation and sealing entirely inside avault >=0.1.13. See
+  `2026-11-14-vault-agent-generate.md` for additive-write guards and typed
+  per-field generated provenance.
 - `export` remains deprecated and never delivers values. Agent-initiated field
   deletion is out of scope; browser/REST removal of extra fields is supported.
 - There are no plaintext or non-secret fields; non-secret notes belong in the

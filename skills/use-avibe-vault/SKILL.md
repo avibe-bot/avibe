@@ -2,7 +2,7 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or signing digests and Solana messages without exposing secret values to the agent.
-version: 0.10.2
+version: 0.10.3
 ---
 
 # Use Avibe Vault
@@ -25,9 +25,11 @@ Rules:
 - Use only the server-listed `bitcoin_address_types` for that account/key. The Web switch selects a displayed receiving address, not the signing default, and never moves funds. If Legacy/Native addresses are missing on an existing seed wallet, ask the user to open its Accounts dialog to prepare them from the stored seed; never ask for words or re-import, re-encode the BIP86 key as BIP84, or substitute another path. Paths are `m/44'/0'/0'/0/i`, `m/84'/0'/0'/0/i`, `m/86'/0'/0'/0/i` for P2PKH/P2WPKH/P2TR: i is the receiving-address index under account 0, not a hardened account index. Existing Taproot addresses never change; do not promise reference-wallet hardened-account-i parity beyond #0.
 - HD EVM/Bitcoin take the independently computed 32-byte `--digest`; HD Solana takes the exact serialized `--message-hex`, never its hash. Signing's original HD surface needs avault >=0.1.11; new imports/public preparation and any explicit Bitcoin `--address-type` need avault >=0.1.12. On `avault_upgrade_required`, stop and ask for the approved avault update rather than changing accounts, address types, schemes or protection. If the managed version is below the required floor, wait for the supported release; do not install an unofficial binary or silently fall back to a legacy import.
 - HD ask-before-signing is per account and applies across that account's three chains. A pending sign request is bound to its original account and input; do not rerun `sign` or switch accounts to bypass approval. On auto-resume, read the completed request's signature and derivation and continue once. Mnemonic words cannot be viewed again; do not attempt to extract them or reconstruct them from the seed.
-- Authorization is per secret: approving a protected secret unlocks **all its fields** for the grant's lifetime. The CLI cannot create, replace, or delete fields; the user does that in the browser.
+- Authorization is per secret: approving a protected secret unlocks **all its fields** for the grant's lifetime. The user creates, replaces, and deletes values in the browser. The CLI's narrow exception is `generate`: it can add a new random static Standard secret or an explicitly named new field, never replace an existing value or generate Protected material.
 - `--env NAME.field` delivers one value to `NAME_FIELD` (only the field is uppercased); `--env LOCAL=NAME.field` chooses the variable. `--tag` and `--skill` deliver every field of each selected secret, using `NAME` for the default and `NAME_FIELD` for extras. Conflicting variable mappings fail before delivery.
-- `list` and `find` print the same value-free row: a static secret lists its `fields`, and a multi-field secret also names its `default_field`, the field `NAME` selects. If a ref fails with `field_not_found`, use the listed field names rather than guessing.
+- `list` and `find` print the same value-free row: a static secret lists its `fields`, and a multi-field secret also names its `default_field`, the field `NAME` selects. A generated field has typed `generated` provenance (field, creator, originating Session/title when available, time, format and length/bytes), not a value. Agent generation says `by: agent`; an owner-terminal command without a Session says `by: cli`. Replacing or removing the field clears its provenance; renaming the default label moves it. If a ref fails with `field_not_found`, use the listed field names rather than guessing.
+- `vibe vault generate` uses only the running service and avault >=0.1.13. avault generates and seals the value; Python, the invoking Agent, and command output never receive plaintext. There is no offline generation fallback. On `avault_upgrade_required` or `service_unavailable`, stop and request the approved dependency/service update; never install an arbitrary binary, start/restart the service, downgrade protection, or generate a value in a script as a workaround. On `execution_unknown`, inspect `vibe vault list` before any retry.
+- Generate only a **new** static Standard secret or an explicit new `--field` of an existing static Standard secret. Existing names without a new field, existing fields (including the default alias), Protected targets and keypairs are refused with a `vibe vault request` hint. For an existing value or Protected secret, ask the user through `request`; never rotate or overwrite it by generating under another name to bypass the refusal.
 - `export` remains deprecated and has no delivery. Prefer `run`; advanced `inject` writes a restricted-permission file, so use it only for tools that require file-based configuration.
 - With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
 - When protected `run` / `fetch` needs approval, Avibe automatically asks the user to decrypt and authorize access, and the command waits for that approval (540 seconds by default; `--approval-wait SECONDS` or `--no-approval-wait` to change it). If the command then succeeds, it ran once: do not run it again. If it returns `approval_required`, `approval_wait_timeout`, or `approval_handed_off`, the command did not run; Avibe resumes this session once the request is decided, and after approval you run the same command once. Stopping a still-pending waiter leaves continuation to that callback. A fetch response lost after approval completion is different: follow its `execution_unknown` guidance rather than assuming the callback will fire.
@@ -43,6 +45,18 @@ Rules:
 - Protected signing needs `--signing-context-json` with a supported verifiable context: `evm-transaction`, `eip-712-typed-data`, `avault-agent-operation`, `bitcoin-taproot-keypath-v1` or `solana-transaction-v1`. An `avault-agent-operation` preimage must begin with `avault-agent-operation:v1` followed by a real LF newline and nonempty operation text; its digest is SHA256 of those UTF-8 bytes. JSON encodes that newline as `\n`, not `\\n`. This domain is for agent operations only, not transaction authorization. A legacy unbound request must be recreated after both producer and sandbox are upgraded.
 
 Common commands:
+
+Generate a password into a new Standard login entry, then use it by name without viewing it:
+`vibe vault generate LOGIN --field password --length 32 --no-lookalikes --description "Automation login" --tag automation`
+`vibe vault run --env PASSWORD=LOGIN.password -- python login.py`
+
+The password default is 24 characters (12..128); letters are always enabled, digits and symbols are enabled unless `--no-digits` / `--no-symbols` is supplied, and lookalikes are allowed unless `--no-lookalikes` is supplied. No plaintext is printed. `--length` and the three password flags are invalid with hex/base64, even if another caller explicitly sends false for a password-only option.
+
+Add a new random field to that Standard entry, or create a separate Base64 secret:
+`vibe vault generate LOGIN --field api_token --type hex --bytes 32`
+`vibe vault generate RANDOM_TOKEN --type base64 --bytes 32`
+
+Hex is lowercase; Base64 uses standard padded encoding without line wrapping. Both default to 32 random bytes (16..64), and `--bytes` is invalid for passwords. Metadata flags `--description`, `--tag`, `--skill`, `--allow-host`, `--fetch-auth`, and `--auth-name` use the same replacement/preservation semantics as `vibe vault edit`; omitted metadata is preserved. The result contains the same masked secret row as `list` plus an operation-level `generated` summary. It never returns the generated value.
 
 Request that the user add a missing static secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
 `vibe vault request OPENAI_API_KEY --reason "Need OpenAI API access" --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`

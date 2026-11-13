@@ -10696,6 +10696,47 @@ def avault_agent_pubkey() -> dict:
     return {"public_key": public_key, "fingerprint": fingerprint}
 
 
+AVAULT_GENERATE_SECRET_MIN_VERSION = "0.1.13"
+
+
+def avault_generate_secret(name: str, recipe: dict):
+    """Generate and seal inside Rust; only the existing Sealed envelope returns.
+
+    The service validates the recipe before this boundary. No plaintext stdin,
+    fallback RNG, delivery, or local dependency installation is involved.
+    """
+    from storage.vault_crypto import Sealed
+
+    _require_avault_min_version(
+        "static secret generation", AVAULT_GENERATE_SECRET_MIN_VERSION,
+        managed_available=_version_at_least(AVAULT_VERSION, AVAULT_GENERATE_SECRET_MIN_VERSION),
+    )
+    args = ["generate-secret", "--name", name, "--type", recipe["type"]]
+    if recipe["type"] == "password":
+        args += ["--length", str(recipe["length"])]
+        if not recipe["digits"]:
+            args.append("--no-digits")
+        if not recipe["symbols"]:
+            args.append("--no-symbols")
+        if recipe["no_lookalikes"]:
+            args.append("--no-lookalikes")
+    else:
+        args += ["--bytes", str(recipe["bytes"])]
+    proc = _run_avault(args)
+    if proc.returncode != 0:
+        # Do not reflect custody process output in exceptions or control JSON.
+        raise AvaultError("avault could not generate and seal a static secret")
+    try:
+        payload = json.loads(proc.stdout)
+        if not isinstance(payload, dict) or set(payload) != {"ciphertext", "nonce", "wrap_meta"}:
+            raise ValueError("invalid envelope fields")
+        if not all(isinstance(value, str) and value for value in payload.values()):
+            raise ValueError("invalid envelope values")
+        return Sealed(**payload)
+    except (ValueError, TypeError):
+        raise AvaultError("avault generation returned a malformed envelope") from None
+
+
 def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):
     """Relay a browser HPKE blind box to ``avault seal --blind-box``.
 
