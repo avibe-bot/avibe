@@ -9,7 +9,7 @@ import type { DesktopUpdateState } from '@/lib/desktopShell';
 
 import { frames, type FrameSpec } from '../../frame';
 import { IPHONE_17_PRO } from '../../shell/fixtures';
-import { Phone, Surfaces, type SurfaceState } from './surfaces';
+import { Phone, Surfaces, TrustedView, type SurfaceState } from './surfaces';
 
 // The design clock reads 2026-11-01 08:00Z, so this check was eight minutes ago.
 const CHECKED_AT = '2026-11-01T07:52:00Z';
@@ -17,7 +17,8 @@ const OFFERED = '3.2.7-rc.1';
 
 const native = (state: Partial<DesktopUpdateState>): DesktopUpdateState => ({
   phase: 'current', latest: null, channel: 'test', prereleases: true, skippedVersion: null,
-  interactive: true, remoteRequest: null, checkedAt: CHECKED_AT, ...state,
+  interactive: true, remoteRequest: null, checkedAt: CHECKED_AT, autoUpdate: false,
+  hostActions: ['check', 'prereleases', 'auto_update'], ...state,
 });
 
 const receipt = (phase: DesktopRemoteUpdateRequest['phase'], extra: Partial<DesktopRemoteUpdateRequest> = {}): DesktopRemoteUpdateRequest => ({
@@ -27,7 +28,8 @@ const receipt = (phase: DesktopRemoteUpdateRequest['phase'], extra: Partial<Desk
 
 const relay = (info: Partial<VersionInfo>): VersionInfo => ({
   current: '3.2.6', latest: null, has_update: false, error: null, managed_by: 'desktop',
-  phase: 'current', desktop_version: '3.2.6', prereleases: true, checked_at: CHECKED_AT,
+  phase: 'current', desktop_version: '3.2.6', prereleases: true, auto_update: false, checked_at: CHECKED_AT,
+  host_actions: ['check', 'prereleases', 'auto_update', 'install'], control_request: null,
   remote_install_allowed: false, remote_request: null, build: { kind: 'package' }, ...info,
 });
 
@@ -37,12 +39,15 @@ const states: State[] = [
   {
     name: 'checking', title: '检查中',
     desktop: native({ phase: 'checking' }),
-    web: relay({ remote_request: receipt('checking') }),
+    web: relay({
+      phase: 'checking',
+      control_request: { request_id: 'check-1', action: 'check', enabled: null, phase: 'checking', error_code: null, updated_at: CHECKED_AT },
+    }),
   },
   {
-    name: 'current', title: '已是最新',
-    desktop: native({ phase: 'current' }),
-    web: relay({ phase: 'current' }),
+    name: 'current', title: '已是最新（自动更新开启）',
+    desktop: native({ phase: 'current', autoUpdate: true }),
+    web: relay({ phase: 'current', auto_update: true }),
   },
   {
     name: 'available', title: '有新版本（预览版开启）',
@@ -92,21 +97,22 @@ const states: State[] = [
     web: relay({ phase: 'disabled' }),
   },
   {
-    name: 'legacy-unknown', title: '旧桌面应用：尚无检查结果（唯一的中性提示）',
-    web: relay({ phase: null, desktop_version: null, prereleases: null, checked_at: null }),
+    name: 'old-desktop', title: '例外：运行 Avibe 的电脑上的桌面应用太旧（3.2.6 及更早）',
+    web: relay({ phase: 'available', latest: OFFERED, has_update: true, host_actions: undefined, auto_update: null }),
   },
   {
-    name: 'legacy-awaiting-host', title: '旧桌面应用：仍需那台电脑确认',
-    web: relay({ phase: 'available', latest: OFFERED, has_update: true, remote_request: receipt('awaiting_host') }),
+    name: 'no-result', title: '桌面应用刚启动、第一次检查还没完成（短暂状态）',
+    desktop: native({ phase: 'idle', checkedAt: null }),
+    web: relay({ phase: null, desktop_version: null, prereleases: null, auto_update: null, checked_at: null, host_actions: undefined }),
   },
 ];
 
-const designFrames = frames(states.flatMap((state): FrameSpec[] => [
+const designFrames = frames([...states.flatMap((state): FrameSpec[] => [
   {
     name: state.name,
     title: `更新面板 · ${state.title} · 桌面应用 / 本机 Web / 远程 Web`,
     width: 1136,
-    height: 560,
+    height: 720,
     status: 'proposed',
     render: () => <Surfaces state={state} />,
   },
@@ -114,10 +120,17 @@ const designFrames = frames(states.flatMap((state): FrameSpec[] => [
     name: `${state.name}-phone`,
     title: `更新面板 · ${state.title} · 手机（远程 Web）`,
     width: IPHONE_17_PRO.width,
-    height: 640,
+    height: 800,
     status: 'proposed',
     render: () => <Phone state={state} />,
   },
-]));
+]), {
+  name: 'trusted-view',
+  title: '更新面板 · 桌面应用连接到另一台电脑时：本机更新在受信界面里打开，同一块面板',
+  width: 1136,
+  height: 720,
+  status: 'proposed',
+  render: () => <TrustedView desktop={native({ phase: 'available', latest: OFFERED })} />,
+}]);
 
 export default designFrames;

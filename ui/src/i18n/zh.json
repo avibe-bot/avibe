@@ -7486,7 +7486,6 @@
       "disabledDetail": "请下载并安装新版本。",
       "checkFailed": "检查更新失败",
       "checkFailedDetail": "请检查网络后重试。",
-      "checkFailedOnHost": "请在运行 Avibe 的电脑上的桌面应用中重试，然后在这里刷新。",
       "requesting": "正在请求运行 Avibe 的电脑更新…",
       "awaitingHost": "正在等运行 Avibe 的电脑上的人确认",
       "awaitingHostDetail": "它的桌面应用版本较旧，安装前仍会先询问。",
@@ -7543,19 +7542,23 @@
       "rejected": {
         "title": "运行 Avibe 的电脑没有接受更新请求",
         "detail": "可以重试。"
+      },
+      "setting": {
+        "title": "设置没有更改成功",
+        "detail": "运行 Avibe 的电脑没有接受这次更改，可以重试。"
       }
-    },
-    "prereleases": {
-      "on": "已开启",
-      "off": "已关闭",
-      "onHost": "在运行 Avibe 的电脑上的桌面应用中更改。",
-      "inMenu": "在 Avibe 应用菜单中更改。"
     },
     "action": {
       "update": "更新",
       "retry": "重试",
-      "check": "检查更新",
-      "refresh": "刷新"
-    }
+      "check": "检查更新"
+    },
+    "setting": {
+      "prereleases": "接收预览版",
+      "prereleasesHint": "同时推送 RC 预览版，抢先体验",
+      "autoUpdate": "自动更新",
+      "autoUpdateHint": "发现新版本后，在 Avibe 空闲时自动安装，不再询问"
+    },
+    "legacyHost": "运行 Avibe 的电脑上的桌面应用版本较旧，不能从这里检查更新或更改设置。请先把那里的桌面应用更新到最新版本。"
   }
 }

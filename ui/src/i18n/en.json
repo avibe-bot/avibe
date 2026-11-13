@@ -7486,7 +7486,6 @@
       "disabledDetail": "Download and install a newer version to update.",
       "checkFailed": "Couldn't check for updates",
       "checkFailedDetail": "Check your connection and try again.",
-      "checkFailedOnHost": "Try again in the desktop app on the computer running Avibe, then refresh here.",
       "requesting": "Asking the computer running Avibe to update…",
       "awaitingHost": "Waiting for someone at the computer running Avibe to approve",
       "awaitingHostDetail": "Its desktop app is an older version that asks before installing.",
@@ -7543,19 +7542,23 @@
       "rejected": {
         "title": "The computer running Avibe didn't accept the update request",
         "detail": "You can try again."
+      },
+      "setting": {
+        "title": "Couldn't change the setting",
+        "detail": "The computer running Avibe didn't accept the change. You can try again."
       }
-    },
-    "prereleases": {
-      "on": "On",
-      "off": "Off",
-      "onHost": "Change it in the desktop app on the computer running Avibe.",
-      "inMenu": "Change it from the Avibe app menu."
     },
     "action": {
       "update": "Update",
       "retry": "Try again",
-      "check": "Check for updates",
-      "refresh": "Refresh"
-    }
+      "check": "Check for updates"
+    },
+    "setting": {
+      "prereleases": "Get pre-release updates",
+      "prereleasesHint": "Also offer release candidates early",
+      "autoUpdate": "Update automatically",
+      "autoUpdateHint": "Install new versions when Avibe is idle, without asking"
+    },
+    "legacyHost": "The desktop app on the computer running Avibe is too old to check for updates or change these settings from here. Update it to the latest version first."
   }
 }

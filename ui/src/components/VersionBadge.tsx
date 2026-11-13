@@ -6,7 +6,6 @@ import {
   type UpgradeResult,
 } from '../context/ApiContext';
 import { AlertCircle, GitCommitHorizontal } from 'lucide-react';
-import { ToggleSwitch } from './settings/SettingsPrimitives';
 import {
   badgeVariants,
   interactiveBadgeTriggerClassName,
@@ -51,6 +50,8 @@ const REMOTE_RECONNECT_POLL_MS = 2000;
 const REMOTE_RECONNECT_TIMEOUT_MS = 120_000;
 const REMOTE_REQUEST_TIMEOUT_MS = 35 * 60_000;
 const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
+// A check or setting change the host has not answered by then is reported from its receipt as it stands.
+const CONTROL_REQUEST_TIMEOUT_MS = 2 * 60_000;
 
 export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
   const { t } = useTranslation();
@@ -112,6 +113,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const handleAutoUpdateToggle = async (enabled: boolean) => {
     setSavingAutoUpdate(true);
     try {
+      if (desktopActions) {
+        await desktopActions.setAutoUpdate(enabled);
+        setDesktopUpdateState((previous) => previous && { ...previous, autoUpdate: enabled });
+        return;
+      }
       await api.mutateConfig([setConfigField(['update', 'auto_update'], enabled)]);
       setAutoUpdate(enabled);
     } catch (e) {
@@ -142,6 +148,77 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       setSavingPrereleases(false);
     }
   };
+
+  // A check or setting change asked of a desktop-managed host: its receipt arrives in the version snapshot.
+  const [controlRequestId, setControlRequestId] = React.useState<string | null>(null);
+  const sendControl = async (action: 'check' | 'prereleases' | 'auto_update', enabled?: boolean) => {
+    setRemoteRequestError(null);
+    setUpgradeResult(null);
+    try {
+      const result = await api.requestUpdateControl(action, enabled);
+      if (!result.ok) {
+        setVersionInfo((previous) => previous && {
+          ...previous,
+          control_request: {
+            request_id: 'rejected', action, enabled: enabled ?? null, phase: 'failed',
+            error_code: result.error, updated_at: new Date().toISOString(),
+          },
+        });
+        return;
+      }
+      if (result.snapshot) {
+        setVersionInfo(result.snapshot);
+        return;
+      }
+      if (result.request_id) {
+        const id = result.request_id;
+        setVersionInfo((previous) => previous && {
+          ...previous,
+          ...(action === 'prereleases' ? { prereleases: enabled ?? null } : {}),
+          ...(action === 'auto_update' ? { auto_update: enabled ?? null } : {}),
+          control_request: {
+            request_id: id, action, enabled: enabled ?? null, phase: 'checking',
+            error_code: null, updated_at: new Date().toISOString(),
+          },
+        });
+        setControlRequestId(id);
+      }
+    } catch (e) {
+      console.error('Failed to send the update request:', e);
+      setRemoteRequestError('request_failed');
+    }
+  };
+  React.useEffect(() => {
+    if (!controlRequestId) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const deadline = Date.now() + CONTROL_REQUEST_TIMEOUT_MS;
+    const poll = async () => {
+      try {
+        const fresh = await api.getVersion({ cache: false, background: true });
+        if (stopped) return;
+        setVersionInfo(fresh);
+        const receipt = fresh.control_request;
+        if (receipt?.request_id !== controlRequestId || receipt.phase !== 'checking') {
+          setControlRequestId(null);
+          return;
+        }
+      } catch {
+        // The next poll retries until the deadline.
+      }
+      if (stopped) return;
+      if (Date.now() >= deadline) {
+        setControlRequestId(null);
+        return;
+      }
+      timer = window.setTimeout(() => void poll(), REMOTE_RECONNECT_POLL_MS);
+    };
+    timer = window.setTimeout(() => void poll(), REMOTE_RECONNECT_POLL_MS);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [api, controlRequestId]);
 
   const readDesktopUpdateState = async (): Promise<DesktopUpdateState | null> => {
     const actions = desktopActions;
@@ -290,7 +367,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       setUpgrading(true);
       setNativeInstallFailed(false);
       try {
-        await desktopActions.install();
+        const target = desktopUpdateState?.latest;
+        if (!target) return;
+        await desktopActions.install(target);
         const state = await waitForDesktopUpdate();
         setNativeInstallFailed(state?.phase === 'error');
       } catch {
@@ -522,6 +601,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           restarting,
           result: upgradeResult && { ok: upgradeResult.ok, target: upgradeTarget },
           prereleases: versionInfo && capabilities.can_manage_instance && !isSourceBuild ? prereleases : null,
+          autoUpdate: versionInfo && capabilities.can_manage_instance && !isSourceBuild ? autoUpdate : null,
           checkedAt,
         });
   if (isSourceBuild) {
@@ -535,36 +615,51 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     setNativeInstallFailed(false);
     void checkVersion(true);
   };
-  const panelActions: UpdatePanelActions = {
-    close: () => setIsPopupOpen(false),
-    check: inDesktopShell && !desktopActions
-      // An older shell without updater IPC checks through its own deep link.
-      ? { run: () => { window.location.href = 'avibe://updates'; } }
-      : {
-        run: refresh,
-        // A browser reads the host's last result again; only the host's desktop app can check.
-        refreshOnly: remoteDesktopWeb || isSourceBuild,
-        disabled: checking || restarting || refreshBlockedByRemoteRequest,
-      },
-  };
+  const manager = capabilities.can_manage_instance;
+  const settingsBusy = savingPrereleases || savingAutoUpdate || checking || upgrading || restarting
+    || Boolean(controlRequestId);
+  const panelActions: UpdatePanelActions = { close: () => setIsPopupOpen(false), settingsBusy };
+  const checkDisabled = checking || restarting || refreshBlockedByRemoteRequest || Boolean(controlRequestId);
   if (nativeModel) {
+    // The desktop app's own updater, over its IPC.
+    const actions = desktopUpdateState.hostActions;
+    panelActions.check = { run: refresh, disabled: checkDisabled };
     if (desktopUpdateState.phase === 'available') {
       panelActions.update = { run: () => void handleUpgrade(), disabled: upgrading };
       panelActions.skip = { run: () => void handleSkipDesktopUpdate(), ignoreRequest: Boolean(localRemoteRequest), disabled: upgrading };
     }
     if (typeof desktopUpdateState.prereleases === 'boolean') panelActions.setPrereleases = (enabled) => void handlePrereleasesToggle(enabled);
+    if (actions?.includes('auto_update')) panelActions.setAutoUpdate = (enabled) => void handleAutoUpdateToggle(enabled);
+  } else if (inDesktopShell && !desktopActions) {
+    // An older shell without updater IPC checks through its own deep link.
+    panelActions.check = { run: () => { window.location.href = 'avibe://updates'; } };
   } else if (remoteDesktopWeb) {
+    // The host's desktop app, through its Runtime.
+    const actions = versionInfo?.host_actions ?? [];
+    // Only a host that takes a check gets the button, except before its first result, when reading again is the check.
+    if ((manager && actions.includes('check')) || !panelModel.legacyHost) {
+      panelActions.check = {
+        run: () => (manager && actions.includes('check') ? void sendControl('check') : refresh()),
+        disabled: checkDisabled,
+      };
+    }
+    if (manager && actions.includes('prereleases')) panelActions.setPrereleases = (enabled) => void sendControl('prereleases', enabled);
+    if (manager && actions.includes('auto_update')) panelActions.setAutoUpdate = (enabled) => void sendControl('auto_update', enabled);
     if (canRequestRemoteUpdate) {
       panelActions.update = {
         run: () => void handleUpgrade(),
         disabled: remoteRequesting || Boolean(remoteRequest && !requestSettled) || remoteUpdateTimedOut,
       };
     }
-  } else if (!isDesktopManaged && capabilities.can_manage_instance && !isSourceBuild) {
-    panelActions.update = { run: () => void handleUpgrade(), disabled: upgrading };
-    if (prereleases !== null) panelActions.setPrereleases = (enabled) => void handlePrereleasesToggle(enabled);
+  } else {
+    // A standalone Runtime checks live and keeps both settings in its own config.
+    panelActions.check = { run: refresh, disabled: checkDisabled };
+    if (manager && !isSourceBuild) {
+      panelActions.update = { run: () => void handleUpgrade(), disabled: upgrading };
+      if (prereleases !== null) panelActions.setPrereleases = (enabled) => void handlePrereleasesToggle(enabled);
+      if (autoUpdate !== null) panelActions.setAutoUpdate = (enabled) => void handleAutoUpdateToggle(enabled);
+    }
   }
-  panelActions.prereleasesDisabled = savingPrereleases || checking || upgrading || restarting;
 
   return (
     <Popover open={isPopupOpen} onOpenChange={setIsPopupOpen}>
@@ -637,20 +732,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 )}
                 {upgradeResult?.ok && upgradeResult.activation_notice && (
                   <p className="whitespace-pre-wrap break-words text-xs text-muted">{upgradeResult.activation_notice}</p>
-                )}
-                {/* Auto Update Toggle: only once the Runtime has said who manages it */}
-                {versionInfo && capabilities.can_manage_instance && !isSourceBuild && !isDesktopManaged && autoUpdate !== null && (
-                  <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
-                    <div className="min-w-0">
-                      <div className="text-sm text-foreground">{t('dashboard.autoUpdate')}</div>
-                      <div className="text-xs text-muted">{t('dashboard.autoUpdateHint')}</div>
-                    </div>
-                    <ToggleSwitch
-                      enabled={autoUpdate}
-                      onClick={() => handleAutoUpdateToggle(!autoUpdate)}
-                      disabled={savingAutoUpdate}
-                    />
-                  </div>
                 )}
               </>}
             />

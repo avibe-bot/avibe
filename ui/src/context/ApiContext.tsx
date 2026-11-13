@@ -865,6 +865,8 @@ export type ApiContextType = {
     options?: { confirmInterrupt?: boolean },
   ) => Promise<DesktopRemoteUpdateResult>;
   doUpgrade: (options?: { confirmInterrupt: boolean }) => Promise<UpgradeResult>;
+  /** Ask this host's updater to check now, or to change one of its settings. */
+  requestUpdateControl: (action: UpdateControlRequest['action'], enabled?: boolean) => Promise<UpdateControlResult>;
   browseDirectory: (path: string, showHidden?: boolean) => Promise<{ ok: boolean; path?: string; parent?: string | null; dirs?: { name: string; path: string }[]; error?: string }>;
   browseFavorites: () => Promise<{ ok: boolean; system?: string; favorites?: { key: string; path: string }[]; error?: string }>;
   browseMkdir: (path: string) => Promise<{ path: string }>;
@@ -2150,11 +2152,16 @@ export type VersionInfo = {
   has_update: boolean;
   error: string | null;
   managed_by?: 'desktop';
-  /** Desktop-managed hosts: the desktop app's last completed check, relayed (vibe/desktop_update_status.py). */
-  phase?: 'current' | 'available' | 'disabled' | 'error' | null;
+  /** Desktop-managed hosts: the desktop app's last completed check, relayed (vibe/desktop_update_status.py);
+   *  `checking` while a check asked for from here runs. */
+  phase?: 'current' | 'available' | 'disabled' | 'error' | 'checking' | null;
   desktop_version?: string | null;
   prereleases?: boolean | null;
+  auto_update?: boolean | null;
   checked_at?: string | null;
+  /** What this host's updater accepts from here; absent from a desktop app too old to accept any. */
+  host_actions?: UpdateHostAction[];
+  control_request?: UpdateControlRequest | null;
   remote_install_allowed?: boolean;
   remote_request?: DesktopRemoteUpdateRequest | null;
   build?: {
@@ -2176,6 +2183,23 @@ export type DesktopRemoteUpdatePhase =
   | 'failed'
   | 'declined'
   | 'expired';
+
+export type UpdateHostAction = 'check' | 'prereleases' | 'auto_update' | 'install';
+
+/** The receipt of a check or a setting change asked of the host's updater. */
+export type UpdateControlRequest = {
+  request_id: string;
+  action: 'check' | 'prereleases' | 'auto_update';
+  enabled: boolean | null;
+  phase: 'checking' | 'completed' | 'failed' | 'expired';
+  error_code: string | null;
+  updated_at: string;
+};
+
+/** `request_id` when a desktop app takes the request; `snapshot` when a standalone Runtime answers at once. */
+export type UpdateControlResult =
+  | { ok: true; request_id?: string; snapshot?: VersionInfo }
+  | { ok: false; error: string };
 
 export type DesktopRemoteUpdateRequest = {
   request_id: string;
@@ -4339,6 +4363,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         throw new ApiError('Upgrade request failed', res.status, payloadJson?.error ?? null);
       }
       return payloadJson as UpgradeResult;
+    },
+    requestUpdateControl: async (action, enabled) => {
+      const path = action === 'check' ? '/api/update/check'
+        : action === 'prereleases' ? '/api/update/prereleases' : '/api/update/auto-update';
+      const { res, payloadJson } = await requestJson(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(action === 'check' ? {} : { enabled }),
+      }, path, { handleError: false });
+      if (!res.ok && typeof payloadJson?.error !== 'string') {
+        throw new ApiError('Update request failed', res.status, null);
+      }
+      return payloadJson as UpdateControlResult;
     },
     browseDirectory: (path, showHidden) => postJson('/api/browse', { path, show_hidden: showHidden || false }),
     browseFavorites: () => getJson('/api/browse/favorites'),

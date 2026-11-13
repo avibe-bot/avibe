@@ -15,16 +15,18 @@ import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { isPrereleaseVersion, releaseNotesUrl } from './versions';
 import type { UpdatePanelModel, UpdatePanelStatus, UpdateSubject } from './updatePanelModel';
 
+/** The same actions on every surface; each container sends them to that computer's updater. */
 export type UpdatePanelActions = {
-  /** Check for updates now, or, where this surface can only reread the last result, refresh it. */
-  check?: { run: () => void; refreshOnly?: boolean; disabled?: boolean };
+  /** Make the computer's updater check now. */
+  check?: { run: () => void; disabled?: boolean };
   /** Install the offered version (from a browser: ask the host to install it). */
   update?: { run: () => void; disabled?: boolean };
   /** The desktop app's own prompt: skip this version, or ignore a remote request. */
   skip?: { run: () => void; ignoreRequest?: boolean; disabled?: boolean };
-  /** Present when this surface can change the pre-release setting. */
   setPrereleases?: (enabled: boolean) => void;
-  prereleasesDisabled?: boolean;
+  setAutoUpdate?: (enabled: boolean) => void;
+  /** A change to either setting is on its way to the updater. */
+  settingsBusy?: boolean;
   close?: () => void;
 };
 
@@ -39,7 +41,7 @@ const TONE_CLASS: Record<Tone, string> = {
 
 type Copy = { tone: Tone; title: string; detail?: string; spin?: boolean; offer?: boolean };
 
-function useStatusCopy(status: UpdatePanelStatus | null, subject: UpdateSubject, refreshOnly: boolean): Copy | null {
+function useStatusCopy(status: UpdatePanelStatus | null, subject: UpdateSubject): Copy | null {
   const { t } = useTranslation();
   const host = subject === 'host-desktop';
   if (!status) return null;
@@ -67,7 +69,7 @@ function useStatusCopy(status: UpdatePanelStatus | null, subject: UpdateSubject,
       return {
         tone: 'danger',
         title: t('update.status.checkFailed'),
-        detail: t(refreshOnly ? 'update.status.checkFailedOnHost' : 'update.status.checkFailedDetail'),
+        detail: t('update.status.checkFailedDetail'),
       };
     case 'requesting':
       return { tone: 'info', spin: true, title: t('update.status.requesting') };
@@ -104,6 +106,25 @@ function useStatusCopy(status: UpdatePanelStatus | null, subject: UpdateSubject,
   }
 }
 
+function Setting({ label, hint, enabled, onChange, busy }: {
+  label: string;
+  hint: string;
+  enabled: boolean;
+  /** Absent where this computer's updater cannot take the change: the switch shows its value, disabled. */
+  onChange?: (enabled: boolean) => void;
+  busy?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-sm text-foreground">{label}</div>
+        <div className="text-xs text-muted">{hint}</div>
+      </div>
+      <ToggleSwitch enabled={enabled} onClick={() => onChange?.(!enabled)} disabled={!onChange || busy} label={label} />
+    </div>
+  );
+}
+
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-3 text-sm">
@@ -122,10 +143,11 @@ export function UpdatePanel({ model, actions, extra, title }: {
 }) {
   const { t } = useTranslation();
   const { status, subject } = model;
-  const refreshOnly = Boolean(actions.check?.refreshOnly);
-  const copy = useStatusCopy(status, subject, refreshOnly);
+  const copy = useStatusCopy(status, subject);
+  // A desktop app too old to take these from here gets one line; its container offers only what it accepts.
+  const legacy = Boolean(model.legacyHost);
   const offered = model.latest;
-  const checkLabel = t(refreshOnly ? 'update.action.refresh' : 'update.action.check');
+  const checkLabel = t('update.action.check');
   const checking = status?.kind === 'checking';
 
   // One lead action per state: install what is offered, or check again after a failure.
@@ -135,9 +157,9 @@ export function UpdatePanel({ model, actions, extra, title }: {
       ? { label: t('update.action.retry'), run: actions.update.run, disabled: actions.update.disabled, icon: <RefreshCw /> }
       // Without an install action (the desktop app dropped the failed offer), trying again starts with a check.
       : (status?.kind === 'check-failed' || status?.kind === 'not-checked'
-        || (status?.kind === 'update-failed' && !actions.update && !refreshOnly)) && actions.check
+        || (status?.kind === 'update-failed' && !actions.update)) && actions.check
         ? {
-          label: status?.kind !== 'not-checked' && !refreshOnly ? t('update.action.retry') : checkLabel,
+          label: status?.kind !== 'not-checked' ? t('update.action.retry') : checkLabel,
           run: actions.check.run,
           disabled: actions.check.disabled,
           icon: <RefreshCw />,
@@ -226,27 +248,30 @@ export function UpdatePanel({ model, actions, extra, title }: {
           </div>
         )}
 
-        {model.prereleases && (
-          <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
-            <div className="min-w-0">
-              <div className="text-sm text-foreground">{t('dashboard.prereleaseUpdates')}</div>
-              <div className="text-xs text-muted">
-                {actions.setPrereleases
-                  ? t('dashboard.prereleaseUpdatesHint')
-                  : t(subject === 'host-desktop' ? 'update.prereleases.onHost' : 'update.prereleases.inMenu')}
-              </div>
-            </div>
-            {actions.setPrereleases ? (
-              <ToggleSwitch
+        {legacy && (
+          <p className="rounded-md border border-edge px-3 py-2 text-xs leading-5 text-muted shadow-elevation-0">
+            {t('update.legacyHost')}
+          </p>
+        )}
+        {(model.prereleases || model.autoUpdate) && (
+          <div className="space-y-3 border-t border-border pt-3">
+            {model.prereleases && (
+              <Setting
+                label={t('update.setting.prereleases')}
+                hint={t('update.setting.prereleasesHint')}
                 enabled={model.prereleases.enabled}
-                onClick={() => actions.setPrereleases?.(!model.prereleases?.enabled)}
-                disabled={actions.prereleasesDisabled}
-                label={t('dashboard.prereleaseUpdates')}
+                onChange={actions.setPrereleases}
+                busy={actions.settingsBusy}
               />
-            ) : (
-              <span className="shrink-0 text-sm text-foreground">
-                {t(model.prereleases.enabled ? 'update.prereleases.on' : 'update.prereleases.off')}
-              </span>
+            )}
+            {model.autoUpdate && (
+              <Setting
+                label={t('update.setting.autoUpdate')}
+                hint={t('update.setting.autoUpdateHint')}
+                enabled={model.autoUpdate.enabled}
+                onChange={actions.setAutoUpdate}
+                busy={actions.settingsBusy}
+              />
             )}
           </div>
         )}

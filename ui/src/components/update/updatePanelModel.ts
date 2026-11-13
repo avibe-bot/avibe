@@ -11,7 +11,7 @@ export type UpdateSubject = 'this-desktop' | 'host-desktop' | 'runtime';
 
 export type UpdateFailure =
   | 'failed' | 'install' | 'requires-host' | 'declined' | 'expired' | 'timeout'
-  | 'unreachable' | 'busy' | 'gone' | 'not-managed' | 'rejected';
+  | 'unreachable' | 'busy' | 'gone' | 'not-managed' | 'rejected' | 'setting';
 
 export type UpdatePanelStatus =
   | { kind: 'checking' }
@@ -39,6 +39,9 @@ export type UpdatePanelModel = {
   latest: string | null;
   latestIsStable?: boolean;
   prereleases: { enabled: boolean } | null;
+  autoUpdate?: { enabled: boolean } | null;
+  /** A desktop-managed host whose desktop app is too old to take a check or a setting from here. */
+  legacyHost?: boolean;
   checkedAt: string | null;
   /** None for a source build, which has no release to check. */
   status: UpdatePanelStatus | null;
@@ -96,12 +99,17 @@ export function modelFromDesktopState(state: DesktopUpdateState, {
     }
   })();
   const offered = ['available', 'downloading', 'installing', 'installed'].includes(status.kind) ? latest : null;
+  // A shell that cannot take every setting is the one exception the panel names.
+  const actions = state.hostActions ?? [];
   return {
     subject,
     current: normalizeVersion(current),
     latest: offered,
     prereleases: typeof state.prereleases === 'boolean' ? { enabled: state.prereleases } : null,
-    checkedAt,
+    autoUpdate: { enabled: state.autoUpdate === true },
+    // Its own IPC always takes a check; only the settings it lacks make it the exception.
+    legacyHost: !(['prereleases', 'auto_update'] as const).every((action) => actions.includes(action)),
+    checkedAt: state.checkedAt ?? checkedAt,
     status,
   };
 }
@@ -169,7 +177,17 @@ export function modelFromDesktopRelay(
     (info.checked_at && Date.parse(info.checked_at) > Date.parse(request.updated_at))
     || (request.phase === 'completed' && hasUpdate && latest !== normalizeVersion(request.target))
   ));
+  // A check or a setting change asked of the host, until a later check speaks for it.
+  const control = info.control_request;
+  const controlSettled = control && control.phase !== 'checking'
+    && !(info.checked_at && Date.parse(info.checked_at) > Date.parse(control.updated_at));
+  const controlStatus: UpdatePanelStatus | null = control?.phase === 'checking' || info.phase === 'checking'
+    ? { kind: 'checking' }
+    : controlSettled && (control.phase === 'failed' || control.phase === 'expired')
+      ? control.action === 'check' ? { kind: 'check-failed' } : { kind: 'update-failed', reason: 'setting' }
+      : null;
   const status: UpdatePanelStatus = (superseded && !view.requesting && !view.error ? null : remoteStatus(info, view))
+    ?? controlStatus
     ?? (hasUpdate && latest ? { kind: 'available', version: latest }
       : info.phase === 'error' ? { kind: 'check-failed' }
         : info.phase === 'disabled' ? { kind: 'disabled' }
@@ -177,6 +195,10 @@ export function modelFromDesktopRelay(
             // A Runtime that predates the relayed phase still says "nothing to install" with a known latest.
             : !info.phase && latest ? { kind: 'current' }
               : { kind: 'unknown' });
+  // Only a host known to have published a result and declared nothing is too old; before its
+  // first result the status says so instead.
+  const legacyHost = Boolean(info.phase)
+    && !(['check', 'prereleases', 'auto_update'] as const).every((action) => info.host_actions?.includes(action));
   // The offered version, while it is still ahead: an installed update is named by its status.
   const shown = ['current', 'unknown', 'check-failed', 'disabled', 'updated'].includes(status.kind) ? null : latest;
   return {
@@ -184,6 +206,10 @@ export function modelFromDesktopRelay(
     current: normalizeVersion(current),
     latest: shown,
     prereleases: typeof info.prereleases === 'boolean' ? { enabled: info.prereleases } : null,
+    // An old desktop app has no automatic installs: it waits for someone to click Update.
+    // Before a host's first result nothing is known, so the row waits too.
+    autoUpdate: typeof info.auto_update === 'boolean' ? { enabled: info.auto_update } : legacyHost ? { enabled: false } : null,
+    legacyHost,
     checkedAt: info.checked_at ?? null,
     status,
   };
@@ -191,13 +217,14 @@ export function modelFromDesktopRelay(
 
 /** A standalone Runtime's own package check. */
 export function modelFromRuntime(info: VersionInfo, {
-  checking, installing, restarting, result, prereleases, checkedAt,
+  checking, installing, restarting, result, prereleases, autoUpdate = null, checkedAt,
 }: {
   checking: boolean;
   installing: boolean;
   restarting: boolean;
   result: { ok: boolean; target: string | null } | null;
   prereleases: boolean | null;
+  autoUpdate?: boolean | null;
   checkedAt: string | null;
 }): UpdatePanelModel {
   const latest = info.latest ? normalizeVersion(info.latest) : null;
@@ -216,6 +243,7 @@ export function modelFromRuntime(info: VersionInfo, {
     latest: status.kind !== 'updated' && (info.has_update || stable) ? latest : null,
     latestIsStable: stable,
     prereleases: prereleases === null ? null : { enabled: prereleases },
+    autoUpdate: autoUpdate === null ? null : { enabled: autoUpdate },
     checkedAt,
     status,
   };

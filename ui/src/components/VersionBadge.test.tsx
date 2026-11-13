@@ -4,7 +4,7 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { VersionBadge } from './VersionBadge';
-import type { DesktopRemoteUpdateResult, VersionInfo, UpgradeResult } from '../context/ApiContext';
+import type { DesktopRemoteUpdateResult, UpdateControlResult, VersionInfo, UpgradeResult } from '../context/ApiContext';
 import {
   DESKTOP_OPEN_UPDATES_EVENT,
   DESKTOP_UPDATE_STATE_EVENT,
@@ -17,6 +17,7 @@ const api = vi.hoisted(() => ({
   mutateConfig: vi.fn(async () => ({})),
   requestDesktopUpdate: vi.fn<(...args: unknown[]) => Promise<DesktopRemoteUpdateResult>>(),
   doUpgrade: vi.fn<(...args: unknown[]) => Promise<UpgradeResult>>(async () => ({ ok: true, message: 'Upgrade successful', output: null, restarting: false })),
+  requestUpdateControl: vi.fn<(...args: unknown[]) => Promise<UpdateControlResult>>(async () => ({ ok: true, request_id: 'control-1' })),
 }));
 const defaultDesktopInvoke = vi.hoisted(() => async (command: string) => {
   if (command === 'desktop_update_state') {
@@ -91,8 +92,11 @@ async function openBrowserPopup(title: string) {
   return entry;
 }
 
+// A host that declares no updater actions offers no setting a browser could change.
 function expectNoRuntimeControls() {
-  expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
+  const auto = screen.queryByRole('switch', { name: i18n.t('update.setting.autoUpdate') }) as HTMLButtonElement | null;
+  expect(auto === null || auto.disabled).toBe(true);
+  expect(api.mutateConfig).not.toHaveBeenCalled();
   expect(screen.queryByText(i18n.t('update.status.checkFailed'))).toBeNull();
 }
 
@@ -193,7 +197,7 @@ describe('desktop version ownership', () => {
     renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
     fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('update.action.update') }));
-    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_install'));
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_install', { targetVersion: '10.0.0' }));
     expect(api.doUpgrade).not.toHaveBeenCalled();
   });
 
@@ -267,7 +271,7 @@ describe('desktop version ownership', () => {
     await vi.waitFor(() => expect(entry.className).toContain('text-gold-ink'));
     fireEvent.click(entry);
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('update.action.update') }));
-    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_install'));
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_install', { targetVersion: '10.0.0' }));
     expect(api.doUpgrade).not.toHaveBeenCalled();
   });
 
@@ -346,7 +350,7 @@ describe('desktop version ownership', () => {
     api.getVersion.mockResolvedValueOnce({ current: '3.2.2rc13', latest: '3.2.3', has_update: true, error: null, managed_by: 'desktop' });
     await openBrowserPopup('v3.2.2rc13');
     expect(api.getVersion).toHaveBeenLastCalledWith(undefined);
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.refresh') }));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
     expect(await screen.findByText(i18n.t('update.status.available'))).toBeTruthy();
     expect(api.getVersion).toHaveBeenLastCalledWith({ cache: false });
   });
@@ -368,10 +372,10 @@ describe('desktop version ownership', () => {
     await vi.waitFor(() => expect(api.getConfig).toHaveBeenCalledOnce());
     // Let the loaded setting render while the version request is still pending.
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
-    expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
+    expect(screen.queryByText(i18n.t('update.setting.autoUpdate'))).toBeNull();
 
     resolveVersion({ current: '9.9.9', latest: '9.9.9', has_update: false });
-    expect(await screen.findByText(i18n.t('dashboard.autoUpdate'))).toBeTruthy();
+    expect(await screen.findByText(i18n.t('update.setting.autoUpdate'))).toBeTruthy();
   });
 
   it('loads the auto-update setting when an editor is promoted to member', async () => {
@@ -381,14 +385,14 @@ describe('desktop version ownership', () => {
     const view = render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
-    expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
+    expect(screen.queryByText(i18n.t('update.setting.autoUpdate'))).toBeNull();
     expect(api.getConfig).not.toHaveBeenCalled();
 
     authorization.capabilities.can_manage_instance = true;
     view.rerender(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
 
     await vi.waitFor(() => expect(api.getConfig).toHaveBeenCalledOnce());
-    expect(await screen.findByText(i18n.t('dashboard.autoUpdate'))).toBeTruthy();
+    expect(await screen.findByText(i18n.t('update.setting.autoUpdate'))).toBeTruthy();
   });
 
   it('shows a successful upgrade warning returned in the output', async () => {
@@ -630,7 +634,7 @@ describe('remote desktop update contract', () => {
     await act(() => vi.advanceTimersByTimeAsync(125_000));
     expect(screen.getByText(i18n.t('update.failure.timeout.title'))).toBeTruthy();
     api.getVersion.mockResolvedValue(remoteReceipt(phase));
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.refresh') }));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
     await act(() => vi.advanceTimersByTimeAsync(0));
     expect(screen.queryByText(i18n.t('update.failure.timeout.title'))).toBeNull();
     const requestButton = screen.getByRole('button', { name: i18n.t('update.action.retry') });
@@ -707,7 +711,7 @@ describe('remote desktop update contract', () => {
 });
 
 describe('pre-release updates', () => {
-  const prereleaseSwitch = () => screen.findByRole('switch', { name: i18n.t('dashboard.prereleaseUpdates') });
+  const prereleaseSwitch = () => screen.findByRole('switch', { name: i18n.t('update.setting.prereleases') });
 
   it('saves the Runtime setting, rechecks, and offers the release candidate with its notes', async () => {
     api.getConfig.mockResolvedValueOnce({ update: { auto_update: true, prereleases: false } });
@@ -756,6 +760,79 @@ describe('pre-release updates', () => {
     renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
     fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
     expect(await screen.findByRole('button', { name: i18n.t('update.action.update') })).toBeTruthy();
-    expect(screen.queryByRole('switch', { name: i18n.t('dashboard.prereleaseUpdates') })).toBeNull();
+    expect(screen.queryByRole('switch', { name: i18n.t('update.setting.prereleases') })).toBeNull();
+  });
+});
+
+// ui/design: update/panel — the same check and switches on every surface, sent to the host's updater.
+describe('one panel on a desktop-managed host', () => {
+  const hostWith = (extra: Partial<VersionInfo> = {}): VersionInfo => ({
+    current: '3.2.6', latest: null, has_update: false, error: null, managed_by: 'desktop',
+    phase: 'current', desktop_version: '3.2.6', prereleases: false, auto_update: false,
+    checked_at: '2026-11-13T07:00:00Z', host_actions: ['check', 'prereleases', 'auto_update', 'install'],
+    control_request: null, ...extra,
+  });
+  const control = (action: 'check' | 'auto_update', phase: 'checking' | 'completed', enabled: boolean | null = null) => ({
+    request_id: 'control-1', action, enabled, phase, error_code: null, updated_at: '2026-11-13T07:05:00Z',
+  });
+
+  it('makes the host check, and shows its answer when the receipt settles', async () => {
+    api.getVersion.mockResolvedValue(hostWith());
+    await openBrowserPopup('v3.2.6');
+    api.getVersion.mockResolvedValue(hostWith({ phase: 'checking', control_request: control('check', 'checking') }));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    expect(api.requestUpdateControl).toHaveBeenCalledExactlyOnceWith('check', undefined);
+    expect(await screen.findByText(i18n.t('update.status.checking'))).toBeTruthy();
+    api.getVersion.mockResolvedValue(hostWith({
+      phase: 'available', latest: '3.2.7', has_update: true, checked_at: '2026-11-13T07:06:00Z',
+      control_request: control('check', 'completed'),
+    }));
+    expect(await screen.findByText(i18n.t('update.status.available'), undefined, { timeout: 4000 })).toBeTruthy();
+    expect(screen.getByRole('button', { name: i18n.t('update.action.update') })).toBeTruthy();
+  });
+
+  it('changes the host\'s automatic updates from the browser', async () => {
+    api.getVersion.mockResolvedValue(hostWith());
+    await openBrowserPopup('v3.2.6');
+    fireEvent.click(screen.getByRole('switch', { name: i18n.t('update.setting.autoUpdate') }));
+    expect(api.requestUpdateControl).toHaveBeenCalledExactlyOnceWith('auto_update', true);
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  it('names a desktop app too old to take these, and still offers its install', async () => {
+    api.getVersion.mockResolvedValue(hostWith({ phase: 'available', latest: '3.2.7', has_update: true, host_actions: undefined, auto_update: null }));
+    await openBrowserPopup('v3.2.6');
+    expect(screen.getByText(i18n.t('update.legacyHost'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: i18n.t('update.action.check') })).toBeNull();
+    expect((screen.getByRole('switch', { name: i18n.t('update.setting.prereleases') }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('switch', { name: i18n.t('update.setting.autoUpdate') }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: i18n.t('update.action.update') })).toBeTruthy();
+  });
+
+  it('keeps members to reading the same panel', async () => {
+    authorization.capabilities.can_manage_instance = false;
+    api.getVersion.mockResolvedValue(hostWith());
+    await openBrowserPopup('v3.2.6');
+    expect((screen.getByRole('switch', { name: i18n.t('update.setting.autoUpdate') }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    expect(api.requestUpdateControl).not.toHaveBeenCalled();
+  });
+
+  it('sets the desktop app\'s own automatic updates over its IPC', async () => {
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') {
+        return {
+          phase: 'current', latest: null, channel: 'stable', prereleases: false, autoUpdate: false,
+          hostActions: ['check', 'prereleases', 'auto_update'], skippedVersion: null, interactive: false,
+        };
+      }
+      return defaultDesktopInvoke(command);
+    });
+    renderInShell('3.2.6', '3.2.6', null, true);
+    fireEvent.click(await screen.findByTitle('v3.2.6'));
+    fireEvent.click(await screen.findByRole('switch', { name: i18n.t('update.setting.autoUpdate') }));
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_auto_update_set', { enabled: true }));
+    expect(screen.queryByText(i18n.t('update.legacyHost'))).toBeNull();
+    expect(api.requestUpdateControl).not.toHaveBeenCalled();
   });
 });
