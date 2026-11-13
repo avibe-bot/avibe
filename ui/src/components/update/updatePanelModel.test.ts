@@ -38,3 +38,14 @@ describe('a settled remote request on a desktop-managed host', () => {
     expect(model.status).toEqual({ kind: 'update-failed', reason: 'failed', retry: true });
   });
 });
+
+describe('a setting change on its way to the host', () => {
+  it('shows the value asked for until the host answers', () => {
+    const model = modelFromDesktopRelay(relay({
+      auto_update: false,
+      control_request: { request_id: 'control-1', action: 'auto_update', enabled: true, phase: 'checking', error_code: null, updated_at: '2026-11-13T07:05:00Z' },
+    }), quiet);
+    expect(model.autoUpdate).toEqual({ enabled: true });
+    expect(model.status).toEqual({ kind: 'current' });
+  });
+});

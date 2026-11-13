@@ -204,6 +204,11 @@ export function modelFromDesktopRelay(
             // A Runtime that predates the relayed phase still says "nothing to install" with a known latest.
             : !info.phase && latest ? { kind: 'current' }
               : { kind: 'unknown' });
+  // A setting change on its way shows the value asked for until the host answers.
+  const asked = (action: 'prereleases' | 'auto_update') => (control?.phase === 'checking' && control.action === action
+    && typeof control.enabled === 'boolean' ? control.enabled : undefined);
+  const prereleases = asked('prereleases') ?? info.prereleases;
+  const autoUpdate = asked('auto_update') ?? info.auto_update;
   // Only a host known to have published a result and declared nothing is too old; before its
   // first result the status says so instead.
   const legacyHost = Boolean(info.phase)
@@ -214,10 +219,10 @@ export function modelFromDesktopRelay(
     subject,
     current: normalizeVersion(current),
     latest: shown,
-    prereleases: typeof info.prereleases === 'boolean' ? { enabled: info.prereleases } : null,
+    prereleases: typeof prereleases === 'boolean' ? { enabled: prereleases } : null,
     // An old desktop app has no automatic installs: it waits for someone to click Update.
     // Before a host's first result nothing is known, so the row waits too.
-    autoUpdate: typeof info.auto_update === 'boolean' ? { enabled: info.auto_update } : legacyHost ? { enabled: false } : null,
+    autoUpdate: typeof autoUpdate === 'boolean' ? { enabled: autoUpdate } : legacyHost ? { enabled: false } : null,
     legacyHost,
     checkedAt: info.checked_at ?? null,
     status,
