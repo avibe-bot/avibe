@@ -2,7 +2,7 @@
 // rev0.6). The parent page draws the complete Add key dialog and launches the secure window; the
 // words, passphrase, three-word check and account #0 review all happen in that window, never here.
 // Signing stays approval-required in the secure window; Bitcoin is Taproot only on this tier.
-import { AlertTriangle, CircleCheck, ExternalLink, KeyRound, Loader2, Lock, ShieldCheck, Signature, TriangleAlert } from 'lucide-react';
+import { AlertTriangle, ChevronRight, CircleCheck, ExternalLink, KeyRound, Loader2, Lock, RefreshCw, ShieldCheck, Signature, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -20,14 +20,18 @@ import { MirrorRow, SandboxCard } from './signing';
 const FIELD = 'text-[12.5px] font-semibold text-foreground';
 const noop = () => {};
 
-export type LaunchState = 'ready' | 'waiting' | 'blocked' | 'cancelled' | 'closed' | 'timeout';
+/** Before the window succeeds nothing reaches the server, so failures there save nothing. Once the
+ *  window succeeded and the page started saving, a lost response is checked against the server
+ *  (same name, record, fingerprint, #0) instead of starting over; the page never makes a new seed. */
+export type LaunchState = 'ready' | 'waiting' | 'blocked' | 'cancelled' | 'closed' | 'timeout' | 'reset'
+  | 'saving' | 'checking' | 'unconfirmed' | 'mismatch';
 
 /** The complete Add key dialog with Protected chosen for a seed-phrase wallet: every field the
  *  dialog has, the secret parts handed to the secure window. */
 export function ProtectedHdDialog({ source, state = 'ready' }: { source: 'create' | 'import'; state?: LaunchState }) {
   const { t } = useTranslation();
   const d = useDraft();
-  const busy = state === 'waiting';
+  const after = state === 'saving' || state === 'checking';
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <DialogHeading icon={KeyRound} title={t('vaults.dialog.title')} subtitle={t('vaults.dialog.subtitle')} />
@@ -78,14 +82,23 @@ export function ProtectedHdDialog({ source, state = 'ready' }: { source: 'create
       </div>
       <LaunchNotice state={state} />
       <div className="mt-1 flex items-center justify-end gap-2">
-        <Button type="button" variant="ghost">{t('vaults.dialog.cancel')}</Button>
-        <Button type="button" disabled={busy}>
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
-          {busy ? d('等安全窗口完成…', 'Waiting for the secure window…') : source === 'create' ? d('在安全窗口中创建', 'Create in secure window') : d('在安全窗口中导入', 'Import in secure window')}
-        </Button>
+        {state === 'mismatch' ? null : <Button type="button" variant="ghost" disabled={after}>{t('vaults.dialog.cancel')}</Button>}
+        <LaunchButton source={source} state={state} />
       </div>
     </div>
   );
+}
+
+function LaunchButton({ source, state }: { source: 'create' | 'import'; state: LaunchState }) {
+  const { t } = useTranslation();
+  const d = useDraft();
+  const spin = <Loader2 className="size-4 animate-spin" />;
+  if (state === 'waiting') return <Button type="button" disabled>{spin}{d('等安全窗口完成…', 'Waiting for the secure window…')}</Button>;
+  if (state === 'saving') return <Button type="button" disabled>{spin}{d('正在保存…', 'Saving…')}</Button>;
+  if (state === 'checking') return <Button type="button" disabled>{spin}{d('正在核对…', 'Checking…')}</Button>;
+  if (state === 'unconfirmed') return <Button type="button"><RefreshCw className="size-4" />{d('再核对一次', 'Check again')}</Button>;
+  if (state === 'mismatch') return <Button type="button" variant="secondary">{t('vaults.dialog.cancel')}</Button>;
+  return <Button type="button"><ExternalLink className="size-4" />{source === 'create' ? d('在安全窗口中创建', 'Create in secure window') : d('在安全窗口中导入', 'Import in secure window')}</Button>;
 }
 
 function LaunchNotice({ state }: { state: LaunchState }) {
@@ -95,7 +108,12 @@ function LaunchNotice({ state }: { state: LaunchState }) {
   if (state === 'blocked') return <Notice tone="warning" icon={TriangleAlert}>{d('浏览器拦住了安全窗口。允许这个网站弹出窗口后再点一次。', 'The browser blocked the secure window. Allow pop-ups for this site and try again.')}</Notice>;
   if (state === 'cancelled') return <Notice tone="neutral" icon={AlertTriangle}>{d('已取消，什么都没有保存。可以再试一次。', 'Cancelled; nothing was saved. You can try again.')}</Notice>;
   if (state === 'closed') return <Notice tone="neutral" icon={AlertTriangle}>{d('安全窗口关了，什么都没有保存。可以再试一次。', 'The secure window was closed; nothing was saved. You can try again.')}</Notice>;
-  return <Notice tone="neutral" icon={AlertTriangle}>{d('超过 5 分钟没有完成，什么都没有保存。再试一次会重新开始。', 'It wasn’t finished within 5 minutes; nothing was saved. Trying again starts over.')}</Notice>;
+  if (state === 'timeout') return <Notice tone="neutral" icon={AlertTriangle}>{d('安全窗口 5 分钟内没有完成，什么都没有保存。再试一次会重新开始。', 'The secure window wasn’t finished within 5 minutes; nothing was saved. Trying again starts over.')}</Notice>;
+  if (state === 'reset') return <Notice tone="neutral" icon={AlertTriangle}>{d('保护档在这期间被锁定或重置，这次操作作废，什么都没有保存。', 'The protected vault was locked or reset meanwhile, so this attempt was dropped; nothing was saved.')}</Notice>;
+  if (state === 'saving') return <Notice tone="neutral" icon={ShieldCheck}>{d('安全窗口已完成，正在保存加密后的钱包。请不要关闭这个页面。', 'The secure window finished; saving the encrypted wallet. Keep this page open.')}</Notice>;
+  if (state === 'checking') return <Notice tone="neutral" icon={ShieldCheck}>{d('没收到保存结果，正在向 Avibe 核对这个钱包是否已经保存。不会重新生成助记词，也不会再保存一份。请不要关闭这个页面。', 'No reply to the save; checking with Avibe whether this wallet was saved. No new words are made and nothing is saved twice. Keep this page open.')}</Notice>;
+  if (state === 'unconfirmed') return <Notice tone="warning" icon={TriangleAlert}>{d('还无法确认是否已保存。请保留抄好的助记词，不要再新建一个同名钱包；可以再核对一次，或稍后在钥匙列表里查看 COLD_WALLET。', 'Can’t confirm yet whether it was saved. Keep the words you wrote down and don’t create another wallet with this name; check again, or look for COLD_WALLET in the key list later.')}</Notice>;
+  return <Notice tone="error" icon={TriangleAlert}>{d('Avibe 里保存的 COLD_WALLET 和安全窗口刚生成的钱包对不上，已阻止使用，不要往这些地址转账。请联系支持并保留抄好的助记词。', 'The COLD_WALLET saved in Avibe doesn’t match the wallet the secure window just made. It’s blocked; don’t send funds to it. Keep your written words and contact support.')}</Notice>;
 }
 
 /** The secure window's steps (vault-sandbox draws them; product tokens here for review). */
@@ -211,16 +229,41 @@ export function ProtectedAccountCard({ index, name }: { index: number; name: str
   );
 }
 
-/** Signing a Bitcoin transaction from a protected wallet account: Taproot, account and path. */
+/** Signing a Bitcoin payment from a protected wallet account: the shipped structured review
+ *  (vault-sandbox src/bitcoin.ts, decoded from the signed bytes; no raw fallback on this tier) with
+ *  one new row, the account and path from the authenticated record. Copy is the sandbox's own. */
 export function WindowSignBitcoin() {
   const d = useDraft();
+  const line = (text: string, tone: 'muted' | 'fg' | 'warn' = 'fg') => (
+    <span className={`text-[12.5px] leading-snug ${tone === 'muted' ? 'break-words text-muted' : tone === 'warn' ? 'break-words text-gold-ink' : 'break-all font-mono text-foreground'}`}>{text}</span>
+  );
   return (
     <SandboxCard title={d('签名保护档操作', 'Sign protected operation')} subtitle="COLD_WALLET" actions={[d('取消', 'Cancel'), d('确认签名', 'Confirm signature')]}>
-      <span className="text-[15px] font-semibold text-foreground">{d('Bitcoin · Taproot 签名', 'Bitcoin · Taproot signature')}</span>
+      <span className="text-[15px] font-semibold text-foreground">{d('审核 Bitcoin Taproot 支付', 'Review Bitcoin Taproot payment')}</span>
       <MirrorRow label={d('签名地址', 'Signing address')} value={CREATED_ADDRESSES[1].btc_taproot} />
       <MirrorRow label={d('钱包账户', 'Wallet account')} value="#1 · m/86'/0'/0'/0/1 · Taproot" added />
-      <MirrorRow label={d('待签摘要', 'Digest to sign')} value="9f2c41d07be3a8156c0e4d92b7a1f3e85d6c20a4b9e7f1c3d8a5062e4b7c19f0" />
-      <span className="text-[12px] leading-snug text-muted">{d('这是交易的摘要，这里看不出收款方和金额。只批准你知道来源的请求。', 'This is the transaction’s digest; it doesn’t show the recipient or amount. Approve only requests you know the origin of.')}</span>
+      <div className="flex flex-col gap-1">
+        {line(d('网络（请求方选择）：mainnet', 'Network (requester’s selection): mainnet'))}
+        {line(d('这个网络标签不是链上证明。请独立核对收款地址和资金来源；不要因为是测试网或 Signet 就降低警惕。', 'This network label is not chain proof. Verify the destination and funding independently; do not treat testnet or Signet as safer.'), 'warn')}
+      </div>
+      <div className="flex flex-col gap-1">
+        {line(`${d('输入：', 'Input: ')}3b6f0c9e2d7a41b85f6e3c1d9a0b72e4f58c6d13a9e2b7f04c81d5e6a2f3a91c:0`)}
+        {line(d('输入金额：20000 sats（0.00020000 BTC）', 'Input amount: 20000 sats (0.00020000 BTC)'))}
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-[12.5px] font-semibold text-foreground">{d('输出', 'Outputs')}</span>
+        {line(`${d('输出 1：', 'Output 1: ')}${CREATED_ADDRESSES[2].btc_taproot} · 15000 sats${d('（0.00015000 BTC）· 收款方', ' (0.00015000 BTC) · recipient')}`)}
+        {line(`${d('输出 2：', 'Output 2: ')}${CREATED_ADDRESSES[1].btc_taproot} · 4790 sats${d('（0.00004790 BTC）· 同一密钥找零', ' (0.00004790 BTC) · same-key return')}`)}
+      </div>
+      <div className="flex flex-col gap-1">
+        {line(d('手续费：210 sats（0.00000210 BTC）· 1.3636 sat/vB', 'Fee: 210 sats (0.00000210 BTC) · 1.3636 sat/vB'))}
+        {line(d('离开此密钥的净金额：15210 sats（0.00015210 BTC）', 'Net value leaving this key: 15210 sats (0.00015210 BTC)'))}
+      </div>
+      <div className="h-px bg-border" />
+      <span className="flex items-center gap-1.5 text-[13px] font-semibold text-foreground">
+        <ChevronRight className="size-3.5 text-muted" />
+        {d('详情（vsize、RBF、未签名交易 ID、输出密钥 Q、摘要）', 'Details (vsize, RBF, unsigned txid, output key Q, digest)')}
+      </span>
     </SandboxCard>
   );
 }
