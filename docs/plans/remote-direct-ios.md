@@ -347,7 +347,7 @@ What the transport owes the listener:
 
 Its rules:
 
-- **The binary.** Link only the gated `IrohLib` artifact whose pin in `packaging/iroh-apple/release.json` is `published`, with a matching checksum. Today the pin is `pending` (tag `iroh-apple-v1.2.0-1`, iroh 1.4.1, deployment target 17.0), so no App build links it. The pin belongs to the gate lane.
+- **The binary.** Link only the gated `IrohLib` artifact whose pin in `packaging/iroh-apple/release.json` is `published`, with a matching checksum. The pin is now published (tag `iroh-apple-v1.2.0-1`, iroh 1.4.1, deployment target 17.0); A1 stages the iOS-only `Iroh.xcframework` and matching generated wrapper, but the App still does not register a transport. The pin belongs to the gate lane.
 - **Nothing exists before a `ready` rendezvous answer:** no endpoint, no UDP socket, and therefore no Local Network prompt. The endpoint uses the minimal preset: no relay, no discovery, a key generated per launch.
 - **Rendezvous.** Native code fetches it with a same-origin request on the account store (D3). The answer never crosses the bridge. The request is an ordinary instance request. It reaches the listener like any other, and goes to the public backend because direct is not authorized before the answer (rendezvous contract, section 5).
 - **Probe.** Open a stream and complete a CONNECT within a short bound (1 second proposed). It is used for the first `usable`, after a network change (`verifying`), and after `pathDidFail`.
