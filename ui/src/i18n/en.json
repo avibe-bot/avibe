@@ -6481,6 +6481,20 @@
       "title": "Recent activity",
       "empty": "No activity yet."
     },
+    "askOff": {
+      "turnedOff": "Turned off with your Passkey; in effect now.",
+      "offHintEdit": "Turning this off needs your Passkey and takes effect right away; you don’t need to Save.",
+      "legacyRegistration": "Your Passkey was set up in a very early preview, and this Avibe didn’t keep what it needs to confirm turning this off. The switch stays on.",
+      "waiting": "Waiting for your Passkey…",
+      "popupBlocked": "Your browser blocked the confirmation window. Allow pop-ups and turn it off again.",
+      "setupRequired": "Turning this off needs a Passkey. You set one up when you add a protected key; after that you can turn it off here.",
+      "factorUnavailable": "The Passkey on record isn’t available to this Avibe, so it can’t confirm turning this off. The switch stays on.",
+      "expired": "The confirmation timed out, so nothing changed. Turn it off again.",
+      "clockSkew": "This device’s clock is off, so nothing changed. Fix the time and try again.",
+      "notVisible": "The confirmation window wasn’t fully visible (covered by another window, screen locked, or not in front), so nothing changed. Bring it fully into view and turn this off again.",
+      "changed": "This key changed elsewhere just now, so nothing changed. Check the latest state and try again.",
+      "failed": "It couldn’t be turned off; signing still asks you first. Try again."
+    },
     "hd": {
       "chainMnemonic": "Seed phrase wallet",
       "chainMnemonicHint": "One phrase covers EVM, Bitcoin and Solana, with as many accounts as you add.",
@@ -6585,7 +6599,20 @@
       "mismatchDeleted": "The wallet was deleted; nothing was kept. Create or import it again.",
       "mismatchNotSaved": "Don’t send funds to this wallet or to any address shown here. It was not saved, and nothing was kept; create or import it again.",
       "close": "Close",
-      "blocked": "Address check failed: don’t send funds to this wallet. Delete it."
+      "blocked": "Address check failed: don’t send funds to this wallet. Delete it.",
+      "passphrase": {
+        "title": "Add a passphrase (optional)",
+        "folded": "Most people don’t need one",
+        "body": "The passphrase and the words together decide the wallet’s addresses. Recovering it needs the words plus this exact passphrase; forget it and the wallet can’t be recovered.",
+        "label": "Passphrase",
+        "again": "Enter it again",
+        "mismatch": "The two entries don’t match.",
+        "match": "They match. Case and spaces count.",
+        "hint": "Case and spaces count and are kept as typed. Leave both empty for none.",
+        "backupReminder": "This wallet also has a passphrase. Write it down separately from the words: recovering needs both, and the passphrase must be exact.",
+        "recovery": "If this computer is lost, only these words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing.",
+        "set": "Set"
+      }
     }
   },
   "permissions": {

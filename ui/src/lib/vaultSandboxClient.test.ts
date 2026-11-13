@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VaultSandboxClient, openVaultAuthorizationWindow, resetVaultSandboxClient } from './vaultSandboxClient';
 import { stubBlankPopup, stubReleaseFetch } from './__fixtures__/vaultSandboxTransport';
 import type { VaultConfirmSurface } from './vaultConfirmSurface';
+import type { PolicyDowngradeContext } from './vaultSigningPolicy';
+import vectors from './__fixtures__/policy-downgrade-wire-vectors.json';
 
 const visibleSurface: VaultConfirmSurface = {
   frame: {
@@ -256,5 +258,59 @@ describe('VaultSandboxClient Solana keypair seal', () => {
   ])('refuses %s when an Ed25519 key was asked for', async (_label, recordMeta, publicKey) => {
     const { instance } = client(sealed(recordMeta, publicKey));
     await expect(instance.seal({ name: 'SOL_KEY', kind: 'keypair', curve: 'ed25519' })).rejects.toMatchObject({ code: 'sandbox_curve_unsupported' });
+  });
+});
+
+describe('VaultSandboxClient signing-policy downgrade (contract v1.1 §B)', () => {
+  const context = vectors.vectors[0].context as unknown as PolicyDowngradeContext;
+  const assertion = {
+    id: 'AQID',
+    rawId: 'AQID',
+    type: 'public-key',
+    response: { clientDataJSON: 'e30=', authenticatorData: 'AAAA', signature: 'MEUCIQ==', userHandle: null },
+  };
+  const client = (operations: string[], result?: unknown) => {
+    const instance = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient;
+    instance.readyPromise = Promise.resolve({ type: 'ready', capabilities: { operations } });
+    const request = vi.spyOn(instance, 'request').mockResolvedValue(result as never);
+    return { instance: instance as unknown as VaultSandboxClient, request };
+  };
+  const withPolicy = ['status', 'setup', 'unlock', 'lock', 'seal', 'reveal', 'sign', 'approveRelease', 'authorizeSigningPolicyDowngrade'];
+
+  it('sends exactly {context} on an interactive request with the parent-opened window and returns the checked result', async () => {
+    const { instance, request } = client(withPolicy, { challengeId: context.challengeId, assertion });
+    await expect(instance.authorizeSigningPolicyDowngrade({ context }, 'win1')).resolves.toEqual({ challengeId: context.challengeId, assertion });
+    expect(request).toHaveBeenCalledExactlyOnceWith('authorizeSigningPolicyDowngrade', { context }, expect.objectContaining({
+      interactive: true, authorizationWindow: 'win1', timeoutMs: 5 * 60_000,
+    }));
+    expect(Object.keys(request.mock.calls[0][1] as object)).toEqual(['context']);
+  });
+
+  it('is unavailable on a build without the operation, and tries no other RPC', async () => {
+    const { instance, request } = client(withPolicy.slice(0, -1));
+    await expect(instance.supports('authorizeSigningPolicyDowngrade')).resolves.toBe(false);
+    await expect(instance.authorizeSigningPolicyDowngrade({ context })).rejects.toMatchObject({ code: 'policy_downgrade_unavailable' });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a boolean', true],
+    ['another challenge', { challengeId: 'vop_other', assertion }],
+    ['an extra field', { challengeId: context.challengeId, assertion, ok: true }],
+    ['no assertion', { challengeId: context.challengeId }],
+    ['an assertion with extra fields', { challengeId: context.challengeId, assertion: { ...assertion, clientExtensionResults: {} } }],
+    ['a non public-key credential', { challengeId: context.challengeId, assertion: { ...assertion, type: 'password' } }],
+    ['a URL-safe rawId', { challengeId: context.challengeId, assertion: { ...assertion, rawId: 'AQ_-' } }],
+    ['a missing signature', { challengeId: context.challengeId, assertion: { ...assertion, response: { ...assertion.response, signature: '' } } }],
+    ['an extra response field', { challengeId: context.challengeId, assertion: { ...assertion, response: { ...assertion.response, prf: 'x' } } }],
+  ])('refuses %s as the sandbox result', async (_label, result) => {
+    const { instance } = client(withPolicy, result);
+    await expect(instance.authorizeSigningPolicyDowngrade({ context })).rejects.toMatchObject({ code: 'policy_result_invalid' });
+  });
+
+  it('keeps an older pinned build usable for its own operations (the op is not globally required)', async () => {
+    const { instance, request } = client(withPolicy.slice(0, -1), { completed: true });
+    await expect(instance.reveal({ material: { name: 'A', envelope: {} as never }, context: {} as never })).resolves.toEqual({ completed: true });
+    expect(request.mock.calls[0][0]).toBe('reveal');
   });
 });

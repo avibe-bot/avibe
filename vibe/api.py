@@ -3764,7 +3764,9 @@ def complete_vault_signing_policy_downgrade(name: str, payload: dict, *, origin:
 
     result = _call_vault_policy_operation(vault_service.complete_signing_policy_downgrade, name, payload, origin=origin, user_context=user_context)
     _publish_vaults_updated(scope="secret", secret_name=name)
-    return result
+    # The row the Web puts in place of the one shown: the same public projection as every other
+    # Vault response (a prepared seed wallet keeps its three Bitcoin types).
+    return {**result, "secret": vault_public_capabilities(result["secret"])}
 
 
 def complete_vault_setup(payload: dict, *, origin: str | None = None, user_context: Any = None) -> dict:

@@ -51,6 +51,7 @@ import {
   checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
 } from '@/lib/vaultHdWallet';
 import { useProtectedVault } from '@/lib/useProtectedVault';
+import { useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
@@ -76,8 +77,9 @@ import {
 import { HintLine, KeySourceTabs } from './vault-key-builder-parts';
 import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import {
-  HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdMismatchBlock, HdNotice, HdStepFooter, HdStepper,
+  HdAvaultOld, HdBackupStep, HdCheckStep, HdCreatePassphrase, HdDoneStep, HdImportFields, HdMismatchBlock, HdNotice, HdStepFooter, HdStepper,
 } from './vault-hd-wallet-steps';
+import { AskTurnOffNote } from './vault-ask-turn-off-note';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 import { VaultSolanaKeyFields } from './vault-solana-key-fields';
@@ -231,6 +233,11 @@ export const VaultSecretForm: React.FC<{
   const [hdChosen, setHdChosen] = useState<Record<number, string>>({});
   const [hdImport, setHdImport] = useState('');
   const [hdPassphrase, setHdPassphrase] = useState('');
+  // Creating a wallet: an optional passphrase, typed twice. Kept apart from the import's own.
+  const [hdNewPassphrase, setHdNewPassphrase] = useState('');
+  const [hdNewPassphraseAgain, setHdNewPassphraseAgain] = useState('');
+  // Whether the wallet just saved used one, for the done screen's recovery line.
+  const [hdSavedWithPassphrase, setHdSavedWithPassphrase] = useState(false);
   const [hdAsk, setHdAsk] = useState(false);
   const [hdCreated, setHdCreated] = useState<VaultHdAccount | null>(null);
   const [hdMismatch, setHdMismatch] = useState(false);
@@ -414,14 +421,23 @@ export const VaultSecretForm: React.FC<{
   }, [isHd, signingSource, hdCheck, hdPassphrase]);
   const isProvision = Boolean(fixedName);
   const isEdit = Boolean(editSecret);
-  // Editing an ordinary standard keypair may turn ask-before-signing on, never off: turning it
-  // off will need a Passkey confirmation that is not built yet (docs/plans/vault-signing-policy.md).
-  const editAskWasOn = (editSecret?.policy as { always_ask?: unknown } | undefined)?.always_ask === true;
+  // Editing an ordinary standard keypair turns ask-before-signing on as an ordinary edit; turning
+  // it off takes a fresh Passkey confirmation through the pinned sandbox (contract v1.1), offered
+  // only when that build can do it, and applied on its own (not by Save).
   const editAskEditable =
     Boolean(editSecret) &&
     editSecret?.kind === 'keypair' &&
     editSecret?.protection === 'standard' &&
     (editSecret?.signer_kind == null || editSecret?.signer_kind === 'local');
+  // Turned off for this key only: a different key in the same editor starts from its own state.
+  const [askTurnedOffFor, setAskTurnedOffFor] = useState<string | null>(null);
+  const askTurnedOff = askTurnedOffFor !== null && askTurnedOffFor === editSecret?.name;
+  const editAskWasOn = !askTurnedOff && (editSecret?.policy as { always_ask?: unknown } | undefined)?.always_ask === true;
+  const askOff = useAskTurnOff({ name: editSecret?.name ?? '' }, editAskEditable, (secret) => {
+    setAskTurnedOffFor(secret.name);
+    setAlwaysAsk(false);
+  });
+  const canTurnAskOff = askOff.state.phase === 'ready';
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
@@ -478,7 +494,8 @@ export const VaultSecretForm: React.FC<{
       new Set(fieldRows.map((field) => field.name)).size === fieldRows.length
     : staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
   const valueReady = isHd
-    ? signingSource === 'generate' || hdCheck.ok
+    // A passphrase typed twice must match before the words are made.
+    ? (signingSource === 'generate' && hdNewPassphrase === hdNewPassphraseAgain) || (signingSource === 'import' && hdCheck.ok)
     : isKeypair
     ? // A generated key, on any chain or tier, is made at submit, so it needs nothing here (owner
       // decision 2026-11-12: an address shown before saving could be noted and then lost to a second
@@ -575,6 +592,8 @@ export const VaultSecretForm: React.FC<{
     setHdChosen({});
     setHdImport('');
     setHdPassphrase('');
+    setHdNewPassphrase('');
+    setHdNewPassphraseAgain('');
     setHdMismatch(false);
     setHdMismatchNotSaved(false);
   };
@@ -589,7 +608,9 @@ export const VaultSecretForm: React.FC<{
     const name = secretName;
     hdSavedNameRef.current = name;
     setHdSavedName(name);
-    const seed = wordsToSeed(words, generated ? '' : hdPassphrase);
+    const passphrase = generated ? hdNewPassphrase : hdPassphrase;
+    setHdSavedWithPassphrase(passphrase.length > 0);
+    const seed = wordsToSeed(words, passphrase);
     let expected: HdAccountAddresses;
     let blindBox: Awaited<ReturnType<typeof sealBlindBox>>;
     try {
@@ -634,6 +655,8 @@ export const VaultSecretForm: React.FC<{
       setHdWords(null);
       setHdImport('');
       setHdPassphrase('');
+      setHdNewPassphrase('');
+      setHdNewPassphraseAgain('');
       setHdQuiz([]);
       setHdChosen({});
       setHdMismatchNotSaved(true);
@@ -661,6 +684,8 @@ export const VaultSecretForm: React.FC<{
     setHdWords(null);
     setHdImport('');
     setHdPassphrase('');
+    setHdNewPassphrase('');
+    setHdNewPassphraseAgain('');
     setHdQuiz([]);
     setHdChosen({});
     const stored = created.secret?.accounts?.find((account) => account.account === 0);
@@ -1484,14 +1509,25 @@ export const VaultSecretForm: React.FC<{
               </span>
               <Switch
                 checked={alwaysAsk}
-                onCheckedChange={setAlwaysAsk}
-                disabled={submitting || editAskWasOn}
+                onCheckedChange={(checked) => {
+                  if (checked || !editAskWasOn) setAlwaysAsk(checked);
+                  else askOff.turnOff();
+                }}
+                disabled={submitting || askOff.state.phase === 'working' || (editAskWasOn && !canTurnAskOff)}
                 label={t('vaults.dialog.alwaysAskSign')}
               />
             </div>
-            {editAskWasOn ? (
+            {editAskWasOn && askOff.state.phase === 'working' ? (
+              <AskTurnOffNote state={askOff.state} />
+            ) : editAskWasOn && canTurnAskOff ? (
+              askOff.state.phase === 'ready' && askOff.state.failure && askOff.state.failure !== 'cancelled'
+                ? <AskTurnOffNote state={askOff.state} />
+                : <span className="text-[11px] text-muted">{t('vaults.askOff.offHintEdit')}</span>
+            ) : editAskWasOn && askOff.state.phase === 'unavailable' ? (
               <span className="text-[11px] text-muted">{t('vaults.dialog.alwaysAskSignLocked')}</span>
-            ) : alwaysAsk ? (
+            ) : askTurnedOff && !alwaysAsk ? (
+              <span role="status" className="text-[11px] text-muted">{t('vaults.askOff.turnedOff')}</span>
+            ) : !editAskWasOn && alwaysAsk && !canTurnAskOff ? (
               <span className="text-[11px] font-medium text-accent-ink">{t('vaults.dialog.alwaysAskSignOneWay')}</span>
             ) : null}
           </div>
@@ -1596,7 +1632,7 @@ export const VaultSecretForm: React.FC<{
           />
         ) : hdStep === 'done' && hdCreated ? (
           <>
-            <HdDoneStep name={hdSavedName} account={hdCreated} />
+            <HdDoneStep name={hdSavedName} account={hdCreated} withPassphrase={hdSavedWithPassphrase} />
             {hdAskFailed ? (
               <HdNotice tone="error" icon={TriangleAlert}>
                 <span className="font-semibold text-destructive-ink">{t('vaults.hd.askFailed')}</span>
@@ -1623,7 +1659,7 @@ export const VaultSecretForm: React.FC<{
         ) : (
           <>
             <HdStepper step={step} />
-            {hdStep === 'backup' && hdWords ? <HdBackupStep words={hdWords} /> : null}
+            {hdStep === 'backup' && hdWords ? <HdBackupStep words={hdWords} withPassphrase={hdNewPassphrase.length > 0} /> : null}
             {hdStep === 'check' ? (
               <HdCheckStep quiz={hdQuiz} chosen={hdChosen} onChoose={(position, word) => setHdChosen((prev) => ({ ...prev, [position]: word }))} />
             ) : null}
@@ -1739,7 +1775,19 @@ export const VaultSecretForm: React.FC<{
             }}
           />
           {signingSource === 'generate' ? (
-            <HintLine text={t('vaults.hd.generateHint')} info={t('vaults.hd.generateInfo')} />
+            <>
+              <HintLine text={t('vaults.hd.generateHint')} info={t('vaults.hd.generateInfo')} />
+              {/* Standard tier: the browser makes the seed. A protected wallet is made in the sandbox. */}
+              {protection === 'standard' ? (
+                <HdCreatePassphrase
+                  value={hdNewPassphrase}
+                  confirm={hdNewPassphraseAgain}
+                  onChange={setHdNewPassphrase}
+                  onConfirmChange={setHdNewPassphraseAgain}
+                  disabled={submitting}
+                />
+              ) : null}
+            </>
           ) : (
             <>
               <HintLine text={t('vaults.hd.importHint')} info={t('vaults.hd.importInfo')} />

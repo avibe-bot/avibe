@@ -1,0 +1,210 @@
+{
+  "contract": "signing-policy-downgrade-v1",
+  "status": "producer-consumer-freeze-candidate",
+  "provenance": "Public HD-wallet fixture addresses/public keys and public opaque envelope strings. Ordinary cases reuse the opaque strings solely to pin identity serialization; these are not legal ordinary-import fixtures or real credentials.",
+  "fixed_issuance_time": "2026-11-13T00:00:00.000Z",
+  "vectors": [
+    {
+      "id": "hd-unicode",
+      "identity_snapshot": {
+        "v": 1,
+        "kind": "keypair",
+        "protection": "standard",
+        "signerKind": "hd-seed",
+        "envelope": {
+          "ciphertext": "JeOTy/N91Qr9HvLPj7t3TenAz6W3KWuTvqdEZUo3aQrbBbrmYS01aqrQ4duMyeDVfBVjbzvmts5UXBY+Dj7zyemqUr+5Q9WbuSQrXW9CzX0=",
+          "nonce": "xqdqO2mLqv7DG4WP",
+          "wrapMeta": "{\"v\":1,\"scheme\":\"machine-hd-seed-aesgcm-v1\",\"wrapped_dek\":\"j5McQFYPR5Fu3ICepTVDhUJxORumrD0Y/1iivEqvl5Ui7eE6JPaIlxjsWed029AG\",\"dek_nonce\":\"8In+1YMQLQQXQPfn\"}",
+          "revision": "2026-11-12T16:00:00.000Z"
+        },
+        "keys": {
+          "evm": {
+            "curve": "secp256k1",
+            "publicKey": "0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299"
+          },
+          "bitcoin": {
+            "curve": "secp256k1",
+            "publicKey": "03cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115"
+          },
+          "solana": {
+            "curve": "ed25519",
+            "chain": "solana",
+            "publicKey": "f036276246a75b9de3349ed42b15e232f6518fc20f5fcd4f1d64e81f9bd258f7"
+          }
+        }
+      },
+      "identity_canonical_json": "{\"envelope\":{\"ciphertext\":\"JeOTy/N91Qr9HvLPj7t3TenAz6W3KWuTvqdEZUo3aQrbBbrmYS01aqrQ4duMyeDVfBVjbzvmts5UXBY+Dj7zyemqUr+5Q9WbuSQrXW9CzX0=\",\"nonce\":\"xqdqO2mLqv7DG4WP\",\"revision\":\"2026-11-12T16:00:00.000Z\",\"wrapMeta\":\"{\\\"v\\\":1,\\\"scheme\\\":\\\"machine-hd-seed-aesgcm-v1\\\",\\\"wrapped_dek\\\":\\\"j5McQFYPR5Fu3ICepTVDhUJxORumrD0Y/1iivEqvl5Ui7eE6JPaIlxjsWed029AG\\\",\\\"dek_nonce\\\":\\\"8In+1YMQLQQXQPfn\\\"}\"},\"keys\":{\"bitcoin\":{\"curve\":\"secp256k1\",\"publicKey\":\"03cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115\"},\"evm\":{\"curve\":\"secp256k1\",\"publicKey\":\"0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299\"},\"solana\":{\"chain\":\"solana\",\"curve\":\"ed25519\",\"publicKey\":\"f036276246a75b9de3349ed42b15e232f6518fc20f5fcd4f1d64e81f9bd258f7\"}},\"kind\":\"keypair\",\"protection\":\"standard\",\"signerKind\":\"hd-seed\",\"v\":1}",
+      "context": {
+        "v": 1,
+        "purpose": "vault-signing-policy-downgrade",
+        "challengeId": "vop_public_wire_vector",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "expiresAt": "2026-11-13T00:02:00.000Z",
+        "rpId": "sandbox.avibe.bot",
+        "origin": "https://sandbox.avibe.bot",
+        "target": {
+          "secretId": "vlt_public_wire_vector",
+          "name": "PUBLIC_VECTOR",
+          "protection": "standard",
+          "signerKind": "hd-seed",
+          "account": 0,
+          "accountName": "账户 🧀 \"主\"\n备用",
+          "addresses": {
+            "eth": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            "btc_legacy": null,
+            "btc_segwit": null,
+            "btc_taproot": "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+            "solana": "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+          },
+          "identitySha256": "a7bb6b347d8c3a7cd6796ff674e9c35d95abf5b9173b2366ba26c376f579ba19"
+        },
+        "change": {
+          "field": "always_ask",
+          "from": true,
+          "to": false,
+          "revision": "legacy"
+        },
+        "factors": [
+          {
+            "factorId": "vaf_public_wire_vector",
+            "credentialId": "UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM"
+          }
+        ]
+      },
+      "canonical_json": "{\"challengeId\":\"vop_public_wire_vector\",\"change\":{\"field\":\"always_ask\",\"from\":true,\"revision\":\"legacy\",\"to\":false},\"expiresAt\":\"2026-11-13T00:02:00.000Z\",\"factors\":[{\"credentialId\":\"UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM\",\"factorId\":\"vaf_public_wire_vector\"}],\"nonce\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"origin\":\"https://sandbox.avibe.bot\",\"purpose\":\"vault-signing-policy-downgrade\",\"rpId\":\"sandbox.avibe.bot\",\"target\":{\"account\":0,\"accountName\":\"账户 🧀 \\\"主\\\"\\n备用\",\"addresses\":{\"btc_legacy\":null,\"btc_segwit\":null,\"btc_taproot\":\"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr\",\"eth\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"solana\":\"HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk\"},\"identitySha256\":\"a7bb6b347d8c3a7cd6796ff674e9c35d95abf5b9173b2366ba26c376f579ba19\",\"name\":\"PUBLIC_VECTOR\",\"protection\":\"standard\",\"secretId\":\"vlt_public_wire_vector\",\"signerKind\":\"hd-seed\"},\"v\":1}",
+      "message_hex": "61766962653a7661756c743a7369676e696e672d706f6c6963792d646f776e67726164653a76310a7b226368616c6c656e67654964223a22766f705f7075626c69635f776972655f766563746f72222c226368616e6765223a7b226669656c64223a22616c776179735f61736b222c2266726f6d223a747275652c227265766973696f6e223a226c6567616379222c22746f223a66616c73657d2c22657870697265734174223a22323032362d31312d31335430303a30323a30302e3030305a222c22666163746f7273223a5b7b2263726564656e7469616c4964223a225546564354456c444c554e5352555246546c524a5155777453555174546b39554c554574556b564254433144556b5645525535555355464d222c22666163746f724964223a227661665f7075626c69635f776972655f766563746f72227d5d2c226e6f6e6365223a2241414543417751464267634943516f4c4441304f4478415245684d554652595847426b61477877644868383d222c226f726967696e223a2268747470733a2f2f73616e64626f782e61766962652e626f74222c22707572706f7365223a227661756c742d7369676e696e672d706f6c6963792d646f776e6772616465222c2272704964223a2273616e64626f782e61766962652e626f74222c22746172676574223a7b226163636f756e74223a302c226163636f756e744e616d65223a22e8b4a6e688b720f09fa780205c22e4b8bb5c225c6ee5a487e794a8222c22616464726573736573223a7b226274635f6c6567616379223a6e756c6c2c226274635f736567776974223a6e756c6c2c226274635f746170726f6f74223a2262633170356379786e75786d65757775766b7766656d39366c717a737a6430326e367864636a727332306361633679716a6a7775647078716b6564726372222c22657468223a22307839383538456646443233324234303333453437643930303033443431454333344563614564613934222c22736f6c616e61223a224841676b31344a704d514c6774367256677637634251464a5746746f3544717869343732755433444b70716b227d2c226964656e74697479536861323536223a2261376262366233343764386333613763643637393666663637346539633335643935616266356239313733623233363662613236633337366635373962613139222c226e616d65223a225055424c49435f564543544f52222c2270726f74656374696f6e223a227374616e64617264222c227365637265744964223a22766c745f7075626c69635f776972655f766563746f72222c227369676e65724b696e64223a2268642d73656564227d2c2276223a317d",
+      "challenge_hex": "39701221d19e6a2a77ae85293b34279d4299213c962127b9a8c803dd9d097f97",
+      "challenge_base64url": "OXASIdGeaip3roUpOzQnnUKZITyWISe5qMgD3Z0Jf5c",
+      "stored_challenge_hash": "b8c286ce6f42965c7d0870aa9efc2e5aa12dde765b5da39f63210e99b0ca3bc0"
+    },
+    {
+      "id": "ordinary-solana",
+      "identity_snapshot": {
+        "v": 1,
+        "kind": "keypair",
+        "protection": "standard",
+        "signerKind": "local",
+        "envelope": {
+          "ciphertext": "JeOTy/N91Qr9HvLPj7t3TenAz6W3KWuTvqdEZUo3aQrbBbrmYS01aqrQ4duMyeDVfBVjbzvmts5UXBY+Dj7zyemqUr+5Q9WbuSQrXW9CzX0=",
+          "nonce": "xqdqO2mLqv7DG4WP",
+          "wrapMeta": "{\"v\":1,\"scheme\":\"machine-hd-seed-aesgcm-v1\",\"wrapped_dek\":\"j5McQFYPR5Fu3ICepTVDhUJxORumrD0Y/1iivEqvl5Ui7eE6JPaIlxjsWed029AG\",\"dek_nonce\":\"8In+1YMQLQQXQPfn\"}",
+          "revision": "2026-11-12T16:00:00.000Z"
+        },
+        "keys": {
+          "signing": {
+            "curve": "ed25519",
+            "chain": "solana",
+            "publicKey": "f036276246a75b9de3349ed42b15e232f6518fc20f5fcd4f1d64e81f9bd258f7"
+          }
+        }
+      },
+      "identity_canonical_json": "{\"envelope\":{\"ciphertext\":\"JeOTy/N91Qr9HvLPj7t3TenAz6W3KWuTvqdEZUo3aQrbBbrmYS01aqrQ4duMyeDVfBVjbzvmts5UXBY+Dj7zyemqUr+5Q9WbuSQrXW9CzX0=\",\"nonce\":\"xqdqO2mLqv7DG4WP\",\"revision\":\"2026-11-12T16:00:00.000Z\",\"wrapMeta\":\"{\\\"v\\\":1,\\\"scheme\\\":\\\"machine-hd-seed-aesgcm-v1\\\",\\\"wrapped_dek\\\":\\\"j5McQFYPR5Fu3ICepTVDhUJxORumrD0Y/1iivEqvl5Ui7eE6JPaIlxjsWed029AG\\\",\\\"dek_nonce\\\":\\\"8In+1YMQLQQXQPfn\\\"}\"},\"keys\":{\"signing\":{\"chain\":\"solana\",\"curve\":\"ed25519\",\"publicKey\":\"f036276246a75b9de3349ed42b15e232f6518fc20f5fcd4f1d64e81f9bd258f7\"}},\"kind\":\"keypair\",\"protection\":\"standard\",\"signerKind\":\"local\",\"v\":1}",
+      "context": {
+        "v": 1,
+        "purpose": "vault-signing-policy-downgrade",
+        "challengeId": "vop_public_sol_vector",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "expiresAt": "2026-11-13T00:02:00.000Z",
+        "rpId": "sandbox.avibe.bot",
+        "origin": "https://sandbox.avibe.bot",
+        "target": {
+          "secretId": "vlt_public_sol_vector",
+          "name": "PUBLIC_SOL_VECTOR",
+          "protection": "standard",
+          "signerKind": "local",
+          "account": null,
+          "accountName": null,
+          "addresses": {
+            "eth": null,
+            "btc_legacy": null,
+            "btc_segwit": null,
+            "btc_taproot": null,
+            "solana": "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+          },
+          "identitySha256": "9679bb17759f1213cc669460c3a4b83722f06c9288f8455925676b7b0f397cdc"
+        },
+        "change": {
+          "field": "always_ask",
+          "from": true,
+          "to": false,
+          "revision": "22222222222222222222222222222222"
+        },
+        "factors": [
+          {
+            "factorId": "vaf_public_wire_vector",
+            "credentialId": "UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM"
+          }
+        ]
+      },
+      "canonical_json": "{\"challengeId\":\"vop_public_sol_vector\",\"change\":{\"field\":\"always_ask\",\"from\":true,\"revision\":\"22222222222222222222222222222222\",\"to\":false},\"expiresAt\":\"2026-11-13T00:02:00.000Z\",\"factors\":[{\"credentialId\":\"UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM\",\"factorId\":\"vaf_public_wire_vector\"}],\"nonce\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"origin\":\"https://sandbox.avibe.bot\",\"purpose\":\"vault-signing-policy-downgrade\",\"rpId\":\"sandbox.avibe.bot\",\"target\":{\"account\":null,\"accountName\":null,\"addresses\":{\"btc_legacy\":null,\"btc_segwit\":null,\"btc_taproot\":null,\"eth\":null,\"solana\":\"HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk\"},\"identitySha256\":\"9679bb17759f1213cc669460c3a4b83722f06c9288f8455925676b7b0f397cdc\",\"name\":\"PUBLIC_SOL_VECTOR\",\"protection\":\"standard\",\"secretId\":\"vlt_public_sol_vector\",\"signerKind\":\"local\"},\"v\":1}",
+      "message_hex": "61766962653a7661756c743a7369676e696e672d706f6c6963792d646f776e67726164653a76310a7b226368616c6c656e67654964223a22766f705f7075626c69635f736f6c5f766563746f72222c226368616e6765223a7b226669656c64223a22616c776179735f61736b222c2266726f6d223a747275652c227265766973696f6e223a223232323232323232323232323232323232323232323232323232323232323232222c22746f223a66616c73657d2c22657870697265734174223a22323032362d31312d31335430303a30323a30302e3030305a222c22666163746f7273223a5b7b2263726564656e7469616c4964223a225546564354456c444c554e5352555246546c524a5155777453555174546b39554c554574556b564254433144556b5645525535555355464d222c22666163746f724964223a227661665f7075626c69635f776972655f766563746f72227d5d2c226e6f6e6365223a2241414543417751464267634943516f4c4441304f4478415245684d554652595847426b61477877644868383d222c226f726967696e223a2268747470733a2f2f73616e64626f782e61766962652e626f74222c22707572706f7365223a227661756c742d7369676e696e672d706f6c6963792d646f776e6772616465222c2272704964223a2273616e64626f782e61766962652e626f74222c22746172676574223a7b226163636f756e74223a6e756c6c2c226163636f756e744e616d65223a6e756c6c2c22616464726573736573223a7b226274635f6c6567616379223a6e756c6c2c226274635f736567776974223a6e756c6c2c226274635f746170726f6f74223a6e756c6c2c22657468223a6e756c6c2c22736f6c616e61223a224841676b31344a704d514c6774367256677637634251464a5746746f3544717869343732755433444b70716b227d2c226964656e74697479536861323536223a2239363739626231373735396631323133636336363934363063336134623833373232663036633932383866383435353932353637366237623066333937636463222c226e616d65223a225055424c49435f534f4c5f564543544f52222c2270726f74656374696f6e223a227374616e64617264222c227365637265744964223a22766c745f7075626c69635f736f6c5f766563746f72222c227369676e65724b696e64223a226c6f63616c227d2c2276223a317d",
+      "challenge_hex": "fd21eeb4387855a2a95087a4fbbee4eaad6b406d51779ab8f7be6d57067348d1",
+      "challenge_base64url": "_SHutDh4VaKpUIek-77k6q1rQG1Rd5q4975tVwZzSNE",
+      "stored_challenge_hash": "98ff10d55721651af5ee35e6d9a0d52b4b47ae4e88cf95ef5766541d401651ea"
+    },
+    {
+      "id": "ordinary-secp-protected",
+      "identity_snapshot": {
+        "v": 1,
+        "kind": "keypair",
+        "protection": "protected",
+        "signerKind": "local",
+        "envelope": {
+          "ciphertext": "JeOTy/N91Qr9HvLPj7t3TenAz6W3KWuTvqdEZUo3aQrbBbrmYS01aqrQ4duMyeDVfBVjbzvmts5UXBY+Dj7zyemqUr+5Q9WbuSQrXW9CzX0=",
+          "nonce": "xqdqO2mLqv7DG4WP",
+          "wrapMeta": "{\"v\":1,\"scheme\":\"machine-hd-seed-aesgcm-v1\",\"wrapped_dek\":\"j5McQFYPR5Fu3ICepTVDhUJxORumrD0Y/1iivEqvl5Ui7eE6JPaIlxjsWed029AG\",\"dek_nonce\":\"8In+1YMQLQQXQPfn\"}",
+          "revision": "2026-11-12T16:00:00.000Z"
+        },
+        "keys": {
+          "signing": {
+            "curve": "secp256k1",
+            "publicKey": "0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299"
+          }
+        }
+      },
+      "identity_canonical_json": "{\"envelope\":{\"ciphertext\":\"JeOTy/N91Qr9HvLPj7t3TenAz6W3KWuTvqdEZUo3aQrbBbrmYS01aqrQ4duMyeDVfBVjbzvmts5UXBY+Dj7zyemqUr+5Q9WbuSQrXW9CzX0=\",\"nonce\":\"xqdqO2mLqv7DG4WP\",\"revision\":\"2026-11-12T16:00:00.000Z\",\"wrapMeta\":\"{\\\"v\\\":1,\\\"scheme\\\":\\\"machine-hd-seed-aesgcm-v1\\\",\\\"wrapped_dek\\\":\\\"j5McQFYPR5Fu3ICepTVDhUJxORumrD0Y/1iivEqvl5Ui7eE6JPaIlxjsWed029AG\\\",\\\"dek_nonce\\\":\\\"8In+1YMQLQQXQPfn\\\"}\"},\"keys\":{\"signing\":{\"curve\":\"secp256k1\",\"publicKey\":\"0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299\"}},\"kind\":\"keypair\",\"protection\":\"protected\",\"signerKind\":\"local\",\"v\":1}",
+      "context": {
+        "v": 1,
+        "purpose": "vault-signing-policy-downgrade",
+        "challengeId": "vop_public_secp_vector",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "expiresAt": "2026-11-13T00:02:00.000Z",
+        "rpId": "sandbox.avibe.bot",
+        "origin": "https://sandbox.avibe.bot",
+        "target": {
+          "secretId": "vlt_public_secp_vector",
+          "name": "PUBLIC_SECP_VECTOR",
+          "protection": "protected",
+          "signerKind": "local",
+          "account": null,
+          "accountName": null,
+          "addresses": {
+            "eth": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            "btc_legacy": "17D4gErm7cqDznM4EstEfnP6y91MWADXm8",
+            "btc_segwit": "bc1qgsvdpdxec8hsu57lhxg5xem7refr233z2ttx7e",
+            "btc_taproot": "bc1p08q6wdgnqe0gwpp4ygs0y8lwgxlpv2l4uc0zq5qjnagwtg92fussqdhm72",
+            "solana": null
+          },
+          "identitySha256": "87c445883ec3e70a90664f7ae474b361fe0b52fbe5cbe3e42365d785819834f4"
+        },
+        "change": {
+          "field": "always_ask",
+          "from": true,
+          "to": false,
+          "revision": "22222222222222222222222222222222"
+        },
+        "factors": [
+          {
+            "factorId": "vaf_public_wire_vector",
+            "credentialId": "UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM"
+          }
+        ]
+      },
+      "canonical_json": "{\"challengeId\":\"vop_public_secp_vector\",\"change\":{\"field\":\"always_ask\",\"from\":true,\"revision\":\"22222222222222222222222222222222\",\"to\":false},\"expiresAt\":\"2026-11-13T00:02:00.000Z\",\"factors\":[{\"credentialId\":\"UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM\",\"factorId\":\"vaf_public_wire_vector\"}],\"nonce\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"origin\":\"https://sandbox.avibe.bot\",\"purpose\":\"vault-signing-policy-downgrade\",\"rpId\":\"sandbox.avibe.bot\",\"target\":{\"account\":null,\"accountName\":null,\"addresses\":{\"btc_legacy\":\"17D4gErm7cqDznM4EstEfnP6y91MWADXm8\",\"btc_segwit\":\"bc1qgsvdpdxec8hsu57lhxg5xem7refr233z2ttx7e\",\"btc_taproot\":\"bc1p08q6wdgnqe0gwpp4ygs0y8lwgxlpv2l4uc0zq5qjnagwtg92fussqdhm72\",\"eth\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"solana\":null},\"identitySha256\":\"87c445883ec3e70a90664f7ae474b361fe0b52fbe5cbe3e42365d785819834f4\",\"name\":\"PUBLIC_SECP_VECTOR\",\"protection\":\"protected\",\"secretId\":\"vlt_public_secp_vector\",\"signerKind\":\"local\"},\"v\":1}",
+      "message_hex": "61766962653a7661756c743a7369676e696e672d706f6c6963792d646f776e67726164653a76310a7b226368616c6c656e67654964223a22766f705f7075626c69635f736563705f766563746f72222c226368616e6765223a7b226669656c64223a22616c776179735f61736b222c2266726f6d223a747275652c227265766973696f6e223a223232323232323232323232323232323232323232323232323232323232323232222c22746f223a66616c73657d2c22657870697265734174223a22323032362d31312d31335430303a30323a30302e3030305a222c22666163746f7273223a5b7b2263726564656e7469616c4964223a225546564354456c444c554e5352555246546c524a5155777453555174546b39554c554574556b564254433144556b5645525535555355464d222c22666163746f724964223a227661665f7075626c69635f776972655f766563746f72227d5d2c226e6f6e6365223a2241414543417751464267634943516f4c4441304f4478415245684d554652595847426b61477877644868383d222c226f726967696e223a2268747470733a2f2f73616e64626f782e61766962652e626f74222c22707572706f7365223a227661756c742d7369676e696e672d706f6c6963792d646f776e6772616465222c2272704964223a2273616e64626f782e61766962652e626f74222c22746172676574223a7b226163636f756e74223a6e756c6c2c226163636f756e744e616d65223a6e756c6c2c22616464726573736573223a7b226274635f6c6567616379223a22313744346745726d376371447a6e4d3445737445666e50367939314d574144586d38222c226274635f736567776974223a22626331716773766470647865633868737535376c6878673578656d37726566723233337a327474783765222c226274635f746170726f6f74223a2262633170303871367764676e71653067777070347967733079386c7767786c7076326c347563307a7135716a6e61677774673932667573737164686d3732222c22657468223a22307839383538456646443233324234303333453437643930303033443431454333344563614564613934222c22736f6c616e61223a6e756c6c7d2c226964656e74697479536861323536223a2238376334343538383365633365373061393036363466376165343734623336316665306235326662653563626533653432333635643738353831393833346634222c226e616d65223a225055424c49435f534543505f564543544f52222c2270726f74656374696f6e223a2270726f746563746564222c227365637265744964223a22766c745f7075626c69635f736563705f766563746f72222c227369676e65724b696e64223a226c6f63616c227d2c2276223a317d",
+      "challenge_hex": "813d0872fe3c6e67442f7f43956fc70c14b16570022f147cd2100efd82847e37",
+      "challenge_base64url": "gT0Icv48bmdEL39DlW_HDBSxZXACLxR80hAO_YKEfjc",
+      "stored_challenge_hash": "85f5aecc484539ea766d647f4eaac56858ab773482b96d5c1c706886216395a4"
+    }
+  ]
+}

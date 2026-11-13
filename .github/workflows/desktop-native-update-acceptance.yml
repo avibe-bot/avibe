@@ -66,8 +66,10 @@ jobs:
       DEVELOPER_DIR: ${{ matrix.developer_dir }}
       AVIBE_NATIVE_ACCEPTANCE_HOSTED: '1'
       ACCEPTANCE_TARGET: ${{ matrix.target }}
-      ACCEPTANCE_ROOT: ${{ runner.temp }}/native-update-acceptance
     steps:
+      - name: Define the isolated runner-owned acceptance root
+        shell: bash
+        run: echo "ACCEPTANCE_ROOT=$RUNNER_TEMP/native-update-acceptance" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ env.ACCEPTANCE_SOURCE_SHA }}

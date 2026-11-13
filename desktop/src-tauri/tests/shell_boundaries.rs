@@ -283,7 +283,11 @@ fn desktop_update_commands_are_workbench_scoped() {
 #[test]
 fn notifications_are_native_only_and_workbench_scoped() {
     let source = shipping_source("src/lib.rs");
-    let native = shipping_source("src/notifications.rs");
+    let native = format!(
+        "{}\n{}",
+        shipping_source("src/notifications.rs"),
+        shipping_source("src/notifications/native.rs")
+    );
     let build = shipping_source("build.rs");
     assert!(source.contains(".plugin(tauri_plugin_notification::init())"));
     assert!(native.contains("NotificationExt"));

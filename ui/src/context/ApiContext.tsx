@@ -1,3 +1,4 @@
+import type { PolicyDowngradeContext } from '../lib/vaultPolicyWire';
 import type { UpdateControlRequest, UpdateSnapshot } from '../components/update/types';
 export type {
   DesktopRemoteUpdatePhase, DesktopRemoteUpdateRequest, UpdateControlRequest, UpdateHostAction,
@@ -1071,6 +1072,10 @@ export type ApiContextType = {
   enableVaultHdAccount: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   /** Renames an enabled account (null resets it) or sets its ask-before-signing. */
   updateVaultHdAccount: (name: string, account: number, payload: { name?: string | null; always_ask?: boolean }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  /** Turning ask-before-signing off, step 1 (contract v1.1 §B): the exact context to authorize. */
+  createVaultSigningPolicyChallenge: (name: string, payload: { always_ask: false; account?: number }) => Promise<{ ok: boolean; context?: PolicyDowngradeContext; code?: string; message?: string }>;
+  /** Step 2: the authorized context; applies only its bound true→false change. */
+  completeVaultSigningPolicyDowngrade: (name: string, payload: { context: PolicyDowngradeContext; authorization: VaultWebAuthnAuthz }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   /** Derive a seed wallet's Legacy and SegWit public keys from its sealed seed (no words). */
   prepareVaultBitcoinAddressTypes: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
@@ -2704,6 +2709,13 @@ export type WebPushTestResult = {
 // only seeing a human string. The AuthGuard relies on this to tell a policy
 // block (e.g. ``remote_access_host_mismatch``) apart from an unconfigured
 // instance.
+/**
+ * How long a cached Inbox read is shared. A cached answer's request went out
+ * less than this long before it was handed over, so `now - INBOX_READ_CACHE_TTL_MS`
+ * is a time its map is at least as recent as.
+ */
+export const INBOX_READ_CACHE_TTL_MS = 1500;
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string | null;
@@ -4681,7 +4693,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
       }
       const options = { handleError: params?.handleError };
-      return params?.cache === false ? getJson(path, options) : getCachedJson(path, 1500, options);
+      return params?.cache === false
+        ? getJson(path, options)
+        : getCachedJson(path, INBOX_READ_CACHE_TTL_MS, options);
     },
     listBots: async (params) => {
       const payload = params?.cache === false
@@ -4783,6 +4797,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     updateVaultSecret: (name, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}`, payload, opts),
     enableVaultHdAccount: (name, opts) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/accounts`, {}, opts),
     updateVaultHdAccount: (name, account, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}/accounts/${account}`, payload, opts),
+    createVaultSigningPolicyChallenge: (name, payload) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/signing-policy/challenge`, payload, { handleError: false }),
+    completeVaultSigningPolicyDowngrade: (name, payload) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/signing-policy`, payload, { handleError: false }),
     prepareVaultBitcoinAddressTypes: (name, opts) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/bitcoin-address-types`, {}, opts),
     updateVaultSecretField: async (name, field, payload, opts) => {
       const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;

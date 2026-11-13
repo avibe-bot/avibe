@@ -1383,6 +1383,41 @@ describe('mobile onboarding', () => {
     expect(mobile.selectInstance).not.toHaveBeenCalled();
   });
 
+  it('returns to the covered instance from Account after a failed first read and a Retry', async () => {
+    window.history.replaceState({}, '', '/#runtime-account');
+    mobile.bootstrap
+      .mockRejectedValueOnce({ code: 'busy', message: 'Another account operation is running.' })
+      .mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' });
+    render(<MobileOnboarding />);
+
+    // The error page over an instance has its own way back to it.
+    const errorBack = await screen.findByRole('button', { name: 'common.back' });
+    expect(errorBack.hasAttribute('data-mobile-back')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+    await screen.findByRole('heading', { name: 'mobileApp.account.title' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    await waitFor(() => expect(mobile.returnToInstance).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('heading', { name: 'mobileApp.instances.switchTitle' })).toBeNull();
+  });
+
+  it('returns from the instance list to the instance it covers, and offers no Back without one', async () => {
+    await openAccount('#runtime-account');
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.switch' }));
+    await screen.findByRole('heading', { name: 'mobileApp.instances.switchTitle' });
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    await waitFor(() => expect(mobile.returnToInstance).toHaveBeenCalledTimes(1));
+    cleanup();
+
+    resetMobileMocks();
+    await openAccount('#account');
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.switch' }));
+    await screen.findByRole('heading', { name: 'mobileApp.instances.switchTitle' });
+    // Nothing to swipe back to, either.
+    expect(screen.queryByRole('button', { name: 'common.back' })).toBeNull();
+    expect(document.querySelector('[data-mobile-back]')).toBeNull();
+  });
+
   it('locks Account while returning and shows the list once the instance behind it closed', async () => {
     const returning = deferred<null>();
     mobile.returnToInstance.mockReturnValueOnce(returning.promise);

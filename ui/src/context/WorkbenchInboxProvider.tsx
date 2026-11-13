@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { useApi } from './ApiContext';
+import { INBOX_READ_CACHE_TTL_MS, useApi } from './ApiContext';
 import type { InboxSession } from './ApiContext';
 import {
   WorkbenchInboxContext,
@@ -15,7 +15,7 @@ import { badgeTotal as loudUnread, unreadByCategory as splitUnread } from '../li
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
 import { useConsumerActivation } from '../lib/useConsumerActivation';
-import { hasNativeCapability, setNativeBadge } from '../lib/native';
+import { hasNativeCapability, reconcileNativeNotifications, setNativeBadge } from '../lib/native';
 import { onPageReactivated } from '../lib/pageActivity';
 import {
   createWorkbenchSessionReadOwnership,
@@ -502,7 +502,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     setLoading(true);
     feedReadStarted();
     try {
+      // A cached read went out less than its lifetime before it is handed over.
+      const asOf = Date.now() - INBOX_READ_CACHE_TTL_MS;
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE });
+      reconcileNativeNotifications(result.unread_by_session, asOf);
       const feedCurrent = readOwnershipRef.current.isCurrent(read, 'inbox-feed');
       if (!feedCurrent) {
         retryAfterInvalidation();
@@ -555,7 +558,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     cursorReadsInFlightRef.current += 1;
     let readAgain = false;
     try {
+      const asOf = Date.now() - INBOX_READ_CACHE_TTL_MS;
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE, before: cursor });
+      reconcileNativeNotifications(result.unread_by_session, asOf);
       if (!readOwnershipRef.current.isCurrent(read, 'inbox-feed')) {
         readAgain = readOwnershipRef.current.isLatestRead(read);
         return;
@@ -615,12 +620,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // Clearing unread is best-effort, so a failure must not raise an error
       // toast. Reading a permitted session and mutating its unread state are
       // independent capabilities.
+      const asOf = Date.now();
       const result = await api
         .markSessionRead(sessionId, untilMessageId, { handleError: false })
         .catch(() => null);
       // With handleError off, a 4xx/5xx resolves with the error body rather
       // than throwing; only the endpoint's success shape is an applied write.
       const applied = typeof result?.updated === 'number' || Boolean(result?.unread_by_session);
+      // The response's map is the server's after this write, whatever this page
+      // adopts of it below: the native App retires what it shows as read.
+      if (applied) reconcileNativeNotifications(result?.unread_by_session, asOf);
       // A later *started* write for this session (a second mark-read, or a
       // read-changing event) took the count over when it started. This write
       // then neither restores nor commits, so completing first cannot fence or
@@ -705,12 +714,14 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     const limit = Math.min(Math.max(loadedIds.size, PAGE_SIZE), 100);
     feedReadStarted();
     try {
+      const asOf = Date.now();
       const result = await api.listInbox({
         platform: 'avibe',
         limit,
         cache: false,
         handleError: false,
       });
+      reconcileNativeNotifications(result.unread_by_session, asOf);
       const feedCurrent = readOwnershipRef.current.isCurrent(read, 'inbox-feed');
       const supersededByCursorRead =
         (readOwnershipRef.current.latestGeneration('inbox-feed-cursor') ?? 0) > read.generation;
@@ -804,6 +815,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         const read = readOwnershipRef.current.beginRead(['inbox-unread']);
         wholeUnreadReadsInFlightRef.current.add(read);
         try {
+          const asOf = Date.now();
           const result = await api.listInbox({
             platform: 'avibe',
             limit: 1,
@@ -811,6 +823,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
             handleError: false,
             backgroundPush,
           });
+          reconcileNativeNotifications(result.unread_by_session, asOf);
           if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
             applyWholeUnreadRead(read, result.unread_by_session ?? {});
           } else if (staleReadNeedsReread(read)) {
@@ -906,6 +919,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           const unreadResource = `inbox-unread-session:${sessionId}`;
           const read = readOwnershipRef.current.beginRead([sessionResource, unreadResource]);
           try {
+            const asOf = Date.now();
             const result = await api.listInbox({
               platform: 'avibe',
               onlySession: sessionId,
@@ -913,6 +927,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
               cache: false,
               handleError: false,
             });
+            reconcileNativeNotifications(result.unread_by_session, asOf);
             const supersededByPendingIntent = targetedReadPendingRef.current.has(sessionId);
             const row = result.sessions.find((s) => s.session_id === sessionId);
             if (

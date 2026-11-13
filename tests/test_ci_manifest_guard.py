@@ -228,22 +228,27 @@ def test_untracked_scratch_schema_is_not_part_of_the_contract(repo: Path) -> Non
     guard.check_schemas(repo)
 
 
+@pytest.mark.parametrize("workflow_name", ["lint.yml", "desktop-native-update-acceptance.yml"])
 @pytest.mark.parametrize(
     "bad_workflow",
     [
         "on: [push\njobs: {}\n",
         "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        run: echo invalid\n",
         "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ missing.context }}\n",
+        "on: workflow_dispatch\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      ACCEPTANCE_ROOT: ${{ runner.temp }}/acceptance\n    steps:\n      - run: echo valid\n",
     ],
 )
-def test_real_actionlint_rejects_workflow_syntax_and_semantics(repo: Path, bad_workflow: str) -> None:
+def test_real_actionlint_rejects_workflow_syntax_and_semantics(
+    repo: Path, bad_workflow: str, workflow_name: str,
+) -> None:
     if not shutil.which("actionlint"):
         pytest.skip(f"workflow validation requires actionlint {guard.ACTIONLINT_VERSION}")
-    path = put(
-        repo,
-        ".github/workflows/lint.yml",
-        "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo valid\n",
-    )
+    valid_workflow = "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo valid\n"
+    # Keep a known workflow present: an omitted acceptance workflow must fail
+    # because its invalid expression escaped semantic validation, not because
+    # the guard found no workflows to check.
+    put(repo, ".github/workflows/lint.yml", valid_workflow)
+    path = put(repo, f".github/workflows/{workflow_name}", valid_workflow)
     run(repo, "git", "add", ".")
     assert guard.main(["--root", str(repo), "--workflows-only"]) == 0
     path.write_text(bad_workflow)

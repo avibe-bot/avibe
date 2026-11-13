@@ -138,6 +138,7 @@ interface AvibeNative {
 | `app` | `app.info()`, `app.openExternal({url})` | `app.foreground`, `app.background` |
 | `badge` | `badge.set({count})`: the App icon badge shows `count`, the Inbox total the Web UI shows; `0` clears it. Fire-and-forget. | - |
 | `haptics` | `haptics.impact({style})`, `haptics.notify({type})`, `haptics.selection()` | - |
+| `notifications` | `notifications.reconcile({unreadSessions, asOf})`: the Sessions with unread messages in one whole Inbox snapshot, and when the read that produced it started. Native retires the delivered notifications of every other Session. Fire-and-forget. | - |
 | `keyboardResizesViewport` | No calls. Declares that UIKit shrinks this WebView's viewport with `keyboardLayoutGuide`. | - |
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
 | `viewport` | `viewport.setOuterScrollLocked({locked})` | - |
@@ -176,7 +177,33 @@ Phase 0a PR 2 implements this v1 subset:
   switching accounts clears the badge. An accepted `count` of `0` also
   removes that instance's and account's `session:*` notifications delivered
   before the call from Notification Center (the push relay contract,
-  section 7);
+  section 7), until `notifications.reconcile` supersedes it;
+- `notifications: 1` admits `notifications.reconcile({unreadSessions, asOf})`
+  from the selected-instance main frame (the rule `badge.set` uses), which
+  returns `null` at once. `unreadSessions` is an array of at most 1000
+  distinct non-empty Session id strings of at most 200 characters each: every
+  Session with an unread count above zero in one whole, account-wide unread
+  map the server returned (not a preference-filtered total, and not the
+  page's optimistic clears). `asOf` is a finite number of milliseconds since
+  the Unix epoch on the device clock, at or before the moment the request
+  that returned that map went out (for a shared cached read, the call time
+  less the cache lifetime), so the map describes the server at `asOf` or
+  later. Any other value, or another parameter, is `invalid_argument`.
+  Native removes from Notification Center the delivered notifications of that
+  instance and the current account whose `threadIdentifier` is `session:<id>`
+  for an id not in `unreadSessions` and whose delivery date is at or before
+  `asOf` (an `asOf` in the future counts as now). A notification delivered
+  after `asOf` may describe a message the map did not see, so it stays; so do
+  pending requests, other instances, other accounts, other threads
+  (`harness:failure`, the test notification), and undecrypted fallbacks. Each
+  call stands alone, so calls arriving out of order cannot clear an unread
+  Session. The Web UI sends it with each whole unread map it reads from the
+  server (an Inbox load, a return to the foreground, a mark-read response),
+  and skips it when more than 1000 Sessions are unread. Once the selected
+  runtime's page has sent it, `badge.set({count: 0})` no longer retires
+  notifications for that runtime: the explicit set supersedes the total,
+  which is preference-filtered and has no snapshot time (the push relay
+  contract, section 7);
 - `voice.permission()` returns `{state: 'granted' | 'denied' | 'prompt'}`. It
   does not itself display a permission prompt; the user-initiated Web media
   request remains the single prompt path;

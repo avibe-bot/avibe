@@ -6481,6 +6481,20 @@
       "title": "最近活动",
       "empty": "暂无活动。"
     },
+    "askOff": {
+      "turnedOff": "已用 Passkey 关闭，立即生效。",
+      "offHintEdit": "关闭需要用 Passkey 确认，确认后立即生效，不用点保存。",
+      "legacyRegistration": "你的 Passkey 是在很早的预览版里设置的，这台 Avibe 没有存下确认关闭所需的资料。开关会保持打开。",
+      "waiting": "等待 Passkey 确认…",
+      "popupBlocked": "浏览器拦截了确认窗口。请允许弹出窗口，再关一次。",
+      "setupRequired": "关闭需要 Passkey。添加一个保护档密钥时会设置 Passkey，之后就能在这里关闭。",
+      "factorUnavailable": "这台 Avibe 记录的 Passkey 现在用不了，不能用来确认关闭。开关会保持打开。",
+      "expired": "确认超时了，没有关闭。再关一次即可。",
+      "clockSkew": "这台设备的时间不准，没有关闭。校准时间后再试。",
+      "notVisible": "确认窗口没能完整显示（可能被其他窗口挡住、屏幕已锁定或不在前台），没有关闭。回到这个窗口、让确认窗口完整露出后再关一次。",
+      "changed": "这把密钥刚在别处改过，没有关闭。看一下最新状态再试。",
+      "failed": "没能关闭，签名前仍会问你。再试一次。"
+    },
     "hd": {
       "chainMnemonic": "助记词钱包",
       "chainMnemonicHint": "一组助记词覆盖 EVM、Bitcoin、Solana，可在里面添加多个账户。",
@@ -6522,7 +6536,7 @@
         "title": "{{name}} 已创建",
         "body": "账户 #0 在三条链上的地址如下。往这些地址充值后，Agent 就能用它签名。",
         "verified": "已核对：avault 保存的地址和这些词算出的地址一致。",
-        "recovery": "这台电脑丢失时，只有这些词能找回资金（如果设置过 passphrase，还要一字不差的 passphrase）。只靠数据库备份无法恢复签名。",
+        "recovery": "这台电脑丢失时，只有这些词能找回资金（如果设置过 Passphrase，还要一字不差的 Passphrase）。只靠数据库备份无法恢复签名。",
         "howTitle": "Agent 这样用它",
         "howHint": "--chain 选 evm、bitcoin 或 solana；--account 选账户编号。",
         "finish": "完成"
@@ -6585,7 +6599,20 @@
       "mismatchDeleted": "这个钱包已经删除，没有留下任何东西。请重新创建或导入。",
       "mismatchNotSaved": "不要往这个钱包转账，也不要用这里显示过的地址。它没有保存，什么也没留下；请重新创建或导入。",
       "close": "关闭",
-      "blocked": "地址核对失败：不要往这个钱包转账，请删除它。"
+      "blocked": "地址核对失败：不要往这个钱包转账，请删除它。",
+      "passphrase": {
+        "title": "添加 Passphrase（可选）",
+        "folded": "大多数人不需要",
+        "body": "Passphrase 和这些词一起决定钱包的地址。恢复时需要词，加上一字不差的 Passphrase；忘了它，钱包就找不回来。",
+        "label": "Passphrase",
+        "again": "再输入一次",
+        "mismatch": "两次输入不一样。",
+        "match": "两次输入一致。区分大小写和空格。",
+        "hint": "区分大小写和空格，原样保留。两栏都空着就是不设置。",
+        "backupReminder": "这个钱包还设置了 Passphrase。把它和这些词分开记下：恢复时两样都要，Passphrase 要一字不差。",
+        "recovery": "这台电脑丢失时，只有这些词加上你设置的 Passphrase（一字不差）能找回资金。只靠数据库备份无法恢复签名。",
+        "set": "已设置"
+      }
     }
   },
   "permissions": {

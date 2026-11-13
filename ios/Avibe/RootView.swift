@@ -87,6 +87,7 @@ private struct BrowserScreen: View {
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,
                         setBadgeCount: appModel.setBadgeCount,
+                        reconcileNotifications: appModel.reconcileNotifications,
                         accountFallbackVisibilityChanged: {
                             showsAccountFallback = $0
                         },

@@ -1,3 +1,4 @@
+import type { AskTurnOffState } from '@/lib/useAskTurnOff';
 import type { InboxSession, InstanceCapabilities, WorkbenchMessage, WorkbenchProject, WorkbenchSession } from '@/context/ApiContext';
 import type { BotRuntimeStatus } from '@/context/BotsContext';
 import type { RuntimeStatus } from '@/context/StatusContext';
@@ -10,6 +11,9 @@ import type { DesignSocketMessage, DesignStreamEvent } from './network';
 /** What a frame can set. Everything is optional; omitted parts are empty, not loading. */
 export interface WorkbenchFixtures {
   capabilities?: InstanceCapabilities;
+  /** What every ask-before-signing switch shows for turning it off; frames never reach the sandbox,
+   *  so it is 'unavailable' (this build can't) unless a frame draws another state. */
+  askTurnOff?: AskTurnOffState;
   /** An Organization instance (shared transcripts name their senders); a personal one when omitted. */
   instanceKind?: InstanceKind;
   /** The principal the viewer's own Chat rows are written as (`local`, `remote:<sub>`). */

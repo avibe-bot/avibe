@@ -7,17 +7,34 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import en from '@/i18n/en.json';
 import type { VaultHdAccount, VaultSecret } from '@/context/ApiContext';
 import { VaultHdWalletDialog } from './vault-hd-wallet-detail';
+import vectors from '@/lib/__fixtures__/policy-downgrade-wire-vectors.json';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 const api = vi.hoisted(() => ({
   enableVaultHdAccount: vi.fn(),
   updateVaultHdAccount: vi.fn(),
+  createVaultSigningPolicyChallenge: vi.fn(),
+  completeVaultSigningPolicyDowngrade: vi.fn(),
   prepareVaultBitcoinAddressTypes: vi.fn(async () => ({ ok: false, code: 'forbidden' })),
   getSession: vi.fn(async () => ({ title: '网格交易' })),
 }));
 vi.mock('@/context/ApiContext', async (original) => ({ ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api }));
 vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+// The pinned sandbox: whether it can turn ask-before-signing off, and its answer.
+const sandbox = vi.hoisted(() => ({
+  canTurnOff: false,
+  authorizeSigningPolicyDowngrade: vi.fn(),
+  windowClose: vi.fn(),
+}));
+vi.mock('@/lib/vaultSandboxClient', async (original) => ({
+  ...await original<typeof import('@/lib/vaultSandboxClient')>(),
+  getVaultSandboxClient: async () => ({
+    supports: async () => sandbox.canTurnOff,
+    authorizeSigningPolicyDowngrade: sandbox.authorizeSigningPolicyDowngrade,
+  }),
+  openVaultAuthorizationWindow: () => ({ id: 'win', close: sandbox.windowClose }),
+}));
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({ lng: 'en', fallbackLng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false } });
@@ -75,7 +92,53 @@ it('turns ask-before-signing on, and does not let it be turned off without the P
   expect(toggle.disabled).toBe(true);
   fireEvent.click(toggle);
   expect(api.updateVaultHdAccount).not.toHaveBeenCalled();
-  expect(screen.getByLabelText(w.askLocked)).toBeTruthy();
+  // This sandbox build can't turn it off.
+  expect(await screen.findByLabelText(w.askLocked)).toBeTruthy();
+  expect(toggle.disabled).toBe(true);
+  expect(api.createVaultSigningPolicyChallenge).not.toHaveBeenCalled();
+});
+
+it('turns one account’s ask-before-signing off with the Passkey when the sandbox can, never through the account PATCH', async () => {
+  sandbox.canTurnOff = true;
+  try {
+    const context = vectors.vectors[0].context;
+    const assertion = {
+      id: 'UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM', rawId: context.factors[0].credentialId, type: 'public-key',
+      response: { clientDataJSON: 'e30=', authenticatorData: 'AAAA', signature: 'MEUCIQ==', userHandle: null },
+    };
+    const after = wallet([account(0), account(1, { always_ask: true })]);
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });
+    sandbox.authorizeSigningPolicyDowngrade.mockResolvedValue({ challengeId: context.challengeId, assertion });
+    api.completeVaultSigningPolicyDowngrade.mockResolvedValue({ ok: true, secret: after });
+    const onChanged = open(wallet([account(0, { always_ask: true }), account(1, { always_ask: true })]));
+    const toggle = screen.getAllByRole('switch', { name: w.ask })[0] as HTMLButtonElement;
+    await vi.waitFor(() => expect(toggle.disabled).toBe(false));
+    expect(screen.queryByLabelText(w.askLocked)).toBeNull();
+    await act(async () => { fireEvent.click(toggle); });
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledWith(after));
+    expect(api.createVaultSigningPolicyChallenge).toHaveBeenCalledExactlyOnceWith('AGENT_WALLET', { always_ask: false, account: 0 });
+    expect(api.updateVaultHdAccount).not.toHaveBeenCalled();
+  } finally {
+    sandbox.canTurnOff = false;
+  }
+});
+
+it('keeps the account asking and says so when the confirmation expired', async () => {
+  sandbox.canTurnOff = true;
+  try {
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context: vectors.vectors[0].context });
+    sandbox.authorizeSigningPolicyDowngrade.mockRejectedValue(Object.assign(new Error('x'), { code: 'policy_context_expired' }));
+    const onChanged = open(wallet([account(0, { always_ask: true })]));
+    const toggle = screen.getByRole('switch', { name: w.ask }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(toggle.disabled).toBe(false));
+    await act(async () => { fireEvent.click(toggle); });
+    expect(await screen.findByText(en.vaults.askOff.expired)).toBeTruthy();
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
+  } finally {
+    sandbox.canTurnOff = false;
+  }
 });
 
 it('renames an account, and stops offering more at the limit', async () => {

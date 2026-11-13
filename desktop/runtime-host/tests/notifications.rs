@@ -1,13 +1,14 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use avibe_runtime_host::notifications::{
     run_notifications, EventStream, NotificationFilter, NotificationGate, NotificationIntent, NotificationPreferences,
-    NotificationSink, NotificationTransport, ReconnectBackoff, RunDetail, RunTimestamps, SseDecoder, StreamError,
-    RETAINED_KEYS, RETENTION, UNREAD_REFRESH_INTERVAL,
+    NotificationReceipt, NotificationRegistry, NotificationSink, NotificationSnapshot, NotificationTransport,
+    ReconnectBackoff, RunDetail, RunTimestamps, SseDecoder, StreamError, UnreadState, RETAINED_KEYS, RETENTION,
+    UNREAD_REFRESH_INTERVAL,
 };
 use serde_json::{json, Value};
 use tokio::time::Instant;
@@ -41,6 +42,8 @@ struct FakeTransport {
     refetched: Mutex<Vec<String>>,
     detail_delay: Duration,
     unread: Mutex<Option<u64>>,
+    unread_by_session: Mutex<Option<HashMap<String, u64>>>,
+    unread_delay: Duration,
     unread_reads: Mutex<Vec<Instant>>,
     preferences: Mutex<VecDeque<Option<NotificationPreferences>>>,
     preference_reads: AtomicUsize,
@@ -71,9 +74,15 @@ impl NotificationTransport for FakeTransport {
         self.preferences.lock().unwrap().pop_front().flatten()
     }
 
-    async fn unread_total(&self) -> Option<u64> {
+    async fn unread(&self) -> Option<UnreadState> {
         self.unread_reads.lock().unwrap().push(Instant::now());
-        *self.unread.lock().unwrap()
+        let total = *self.unread.lock().unwrap();
+        let by_session = self.unread_by_session.lock().unwrap().clone();
+        tokio::time::sleep(self.unread_delay).await;
+        Some(UnreadState {
+            total: total?,
+            by_session,
+        })
     }
 }
 
@@ -99,6 +108,10 @@ struct FakeSink {
     sources: Mutex<Vec<Option<String>>>,
     unread: Mutex<Vec<u64>>,
     desktop_update_nudges: AtomicUsize,
+    registry: Mutex<NotificationRegistry>,
+    receipts: Mutex<NotificationSnapshot>,
+    withdrawn: Mutex<Vec<i32>>,
+    generation: AtomicU64,
 }
 
 impl Default for FakeSink {
@@ -111,11 +124,23 @@ impl Default for FakeSink {
             sources: Mutex::new(Vec::new()),
             unread: Mutex::new(Vec::new()),
             desktop_update_nudges: AtomicUsize::new(0),
+            registry: Mutex::new(NotificationRegistry::default()),
+            receipts: Mutex::new(Vec::new()),
+            withdrawn: Mutex::new(Vec::new()),
+            generation: AtomicU64::new(0),
         }
     }
 }
 
 impl NotificationSink for FakeSink {
+    fn registry(&self) -> &Mutex<NotificationRegistry> {
+        &self.registry
+    }
+
+    fn presentation_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     fn gate(&self) -> NotificationGate {
         NotificationGate {
             enabled: self.enabled.load(Ordering::SeqCst),
@@ -124,9 +149,31 @@ impl NotificationSink for FakeSink {
         }
     }
 
-    fn deliver(&self, intent: NotificationIntent, source: Option<String>, _: u64) {
+    fn deliver(
+        &self,
+        intent: NotificationIntent,
+        source: Option<String>,
+        generation: u64,
+        receipt: Arc<NotificationReceipt>,
+    ) {
+        if receipt.retired() || generation != self.presentation_generation() {
+            return;
+        }
+        receipt.posted();
+        self.receipts.lock().unwrap().push(receipt);
         self.delivered.lock().unwrap().push(intent);
         self.sources.lock().unwrap().push(source);
+    }
+
+    fn withdraw(&self, snapshot: NotificationSnapshot, unread: HashMap<String, u64>, generation: u64) {
+        if generation != self.presentation_generation() {
+            return;
+        }
+        let mut registry = self.registry.lock().unwrap();
+        for receipt in registry.reconcile(snapshot, &unread) {
+            self.withdrawn.lock().unwrap().push(receipt.id());
+            registry.forget(receipt.id());
+        }
     }
 
     fn show_unread(&self, total: u64, _: u64) {
@@ -1159,4 +1206,191 @@ async fn a_failed_unread_read_keeps_the_last_total_until_the_next_frame() {
     assert!(transport.unread_reads.lock().unwrap().len() >= 2);
     assert_eq!(*sink.unread.lock().unwrap(), [5]);
     task.abort();
+}
+
+fn post_session(sink: &FakeSink, session: &str) -> Arc<NotificationReceipt> {
+    let receipt = sink.registry.lock().unwrap().reserve(Some(session.into())).unwrap();
+    receipt.confirm_workbench_session(true);
+    sink.deliver(
+        NotificationIntent::RunSucceeded,
+        None,
+        sink.presentation_generation(),
+        receipt.clone(),
+    );
+    sink.withdraw(vec![receipt.clone()], HashMap::from([(session.into(), 1)]), 0);
+    receipt
+}
+
+#[tokio::test(start_paused = true)]
+async fn unread_request_captures_notification_keys_before_the_http_wait() {
+    let transport = Arc::new(FakeTransport {
+        unread_delay: Duration::from_secs(2),
+        ..FakeTransport::default()
+    });
+    let sink = Arc::new(FakeSink::default());
+    let old = post_session(&sink, "a");
+    *transport.unread.lock().unwrap() = Some(0);
+    *transport.unread_by_session.lock().unwrap() = Some(HashMap::new());
+    transport.stream([], false);
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    assert_eq!(transport.unread_reads.lock().unwrap().len(), 1);
+    let newer = post_session(&sink, "a");
+    tokio::time::advance(Duration::from_secs(2)).await;
+    settle().await;
+    assert_eq!(*sink.withdrawn.lock().unwrap(), [old.id()]);
+    assert!(old.retired());
+    assert!(!newer.retired());
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_generation_failed_reads_and_old_server_maps_never_withdraw() {
+    for case in ["generation", "failed", "old-server"] {
+        let transport = Arc::new(FakeTransport {
+            unread_delay: Duration::from_secs(2),
+            ..FakeTransport::default()
+        });
+        let sink = Arc::new(FakeSink::default());
+        let old = post_session(&sink, "a");
+        *transport.unread.lock().unwrap() = (case != "failed").then_some(0);
+        *transport.unread_by_session.lock().unwrap() = (case != "old-server").then_some(HashMap::new());
+        transport.stream([], false);
+        let task = spawn(transport.clone(), sink.clone());
+        settle().await;
+        if case == "generation" {
+            sink.generation.store(1, Ordering::SeqCst);
+        }
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle().await;
+        assert!(sink.withdrawn.lock().unwrap().is_empty(), "{case}");
+        assert!(!old.retired(), "{case}");
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn resultless_terminal_notifications_require_read_evidence_before_withdrawal() {
+    for (status, intent) in [
+        ("succeeded", NotificationIntent::RunSucceeded),
+        ("failed", NotificationIntent::RunFailed),
+        ("canceled", NotificationIntent::RunCanceled),
+    ] {
+        let transport = Arc::new(FakeTransport::default());
+        let sink = Arc::new(FakeSink::default());
+        transport.details.lock().unwrap().insert(
+            "run".into(),
+            RunDetail {
+                session_platform: Some("avibe".into()),
+                ..RunDetail::default()
+            },
+        );
+        *transport.unread.lock().unwrap() = Some(0);
+        *transport.unread_by_session.lock().unwrap() = Some(HashMap::new());
+        transport.stream(
+            [frame(
+                "runs.updated",
+                json!({"run_id":"run", "session_id":"a", "run_type":"scheduled", "status":status}),
+            )],
+            false,
+        );
+        let task = spawn(transport, sink.clone());
+        settle().await;
+
+        assert_eq!(*sink.delivered.lock().unwrap(), [intent]);
+        let receipt = sink.receipts.lock().unwrap()[0].clone();
+        sink.withdraw(vec![receipt.clone()], HashMap::new(), 0);
+        assert!(sink.withdrawn.lock().unwrap().is_empty(), "{status}");
+        assert!(!receipt.retired(), "{status}");
+        sink.withdraw(vec![receipt.clone()], HashMap::from([("a".into(), 1)]), 0);
+        sink.withdraw(vec![receipt.clone()], HashMap::new(), 0);
+        assert_eq!(receipt.retired(), status == "succeeded", "{status}");
+        assert_eq!(
+            sink.withdrawn.lock().unwrap().len(),
+            usize::from(status == "succeeded"),
+            "{status}"
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn remote_read_sse_withdraws_even_when_focused_or_notifications_disabled() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    let old = post_session(&sink, "a");
+    let other = post_session(&sink, "b");
+    *transport.unread.lock().unwrap() = Some(2);
+    *transport.unread_by_session.lock().unwrap() = Some(HashMap::from([("a".into(), 1), ("b".into(), 1)]));
+    transport.paced_stream(
+        [frame("inbox.unread.changed", json!({"session_id":"a", "delta":-1}))],
+        false,
+        Duration::from_secs(1),
+    );
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    assert!(sink.withdrawn.lock().unwrap().is_empty());
+    sink.focused.store(true, Ordering::SeqCst);
+    sink.enabled.store(false, Ordering::SeqCst);
+    *transport.unread.lock().unwrap() = Some(0); // badge may exclude quiet b
+    *transport.unread_by_session.lock().unwrap() = Some(HashMap::from([("b".into(), 1)]));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    settle().await;
+    assert_eq!(*sink.withdrawn.lock().unwrap(), [old.id()]);
+    assert!(!other.retired());
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_read_during_slow_detail_lookup_prevents_late_workbench_delivery_but_preserves_im() {
+    for (platform, is_workbench, withdrawable) in [
+        (Some("avibe"), None, true),
+        (None, Some(true), true), // scope-less Bot Session
+        (Some("slack"), Some(false), false),
+        (None, None, false), // unreadable/old-server source
+    ] {
+        let transport = Arc::new(FakeTransport {
+            detail_delay: Duration::from_secs(4),
+            ..FakeTransport::default()
+        });
+        let sink = Arc::new(FakeSink::default());
+        transport.details.lock().unwrap().insert(
+            "run".into(),
+            RunDetail {
+                session_platform: platform.map(Into::into),
+                session_is_workbench: is_workbench,
+                ..RunDetail::default()
+            },
+        );
+        *transport.unread.lock().unwrap() = Some(1);
+        *transport.unread_by_session.lock().unwrap() = Some(HashMap::from([("a".into(), 1)]));
+        transport.paced_stream(
+            [
+                frame(
+                    "runs.updated",
+                    json!({"run_id":"run", "session_id":"a", "run_type":"watch", "status":"succeeded"}),
+                ),
+                frame("inbox.unread.changed", json!({"session_id":"a", "delta":-1})),
+            ],
+            false,
+            Duration::from_secs(1),
+        );
+        let task = spawn(transport.clone(), sink.clone());
+        settle().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(*transport.refetched.lock().unwrap(), ["run"]);
+        *transport.unread.lock().unwrap() = Some(0);
+        *transport.unread_by_session.lock().unwrap() = Some(HashMap::new());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        settle().await;
+        assert_eq!(
+            sink.delivered.lock().unwrap().len(),
+            usize::from(!withdrawable),
+            "{platform:?}"
+        );
+        task.abort();
+    }
 }

@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react';
 import type { ComponentType, ReactNode } from 'react';
 import {
-  AlertTriangle, ArrowLeft, ArrowUpCircle, Bot, Check, ChevronDown, ChevronRight, CircleCheck, Copy, Eye, EyeOff, Loader2, WalletCards, X,
+  AlertTriangle, ArrowLeft, ArrowUpCircle, Bot, Check, ChevronDown, ChevronRight, CircleCheck, Copy, Eye, EyeOff, KeyRound, Loader2, WalletCards, X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -100,7 +100,7 @@ export function WordGrid({ words, hidden, bad, onReveal }: { words: string[]; hi
 }
 
 /** Step 2: the words, hidden until asked for. */
-export function HdBackupStep({ words }: { words: string[] }) {
+export function HdBackupStep({ words, withPassphrase = false }: { words: string[]; withPassphrase?: boolean }) {
   const { t } = useTranslation();
   const [hidden, setHidden] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -132,6 +132,7 @@ export function HdBackupStep({ words }: { words: string[] }) {
           <span className="text-[11px] text-muted">{t('vaults.hd.backup.clipboard')}</span>
         </div>
       ) : null}
+      {withPassphrase ? <HdNotice tone="warning" icon={KeyRound}>{t('vaults.hd.passphrase.backupReminder')}</HdNotice> : null}
       <HdNotice tone="violet" icon={Bot}>{t('vaults.hd.backup.agentNote')}</HdNotice>
     </>
   );
@@ -223,7 +224,12 @@ export function HdAccountAddressList({ account, types }: {
 }
 
 /** Done: account #0 is ready and checked, and the user learns how to point an Agent at it. */
-export function HdDoneStep({ name, account }: { name: string; account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> }) {
+export function HdDoneStep({ name, account, withPassphrase = false }: {
+  name: string;
+  account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'>;
+  /** The wallet was made with a passphrase: recovery names both, not "if one was set". */
+  withPassphrase?: boolean;
+}) {
   const { t } = useTranslation();
   return (
     <>
@@ -245,7 +251,11 @@ export function HdDoneStep({ name, account }: { name: string; account: Pick<HdAc
           {t('vaults.hd.done.verified')}
         </span>
       </div>
-      <span className="text-[12px] text-muted">{t('vaults.hd.done.recovery')}</span>
+      {withPassphrase ? (
+        <HdNotice tone="warning" icon={AlertTriangle}>{t('vaults.hd.passphrase.recovery')}</HdNotice>
+      ) : (
+        <span className="text-[12px] text-muted">{t('vaults.hd.done.recovery')}</span>
+      )}
       <div className="flex flex-col gap-1.5">
         <span className="flex items-center gap-1.5 text-[12.5px] font-medium text-foreground">
           <Bot className="size-3.5 text-muted" />
@@ -452,5 +462,80 @@ export function HdMismatchBlock({ outcome, error, busy, onClose, onDelete }: {
         )}
       </div>
     </>
+  );
+}
+
+/** A passphrase field with the same show/hide as other secret inputs: a typo here costs the wallet. */
+function PassphraseField({ label, value, onChange, invalid, disabled }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  invalid?: boolean;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation();
+  const [shown, setShown] = useState(false);
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[12px] font-medium text-foreground">{label}</span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Input
+          type={shown ? 'text' : 'password'}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+          disabled={disabled}
+          aria-label={label}
+          aria-invalid={invalid || undefined}
+          className="min-w-0 flex-1 font-mono text-xs"
+        />
+        <Button type="button" variant="ghost" size="icon" onClick={() => setShown((current) => !current)} aria-label={shown ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}>
+          {shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+        </Button>
+      </span>
+    </label>
+  );
+}
+
+/** Creating a wallet: an optional BIP39 passphrase, folded by default and entered twice (ui/design:
+ *  vault/mnemonic/create-passphrase). Taken as typed; the seed applies the same NFKD as import. */
+export function HdCreatePassphrase({ value, confirm, onChange, onConfirmChange, disabled }: {
+  value: string;
+  confirm: string;
+  onChange: (value: string) => void;
+  onConfirmChange: (value: string) => void;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(Boolean(value || confirm));
+  const Chevron = open ? ChevronDown : ChevronRight;
+  const typed = Boolean(value || confirm);
+  const mismatch = typed && value !== confirm;
+  return (
+    <div className="flex flex-col rounded-[10px] border border-edge bg-surface-2">
+      <button type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
+        <Chevron className="size-3.5 text-muted" />
+        <span className="flex-1 text-[12.5px] font-semibold text-foreground">{t('vaults.hd.passphrase.title')}</span>
+        {/* Folded with something typed: say it is set, so a hidden passphrase is never a surprise. */}
+        {!open ? (
+          typed ? <span className="text-[11px] font-medium text-mint-ink">{t('vaults.hd.passphrase.set')}</span> : <span className="text-[11px] text-muted">{t('vaults.hd.passphrase.folded')}</span>
+        ) : null}
+      </button>
+      {open ? (
+        <div className="flex flex-col gap-2.5 px-3 pb-3">
+          <span className="text-[11.5px] leading-snug text-muted">{t('vaults.hd.passphrase.body')}</span>
+          <PassphraseField label={t('vaults.hd.passphrase.label')} value={value} onChange={onChange} disabled={disabled} />
+          <PassphraseField label={t('vaults.hd.passphrase.again')} value={confirm} onChange={onConfirmChange} invalid={mismatch} disabled={disabled} />
+          {mismatch ? (
+            <span role="alert" className="text-[11.5px] text-destructive-ink">{t('vaults.hd.passphrase.mismatch')}</span>
+          ) : typed ? (
+            <span className="text-[11.5px] text-mint-ink">{t('vaults.hd.passphrase.match')}</span>
+          ) : (
+            <span className="text-[11.5px] text-muted">{t('vaults.hd.passphrase.hint')}</span>
+          )}
+        </div>
+      ) : null}
+    </div>
   );
 }

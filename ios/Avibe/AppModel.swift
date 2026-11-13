@@ -92,6 +92,9 @@ final class AppModel: ObservableObject {
     private let nativeBadge: NativeBadge
     /// Retires an instance's Session notifications once nothing there is unread.
     private let sessionNotifications: SessionNotificationCleaner
+    /// The runtime whose page has sent `notifications.reconcile`: from then
+    /// on its unread set, not a zero badge, retires notifications.
+    private var reconciledRuntimeIdentity: Int?
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -276,13 +279,17 @@ final class AppModel: ObservableObject {
 
     /// Covers the live runtime with the bundled account page, keeping its
     /// document, history, and scroll position for `returnToRuntime()`.
+    /// A push-management request the App makes on its own (at launch, in the
+    /// background) keeps the runtime selected (`isSelectedRuntime`), so it
+    /// neither closes the runtime here nor keeps the page from returning to
+    /// it; signing out or another account does.
     func showAccount() {
         switch route {
         case .accountOverBrowser:
             return
         case .browser(let runtime)
             where runtimeController != nil
-                && sessionCoordinator.isCurrentRuntime(runtime):
+                && sessionCoordinator.isSelectedRuntime(runtime):
             runtimeController?.prepareForAccountCover()
             route = .accountOverBrowser(runtime)
         default:
@@ -297,11 +304,11 @@ final class AppModel: ObservableObject {
         guard
             case .accountOverBrowser(let runtime) = route,
             runtimeController != nil,
-            sessionCoordinator.isCurrentRuntime(runtime)
+            sessionCoordinator.isSelectedRuntime(runtime)
         else {
             return false
         }
-        sessionCoordinator.deactivateAccountSurface()
+        sessionCoordinator.leaveAccountSurface()
         route = .browser(runtime)
         return true
     }
@@ -609,7 +616,13 @@ final class AppModel: ObservableObject {
             return false
         }
         nativeBadge.set(count)
-        if count == 0, let account = sessionCoordinator.currentAccount {
+        // Once this runtime's page names its unread Sessions, that set
+        // retires notifications; the total is preference-filtered and has no
+        // snapshot time.
+        if count == 0,
+           reconciledRuntimeIdentity != runtimeIdentity,
+           let account = sessionCoordinator.currentAccount
+        {
             // Nothing notified on this instance is unread. The zero was
             // computed before this call arrived, so only what was delivered
             // by now is covered by it; anything later stays.
@@ -619,6 +632,31 @@ final class AppModel: ObservableObject {
                 readAt: Date()
             )
         }
+        return true
+    }
+
+    /// `notifications.reconcile` from a runtime page: only the selected
+    /// instance's page retires its notifications, the rule `badge.set`
+    /// follows, and only this account's.
+    @discardableResult
+    func reconcileNotifications(
+        _ reconcile: NotificationReconcile,
+        origin: WebOrigin
+    ) -> Bool {
+        guard
+            let runtime = route.runtime,
+            sessionCoordinator.isSelectedRuntime(runtime),
+            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized,
+            let account = sessionCoordinator.currentAccount
+        else {
+            return false
+        }
+        reconciledRuntimeIdentity = runtimeIdentity
+        sessionNotifications.reconcile(
+            reconcile,
+            instanceOrigin: origin.serialized,
+            accountID: account.id
+        )
         return true
     }
 

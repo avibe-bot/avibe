@@ -1,8 +1,8 @@
 /* @vitest-environment jsdom */
 
 import { webcrypto } from 'node:crypto';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { ReactElement } from 'react';
@@ -10,6 +10,7 @@ import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
 import type { VaultSecret } from '@/context/ApiContext';
 import { VaultSecretForm } from './vault-secret-form';
+import vectors from '@/lib/__fixtures__/policy-downgrade-wire-vectors.json';
 
 const api = vi.hoisted(() => ({
   listDependencies: vi.fn(),
@@ -17,6 +18,8 @@ const api = vi.hoisted(() => ({
   listSkills: vi.fn(async () => ({ skills: [] })),
   createVaultSecret: vi.fn(),
   updateVaultSecret: vi.fn(async () => ({ ok: true })),
+  createVaultSigningPolicyChallenge: vi.fn(),
+  completeVaultSigningPolicyDowngrade: vi.fn(),
   getVaultPubkey: vi.fn(async () => ({ public_key: 'public', fingerprint: 'fingerprint' })),
   deriveSigningAddresses: vi.fn(async () => ({ ok: true, addresses: {} })),
   connectWorkbenchEvents: vi.fn(() => vi.fn()),
@@ -32,6 +35,21 @@ vi.mock('@/context/ApiContext', async (original) => ({
   ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api,
 }));
 vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
+// The pinned sandbox: whether it can turn ask-before-signing off, and its answer.
+const sandbox = vi.hoisted(() => ({
+  canTurnOff: false,
+  windowBlocked: false,
+  authorizeSigningPolicyDowngrade: vi.fn(),
+  windowClose: vi.fn(),
+}));
+vi.mock('@/lib/vaultSandboxClient', async (original) => ({
+  ...await original<typeof import('@/lib/vaultSandboxClient')>(),
+  getVaultSandboxClient: async () => ({
+    supports: async () => sandbox.canTurnOff,
+    authorizeSigningPolicyDowngrade: sandbox.authorizeSigningPolicyDowngrade,
+  }),
+  openVaultAuthorizationWindow: () => (sandbox.windowBlocked ? null : { id: 'win', close: sandbox.windowClose }),
+}));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
 vi.mock('@/lib/vaultCrypto', async (original) => ({
   ...await original<typeof import('@/lib/vaultCrypto')>(), sealBlindBox,
@@ -519,7 +537,9 @@ it('shows ask-before-signing locked on once it is on, and never sends it off', a
   render(form(<VaultSecretForm editSecret={{ ...standardKey, policy: { always_ask: true } }} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
   expect(askSwitch().getAttribute('aria-checked')).toBe('true');
   expect(askSwitch().disabled).toBe(true);
-  expect(screen.getByText(en.vaults.dialog.alwaysAskSignLocked)).toBeTruthy();
+  // This sandbox build can't turn it off: say so.
+  expect(await screen.findByText(en.vaults.dialog.alwaysAskSignLocked)).toBeTruthy();
+  expect(askSwitch().disabled).toBe(true);
   save();
   await waitFor(() => expect(api.updateVaultSecret).toHaveBeenCalledOnce());
   expect(api.updateVaultSecret.mock.calls[0][1]).not.toHaveProperty('always_ask');
@@ -530,4 +550,109 @@ it('offers no ask-before-signing edit for protected keys or static secrets', () 
   expect(screen.queryByRole('switch', { name: en.vaults.dialog.alwaysAskSign })).toBeNull();
   rerender(form(<VaultSecretForm editSecret={{ ...standardKey, name: 'API_KEY', kind: 'static', signer_kind: null, fields: ['value'], default_field: 'value' } as VaultSecret} onCancel={vi.fn()} onCreated={vi.fn()} />));
   expect(screen.queryByRole('switch', { name: en.vaults.dialog.alwaysAskSign })).toBeNull();
+});
+
+describe('turning ask-before-signing off with a Passkey', () => {
+  const context = vectors.vectors[2].context;
+  const assertion = {
+    id: 'UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM',
+    rawId: context.factors[0].credentialId,
+    type: 'public-key',
+    response: { clientDataJSON: 'e30=', authenticatorData: 'AAAA', signature: 'MEUCIQ==', userHandle: null },
+  };
+  const on = { ...standardKey, policy: { always_ask: true } };
+  afterEach(() => { sandbox.canTurnOff = false; sandbox.windowBlocked = false; });
+
+  it('turns it off through the sandbox, only for this key, and Save no longer sends it', async () => {
+    sandbox.canTurnOff = true;
+    api.updateVaultSecret.mockClear();
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });
+    sandbox.authorizeSigningPolicyDowngrade.mockResolvedValue({ challengeId: context.challengeId, assertion });
+    api.completeVaultSigningPolicyDowngrade.mockResolvedValue({ ok: true, secret: { ...on, policy: {} } });
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    expect(askSwitch().disabled).toBe(false);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    await waitFor(() => expect(askSwitch().getAttribute('aria-checked')).toBe('false'));
+    expect(api.createVaultSigningPolicyChallenge).toHaveBeenCalledExactlyOnceWith('ETH_KEY', { always_ask: false });
+    expect(api.completeVaultSigningPolicyDowngrade.mock.calls[0][1]).toMatchObject({ authorization: { kind: 'webauthn', factor_id: context.factors[0].factorId } });
+    expect(sandbox.windowClose).toHaveBeenCalled();
+    // Applied by the Passkey confirmation itself; Save is not involved.
+    expect(screen.getByText(en.vaults.askOff.turnedOff)).toBeTruthy();
+    expect(api.updateVaultSecret).not.toHaveBeenCalled();
+    save();
+    await waitFor(() => expect(api.updateVaultSecret).toHaveBeenCalledOnce());
+    expect(api.updateVaultSecret.mock.calls[0][1]).not.toHaveProperty('always_ask');
+  });
+
+  it('stays on and says why when no Passkey was ever set up', async () => {
+    sandbox.canTurnOff = true;
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: false, code: 'vault_policy_setup_required' });
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    expect(await screen.findByText(en.vaults.askOff.setupRequired)).toBeTruthy();
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(sandbox.authorizeSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
+
+  it('says the browser blocked the window and asks the server nothing when the pop-up is blocked', async () => {
+    sandbox.canTurnOff = true;
+    sandbox.windowBlocked = true;
+    api.createVaultSigningPolicyChallenge.mockClear();
+    sandbox.authorizeSigningPolicyDowngrade.mockClear();
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    expect(await screen.findByText(en.vaults.askOff.popupBlocked)).toBeTruthy();
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(api.createVaultSigningPolicyChallenge).not.toHaveBeenCalled();
+    expect(sandbox.authorizeSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
+
+  it('never applies a late answer for the previous key to the key now in the editor', async () => {
+    sandbox.canTurnOff = true;
+    let finish: (value: unknown) => void = () => {};
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });
+    sandbox.authorizeSigningPolicyDowngrade.mockResolvedValue({ challengeId: context.challengeId, assertion });
+    api.completeVaultSigningPolicyDowngrade.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const other = { ...on, name: 'OTHER_KEY' };
+    const view = render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    await waitFor(() => expect(api.completeVaultSigningPolicyDowngrade).toHaveBeenCalled());
+    // The same editor now shows another key, then the first key's turn-off succeeds.
+    view.rerender(form(<VaultSecretForm editSecret={other} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await act(async () => { finish({ ok: true, secret: { ...on, policy: {} } }); });
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(screen.queryByText(en.vaults.askOff.turnedOff)).toBeNull();
+    expect(screen.getByText(en.vaults.askOff.offHintEdit)).toBeTruthy();
+  });
+
+  it('says the confirmation window was not fully visible, in the neutral tone, and stays on', async () => {
+    sandbox.canTurnOff = true;
+    api.completeVaultSigningPolicyDowngrade.mockClear();
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });
+    sandbox.authorizeSigningPolicyDowngrade.mockRejectedValue(Object.assign(new Error('x'), { code: 'sandbox_not_visible' }));
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    const line = await screen.findByText(en.vaults.askOff.notVisible);
+    expect(line.getAttribute('role')).toBe('note');
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
+
+  it.each(['passkey_cancelled', 'authorization_window_closed'])('stays on without a message when the confirmation ends with %s', async (code) => {
+    sandbox.canTurnOff = true;
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });
+    sandbox.authorizeSigningPolicyDowngrade.mockRejectedValue(Object.assign(new Error('x'), { code }));
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    await waitFor(() => expect(askSwitch().disabled).toBe(false));
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText(en.vaults.askOff.offHintEdit)).toBeTruthy();
+    expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
 });

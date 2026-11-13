@@ -288,6 +288,8 @@ function Brand({
             size="icon"
             disabled={disabled}
             aria-label={t('common.back')}
+            // The App's left-edge swipe presses this button (MobileOnboardingBridge).
+            data-mobile-back=""
             onClick={onBack}
           >
             <ArrowLeft className="size-5" />
@@ -1368,6 +1370,7 @@ function Instances({
   onSelect,
   onAccount,
   onAdd,
+  onBack,
 }: {
   session: Extract<MobileSessionState, { status: 'signedIn' }>;
   busy: BusyAction | null;
@@ -1378,12 +1381,20 @@ function Instances({
   onSelect: (instance: MobileInstance) => void;
   onAccount: () => void;
   onAdd: () => void;
+  /** Present while the page covers an instance: Back returns to it. */
+  onBack?: () => void;
 }) {
   const { t } = useTranslation();
   const refreshing = busy === 'refresh';
   return (
     <CloudScreen>
-      <Brand account disabled={locked} onAccount={onAccount} />
+      <Brand
+        back={Boolean(onBack)}
+        account
+        disabled={locked}
+        onBack={onBack}
+        onAccount={onAccount}
+      />
       <div className="flex items-start justify-between gap-3">
         <PageTitle
           title={session.selected_instance_id
@@ -1694,15 +1705,20 @@ function BootRecovery({
   errorKey,
   locked,
   onRetry,
+  onBack,
 }: {
   errorKey: MobileErrorKey;
   locked: boolean;
   onRetry: () => void;
+  /** Present while the page covers an instance: Back returns to it. */
+  onBack?: () => void;
 }) {
   const { t } = useTranslation();
   return (
     <CloudScreen>
-      <Brand account disabled />
+      {onBack
+        ? <Brand back disabled={locked} onBack={onBack} />
+        : <Brand account disabled />}
       <PageTitle
         title={t('mobileApp.instances.title')}
         subtitle={t('mobileApp.instances.subtitle')}
@@ -1719,7 +1735,9 @@ export function MobileOnboarding() {
   );
   // Account Back returns to the instance this page covers while native still
   // holds it; otherwise it shows the instance list.
-  const coversInstance = useRef(window.location.hash === RUNTIME_ACCOUNT_HASH);
+  const [coversInstance, setCoversInstance] = useState(
+    () => window.location.hash === RUNTIME_ACCOUNT_HASH,
+  );
   // avibe.bot's second-factor throttle window; a completed code waits for the button.
   const secondFactorRetryAt = useRef(0);
   const [screen, setScreen] = useState<Screen>('boot');
@@ -2086,7 +2104,7 @@ export function MobileOnboarding() {
   };
 
   const leaveAccount = async () => {
-    if (!coversInstance.current) {
+    if (!coversInstance) {
       if (isOperationLocked()) return;
       setErrorKey(null);
       setScreen(accountReturnScreen);
@@ -2101,7 +2119,7 @@ export function MobileOnboarding() {
     } catch {
       if (!ownsOperation(token)) return;
       // A switch, refresh, or sign-out closed it; nothing is behind the page.
-      coversInstance.current = false;
+      setCoversInstance(false);
       setScreen(accountReturnScreen);
     } finally {
       finishOperation(token);
@@ -2152,6 +2170,7 @@ export function MobileOnboarding() {
         errorKey={errorKey ?? 'mobileApp.errors.network'}
         locked={locked}
         onRetry={() => void bootstrap()}
+        onBack={coversInstance ? () => void leaveAccount() : undefined}
       />
     );
   }
@@ -2367,6 +2386,7 @@ export function MobileOnboarding() {
           setScreen('empty');
         }
       }}
+      onBack={coversInstance ? () => void leaveAccount() : undefined}
     />
   );
 }
