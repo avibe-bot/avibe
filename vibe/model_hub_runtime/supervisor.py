@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import atexit
 import errno
 import json
 import logging
@@ -33,6 +32,7 @@ from core.process_isolation import (
     signal_process_tree,
 )
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
+from vibe.shutdown_diagnostics import register_shutdown_hook
 from vibe.model_hub_runtime.config import (
     expected_model_names,
     registered_model_ids,
@@ -1036,4 +1036,4 @@ def stop_engine_supervisor() -> None:
         _supervisor = None
 
 
-atexit.register(stop_engine_supervisor)
+register_shutdown_hook("vibe.model_hub_runtime.stop_engine_supervisor", stop_engine_supervisor)

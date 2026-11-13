@@ -13,10 +13,13 @@ On the first handled SIGTERM/SIGINT, `main.py` arms `ShutdownDiagnostics` and
 reports its destination in the application log. The diagnostic writer creates
 one private, exclusively created `logs/shutdown-<pid>-<time_ns>.log` under the
 configured Avibe home. It does not reuse an existing file or a logging handler.
-Only its daemon thread opens/writes the sink; cleanup merely enqueues small
-records. Failure or a blocked destination cannot hold up service shutdown.
+Ordinary phase producers enqueue small records to the daemon writer; exit-boundary
+markers append and flush directly to the private sink so they remain visible
+after the queue writer or logging listener has stopped. Failure or a blocked
+destination cannot hold up service shutdown.
 
-The file records UTC timestamps, PID and milliseconds since the first signal:
+The file records UTC timestamps, PID and milliseconds since the first signal. The
+normal cleanup phases are:
 
 - `shutdown_requested`
 - `controller_run_return`: the controller's `run()` has left, after its cleanup
@@ -25,6 +28,21 @@ The file records UTC timestamps, PID and milliseconds since the first signal:
 - `logging_drain_start` / `logging_drain_return`
 - `main_return`: main's final exit boundary, after the existing conditional
   service-lock release; **not** proof that the process has exited
+
+After `main_return`, the diagnostic sink also records synchronous, private-file
+markers around the Avibe-owned `atexit` hooks and CPython's pre-thread-shutdown
+executor joins when the interpreter exposes those hooks:
+
+- `atexit_<hook>_start` / `atexit_<hook>_return`
+- `thread_executor_join_start` / `thread_executor_join_return`
+- `process_executor_join_start` / `process_executor_join_return`
+
+These markers are written and flushed directly to the private sink rather than
+through the logging listener or the diagnostic queue. Because ordinary phase
+records are queued while exit markers are synchronous, compare their
+`elapsed_ms` values rather than assuming file order. A missing return marker
+therefore identifies the hook/join in progress when the supervisor escalates;
+it is still observation, not a new shutdown lease or timeout.
 
 After four seconds, if the process is still alive, the same daemon writes one
 `thread_snapshot`: all currently observed Python thread IDs/names and up to
@@ -49,9 +67,23 @@ blocked diagnostic filesystem can also prevent a useful snapshot.
 `tests/test_shutdown_diagnostics.py` verifies the late snapshot in a temporary,
 self-owned child process whose interpreter joins an executor after normal
 logging shutdown. It checks timestamps, a single snapshot, thread names/frame
-coordinates, absence of local/source values, and private file permissions on
-POSIX. Separate child cases verify that a healthy, blocked or failing sink
-never prevents process exit. Thread-start failure is also best effort.
+coordinates, absence of local/source values, private file permissions on POSIX,
+and the synchronous executor-join marker. Separate child cases verify that a
+healthy, blocked or failing sink never prevents process exit. Thread-start failure
+is also best effort.
+
+The production ownership checks cover the three child classes affected by this
+boundary: `test_supervisor_reaps_an_engine_left_running_by_a_dead_service` in
+`tests/test_model_hub_runtime.py`, the deterministic workspace-bound orphan
+sweep test `test_show_runtime_orphan_sweep_terminates_workspace_bound_server` in
+`tests/test_shutdown_child_ownership.py`, and Tunnel Recovery's deterministic
+orphan-candidate reconciliation (`test_ra_tq_008_restart_removes_orphan_candidate`
+in `tests/test_tunnel_recovery.py`). A forced service kill skips `atexit`, so
+Model Hub and Show Runtime can remain alive when their cleanup hook is bypassed.
+The remote-access `atexit` hook only drains status reports; connector shutdown
+belongs to the controller/runtime path before `main_return`, while the startup
+candidate-reconciliation test covers an interrupted tunnel handoff. This PR
+observes those ownership consequences and changes none of their policies.
 
 `test_service_main_owns_monitor_shutdown` in
 `tests/test_macos_session_diagnostics.py` checks the actual main-path phase
