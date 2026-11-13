@@ -13,7 +13,7 @@ import { HdAccountAddressList } from '@/components/ui/vault-hd-wallet-steps';
 import { HintLine, KeySourceTabs } from '@/components/ui/vault-key-builder-parts';
 
 import { useDraft } from '../draft';
-import { CREATED_ADDRESSES, CREATED_WORDS, IMPORTED_ADDRESSES, IMPORTED_WORDS } from './data';
+import { CREATED_ADDRESSES, CREATED_WORDS, IMPORTED_ADDRESSES, IMPORTED_WORDS, path } from './data';
 import { AccountIndex, DialogHeading, Notice, TierCards, WordGrid } from './parts';
 import { MirrorRow, SandboxCard } from './signing';
 
@@ -161,7 +161,8 @@ export function WindowPassphrase({ mode, state }: { mode: 'create' | 'import'; s
           : d('只有原钱包用过才填。填错不会报错，只会得到不同的地址，下一步核对。', 'Only if your old wallet used one. A wrong passphrase gives no error, just different addresses; you compare them next.')}
       </span>
       <MirrorRow label="Passphrase" value={state === 'empty' ? '' : '••••••••••••••••••'} />
-      <MirrorRow label={d('再输入一次', 'Enter it again')} value={state === 'empty' ? '' : state === 'match' ? '••••••••••••••••••' : '•••••••••••••••••'} />
+      {/* Import takes the old wallet's passphrase once: comparing #0 next is the check. */}
+      {mode === 'create' ? <MirrorRow label={d('再输入一次', 'Enter it again')} value={state === 'empty' ? '' : state === 'match' ? '••••••••••••••••••' : '•••••••••••••••••'} /> : null}
       {state === 'mismatch' ? <span role="alert" className="text-[12px] text-destructive-ink">{d('两次输入不一样。', 'The two entries don’t match.')}</span> : state === 'match' ? <span className="text-[12px] text-mint-ink">{d('两次输入一致。区分大小写和空格。', 'They match. Case and spaces count.')}</span> : null}
     </SandboxCard>
   );
@@ -174,8 +175,11 @@ export function WindowReview({ mode }: { mode: 'create' | 'import' }) {
     <SandboxCard title={mode === 'create' ? d('保存钱包', 'Save the wallet') : d('和原钱包核对，然后保存', 'Compare, then save')} subtitle={`COLD_WALLET · ${mode === 'create' ? '4/4' : '3/3'}`} actions={[d('返回', 'Back'), d('用通行密钥保存', 'Save with passkey')]}>
       <span className="text-[12.5px] text-muted">{mode === 'create' ? d('账户 #0 的地址：', 'Account #0’s addresses:') : d('应该和原钱包的第一个账户一样：', 'These should match your old wallet’s first account:')}</span>
       <MirrorRow label="ETH" value={a.eth} />
+      <span className="-mt-2 font-mono text-[11.5px] text-muted">{path('evm', 0)}</span>
       <MirrorRow label="BTC · Taproot" value={a.btc_taproot} />
+      <span className="-mt-2 font-mono text-[11.5px] text-muted">{path('bitcoin', 0)}</span>
       <MirrorRow label="Solana" value={a.solana} />
+      <span className="-mt-2 font-mono text-[11.5px] text-muted">{path('solana', 0)}</span>
       <span className="flex items-start gap-1.5 text-[12px] leading-snug text-muted"><Lock className="mt-0.5 size-3.5 shrink-0" />{d('保存时用通行密钥确认；随后在安全窗口里重新打开加密结果核对，再把加密结果交给 Avibe。', 'Saving is confirmed with your passkey; the secure window then reopens the encrypted result to check it before handing the encrypted result to Avibe.')}</span>
     </SandboxCard>
   );
