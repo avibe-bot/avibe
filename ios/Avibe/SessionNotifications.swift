@@ -95,7 +95,7 @@ final class SessionNotificationCleaner {
         clear(
             instanceOrigin: instanceOrigin,
             accountID: accountID,
-            deliveredBy: min(reconcile.asOf, Date())
+            deliveredBy: Date()
         ) { sessionID in
             !reconcile.unreadSessions.contains(sessionID)
         }
