@@ -211,6 +211,20 @@ vibe vault request GITHUB_LOGIN --reason "Log in to GitHub" \
   --spec-json '{"protection":"protected","fields":["username","password","totp"],"default_field":"password"}'
 ```
 
+A request can also carry an advisory `generate` recipe. It never generates,
+saves, or authorizes anything: the browser may use it to preset the user's
+explicit generator action on either tier. Recipes are strict objects:
+
+- Password: `{"type":"password","length":24,"digits":true,"symbols":true,"no_lookalikes":false}`.
+  `length` is 12–128 characters; the other options are booleans. Omitted options
+  use these defaults.
+- Hex or standard padded Base64: `{"type":"hex","bytes":32}` or
+  `{"type":"base64","bytes":32}`. `bytes` is 16–64 and defaults to 32;
+  password options are not accepted for these types.
+- Any recipe may name an optional `field` (a valid field label); omission targets
+  the default field. Unknown keys, types, or invalid limits reject the whole
+  request spec before any request/audit row is written. Recipes carry no value.
+
 The browser form starts with those rows. The user may remove rows, and every
 submitted field needs a value. Field-aware provision replies (asynchronous
 callbacks, synchronous `--wait`, and already-existing results) list current field

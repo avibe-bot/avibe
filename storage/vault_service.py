@@ -104,6 +104,7 @@ PROVISION_SPEC_ALLOWED_KEYS = {
     "links",
     "fields",
     "default_field",
+    "generate",
 }
 PROVISION_FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_SECRET_FIELDS = 32
@@ -923,6 +924,39 @@ def _stored_fetch_policy_visible_snapshot(policy: dict[str, Any]) -> dict[str, A
     return snapshot
 
 
+def normalize_generate_recipe(recipe: Any) -> dict[str, Any]:
+    """Validate a value-free generation hint; this never generates or saves a value."""
+    if not isinstance(recipe, dict):
+        raise VaultServiceError("generate must be an object")
+    recipe_type = recipe.get("type")
+    if not isinstance(recipe_type, str) or recipe_type not in {"password", "hex", "base64"}:
+        raise VaultServiceError("generate.type must be 'password', 'hex', or 'base64'")
+    allowed = {"type", "field"} | (
+        {"length", "digits", "symbols", "no_lookalikes"} if recipe_type == "password" else {"bytes"}
+    )
+    if set(recipe) - allowed:
+        raise VaultServiceError("unsupported options for generate.type")
+    normalized: dict[str, Any] = {"type": recipe_type}
+    if recipe_type == "password":
+        length = recipe.get("length", 24)
+        if type(length) is not int or not 12 <= length <= 128:
+            raise VaultServiceError("generate.length must be an integer from 12 to 128")
+        normalized["length"] = length
+        for key, default in (("digits", True), ("symbols", True), ("no_lookalikes", False)):
+            value = recipe.get(key, default)
+            if type(value) is not bool:
+                raise VaultServiceError(f"generate.{key} must be a boolean")
+            normalized[key] = value
+    else:
+        count = recipe.get("bytes", 32)
+        if type(count) is not int or not 16 <= count <= 64:
+            raise VaultServiceError("generate.bytes must be an integer from 16 to 64")
+        normalized["bytes"] = count
+    if "field" in recipe:
+        normalized["field"] = _validate_field_name(recipe["field"], field="generate.field")
+    return normalized
+
+
 def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     """Return non-secret creation hints for a provision request.
 
@@ -1002,6 +1036,9 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
             normalized_skills = list(dict.fromkeys(_normalize_tag(skill, field="spec.links.skills") for skill in skills))
             tags = list(dict.fromkeys([*tags, *(skill_tag(skill) for skill in normalized_skills)]))
             normalized["links"] = {"skills": normalized_skills}
+
+    if "generate" in spec:
+        normalized["generate"] = normalize_generate_recipe(spec["generate"])
 
     if tags:
         normalized["tags"] = tags
