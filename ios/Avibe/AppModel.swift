@@ -271,13 +271,17 @@ final class AppModel: ObservableObject {
 
     /// Covers the live runtime with the bundled account page, keeping its
     /// document, history, and scroll position for `returnToRuntime()`.
+    /// A push-management request the App makes on its own (at launch, in the
+    /// background) keeps the runtime selected (`isSelectedRuntime`), so it
+    /// neither closes the runtime here nor keeps the page from returning to
+    /// it; signing out or another account does.
     func showAccount() {
         switch route {
         case .accountOverBrowser:
             return
         case .browser(let runtime)
             where runtimeController != nil
-                && sessionCoordinator.isCurrentRuntime(runtime):
+                && sessionCoordinator.isSelectedRuntime(runtime):
             runtimeController?.prepareForAccountCover()
             route = .accountOverBrowser(runtime)
         default:
@@ -292,11 +296,11 @@ final class AppModel: ObservableObject {
         guard
             case .accountOverBrowser(let runtime) = route,
             runtimeController != nil,
-            sessionCoordinator.isCurrentRuntime(runtime)
+            sessionCoordinator.isSelectedRuntime(runtime)
         else {
             return false
         }
-        sessionCoordinator.deactivateAccountSurface()
+        sessionCoordinator.leaveAccountSurface()
         route = .browser(runtime)
         return true
     }

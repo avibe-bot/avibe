@@ -786,6 +786,34 @@ final class DirectPathAppTests: XCTestCase {
         )
     }
 
+    // MARK: Account over the runtime while a push request runs
+
+    /// The avatar while a push request the App made on its own is running:
+    /// Account covers the runtime (it used to close it and show the plain
+    /// account page), and Back returns to it.
+    @MainActor
+    func testAccountCoversTheRuntimeAndReturnsToItWhileAPushRequestRuns() async throws {
+        let hold = PushHold(path: "/api/push/hold-account")
+        let app = try await makeApp(directTransport: nil, pushHolds: [hold])
+        let runtime = try await select("instance-1", in: app)
+        app.registerRuntimeController(
+            try makeRuntimeController(app, runtime),
+            for: runtime
+        )
+        XCTAssertEqual(app.route, .browser(runtime))
+
+        let management = try await holdPushManagement(hold, in: app)
+        app.showAccount()
+        XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+        XCTAssertTrue(app.returnToRuntime())
+        XCTAssertEqual(app.route, .browser(runtime))
+
+        hold.release.signal()
+        try await management.value
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertFalse(app.mobileSessionCoordinator.isAccountSurfaceActive)
+    }
+
     // MARK: A runtime abandoned when its WebView registers
 
     @MainActor

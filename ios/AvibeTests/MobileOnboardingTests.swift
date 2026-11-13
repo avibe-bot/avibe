@@ -1027,6 +1027,165 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertFalse(coordinator.isSelectedRuntime(opened))
     }
 
+    /// The account page over a runtime reads the session while a push
+    /// request the App made on its own is still running, instead of failing
+    /// as busy (shown as "can't reach avibe.bot"). Nothing that changes the
+    /// account, the store or the selection runs meanwhile.
+    func testTheAccountPageReadsTheSessionWhileAPushRequestRuns() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        var coordinator: MobileSessionCoordinator!
+        var read: MobileSessionState?
+        var refused: [String] = []
+        management.pushManagementHandler = { _ in
+            read = try await coordinator.bootstrap()
+            do {
+                _ = try await coordinator.refresh()
+            } catch let error as MobileAccountError {
+                refused.append("refresh: \(error.code)")
+            }
+            do {
+                _ = try coordinator.selectInstance(id: self.instance.id)
+            } catch let error as MobileAccountError {
+                refused.append("select: \(error.code)")
+            }
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+
+        _ = try await coordinator.pushManagementRequest(
+            PushManagementRequest(
+                method: "POST",
+                path: "/api/push/apns/installations",
+                headers: [:],
+                body: nil
+            )
+        )
+
+        guard case .signedIn(let session, let selected) = try XCTUnwrap(read) else {
+            return XCTFail("The account page did not read the session: \(String(describing: read))")
+        }
+        XCTAssertEqual(session.account.id, "account-1")
+        XCTAssertEqual(selected, instance.id)
+        XCTAssertEqual(
+            refused,
+            ["refresh: \(MobileAccountError.busy.code)", "select: \(MobileAccountError.busy.code)"]
+        )
+    }
+
+    /// The instance list: the current instance first, then the ones opened on
+    /// this device, most recent first, then the rest in avibe.bot's order.
+    /// Each account keeps its own.
+    func testInstancesListTheCurrentThenTheRecentlyOpenedThenAvibeBotsOrder() async throws {
+        let instances = ["a", "b", "c", "d"].map { id in
+            MobileInstance(
+                id: id,
+                name: "Instance \(id)",
+                host: "\(id).avibe.bot",
+                url: URL(string: "https://\(id).avibe.bot")!,
+                relationship: "owner",
+                ownerEmail: nil,
+                available: true
+            )
+        }
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1", instances: instances)
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()]
+        )
+        let order = { (state: MobileSessionState) -> [String] in
+            guard case .signedIn(let session, _) = state else { return [] }
+            return session.instances.map(\.id)
+        }
+        coordinator.activateAccountSurface()
+        XCTAssertEqual(order(try await coordinator.bootstrap()), ["a", "b", "c", "d"])
+
+        _ = try coordinator.selectInstance(id: "c")
+        XCTAssertEqual(order(try await coordinator.bootstrap()), ["c", "a", "b", "d"])
+        try await Task.sleep(for: .milliseconds(20))
+        _ = try coordinator.selectInstance(id: "b")
+        XCTAssertEqual(order(try await coordinator.bootstrap()), ["b", "c", "a", "d"])
+
+        // A relaunch keeps it, recorded under this account only.
+        let relaunched = makeCoordinator(defaults: defaults, transports: [transport])
+        relaunched.activateAccountSurface()
+        XCTAssertEqual(order(try await relaunched.bootstrap()), ["b", "c", "a", "d"])
+        XCTAssertEqual(
+            defaults.dictionary(forKey: "avibe.mobile.instanceUse")?.keys.sorted(),
+            ["account-1"]
+        )
+    }
+
+    /// A swipe in from the left edge presses the page's own Back, where one is
+    /// shown, and does nothing where none is.
+    func testAnEdgeSwipePressesTheShownBackAndNothingWithoutOne() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport, FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+
+        var returned = 0
+        let account = MobileOnboardingViewController(
+            coordinator: coordinator,
+            startScreen: .runtimeAccount,
+            returnToRuntime: {
+                returned += 1
+                return true
+            }
+        )
+        let (accountWindow, accountWebView) = try present(
+            account,
+            size: CGSize(width: 390, height: 700)
+        )
+        defer { accountWindow.isHidden = true }
+        XCTAssertTrue(
+            account.view.gestureRecognizers?.contains {
+                ($0 as? UIScreenEdgePanGestureRecognizer)?.edges == .left
+            } == true
+        )
+        let backShown = try await waitForJavaScriptValue(in: accountWebView) {
+            "document.querySelector('[data-mobile-back]') !== null"
+        }
+        XCTAssertTrue(backShown)
+        let pressed = await account.pressPageBack()
+        XCTAssertTrue(pressed)
+        for _ in 0..<50 where returned == 0 {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertEqual(returned, 1)
+
+        // The instance list with nothing behind it has no Back.
+        let list = MobileOnboardingViewController(
+            coordinator: coordinator,
+            startScreen: .instances
+        )
+        let (listWindow, listWebView) = try present(
+            list,
+            size: CGSize(width: 390, height: 700)
+        )
+        defer { listWindow.isHidden = true }
+        let listShown = try await waitForJavaScriptValue(in: listWebView) {
+            "document.querySelector('main button') !== null"
+        }
+        XCTAssertTrue(listShown)
+        let pressedOnList = await list.pressPageBack()
+        XCTAssertFalse(pressedOnList)
+    }
+
     func testOtherAccountBootstrapUsesTheSamePushLogoutPreparation()
         async throws
     {

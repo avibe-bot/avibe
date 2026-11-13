@@ -502,6 +502,9 @@ final class MobileSessionCoordinator {
     ) -> MobileAuthTransporting
 
     private static let selectionKey = "avibe.mobile.selection"
+    /// When each instance was last opened as the selected runtime, per
+    /// account: `[accountID: [instanceID: seconds since 1970]]`.
+    private static let instanceUseKey = "avibe.mobile.instanceUse"
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -521,6 +524,13 @@ final class MobileSessionCoordinator {
     private var secondFactorEmail: String?
     private var generation = 0
     private var phase = Phase.ready
+    /// The exclusive operation now running that keeps the account, its store
+    /// and the selection as they are (a push-management request). The selected
+    /// runtime stays current through it.
+    private var selectionKeepingOperation: UUID?
+    /// The account page closed while that operation used the transport; it
+    /// is released when the operation ends rather than under it.
+    private var releasesSurfaceAfterOperation = false
     private var signedOutStoreIsFresh = false
     private var pendingStoreReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -583,9 +593,20 @@ final class MobileSessionCoordinator {
         transport = nil
     }
 
+    /// The account page over the runtime is closing. Its transport is
+    /// released now, or, while a push-management request runs on it, once
+    /// that request ends.
+    func leaveAccountSurface() {
+        guard selectionKeepingOperation == nil else {
+            releasesSurfaceAfterOperation = true
+            return
+        }
+        deactivateAccountSurface()
+    }
+
     func bootstrap() async throws -> MobileSessionState {
         if let snapshot {
-            guard phase == .ready else {
+            guard keepsSelection else {
                 throw MobileAccountError.busy
             }
             return state(for: snapshot)
@@ -829,6 +850,7 @@ final class MobileSessionCoordinator {
                 url: instance.url
             )
         )
+        recordInstanceUse(accountID: snapshot.account.id, instanceID: instance.id)
         deactivateAccountSurface()
         onOpenRuntime(
             MobileRuntimeContext(
@@ -879,13 +901,14 @@ final class MobileSessionCoordinator {
             return response
         }
         let wasActive = transport != nil
-        return try await runExclusive {
+        return try await runExclusive(keepingSelection: true) {
             let requestGeneration = self.generation
             self.activateAccountSurface()
             defer {
-                if !wasActive {
+                if !wasActive || self.releasesSurfaceAfterOperation {
                     self.deactivateAccountSurface()
                 }
+                self.releasesSurfaceAfterOperation = false
             }
             let response = try await self.requireTransport().pushManagementRequest(
                 request
@@ -974,9 +997,57 @@ final class MobileSessionCoordinator {
             })
         else {
             clearStoredSelection()
-            return .signedIn(snapshot: snapshot, selectedInstanceID: nil)
+            let ordered = orderedByUse(snapshot, current: nil)
+            self.snapshot = ordered
+            return .signedIn(snapshot: ordered, selectedInstanceID: nil)
         }
-        return .signedIn(snapshot: snapshot, selectedInstanceID: selected.id)
+        let ordered = orderedByUse(snapshot, current: selected.id)
+        self.snapshot = ordered
+        return .signedIn(snapshot: ordered, selectedInstanceID: selected.id)
+    }
+
+    /// The account's instances as the instance list shows them: the current
+    /// one first, then the ones opened on this device, most recent first,
+    /// then the rest in the order avibe.bot sent them (pinned, then newest).
+    private func orderedByUse(
+        _ snapshot: MobileSessionSnapshot,
+        current: String?
+    ) -> MobileSessionSnapshot {
+        let uses = instanceUses(accountID: snapshot.account.id)
+        let serverOrder = Dictionary(
+            uniqueKeysWithValues: snapshot.instances.enumerated().map {
+                ($0.element.id, $0.offset)
+            }
+        )
+        let instances = snapshot.instances.sorted { left, right in
+            if (left.id == current) != (right.id == current) {
+                return left.id == current
+            }
+            let leftUse = uses[left.id]
+            let rightUse = uses[right.id]
+            switch (leftUse, rightUse) {
+            case let (leftUse?, rightUse?) where leftUse != rightUse:
+                return leftUse > rightUse
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return serverOrder[left.id, default: 0] < serverOrder[right.id, default: 0]
+            }
+        }
+        return MobileSessionSnapshot(account: snapshot.account, instances: instances)
+    }
+
+    private func instanceUses(accountID: String) -> [String: Double] {
+        let all = defaults.dictionary(forKey: Self.instanceUseKey) as? [String: [String: Double]]
+        return all?[accountID] ?? [:]
+    }
+
+    private func recordInstanceUse(accountID: String, instanceID: String) {
+        var all = defaults.dictionary(forKey: Self.instanceUseKey) as? [String: [String: Double]] ?? [:]
+        all[accountID, default: [:]][instanceID] = Date().timeIntervalSince1970
+        defaults.set(all, forKey: Self.instanceUseKey)
     }
 
     func restorableRuntime(
@@ -1036,6 +1107,7 @@ final class MobileSessionCoordinator {
     }
 
     private func runExclusive<T>(
+        keepingSelection: Bool = false,
         _ operation: () async throws -> T
     ) async throws -> T {
         guard phase == .ready else {
@@ -1043,12 +1115,34 @@ final class MobileSessionCoordinator {
         }
         let token = UUID()
         phase = .operation(token)
+        if keepingSelection {
+            selectionKeepingOperation = token
+        }
         defer {
+            if selectionKeepingOperation == token {
+                selectionKeepingOperation = nil
+            }
             if phase == .operation(token) {
                 phase = .ready
             }
         }
         return try await operation()
+    }
+
+    /// Whether the signed-in session may be read now: no operation is
+    /// running, or only one that keeps the account, its store and the
+    /// selection (a push-management request, which the App makes on its own
+    /// at launch and in the background). The account page opened over the
+    /// runtime reads it, and must not fail on that request.
+    private var keepsSelection: Bool {
+        switch phase {
+        case .ready:
+            return true
+        case .operation(let token):
+            return token == selectionKeepingOperation
+        case .resetting, .pushLogout:
+            return false
+        }
     }
 
     @discardableResult
