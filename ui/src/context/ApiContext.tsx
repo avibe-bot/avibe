@@ -155,6 +155,10 @@ export type VaultSecret = {
   /** Receive addresses derived from a keypair secret's public key. Agents and the UI
    *  identify a signing key by address; the raw public key is never surfaced here. */
   signing_addresses?: SigningAddresses | null;
+  /** The Bitcoin types this key can sign for (server capability, not inferred from addresses). */
+  bitcoin_address_types?: BitcoinAddressType[];
+  /** A seed wallet prepared for the three Bitcoin types. Absent: Taproot only until prepared. */
+  bitcoin_profile?: 'bitcoin-address-types-v1';
   /** The key's curve from its stored public metadata; present even when no address can be derived. */
   signing_curve?: 'secp256k1' | 'ed25519';
   /** A seed-phrase wallet (`signer_kind: 'hd-seed'`): its enabled accounts, #0 first, and how many
@@ -170,12 +174,21 @@ export type VaultSecret = {
   updated_at: string;
 };
 
+/** A Bitcoin script type the server can sign for: Legacy P2PKH, Native SegWit P2WPKH, Taproot. */
+export type BitcoinAddressType = 'p2pkh' | 'p2wpkh' | 'p2tr';
+
 export type VaultHdAccount = {
   account: number;
   /** Null: the localized fallback name. */
   name: string | null;
   eth: string;
   btc_taproot: string;
+  /** bitcoin-address-types-v1 (docs/plans/vault-bitcoin-address-types.md): present once the wallet is
+   *  prepared; `bitcoin_address_types` lists the types the server can sign for. */
+  btc_segwit?: string;
+  btc_legacy?: string;
+  bitcoin_paths?: { p2pkh: string; p2wpkh: string; p2tr: string };
+  bitcoin_address_types?: BitcoinAddressType[];
   solana: string;
   paths: { evm: string; bitcoin: string; solana: string };
   always_ask: boolean;
@@ -467,7 +480,9 @@ export type VaultCreatePayload = {
   signer_kind?: string | null;
   /** Seed-phrase wallets: account #0 as this browser derived it. The server compares it with what
    *  avault derives before saving anything, and refuses with 409 `hd_address_check_failed`. */
-  expected_account0?: { eth: string; btc_taproot: string; solana: string };
+  expected_account0?:
+    | { eth: string; btc_taproot: string; solana: string }
+    | { eth: string; btc_legacy: string; btc_segwit: string; btc_taproot: string; solana: string };
   /** Seed-phrase wallets: account #0 asks before every signature from the moment it is saved. */
   account0_always_ask?: boolean;
   /**
@@ -478,7 +493,7 @@ export type VaultCreatePayload = {
     | { curve: 'ed25519'; source: 'generate' }
     | { curve: 'ed25519'; source: 'import'; format: 'solana-cli-json' | 'base58-secret' }
     /** A seed-phrase wallet: the browser sealed the 64-byte BIP39 seed in `blind_box`. */
-    | { type: 'hd-seed'; source: 'import'; format: 'raw-seed' };
+    | { type: 'hd-seed'; source: 'import'; format: 'raw-seed'; profile?: 'bitcoin-address-types-v1' };
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
   /** Bare skill names. Sent alongside the folded `skill:<name>` tags so skill scopes work on
@@ -1056,6 +1071,8 @@ export type ApiContextType = {
   enableVaultHdAccount: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   /** Renames an enabled account (null resets it) or sets its ask-before-signing. */
   updateVaultHdAccount: (name: string, account: number, payload: { name?: string | null; always_ask?: boolean }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  /** Derive a seed wallet's Legacy and SegWit public keys from its sealed seed (no words). */
+  prepareVaultBitcoinAddressTypes: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecretField: (name: string, field: string, payload: { expected_updated_at: string }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
@@ -4766,6 +4783,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     updateVaultSecret: (name, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}`, payload, opts),
     enableVaultHdAccount: (name, opts) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/accounts`, {}, opts),
     updateVaultHdAccount: (name, account, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}/accounts/${account}`, payload, opts),
+    prepareVaultBitcoinAddressTypes: (name, opts) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/bitcoin-address-types`, {}, opts),
     updateVaultSecretField: async (name, field, payload, opts) => {
       const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;
       const { payloadJson } = await requestJson(path, {

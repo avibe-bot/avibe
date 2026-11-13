@@ -90,6 +90,8 @@ final class AppModel: ObservableObject {
     /// The App icon badge: the selected instance's Inbox total, which its Web
     /// UI sets through `badge.set` (and a push sets while the App is away).
     private let nativeBadge: NativeBadge
+    /// Retires an instance's Session notifications once nothing there is unread.
+    private let sessionNotifications: SessionNotificationCleaner
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -226,6 +228,9 @@ final class AppModel: ObservableObject {
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
         nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())
+        sessionNotifications = SessionNotificationCleaner(
+            center: pushNotificationCenter ?? SystemPushNotificationCenter()
+        )
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
         _ = nativePushCoordinator
         _ = directPathController
@@ -604,6 +609,16 @@ final class AppModel: ObservableObject {
             return false
         }
         nativeBadge.set(count)
+        if count == 0, let account = sessionCoordinator.currentAccount {
+            // Nothing notified on this instance is unread. The zero was
+            // computed before this call arrived, so only what was delivered
+            // by now is covered by it; anything later stays.
+            sessionNotifications.clearAllSessions(
+                instanceOrigin: origin.serialized,
+                accountID: account.id,
+                readAt: Date()
+            )
+        }
         return true
     }
 

@@ -13,6 +13,7 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 const api = vi.hoisted(() => ({
   enableVaultHdAccount: vi.fn(),
   updateVaultHdAccount: vi.fn(),
+  prepareVaultBitcoinAddressTypes: vi.fn(async () => ({ ok: false, code: 'forbidden' })),
   getSession: vi.fn(async () => ({ title: '网格交易' })),
 }));
 vi.mock('@/context/ApiContext', async (original) => ({ ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api }));
@@ -109,4 +110,25 @@ it('shows an Editor the addresses but no account-management actions, and says wh
   expect(screen.queryByRole('button', { name: /\+|Add account/ })).toBeNull();
   for (const sw of screen.getAllByRole('switch', { name: en.vaults.hd.wallet.ask })) expect((sw as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByText(en.vaults.hd.wallet.needsManager)).toBeTruthy();
+});
+
+it('applies a preparation answer even when the page rerenders with a new handler meanwhile', async () => {
+  let resolve!: (value: unknown) => void;
+  api.prepareVaultBitcoinAddressTypes.mockReturnValueOnce(new Promise((r) => { resolve = r; }) as never);
+  const first = vi.fn();
+  const second = vi.fn();
+  const unprepared = wallet([account(0)]);
+  const view = (onChanged: (s: VaultSecret) => void) => (
+    <I18nextProvider i18n={i18n}>
+      <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: null, instanceRole: null, capabilities: OWNER_INSTANCE_CAPABILITIES }}>
+        <VaultHdWalletDialog secret={unprepared} open onOpenChange={vi.fn()} onChanged={onChanged} />
+      </InstanceAuthorizationContext.Provider>
+    </I18nextProvider>
+  );
+  const { rerender } = render(view(first));
+  rerender(view(second));
+  const prepared = { ...unprepared, bitcoin_profile: 'bitcoin-address-types-v1' as const };
+  await act(async () => { resolve({ ok: true, secret: prepared }); });
+  expect(api.prepareVaultBitcoinAddressTypes).toHaveBeenCalledOnce();
+  expect(second).toHaveBeenCalledWith(prepared);
 });

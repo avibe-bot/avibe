@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { CheckCircle2, KeyRound, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { badgeVariants } from './badge-variants';
-import { VaultSecretDialog } from './vault-secret-dialog';
+import { LazyVaultSecretDialog } from './vault-secret-dialog-lazy';
 import { useApi, type VaultRequest } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 
@@ -57,6 +57,8 @@ const LiveSecretRequest: React.FC<{ name: string; requestId?: string }> = ({ nam
   const api = useApi();
   const [open, setOpen] = useState(false);
   const [fulfilled, setFulfilled] = useState(false);
+  // Fetch the dialog's code once the badge is up, so opening it is not a wait.
+  useEffect(() => { void LazyVaultSecretDialog.preload(); }, []);
   const [resolvedRequest, setResolvedRequest] = useState<VaultRequest | null>(null);
   const [requestLoaded, setRequestLoaded] = useState(false);
   const [requestAmbiguous, setRequestAmbiguous] = useState(false);
@@ -107,7 +109,9 @@ const LiveSecretRequest: React.FC<{ name: string; requestId?: string }> = ({ nam
         <KeyRound className="mr-1 inline size-3" />
         {name} — {t('vaults.request.provide')}
       </button>
-      <VaultSecretDialog
+      {open ? (
+      <Suspense fallback={null}>
+      <LazyVaultSecretDialog
         open={open}
         onOpenChange={setOpen}
         name={name}
@@ -129,6 +133,8 @@ const LiveSecretRequest: React.FC<{ name: string; requestId?: string }> = ({ nam
           setOpen(false);
         }}
       />
+      </Suspense>
+      ) : null}
     </>
   );
 };

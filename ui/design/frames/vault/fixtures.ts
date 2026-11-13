@@ -71,6 +71,7 @@ export const vaultSecrets: VaultSecret[] = [
     description: '测试网合约部署（公开的合成测试密钥，切勿充值）',
     tags: ['crypto'],
     signing_addresses: syntheticAddresses,
+    bitcoin_address_types: ['p2pkh', 'p2wpkh', 'p2tr'],
     use_count: 3,
     last_used_at: ago(60 * 24 * 5),
   }),

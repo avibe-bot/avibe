@@ -95,7 +95,8 @@ const fieldDraft = (name: string, value = ''): FieldDraft => ({ id: nextFieldDra
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
 /** Seed-phrase wallets: avault imports the seed and signs by derivation path (avault DESIGN). */
-const AVAULT_HD_MIN_VERSION = '0.1.11';
+// 0.1.12: seed wallets are created with the three Bitcoin types (bitcoin-address-types-v1).
+const AVAULT_HD_MIN_VERSION = '0.1.12';
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const HTTP_HEADER_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const QUERY_PARAM_RE = /^[A-Za-z0-9._~-]+$/;
@@ -233,6 +234,8 @@ export const VaultSecretForm: React.FC<{
   const [hdAsk, setHdAsk] = useState(false);
   const [hdCreated, setHdCreated] = useState<VaultHdAccount | null>(null);
   const [hdMismatch, setHdMismatch] = useState(false);
+  // The server said this avault cannot create a wallet with the Bitcoin types profile.
+  const [hdAvaultUpgrade, setHdAvaultUpgrade] = useState(false);
   const [hdMismatchNotSaved, setHdMismatchNotSaved] = useState(false);
   // The wallet exists but #0 came back without the ask-before-signing the create asked for (a server
   // that ignored account0_always_ask): not done until it is on.
@@ -604,10 +607,18 @@ export const VaultSecretForm: React.FC<{
         kind: 'keypair',
         protection: 'standard',
         signer_kind: 'hd-seed',
-        keypair: { type: 'hd-seed', source: 'import', format: 'raw-seed' },
+        // The three Bitcoin types (docs/plans/vault-bitcoin-address-types.md): the server checks all
+        // five #0 addresses below. An avault without this profile refuses; there is no fallback.
+        keypair: { type: 'hd-seed', source: 'import', format: 'raw-seed', profile: 'bitcoin-address-types-v1' },
         blind_box: blindBox,
         // Always sent, never dropped on a retry: the server saves nothing unless avault's #0 matches.
-        expected_account0: { eth: expected.eth, btc_taproot: expected.btc_taproot, solana: expected.solana },
+        expected_account0: {
+          eth: expected.eth,
+          btc_legacy: expected.btc_legacy,
+          btc_segwit: expected.btc_segwit,
+          btc_taproot: expected.btc_taproot,
+          solana: expected.solana,
+        },
         // Saved with the wallet in one transaction: #0 is never signable without asking, not even briefly.
         account0_always_ask: hdAsk ? true : undefined,
         description: description.trim() || undefined,
@@ -628,6 +639,11 @@ export const VaultSecretForm: React.FC<{
       setHdMismatchNotSaved(true);
       setHdMismatchDeleted(true);
       setHdMismatch(true);
+      return;
+    }
+    if (!created.ok && created.code === 'avault_upgrade_required') {
+      // Nothing was saved; what was entered stays so the user can update avault and save again.
+      setHdAvaultUpgrade(true);
       return;
     }
     if (!created.ok) {
@@ -1878,7 +1894,7 @@ export const VaultSecretForm: React.FC<{
       {isHd && protection === 'protected' ? (
         <span role="note" className="text-xs text-muted">{t('vaults.hd.protectedUnsupported')}</span>
       ) : null}
-      {isHd && avaultDep && !hdReady ? (
+      {isHd && avaultDep && (!hdReady || hdAvaultUpgrade) ? (
         <HdAvaultOld version={AVAULT_HD_MIN_VERSION} installed={avaultDep.version ?? 'unknown'} />
       ) : null}
 
@@ -1903,5 +1919,8 @@ export const VaultSecretForm: React.FC<{
 };
 
 /** Whether avault stored, for an account, the addresses this browser derived from the words. */
+// All five #0 addresses must come back as these words give them: a wallet created with the Bitcoin
+// types profile that lacks SegWit or Legacy is not the wallet that was asked for.
 const sameHdAddresses = (stored: VaultHdAccount, expected: HdAccountAddresses) =>
-  stored.eth === expected.eth && stored.btc_taproot === expected.btc_taproot && stored.solana === expected.solana;
+  stored.eth === expected.eth && stored.btc_taproot === expected.btc_taproot && stored.solana === expected.solana
+  && stored.btc_segwit === expected.btc_segwit && stored.btc_legacy === expected.btc_legacy;
