@@ -16,7 +16,20 @@ Section
   ; Must agree with the observer-owned exact root. Never rely on NSIS's default.
   ReadEnvStr $0 "AVIBE_NATIVE_ACCEPTANCE_INSTALLATION"
   StrCmp $0 "" refused
-  StrCmp $INSTDIR $0 allowed refused
+  ; Normalize ordinary and canonical extended-length spellings before the exact
+  ; ownership comparison. The Rust fixture keeps the native spelling, while
+  ; this also protects the gate if either side is canonicalized by Windows.
+  StrCpy $1 $0
+  StrCpy $2 $INSTDIR
+  StrCpy $3 $1 4
+  StrCmp $3 "\\?\" 0 +2
+    StrCpy $1 $1 "" 4
+  StrCpy $3 $2 4
+  StrCmp $3 "\\?\" 0 +2
+    StrCpy $2 $2 "" 4
+  GetFullPathName $1 "$1"
+  GetFullPathName $2 "$2"
+  StrCmp $1 $2 allowed refused
   allowed:
     SetOutPath "$INSTDIR"
     File /oname=avibe-desktop.exe "${NEXT_BINARY}"

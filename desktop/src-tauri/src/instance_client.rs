@@ -817,9 +817,12 @@ fn apply_presentation(app: &AppHandle) {
     // A newer presentation may have arrived during native admission.
     schedule_presentation(app);
 }
-/// The callback reports actual dispatch, not merely native eval submission.
-/// Once an event is consumed, either approving or cancelling its unsaved-work
-/// guard is terminal. Only a proven receiver mismatch can be retried safely.
+/// The callback reports actual guarded-event delivery, not merely native eval submission.
+/// A compatible page cancels the event before it performs (or awaits) its own guarded
+/// navigation. An older page that does not know the event leaves it unconsumed and
+/// therefore receives no fallback URL; ambiguous execution remains parked.
+/// Once an event is consumed, either approving or cancelling its unsaved-work guard
+/// is terminal. Only a proven receiver mismatch can be retried safely.
 fn guarded_presentation_script(attempt: &GuardAttempt) -> String {
     let receiver = serde_json::to_string(&attempt.receiver).expect("receiver");
     let view = serde_json::to_string(attempt.intent.view).expect("view");
@@ -829,8 +832,8 @@ fn guarded_presentation_script(attempt: &GuardAttempt) -> String {
         try {{
             if (window.self !== window.top || window.location.href !== {receiver}) return "not_dispatched";
             const event = new CustomEvent('avibe:desktop-present', {{ cancelable: true, detail: {{ view: {view}, presentationToken: {token} }} }});
-            if (window.dispatchEvent(event)) window.location.assign('avibe://desktop/' + {view} + '?native_request=' + encodeURIComponent({token}));
-            return "dispatched";
+            window.dispatchEvent(event);
+            return event.defaultPrevented ? "dispatched" : "unconsumed";
         }} catch (_) {{ return "unknown"; }}
     }})()"#
     )
@@ -1470,6 +1473,23 @@ mod tests {
     // Native eval acceptance is not event delivery. Unknown execution could
     // already have shown the unsaved-work prompt, so only an explicit
     // not-dispatched callback may retry; stale acknowledgements own nothing.
+    #[test]
+    fn guarded_presentation_requires_a_compatible_event_consumer() {
+        let attempt = GuardAttempt {
+            sequence: 1,
+            intent: PresentationIntent {
+                id: 1,
+                view: "updates",
+                owner: 4,
+                guarded: true,
+            },
+            receiver: "tauri://localhost/account/index.html?view=instances".into(),
+        };
+        let script = guarded_presentation_script(&attempt);
+        assert!(script.contains("event.defaultPrevented ? \"dispatched\" : \"unconsumed\""));
+        assert!(!script.contains("window.location.assign"));
+    }
+
     #[test]
     fn guarded_presentation_retries_only_proven_non_dispatch_and_fences_callbacks() {
         let mut queue = PresentationQueue::default();

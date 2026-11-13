@@ -75,10 +75,20 @@ def validate_presentation_lifecycle(library: str, fixture: str) -> dict:
 def adapt(source: Path) -> dict:
     desktop = source / "desktop/src-tauri"
     library = desktop / "src/lib.rs"
-    presentation = validate_presentation_lifecycle(
-        library.read_text(encoding="utf-8"),
-        (desktop / "examples/support/fixture_native_update.rs").read_text(encoding="utf-8"),
-    )
+    fixture_path = desktop / "examples/support/fixture_native_update.rs"
+    fixture_source = fixture_path.read_text(encoding="utf-8")
+    presentation = validate_presentation_lifecycle(library.read_text(encoding="utf-8"), fixture_source)
+    installer_source = (desktop / "tests/native_update/fixture-installer.nsi").read_text(encoding="utf-8")
+    if not all(marker in fixture_source for marker in (
+        "let native_installation = native_executable.parent().unwrap().to_path_buf();",
+        "std::env::set_var(\"AVIBE_NATIVE_ACCEPTANCE_INSTALLATION\", installation);",
+        "installation.canonicalize()",
+    )) or not all(marker in installer_source for marker in (
+        'StrCmp $0 "" refused',
+        'GetFullPathName $1 "$1"',
+        'GetFullPathName $2 "$2"',
+    )):
+        raise RuntimeError("Fixture installer path ownership normalization drifted")
     updater = desktop / "src/updater.rs"
     original = updater.read_text(encoding="utf-8")
     start = original.index("fn client() -> Result<reqwest::Client, String> {")

@@ -155,7 +155,9 @@ async fn desktop_client_request(
 pub fn run() {
     // LaunchServices does not promise inherited environment. Locate persistent
     // config beside the owned installation, and bind it to this job's binary.
-    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let native_executable = std::env::current_exe().unwrap();
+    let native_installation = native_executable.parent().unwrap().to_path_buf();
+    let executable = native_executable.canonicalize().unwrap();
     let root = executable.ancestors().nth(if cfg!(windows) { 2 } else { 5 }).unwrap();
     let path = root.join("config.json");
     let mut config: Config = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -191,7 +193,20 @@ pub fn run() {
         std::env::set_var(key, owned);
     }
     std::env::set_var("AVIBE_COMPUTER_USE_STATE_DIR", config.root.join("native-state"));
-    std::env::set_var("AVIBE_NATIVE_ACCEPTANCE_INSTALLATION", config.root.join("installation"));
+    // Windows production passes the native current_exe().parent() spelling to
+    // NSIS, while config.root is canonicalized for the ownership boundary.
+    // Keep the installer mailbox in that same native spelling; the canonical
+    // assertion above still proves it is exactly the owned installation.
+    let installation = if cfg!(windows) {
+        native_installation
+    } else {
+        config.root.join("installation")
+    };
+    assert!(installation
+        .canonicalize()
+        .unwrap()
+        .starts_with(config.root.join("installation")));
+    std::env::set_var("AVIBE_NATIVE_ACCEPTANCE_INSTALLATION", installation);
     for url in [&config.local, &config.proxy] {
         assert_eq!(url.scheme(), "http");
         assert_eq!(url.host_str(), Some("127.0.0.1"));

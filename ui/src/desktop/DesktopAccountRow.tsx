@@ -25,7 +25,6 @@ export function DesktopAccountRow() {
   useEffect(() => {
     void UpdatePanel.preload();
   }, []);
-  // A page this computer serves acts on its desktop app over IPC. Another computer's page never does:
   useEffect(() => {
     const open = (event: Event) => {
       event.preventDefault();
