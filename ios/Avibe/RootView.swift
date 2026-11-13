@@ -9,10 +9,17 @@ struct RootView: View {
     var body: some View {
         ZStack {
             if let runtime = appModel.route.runtime {
-                BrowserScreen(runtime: runtime)
-                    .id(appModel.runtimeIdentity)
-                    .allowsHitTesting(!appModel.route.coversRuntime)
-                    .accessibilityHidden(appModel.route.coversRuntime)
+                if appModel.presentsDirectFaultOnly(runtime) {
+                    // Opened under the listener fault: no WebView is made
+                    // for a route to a port the App may not hold.
+                    DirectFaultMessage()
+                        .id(appModel.runtimeIdentity)
+                } else {
+                    BrowserScreen(runtime: runtime)
+                        .id(appModel.runtimeIdentity)
+                        .allowsHitTesting(!appModel.route.coversRuntime)
+                        .accessibilityHidden(appModel.route.coversRuntime)
+                }
             }
             if let startScreen = appModel.route.onboardingStartScreen {
                 MobileOnboardingContainer(
@@ -76,6 +83,8 @@ private struct BrowserScreen: View {
                         websiteDataStore: appModel.runtimeWebsiteDataStore,
                         pushCoordinator: appModel.pushCoordinator,
                         showAccount: appModel.showAccount,
+                        directStatus: appModel.directStatusProvider,
+                        directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,
                         setBadgeCount: appModel.setBadgeCount,
                         accountFallbackVisibilityChanged: {
@@ -113,7 +122,13 @@ private struct BrowserScreen: View {
                     // is not the screen's, so the page starts there.
                     .ignoresSafeArea(.container, edges: [.top, .bottom])
 
-                    if isLoading && !failed {
+                    let overlay = BrowserOverlay(
+                        isLoading: isLoading,
+                        failed: failed,
+                        directFault: appModel.directFaultCovers(runtime)
+                    )
+
+                    if overlay == .loading {
                         ProgressView("browser.loading")
                             .padding(14)
                             .background(
@@ -123,7 +138,7 @@ private struct BrowserScreen: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
 
-                    if failed {
+                    if overlay == .loadFailure {
                         ContentUnavailableView {
                             Label(
                                 "browser.error.title",
@@ -132,11 +147,23 @@ private struct BrowserScreen: View {
                         } description: {
                             Text("browser.error.body")
                         } actions: {
-                            Button("browser.error.retry") {
-                                showsAccountFallback = false
-                                reloadID = UUID()
+                            // Retry is offered only while the shell may
+                            // reload: on WebKit's normal path, or with a
+                            // serving listener. While the listener is being
+                            // bound again after the background it is not
+                            // shown; it returns when the return settles.
+                            if appModel.mayReload(runtime) {
+                                Button("browser.error.retry") {
+                                    // Decided again at the tap, for the
+                                    // reload itself.
+                                    guard appModel.authorizeReload(of: runtime) else {
+                                        return
+                                    }
+                                    showsAccountFallback = false
+                                    reloadID = UUID()
+                                }
+                                .buttonStyle(.borderedProminent)
                             }
-                            .buttonStyle(.borderedProminent)
 
                             Button("browser.change_instance") {
                                 appModel.showInstancePicker()
@@ -147,6 +174,12 @@ private struct BrowserScreen: View {
                             Color(uiColor: .systemBackground)
                                 .ignoresSafeArea(.container, edges: .top)
                         )
+                    }
+
+                    // Terminal for this process: no Retry or reload, which
+                    // would not reach a working listener. Reopening does.
+                    if overlay == .directFault {
+                        DirectFaultMessage()
                     }
                 }
             }
@@ -164,6 +197,48 @@ private struct BrowserScreen: View {
                     appModel.showInstancePicker()
                 }
             }
+        }
+    }
+}
+
+/// The listener fault's message: reopen the App. It has no Retry and no other
+/// action, because nothing in this process reaches a working listener.
+private struct DirectFaultMessage: View {
+    var body: some View {
+        ContentUnavailableView {
+            Label(
+                "browser.direct_fault.title",
+                systemImage: "wifi.exclamationmark"
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            Color(uiColor: .systemBackground)
+                .ignoresSafeArea(.container, edges: .top)
+        )
+        .contentShape(Rectangle())
+        .accessibilityIdentifier("direct-listener-fault")
+    }
+}
+
+/// What covers the runtime's WebView. The listener fault comes first: it is
+/// terminal for the process, so neither the spinner nor the load-failure
+/// view, whose Retry would not reach a working listener, is shown with it.
+enum BrowserOverlay: Equatable {
+    case none
+    case loading
+    case loadFailure
+    case directFault
+
+    init(isLoading: Bool, failed: Bool, directFault: Bool) {
+        if directFault {
+            self = .directFault
+        } else if failed {
+            self = .loadFailure
+        } else if isLoading {
+            self = .loading
+        } else {
+            self = .none
         }
     }
 }

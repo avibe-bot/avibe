@@ -238,9 +238,9 @@ A shell can carry the instance origin's connections through a local proxy that c
 
 - **`preferred`** is `"tunnel"` (the public origin, the default) or `"direct"`.
   - It says only what the shell will try first for the calling document's next connections, never where an existing connection runs.
-  - It is `"direct"` only for the selected instance's origin. For every other caller, and in a shell with no direct transport, it is always `"tunnel"`.
+  - It is `"direct"` only for the selected instance's origin. For every other caller it is `"tunnel"`. A shell with no direct transport has no `direct` capability, and `direct.status()` is unsupported there.
 - **`closure`** is a non-negative integer for the calling document's instance host.
-  - It grows by one each time the shell closes connections for that host because their path was lost, because the App went to the background, or because its local port was recovered.
+  - It grows by one each time the shell closes connections for that host because their path was lost, or because the App went to the background.
   - A closure caused by the background is published only on return to the foreground, once the shell's local proxy is ready again.
   - It never decreases while the shell process lives, and starts at 0.
   - Each increase asks the Web UI to act once.
@@ -248,7 +248,7 @@ A shell can carry the instance origin's connections through a local proxy that c
 
 The shell emits `direct.transportChanged({preferred, sequence, closure})` after any change of `preferred` or increase of `closure`, and once more with the current state when it returns to the foreground and its local proxy is ready. A shell with no direct transport never emits it.
 
-From the return to the foreground until its local proxy is ready again, the shell holds `direct.status()` answers. An answer received after a resume therefore already includes the closure published on return. It goes to the current runtime's instance-origin documents only, the primary main frame and instance-origin child windows, and its script checks the origin of the document it runs in.
+From the return to the foreground until its local proxy is ready again, the shell holds `direct.status()` answers. If the proxy cannot be made ready again, or the runtime or account the answer was asked under ends meanwhile, the answer is the error `failed`. An answer received after a resume therefore already includes the closure published on return. It goes to the current runtime's instance-origin documents only, the primary main frame and instance-origin child windows, and its script checks the origin of the document it runs in.
 
 The Web UI keeps two values per document, separately:
 
