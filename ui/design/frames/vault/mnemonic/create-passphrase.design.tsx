@@ -1,4 +1,4 @@
-// Creating a seed-phrase wallet with an optional passphrase (owner request, 3.2.7). Set up is the
+// Creating a seed-phrase wallet with an optional passphrase (owner approved 2026-11-13, 3.2.7). Set up is the
 // whole shipped Add key dialog with every field (kind, name, chain, key source, description, tags, tier,
 // ask for #0): the folded 「添加 Passphrase（可选）」 sits right under the key-source hint, the step it
 // changes, before the fields every key has. The typed states draw the shipped section on its own (a
@@ -38,15 +38,15 @@ const done = () => (
 );
 
 const designFrames = frames([
-  { name: 'setup-folded', title: '新建 · 完整弹窗 · Passphrase 默认折叠（在密钥来源下面）', width: 800, height: 1420, status: 'proposed', fixtures, click: setup, render: add },
-  { name: 'setup-expanded', title: '新建 · 完整弹窗 · Passphrase 展开（两栏空着 = 不设置）', width: 800, height: 1700, status: 'proposed', fixtures, click: expand, render: add },
-  { name: 'setup-folded-phone', title: '新建 · 完整弹窗 · 手机 · 折叠', width: 390, height: 844, status: 'proposed', route: '/vaults', fixtures, click: setup, render: consolePage(<><VaultsPage />{add()}</>) },
-  { name: 'setup-expanded-phone', title: '新建 · 完整弹窗 · 手机 · 展开', width: 390, height: 844, status: 'proposed', route: '/vaults', fixtures, click: expand, render: consolePage(<><VaultsPage />{add()}</>) },
-  { name: 'typed-match', title: 'Passphrase 区块 · 两次一致（单独画，帧里不能打字）', width: 800, height: 520, status: 'proposed', fixtures, render: alone(T, typed('correct horse battery', 'correct horse battery')()) },
-  { name: 'typed-mismatch', title: 'Passphrase 区块 · 两次不一致，「生成助记词」不可点', width: 800, height: 520, status: 'proposed', fixtures, render: alone(T, typed('correct horse battery', 'correct horse batery')()) },
-  { name: 'backup', title: '抄下助记词 · 提醒 Passphrase 另外记下', width: 800, height: 1000, status: 'proposed', fixtures, click: show, render: alone(T, backup()) },
-  { name: 'done', title: '完成 · 恢复需要词 + 一字不差的 Passphrase（替换原来的灰字）', width: 800, height: 1100, status: 'proposed', fixtures, render: alone(T, done()) },
-  { name: 'backup-phone', title: '抄下助记词 · 手机 · Passphrase 提醒', width: 390, height: 844, status: 'proposed', route: '/vaults', fixtures, click: show, render: consolePage(<><VaultsPage />{alone(T, backup())()}</>) },
+  { name: 'setup-folded', title: '新建 · 完整弹窗 · Passphrase 默认折叠（在密钥来源下面）', width: 800, height: 1420, status: 'shipped', fixtures, click: setup, render: add },
+  { name: 'setup-expanded', title: '新建 · 完整弹窗 · Passphrase 展开（两栏空着 = 不设置）', width: 800, height: 1700, status: 'shipped', fixtures, click: expand, render: add },
+  { name: 'setup-folded-phone', title: '新建 · 完整弹窗 · 手机 · 折叠', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: setup, render: consolePage(<><VaultsPage />{add()}</>) },
+  { name: 'setup-expanded-phone', title: '新建 · 完整弹窗 · 手机 · 展开', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: expand, render: consolePage(<><VaultsPage />{add()}</>) },
+  { name: 'typed-match', title: 'Passphrase 区块 · 两次一致（单独画，帧里不能打字）', width: 800, height: 520, status: 'shipped', fixtures, render: alone(T, typed('correct horse battery', 'correct horse battery')()) },
+  { name: 'typed-mismatch', title: 'Passphrase 区块 · 两次不一致，「生成助记词」不可点', width: 800, height: 520, status: 'shipped', fixtures, render: alone(T, typed('correct horse battery', 'correct horse batery')()) },
+  { name: 'backup', title: '抄下助记词 · 提醒 Passphrase 另外记下', width: 800, height: 1000, status: 'shipped', fixtures, click: show, render: alone(T, backup()) },
+  { name: 'done', title: '完成 · 恢复需要词 + 一字不差的 Passphrase（替换原来的灰字）', width: 800, height: 1100, status: 'shipped', fixtures, render: alone(T, done()) },
+  { name: 'backup-phone', title: '抄下助记词 · 手机 · Passphrase 提醒', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: show, render: consolePage(<><VaultsPage />{alone(T, backup())()}</>) },
 ]);
 
 export default designFrames;

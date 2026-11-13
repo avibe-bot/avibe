@@ -6638,7 +6638,8 @@
         "match": "They match. Case and spaces count.",
         "hint": "Case and spaces count and are kept as typed. Leave both empty for none.",
         "backupReminder": "This wallet also has a passphrase. Write it down separately from the words: recovering needs both, and the passphrase must be exact.",
-        "recovery": "If this computer is lost, only these words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing."
+        "recovery": "If this computer is lost, only these words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing.",
+        "set": "Set"
       }
     }
   },

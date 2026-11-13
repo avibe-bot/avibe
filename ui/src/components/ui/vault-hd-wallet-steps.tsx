@@ -517,7 +517,10 @@ export function HdCreatePassphrase({ value, confirm, onChange, onConfirmChange, 
       <button type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
         <Chevron className="size-3.5 text-muted" />
         <span className="flex-1 text-[12.5px] font-semibold text-foreground">{t('vaults.hd.passphrase.title')}</span>
-        {!open ? <span className="text-[11px] text-muted">{t('vaults.hd.passphrase.folded')}</span> : null}
+        {/* Folded with something typed: say it is set, so a hidden passphrase is never a surprise. */}
+        {!open ? (
+          typed ? <span className="text-[11px] font-medium text-mint-ink">{t('vaults.hd.passphrase.set')}</span> : <span className="text-[11px] text-muted">{t('vaults.hd.passphrase.folded')}</span>
+        ) : null}
       </button>
       {open ? (
         <div className="flex flex-col gap-2.5 px-3 pb-3">
