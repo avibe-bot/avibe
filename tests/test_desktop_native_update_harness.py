@@ -9,12 +9,16 @@ import asyncio
 import hashlib
 import importlib.util
 import io
+import json
+import os
 from pathlib import Path
 import shutil
 import sys
+from urllib.error import HTTPError
 import zipfile
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "desktop/src-tauri/tests/native_update"
@@ -24,7 +28,7 @@ HARNESS = ROOT / "desktop/src-tauri/tests/native_update"
 def harness(monkeypatch):
     monkeypatch.syspath_prepend(str(HARNESS))
     modules = {}
-    for name in ("build", "runtime"):
+    for name in ("build", "runtime", "guard"):
         spec = importlib.util.spec_from_file_location(f"native_update_{name}", HARNESS / f"{name}.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -132,3 +136,93 @@ def test_controller_constructor_precedes_async_lifecycle(harness, monkeypatch, t
     monkeypatch.setenv("VIBE_INTERNAL_DISPATCH_SOCKET", "isolated-test")
     runtime.main()
     assert calls == ["deny_external", "constructor_reconciliation", "serve", "close"]
+
+
+@pytest.fixture
+def admission(harness, monkeypatch, tmp_path):
+    guard = harness["guard"]
+    event = tmp_path / "event.json"
+    source = "1" * 40
+    event.write_text(json.dumps({"action": "labeled", "label": {"name": "native-update-acceptance"},
+        "pull_request": {"base": {"ref": "master"},
+                         "head": {"sha": source, "repo": {"full_name": guard.REPOSITORY}}}}))
+    for key, value in {
+        "GITHUB_REPOSITORY": guard.REPOSITORY, "ACCEPTANCE_SOURCE_SHA": source,
+        "GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "pull_request",
+        "ACCEPTANCE_EVENT_SHA": "2" * 40, "ACCEPTANCE_WORKFLOW_SHA": "3" * 40,
+        "ACCEPTANCE_WORKFLOW_REF": "fixture", "GH_TOKEN": "test-only-workflow-token",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    def git(*args, **kwargs):
+        assert "GH_TOKEN" not in os.environ
+        return source + "\n"
+
+    monkeypatch.setattr(guard.subprocess, "check_output", git)
+    return guard
+
+
+def test_admission_scopes_token_to_fixed_origin_get_without_evidence_leak(admission, monkeypatch):
+    guard = admission
+    calls = []
+
+    class Opener:
+        def open(self, request, *, timeout):
+            calls.append(request.full_url)
+            assert request.full_url.startswith(
+                "https://api.github.com/repos/avibe-bot/avibe/actions/workflows/desktop-release.yml/runs?")
+            assert request.get_method() == "GET"
+            assert request.get_header("Authorization") == "Bearer test-only-workflow-token"
+            assert timeout == 20
+            return io.BytesIO(b'{"total_count":0,"workflow_runs":[]}')
+
+    def opener(*handlers):
+        assert handlers[0].proxies == {}
+        assert isinstance(handlers[1], guard.NoRedirect)
+        return Opener()
+
+    monkeypatch.setattr(guard, "build_opener", opener)
+    result = guard.check()
+    assert len(calls) == len(guard.ACTIVE)
+    assert all(count == 0 for count in result["active_counts"].values())
+    assert "test-only-workflow-token" not in json.dumps(result)
+    assert "GH_TOKEN" not in os.environ
+    with pytest.raises(RuntimeError, match="redirect refused"):
+        guard.NoRedirect().redirect_request(None, None, None, None, None, None)
+
+
+@pytest.mark.parametrize("failure", ["active", "malformed", "rate_limit", "missing_token"])
+def test_admission_still_fails_closed(admission, monkeypatch, failure):
+    guard = admission
+
+    class Opener:
+        def open(self, request, *, timeout):
+            if failure == "rate_limit":
+                raise HTTPError(request.full_url, 403, "rate limit exceeded", {}, None)
+            data = ({"total_count": 1, "workflow_runs": [{}]} if failure == "active"
+                    else {"total_count": "0", "workflow_runs": []})
+            return io.BytesIO(json.dumps(data).encode())
+
+    monkeypatch.setattr(guard, "build_opener", lambda *args: Opener())
+    if failure == "missing_token":
+        monkeypatch.delenv("GH_TOKEN")
+    with pytest.raises((RuntimeError, HTTPError)) as error:
+        guard.check()
+    assert "test-only-workflow-token" not in str(error.value)
+    assert "GH_TOKEN" not in os.environ
+
+
+def test_workflow_token_is_read_only_and_guard_step_scoped():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/desktop-native-update-acceptance.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+    assert "GH_TOKEN" not in workflow.get("env", {})
+    guards = 0
+    for job in workflow["jobs"].values():
+        assert "GH_TOKEN" not in job.get("env", {})
+        for step in job["steps"]:
+            if "native_update/guard.py" in step.get("run", ""):
+                assert step["env"] == {"GH_TOKEN": "${{ github.token }}"}
+                guards += 1
+            else:
+                assert "GH_TOKEN" not in step.get("env", {})
+    assert guards == 3

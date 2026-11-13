@@ -1,5 +1,6 @@
-"""Read-only public API admission. No token and no actions:read permission.
+"""Read-only API admission using the job's ephemeral actions:read token.
 
+The workflow provides it only to guard steps, never builds/native processes.
 Any active Desktop Stage 2 run, unexpected response or rate limit blocks this
 acceptance. This observation is not a lock against a later release dispatch.
 """
@@ -23,6 +24,12 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def check() -> dict:
+    # Consume before spawning even the read-only git check. The token is only
+    # used for fixed-origin GETs; redirects/proxies remain disabled and no
+    # credential or request headers enter the evidence.
+    token = os.environ.pop("GH_TOKEN", None)
+    if not token:
+        raise RuntimeError("Stage 2 admission requires the ephemeral workflow token")
     if os.environ.get("GITHUB_REPOSITORY") != REPOSITORY:
         raise RuntimeError("Only the public product repository is admitted")
     source = os.environ["ACCEPTANCE_SOURCE_SHA"]
@@ -51,6 +58,7 @@ def check() -> dict:
         url = (f"https://api.github.com/repos/{REPOSITORY}/actions/workflows/"
                f"desktop-release.yml/runs?status={status}&per_page=1")
         request = Request(url, headers={"Accept": "application/vnd.github+json",
+                                        "Authorization": f"Bearer {token}",
                                         "User-Agent": "Avibe-native-acceptance-admission",
                                         "X-GitHub-Api-Version": "2022-11-28"})
         with opener.open(request, timeout=20) as response:

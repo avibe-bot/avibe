@@ -259,7 +259,13 @@ editor/viewer or bypasses origin/CSRF protection.
   Reapply the label after a final push. Use read-only permissions, no persisted
   Git credentials, production secrets, release environments or publishing. Do
   not activate while RC/stable Stage 2 is running; recheck that guard before
-  expensive native jobs. Do not weaken existing CI scope or aggregators.
+  expensive native jobs. The guard alone receives the ephemeral job token with
+  `actions: read` to avoid the shared hosted-egress anonymous API quota. It uses
+  fixed-origin GETs with redirects and proxies disabled, consumes the token
+  before spawning its read-only Git check, and never records it in evidence.
+  The token is step-scoped, absent from build/native processes; active releases,
+  rate limits and unreadable status still fail closed. Do not weaken existing
+  CI scope or aggregators.
 - Real automatic acceptance uses the unchanged `auto_update_loop`, a fresh
   isolated controller-owned idle producer and normal scheduling durations, not
   a direct tick, remote idle ticket, canned idle time or timer patch. Budget up

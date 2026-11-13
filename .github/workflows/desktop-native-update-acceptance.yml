@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # Admission reads Stage 2 runs; no workflow mutation is permitted.
 
 concurrency:
   group: native-update-acceptance-${{ github.event.pull_request.number || github.ref }}
@@ -39,6 +40,8 @@ jobs:
           ref: ${{ env.ACCEPTANCE_SOURCE_SHA }}
           persist-credentials: false
       - name: Refuse active or unreadable Desktop Stage 2
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python desktop/src-tauri/tests/native_update/guard.py --output stage2-admission.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
@@ -76,6 +79,8 @@ jobs:
           persist-credentials: false
       # Repeat after runner allocation; an earlier admission is not a lease.
       - name: Recheck Stage 2 before any dependency install or native build
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python desktop/src-tauri/tests/native_update/guard.py --output "${{ env.ACCEPTANCE_ROOT }}/evidence/stage2-before-build.json"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
@@ -102,6 +107,8 @@ jobs:
         run: |
           uv run --no-sync python desktop/src-tauri/tests/native_update/build.py --source "$GITHUB_WORKSPACE" --root "$ACCEPTANCE_ROOT" --head "$ACCEPTANCE_SOURCE_SHA" --target "$ACCEPTANCE_TARGET"
       - name: Recheck Stage 2 before native acceptance
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python desktop/src-tauri/tests/native_update/guard.py --output "${{ env.ACCEPTANCE_ROOT }}/evidence/stage2-before-run.json"
       - name: Native panel, explicit policy, normal automatic policy and handoff
         shell: bash
