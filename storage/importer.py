@@ -16,7 +16,6 @@ from typing import Any
 from sqlalchemy import Connection, func, select
 
 from config import paths
-from config.atomic_io import read_snapshot
 from config.discovered_chats import DiscoveredChatsStore
 from config.v2_sessions import (
     SessionState,
@@ -360,7 +359,7 @@ def _resolve_primary_platform_from_config_path(config_path: Path) -> str | None:
     try:
         if not config_path.exists():
             return None
-        payload = json.loads(read_snapshot(config_path, encoding="utf-8"))
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return None
 

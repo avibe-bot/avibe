@@ -517,12 +517,12 @@ def test_failed_refresh_preserves_prior_unpublished_withdrawals(tmp_path, signer
     )
     assert engine_channel.refresh().state == "accepted"
     before = engine_channel.store.state_path.read_bytes()
-    replace = atomic_io.replace_snapshot
+    replace = atomic_io.os.replace
 
     def fail_publication(*_args):
         raise OSError("test-owned channel publication refused")
 
-    monkeypatch.setattr(atomic_io, "replace_snapshot", fail_publication)
+    monkeypatch.setattr(atomic_io.os, "replace", fail_publication)
     engine_channel._fetch = lambda: signed(signer, 11, releases=releases, revoked=[tombstone(V63_2, V63_1)])
     assert engine_channel.refresh().reason == "state_unreadable"
     assert engine_channel.resolve(current=V63_2).action is ResolutionAction.BLOCKED
@@ -584,7 +584,7 @@ def test_failed_refresh_preserves_prior_unpublished_withdrawals(tmp_path, signer
     expected = ResolutionAction.BLOCKED if failure == "publication" else ResolutionAction.KEEP
     assert engine_channel.resolve(current=V63_3).action is expected
 
-    monkeypatch.setattr(atomic_io, "replace_snapshot", replace)
+    monkeypatch.setattr(atomic_io.os, "replace", replace)
     engine_channel._fetch = lambda: signed(signer, 12, releases=releases, revoked=[
         tombstone(V63_2, V63_1), tombstone(V63_3, V63_1),
     ])
@@ -609,7 +609,7 @@ def test_a_failed_recovery_write_preserves_the_damaged_file(tmp_path, signer, mo
     def fail_replace(*_args):
         raise OSError("replacement refused")
 
-    monkeypatch.setattr(atomic_io, "replace_snapshot", fail_replace)
+    monkeypatch.setattr(atomic_io.os, "replace", fail_replace)
     with pytest.raises(OSError, match="replacement refused"):
         _accept(store, signer, signed(signer, 5))
     assert store.state_path.read_bytes() == b"{damaged"
@@ -628,7 +628,7 @@ def test_channel_acceptance_publishes_a_complete_file_before_returning(tmp_path,
     store = channel.ChannelStateStore(tmp_path / "channel")
     _accept(store, signer, signed(signer, 4))
     before = store.state_path.read_bytes()
-    replace = atomic_io.replace_snapshot
+    replace = atomic_io.os.replace
     sync_directory = atomic_io._fsync_directory
     published = []
 
@@ -647,7 +647,7 @@ def test_channel_acceptance_publishes_a_complete_file_before_returning(tmp_path,
         sync_directory(directory)
         published.append("directory_sync")
 
-    monkeypatch.setattr(atomic_io, "replace_snapshot", observe_replace)
+    monkeypatch.setattr(atomic_io.os, "replace", observe_replace)
     monkeypatch.setattr(atomic_io, "_fsync_directory", observe_directory_sync)
     assert _accept(store, signer, signed(signer, 5)) is True
     assert published == ["replace", "directory_sync"]

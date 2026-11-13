@@ -314,16 +314,15 @@ def replace(source: str, destination: str) -> None:
         ]
 
     name = os.path.abspath(destination)
-    encoded_name = name.encode("utf-16-le", errors="surrogatepass")
-    size = RenameInformation.FileName.offset + len(encoded_name) + ctypes.sizeof(wintypes.WCHAR)
+    size = RenameInformation.FileName.offset + (len(name) + 1) * ctypes.sizeof(wintypes.WCHAR)
     buffer = ctypes.create_string_buffer(size)
     information = RenameInformation.from_buffer(buffer)
     information.Flags = _FILE_RENAME_FLAG_REPLACE_IF_EXISTS | _FILE_RENAME_FLAG_POSIX_SEMANTICS
-    information.FileNameLength = len(encoded_name)
+    information.FileNameLength = len(name) * ctypes.sizeof(wintypes.WCHAR)
     ctypes.memmove(
         ctypes.addressof(information) + RenameInformation.FileName.offset,
-        encoded_name,
-        len(encoded_name),
+        ctypes.create_unicode_buffer(name),
+        (len(name) + 1) * ctypes.sizeof(wintypes.WCHAR),
     )
     handle = kernel32.CreateFileW(
         source,

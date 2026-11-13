@@ -40,74 +40,20 @@ The guarantees, for every caller:
   each other's fragments.
 * A failed write never leaves a temp file behind, and never truncates the
   destination — the old contents survive until the rename succeeds.
-* On POSIX the default replacement is owner-private (0600) from creation through
-  publication. Windows keeps the temporary file's creation/inherited ACL;
-  chmod's mode bits are not a private DACL. A user-file editor may supply its captured mode;
+* By default the replacement is owner-private (0600) from creation through
+  publication. A user-file editor may explicitly supply its captured mode;
   that mode is applied only to the unpublished inode, before its fsync.
   No caller widens a published path through this primitive.
 """
 
 from __future__ import annotations
 
-import io
 import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import BinaryIO, overload
 
-__all__ = ["open_snapshot", "read_snapshot", "replace_snapshot", "write_atomic"]
-
-
-def open_snapshot(path: Path) -> BinaryIO:
-    """Open one immutable snapshot without obstructing a cooperating publisher.
-
-    Windows needs both a delete-sharing reader and the POSIX rename semantics
-    in ``replace_snapshot``. No application lock is taken: callers may already
-    hold a SQLite writer while another process holds the config writer lock.
-    """
-    if os.name != "nt":
-        return path.open("rb")
-    from core.agent_core.tools import windows_files
-
-    descriptor = windows_files.open_for_reading(os.fspath(path))
-    try:
-        return os.fdopen(descriptor, "rb")
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
-@overload
-def read_snapshot(path: Path, *, encoding: None = None) -> bytes: ...
-
-
-@overload
-def read_snapshot(path: Path, *, encoding: str) -> str: ...
-
-
-def read_snapshot(path: Path, *, encoding: str | None = None) -> bytes | str:
-    """Read a whole snapshot, retaining ``read_text`` newline handling for text."""
-    with open_snapshot(path) as handle:
-        if encoding is None:
-            return handle.read()
-        with io.TextIOWrapper(handle, encoding=encoding) as text:
-            return text.read()
-
-
-def replace_snapshot(source: str | Path, destination: Path) -> None:
-    """Publish a prepared snapshot; preparation, guards and locks stay with callers.
-
-    Unsupported Windows filesystems retain the existing helper's ``os.replace``
-    fallback, which can fail with an open reader. Access errors propagate; there
-    is no retry, destination unlink, or permission relaxation.
-    """
-    if os.name == "nt":
-        from core.agent_core.tools import windows_files
-
-        windows_files.replace(os.fspath(source), os.fspath(destination))
-    else:
-        os.replace(source, destination)
+__all__ = ["write_atomic"]
 
 
 def _fsync_directory(path: Path) -> None:
@@ -181,7 +127,7 @@ def write_atomic(
             os.fsync(handle.fileno())
         if before_replace is not None:
             before_replace()
-        replace_snapshot(temporary_name, target)
+        os.replace(temporary_name, target)
         unpublished = None
         _fsync_directory(target.parent)
     finally:

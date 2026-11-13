@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from config import paths
-from config.atomic_io import read_snapshot, write_atomic
+from config.atomic_io import write_atomic
 from config.v2_config import UpdateConfig
 from config.v2_settings import _infer_channel_platform
 from core.handlers.admin_notifications import delivery_succeeded, resolve_admin_target, send_admin_text
@@ -302,7 +302,7 @@ class UpdateChecker:
         try:
             config_path = paths.get_config_path()
             if config_path.exists():
-                data = json.loads(read_snapshot(config_path, encoding="utf-8"))
+                data = json.loads(config_path.read_text(encoding="utf-8"))
                 update_data = data.get("update") or {}
                 # Backward compat: rename legacy "notify_slack" → "notify_admins"
                 if "notify_slack" in update_data and "notify_admins" not in update_data:

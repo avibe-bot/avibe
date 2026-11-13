@@ -26,7 +26,7 @@ from typing import (
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
-from config.atomic_io import open_snapshot, read_snapshot, replace_snapshot, write_atomic
+from config.atomic_io import write_atomic
 from config.model_hub_snapshot import ModelHubSnapshotNode
 from config.platform_registry import (
     WORKBENCH_PLATFORM_ID,
@@ -1430,7 +1430,7 @@ class _RecoveredSectionGuard:
         """
 
         try:
-            stored = json.loads(read_snapshot(path).decode("utf-8"))
+            stored = json.loads(path.read_bytes().decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(
                 "Config was loaded with recovery warnings and its recovered sections "
@@ -1499,7 +1499,7 @@ def _backup_config_file(
         return None
     try:
         if content is None:
-            content = read_snapshot(path)
+            content = path.read_bytes()
         existing = sorted(
             path.parent.glob(f"{path.name}.bak-{label}-*"),
             key=lambda candidate: candidate.stat().st_mtime,
@@ -1522,7 +1522,7 @@ def _backup_config_file(
         file_descriptor = os.open(backup, flags, 0o600)
         with os.fdopen(file_descriptor, "wb") as destination:
             if content is None:
-                with open_snapshot(path) as source:
+                with path.open("rb") as source:
                     shutil.copyfileobj(source, destination)
             else:
                 destination.write(content)
@@ -1597,10 +1597,10 @@ def _write_config_payload_if_unchanged(
                 tmp.flush()
                 os.fsync(tmp.fileno())
                 temp_name = tmp.name
-            current_raw = read_snapshot(path, encoding="utf-8")
+            current_raw = path.read_text(encoding="utf-8")
             if current_raw != expected_raw:
                 return False
-            replace_snapshot(temp_name, path)
+            os.replace(temp_name, path)
             temp_name = None
             return True
         except (OSError, UnicodeDecodeError):
@@ -1624,7 +1624,7 @@ def _persist_migrated_config_payload(
         with CONFIG_LOCK:
             with _config_file_lock(path):
                 try:
-                    current_raw = read_snapshot(path, encoding="utf-8")
+                    current_raw = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError) as exc:
                     return None, f"Could not verify config before migration persistence: {exc}"
                 if current_raw != expected_raw:
@@ -4121,7 +4121,7 @@ class V2Config:
             raise FileNotFoundError(f"Config not found: {path}")
         raw_bytes = b""
         try:
-            raw_bytes = read_snapshot(path)
+            raw_bytes = path.read_bytes()
             raw = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             backup = _backup_config_file(path, "invalid-encoding", content=raw_bytes)

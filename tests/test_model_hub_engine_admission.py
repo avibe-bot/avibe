@@ -228,14 +228,14 @@ async def test_bad_refresh_cannot_reopen_admission_after_unpublished_withdrawal(
     withdrawn = signed(signer, 11, releases=[
         release_entry(manifest), release_entry(manifest_bytes(version="v8.0.30", build=1)),
     ], revoked=[tombstone(candidate.asset_release_tag, "model-hub-engine-v8.0.30-1")])
-    replace = atomic_io.replace_snapshot
+    replace = atomic_io.os.replace
 
     def refuse_channel_publication(source, destination):
         if destination == owner.channel.store.state_path:
             raise OSError("test-owned channel publication refused")
         return replace(source, destination)
 
-    monkeypatch.setattr(atomic_io, "replace_snapshot", refuse_channel_publication)
+    monkeypatch.setattr(atomic_io.os, "replace", refuse_channel_publication)
     owner.channel._fetch = lambda: withdrawn
     await transport._reconcile_engine(explicit=False)
     assert transport._engine_admission.reason == "engine_withdrawn"
