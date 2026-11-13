@@ -6375,6 +6375,24 @@ async def vault_hd_account_patch(name: str, account: int, starlette_request: Fas
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post("/api/vault/secrets/{name}/fields", include_in_schema=False)
+async def vault_secret_fields_post(name: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(await asyncio.to_thread(
+                api.update_vault_secret_fields,
+                name,
+                request.json,
+                user_context=getattr(g, "authorization_context", None),
+            ))
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.put("/api/vault/secrets/{name}/fields/{field}", include_in_schema=False)
 async def vault_secret_field_put(
     name: str,
