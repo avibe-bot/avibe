@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import atexit
 import asyncio
 import base64
 import binascii
@@ -67,6 +66,7 @@ from core.show_runtime_failures import (
     show_runtime_recovery_action,
 )
 from core.show_runtime_source import retired_show_runtime_source
+from vibe.shutdown_diagnostics import register_shutdown_hook
 
 
 logger = logging.getLogger(__name__)
@@ -4851,4 +4851,4 @@ def _resolve_executable_path(path: Path) -> str | None:
     return str(expanded) if expanded.exists() and os.access(expanded, os.X_OK) else None
 
 
-atexit.register(stop_show_runtime_manager)
+register_shutdown_hook("core.show_runtime.stop_show_runtime_manager", stop_show_runtime_manager)
