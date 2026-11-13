@@ -52,3 +52,17 @@ at 180 degrees; the pressed trigger scaled to 0.94. Repairs pass ten focused
 component/protocol tests and 35 browser cases covering both Setup exits, login,
 factors, consent, instance dispatch, and the eight new layout/menu cases.
 English/light and Chinese/dark screenshots were inspected at both target sizes.
+
+## Shared login design source
+
+The email/code/code-error frames render the same AccountLoginView as AccountApp
+using typed synthetic props. The old kit Login markup is removed. The frames
+show the card in an isolated stage, without redrawing page chrome or enabling a
+native bridge. AccountApp retains the request, busy/error, cancellation, and
+native lifecycle ownership. The top-level window guard is unchanged.
+
+After extraction, all ten product tests and 35 browser cases still pass. Design
+typecheck passes; scoped capture and export each cover twelve shots (three
+states, two languages, two themes), with no console errors or unfixtured API
+requests. Email, verification and invalid-code captures were visually inspected.
+Private review page: https://max-app.avibe.bot/show/sesuzge7suz9p/ .

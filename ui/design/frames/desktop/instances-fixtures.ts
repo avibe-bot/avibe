@@ -1,5 +1,6 @@
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
+import type { AccountLoginViewProps } from '@/desktop/AccountLoginView';
 import type { FrameSpec } from '../../frame';
 import type { DesktopInstanceFixture, DesktopInstanceState } from '../../kit/desktop-instances';
 import { workbenchFixtures, homeFactsApi } from '../workbench/fixtures';
@@ -47,3 +48,17 @@ export const desktopInstanceFrames: (Omit<FrameSpec, 'render'> & { fixture: Desk
     '/api/version': { current: state === 'signed-out' ? '3.2.6rc9' : '3.2.4', latest: state === 'signed-out' ? '3.2.6rc9' : '3.2.4', has_update: false, error: null },
   }, { copy: copyFor(lang === 'en' ? en : zh) }),
 })));
+
+// Static props for the actual product card. Native lifecycle and credentials are
+// deliberately absent: embedded design documents cannot acquire Desktop IPC.
+export function loginViewProps(fixture: DesktopInstanceFixture): AccountLoginViewProps | null {
+  if (!['email', 'code', 'code-error'].includes(fixture.state)) return null;
+  const verify = fixture.state !== 'email';
+  const noAction = () => {};
+  return {
+    verify, email: 'max@example.test', value: verify ? '123456' : '', busy: false,
+    errorMessage: fixture.state === 'code-error' ? (fixture.lang === 'en' ? en : zh).desktopClient.errors.code : null,
+    onValueChange: noAction, onSubmit: noAction, onChangeEmail: noAction,
+    onResendCode: noAction, onContinueLocal: noAction,
+  };
+}
