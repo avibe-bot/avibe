@@ -608,8 +608,8 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     assert '-resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult"' in test_step["run"]
 
     artifact = steps[-1]
-    assert artifact["name"] == "Upload XCTest failure result bundle"
-    assert artifact["if"] == "${{ failure() }}"
+    assert artifact["name"] == "Upload XCTest result bundle"
+    assert artifact["if"] == "${{ always() }}"
     assert artifact["uses"] == (
         "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
     )
@@ -624,6 +624,59 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         ROOT / "ios/Avibe.xcodeproj/xcshareddata/xcschemes/Avibe.xcscheme"
     ).read_text(encoding="utf-8")
     assert 'parallelizable = "NO"' in scheme
+
+
+@pytest.mark.parametrize("inventory", ["ordered", "reversed", "missing-runtime", "wrong-device", "unavailable"])
+def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: str) -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["simulator"]["steps"]
+    selection_index, selection = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Select the pinned iPhone 17 Pro simulator"
+    )
+    boot = steps[selection_index + 1]
+    assert boot["run"] == 'xcrun simctl bootstatus "$SIMULATOR_ID" -b'
+    assert steps[selection_index + 2]["name"] == "Run XCTest on iPhone Simulator"
+    shell = selection["run"]
+    subprocess.run(["bash", "-n"], input=shell, text=True, check=True)
+    # Execute the actual workflow selector, not a copied implementation.
+    selector = shell.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    pinned = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+    devices = {
+        "com.apple.CoreSimulator.SimRuntime.iOS-26-4-1": [
+            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "old"},
+        ],
+        pinned: [
+            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "z"},
+            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "a"},
+        ],
+    }
+    if inventory == "reversed":
+        devices = dict(reversed(list(devices.items())))
+        devices[pinned].reverse()
+    elif inventory == "missing-runtime":
+        del devices[pinned]
+    elif inventory == "wrong-device":
+        for device in devices[pinned]:
+            device["name"] = "iPhone 17"
+    elif inventory == "unavailable":
+        for device in devices[pinned]:
+            device["isAvailable"] = False
+    source = tmp_path / "simulators.json"
+    source.write_text(json.dumps({"devices": devices}), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-c", selector, str(source)],
+        capture_output=True, text=True, timeout=10,
+    )
+    if inventory in {"ordered", "reversed"}:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "a"
+    else:
+        assert result.returncode != 0
+        assert result.stdout == ""
+        assert f"No available iPhone 17 Pro simulator for {pinned}" in result.stderr
 
 
 @pytest.mark.parametrize("pin_state", ["pending", "published"])

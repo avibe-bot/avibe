@@ -97,7 +97,7 @@ jobs:
             "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib" \
             YES
 
-      - name: Select an available iPhone simulator
+      - name: Select the pinned iPhone 17 Pro simulator
         run: |
           set -euo pipefail
           xcrun simctl list devices available --json > "$RUNNER_TEMP/ios-simulators.json"
@@ -106,17 +106,26 @@ jobs:
           import json
           import sys
 
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+          device_name = "iPhone 17 Pro"
           with open(sys.argv[1], encoding="utf-8") as source:
-              devices = json.load(source)["devices"]
-          for runtime_devices in devices.values():
-              for device in runtime_devices:
-                  if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
-                      print(device["udid"])
-                      raise SystemExit(0)
-          raise SystemExit("No available iPhone simulator is installed")
+              devices = json.load(source)["devices"].get(runtime, [])
+          matches = sorted(
+              device["udid"]
+              for device in devices
+              if device.get("isAvailable") and device.get("name") == device_name
+          )
+          if not matches:
+              raise SystemExit(
+                  f"No available {device_name} simulator for {runtime} is installed"
+              )
+          print(matches[0])
           PY
           )"
           echo "SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+
+      - name: Boot the pinned simulator
+        run: xcrun simctl bootstatus "$SIMULATOR_ID" -b
 
       - name: Run XCTest on iPhone Simulator
         run: |
@@ -131,8 +140,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             test
 
-      - name: Upload XCTest failure result bundle
-        if: ${{ failure() }}
+      - name: Upload XCTest result bundle
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-shell-xcresult
