@@ -1498,7 +1498,7 @@ mod tests {
         let first = queue
             .begin_guard(intent, "https://fixture.avibe.bot/apps/1".into())
             .unwrap();
-        for ambiguous in ["", "null", "not json", "\"unknown\""] {
+        for ambiguous in ["", "null", "not json", "\"unknown\"", "\"unconsumed\""] {
             queue.guard_result(&first, ambiguous);
             assert!(queue.begin_guard(intent, first.receiver.clone()).is_none());
             assert_eq!(queue.current(4), Some(intent));
