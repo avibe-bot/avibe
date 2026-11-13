@@ -361,6 +361,50 @@ def test_provision_field_spec_contains_only_valid_distinct_labels():
             vs.normalize_provision_spec(invalid)
 
 
+@pytest.mark.parametrize(
+    ("recipe", "normalized"),
+    [
+        ({"type": "password"}, {"type": "password", "length": 24, "digits": True, "symbols": True, "no_lookalikes": False}),
+        ({"type": "password", "length": 12, "digits": False, "symbols": False, "no_lookalikes": True, "field": "password"},
+         {"type": "password", "length": 12, "digits": False, "symbols": False, "no_lookalikes": True, "field": "password"}),
+        ({"type": "password", "length": 128}, {"type": "password", "length": 128, "digits": True, "symbols": True, "no_lookalikes": False}),
+        ({"type": "hex"}, {"type": "hex", "bytes": 32}),
+        ({"type": "hex", "bytes": 16}, {"type": "hex", "bytes": 16}),
+        ({"type": "base64", "bytes": 64}, {"type": "base64", "bytes": 64}),
+    ],
+)
+def test_provision_generate_recipe_is_strict_nonsecret_metadata(recipe, normalized):
+    # A recipe presets the browser only; it must survive normalization without
+    # permitting sealed/plaintext material or format-specific option confusion.
+    assert vs.normalize_provision_spec({"protection": "protected", "generate": recipe}) == {
+        "protection": "protected", "generate": normalized,
+    }
+
+
+@pytest.mark.parametrize("recipe", [
+    None, [], "password", {}, {"type": "base64url"}, {"type": "Password"},
+    {"type": "password", "length": 11}, {"type": "password", "length": 129},
+    {"type": "password", "length": True}, {"type": "password", "length": 24.0},
+    {"type": "password", "length": "24"}, {"type": "password", "bytes": 32},
+    {"type": "password", "digits": 1}, {"type": "password", "symbols": None},
+    {"type": "password", "no_lookalikes": "false"}, {"type": "password", "field": "Invalid"},
+    {"type": "password", "field": None}, {"type": "password", "unknown": True},
+    {"type": "hex", "bytes": 15}, {"type": "hex", "bytes": 65},
+    {"type": "base64", "bytes": True}, {"type": "base64", "bytes": 32.0},
+    {"type": "hex", "length": 24}, {"type": "base64", "digits": False},
+    {"type": "hex", "symbols": False}, {"type": "base64", "no_lookalikes": True},
+    {"type": "hex", "value": "must-not-be-accepted"},
+    {"type": "hex", "sealed": {"ciphertext": "opaque"}},
+])
+def test_invalid_generate_recipe_rejects_entire_provision_spec(vault, recipe):
+    with vault.begin() as conn:
+        with pytest.raises(vs.VaultServiceError):
+            vs.create_provision_request(conn, "INVALID_RECIPE", spec={"tags": ["app"], "generate": recipe})
+        assert conn.execute(select(vault_requests)).first() is None
+        assert conn.execute(select(vault_audit)).first() is None
+        assert conn.execute(select(vault_secrets)).first() is None
+
+
 def test_fields_use_canonical_records_and_default_label_fallback(vault):
     _create(
         vault,

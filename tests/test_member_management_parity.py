@@ -162,7 +162,8 @@ def test_complete_registered_api_management_inventory():
     # + 1 fresh controller idle probe (Member and direct-loopback-only).
     # + 1 HD Bitcoin public preparation mutation (Editor plus resource management).
     # + 3 shared Vault setup and exact-target policy authorization methods.
-    assert len(endpoints) == 335
+    # + 1 atomic Vault field save (Editor namespace plus resource management).
+    assert len(endpoints) == 336
     idle_policy = http_authorization_policy("GET", "/api/desktop/update/idle")
     assert idle_policy.minimum_role == "member"
     assert idle_policy.direct_loopback_only
@@ -192,6 +193,7 @@ def test_complete_registered_api_management_inventory():
         assert (method, "/api/vault/secrets/{name}/fields/{field}") in endpoints
         assert http_authorization_policy(method, "/api/vault/secrets/LOGIN/fields/username").minimum_role == "editor"
     for method, path in (
+        ("POST", "/api/vault/secrets/{name}/fields"),
         ("POST", "/api/vault/secrets/{name}/accounts"),
         ("POST", "/api/vault/secrets/{name}/bitcoin-address-types"),
         ("PATCH", "/api/vault/secrets/{name}/accounts/{account}"),
