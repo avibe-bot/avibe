@@ -49,8 +49,13 @@ const SERVER_REASONS: Record<string, PolicyTurnOffFailure> = {
 const SANDBOX_REASONS: Record<string, PolicyTurnOffFailure> = {
   policy_downgrade_unavailable: 'unavailable',
   authorization_cancelled: 'cancelled',
+  // The user closed the confirmation window: an ordinary cancel, said nothing about.
+  authorization_window_closed: 'cancelled',
   passkey_cancelled: 'cancelled',
   sandbox_reset: 'cancelled',
+  authorization_popup_blocked: 'popup_blocked',
+  // The window never connected in time: the neutral timed-out line, as for an expired context.
+  authorization_window_timeout: 'expired',
   policy_context_expired: 'expired',
   policy_context_clock_skew: 'clock_skew',
 };

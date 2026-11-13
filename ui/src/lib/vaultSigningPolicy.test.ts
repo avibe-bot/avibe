@@ -81,6 +81,10 @@ describe('turnOffAskBeforeSigning', () => {
   it.each([
     ['passkey_cancelled', 'cancelled'],
     ['authorization_cancelled', 'cancelled'],
+    // The codes the pinned build (fc013b75) actually emits for a closed, blocked or silent window.
+    ['authorization_window_closed', 'cancelled'],
+    ['authorization_popup_blocked', 'popup_blocked'],
+    ['authorization_window_timeout', 'expired'],
     ['sandbox_reset', 'cancelled'],
     ['policy_downgrade_unavailable', 'unavailable'],
     ['policy_context_expired', 'expired'],

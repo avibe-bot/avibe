@@ -629,10 +629,10 @@ describe('turning ask-before-signing off with a Passkey', () => {
     expect(screen.getByText(en.vaults.askOff.offHintEdit)).toBeTruthy();
   });
 
-  it('stays on without a message when the Passkey prompt is cancelled', async () => {
+  it.each(['passkey_cancelled', 'authorization_window_closed'])('stays on without a message when the confirmation ends with %s', async (code) => {
     sandbox.canTurnOff = true;
     api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });
-    sandbox.authorizeSigningPolicyDowngrade.mockRejectedValue(Object.assign(new Error('x'), { code: 'passkey_cancelled' }));
+    sandbox.authorizeSigningPolicyDowngrade.mockRejectedValue(Object.assign(new Error('x'), { code }));
     render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
     await screen.findByText(en.vaults.askOff.offHintEdit);
     await act(async () => { fireEvent.click(askSwitch()); });
