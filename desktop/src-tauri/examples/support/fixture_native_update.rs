@@ -220,6 +220,12 @@ pub fn run() {
     context.config_mut().app.app_directories_override = Some(AppDirectoriesOverride::Root(data.clone()));
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // The production client reconciles Pet shortcuts when presentation
+        // changes, even when the Pet window is disabled. Manage both real
+        // dependencies before attaching the client; never bypass auxiliaries.
+        .plugin(tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(|app, shortcut, event| pet::handle_shortcut(app, shortcut, event.state()))
+            .build())
         .invoke_handler(tauri::generate_handler![desktop_client_request])
         .plugin(tauri::plugin::Builder::<_, ()>::new("native-update-fixture")
             .on_navigation(|view, url| {
@@ -251,6 +257,7 @@ pub fn run() {
             let active = shell.active_origin.clone();
             app.manage(shell);
             app.manage(notifications::Notifications::new(data.join("notifications.json")));
+            app.manage(pet::Pet::new(data.join("pet.json")));
             app.manage(Mutex::new(DeepLinks::default()));
             app.manage(PendingDesktopUpdateOpen(AtomicBool::new(false)));
             updater::init(app.handle())?;

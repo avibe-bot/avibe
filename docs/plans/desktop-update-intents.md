@@ -242,6 +242,16 @@ editor/viewer or bypasses origin/CSRF protection.
   This is not a claim of production NSIS, Certum, notarization or standard-user
   elevation coverage. Native GUI/WebView control and path isolation must pass
   preflight on each runner; no owner-machine fallback is allowed.
+- The first hosted run failed before handoff: Windows had no NSIS compiler,
+  and the native fixture omitted the Pet state and shortcut plugin used by the
+  production client's auxiliary reconciliation. Fixture setup now registers
+  those real dependencies before attaching the client, and Windows provisions
+  a hash-pinned portable NSIS archive under the run-owned root before building.
+  The controller fixture constructs its real owner synchronously, as `main.py`
+  does, before entering the serving loop; constructing it inside that loop had
+  suppressed Model Hub reconciliation with nested-`asyncio.run` errors. Hermetic
+  assembly/lifecycle tests guard these repairs, but cannot replace another real
+  hosted run. Neither platform's handoff is accepted from that failed run.
 - The hosted fixture workflow is label- or dispatch-triggered only, never on
   push. A same-repository/master-base PR label is the premerge manual trigger;
   `workflow_dispatch` becomes usable after default-branch registration. Checkout

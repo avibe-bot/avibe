@@ -16,16 +16,36 @@ import re
 import shutil
 import subprocess
 import tarfile
+import urllib.request
+import zipfile
 
 from common import command, digest, hosted, save
 
 BASE = "0.0.1-rc.1"
 NEXT = "0.0.1-rc.2"
 TAG = "gh-v0.0.1rc2"
+NSIS_URL = "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip"
+NSIS_SHA256 = "c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1"
 TARGETS = {
     "aarch64-apple-darwin": ("darwin-aarch64", ".app.tar.gz"),
     "x86_64-pc-windows-msvc": ("windows-x86_64", ".exe"),
 }
+
+
+def provision_nsis(root: Path) -> Path:
+    """Use a hash-pinned portable compiler, never an assumed runner install."""
+    with urllib.request.urlopen(NSIS_URL, timeout=60) as response:
+        payload = response.read(8 * 1024 * 1024 + 1)
+    if len(payload) > 8 * 1024 * 1024 or hashlib.sha256(payload).hexdigest() != NSIS_SHA256:
+        raise RuntimeError("Fixture NSIS archive digest mismatch")
+    destination = root / "tools"
+    destination.mkdir(exist_ok=False)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        archive.extractall(destination)
+    executable = destination / "nsis-3.11/makensis.exe"
+    if not executable.is_file():
+        raise RuntimeError("Pinned NSIS archive lacks makensis.exe")
+    return executable
 
 
 def replace_once(text: str, old: str, new: str) -> str:
@@ -62,7 +82,10 @@ def validate_presentation_lifecycle(library: str, fixture: str) -> dict:
     ensure = section("fn ensure_main_window(", "\nfn build_main_window(")
     ordered(ensure, ["if let Some(window) = app.get_webview_window(MAIN_WINDOW) {",
                      "return Some(window);", "build_main_window(app, None, false, None)"])
-    ordered(fixture, [".visible(false).build()?;",
+    ordered(fixture, [".plugin(tauri_plugin_global_shortcut::Builder::new()",
+                      'app.manage(pet::Pet::new(data.join("pet.json")));',
+                      "let coordinator = instance_client::attach(",
+                      ".visible(false).build()?;",
                       'assert!(instance_client::present(app.handle(), "updates"));',
                       "super::focus_or_restore_main_window(app.handle());",
                       'emit(json!({"event":"native_ready"'])
@@ -192,6 +215,11 @@ def main() -> None:
               "workflow_sha": os.environ["ACCEPTANCE_WORKFLOW_SHA"],
               "workflow_ref": os.environ["ACCEPTANCE_WORKFLOW_REF"],
               "runner_image": os.environ.get("ImageVersion"), "runner_os": os.environ.get("RUNNER_OS"), "rustc": rustc}
+    nsis = provision_nsis(root) if os.name == "nt" else None
+    if nsis is not None:
+        command([nsis, "/VERSION"], root, log=log)
+        record["nsis"] = {"url": NSIS_URL, "archive_sha256": NSIS_SHA256,
+                          "compiler_sha256": digest(nsis)}
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if not npm:
         raise RuntimeError("Node/npm missing")
@@ -247,10 +275,7 @@ if ($info.ProductName -ne 'Avibe' -or $info.ProductVersion -ne $Expected) {
     payloads.mkdir()
     artifact = payloads / f"Avibe_{NEXT}_{args.target}{extension}"
     if os.name == "nt":
-        candidates = [shutil.which("makensis"), r"C:\Program Files (x86)\NSIS\makensis.exe"]
-        nsis = next((p for p in candidates if p and Path(p).is_file()), None)
-        if not nsis:
-            raise RuntimeError("NSIS unavailable on runner; native fixture installer was not built")
+        assert nsis is not None
         command([nsis, "/V2", f"/DOUTPUT={artifact}", f"/DNEXT_BINARY={outputs['next']}",
                  source / "desktop/src-tauri/tests/native_update/fixture-installer.nsi"], source, log=log)
         command(["powershell.exe", "-NoProfile", "-NonInteractive", "-File", version_check,

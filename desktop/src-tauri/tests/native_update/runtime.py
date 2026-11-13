@@ -47,16 +47,13 @@ def append(path: Path, event: dict) -> None:
         stream.flush()
 
 
-async def serve(root: Path) -> None:
+def create_controller(root: Path):
+    """Match main.py: construct the real Controller before entering its loop."""
     from config import paths
     from config.v2_config import V2Config, ModelHubConfig
     from config.v2_compat import to_app_config
     from storage.importer import ensure_sqlite_state
     from core.controller import Controller
-    from core import internal_server
-    from core.inbox_events import publish_runtime_activity
-    from vibe import ui_server, internal_client
-    import uvicorn
 
     assert paths.get_config_path().resolve().is_relative_to(root)
     assert paths.get_sqlite_state_path().resolve().is_relative_to(root)
@@ -80,6 +77,16 @@ async def serve(root: Path) -> None:
     config.save()
     ensure_sqlite_state()
     controller = Controller(to_app_config(config))
+    return controller, listener
+
+
+async def serve(root: Path, controller, listener: socket.socket) -> None:
+    from core import internal_server
+    from core.inbox_events import publish_runtime_activity
+    from vibe import ui_server, internal_client
+    import uvicorn
+
+    port = listener.getsockname()[1]
     # Real owner lifecycle on the same asyncio loop as control IPC. The fresh
     # database has no durable work to restore; no backend starts in this fixture.
     controller._loop = asyncio.get_running_loop()
@@ -168,7 +175,11 @@ def main() -> None:
     root = hosted(args.root)
     os.environ["VIBE_INTERNAL_DISPATCH_SOCKET"] = str(root / "i.sock")
     deny_external(root)
-    asyncio.run(serve(root))
+    controller, listener = create_controller(root)
+    try:
+        asyncio.run(serve(root, controller, listener))
+    finally:
+        listener.close()
 
 
 if __name__ == "__main__":
