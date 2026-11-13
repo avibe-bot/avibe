@@ -369,5 +369,5 @@ account as its last row (a page pushed inside the sheet). Drag down, ✕ or the
 current instance return. First use keeps a full page with the same rows. Plan,
 variants A/B, desktop consistency and build notes:
 `docs/plans/2026-11-13-ios-instance-pages.md`. Kit:
-`ui/design/kit/mobile-instance-sheet.tsx`; frames `switcher/*`, 18 states ×
+`ui/design/kit/mobile-instance-sheet.tsx`; frames `switcher/*`, 19 states ×
 zh/en, light and dark.

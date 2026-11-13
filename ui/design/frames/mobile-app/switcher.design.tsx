@@ -69,6 +69,7 @@ const designFrames = frames([
   ...both('sheet-only-current', 'A · 只有当前这一个实例', sheet('only-current')),
   ...both('sheet-dismissing', 'A · 手势：下拉关闭回到当前实例', sheet('dismissing')),
   ...both('sheet-long', 'A · 长实例名与长邮箱 · 375×667', () => <InstanceSheet state="default" current={longCurrent} others={longOthers} email={longEmail} />, { size: SMALL, email: longEmail }),
+  ...both('sheet-long-end', 'A · 长文本 · 滚到底：长邮箱在账户行里完整换行 · 375×667', () => <InstanceSheet state="default" current={longCurrent} others={longOthers} email={longEmail} atEnd />, { size: SMALL, email: longEmail }),
   // Account, pushed inside the sheet.
   ...both('account', '账户：在 sheet 里推入的一页，← 回到实例列表', () => <SheetAccount current={personal} others={others} email={email} />),
   ...both('account-swipe', '手势：从左边缘右滑回到实例列表', () => <SheetAccount current={personal} others={others} email={email} swiping />),

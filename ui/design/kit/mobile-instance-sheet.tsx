@@ -56,7 +56,7 @@ function Underneath({ children, named }: { children?: ReactNode; named?: string 
 }
 
 /** The sheet card: grabber, a header, and a scrolling body above the Home indicator. */
-function SheetCard({ header, children, className }: { header: ReactNode; children: ReactNode; className?: string }) {
+function SheetCard({ header, children, className, atEnd = false }: { header: ReactNode; children: ReactNode; className?: string; atEnd?: boolean }) {
   return (
     <section
       aria-modal="true"
@@ -64,7 +64,7 @@ function SheetCard({ header, children, className }: { header: ReactNode; childre
     >
       <span aria-hidden="true" className="mx-auto mt-2 h-1.5 w-10 shrink-0 rounded-full bg-muted/40" />
       {header}
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(env(safe-area-inset-bottom)+1.5rem)]">{children}</div>
+      <div className={cn('min-h-0 flex-1 px-4 pb-[calc(env(safe-area-inset-bottom)+1.5rem)]', atEnd ? 'flex flex-col justify-end overflow-hidden [&>*]:shrink-0' : 'overflow-y-auto')}>{children}</div>
     </section>
   );
 }
@@ -237,7 +237,7 @@ function GestureNote({ children, className }: { children: ReactNode; className?:
 export type SheetState = 'default' | 'offline-open' | 'opening' | 'open-failed' | 'stale' | 'refreshing' | 'only-current' | 'dismissing';
 
 /** Variant A: the avatar opens this sheet. Variant B (`named`): the instance name in the header opens it, and the avatar opens Account directly, so the sheet has no account row. */
-export function InstanceSheet({ state, current, others, email, named = false }: { state: SheetState; current: SheetInstance; others: SheetInstance[]; email: string; named?: boolean }) {
+export function InstanceSheet({ state, current, others, email, named = false, atEnd = false }: { state: SheetState; current: SheetInstance; others: SheetInstance[]; email: string; named?: boolean; /** Drawn scrolled to the end of the list. */ atEnd?: boolean }) {
   const t = useCopy();
   const opening = others.find((each) => each.online && each.id !== current.id);
   const offline = others.find((each) => !each.online);
@@ -247,7 +247,7 @@ export function InstanceSheet({ state, current, others, email, named = false }: 
   if (state === 'offline-open' && offline) states[offline.id] = 'offline-open';
   return (
     <Underneath named={named ? current.name : undefined}>
-      <SheetCard header={<SheetHeader current={current.name} />} className={state === 'dismissing' ? 'translate-y-1/4' : undefined}>
+      <SheetCard header={<SheetHeader current={current.name} />} className={state === 'dismissing' ? 'translate-y-1/4' : undefined} atEnd={atEnd}>
         {state === 'stale' && <StaleBanner />}
         <CurrentInstance instance={current} />
         <OtherInstances instances={state === 'only-current' ? [] : others} states={states} status={state === 'refreshing' ? 'refreshing' : 'sorted'} />
@@ -306,7 +306,7 @@ export function SheetAccount({ current, others, email, swiping = false }: { curr
         <AccountPageBody email={email} />
       </SheetCard>
       {swiping && (
-        <GestureNote className="top-1/2 left-4">
+        <GestureNote className="bottom-[calc(env(safe-area-inset-bottom)+5rem)] left-4">
           <ArrowRight className="size-4" />{t('从左边缘右滑，回到实例列表', 'Swipe from the left edge to go back')}
         </GestureNote>
       )}

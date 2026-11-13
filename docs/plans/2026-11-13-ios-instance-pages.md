@@ -139,13 +139,13 @@ Recommendation: **A now, B next.** A removes every confusion except C1 with no R
 | `sheet-opening`, `sheet-open-failed` | Switching in progress; a failed switch on its row |
 | `sheet-stale` | Refresh failed: banner + Retry, list still usable |
 | `sheet-dismissing`, `account-swipe` | Gesture diagrams: drag down to return; swipe from the left edge to go back |
-| `sheet-long`, `account-long` (375×667) | Long instance names, long shared-by line, long email |
+| `sheet-long`, `sheet-long-end`, `account-long` (375×667) | Long instance names and shared-by line; scrolled to the end, the long email wraps in full in the account row; long email on Account |
 | `account` | Account pushed inside the sheet |
 | `first-run`, `first-run-pulling`, `first-run-error` | First use as a full page; pull to refresh; load failure without cache |
 | `runtime-failed` | Native failure screen in the same words, 其他实例 → sheet |
 | `b-home`, `b-sheet` | Variant B: the named header; its sheet without the account row |
 
-18 states × zh/en = 36 frames, 72 captures, iPhone 17 Pro (402×874, safe area 62/34) unless noted.
+19 states × zh/en = 38 frames, 76 captures, iPhone 17 Pro (402×874, safe area 62/34) unless noted.
 
 ## 4. Desktop consistency
 
