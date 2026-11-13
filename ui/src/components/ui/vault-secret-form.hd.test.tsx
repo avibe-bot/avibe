@@ -5,6 +5,8 @@
 // thing that leaves the browser (the seed in the blind box) is exactly BIP39(displayed words), that
 // no words, seed or accounts are posted, and that a wallet whose stored #0 differs is never offered.
 import { webcrypto } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -51,6 +53,12 @@ vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => ({ status: 
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
 vi.mock('./avault-authorization-notice', () => ({ AvaultAuthorizationNotice: () => <div role="note">avault-authorization</div> }));
 vi.mock('@/lib/vaultCrypto', async (original) => ({ ...await original<typeof import('@/lib/vaultCrypto')>(), sealBlindBox }));
+// A test may hand the dialog fixed words in place of fresh ones (the corpus cases below).
+const phrase = vi.hoisted(() => ({ next: null as string[] | null }));
+vi.mock('@/lib/vaultHdWallet', async (original) => {
+  const real = await original<typeof import('@/lib/vaultHdWallet')>();
+  return { ...real, newPhrase: () => phrase.next ?? real.newPhrase() };
+});
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({ lng: 'en', fallbackLng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false } });
@@ -417,4 +425,91 @@ it('creates with the Bitcoin types profile and all five #0 addresses, and says t
   expect(await screen.findByText(hd.avaultOld.replace('{{version}}', '0.1.12').replace('{{installed}}', '0.1.12'))).toBeTruthy();
   expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe(OFFICIAL);
   expect(api.createVaultSecret).toHaveBeenCalledOnce();
+});
+
+it('creates a wallet with a passphrase typed twice: the sealed seed uses it, it never leaves the browser, and recovery names it', async () => {
+  const pass = '  Ångström 日本 ';
+  await openWallet('WALLET_PASS');
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${hd.passphrase.title.replace(/[()]/g, '\\$&')}`) }));
+  const [first, again] = [screen.getByLabelText(hd.passphrase.label), screen.getByLabelText(hd.passphrase.again)];
+  fireEvent.change(first, { target: { value: pass } });
+  fireEvent.change(again, { target: { value: pass.trim() } });
+  // Two different entries: no words yet.
+  expect(screen.getByText(hd.passphrase.mismatch)).toBeTruthy();
+  expect((screen.getByRole('button', { name: hd.generateCta }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(again, { target: { value: pass } });
+  expect(screen.getByText(hd.passphrase.match)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: hd.generateCta }));
+  fireEvent.click(await screen.findByRole('button', { name: hd.backup.show.replace('{{count}}', '12') }));
+  expect(screen.getByText(hd.passphrase.backupReminder)).toBeTruthy();
+  const grid = screen.getByRole('list', { name: hd.steps.backup });
+  const words = within(grid).getAllByRole('listitem').map((item) => item.querySelectorAll('span')[1].textContent ?? '');
+  fireEvent.click(screen.getByRole('button', { name: hd.backup.done }));
+  for (const group of screen.getAllByRole('radiogroup')) {
+    const position = Number(/\d+/.exec(group.getAttribute('aria-label') ?? '')![0]);
+    fireEvent.click(within(group).getByRole('radio', { name: words[position - 1] }));
+  }
+  api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [storedFor(words, pass)] } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.createCta })); });
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  // Exactly as typed (spaces kept); the seed's own NFKD is the only change.
+  expect(bytesToHex(sealed.plaintext!)).toBe(bytesToHex(wordsToSeed(words, pass)));
+  expect(bytesToHex(sealed.plaintext!)).not.toBe(bytesToHex(wordsToSeed(words, '')));
+  expect(JSON.stringify(api.createVaultSecret.mock.calls)).not.toContain('Ångström');
+  expectNoSecretsPosted(words);
+  expect(await screen.findByText(hd.passphrase.recovery)).toBeTruthy();
+});
+
+it('leaves the passphrase out when both fields stay empty', async () => {
+  await openWallet('WALLET_NOPASS');
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${hd.passphrase.title.replace(/[()]/g, '\\$&')}`) }));
+  expect((screen.getByRole('button', { name: hd.generateCta }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+// acceptance.md (passphrase cases): every public corpus phrase that has a passphrase — ASCII, café,
+// Ångström, Japanese, leading/trailing/double spaces, the TREZOR vectors — created through the
+// dialog with that passphrase typed twice gives exactly the corpus seed and account #0.
+type CorpusEntry = { id: string; words: string; passphrase: string; seed_hex: string; accounts: { eth: string; btc_taproot: string; solana: string }[] };
+const corpus = JSON.parse(readFileSync(resolve(__dirname, '../../../../tests/fixtures/vault_signing/hd-seed-corpus.json'), 'utf8')) as { entries: CorpusEntry[] };
+const withPassphrase = corpus.entries.filter((entry) => entry.passphrase !== '' && entry.words.split(' ').length === 12);
+
+it.each(withPassphrase.map((entry) => [entry.id, entry] as const))('creates %s with its passphrase: the corpus seed and #0', async (_id, entry) => {
+  phrase.next = entry.words.split(' ');
+  try {
+    await openWallet('WALLET_CORPUS');
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${hd.passphrase.title.replace(/[()]/g, '\\$&')}`) }));
+    fireEvent.change(screen.getByLabelText(hd.passphrase.label), { target: { value: entry.passphrase } });
+    fireEvent.change(screen.getByLabelText(hd.passphrase.again), { target: { value: entry.passphrase } });
+    fireEvent.click(screen.getByRole('button', { name: hd.generateCta }));
+    fireEvent.click(await screen.findByRole('button', { name: hd.backup.show.replace('{{count}}', '12') }));
+    fireEvent.click(screen.getByRole('button', { name: hd.backup.done }));
+    const words = entry.words.split(' ');
+    for (const group of screen.getAllByRole('radiogroup')) {
+      const position = Number(/\d+/.exec(group.getAttribute('aria-label') ?? '')![0]);
+      fireEvent.click(within(group).getByRole('radio', { name: words[position - 1] }));
+    }
+    api.createVaultSecret.mockResolvedValue({ ok: true, secret: { accounts: [storedFor(words, entry.passphrase)] } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.createCta })); });
+    await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+    expect(bytesToHex(sealed.plaintext!)).toBe(entry.seed_hex);
+    const expected = postedPayload().expected_account0 as Record<string, string>;
+    expect({ eth: expected.eth, btc_taproot: expected.btc_taproot, solana: expected.solana }).toEqual({
+      eth: entry.accounts[0].eth, btc_taproot: entry.accounts[0].btc_taproot, solana: entry.accounts[0].solana,
+    });
+    expect(JSON.stringify(api.createVaultSecret.mock.calls)).not.toContain(entry.passphrase.trim() || '\u0000');
+    expect(await screen.findByText(hd.passphrase.recovery)).toBeTruthy();
+  } finally {
+    phrase.next = null;
+  }
+});
+
+it('says the passphrase is set when its section is folded again', async () => {
+  await openWallet('WALLET_FOLD');
+  const toggle = () => screen.getByRole('button', { name: new RegExp(`^${hd.passphrase.title.replace(/[()]/g, '\\$&')}`) });
+  fireEvent.click(toggle());
+  fireEvent.change(screen.getByLabelText(hd.passphrase.label), { target: { value: 'x' } });
+  fireEvent.change(screen.getByLabelText(hd.passphrase.again), { target: { value: 'x' } });
+  fireEvent.click(toggle());
+  expect(screen.getByText(hd.passphrase.set)).toBeTruthy();
+  expect(screen.queryByText(hd.passphrase.folded)).toBeNull();
 });

@@ -676,6 +676,20 @@ describe('turning ask-before-signing off with a Passkey', () => {
     expect(api.createVaultSigningPolicyChallenge).toHaveBeenCalledTimes(2);
   });
 
+  it('says the confirmation window was not fully visible, in the neutral tone, and stays on', async () => {
+    sandbox.canTurnOff = true;
+    api.completeVaultSigningPolicyDowngrade.mockClear();
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });
+    sandbox.authorizeSigningPolicyDowngrade.mockRejectedValue(Object.assign(new Error('x'), { code: 'sandbox_not_visible' }));
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    const line = await screen.findByText(en.vaults.askOff.notVisible);
+    expect(line.getAttribute('role')).toBe('note');
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
+
   it.each(['passkey_cancelled', 'authorization_window_closed'])('stays on without a message when the confirmation ends with %s', async (code) => {
     sandbox.canTurnOff = true;
     api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });

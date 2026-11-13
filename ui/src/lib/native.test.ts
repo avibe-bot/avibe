@@ -14,6 +14,8 @@ import {
   nativeVoicePermission,
   onNativePushOpened,
   openNativeExternal,
+  NATIVE_RECONCILE_MAX_SESSIONS,
+  reconcileNativeNotifications,
   setNativeAccountActionAvailable,
   setNativeBadge,
   setNativeOuterScrollLocked,
@@ -162,6 +164,46 @@ describe('native shell bridge', () => {
     expect(older).not.toHaveBeenCalled();
     Reflect.deleteProperty(window, 'avibeNative');
     expect(setNativeBadge(3)).toBe(false);
+  });
+
+  it('names the unread Sessions of a whole map to the App, or nothing when it cannot name them all', () => {
+    const call = installBridge({ capabilities: { app: 1, notifications: 1 } });
+
+    // Only counts above zero are unread.
+    expect(reconcileNativeNotifications({ ses_a: 2, ses_b: 0, ses_c: 1 }, 1_000)).toBe(true);
+    expect(reconcileNativeNotifications({}, 2_000)).toBe(true);
+    expect(call.mock.calls).toEqual([
+      ['notifications.reconcile', { unreadSessions: ['ses_a', 'ses_c'], asOf: 1_000 }],
+      ['notifications.reconcile', { unreadSessions: [], asOf: 2_000 }],
+    ]);
+
+    // A Session the call could not name would read as read: nothing is sent.
+    const tooMany = Object.fromEntries(
+      Array.from({ length: NATIVE_RECONCILE_MAX_SESSIONS + 1 }, (_, i) => [`ses_${i}`, 1]),
+    );
+    const atLimit = Object.fromEntries(Object.entries(tooMany).slice(0, NATIVE_RECONCILE_MAX_SESSIONS));
+    for (const unread of [
+      tooMany,
+      { ['s'.repeat(201)]: 1 },
+      { ses_a: Number.NaN },
+      { ses_a: '1' },
+      null,
+      undefined,
+      ['ses_a'],
+    ]) {
+      expect(reconcileNativeNotifications(unread, 3_000)).toBe(false);
+    }
+    expect(reconcileNativeNotifications({ ses_a: 1 }, Number.NaN)).toBe(false);
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(reconcileNativeNotifications(atLimit, 4_000)).toBe(true);
+    expect(call).toHaveBeenCalledTimes(3);
+
+    // An older shell, and a plain browser, have no native reconcile.
+    const older = installBridge({ capabilities: { app: 1, badge: 1 } });
+    expect(reconcileNativeNotifications({ ses_a: 1 }, 1_000)).toBe(false);
+    expect(older).not.toHaveBeenCalled();
+    Reflect.deleteProperty(window, 'avibeNative');
+    expect(reconcileNativeNotifications({ ses_a: 1 }, 1_000)).toBe(false);
   });
 
   it.each([

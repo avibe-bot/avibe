@@ -85,6 +85,8 @@ describe('turnOffAskBeforeSigning', () => {
     ['authorization_window_closed', 'cancelled'],
     ['authorization_popup_blocked', 'popup_blocked'],
     ['authorization_window_timeout', 'expired'],
+    // fc013 decides the window's visibility once as it opens (covered, off screen, screen locked).
+    ['sandbox_not_visible', 'not_visible'],
     ['sandbox_reset', 'cancelled'],
     ['policy_downgrade_unavailable', 'unavailable'],
     ['policy_context_expired', 'expired'],

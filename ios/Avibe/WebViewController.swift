@@ -332,6 +332,7 @@ final class WebViewFactory {
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
+    private let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
     ] = [:]
@@ -381,6 +382,9 @@ final class WebViewFactory {
         },
         setBadgeCount: { [weak self] count, origin in
             self?.setBadgeCount(count, origin) ?? false
+        },
+        reconcileNotifications: { [weak self] reconcile, origin in
+            self?.reconcileNotifications(reconcile, origin) ?? false
         }
     )
 
@@ -394,6 +398,7 @@ final class WebViewFactory {
         directStatus: DirectStatusProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
+        reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
         pushCoordinator: NativePushCoordinator? = nil
     ) {
         self.instanceOrigin = instanceOrigin
@@ -405,6 +410,7 @@ final class WebViewFactory {
         self.directStatus = directStatus
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
+        self.reconcileNotifications = reconcileNotifications
         self.pushCoordinator = pushCoordinator
     }
 
@@ -568,6 +574,7 @@ final class WebViewController: UIViewController {
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
+    private let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
@@ -620,6 +627,9 @@ final class WebViewController: UIViewController {
             setBadgeCount: { [weak self] count, origin in
                 self?.setBadgeCount(count, origin) ?? false
             },
+            reconcileNotifications: { [weak self] reconcile, origin in
+                self?.reconcileNotifications(reconcile, origin) ?? false
+            },
             pushCoordinator: pushCoordinator
         )
         retainedWebViewFactory = factory
@@ -646,6 +656,7 @@ final class WebViewController: UIViewController {
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
+        reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
@@ -665,6 +676,7 @@ final class WebViewController: UIViewController {
         self.pageColorSchemeChanged = pageColorSchemeChanged
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
+        self.reconcileNotifications = reconcileNotifications
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading

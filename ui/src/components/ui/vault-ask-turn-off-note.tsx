@@ -14,6 +14,7 @@ const FAILURE_KEYS = {
   legacy_registration: 'vaults.askOff.legacyRegistration',
   expired: 'vaults.askOff.expired',
   clock_skew: 'vaults.askOff.clockSkew',
+  not_visible: 'vaults.askOff.notVisible',
   changed: 'vaults.askOff.changed',
   failed: 'vaults.askOff.failed',
 } as const satisfies Record<Exclude<PolicyTurnOffFailure, 'cancelled' | 'unavailable'>, string>;

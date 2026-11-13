@@ -22,6 +22,7 @@ struct NativeShellMetadata: Equatable {
         "badge": 1,
         "haptics": 1,
         "keyboardResizesViewport": 1,
+        "notifications": 1,
         "push": 1,
         "viewport": 1,
         "voice": 1,
@@ -102,6 +103,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
     case navigationHistoryChanged = "navigation.historyChanged"
+    case notificationsReconcile = "notifications.reconcile"
     case pushStatus = "push.status"
     case pushSubscribe = "push.subscribe"
     case pushUnsubscribe = "push.unsubscribe"
@@ -257,6 +259,12 @@ enum NativeBridgeConfiguration {
             WebOrigin
         ) -> Bool = { _, _ in
             false
+        },
+        reconcileNotifications: @escaping @MainActor (
+            NotificationReconcile,
+            WebOrigin
+        ) -> Bool = { _, _ in
+            false
         }
     ) -> WKWebViewConfiguration {
         // `direct` exists only with a provider: a shell with no direct
@@ -278,7 +286,8 @@ enum NativeBridgeConfiguration {
             pushSubscribe: pushSubscribe,
             pushUnsubscribe: pushUnsubscribe,
             pushOpenedAck: pushOpenedAck,
-            setBadgeCount: setBadgeCount
+            setBadgeCount: setBadgeCount,
+            reconcileNotifications: reconcileNotifications
         )
         controller.addScriptMessageHandler(
             handler,
@@ -556,6 +565,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         Int,
         WebOrigin
     ) -> Bool
+    private let reconcileNotifications: @MainActor (
+        NotificationReconcile,
+        WebOrigin
+    ) -> Bool
 
     init(
         policy: NativeBridgePolicy,
@@ -585,6 +598,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         setBadgeCount: @escaping @MainActor (
             Int,
             WebOrigin
+        ) -> Bool,
+        reconcileNotifications: @escaping @MainActor (
+            NotificationReconcile,
+            WebOrigin
         ) -> Bool
     ) {
         self.policy = policy
@@ -600,6 +617,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.pushUnsubscribe = pushUnsubscribe
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
+        self.reconcileNotifications = reconcileNotifications
     }
 
     func userContentController(
@@ -864,6 +882,23 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             // The instance this WebView was made for, which the App checks
             // is still the selected one (as push.* does).
             guard setBadgeCount(count, policy.instanceOrigin) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            reply(replyHandler, result: NSNull())
+        case .notificationsReconcile:
+            guard let reconcile = NotificationReconcile.parse(request.params) else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "notifications.reconcile requires unreadSessions, at most \(NotificationReconcile.maximumSessions) distinct Session ids, and an asOf time in milliseconds."
+                    )
+                )
+                return
+            }
+            // The instance this WebView was made for, which the App checks
+            // is still the selected one (as badge.set does).
+            guard reconcileNotifications(reconcile, policy.instanceOrigin) else {
                 reply(replyHandler, error: .forbidden)
                 return
             }

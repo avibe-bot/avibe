@@ -30,6 +30,7 @@ export type PolicyTurnOffFailure =
   | 'expired' // the 2-minute confirmation ran out: try again
   | 'clock_skew' // this device's clock is off
   | 'changed' // the key changed elsewhere meanwhile
+  | 'not_visible' // the confirmation window was covered or not in view (e.g. the screen locked)
   | 'failed';
 
 export type PolicyTurnOffOutcome<S> = { ok: true; secret: S } | { ok: false; reason: PolicyTurnOffFailure };
@@ -58,6 +59,8 @@ const SANDBOX_REASONS: Record<string, PolicyTurnOffFailure> = {
   authorization_window_timeout: 'expired',
   policy_context_expired: 'expired',
   policy_context_clock_skew: 'clock_skew',
+  // The confirmation window was not fully in view when it opened: retryable, not a fault.
+  sandbox_not_visible: 'not_visible',
 };
 
 export const policyFailureFromServer = (code: string | undefined): PolicyTurnOffFailure =>
