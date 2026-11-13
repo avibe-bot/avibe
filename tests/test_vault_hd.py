@@ -595,6 +595,7 @@ def test_signs_only_selected_account_and_records_original_session(custody, chain
         payload = {**sign_input(chain, account), "request_id": request["id"], "requester": {"session_id": "approving-browser"}}
     result = api.vault_sign(payload)
     assert result["ok"] and result["signature"] == custody.reply
+    assert "signing_public_key" not in result  # Omitted BTC selector and EVM/Solana keep their shipped result wire.
     command, wire = custody.calls[0]
     assert command == ["sign"]
     assert wire == {
@@ -735,7 +736,8 @@ def test_cli_default_account_list_and_plain_keypair_option_refusal(custody, capf
     assert cli.cmd_vault_list(parser.parse_args(["vault", "list"])) == 0
     listed = json.loads(capfd.readouterr().out)["secrets"][0]
     assert listed["signer_kind"] == "hd-seed"
-    assert set(listed["accounts"][0]) == {"account", "name", "eth", "btc_taproot", "solana"}
+    assert set(listed["accounts"][0]) == {"account", "name", "eth", "btc_taproot", "solana", "paths", "bitcoin_address_types"}
+    assert listed["accounts"][0]["bitcoin_address_types"] == ["p2tr"]
     with api._vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PLAIN", kind="keypair", sealed=Sealed("ct", "nonce", "meta"))
     before = len(custody.calls)

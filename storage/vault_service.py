@@ -259,6 +259,14 @@ class InvalidHdWalletError(InvalidSigningKeyError):
     code = "invalid_hd_wallet"
 
 
+class HdBitcoinTypesStateChangedError(InvalidRequestError):
+    code = "hd_bitcoin_types_state_changed"
+
+
+class HdBitcoinTypesIntegrityError(InvalidRequestError):
+    code = "hd_bitcoin_types_integrity_failed"
+
+
 class InvalidSigningContextError(InvalidRequestError):
     pass
 
@@ -1034,6 +1042,8 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         payload["account_limit"] = vault_hd.ACCOUNT_LIMIT
         try:
             payload["accounts"] = vault_hd.public_accounts(public_meta)
+            if public_meta.get("bitcoin_profile") == vault_hd.BITCOIN_PROFILE:
+                payload["bitcoin_profile"] = vault_hd.BITCOIN_PROFILE
         except ValueError:
             # Corrupt/unknown metadata must not hide a row or prevent deletion.
             payload["accounts"] = []
@@ -1057,6 +1067,7 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
                 }
             elif isinstance(public_key, str) and signing_public_key.get("curve") == "secp256k1":
                 payload["signing_addresses"] = derive_addresses(public_key)
+                payload["bitcoin_address_types"] = ["p2tr"] if protection == "protected" else list(vault_hd.BITCOIN_TYPES)
         except Exception:
             logger.warning("failed to derive signing addresses for secret %r", row.get("name"))
     return payload
@@ -2442,7 +2453,7 @@ def _row_signing_public_key(
             raise InvalidHdWalletError("HD seed wallets support only standard-tier keypairs")
         try:
             selection = vault_hd.validate_derivation(derivation)
-            if scheme is not None and scheme != vault_hd.SCHEMES[selection["chain"]]:
+            if scheme is not None and scheme != vault_hd.signing_scheme(selection):
                 raise ValueError("signature scheme does not match the HD chain")
             return vault_hd.signing_public_key(meta, selection)
         except ValueError as exc:
@@ -3693,10 +3704,11 @@ def _create_secret(
         try:
             vault_hd.validate_envelope(sealed)
             accounts = vault_hd.stored_accounts(public_meta)
+            profile = public_meta.get("bitcoin_profile")
             expected = vault_hd.import_accounts([
-                {"account": item["account"], **{chain: item.get(chain) for chain in vault_hd.SCHEMES}}
+                {"account": item["account"], **{field: item.get(field) for field in vault_hd.public_fields(profile)}}
                 for item in accounts
-            ])
+            ], profile=profile)
             if accounts != expected:
                 raise ValueError("new HD wallets start with only account 0 enabled and default account settings")
             # Apply only the explicit initial policy to canonical, fresh metadata,
@@ -4044,6 +4056,59 @@ def hd_signing_binding(row: dict[str, Any], derivation: dict[str, Any]) -> dict[
     }
 
 
+def capture_hd_bitcoin_types(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
+    """Capture identity/public keys under management ACL, never a private derivation."""
+    row = require_secret_management(conn, name, user_context=user_context)
+    if row.get("kind") != "keypair" or row.get("signer_kind") != vault_hd.SIGNER_KIND or row.get("protection") != "standard":
+        raise InvalidRequestError("Bitcoin public preparation requires a standard HD seed wallet")
+    meta = _public_meta(row.get("public_meta"))
+    try:
+        vault_hd.validate_envelope(_row_sealed(row))
+        base = vault_hd.base_identities(meta)
+    except ValueError as exc:
+        raise HdBitcoinTypesIntegrityError(str(exc)) from exc
+    return {"id": row["id"], "name": row["name"], "envelope": _row_sealed(row),
+            "base": base, "prepared": meta.get("bitcoin_profile") == vault_hd.BITCOIN_PROFILE}
+
+
+def commit_hd_bitcoin_types(
+    conn: Connection, snapshot: dict[str, Any], accounts: list[dict[str, Any]], *, user_context: Any = None,
+) -> dict[str, Any]:
+    """CAS immutable identity, then merge into CURRENT mutable metadata under the writer."""
+    # Validate before taking the writer, even for storage-layer callers.
+    try:
+        canonical = vault_hd.import_accounts(accounts, profile=vault_hd.BITCOIN_PROFILE)
+        if vault_hd.base_identities({"hd_accounts": canonical, "bitcoin_profile": vault_hd.BITCOIN_PROFILE}) != snapshot["base"]:
+            raise ValueError("avault public identities disagree with the existing wallet")
+    except ValueError as exc:
+        raise HdBitcoinTypesIntegrityError(str(exc)) from exc
+    conn.execute(vault_secrets.update().where(vault_secrets.c.id == snapshot["id"]).values(updated_at=vault_secrets.c.updated_at))
+    # The savepoint owns the complete metadata+audit unit even when a storage
+    # caller catches an error and goes on to commit its outer transaction.
+    with conn.begin_nested():
+        try:
+            row = require_secret_management(conn, snapshot["name"], user_context=user_context)
+        except SecretNotFoundError as exc:
+            raise HdBitcoinTypesStateChangedError("HD wallet was removed during preparation") from exc
+        if row["id"] != snapshot["id"] or _row_sealed(row) != snapshot["envelope"]:
+            raise HdBitcoinTypesStateChangedError("HD wallet identity changed during preparation")
+        current = capture_hd_bitcoin_types(conn, snapshot["name"], user_context=user_context)
+        if current["base"] != snapshot["base"]:
+            raise HdBitcoinTypesStateChangedError("HD wallet public identities changed during preparation")
+        meta = _public_meta(row.get("public_meta"))
+        for item, derived in zip(meta["hd_accounts"], canonical):
+            for field in ("bitcoin_p2pkh", "bitcoin_p2wpkh"):
+                if field in item and item[field] != derived[field]:
+                    raise HdBitcoinTypesIntegrityError("existing Bitcoin extension keys disagree with avault")
+                item[field] = derived[field]
+        if current["prepared"]:
+            return _meta_payload(row)
+        meta["bitcoin_profile"] = vault_hd.BITCOIN_PROFILE
+        conn.execute(vault_secrets.update().where(vault_secrets.c.id == row["id"]).values(public_meta=json.dumps(meta), updated_at=_now()))
+        audit(conn, "bitcoin-address-types-prepared", secret_name=row["name"], delivery={"profile": vault_hd.BITCOIN_PROFILE})
+        return _meta_payload(_require_row(conn, row["name"]))
+
+
 def update_hd_account(
     conn: Connection, name: str, *, account: int | None = None,
     changes: dict[str, Any] | None = None, user_context: Any = None,
@@ -4165,7 +4230,7 @@ def _searchable_secret_text(secret: dict[str, Any]) -> str:
     if isinstance(addresses, dict):
         fields.append(addresses)
     if secret.get("signer_kind") == vault_hd.SIGNER_KIND:
-        fields.extend({key: account.get(key) for key in ("account", "name", "eth", "btc_taproot", "solana")} for account in secret.get("accounts", []))
+        fields.extend({key: account.get(key) for key in ("account", "name", "eth", "btc_taproot", "btc_legacy", "btc_segwit", "solana")} for account in secret.get("accounts", []))
     return json.dumps(fields, sort_keys=True, default=str).lower()
 
 
@@ -5291,6 +5356,11 @@ def create_sign_request(
         delivery_payload["derivation"] = dict(derivation)
         delivery_payload["signing_key"] = hd_signing_binding(row, derivation)
         account_meta = next(item for item in vault_hd.public_accounts(_public_meta(row.get("public_meta"))) if item["account"] == derivation["account"])
+        if derivation["chain"] == "bitcoin" and "address_type" in derivation:
+            address_type = derivation.get("address_type", "p2tr")
+            address_field = {"p2pkh": "btc_legacy", "p2wpkh": "btc_segwit", "p2tr": "btc_taproot"}[address_type]
+            account_meta.update({"bitcoin_address_type": address_type, "bitcoin_address": account_meta[address_field],
+                                 "bitcoin_path": vault_hd.bitcoin_paths(derivation["account"])[address_type]})
         card.update({"derivation": dict(derivation), "account": account_meta})
     if row.get("protection") == "protected" and scheme == vault_solana.SCHEME:
         delivery_payload["signing_key"] = {

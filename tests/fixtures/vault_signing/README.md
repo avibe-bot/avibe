@@ -15,6 +15,11 @@ these keys to receive funds or to authenticate a production instance.
   key, chain code or machine key is included. The envelope is AAD-bound to
   `HD_TEST_WALLET` and is opaque test data; CI tests do not need its master key.
 
+- `hd-bitcoin/`: additive purpose44/84/86 public corpus (37 cases ×20 indices),
+  independently generated low-S DER fixtures and published BIP84/143/SLIP132
+  anchors. Its README records hashes, independent replay tools, index semantics
+  and the distinction between public-vector tests and real custody/funds gates.
+
 - `bip340.csv`: bitcoin/bips `bip-0340/test-vectors.csv`, downloaded 2026-11-02.
   SHA256 `34c9d1d9c3a88d524bc80778540dc43f8306ec249a7485293063c376db851c2d`.
 - `bip341-wallet.json`: bitcoin/bips `bip-0341/wallet-test-vectors.json`.
