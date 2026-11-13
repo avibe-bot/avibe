@@ -972,11 +972,18 @@ def test_explicit_remote_update_needs_no_host_prompt_and_rechecks_its_ticket(nat
     assert receipt["requestId"] == request["request_id"]
     assert receipt["target"] == request["target"]
     assert not any((update.get("remoteRequest") or {}).get("phase") == "awaiting_host" for update in f["updates"])
-    if boundary == "expired":
-        changed = {**request, "state": "expired"}
-    else:
-        changed = {**request, "request_id": str(uuid.uuid4())}
-    f["send"](action="remote_update", request=changed)
+    if boundary == "replaced":
+        # An unrelated mailbox writer cannot revoke or settle the accepted
+        # download. Prove the original receipt survives before expiring it.
+        f["send"](action="remote_update", request={**request, "request_id": str(uuid.uuid4())})
+        f["wait"]("remote_dispatched")
+        retained = f["state"](lambda _: True)["state"]["desktop"]["update"]["remoteRequest"]
+        assert retained["requestId"] == request["request_id"]
+        assert retained["target"] == request["target"]
+        assert retained["phase"] == "downloading"
+    # This probe is deliberately not installable. Revoke the accepted ticket,
+    # not an unrelated one, before allowing verified bytes to reach the handoff.
+    f["send"](action="remote_update", request={**request, "state": "expired"})
     f["wait"]("remote_dispatched")
     f["updater"]["release"].set()
     ended = f["state"](lambda state: (state["desktop"]["update"].get("remoteRequest") or {}).get("phase") in {"expired", "failed"})
