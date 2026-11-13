@@ -935,16 +935,18 @@ total through `badge.set` there, and a push's `badge_count`, computed when it
 was sent, can only be as recent or older.
 
 A Session's notifications leave Notification Center once it is read in the
-app. When the selected instance's primary WebView shows `/chat/<id>`, on a URL
-change (including the Web UI's `pushState`) or when the app returns to the
-foreground on that page, the app removes the delivered notifications whose
-`threadIdentifier` is `session:<id>` and whose `userInfo` names that instance
-origin and the current account. When the selected instance's main frame sets
-`badge.set({count: 0})`, the loud unread total there is zero, and the app
-removes all of that instance's and account's `session:*` notifications. Either
-way, only notifications delivered by that moment (the URL observation, or the
-bridge call's arrival) are removed: one delivered after it is news the read did
-not cover. Pending requests, other instances, other accounts, the test notification,
+app. The app follows which Session the selected instance's primary WebView
+shows (`/chat/<id>`), on each URL change (including the Web UI's `pushState`)
+and on a return to the foreground. Showing it is not yet reading it: the page
+may not have loaded it (offline after a return to the foreground). The next
+`badge.set` from that page, sent after it has read its Inbox, is what retires
+it: the app removes the delivered notifications whose `threadIdentifier` is
+`session:<id>` and whose `userInfo` names that instance origin and the current
+account. A `badge.set({count: 0})` also removes all of that instance's and
+account's `session:*` notifications: the loud unread total there is zero.
+Either way, only notifications delivered by the moment the `badge.set` call
+arrived are removed: one delivered after it is news the read did not cover.
+Pending requests, other instances, other accounts, the test notification,
 `harness:failure` notices (not part of the Inbox's unread total, so a zero
 says nothing about them), and undecrypted fallbacks (no thread, origin, or
 account) stay.

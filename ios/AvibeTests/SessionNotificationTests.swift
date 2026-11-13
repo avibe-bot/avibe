@@ -4,7 +4,8 @@ import XCTest
 @testable import Avibe
 
 /// A Session's notifications leave Notification Center once it is read in the
-/// App: when its page is shown, and when the instance has nothing unread.
+/// App: when its page has shown it and then read its Inbox, and when the
+/// instance has nothing unread.
 final class SessionNotificationTests: XCTestCase {
     private let one = "https://instance-one.example"
     private let two = "https://instance-two.example"
@@ -112,28 +113,42 @@ final class SessionNotificationTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(200))
         let startupPasses = center.passes
 
-        // No instance is open: a Session page clears nothing.
+        // No instance is open: a Session page is not the selected one's.
         appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/chat/ses_a")))
 
         _ = try appModel.mobileSessionCoordinator.selectInstance(id: "instance-1")
         try await waitUntil {
             appModel.route.runtime?.instance.id == "instance-1"
         }
+        XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
 
-        // Another instance's page, and a page that is not a Session, clear
-        // nothing; the selected instance's Session page clears that Session.
-        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(two)/chat/ses_a")))
+        // A Session left before the page read its Inbox, and another
+        // instance's page, are not read here.
+        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/chat/ses_a")))
         appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/inbox")))
+        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(two)/chat/ses_a")))
+        XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
+
+        // Shown alone, a Session is not yet read: the page may not have
+        // loaded it (offline after a return to the foreground).
         appModel.primaryLocationDidChange(
             try XCTUnwrap(URL(string: "\(one)/chat/ses_a?msg=m1&from=notification"))
         )
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(center.passes, startupPasses)
+
+        // The page's next badge, read after showing it, retires that
+        // Session's notifications delivered by then; another instance's
+        // badge does not.
+        XCTAssertFalse(appModel.setBadgeCount(2, origin: originTwo))
+        XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
         try await waitUntil { center.passes == startupPasses + 1 }
         XCTAssertEqual(center.removedDelivered, ["one-a", "one-a-2"])
         center.removedDelivered = []
 
-        // A count above zero, or a zero from another instance, clears
-        // nothing; the selected instance's zero clears all its Sessions.
-        XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
+        // Nothing unread retires every Session of the instance; another
+        // instance's zero does not.
+        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/inbox")))
         XCTAssertFalse(appModel.setBadgeCount(0, origin: originTwo))
         XCTAssertTrue(appModel.setBadgeCount(0, origin: originOne))
         try await waitUntil { center.passes == startupPasses + 2 }

@@ -92,6 +92,8 @@ final class AppModel: ObservableObject {
     private let nativeBadge: NativeBadge
     /// Retires a Session's notifications once it is read in the App.
     private let sessionNotifications: SessionNotificationCleaner
+    /// The Session the selected instance's page shows, if any.
+    private var shownSession: (sessionID: String, origin: String)?
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -335,6 +337,7 @@ final class AppModel: ObservableObject {
 
     private func stopRuntime() {
         deferredOpen = nil
+        shownSession = nil
         directPathController?.runtimeDidStop()
         if let runtimeController {
             recordRuntimeReleaseBarrier(
@@ -609,41 +612,54 @@ final class AppModel: ObservableObject {
             return false
         }
         nativeBadge.set(count)
-        if count == 0, let account = sessionCoordinator.currentAccount {
-            // The zero was computed before this call arrived: only what was
-            // delivered by now is covered by it.
-            // Nothing on this instance is unread: its Session notifications
-            // have all been read, here or elsewhere.
-            sessionNotifications.clearAllSessions(
-                instanceOrigin: origin.serialized,
-                accountID: account.id,
-                readAt: Date()
-            )
-        }
+        retireReadNotifications(count: count, origin: origin)
         return true
     }
 
-    /// The selected instance's page now shows `url`. Showing a Session reads
-    /// it, so its notifications leave Notification Center. Only the selected
-    /// instance's page counts, and only this account's notifications go.
+    /// A `badge.set` is the page's word that it has read its Inbox, after
+    /// whatever it showed: the moment its notifications can be retired.
+    /// Everything delivered by now is covered; anything later stays.
+    private func retireReadNotifications(count: Int, origin: WebOrigin) {
+        guard let account = sessionCoordinator.currentAccount else {
+            return
+        }
+        let readAt = Date()
+        // The Session on screen: shown, and its page live enough to have
+        // read the Inbox since. A page on a chat it cannot load (offline
+        // after a return to the foreground) sends nothing, so clears nothing.
+        if let shownSession, shownSession.origin == origin.serialized {
+            sessionNotifications.clearSession(
+                shownSession.sessionID,
+                instanceOrigin: origin.serialized,
+                accountID: account.id,
+                readAt: readAt
+            )
+        }
+        // Nothing notified on this instance is unread.
+        if count == 0 {
+            sessionNotifications.clearAllSessions(
+                instanceOrigin: origin.serialized,
+                accountID: account.id,
+                readAt: readAt
+            )
+        }
+    }
+
+    /// The selected instance's page now shows `url` (on each URL change and
+    /// on a return to the foreground). A Session it shows is retired on the
+    /// page's next `badge.set`, once it has read its Inbox after showing it.
     func primaryLocationDidChange(_ url: URL) {
         guard
-            let sessionID = SessionNotificationThread.sessionID(shownAt: url),
             let origin = WebOrigin(url: url),
             let runtime = route.runtime,
             sessionCoordinator.isSelectedRuntime(runtime),
-            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized,
-            let account = sessionCoordinator.currentAccount
+            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
         else {
             return
         }
-        // Only what was delivered while it is on screen, now, is read.
-        sessionNotifications.clearSession(
-            sessionID,
-            instanceOrigin: origin.serialized,
-            accountID: account.id,
-            readAt: Date()
-        )
+        shownSession = SessionNotificationThread.sessionID(shownAt: url).map {
+            (sessionID: $0, origin: origin.serialized)
+        }
     }
 
     private func handlePushTap(_ tap: PushNotificationTap) {

@@ -173,10 +173,10 @@ Phase 0a PR 2 implements this v1 subset:
   `setAppBadge`, `0` included, and again after a read when the App returns to
   the foreground; a push in the background has the notification service
   extension set the instance's total meanwhile (section 8). Signing out or
-  switching accounts clears the badge. A `count` of `0` also removes that
-  instance's and account's `session:*` notifications from Notification Center
-  (the push relay contract, section 7), as does showing one Session's page
-  for that Session's;
+  switching accounts clears the badge. Each accepted call also retires read
+  notifications (the push relay contract, section 7): those of the Session
+  the page shows, and with a `count` of `0` all of that instance's and
+  account's `session:*` notifications, delivered by the call's arrival;
 - `voice.permission()` returns `{state: 'granted' | 'denied' | 'prompt'}`. It
   does not itself display a permission prompt; the user-initiated Web media
   request remains the single prompt path;
