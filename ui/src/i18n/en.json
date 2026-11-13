@@ -7465,11 +7465,6 @@
     "localStatus": "{{name}} · {{status}}"
   },
   "update": {
-    "subject": {
-      "this-desktop": "Avibe Desktop on this computer",
-      "host-desktop": "Installed by the desktop app on the computer running Avibe",
-      "runtime": "Installed directly on the computer running Avibe"
-    },
     "row": {
       "current": "Current version",
       "offered": "Update to",
@@ -7559,6 +7554,10 @@
       "autoUpdate": "Update automatically",
       "autoUpdateHint": "Install new versions when Avibe is idle, without asking"
     },
-    "legacyHost": "The desktop app on the computer running Avibe is too old to check for updates or change these settings from here. Update it to the latest version first."
+    "legacyHost": "The desktop app on the computer running Avibe is too old to check for updates or change these settings from here. Update it to the latest version first.",
+    "trustedView": {
+      "title": "Avibe Desktop on this computer",
+      "body": "You are using Avibe on another computer. This updates the desktop app on this one."
+    }
   }
 }

@@ -49,7 +49,12 @@ export type DesktopClientAction =
   | { type: 'decide_consent'; approve: boolean }
   | { type: 'cancel' }
   | { type: 'return_local' }
-  | { type: 'sign_out' };
+  | { type: 'sign_out' }
+  // This computer's desktop updater, from the trusted update view (ui/design: update/panel/trusted-view).
+  | { type: 'update_check' }
+  | { type: 'update_set_prereleases'; enabled: boolean }
+  | { type: 'update_set_auto_update'; enabled: boolean }
+  | { type: 'update_install'; target_version: string };
 export type DesktopClientRequest = {
   version: 1; request_id: string; expected_generation: number; action: DesktopClientAction;
 };
@@ -64,7 +69,7 @@ export type DesktopClientReply =
 
 export const DESKTOP_CLIENT_STATE_EVENT = 'avibe:desktop-client-state';
 export const DESKTOP_PRESENT_EVENT = 'avibe:desktop-present';
-export const DESKTOP_CLIENT_VIEWS = ['account', 'instances', 'setup-complete', 'sign-out'] as const;
+export const DESKTOP_CLIENT_VIEWS = ['account', 'instances', 'setup-complete', 'sign-out', 'updates'] as const;
 export type DesktopClientView = typeof DESKTOP_CLIENT_VIEWS[number];
 declare global {
   interface Window {

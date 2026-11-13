@@ -169,10 +169,8 @@ export function UpdatePanel({ model, actions, extra, title }: {
   return (
     <div data-update-panel data-update-status={status?.kind ?? 'none'} className="text-popover-foreground">
       <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-foreground">{title ?? t('dashboard.versionAndUpdate')}</p>
-          <p className="mt-0.5 text-xs text-muted">{t(`update.subject.${subject}`)}</p>
-        </div>
+        {/* One title on every surface: the panel never describes itself differently by where it is opened. */}
+        <p className="min-w-0 text-sm font-medium text-foreground">{title ?? t('dashboard.versionAndUpdate')}</p>
         <div className="flex shrink-0 items-center gap-1">
           {actions.check && (
             <Button

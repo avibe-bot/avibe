@@ -1,5 +1,6 @@
 // The three places one computer's update is read, drawn side by side for update/panel.
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { VersionInfo } from '@/context/ApiContext';
 import type { DesktopUpdateState } from '@/lib/desktopShell';
@@ -95,15 +96,18 @@ export function Phone({ state }: { state: SurfaceState }) {
  *  where the same panel acts on this computer's desktop app. */
 export function TrustedView({ desktop }: { desktop: DesktopUpdateState }) {
   const d = useDraft();
+  const { t } = useTranslation();
   const model = modelFromDesktopState(desktop, { current: CURRENT, checkedAt: desktop.checkedAt });
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
       <div className="flex items-center justify-between border-b border-border px-6 py-3 text-sm">
-        <span className="text-muted">{d('Avibe 桌面应用 · 这台电脑', 'Avibe Desktop · this computer')}</span>
+        <span className="text-muted">{d('← 返回工作台', '← Back to Workbench')}</span>
         <span className="text-xs text-muted">{d('当前连接：Studio（另一台电脑）', 'Connected to: Studio (another computer)')}</span>
       </div>
-      <div className="flex flex-1 items-start justify-center p-10">
-        <div className="w-96 overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2">
+      <div className="mx-auto w-full max-w-md pt-12">
+        <h1 className="text-2xl font-semibold tracking-tight">{t('update.trustedView.title')}</h1>
+        <p className="mt-3 mb-7 text-sm leading-6 text-muted">{t('update.trustedView.body')}</p>
+        <div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2">
           <UpdatePanel model={model} actions={actionsFor(model)} />
         </div>
       </div>

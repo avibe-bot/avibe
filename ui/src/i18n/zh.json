@@ -7465,11 +7465,6 @@
     "localStatus": "{{name}} · {{status}}"
   },
   "update": {
-    "subject": {
-      "this-desktop": "这台电脑上的 Avibe 桌面应用",
-      "host-desktop": "由运行 Avibe 的电脑上的桌面应用安装",
-      "runtime": "直接安装在运行 Avibe 的电脑上"
-    },
     "row": {
       "current": "当前版本",
       "offered": "可更新到",
@@ -7559,6 +7554,10 @@
       "autoUpdate": "自动更新",
       "autoUpdateHint": "发现新版本后，在 Avibe 空闲时自动安装，不再询问"
     },
-    "legacyHost": "运行 Avibe 的电脑上的桌面应用版本较旧，不能从这里检查更新或更改设置。请先把那里的桌面应用更新到最新版本。"
+    "legacyHost": "运行 Avibe 的电脑上的桌面应用版本较旧，不能从这里检查更新或更改设置。请先把那里的桌面应用更新到最新版本。",
+    "trustedView": {
+      "title": "这台电脑上的 Avibe 桌面应用",
+      "body": "你正在使用另一台电脑上的 Avibe，这里更新的是这台电脑上的桌面应用。"
+    }
   }
 }

@@ -3,26 +3,29 @@ import { useTranslation } from 'react-i18next';
 import { ChevronDown, Download, Globe, Laptop, LogOut, RefreshCw, UserRound, WifiOff } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../components/ui/popover';
-import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
+import { DESKTOP_OPEN_UPDATES_EVENT, desktopUpdateShellActions } from '../lib/desktopShell';
 import { UpdatePanel } from '../components/update/UpdatePanel';
 import { modelFromDesktopState } from '../components/update/updatePanelModel';
 import { useDesktopClientProjection, usePresentDesktopClient } from './useDesktopClient';
 
-/** Nonsecret footer: every account/updater action presents native-owned UI. */
+/** Nonsecret footer: account actions present native-owned UI. This computer's update acts over the
+ *  desktop app's IPC only on a page it serves; otherwise it opens the trusted update view. */
 export function DesktopAccountRow() {
   const { t } = useTranslation();
   const state = useDesktopClientProjection();
   const present = usePresentDesktopClient();
   const [panel, setPanel] = useState<'account' | 'update' | null>(null);
+  const servedLocally = state?.connection.committed.kind === 'local';
   useEffect(() => {
     const open = (event: Event) => {
       event.preventDefault();
       window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = true;
-      setPanel('update');
+      if (servedLocally) setPanel('update');
+      else present('updates');
     };
     window.addEventListener(DESKTOP_OPEN_UPDATES_EVENT, open);
     return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, open);
-  }, []);
+  }, [present, servedLocally]);
   if (!state) return null;
   const signedIn = state.account.status === 'signed_in';
   const busy = state.connection.status === 'switching';
@@ -33,6 +36,16 @@ export function DesktopAccountRow() {
   const label = busy ? t('desktopClient.switchLabel', { from: instance, to: state.connection.pending?.name ?? '' })
     : signedIn ? instance : t('desktopClient.signIn');
   const open = (view: Parameters<typeof present>[0]) => { setPanel(null); present(view); };
+  // A page this computer serves acts on its desktop app over IPC. Another computer's page never does:
+  // this computer's update opens in the trusted update view instead.
+  const local = state.connection.committed.kind === 'local';
+  const updater = local ? desktopUpdateShellActions() : null;
+  const latest = state.desktop.update.latest;
+  const accepts = (action: string) => state.desktop.update.hostActions?.includes(action) ?? false;
+  const openUpdates = (value: boolean) => {
+    if (value && !local) open('updates');
+    else setPanel(value ? 'update' : null);
+  };
   return <div data-desktop-account-row className="relative flex min-w-0 items-center gap-1">
     <Popover open={panel === 'account'} onOpenChange={(value) => setPanel(value ? 'account' : null)}>
       <PopoverTrigger asChild>
@@ -55,19 +68,21 @@ export function DesktopAccountRow() {
         {signedIn && <Button variant="ghost" className="w-full justify-start gap-3 text-muted" onClick={() => open('sign-out')}><LogOut className="size-4" />{t('desktopClient.signOut')}</Button>}
       </PopoverContent>
     </Popover>
-    <Popover open={panel === 'update'} onOpenChange={(value) => setPanel(value ? 'update' : null)}>
+    <Popover open={panel === 'update'} onOpenChange={openUpdates}>
       {/* Anchor to the entire row: the version stays right while the popover starts at x=16. */}
       <PopoverTrigger asChild><Button data-version-trigger variant="ghost" size="sm" className="h-8 shrink-0 gap-1 px-1.5 text-2xs text-muted" aria-label={t('desktopClient.localVersion', { version: state.desktop.version })}>
         {update ? <><Download className="size-3 text-gold-ink" /><span className="size-1.5 rounded-full bg-gold" /></> : state.desktop.version}
       </Button></PopoverTrigger>
       <PopoverAnchor className="pointer-events-none absolute inset-0" />
-      {/* The same panel as the version popover (ui/design: update/panel); every action still opens native-owned UI. */}
+      {/* The same panel as the version popover (ui/design: update/panel), acting on this computer's desktop app. */}
       <PopoverContent data-update-menu side="top" align="start" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0">
         <UpdatePanel
-          model={modelFromDesktopState(state.desktop.update, { current: state.desktop.version, checkedAt: state.desktop.update.checkedAt ?? null })}
+          model={modelFromDesktopState(state.desktop.update, { current: state.desktop.version })}
           actions={{
-            check: { run: () => open('updates'), disabled: ['checking', 'downloading', 'installing'].includes(state.desktop.update.phase) },
-            ...(update ? { update: { run: () => open('updates') } } : {}),
+            check: { run: () => void updater?.check(), disabled: !updater || ['checking', 'downloading', 'installing'].includes(state.desktop.update.phase) },
+            ...(update && updater && latest ? { update: { run: () => void updater.install(latest) } } : {}),
+            ...(updater && accepts('prereleases') ? { setPrereleases: (enabled: boolean) => void updater.setPrereleases(enabled) } : {}),
+            ...(updater && accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void updater.setAutoUpdate(enabled) } : {}),
             close: () => setPanel(null),
           }}
         />
