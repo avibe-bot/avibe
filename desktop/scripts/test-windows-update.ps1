@@ -3,6 +3,22 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../src-tauri/src/update_windows.ps1"
 $root = Join-Path ([IO.Path]::GetTempPath()) ('avibe-update-test-' + [Guid]::NewGuid())
 [IO.Directory]::CreateDirectory($root) | Out-Null
+$fixtureProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+$assertionsPassed = $false
+
+# Observe the real supervisor's launches without changing its asynchronous app
+# relaunch or its synchronous installer/ExitCode contract. Retain process handles,
+# not process-name searches (or PIDs looked up later, which could be reused).
+function Start-Process {
+    [CmdletBinding()]
+    param([string]$FilePath, [string[]]$ArgumentList, [switch]$Wait, [switch]$PassThru)
+    $returnProcess = $PassThru
+    $PSBoundParameters['PassThru'] = $true
+    $process = Microsoft.PowerShell.Management\Start-Process @PSBoundParameters
+    $fixtureProcesses.Add($process)
+    if ($returnProcess) { return $process }
+}
+
 try {
     function Build-App($path, $version, $marker, $class) {
         $source = @"
@@ -14,6 +30,9 @@ using System.Reflection;
 public class $class {
     public static void Main() {
         File.WriteAllText(Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "$marker"), "started");
+        // A launch marker is not an exit signal. Keep the executable mapped
+        // briefly so the fixture exercises the cleanup wait rather than racing it.
+        System.Threading.Thread.Sleep(500);
     }
 }
 "@
@@ -86,7 +105,32 @@ public class Installer {
             Start-Sleep -Milliseconds 100
         }
     }
+    $assertionsPassed = $true
     Write-Output 'Native Windows update success and rollback fixtures passed.'
 } finally {
-    Remove-Item -LiteralPath $root -Recurse -Force
+    $processCleanupErrors = @()
+    foreach ($process in $fixtureProcesses) {
+        try {
+            if (-not $process.WaitForExit(10000)) {
+                Write-Warning "Stopping fixture process PID $($process.Id) after a 10-second exit wait."
+                # Stop only this retained process, never unrelated app.exe instances.
+                Stop-Process -InputObject $process -Force -ErrorAction Stop
+                if (-not $process.WaitForExit(5000)) {
+                    throw "Fixture process PID $($process.Id) did not exit after being stopped."
+                }
+            }
+        } catch {
+            $processCleanupErrors += $_
+        } finally {
+            $process.Dispose()
+        }
+    }
+    # Failure to stop our processes remains fatal, even when assertions passed.
+    if ($processCleanupErrors.Count -gt 0) { throw $processCleanupErrors[0] }
+    try {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    } catch {
+        if (-not $assertionsPassed) { throw }
+        Write-Warning "Fixtures passed, but temporary directory cleanup failed for '${root}': $_"
+    }
 }
