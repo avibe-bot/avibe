@@ -711,7 +711,8 @@ def typed_envelope(kind="hd-seed"):
     return Sealed(**value["sealed"])
 
 
-@pytest.mark.parametrize("operation", ["create-extra", "replace-default", "add-extra", "replace-extra", "rotate"])
+@pytest.mark.parametrize("operation", ["create-extra", "replace-default", "add-extra", "replace-extra", "rotate",
+                                       "batch-default", "batch-add-extra", "batch-replace-extra", "batch-rename-default"])
 @pytest.mark.parametrize("kind", ["hd-seed", "future-kind"])
 def test_generic_value_ingest_refuses_typed_signer_or_unknown_envelopes_before_effects(operation, kind):
     sealed = typed_envelope(kind)
@@ -721,7 +722,7 @@ def test_generic_value_ingest_refuses_typed_signer_or_unknown_envelopes_before_e
         api.create_vault_secret({"name": "STATIC", "protection": "protected", "sealed": {
             "ciphertext": "legacy-default", "nonce": "legacy-nonce", "wrap_meta": "legacy-wrap"},
             "fields": [{"name": "extra", "record": "STATIC.extra", "sealed": {"ciphertext": "legacy-extra", "nonce": "n", "wrap_meta": "w"}}]
-                      if operation == "replace-extra" else []})
+                      if operation in {"replace-extra", "batch-replace-extra"} else []})
     before = rows(vault_secrets), rows(vault_audit), rows(vault_requests), rows(resource_access_policies)
     with api._vault_engine().begin() as conn:
         with pytest.raises(vault_service.InvalidRequestError):
@@ -730,6 +731,13 @@ def test_generic_value_ingest_refuses_typed_signer_or_unknown_envelopes_before_e
                     fields=[{"name": "extra", "sealed": sealed}])
             elif operation == "rotate":
                 vault_service.rotate_secret(conn, "STATIC", sealed)
+            elif operation.startswith("batch-"):
+                default = operation in {"batch-default", "batch-rename-default"}
+                field = "password" if operation == "batch-rename-default" else "value" if default else "extra"
+                vault_service.update_secret_fields(conn, "STATIC", expected_updated_at=before[0][0]["updated_at"],
+                    default_field="password" if operation == "batch-rename-default" else None,
+                    values=[{"field": "valid", "record": "STATIC.valid", "sealed": Sealed("legacy-valid", "n", "w")},
+                            {"field": field, "record": "STATIC" if default else "STATIC.extra", "sealed": sealed}])
             else:
                 default = operation == "replace-default"
                 vault_service.update_secret_field(conn, "STATIC", "value" if default else "extra", sealed,

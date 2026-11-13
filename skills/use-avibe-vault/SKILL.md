@@ -48,6 +48,9 @@ Common commands:
 Request that the user add a missing static secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
 `vibe vault request OPENAI_API_KEY --reason "Need OpenAI API access" --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`
 
+A request may suggest a generator preset for an application that accepts a user-chosen secret. This is only a hint: the user chooses whether to generate and save, for either tier. Passwords default to 24 characters (12–128); hex and standard padded Base64 default to 32 random bytes (16–64). Do not use a generator to invent a third-party API key:
+`vibe vault request APP_SECRET --reason "Configure the app signing secret" --spec-json '{"generate":{"type":"hex","bytes":32}}'`
+
 Request a multi-field login item with a password default. These are field names only, never values:
 `vibe vault request GITHUB_LOGIN --reason "Log in to GitHub" --spec-json '{"protection":"protected","fields":["username","password","totp"],"default_field":"password"}'`
 

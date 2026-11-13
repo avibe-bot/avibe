@@ -4462,6 +4462,78 @@ def update_vault_secret_field(
     return {"ok": True, "secret": vault_public_capabilities(meta)}
 
 
+def update_vault_secret_fields(name: str, payload: dict, *, user_context: Any = None) -> dict:
+    """Seal every changed field before atomically committing a dialog save."""
+    from storage import vault_crypto, vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    _reject_plaintext_value_fields(payload)
+    if set(payload) - {"expected_updated_at", "default_field", "values", "remove"}:
+        raise VaultApiError("unsupported field batch payload", code="invalid_request", status=409)
+    expected_updated_at = payload.get("expected_updated_at")
+    if not isinstance(expected_updated_at, str) or not expected_updated_at:
+        raise VaultApiError("expected_updated_at is required", code="invalid_request", status=409)
+    if "default_field" in payload and not isinstance(payload["default_field"], str):
+        raise VaultApiError("default_field must be a field name", code="invalid_field_name")
+    secret_name = str(name or "").strip()
+    if not vault_crypto.is_valid_secret_name(secret_name):
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
+    values = payload.get("values", [])
+    remove = payload.get("remove", [])
+    engine = _vault_engine()
+    try:
+        with engine.connect() as conn:
+            meta = _vault_secret_management_meta(conn, secret_name, user_context=user_context)
+        if meta.get("updated_at") != expected_updated_at:
+            raise vault_service.SecretConflictError(f"secret {secret_name!r} changed while fields were being updated")
+        vault_service.validate_secret_field_changes(
+            meta, default_field=payload.get("default_field"), values=values, remove=remove,
+        )
+    except vault_service.VaultServiceError as exc:
+        raise _vault_field_service_error(exc) from exc
+
+    # Validate the complete tier-specific request before invoking custody. Never
+    # hold a database transaction across subprocess/cryptography work.
+    protection = meta.get("protection")
+    if protection not in {"standard", "protected"}:
+        raise VaultApiError("invalid protection tier", code="invalid_protection")
+    envelope_key = "blind_box" if protection == "standard" else "sealed"
+    prepared: list[dict] = []
+    for item in values:
+        if set(item) != {"field", "record", envelope_key}:
+            raise VaultApiError(f"field changes require field, record and {envelope_key}", code="invalid_request", status=409)
+        envelope = item[envelope_key]
+        if protection == "standard":
+            if not isinstance(envelope, dict):
+                raise VaultApiError("standard field changes require blind_box", code="blind_box_required")
+        else:
+            envelope = _sealed_from_payload(envelope)
+        prepared.append({"field": item["field"], "record": item["record"], envelope_key: envelope})
+    opaque: list[dict] = []
+    for item in prepared:
+        try:
+            sealed = avault_seal_blind_box(item["record"], item["blind_box"]) if protection == "standard" else item["sealed"]
+        except AvaultError as exc:
+            raise _vault_api_error_from_avault(exc, prefix="avault blind-box seal failed") from exc
+        opaque.append({"field": item["field"], "record": item["record"], "sealed": sealed})
+
+    release_scopes: list[dict[str, str]] = []
+    try:
+        with engine.begin() as conn:
+            updated = vault_service.update_secret_fields(
+                conn, secret_name, expected_updated_at=expected_updated_at,
+                expected_default_field=str(meta.get("default_field") or "value"),
+                default_field=payload.get("default_field"), values=opaque, remove=remove,
+                release_scopes=release_scopes, user_context=user_context,
+            )
+    except vault_service.VaultServiceError as exc:
+        raise _vault_field_service_error(exc) from exc
+    release_vault_agent_scopes(release_scopes, reason="update_vault_secret_fields")
+    _publish_vaults_updated(scope="secret", secret_name=secret_name)
+    return {"ok": True, "secret": vault_public_capabilities(updated)}
+
+
 def delete_vault_secret_field(
     name: str,
     field: str,
