@@ -1503,11 +1503,25 @@ final class DirectConnectListenerTests: XCTestCase {
     /// The same decision guards the confirmation: one that comes once the
     /// deadline has come does not make the listener serve. One in time
     /// does, and that ends the episode for good.
-    func testALateConfirmationCannotClearAnOverdueEpisode() {
+    func testALateConfirmationCannotClearAnOverdueEpisode() async throws {
         let late = makeLifecycle(in: "verifying")
         XCTAssertNotNil(late.beginEpisode(deadline: reached))
         XCTAssertFalse(late.confirm(1))
         XCTAssertEqual(late.phase, .failed(generation: 1))
+
+        // The deadline is decided against the clock at each decision, not
+        // against what it read when the episode began: the same episode,
+        // ahead at first, has come once real time has passed it.
+        let passes = makeLifecycle(in: "verifying")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1.5))
+        let episode = passes.beginEpisode(deadline: deadline)
+        XCTAssertNotNil(episode)
+        XCTAssertEqual(passes.phase, .verifying(generation: 1, rebind: false))
+        XCTAssertEqual(passes.currentEpisode, episode)
+        try await Task.sleep(until: deadline, clock: ContinuousClock())
+        XCTAssertFalse(passes.confirm(1))
+        XCTAssertEqual(passes.phase, .failed(generation: 1))
+        XCTAssertNil(passes.currentEpisode)
 
         let inTime = makeLifecycle(in: "verifying")
         XCTAssertNotNil(inTime.beginEpisode(deadline: later))
