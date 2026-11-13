@@ -22,7 +22,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let directLoadGate: DirectLoadGateProvider?
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
-    let primaryLocationChanged: (URL) -> Void
+    let primaryLocationChanged: (URL?) -> Void
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let didCreateController: (WebViewController) -> Void
@@ -40,7 +40,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
-        primaryLocationChanged: @escaping (URL) -> Void = { _ in },
+        primaryLocationChanged: @escaping (URL?) -> Void = { _ in },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         didCreateController: @escaping (WebViewController) -> Void,

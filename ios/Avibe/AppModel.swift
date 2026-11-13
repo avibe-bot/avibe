@@ -647,15 +647,19 @@ final class AppModel: ObservableObject {
     }
 
     /// The selected instance's page now shows `url` (on each URL change and
-    /// on a return to the foreground). A Session it shows is retired on the
-    /// page's next `badge.set`, once it has read its Inbox after showing it.
-    func primaryLocationDidChange(_ url: URL) {
+    /// on a return to the foreground), or `nil` while a child window covers
+    /// it. A Session it shows is retired on the page's next `badge.set`, once
+    /// it has read its Inbox after showing it. Anything else, another origin
+    /// included, shows no Session.
+    func primaryLocationDidChange(_ url: URL?) {
         guard
+            let url,
             let origin = WebOrigin(url: url),
             let runtime = route.runtime,
             sessionCoordinator.isSelectedRuntime(runtime),
             WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
         else {
+            shownSession = nil
             return
         }
         shownSession = SessionNotificationThread.sessionID(shownAt: url)

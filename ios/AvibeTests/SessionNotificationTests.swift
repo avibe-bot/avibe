@@ -122,8 +122,12 @@ final class SessionNotificationTests: XCTestCase {
         }
         XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
 
-        // A Session left before the page read its Inbox, and another
+        // A Session covered by a child window (whose page may send the
+        // badge), one left before the page read its Inbox, and another
         // instance's page, are not read here.
+        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/chat/ses_a")))
+        appModel.primaryLocationDidChange(nil)
+        XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
         appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/chat/ses_a")))
         appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/inbox")))
         appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(two)/chat/ses_a")))
@@ -156,13 +160,13 @@ final class SessionNotificationTests: XCTestCase {
     }
 
     @MainActor
-    func testTheRuntimeReportsWhereItsPageIsAndAgainOnForeground() async throws {
+    func testTheRuntimeReportsWhereItsPageIsAgainOnForegroundAndWhileCovered() async throws {
         let instance = try XCTUnwrap(WebOrigin.parseConfigured(one))
         var reported: [String] = []
         let controller = WebViewController(
             instanceOrigin: instance,
             websiteDataStore: .nonPersistent(),
-            primaryLocationChanged: { reported.append($0.absoluteString) },
+            primaryLocationChanged: { reported.append($0?.absoluteString ?? "covered") },
             didStartLoading: {},
             didFinishLoading: {},
             didFailLoading: {}
@@ -172,6 +176,7 @@ final class SessionNotificationTests: XCTestCase {
         window.makeKeyAndVisible()
         controller.loadViewIfNeeded()
         defer {
+            window.rootViewController = nil
             window.isHidden = true
         }
         let webView = try XCTUnwrap(
@@ -180,7 +185,10 @@ final class SessionNotificationTests: XCTestCase {
         let probe = SessionWebViewLoadProbe()
         webView.navigationDelegate = probe
         try await probe.loadHTML(
-            "<!doctype html><title>Workbench</title>",
+            """
+            <!doctype html><title>Workbench</title>
+            <button id="open-child" onclick="window.open('/chat/ses_b', '_blank')">Open</button>
+            """,
             baseURL: instance.url,
             in: webView
         )
@@ -191,7 +199,7 @@ final class SessionNotificationTests: XCTestCase {
         )
         try await waitUntil { reported.last == "\(one)/chat/ses_a" }
 
-        let before = reported.count
+        var before = reported.count
         NotificationCenter.default.post(
             name: UIApplication.willEnterForegroundNotification,
             object: nil
@@ -199,13 +207,34 @@ final class SessionNotificationTests: XCTestCase {
         XCTAssertEqual(reported.count, before + 1)
         XCTAssertEqual(reported.last, "\(one)/chat/ses_a")
 
+        // A child window covers the page, and its own page may send the
+        // badge: no Session of the primary is on screen until it closes.
+        _ = try await webView.evaluateJavaScript(
+            "document.querySelector('#open-child').click()"
+        )
+        try await waitUntil { reported.last == "covered" }
+        var popupNavigation: UINavigationController?
+        try await waitUntil {
+            popupNavigation = controller.presentedViewController as? UINavigationController
+            return popupNavigation != nil
+        }
+        var child: WKWebView?
+        try await waitUntil {
+            child = popupNavigation?.topViewController?.viewIfLoaded?.subviews
+                .compactMap { $0 as? WKWebView }.first
+            return child != nil
+        }
+        _ = try await child?.evaluateJavaScript("window.close(); true")
+        try await waitUntil { reported.last == "\(one)/chat/ses_a" }
+
         // Released for an account transition: it reports nothing more.
         _ = controller.invalidateForAccountTransition()
+        before = reported.count
         NotificationCenter.default.post(
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
-        XCTAssertEqual(reported.count, before + 1)
+        XCTAssertEqual(reported.count, before)
     }
 
     /// Delivered notifications across two instances, two accounts, the

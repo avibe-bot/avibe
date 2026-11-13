@@ -568,11 +568,18 @@ final class WebViewController: UIViewController {
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
-    /// Told where the primary WebView is, on each change of its URL and
-    /// when the App returns to the foreground; the App retires the
+    /// Told where the primary WebView is, on each change of its URL, when
+    /// the App returns to the foreground, and when a child window starts or
+    /// stops covering it (`nil` while covered); the App retires the
     /// notifications of a Session it shows.
-    private let primaryLocationChanged: (URL) -> Void
-    private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
+    private let primaryLocationChanged: (URL?) -> Void
+    private var popupRecords: [ObjectIdentifier: PopupRecord] = [:] {
+        didSet {
+            if popupRecords.isEmpty != oldValue.isEmpty {
+                reportPrimaryLocation()
+            }
+        }
+    }
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
@@ -650,7 +657,7 @@ final class WebViewController: UIViewController {
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
-        primaryLocationChanged: @escaping (URL) -> Void = { _ in },
+        primaryLocationChanged: @escaping (URL?) -> Void = { _ in },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
@@ -959,7 +966,8 @@ final class WebViewController: UIViewController {
         guard let url = livePrimaryWebView?.url else {
             return
         }
-        primaryLocationChanged(url)
+        // A child window's page (`badge.set` included) is in front of it.
+        primaryLocationChanged(popupRecords.isEmpty ? url : nil)
     }
 
     private func updateBackNavigationGesture(in webView: WKWebView) {
