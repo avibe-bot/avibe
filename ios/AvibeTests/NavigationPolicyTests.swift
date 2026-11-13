@@ -792,6 +792,19 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testSignedInFixtureRejectsBootstrapFailureOnThePickerRoute() async throws {
+        do {
+            _ = try await makePushTapAppModel(sessionResponse: .status(503))
+            XCTFail("A failed bootstrap must not admit a signed-in fixture")
+        } catch let error as FixtureReadinessError {
+            // A readiness timeout must not satisfy this regression: prove the
+            // fixture reached the deliberately failed session response.
+            XCTAssertTrue(error.description.contains("bootstrap settled"))
+            XCTAssertTrue(error.description.contains("account=nil"))
+            XCTAssertTrue(error.description.contains("GET /api/mobile/session -> 503"))
+        }
+    }
+
     func testPendingPushTapExpiresAfterOneHundredTwentySeconds()
         async throws
     {
@@ -2477,7 +2490,8 @@ final class NavigationPolicyTests: XCTestCase {
         try await exerciseAppModelAccountTransition(
             defaults: defaults,
             controlPlaneURL: baseURL,
-            storeCleanups: storeCleanups
+            storeCleanups: storeCleanups,
+            requests: server.requests
         )
         for storeCleanup in storeCleanups {
             let removalError = await storeCleanup.remove()
@@ -2904,7 +2918,8 @@ final class NavigationPolicyTests: XCTestCase {
     private func exerciseAppModelAccountTransition(
         defaults: UserDefaults,
         controlPlaneURL: URL,
-        storeCleanups: [NamedDataStoreCleanup]
+        storeCleanups: [NamedDataStoreCleanup],
+        requests: FixtureRequestLog
     ) async throws {
         var appModel: AppModel? = makeTestAppModel(
             defaults: defaults,
@@ -2917,7 +2932,8 @@ final class NavigationPolicyTests: XCTestCase {
         )
         try await exerciseRuntimeAccountTransition(
             appModel: try XCTUnwrap(appModel),
-            storeCleanups: storeCleanups
+            storeCleanups: storeCleanups,
+            requests: requests
         )
         appModel = nil
         try? await Task.sleep(for: .milliseconds(100))
@@ -2926,9 +2942,13 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     private func exerciseRuntimeAccountTransition(
         appModel: AppModel,
-        storeCleanups: [NamedDataStoreCleanup]
+        storeCleanups: [NamedDataStoreCleanup],
+        requests: FixtureRequestLog
     ) async throws {
-        try await waitForSignedInInstances(appModel)
+        try await waitForSignedInInstances(
+            appModel, accountID: "account", instanceIDs: ["instance", "instance-2"],
+            requests: requests
+        )
         _ = try appModel.mobileSessionCoordinator.selectInstance(id: "instance")
 
         guard case .browser(let runtime) = appModel.route else {
@@ -3129,14 +3149,15 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     private func makePushTapAppModel(
-        pushOpenedNow: @escaping () -> Date = Date.init
+        pushOpenedNow: @escaping () -> Date = Date.init,
+        sessionResponse: LocalHTTPResponse? = nil
     ) async throws -> AppModel {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
-                return .json(
+                return sessionResponse ?? .json(
                     """
                     {
                       "account": {
@@ -3186,40 +3207,31 @@ final class NavigationPolicyTests: XCTestCase {
             ),
             pushOpenedNow: pushOpenedNow
         )
-        try await waitForSignedInInstances(appModel)
+        let storeCleanup = NamedDataStoreCleanup()
+        storeCleanup.identifier = appModel.websiteDataStore.identifier
+        addTeardownBlock { @MainActor [weak appModel, self] in
+            appModel?.showInstancePicker()
+            appModel?.mobileSessionCoordinator.deactivateAccountSurface()
+            print("[iOS fixture] stage=push App views invalidated before store removal")
+            let error = await storeCleanup.remove()
+            XCTAssertNil(error, "Push fixture named-store cleanup failed")
+            server.requests.attach(to: self, name: "push App bootstrap requests")
+        }
+        try await waitForSignedInInstances(appModel, requests: server.requests)
         return appModel
     }
 
-    /// Waits for the App's launch to settle, then expects the signed-in
-    /// instance list. The launch reads the session through a WebView, so it
-    /// is bounded by the App's own deadlines for that read
-    /// (`WebKitReadiness.standardTransportOperation`), and a launch that
-    /// settles elsewhere fails with the route it reached.
+    /// A settled picker is not enough: bootstrap errors also land there.
     @MainActor
     private func waitForSignedInInstances(
         _ appModel: AppModel,
-        file: StaticString = #filePath,
-        line: UInt = #line
+        accountID: String = "account-1",
+        instanceIDs: Set<String> = ["instance-1", "instance-2"],
+        requests: FixtureRequestLog
     ) async throws {
-        try await waitUntil(
-            "The App's launch",
-            timeout: WebKitReadiness.standardTransportOperation,
-            file: file,
-            line: line
-        ) {
-            if case .loading = appModel.route {
-                return false
-            }
-            return true
-        }
-        guard case .onboarding(.instances) = appModel.route else {
-            XCTFail(
-                "The App's launch settled on \(appModel.route), not the instance list.",
-                file: file,
-                line: line
-            )
-            throw TestWaitError.unexpectedRoute
-        }
+        try await WebKitReadiness.waitForSignedInFixture(
+            appModel, accountID: accountID, instanceIDs: instanceIDs, requests: requests
+        )
     }
 
     @MainActor
@@ -3800,7 +3812,6 @@ private final class KeyboardViewportFixture {
 
 private enum TestWaitError: Error {
     case timedOut
-    case unexpectedRoute
 }
 
 @MainActor
