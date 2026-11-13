@@ -144,7 +144,9 @@ pub struct UpdateStatusRecord {
     pub has_update: bool,
     /// RFC 3339 UTC.
     pub checked_at: String,
-    /// Whether a local Workbench has opted into unattended remote installs.
+    /// Legacy delivery hint. New shells set this true when their direct
+    /// explicit-request path exists; it is not a stored permission and never
+    /// means automatic updates.
     #[serde(default)]
     pub remote_install_allowed: bool,
     /// The last remote request, including terminal outcomes.
@@ -203,9 +205,10 @@ impl UpdateStatusRecord {
     }
 
     pub fn with_control(mut self, control_request: Option<ControlStatus>) -> Self {
-        // Install keeps its legacy authorization behavior until that separate
-        // policy change lands; do not advertise unattended explicit installs.
-        self.host_actions = vec!["check".into(), "prereleases".into()];
+        // Installation is an exact-target explicit request, not a persistent
+        // remote-install permission. Older readers use the legacy bool hint.
+        self.host_actions = vec!["check".into(), "prereleases".into(), "install".into()];
+        self.remote_install_allowed = true;
         self.control_request = control_request;
         self
     }

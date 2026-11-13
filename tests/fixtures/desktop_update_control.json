@@ -16,9 +16,9 @@
     "channel": "test",
     "has_update": true,
     "checked_at": "1970-01-01T00:16:40Z",
-    "remote_install_allowed": false,
+    "remote_install_allowed": true,
     "remote_request": null,
-    "host_actions": ["check", "prereleases"],
+    "host_actions": ["check", "prereleases", "install"],
     "control_request": {
       "request_id": "00000000-0000-4000-8000-000000000001",
       "action": "prereleases",

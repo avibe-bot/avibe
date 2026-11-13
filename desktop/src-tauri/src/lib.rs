@@ -724,14 +724,6 @@ fn take_desktop_update_request(app: &AppHandle) -> bool {
     app.state::<PendingDesktopUpdateOpen>().take()
 }
 
-fn request_and_open_desktop_updates(app: &AppHandle) {
-    request_desktop_updates(app);
-    focus_or_restore_main_window(app);
-    if open_desktop_updates(app) {
-        let _ = take_desktop_update_request(app);
-    }
-}
-
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
     refresh_native_controls(app, Some(state));
 }
@@ -2627,8 +2619,6 @@ pub fn run() {
             pet::pet_set_voice_mode,
             notifications::desktop_notifications_state,
             notifications::desktop_notifications_set_enabled,
-            updater::desktop_remote_install_allowed,
-            updater::desktop_remote_install_set,
             updater::desktop_update_prereleases_set,
             updater::desktop_update_remote_decline,
             pet::pet_ready,

@@ -59,7 +59,7 @@ def test_rust_control_fixture_is_readable_without_changing_the_legacy_offer():
     assert control.parse_control_request(fixture["request"]) == fixture["request"]
     parsed = parse_desktop_update_status(fixture["status"])
     assert parsed["control_request"] == fixture["status"]["control_request"]
-    assert parsed["host_actions"] == ["check", "prereleases"]
+    assert parsed["host_actions"] == ["check", "prereleases", "install"]
     assert parsed["has_update"] and parsed["latest"] == "3.2.7"
 
 

@@ -261,8 +261,6 @@ fn desktop_update_commands_are_workbench_scoped() {
             "allow-desktop-update-install",
             "allow-desktop-update-skip",
             "allow-desktop-update-prereleases-set",
-            "allow-desktop-remote-install-allowed",
-            "allow-desktop-remote-install-set",
             "allow-desktop-update-remote-decline"
         ])
     );
@@ -273,8 +271,6 @@ fn desktop_update_commands_are_workbench_scoped() {
         "updater::desktop_update_install",
         "updater::desktop_update_skip",
         "updater::desktop_update_prereleases_set",
-        "updater::desktop_remote_install_allowed",
-        "updater::desktop_remote_install_set",
         "updater::desktop_update_remote_decline",
     ] {
         assert!(source.contains(command), "missing Workbench updater command {command}");
@@ -614,8 +610,6 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_reset_voice_shortcut",
         "desktop_notifications_state",
         "desktop_notifications_set_enabled",
-        "desktop_remote_install_allowed",
-        "desktop_remote_install_set",
         "desktop_update_remote_decline",
         "pet_ready",
         "pet_context_menu",

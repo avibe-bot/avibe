@@ -30,7 +30,13 @@ def _version(*, has_update: bool = True):
     }
 
 
-def _acknowledged(*, allowed: bool = False, phase: str = "awaiting_host", error_code=None):
+def _acknowledged(
+    *,
+    allowed: bool = False,
+    host_actions: list[str] | None = None,
+    phase: str = "awaiting_host",
+    error_code=None,
+):
     remote = {
         "request_id": "",
         "target": TARGET,
@@ -47,6 +53,7 @@ def _acknowledged(*, allowed: bool = False, phase: str = "awaiting_host", error_
                 "latest": TARGET,
                 "has_update": True,
                 "remote_install_allowed": allowed,
+                "host_actions": host_actions or [],
                 "remote_request": remote,
             },
             remote,
@@ -117,7 +124,21 @@ def test_desktop_update_request_uses_same_origin_and_csrf_guards(monkeypatch, tm
     assert read_desktop_update_request(tmp_path / "desktop-update-request.json") is None
 
 
-def test_desktop_update_request_reports_confirmation_and_delivery(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("allowed", "host_actions", "expected_delivery"),
+    [
+        (False, [], "prompt"),
+        (False, ["check", "prereleases", "install"], "install"),
+        (True, [], "install"),
+    ],
+)
+def test_desktop_update_request_reports_confirmation_and_delivery(
+    monkeypatch,
+    tmp_path,
+    allowed,
+    host_actions,
+    expected_delivery,
+) -> None:
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     monkeypatch.setenv("AVIBE_COMPUTER_USE_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(api, "get_version_info", _version)
@@ -152,7 +173,7 @@ def test_desktop_update_request_reports_confirmation_and_delivery(monkeypatch, t
 
     monkeypatch.setattr(
         "vibe.ui_server._wait_for_desktop_update_ack",
-        _acknowledged(allowed=True),
+        _acknowledged(allowed=allowed, host_actions=host_actions),
     )
     accepted = client.post(
         "/api/desktop/update/request",
@@ -161,7 +182,7 @@ def test_desktop_update_request_reports_confirmation_and_delivery(monkeypatch, t
         base_url="http://127.0.0.1",
     )
     assert accepted.status_code == 200
-    assert accepted.get_json()["delivery"] == "install"
+    assert accepted.get_json()["delivery"] == expected_delivery
     assert accepted.get_json()["request_id"]
 
 

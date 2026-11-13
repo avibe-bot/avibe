@@ -36,7 +36,7 @@ fn claim(state: &mut State, busy: &AtomicBool, request: &ControlRequest, now: Sy
 fn write_status(app: &AppHandle, state: &State) -> bool {
     let updater = app.state::<Updater>();
     let record = base_status(app, state)
-        .with_remote(state.remote_install_allowed, state.remote_request.clone())
+        .with_remote(true, state.remote_request.clone())
         .with_control(state.control_request.clone());
     if let Err(error) = updater.status.write(&record) {
         eprintln!("desktop update control status: {error}");
@@ -214,7 +214,6 @@ mod tests {
             channel: Channel::Stable,
             manifest: None,
             availability_interactive: false,
-            remote_install_allowed: false,
             remote_request: None,
             active_request: None,
             control_request: None,

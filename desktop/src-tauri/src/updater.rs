@@ -13,8 +13,7 @@ use avibe_runtime_host::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -27,7 +26,6 @@ use tauri::{
     AppHandle, Emitter, Manager, WebviewWindow,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
-use tauri_plugin_notification::NotificationExt;
 
 pub const MENU_ID: &str = "desktop-update";
 pub const CHANNEL_ID: &str = "desktop-update-test";
@@ -73,47 +71,6 @@ pub struct Catalog {
 }
 fn catalog() -> Catalog {
     super::native_catalog_for_locales(sys_locale::get_locales()).updater
-}
-
-#[derive(Deserialize, Serialize)]
-struct RemoteInstallPreference {
-    enabled: bool,
-}
-
-fn read_remote_install_preference(path: &Path) -> io::Result<bool> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<RemoteInstallPreference>(&bytes)
-            .map(|preference| preference.enabled)
-            .map_err(io::Error::other),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-fn write_remote_install_preference(path: &Path, enabled: bool) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "preference path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let suffix = REMOTE_PREFERENCE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".{REMOTE_INSTALL_PREFERENCE_FILE}.{}.{}.tmp",
-        std::process::id(),
-        suffix
-    ));
-    let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary)?;
-    let bytes = serde_json::to_vec(&RemoteInstallPreference { enabled }).map_err(io::Error::other)?;
-    let result = (|| {
-        file.write_all(&bytes)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -167,7 +124,6 @@ struct State {
     channel: Channel,
     manifest: Option<Manifest>,
     availability_interactive: bool,
-    remote_install_allowed: bool,
     remote_request: Option<RemoteRequestStatus>,
     /// The accepted request owns its deadline even if the mailbox is replaced.
     active_request: Option<DesktopUpdateRequest>,
@@ -187,7 +143,6 @@ pub struct DesktopUpdateState {
     checked_at: Option<String>,
     skipped_version: Option<String>,
     interactive: bool,
-    remote_install_allowed: bool,
     remote_request: Option<DesktopRemoteRequestState>,
 }
 pub struct Updater {
@@ -198,7 +153,6 @@ pub struct Updater {
     source: AtomicUsize,
     channel_path: PathBuf,
     skipped_path: PathBuf,
-    remote_install_path: PathBuf,
     remote_request_path: PathBuf,
     /// The last completed check, published for the Runtime to relay to browsers.
     status: UpdateStatusStore,
@@ -206,9 +160,7 @@ pub struct Updater {
     pub channel_menu: CheckMenuItem<tauri::Wry>,
 }
 
-const REMOTE_INSTALL_PREFERENCE_FILE: &str = "remote-install.json";
 const REMOTE_REQUEST_EXPIRY_CODE: &str = "expired";
-static REMOTE_PREFERENCE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 /// The record a finished check publishes, or None while no check result is in
 /// memory. `Error` here means the check failed: only `check()` publishes.
 fn check_record(state: &State, current: &str, checked_at: SystemTime) -> Option<UpdateStatusRecord> {
@@ -261,7 +213,7 @@ fn publish_status(app: &AppHandle) {
     let updater = app.state::<Updater>();
     let state = updater.state.lock().expect("updater state");
     let record = base_status(app, &state)
-        .with_remote(state.remote_install_allowed, state.remote_request.clone())
+        .with_remote(true, state.remote_request.clone())
         .with_control(state.control_request.clone());
     if let Err(error) = updater.status.write(&record) {
         eprintln!("desktop update status: {error}");
@@ -352,7 +304,7 @@ fn settle_update(app: &AppHandle, context: Option<&RemoteInstallContext>, outcom
         let settled = settle(&mut state, &updater.busy, context, outcome, SystemTime::now());
         if settled {
             let record = record
-                .with_remote(state.remote_install_allowed, state.remote_request.clone())
+                .with_remote(true, state.remote_request.clone())
                 .with_control(state.control_request.clone());
             if let Err(error) = updater.status.write(&record) {
                 eprintln!("desktop update status: {error}");
@@ -516,13 +468,6 @@ fn claim_remote_request(
     RemoteRequestStart::Started
 }
 
-fn remote_preference_can_change(state: &State) -> bool {
-    state
-        .remote_request
-        .as_ref()
-        .is_none_or(|request| request.phase.is_terminal())
-}
-
 fn startup_remote_request_outcome(request: &RemoteRequestStatus, current: &str) -> Option<Settlement> {
     match request.phase {
         RemoteRequestPhase::Restarting if request.target == current => Some(Settlement::Completed),
@@ -593,11 +538,8 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
     let remote_busy = remote_request
         .as_ref()
         .is_some_and(|request| !request.phase.is_terminal());
-    let remote_install_path = app.path().app_local_data_dir()?.join(REMOTE_INSTALL_PREFERENCE_FILE);
-    let remote_install_allowed = read_remote_install_preference(&remote_install_path).unwrap_or_else(|error| {
-        eprintln!("desktop remote-install preference: {error}");
-        false
-    });
+    // Explicit manager requests authorize their own install. Leave the old
+    // remote-install.json untouched for downgrade; it is not an auto-update grant.
     app.manage(Updater {
         state: Mutex::new(State {
             phase: Phase::Idle,
@@ -605,7 +547,6 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             channel,
             manifest: None,
             availability_interactive: false,
-            remote_install_allowed,
             remote_request,
             active_request: None,
             control_request,
@@ -614,7 +555,6 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         source: AtomicUsize::new(0),
         channel_path,
         skipped_path: app.path().app_local_data_dir()?.join("update-skipped.json"),
-        remote_install_path,
         remote_request_path: status_dir.join(DESKTOP_UPDATE_REQUEST_FILE),
         status,
         menu: MenuItem::with_id(app, MENU_ID, &c.menu, true, None::<&str>)?,
@@ -670,11 +610,10 @@ fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
         prereleases: state.channel == Channel::Test,
         // These are local IPC methods, usable before the first check. Runtime
         // HTTP capabilities are separately gated by the persisted status record.
-        host_actions: vec!["check".into(), "prereleases".into()],
+        host_actions: vec!["check".into(), "prereleases".into(), "install".into()],
         checked_at: updater.status.read().ok().flatten().map(|record| record.checked_at),
         skipped_version: skipped_version(&updater),
         interactive: state.availability_interactive,
-        remote_install_allowed: state.remote_install_allowed,
         remote_request: state.remote_request.as_ref().map(DesktopRemoteRequestState::from),
     }
 }
@@ -864,20 +803,6 @@ async fn asset_with_progress(
 struct RemoteInstallContext {
     request_id: String,
     target: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RemoteDelivery {
-    Prompt,
-    Install,
-}
-
-fn remote_delivery(allowed: bool) -> RemoteDelivery {
-    if allowed {
-        RemoteDelivery::Install
-    } else {
-        RemoteDelivery::Prompt
-    }
 }
 
 fn should_publish_download_progress(current: Option<&RemoteRequestStatus>, request_id: &str, progress: u8) -> bool {
@@ -1157,7 +1082,7 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
             return;
         };
         let record = record
-            .with_remote(state.remote_install_allowed, state.remote_request.clone())
+            .with_remote(true, state.remote_request.clone())
             .with_control(state.control_request.clone());
         if let Err(error) = updater.status.write(&record) {
             eprintln!("desktop update status: {error}");
@@ -1258,67 +1183,46 @@ pub fn desktop_update_prereleases_set(window: WebviewWindow, app: AppHandle, ena
     Ok(enabled)
 }
 
-#[tauri::command]
-pub fn desktop_remote_install_allowed(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {
-    ensure_workbench(&window)?;
-    Ok(app
-        .state::<Updater>()
-        .state
-        .lock()
-        .expect("updater state")
-        .remote_install_allowed)
+fn claim_explicit_install(
+    state: &State,
+    busy: &AtomicBool,
+    target: &str,
+) -> Result<(Manifest, Option<RemoteInstallContext>), String> {
+    let remote = state.remote_request.as_ref().and_then(|request| {
+        (request.phase == RemoteRequestPhase::AwaitingHost).then(|| RemoteInstallContext {
+            request_id: request.request_id.clone(),
+            target: request.target.clone(),
+        })
+    });
+    if remote.is_none() && state.phase != Phase::Available {
+        return Err("No desktop update is ready to install.".to_owned());
+    }
+    let manifest = state
+        .manifest
+        .clone()
+        .ok_or_else(|| "No desktop update is ready to install.".to_owned())?;
+    validate_remote_target(&manifest.version, target).map_err(str::to_owned)?;
+    if let Some(remote) = &remote {
+        validate_remote_target(&remote.target, target).map_err(str::to_owned)?;
+    } else if busy.swap(true, Ordering::SeqCst) {
+        return Err("A desktop update is already in progress.".to_owned());
+    }
+    Ok((manifest, remote))
 }
 
 #[tauri::command]
-pub fn desktop_remote_install_set(window: WebviewWindow, app: AppHandle, enabled: bool) -> Result<bool, String> {
+pub fn desktop_update_install(window: WebviewWindow, app: AppHandle, target_version: String) -> Result<(), String> {
     ensure_workbench(&window)?;
-    let updater = app.state::<Updater>();
-    {
-        let mut state = updater.state.lock().expect("updater state");
-        if !remote_preference_can_change(&state) {
-            return Err("Remote install preference cannot change while an update request is active.".to_owned());
-        }
-        write_remote_install_preference(&updater.remote_install_path, enabled)
-            .map_err(|error| format!("Remote install preference could not be saved: {error}"))?;
-        state.remote_install_allowed = enabled;
-    }
-    publish_status(&app);
-    emit_state(&app);
-    Ok(enabled)
-}
-
-#[tauri::command]
-pub fn desktop_update_install(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
-    ensure_workbench(&window)?;
-    if crate::instance_client::enabled(&app) {
-        trusted_decision(app);
-        return Ok(());
-    }
-    let updater = app.state::<Updater>();
+    let generation = crate::instance_client::epoch(&app);
     let (manifest, remote) = {
+        let updater = app.state::<Updater>();
         let state = updater
             .state
             .lock()
             .map_err(|_| "Desktop updater state is unavailable.".to_owned())?;
-        let remote = state.remote_request.as_ref().and_then(|request| {
-            (request.phase == RemoteRequestPhase::AwaitingHost).then(|| RemoteInstallContext {
-                request_id: request.request_id.clone(),
-                target: request.target.clone(),
-            })
-        });
-        if remote.is_none() && state.phase != Phase::Available {
-            return Err("No desktop update is ready to install.".to_owned());
-        }
-        let manifest = state
-            .manifest
-            .clone()
-            .ok_or_else(|| "No desktop update is ready to install.".to_owned())?;
-        (manifest, remote)
+        claim_explicit_install(&state, &updater.busy, &target_version)?
     };
-    if remote.is_none() && updater.busy.swap(true, Ordering::SeqCst) {
-        return Err("A desktop update is already in progress.".to_owned());
-    }
-    install_with_context(app, manifest, remote);
+    install_in_generation(app, manifest, remote, generation);
     Ok(())
 }
 
@@ -1423,29 +1327,6 @@ fn record_remote_gate_failure(
     code.to_owned()
 }
 
-fn notify_remote_request(app: &AppHandle) {
-    let c = catalog();
-    if app
-        .notification()
-        .builder()
-        .title(c.title)
-        .body(c.available)
-        .show()
-        .is_err()
-    {
-        eprintln!("The desktop update notification could not be submitted to the operating system.");
-    }
-}
-
-fn schedule_remote_expiry(app: &AppHandle, request: DesktopUpdateRequest) {
-    let wait = request.expires_in(SystemTime::now());
-    let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(wait).await;
-        expire_remote_request(&handle, &request.request_id, &request.target);
-    });
-}
-
 fn fail_remote_request(app: &AppHandle, request: &DesktopUpdateRequest, error_code: &'static str) {
     settle_update(
         app,
@@ -1491,12 +1372,6 @@ pub fn handle_remote_update_request(app: &AppHandle) {
 }
 
 async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateRequest) {
-    let remote_install_allowed = app
-        .state::<Updater>()
-        .state
-        .lock()
-        .expect("updater state")
-        .remote_install_allowed;
     set_remote_phase(
         &app,
         &request.request_id,
@@ -1537,22 +1412,10 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
                 eprintln!("remote desktop update request gate: {code}");
                 return;
             }
-            match remote_delivery(remote_install_allowed) {
-                RemoteDelivery::Install => install_with_context(app, manifest, Some(remote)),
-                RemoteDelivery::Prompt => {
-                    set_remote_phase(
-                        &app,
-                        &request.request_id,
-                        &request.target,
-                        RemoteRequestPhase::AwaitingHost,
-                        None,
-                        None,
-                    );
-                    super::request_and_open_desktop_updates(&app);
-                    notify_remote_request(&app);
-                    schedule_remote_expiry(&app, request);
-                }
-            }
+            // The authenticated manager's exact-target request is the install
+            // authorization. Discovery, request lifetime and the installer
+            // gates still run; there is no second host prompt or preference.
+            install_with_context(app, manifest, Some(remote));
         }
         Ok(None) => {
             set_state(&app, Phase::Current, None);
@@ -1618,9 +1481,6 @@ fn install_in_generation(
     remote: Option<RemoteInstallContext>,
     generation: Option<u64>,
 ) {
-    if install_generation_current(&app, generation).is_err() {
-        return;
-    }
     if let Some(remote) = &remote {
         let updater = app.state::<Updater>();
         // Claim the worker before rereading the mailbox: a second host action
@@ -1632,6 +1492,18 @@ fn install_in_generation(
         ) {
             return;
         }
+    }
+    if install_generation_current(&app, generation).is_err() {
+        // This invocation now owns the worker. A stale presentation must not
+        // strand its busy gate, nor settle a duplicate worker it never claimed.
+        if let Some(remote) = remote.as_ref() {
+            settle_update(&app, Some(remote), Settlement::Failed("stale_desktop_generation"));
+        } else {
+            finish(&app.state::<Updater>().busy);
+        }
+        return;
+    }
+    if let Some(remote) = &remote {
         if let Err(error) = reread_remote_request(&app, remote) {
             let code = record_remote_gate_failure(&app, remote, error);
             eprintln!("remote desktop update request gate: {code}");
@@ -1787,6 +1659,77 @@ fn install_in_generation(
 mod tests {
     use super::*;
 
+    fn state_with_manifest() -> State {
+        State {
+            control_request: None,
+            active_request: None,
+            phase: Phase::Available,
+            latest: Some("3.1.2".to_owned()),
+            channel: Channel::Stable,
+            manifest: Some(
+                serde_json::from_str(include_str!(
+                    "../../runtime-host/tests/fixtures/updater/stable-aarch64-apple-darwin.json"
+                ))
+                .unwrap(),
+            ),
+            availability_interactive: true,
+            remote_request: None,
+        }
+    }
+
+    #[test]
+    fn explicit_install_claim_binds_target_and_claims_local_busy_gate() {
+        let state = state_with_manifest();
+        let busy = AtomicBool::new(false);
+
+        let (manifest, remote) = claim_explicit_install(&state, &busy, "3.1.2").unwrap();
+        assert_eq!(manifest.version, "3.1.2");
+        assert!(remote.is_none());
+        assert!(busy.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn explicit_install_claim_rejects_target_mismatch_and_busy_local_install() {
+        let state = state_with_manifest();
+        let busy = AtomicBool::new(false);
+        assert_eq!(
+            claim_explicit_install(&state, &busy, "3.1.3").unwrap_err(),
+            "target_mismatch"
+        );
+        assert!(!busy.load(Ordering::SeqCst));
+
+        let busy = AtomicBool::new(true);
+        assert_eq!(
+            claim_explicit_install(&state, &busy, "3.1.2").unwrap_err(),
+            "A desktop update is already in progress."
+        );
+        assert!(busy.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn explicit_install_claim_binds_a_remote_request_to_the_clicked_target() {
+        let mut state = state_with_manifest();
+        state.remote_request = Some(RemoteRequestStatus::new(
+            "00000000-0000-4000-8000-000000000000",
+            "3.1.2",
+            RemoteRequestPhase::AwaitingHost,
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+        ));
+        let busy = AtomicBool::new(false);
+
+        assert_eq!(
+            claim_explicit_install(&state, &busy, "3.1.3").unwrap_err(),
+            "target_mismatch"
+        );
+        let (_, remote) = claim_explicit_install(&state, &busy, "3.1.2").unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(remote.request_id, "00000000-0000-4000-8000-000000000000");
+        assert_eq!(remote.target, "3.1.2");
+        assert!(!busy.load(Ordering::SeqCst));
+    }
+
     fn state_with_remote_request(request_id: &str, target: &str, phase: RemoteRequestPhase) -> State {
         State {
             control_request: None,
@@ -1796,7 +1739,6 @@ mod tests {
             channel: Channel::Stable,
             manifest: None,
             availability_interactive: true,
-            remote_install_allowed: false,
             remote_request: Some(RemoteRequestStatus::new(
                 request_id,
                 target,
@@ -1864,7 +1806,6 @@ mod tests {
             channel: Channel::Stable,
             manifest: None,
             availability_interactive: false,
-            remote_install_allowed: false,
             remote_request: None,
         };
         let busy = AtomicBool::new(true);
@@ -1913,11 +1854,10 @@ mod tests {
             latest: Some("3.2.3".to_owned()),
             channel: Channel::Test,
             prereleases: true,
-            host_actions: vec!["check".into(), "prereleases".into()],
+            host_actions: vec!["check".into(), "prereleases".into(), "install".into()],
             checked_at: None,
             skipped_version: Some("3.2.3".to_owned()),
             interactive: true,
-            remote_install_allowed: false,
             remote_request: None,
         };
         assert_eq!(
@@ -1927,11 +1867,10 @@ mod tests {
                 "latest": "3.2.3",
                 "channel": "test",
                 "prereleases": true,
-                "hostActions": ["check", "prereleases"],
+                "hostActions": ["check", "prereleases", "install"],
                 "checkedAt": null,
                 "skippedVersion": "3.2.3",
                 "interactive": true,
-                "remoteInstallAllowed": false,
                 "remoteRequest": null,
             })
         );
@@ -1958,7 +1897,6 @@ mod tests {
                 channel: Channel::Test,
                 manifest: None,
                 availability_interactive: false,
-                remote_install_allowed: false,
                 remote_request: None,
             };
             let expected = match phase {
@@ -2001,12 +1939,11 @@ mod tests {
             channel: Channel::Stable,
             manifest: None,
             availability_interactive: true,
-            remote_install_allowed: true,
             remote_request: Some(remote.clone()),
         };
 
         let published = status_for_publish(&state, "3.2.2", Some(previous.clone()), SystemTime::UNIX_EPOCH)
-            .with_remote(state.remote_install_allowed, state.remote_request.clone())
+            .with_remote(true, state.remote_request.clone())
             .with_control(state.control_request.clone());
         assert_eq!(published.phase, UpdateStatusPhase::Error);
         assert_eq!(published.channel, Channel::Stable);
@@ -2033,12 +1970,6 @@ mod tests {
             "3.2.3",
             "a remote explicit check must not mutate the global skip preference"
         );
-    }
-
-    #[test]
-    fn remote_delivery_is_selected_only_by_the_local_shell_preference() {
-        assert_eq!(remote_delivery(false), RemoteDelivery::Prompt);
-        assert_eq!(remote_delivery(true), RemoteDelivery::Install);
     }
 
     #[test]
@@ -2093,7 +2024,6 @@ mod tests {
             channel: Channel::Stable,
             manifest: None,
             availability_interactive: false,
-            remote_install_allowed: false,
             remote_request: None,
         };
         let busy = AtomicBool::new(false);
@@ -2298,52 +2228,9 @@ mod tests {
     }
 
     #[test]
-    fn remote_install_preference_is_stable_for_the_lifetime_of_a_request() {
-        let remote = |phase| {
-            RemoteRequestStatus::new(
-                "00000000-0000-4000-8000-000000000000",
-                "3.2.4",
-                phase,
-                None,
-                None,
-                SystemTime::UNIX_EPOCH,
-            )
-        };
-        let mut state = State {
-            control_request: None,
-            active_request: None,
-            phase: Phase::Idle,
-            latest: None,
-            channel: Channel::Stable,
-            manifest: None,
-            availability_interactive: false,
-            remote_install_allowed: false,
-            remote_request: None,
-        };
-
-        assert!(remote_preference_can_change(&state));
-        state.remote_request = Some(remote(RemoteRequestPhase::Checking));
-        assert!(!remote_preference_can_change(&state));
-        state.remote_request = Some(remote(RemoteRequestPhase::Completed));
-        assert!(remote_preference_can_change(&state));
-    }
-
-    #[test]
     fn remote_target_must_equal_the_fresh_current_channel_result() {
         assert_eq!(validate_remote_target("3.2.4", "3.2.4"), Ok(()));
         assert_eq!(validate_remote_target("3.2.5", "3.2.4"), Err("target_mismatch"));
-    }
-
-    #[test]
-    fn remote_install_preference_defaults_off_and_round_trips_locally() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("remote-install.json");
-        assert!(!read_remote_install_preference(&path).unwrap());
-
-        write_remote_install_preference(&path, true).unwrap();
-        assert!(read_remote_install_preference(&path).unwrap());
-        write_remote_install_preference(&path, false).unwrap();
-        assert!(!read_remote_install_preference(&path).unwrap());
     }
 
     #[test]

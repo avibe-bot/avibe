@@ -7752,7 +7752,7 @@ async def desktop_update_request():
             "ok": True,
             "request_id": remote["request_id"],
             "delivery": (
-                "install" if status["remote_install_allowed"] else "prompt"
+                "install" if "install" in status.get("host_actions", []) or status["remote_install_allowed"] else "prompt"
             ),
         }
     )
