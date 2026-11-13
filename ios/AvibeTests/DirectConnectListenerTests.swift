@@ -989,6 +989,29 @@ final class DirectConnectListenerTests: XCTestCase {
         client.close()
     }
 
+    /// A request that never completes its head takes the spare connection
+    /// first. It holds it only for the spare's short head bound, and the
+    /// ownership check, which tries again within its window, still passes.
+    func testAnIncompleteRequestOnTheSpareDoesNotStarveTheOwnershipCheck() async throws {
+        let fixture = try await makeListener(limits: limits(maxConnections: 1))
+        let client = LoopbackClient(port: fixture.port)
+        _ = try await establish(client, fixture)
+        let slow = LoopbackClient(port: fixture.port)
+        try await slow.send("CONNECT instance.example:443 HTTP/1.1\r\nHost: ")
+        let nonce = await fixture.listener.ownershipNonce
+
+        let owned = await DirectConnectListener.ownershipCheck(
+            port: fixture.port.rawValue,
+            nonce: nonce,
+            within: 3
+        )
+
+        XCTAssertTrue(owned)
+        let rest = try await slow.receiveUntilClosed()
+        XCTAssertEqual(rest, Data())
+        client.close()
+    }
+
     func testStoppingClosesARefusalThatIsStillWaitingForItsClient() async throws {
         // The client has up to a minute to read a refusal and close.
         let fixture = try await makeListener(limits: limits(headSeconds: 60))
@@ -1135,7 +1158,7 @@ final class DirectConnectListenerTests: XCTestCase {
         let otherNonce = await DirectConnectListener.ownershipCheck(
             port: fixture.port.rawValue,
             nonce: "another-nonce",
-            within: 10
+            within: 1
         )
         XCTAssertFalse(otherNonce)
 

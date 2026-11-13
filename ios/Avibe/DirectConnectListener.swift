@@ -379,7 +379,11 @@ actor DirectConnectListener {
     /// The close of the previous listening socket, until it has finished.
     private var closing: Task<Void, Never>?
     /// The one connection beyond the limit, kept for the ownership check.
-    private var spare: Task<Void, Never>?
+    private var spare: (id: UUID, task: Task<Void, Never>)?
+    /// How long the spare connection waits for a request head. Far shorter
+    /// than an ownership check's window, which retries: a slow or
+    /// incomplete request cannot hold the spare through a check.
+    static let spareHeadSeconds: TimeInterval = 0.5
     /// The highest path generation and the newest scope retired so far.
     private var retiredGeneration = Int.min
     private var retiredScope = DirectPlanScope(selection: .min, accountEpoch: .min)
@@ -532,6 +536,9 @@ actor DirectConnectListener {
     func closeListeningSocket() async {
         endPendingBind()
         health.closed()
+        // The spare belongs to the socket that accepted it; the next socket's
+        // ownership check must not find it taken.
+        endSpare()
         if let listener {
             self.listener = nil
             closing = Task {
@@ -575,8 +582,7 @@ actor DirectConnectListener {
             relay.task.cancel()
         }
         relays.removeAll()
-        spare?.cancel()
-        spare = nil
+        endSpare()
     }
 
     /// Closes the committed relays on `backend` (`nil`: both) whose plan was
@@ -666,13 +672,13 @@ actor DirectConnectListener {
                 connection.cancel()
                 return
             }
-            let limits = limits
             let nonce = ownershipNonce
-            spare = Task { [weak self] in
-                await Self.answerOwnershipCheckOnly(connection, nonce: nonce, limits: limits)
+            let id = UUID()
+            spare = (id, Task { [weak self] in
+                await Self.answerOwnershipCheckOnly(connection, nonce: nonce)
                 connection.cancel()
-                await self?.spareDidEnd()
-            }
+                await self?.spareDidEnd(id)
+            })
             return
         }
         let id = UUID()
@@ -704,7 +710,16 @@ actor DirectConnectListener {
     /// A relay whose stream failed before any event closed it is not counted
     /// by a later event: that event did not close it, and the page already
     /// saw that connection fail.
-    private func spareDidEnd() {
+    /// Clears the spare only if it is still this one: a spare cancelled by
+    /// a socket close may end after a newer one took its place.
+    private func spareDidEnd(_ id: UUID) {
+        if spare?.id == id {
+            spare = nil
+        }
+    }
+
+    private func endSpare() {
+        spare?.task.cancel()
         spare = nil
     }
 
@@ -760,11 +775,14 @@ actor DirectConnectListener {
     /// nothing else, within the head bound.
     private static func answerOwnershipCheckOnly(
         _ connection: NWConnection,
-        nonce: String,
-        limits: DirectConnectLimits
+        nonce: String
     ) async {
-        let request = try? await directDeadline(limits.headSeconds) {
-            try await readRequest(from: connection, allowedHosts: [], limits: limits)
+        let request = try? await directDeadline(spareHeadSeconds) {
+            try await readRequest(
+                from: connection,
+                allowedHosts: [],
+                limits: .standard
+            )
         }
         guard request == .ownershipCheck(nonce: nonce) else {
             return
@@ -1338,7 +1356,27 @@ actor DirectConnectListener {
         nonce: String,
         within seconds: TimeInterval
     ) async -> Bool {
-        guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
+        // Tried again until the window ends: one attempt can find the spare
+        // connection briefly taken (`spareHeadSeconds`).
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < deadline, !Task.isCancelled {
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            let remainingSeconds = Double(remaining.components.seconds)
+                + Double(remaining.components.attoseconds) / 1e18
+            if await checkOwnershipOnce(port: port, nonce: nonce, within: remainingSeconds) {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return false
+    }
+
+    private static func checkOwnershipOnce(
+        port: UInt16,
+        nonce: String,
+        within seconds: TimeInterval
+    ) async -> Bool {
+        guard seconds > 0, let endpointPort = NWEndpoint.Port(rawValue: port) else {
             return false
         }
         let connection = NWConnection(
