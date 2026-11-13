@@ -15,10 +15,11 @@
 import { HDKey } from '@scure/bip32';
 import { entropyToMnemonic, generateMnemonic, mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english.js';
-import { base58, bech32m } from '@scure/base';
+import { base58, bech32, bech32m, createBase58check } from '@scure/base';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js';
 import { hmac } from '@noble/hashes/hmac.js';
+import { ripemd160 } from '@noble/hashes/legacy.js';
 import { sha256, sha512 } from '@noble/hashes/sha2.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
@@ -31,6 +32,9 @@ export type HdAccountAddresses = {
   account: number;
   eth: string;
   btc_taproot: string;
+  /** Native SegWit (P2WPKH, m/84'/0'/0'/0/i) and Legacy (P2PKH, m/44'/0'/0'/0/i), bitcoin-address-types-v1. */
+  btc_segwit: string;
+  btc_legacy: string;
   solana: string;
   paths: Record<HdChain, string>;
 };
@@ -149,6 +153,13 @@ function slip10Ed25519(seed: Uint8Array, path: string): Uint8Array {
   return key;
 }
 
+const base58check = createBase58check(sha256);
+const hash160 = (publicKey: Uint8Array) => ripemd160(sha256(publicKey));
+/** Mainnet P2WPKH (bc1q…) of a compressed public key. */
+export const segwitAddress = (publicKey: Uint8Array) => bech32.encode('bc', [0, ...bech32.toWords(hash160(publicKey))]);
+/** Mainnet P2PKH (1…) of a compressed public key. */
+export const legacyAddress = (publicKey: Uint8Array) => base58check.encode(Uint8Array.from([0, ...hash160(publicKey)]));
+
 /** The public addresses of accounts `from`..`to - 1`. Private keys are dropped as soon as used. */
 export function deriveAccounts(seed: Uint8Array, count = 1, from = 0): HdAccountAddresses[] {
   if (seed.length !== 64) throw new Error('a BIP39 seed is 64 bytes');
@@ -159,6 +170,8 @@ export function deriveAccounts(seed: Uint8Array, count = 1, from = 0): HdAccount
       const paths = hdPaths(account);
       const evm = root.derive(paths.evm);
       const btc = root.derive(paths.bitcoin);
+      const segwit = root.derive(`m/84'/0'/0'/0/${account}`);
+      const legacy = root.derive(`m/44'/0'/0'/0/${account}`);
       const evmPub = secp256k1.Point.fromBytes(evm.publicKey!).toBytes(false);
       const solPriv = slip10Ed25519(seed, paths.solana);
       const solPub = ed25519.getPublicKey(solPriv);
@@ -167,11 +180,15 @@ export function deriveAccounts(seed: Uint8Array, count = 1, from = 0): HdAccount
         account,
         eth: keccakAddress(evmPub),
         btc_taproot: taprootAddress(taprootOutputKey(btc.publicKey!)),
+        btc_segwit: segwitAddress(segwit.publicKey!),
+        btc_legacy: legacyAddress(legacy.publicKey!),
         solana: base58.encode(solPub),
         paths,
       });
       evm.wipePrivateData();
       btc.wipePrivateData();
+      segwit.wipePrivateData();
+      legacy.wipePrivateData();
     }
   } finally {
     root.wipePrivateData();

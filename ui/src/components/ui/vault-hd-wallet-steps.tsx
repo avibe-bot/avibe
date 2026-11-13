@@ -13,6 +13,8 @@ import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Button } from './button';
 import { Input } from './input';
 import { SigningAddressRow } from './signing-address-list';
+import { BtcAddressRow } from './btc-address-row';
+import type { BitcoinAddressType } from '@/context/ApiContext';
 import { InfoHint } from './info-hint';
 import { Textarea } from './textarea';
 
@@ -193,21 +195,29 @@ export function HdCheckStep({ quiz, chosen, onChoose }: {
 
 
 /** Account #0's three addresses, in the shipped address list. */
-/** A wallet account's three addresses, for comparing with another wallet: the Bitcoin row says it
- *  is Taproot, since Phantom and others show a SegWit (bc1q) address by default. */
-export function HdAccountAddressList({ account }: { account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> }) {
+/** A wallet account's addresses, for comparing with another wallet (ui/design: vault/btc-address-switch).
+ *  Bitcoin is one row whose label switches between the types the account can sign for; `types`
+ *  overrides the account's own list (the pre-save preview offers what the wallet will have). With
+ *  Taproot alone, a hint says Phantom and others show SegWit by default. */
+export function HdAccountAddressList({ account, types }: {
+  account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> & {
+    btc_segwit?: string;
+    btc_legacy?: string;
+    bitcoin_address_types?: BitcoinAddressType[];
+  };
+  types?: BitcoinAddressType[];
+}) {
   const { t } = useTranslation();
-  const label = 'w-[104px] whitespace-nowrap';
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      <SigningAddressRow label={t('vaults.addresses.eth')} value={account.eth} labelClassName={label} />
-      <SigningAddressRow
-        label={t('vaults.hd.btcTaproot')}
-        value={account.btc_taproot}
-        labelClassName={label}
-        hint={<InfoHint hover content={t('vaults.hd.btcTaprootInfo')} label={t('vaults.dialog.moreInfo')} />}
+      <SigningAddressRow label={t('vaults.addresses.eth')} value={account.eth} labelClassName="sm:w-[104px]" />
+      <BtcAddressRow
+        // An account the server has not prepared lists no types: Taproot only, never inferred.
+        types={types ?? account.bitcoin_address_types ?? ['p2tr']}
+        addresses={{ p2tr: account.btc_taproot, p2wpkh: account.btc_segwit, p2pkh: account.btc_legacy }}
+        singleHint={<InfoHint hover content={t('vaults.hd.btcTaprootInfo')} label={t('vaults.dialog.moreInfo')} />}
       />
-      <SigningAddressRow label={t('vaults.addresses.solana')} value={account.solana} labelClassName={label} />
+      <SigningAddressRow label={t('vaults.addresses.solana')} value={account.solana} labelClassName="sm:w-[104px]" />
     </div>
   );
 }
@@ -357,7 +367,8 @@ export function HdImportFields({
             <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">{t('vaults.hd.accountIndex', { account: 0 })}</span>
             {t('vaults.hd.import.previewTitle')}
           </span>
-          <HdAccountAddressList account={preview} />
+          {/* Before saving: the three types a new wallet gets, all derived here from these words. */}
+          <HdAccountAddressList account={preview} types={['p2tr', 'p2wpkh', 'p2pkh']} />
           <span className="text-[11px] leading-snug text-muted">{t('vaults.hd.import.previewHint')}</span>
         </div>
       ) : null}

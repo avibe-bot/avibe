@@ -726,3 +726,52 @@ it('shows a wallet Solana approval the account snapshot address in the message d
   expect(screen.getAllByText('SoLsnapshotAddress111').length).toBeGreaterThanOrEqual(2);
 });
 
+
+it.each([
+  ['p2wpkh', 'ecdsa-secp256k1-der', 'bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g', "m/84'/0'/0'/0/1"],
+  ['p2pkh', 'ecdsa-secp256k1-der', '1Ak8PffB2meyfYnbXZR9EGfLfFZVpzJvQP', "m/44'/0'/0'/0/1"],
+  ['p2tr', 'schnorr-secp256k1-bip341-keypath', 'bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh', "m/86'/0'/0'/0/1"],
+] as const)('a seed-wallet Bitcoin approval signs as the requested type (%s): its address and path, not Taproot by default', async (type, scheme, address, path) => {
+  api.listVaultSecrets.mockResolvedValue({ secrets: [{ name: 'AGENT_WALLET' }] });
+  const taproot = 'bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh';
+  const account = {
+    account: 1, name: null, eth: '0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0', btc_taproot: taproot, solana: 'Hh8QwFUA6MtVu1qAoq12ucvFHNwCcVTV7hpWjeY1Hztb',
+    paths: { evm: "m/44'/60'/0'/0/1", bitcoin: "m/86'/0'/0'/0/1", solana: "m/44'/501'/1'/0'" }, always_ask: true, last_signer: null,
+    bitcoin_address_type: type, bitcoin_address: address, bitcoin_path: path,
+  };
+  const request = {
+    ...standardSignRequest, id: `vrq_hd_btc_${type}`, secret_name: 'AGENT_WALLET',
+    delivery: { digest: '22'.repeat(32), scheme, derivation: { chain: 'bitcoin', account: 1, address_type: type } },
+    card: { request_type: 'sign', secret_name: 'AGENT_WALLET', kind: 'keypair', protection: 'standard', derivation: { chain: 'bitcoin', account: 1 }, account },
+  } as unknown as VaultRequest;
+  render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+  expect(screen.getByText(address)).toBeTruthy();
+  expect(screen.getByText(en.vaults.approval.path.replace('{{path}}', path))).toBeTruthy();
+  const typeLabel = { p2tr: en.vaults.addresses.typeTaproot, p2wpkh: en.vaults.addresses.typeSegwit, p2pkh: en.vaults.addresses.typeLegacy }[type];
+  expect(screen.getByText(en.vaults.addresses.btcWithType.replace('{{type}}', typeLabel))).toBeTruthy();
+  if (type !== 'p2tr') expect(screen.queryByText(taproot)).toBeNull();
+});
+
+it.each([['p2pkh'], ['p2wpkh'], ['p2tr'], [undefined]] as const)('approving a seed-wallet Bitcoin request sends back its address type exactly (%s)', async (type) => {
+  api.listVaultSecrets.mockResolvedValue({ secrets: [{ name: 'AGENT_WALLET' }] });
+  api.signVaultDigest.mockResolvedValue({ ok: true });
+  const account = {
+    account: 0, name: null, eth: '0x9858EfFD232B4033E47d90003D41EC34EcaEda94', btc_taproot: 'bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr',
+    solana: 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk', paths: { evm: "m/44'/60'/0'/0/0", bitcoin: "m/86'/0'/0'/0/0", solana: "m/44'/501'/0'/0'" },
+    always_ask: true, last_signer: null,
+  };
+  const derivation = { chain: 'bitcoin', account: 0, ...(type ? { address_type: type } : {}) };
+  const scheme = type === 'p2pkh' || type === 'p2wpkh' ? 'ecdsa-secp256k1-der' : 'schnorr-secp256k1-bip341-keypath';
+  const request = {
+    ...standardSignRequest, id: `vrq_hd_btc_send_${type ?? 'none'}`, secret_name: 'AGENT_WALLET',
+    delivery: { digest: '33'.repeat(32), scheme, derivation },
+    card: { request_type: 'sign', secret_name: 'AGENT_WALLET', kind: 'keypair', protection: 'standard', derivation, account },
+  } as unknown as VaultRequest;
+  render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: i18n.t('vaults.approval.sign'), exact: true })); });
+  await vi.waitFor(() => expect(api.signVaultDigest).toHaveBeenCalledOnce());
+  const body = api.signVaultDigest.mock.calls[0][0] as Record<string, unknown>;
+  expect(body.chain).toBe('bitcoin');
+  if (type) expect(body.address_type).toBe(type);
+  else expect(body).not.toHaveProperty('address_type');
+});

@@ -7,6 +7,7 @@ import {
   useApi,
   type SigningAddresses,
   type VaultHdAccount,
+  type BitcoinAddressType,
   type VaultAgentBindingsBatchResult,
   type VaultGrantDuration,
   type VaultRequest,
@@ -105,6 +106,25 @@ export type ApprovalOutcome = { kind: 'approved' | 'denied'; requestType: 'acces
 /** The receive address(es) a signature scheme produces, for the sign card's "Signing as" row.
  * ui/design: vault/signing/keypath, vault/signing/raw
  */
+/** An HD approval's account snapshot. A Bitcoin request also names the type it signs as and that
+ *  type's address and path (docs/plans/vault-bitcoin-address-types.md); older cards are Taproot. */
+type HdApprovalAccount = VaultHdAccount & {
+  bitcoin_address_type?: BitcoinAddressType;
+  bitcoin_address?: string;
+  bitcoin_path?: string;
+};
+
+/** The one Bitcoin address an HD request signs as: the selected type's, never Taproot's by default
+ *  when another type was asked for. */
+const BTC_TYPE_LABEL = { p2tr: 'vaults.addresses.typeTaproot', p2wpkh: 'vaults.addresses.typeSegwit', p2pkh: 'vaults.addresses.typeLegacy' } as const;
+
+const hdBitcoinSigningAddress = (account: HdApprovalAccount): SigningAddresses => {
+  const type = account.bitcoin_address_type ?? 'p2tr';
+  const address = account.bitcoin_address ?? (type === 'p2tr' ? account.btc_taproot : undefined);
+  if (!address) return {};
+  return type === 'p2wpkh' ? { btc_segwit: address } : type === 'p2pkh' ? { btc_legacy: address } : { btc_taproot: address };
+};
+
 function addressesForScheme(
   scheme: string | undefined,
   addresses: SigningAddresses | null,
@@ -270,11 +290,12 @@ export const VaultApprovalCard: React.FC<{
     // The daemon-signed sign context (protocol v2 §6.2); the sandbox renders + verifies it.
     operation_context?: VaultSignedOperationContext;
     /** A seed-phrase wallet's chain and account, chosen when the Agent asked (server-created). */
-    derivation?: { chain: 'evm' | 'bitcoin' | 'solana'; account: number };
+    /** `address_type`: a Bitcoin request's script type, as the Agent asked; absent on older requests (Taproot). */
+    derivation?: { chain: 'evm' | 'bitcoin' | 'solana'; account: number; address_type?: BitcoinAddressType };
   };
   // A seed-phrase wallet's request carries the account as it was when the Agent asked: the card
   // shows that snapshot, never the wallet's current row (docs/plans/vault-hd-wallets.md).
-  const hdAccount = (card as { account?: VaultHdAccount } | null)?.account ?? null;
+  const hdAccount = (card as { account?: HdApprovalAccount } | null)?.account ?? null;
   const hdDerivation = (card as { derivation?: { chain: 'evm' | 'bitcoin' | 'solana'; account: number } } | null)?.derivation
     ?? delivery.derivation ?? null;
   const accountName = useAccountName();
@@ -337,7 +358,7 @@ export const VaultApprovalCard: React.FC<{
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
   // The addresses this request signs as: a wallet's stored account snapshot, else the key's row.
   const signingAddresses = hdDerivation
-    ? (hdAccount ? { eth: hdAccount.eth, btc_taproot: hdAccount.btc_taproot, solana: hdAccount.solana } : null)
+    ? (hdAccount ? { eth: hdAccount.eth, ...hdBitcoinSigningAddress(hdAccount), solana: hdAccount.solana } : null)
     : signAddresses;
   const [copiedDigest, setCopiedDigest] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -547,6 +568,8 @@ export const VaultApprovalCard: React.FC<{
         failIfNotOk(await api.signVaultDigest({
           name, request_id: request.id, ...signed, scheme,
           ...(delivery.derivation ? { chain: delivery.derivation.chain, account: delivery.derivation.account } : {}),
+          // The type is bound to the request: send it back exactly as asked, and nothing when it was not.
+          ...(delivery.derivation?.address_type ? { address_type: delivery.derivation.address_type } : {}),
           ...(delivery.derivation && persistedContext ? { signing_context: persistedContext } : {}),
         }));
       }
@@ -691,10 +714,15 @@ export const VaultApprovalCard: React.FC<{
               <span className="flex min-w-0 items-center gap-2">
                 <AccountIndex index={hdDerivation.account} />
                 {hdAccount ? <span className="truncate text-[13px] font-semibold text-foreground">{accountName(hdAccount)}</span> : null}
-                <Badge variant="outline">{t(hdDerivation.chain === 'evm' ? 'vaults.addresses.eth' : hdDerivation.chain === 'bitcoin' ? 'vaults.addresses.btcTaproot' : 'vaults.addresses.solana')}</Badge>
+                <Badge variant="outline">{hdDerivation.chain === 'evm' ? t('vaults.addresses.eth') : hdDerivation.chain === 'solana' ? t('vaults.addresses.solana')
+                  // The type this request signs as; older requests without one are Taproot.
+                  : t('vaults.addresses.btcWithType', { type: t(BTC_TYPE_LABEL[hdAccount?.bitcoin_address_type ?? delivery.derivation?.address_type ?? 'p2tr']) })}</Badge>
               </span>
               {hdAccount?.paths?.[hdDerivation.chain] ? (
-                <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', { path: hdAccount.paths[hdDerivation.chain] })}</span>
+                <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', {
+                  // A Bitcoin request names the type it signs as; its path differs from Taproot's.
+                  path: hdDerivation.chain === 'bitcoin' && hdAccount.bitcoin_path ? hdAccount.bitcoin_path : hdAccount.paths[hdDerivation.chain],
+                })}</span>
               ) : null}
             </span>
           </DetailRow>
