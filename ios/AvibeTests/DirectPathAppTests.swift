@@ -1103,6 +1103,89 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(source.webView(for: selection))
     }
 
+    // MARK: A loss of the iroh transport's path
+
+    /// The App goes to the background with a direct relay committed on the
+    /// iroh transport's path. The transport and the controller both hear
+    /// it; whichever acts first, the relay is counted as closed by the
+    /// background, once, and the return publishes it.
+    @MainActor
+    func testTheBackgroundCountsTheDirectRelayOnTheIrohTransportsPathOnce() async throws {
+        let fixture = try await makeAppWithACommittedDirectRelay()
+        defer { fixture.close() }
+
+        NotificationCenter.default.post(
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        try await eventually { fixture.log.count(of: "connection.close") == 1 }
+        NotificationCenter.default.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        try await eventually {
+            fixture.app.directListenerFault
+                || self.directStatus(fixture.app, self.instance) != nil
+        }
+        // The simulator can refuse the re-bind; that is the listener fault,
+        // with tests of its own.
+        guard !fixture.app.directListenerFault else {
+            return
+        }
+        try await eventually { self.directStatus(fixture.app, self.instance)?.closure == 1 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(directStatus(fixture.app, instance)?.closure, 1)
+    }
+
+    /// The instance answers that it offers no direct path while a relay is
+    /// committed on it: the relay is counted as closed by that answer,
+    /// once.
+    @MainActor
+    func testAnUnavailableAnswerCountsTheDirectRelayOnTheIrohTransportsPathOnce() async throws {
+        let fixture = try await makeAppWithACommittedDirectRelay()
+        defer { fixture.close() }
+
+        fixture.rendezvous.next.append(
+            DirectIrohFixtures.unavailable(
+                retryAfterSeconds: 60,
+                instanceID: "instance-1",
+                hostname: "instance-one.example"
+            )
+        )
+        try fixture.fireRefresh()
+        try await eventually { self.directStatus(fixture.app, self.instance)?.closure == 1 }
+        XCTAssertEqual(fixture.log.count(of: "connection.close"), 1)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(directStatus(fixture.app, instance)?.closure, 1)
+        XCTAssertEqual(directStatus(fixture.app, instance)?.preferred, .tunnel)
+    }
+
+    /// The instance answers with a new endpoint while a relay is committed
+    /// on the old one: the relay is counted as closed by the replacement,
+    /// once, and the new path comes up.
+    @MainActor
+    func testAReplacementAnswerCountsTheDirectRelayOnTheIrohTransportsPathOnce() async throws {
+        let fixture = try await makeAppWithACommittedDirectRelay()
+        defer { fixture.close() }
+
+        fixture.engine.prepare().connection.resolve(
+            DirectIrohFakeConnection(
+                log: fixture.log,
+                remote: DirectIrohFixtures.instanceEndpoint,
+                answers: [DirectIrohFakeConnection.established]
+            )
+        )
+        fixture.rendezvous.generation = "g2"
+        try fixture.fireRefresh()
+        try await eventually {
+            let status = self.directStatus(fixture.app, self.instance)
+            return status?.closure == 1 && status?.preferred == .direct
+        }
+        XCTAssertEqual(fixture.log.count(of: "connection.close"), 1)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(directStatus(fixture.app, instance)?.closure, 1)
+    }
+
     // MARK: The bridge
 
     @MainActor
@@ -1453,6 +1536,76 @@ final class DirectPathAppTests: XCTestCase {
         return timing
     }()
 
+    /// An App whose transport is the iroh transport over a stand-in for the
+    /// binding, with its path to instance-1 up through the runtime's
+    /// primary WebView, and one direct relay committed through the App's
+    /// own listener on that path.
+    @MainActor
+    private func makeAppWithACommittedDirectRelay() async throws -> CommittedDirectRelay {
+        let log = DirectIrohEventLog()
+        let engine = DirectIrohFakeEngine(log: log)
+        let scheduler = DirectIrohManualScheduler()
+        let source = DirectRendezvousWebViewSource()
+        let rendezvous = ScriptedRendezvous()
+        let transport = DirectIrohTransport(
+            engine: engine,
+            fetchRendezvous: { selection, clientEndpointID in
+                guard source.webView(for: selection) != nil else {
+                    throw DirectRendezvousFetchError.pageNotReady
+                }
+                return rendezvous.answer(for: selection, client: clientEndpointID)
+            },
+            network: DirectIrohFakeNetwork(),
+            scheduler: scheduler,
+            timing: Self.patientIrohTiming,
+            isInBackground: false
+        )
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(directTransport: transport) {
+            listening = try listeningSockets()
+        }
+        source.appModel = app
+        // The probe's stream, then the relay's.
+        let connection = DirectIrohFakeConnection(
+            log: log,
+            remote: DirectIrohFixtures.instanceEndpoint,
+            answers: [DirectIrohFakeConnection.established, DirectIrohFakeConnection.established]
+        )
+        engine.prepare().connection.resolve(connection)
+
+        let runtime = try await select("instance-1", in: app)
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        let page = try RuntimePage(controller: controller)
+        try await eventually {
+            // A request made before the WebView existed is asked again.
+            scheduler.fire(Self.patientIrohTiming.pageRetrySeconds)
+            return self.directStatus(app, self.instance)?.preferred == .direct
+        }
+
+        let socket = try XCTUnwrap(try newListeners(since: listening).first)
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let client = LoopbackClient(port: port)
+        try await client.send(
+            "CONNECT instance-one.example:443 HTTP/1.1\r\nHost: instance-one.example:443\r\n\r\n"
+        )
+        let established = "HTTP/1.1 200 Connection Established\r\n\r\n"
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertEqual(connection.streams.count, 2)
+        XCTAssertEqual(log.count(of: "connection.close"), 0)
+        XCTAssertEqual(directStatus(app, instance)?.closure, 0)
+        return CommittedDirectRelay(
+            app: app,
+            engine: engine,
+            scheduler: scheduler,
+            rendezvous: rendezvous,
+            log: log,
+            page: page,
+            client: client
+        )
+    }
+
     /// The isolated preferences of the last App `makeApp` built.
     private var appDefaults: UserDefaults?
 
@@ -1744,6 +1897,54 @@ private struct PushHold: Sendable {
             headersSentEvent: inFlight,
             bodyRelease: release
         )
+    }
+}
+
+/// What the instance answers the iroh transport's rendezvous requests: a
+/// ready answer of `generation` for the selection, unless a scripted
+/// answer is next.
+@MainActor
+private final class ScriptedRendezvous {
+    var generation = "g1"
+    var next: [Data] = []
+
+    func answer(for selection: DirectIrohSelection, client: DirectEndpointID) -> Data {
+        guard next.isEmpty else {
+            return next.removeFirst()
+        }
+        return DirectIrohFixtures.ready(
+            generation: generation,
+            client: client,
+            instanceID: selection.instanceID,
+            hostname: selection.host
+        )
+    }
+}
+
+/// An App with one direct relay committed on the iroh transport's path.
+@MainActor
+private struct CommittedDirectRelay {
+    let app: AppModel
+    let engine: DirectIrohFakeEngine
+    let scheduler: DirectIrohManualScheduler
+    let rendezvous: ScriptedRendezvous
+    let log: DirectIrohEventLog
+    let page: RuntimePage
+    let client: LoopbackClient
+
+    /// Fires the transport's refresh of its rendezvous answer: the one
+    /// timer that is neither the stability timer nor the answer's deadline.
+    func fireRefresh() throws {
+        let stable = DirectIrohTiming.standard.stableSeconds
+        let pending = scheduler.pending.filter { $0 != stable }.sorted()
+        XCTAssertEqual(pending.count, 2, "\(scheduler.pending)")
+        let refresh = try XCTUnwrap(pending.first)
+        XCTAssertTrue(scheduler.fire(refresh))
+    }
+
+    func close() {
+        client.close()
+        page.close()
     }
 }
 

@@ -630,13 +630,11 @@ final class DirectIrohTransport {
             Self.logger.info("Direct transport: the instance offers no direct path")
             // The newest accepted answer speaks for the instance: whatever
             // an earlier one started, a dial under way included, ends.
-            let hadSession = session != nil
             cancelDial()
-            endSession()
-            scheduleFetch(after: TimeInterval(retryAfterSeconds))
-            if hadSession {
-                emit(.lost)
+            guard endSessionReportingLoss() else {
+                return
             }
+            scheduleFetch(after: TimeInterval(retryAfterSeconds))
         case .ready(let offer):
             // The instance issued the answer after the request was sent, so
             // a deadline counted from then is never later than the
@@ -688,13 +686,11 @@ final class DirectIrohTransport {
             // A new endpoint key or address set. The old path is retired
             // before the new one is dialled: new connections use the
             // public origin until the new path answers.
-            let hadSession = session != nil
-            endSession()
+            guard endSessionReportingLoss() else {
+                return
+            }
             startDial(under: accepted, key: key, host: selection.host)
             scheduleFetch(after: refresh)
-            if hadSession {
-                emit(.lost)
-            }
         }
     }
 
@@ -1018,11 +1014,13 @@ final class DirectIrohTransport {
         sessionDidEnd(retryNow: false)
     }
 
-    /// The path is gone. `lost` is reported after the next attempt is
-    /// arranged, so new connections are already on the public origin.
+    /// The path is gone: it is reported, closed, and the next attempt is
+    /// arranged.
     private func sessionDidEnd(retryNow: Bool) {
         Self.logger.info("Direct transport: lost")
-        endSession()
+        guard endSessionReportingLoss() else {
+            return
+        }
         cancelFetch()
         if retryNow {
             failures = 0
@@ -1031,7 +1029,6 @@ final class DirectIrohTransport {
         } else {
             scheduleRetry()
         }
-        emit(.lost)
     }
 
     private func startProbe(_ reason: ProbeReason) {
@@ -1151,6 +1148,25 @@ final class DirectIrohTransport {
         session.link.close()
     }
 
+    /// Ends the live path, if there is one, and reports `lost` for it,
+    /// first. Whoever hears the report closes and counts the relays the
+    /// path carried in that same turn (`DirectPathController` takes their
+    /// claims there); a stream closed before that would look to it as one
+    /// that ended on its own, and its page would not be told to reconnect.
+    /// `false` when the report itself replaced or ended the selection:
+    /// whatever did that has already stopped this work.
+    private func endSessionReportingLoss() -> Bool {
+        if let ending = session {
+            let current = selection
+            emit(.lost)
+            guard selection == current, session === ending else {
+                return false
+            }
+        }
+        endSession()
+        return true
+    }
+
     private func stopWork() {
         fetchTimer?.cancel()
         fetchTimer = nil
@@ -1220,12 +1236,12 @@ final class DirectIrohTransport {
             return
         }
         isInBackground = true
-        let hadSession = session != nil
-        stopWork()
-        network.stop()
-        if hadSession {
-            emit(.lost)
+        // Reported before anything is closed, as for every loss. Nothing is
+        // watched in the background, whatever the report led to.
+        if endSessionReportingLoss() {
+            stopWork()
         }
+        network.stop()
     }
 
     private func applicationWillEnterForeground() {

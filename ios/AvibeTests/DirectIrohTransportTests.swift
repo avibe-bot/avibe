@@ -1453,6 +1453,59 @@ final class DirectIrohTransportTests: XCTestCase {
         await assertStale { _ = try await harness.transport.openStream(for: old) }
     }
 
+    // MARK: Losses are reported first
+
+    /// Every loss of a live path is reported before any of its streams or
+    /// its connection is closed: whoever hears the report closes and counts
+    /// the relays the path carried in that turn, and a stream closed first
+    /// would look to it as one that ended on its own.
+    func testALossIsReportedBeforeItsStreamsAndItsConnectionAreClosed() async throws {
+        enum Loss: CaseIterable {
+            case background
+            case unavailable
+            case replacement
+            case connectionClosed
+        }
+        for loss in Loss.allCases {
+            let harness = Harness()
+            let connection = try await harness.bringUp(generation: "boot:1")
+            let stream = try await harness.transport.openStream(for: harness.tag("boot:1"))
+            switch loss {
+            case .background:
+                harness.notifications.post(
+                    name: UIApplication.didEnterBackgroundNotification,
+                    object: nil
+                )
+            case .unavailable:
+                harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 60))
+                XCTAssertTrue(harness.scheduler.fire(240), "\(loss)")
+            case .replacement:
+                harness.engine.prepare().connection.resolve(
+                    harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+                )
+                harness.rendezvous.answer(
+                    DirectIrohFixtures.ready(generation: "boot:2", client: harness.engine.key.endpointID)
+                )
+                XCTAssertTrue(harness.scheduler.fire(240), "\(loss)")
+            case .connectionClosed:
+                connection.drop()
+            }
+            try await eventually("the loss is reported: \(loss)") {
+                harness.reports.count >= 2
+            }
+            XCTAssertEqual(harness.reports[1], .lost, "\(loss)")
+            // Nothing of the path was closed when the loss was reported.
+            XCTAssertEqual(
+                harness.logAtReports[1].filter { $0 == "connection.close" },
+                [],
+                "\(loss)"
+            )
+            // Then all of it was.
+            XCTAssertEqual(harness.log.count(of: "connection.close"), 1, "\(loss)")
+            await assertCancelled { try await stream.write(Data("x".utf8)) }
+        }
+    }
+
     // MARK: The background
 
     func testNothingLivesInTheBackground() async throws {
@@ -1526,6 +1579,8 @@ final class DirectIrohTransportTests: XCTestCase {
         let clock = DirectIrohManualClock()
         let transport: DirectIrohTransport
         private(set) var reports: [DirectIrohReport] = []
+        /// What the stand-ins had been asked to do when each report came.
+        private(set) var logAtReports: [[String]] = []
         private(set) var selection = DirectIrohFixtures.selection(1)
 
         init(timing: DirectIrohTiming = Harness.patientTiming, isInBackground: Bool = false) {
@@ -1550,7 +1605,11 @@ final class DirectIrohTransportTests: XCTestCase {
         func select(_ selection: DirectIrohSelection = DirectIrohFixtures.selection(1)) {
             self.selection = selection
             transport.select(selection) { [weak self] report in
-                self?.reports.append(report)
+                guard let self else {
+                    return
+                }
+                self.reports.append(report)
+                self.logAtReports.append(self.log.all)
             }
         }
 

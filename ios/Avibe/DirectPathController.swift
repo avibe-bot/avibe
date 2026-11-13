@@ -855,6 +855,13 @@ final class DirectPathController {
     /// closure waits for the return.
     /// `then` runs on the main actor once the close has run (at once when
     /// there is no listener).
+    ///
+    /// Which relays this event closes is decided here, in the event's own
+    /// turn: their claims are taken before anything that runs after it can
+    /// end them. The transport may close its streams right after reporting
+    /// a loss, and a relay whose stream ended before the close reached it
+    /// would otherwise look as if it had ended on its own, and its page
+    /// would not be told.
     private func closeRelays(
         _ backend: DirectRelayBackend?,
         countsAsClosure: Bool,
@@ -865,11 +872,12 @@ final class DirectPathController {
             return
         }
         // Only relays committed under a plan made before this event: one
-        // committed after it, by the time this task runs, is kept.
+        // committed after it is kept.
         let generation = pathGeneration
+        let claimed = listener.lifecycle.claimForEvent(backend: backend, before: generation)
+        let hosts = claimed.filter { $0.value > 0 }.map(\.key)
         Task { [weak self] in
-            let closed = await listener.closeRelays(backend: backend, before: generation)
-            let hosts = closed.filter { $0.value > 0 }.map(\.key)
+            _ = await listener.closeRelays(backend: backend, before: generation)
             await MainActor.run {
                 if countsAsClosure {
                     self?.recordClosure(hosts: hosts)
