@@ -59,7 +59,7 @@ describe('turnOffAskBeforeSigning', () => {
 
   it.each([
     ['vault_policy_setup_required', 'setup_required'],
-    ['vault_policy_legacy_registration_missing', 'factor_unavailable'],
+    ['vault_policy_legacy_registration_missing', 'legacy_registration'],
     ['vault_policy_factor_unavailable', 'factor_unavailable'],
     ['vault_policy_context_unsupported', 'unavailable'],
     ['vault_policy_state_changed', 'changed'],

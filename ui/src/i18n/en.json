@@ -6518,11 +6518,13 @@
       "empty": "No activity yet."
     },
     "askOff": {
+      "turnedOff": "Turned off with your Passkey; in effect now.",
+      "offHintEdit": "Turning this off needs your Passkey and takes effect right away; you don’t need to Save.",
+      "legacyRegistration": "Your Passkey was set up in an earlier version, and this Avibe didn’t keep what it needs to confirm turning this off. The switch stays on; a later version will offer a fix.",
       "waiting": "Waiting for your Passkey…",
-      "offHint": "Turning this off needs your Passkey.",
       "popupBlocked": "Your browser blocked the confirmation window. Allow pop-ups and turn it off again.",
       "setupRequired": "Turning this off needs a Passkey. You set one up when you add a protected key; after that you can turn it off here.",
-      "factorUnavailable": "This Avibe’s Passkey can’t confirm this right now, so it can’t be turned off here yet.",
+      "factorUnavailable": "The Passkey this Avibe has on record is disabled, so it can’t confirm turning this off. The switch stays on.",
       "expired": "The confirmation timed out, so nothing changed. Turn it off again.",
       "clockSkew": "This device’s clock is off, so nothing changed. Fix the time and try again.",
       "changed": "This key changed elsewhere just now, so nothing changed. Check the latest state and try again.",

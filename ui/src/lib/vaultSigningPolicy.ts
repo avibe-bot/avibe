@@ -105,7 +105,8 @@ export type PolicyTurnOffFailure =
   | 'popup_blocked'
   | 'unavailable' // this sandbox build, or the instance, cannot do it
   | 'setup_required' // no Passkey yet (never set up)
-  | 'factor_unavailable' // a Passkey exists but cannot be used for this (legacy / disabled / other site)
+  | 'factor_unavailable' // the Passkey on record is disabled or otherwise unusable for this
+  | 'legacy_registration' // set up in an earlier version without the record this check needs
   | 'expired' // the 2-minute confirmation ran out: try again
   | 'clock_skew' // this device's clock is off
   | 'changed' // the key changed elsewhere meanwhile
@@ -115,7 +116,7 @@ export type PolicyTurnOffOutcome<S> = { ok: true; secret: S } | { ok: false; rea
 
 const SERVER_REASONS: Record<string, PolicyTurnOffFailure> = {
   vault_policy_setup_required: 'setup_required',
-  vault_policy_legacy_registration_missing: 'factor_unavailable',
+  vault_policy_legacy_registration_missing: 'legacy_registration',
   vault_policy_factor_unavailable: 'factor_unavailable',
   vault_policy_context_unsupported: 'unavailable',
   vault_policy_downgrade_unavailable: 'unavailable',

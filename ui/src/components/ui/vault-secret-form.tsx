@@ -1490,9 +1490,11 @@ export const VaultSecretForm: React.FC<{
             ) : editAskWasOn && canTurnAskOff ? (
               askOff.state.phase === 'ready' && askOff.state.failure && askOff.state.failure !== 'cancelled'
                 ? <AskTurnOffNote state={askOff.state} />
-                : <span className="text-[11px] text-muted">{t('vaults.askOff.offHint')}</span>
+                : <span className="text-[11px] text-muted">{t('vaults.askOff.offHintEdit')}</span>
             ) : editAskWasOn && askOff.state.phase === 'unavailable' ? (
               <span className="text-[11px] text-muted">{t('vaults.dialog.alwaysAskSignLocked')}</span>
+            ) : askTurnedOff && !alwaysAsk ? (
+              <span role="status" className="text-[11px] text-muted">{t('vaults.askOff.turnedOff')}</span>
             ) : !editAskWasOn && alwaysAsk && !canTurnAskOff ? (
               <span className="text-[11px] font-medium text-accent-ink">{t('vaults.dialog.alwaysAskSignOneWay')}</span>
             ) : null}

@@ -9,6 +9,7 @@ const FAILURE_KEYS = {
   popup_blocked: 'vaults.askOff.popupBlocked',
   setup_required: 'vaults.askOff.setupRequired',
   factor_unavailable: 'vaults.askOff.factorUnavailable',
+  legacy_registration: 'vaults.askOff.legacyRegistration',
   expired: 'vaults.askOff.expired',
   clock_skew: 'vaults.askOff.clockSkew',
   changed: 'vaults.askOff.changed',
@@ -30,7 +31,9 @@ export function AskTurnOffNote({ state, className }: { state: AskTurnOffState; c
     );
   }
   if (state.phase !== 'ready' || !state.failure || state.failure === 'cancelled' || state.failure === 'unavailable') return null;
-  const warn = state.failure !== 'setup_required';
+  // Red only when something actually went wrong; a timeout, a clock to fix, a change elsewhere or
+  // a Passkey that can't do this yet are said in the neutral tone.
+  const warn = state.failure === 'failed';
   return (
     <span role={warn ? 'alert' : 'note'} className={cn('text-[11.5px]', warn ? 'text-destructive-ink' : 'text-muted', className)}>
       {t(FAILURE_KEYS[state.failure])}
