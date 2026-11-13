@@ -210,14 +210,14 @@ export function HdAccountAddressList({ account, types }: {
   const { t } = useTranslation();
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      <SigningAddressRow label={t('vaults.addresses.eth')} value={account.eth} />
+      <SigningAddressRow label={t('vaults.addresses.eth')} value={account.eth} labelClassName="sm:w-[104px]" />
       <BtcAddressRow
         // An account the server has not prepared lists no types: Taproot only, never inferred.
         types={types ?? account.bitcoin_address_types ?? ['p2tr']}
         addresses={{ p2tr: account.btc_taproot, p2wpkh: account.btc_segwit, p2pkh: account.btc_legacy }}
         singleHint={<InfoHint hover content={t('vaults.hd.btcTaprootInfo')} label={t('vaults.dialog.moreInfo')} />}
       />
-      <SigningAddressRow label={t('vaults.addresses.solana')} value={account.solana} />
+      <SigningAddressRow label={t('vaults.addresses.solana')} value={account.solana} labelClassName="sm:w-[104px]" />
     </div>
   );
 }

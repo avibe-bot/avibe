@@ -6130,6 +6130,7 @@
       "btcTaproot": "BTC Taproot",
       "btcLegacy": "BTC Legacy",
       "btc": "BTC",
+      "btcSeparator": "·",
       "btcWithType": "BTC · {{type}}",
       "typeTaproot": "Taproot",
       "typeSegwit": "SegWit",

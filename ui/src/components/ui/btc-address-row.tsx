@@ -42,16 +42,19 @@ export function BtcAddressRow({ types, addresses, labelClassName, singleHint }: 
   const type = offered.includes(chosen) ? chosen : offered[0];
   const typeLabel = t(TYPE_KEY[type]);
   // "BTC" over the type, so the label fits the column and the address keeps its full width.
+  // One line, "BTC · Taproot ⌄", where the label column has room (owner's pick); at phone width
+  // "BTC" stacks over the type so the column, and every address, keeps its width.
   const stacked = (type: React.ReactNode) => (
-    <>
+    <span className="flex flex-col items-start sm:flex-row sm:items-center sm:gap-1">
       <span className="text-[11px] font-medium leading-tight text-muted">{t('vaults.addresses.btc')}</span>
-      <span className="flex items-center gap-0.5 whitespace-nowrap text-[10.5px] font-medium leading-tight text-foreground">{type}</span>
-    </>
+      <span aria-hidden="true" className="hidden text-[11px] leading-tight text-muted sm:inline">{t('vaults.addresses.btcSeparator')}</span>
+      <span className="flex items-center gap-0.5 whitespace-nowrap text-[10.5px] font-medium leading-tight text-foreground sm:text-[11px]">{type}</span>
+    </span>
   );
   if (offered.length === 1) {
     return (
       <div className="flex min-w-0 items-center gap-2">
-        <span className={cn('flex w-[68px] shrink-0 flex-col items-start', labelClassName)}>
+        <span className={cn('flex w-[68px] shrink-0 items-center sm:w-[104px]', labelClassName)}>
           {stacked(<>{typeLabel}{singleHint}</>)}
         </span>
         <div className="min-w-0 flex-1">
@@ -62,13 +65,13 @@ export function BtcAddressRow({ types, addresses, labelClassName, singleHint }: 
   }
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <span className={cn('flex w-[68px] shrink-0', labelClassName)}>
+      <span className={cn('flex w-[68px] shrink-0 sm:w-[104px]', labelClassName)}>
         <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger asChild>
             <button
               type="button"
               aria-label={t('vaults.addresses.btcTypeChoose', { type: typeLabel })}
-              className="press -mx-1 flex min-w-0 flex-col items-start rounded-md px-1 py-0.5 text-left outline-none hover:bg-wash-hover focus-visible:ring-2 focus-visible:ring-ring"
+              className="press -mx-1 flex min-w-0 items-center rounded-md px-1 py-0.5 text-left outline-none hover:bg-wash-hover focus-visible:ring-2 focus-visible:ring-ring"
             >
               {stacked(<>{typeLabel}<ChevronDown className="size-3 text-muted" /></>)}
             </button>
@@ -102,6 +105,9 @@ export function BtcAddressRow({ types, addresses, labelClassName, singleHint }: 
   );
 }
 
+/** The label column next to a BTC row: widened past phone width so "BTC · Taproot ⌄" fits on one line. */
+const WIDE = 'sm:w-[104px]';
+
 /** A plain signing key's addresses (ui/design: vault/btc-address-switch/b-key-row): ETH, one
  *  Bitcoin row over the types the server says it can sign, Solana. Without a list from the server,
  *  only the Taproot address it already had is shown, never a type inferred from an address. */
@@ -117,9 +123,9 @@ export function KeyAddressList({ addresses, types, className }: {
   if (!addresses.eth && !addresses.solana && offered.length === 0) return null;
   return (
     <div className={cn('flex min-w-0 flex-col gap-1', className)}>
-      {addresses.eth ? <SigningAddressRow label={t('vaults.addresses.eth')} value={addresses.eth} /> : null}
+      {addresses.eth ? <SigningAddressRow label={t('vaults.addresses.eth')} value={addresses.eth} labelClassName={WIDE} /> : null}
       {offered.length ? <BtcAddressRow types={types ?? ['p2tr']} addresses={bitcoin} /> : null}
-      {addresses.solana ? <SigningAddressRow label={t('vaults.addresses.solana')} value={addresses.solana} /> : null}
+      {addresses.solana ? <SigningAddressRow label={t('vaults.addresses.solana')} value={addresses.solana} labelClassName={WIDE} /> : null}
     </div>
   );
 }
