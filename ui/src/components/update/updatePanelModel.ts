@@ -3,7 +3,7 @@
 // desktop-managed host), and a standalone Runtime's package check all map onto
 // this one model, so the same computer reads the same on every surface.
 import type { DesktopUpdateState } from '../../lib/desktopShell';
-import type { DesktopRemoteUpdateRequest, VersionInfo } from '../../context/ApiContext';
+import type { DesktopRemoteUpdateRequest, UpdateSnapshot as VersionInfo } from './types';
 import { isPrereleaseVersion, normalizeVersion, releasePrecedes } from './versions';
 
 /** Who installs the update: this computer's desktop app, the desktop app on the host, or the Runtime itself. */

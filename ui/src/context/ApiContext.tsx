@@ -1,3 +1,7 @@
+import type { UpdateControlRequest, UpdateSnapshot } from '../components/update/types';
+export type {
+  DesktopRemoteUpdatePhase, DesktopRemoteUpdateRequest, UpdateControlRequest, UpdateHostAction,
+} from '../components/update/types';
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
@@ -2146,69 +2150,14 @@ export type LogSource = {
   logs?: LogEntry[];
 };
 
-export type VersionInfo = {
-  current: string;
-  latest: string | null;
-  has_update: boolean;
-  error: string | null;
-  managed_by?: 'desktop';
-  /** Desktop-managed hosts: the desktop app's last completed check, relayed (vibe/desktop_update_status.py);
-   *  `checking` while a check asked for from here runs. */
-  phase?: 'current' | 'available' | 'disabled' | 'error' | 'checking' | null;
-  desktop_version?: string | null;
-  prereleases?: boolean | null;
-  auto_update?: boolean | null;
-  checked_at?: string | null;
-  /** What this host's updater accepts from here; absent from a desktop app too old to accept any. */
-  host_actions?: UpdateHostAction[];
-  control_request?: UpdateControlRequest | null;
-  remote_install_allowed?: boolean;
-  remote_request?: DesktopRemoteUpdateRequest | null;
-  build?: {
-    kind: 'package' | 'source';
-    revision?: string;
-    dirty?: boolean;
-  };
-};
-
-export type DesktopRemoteUpdatePhase =
-  | 'requested'
-  | 'acknowledged'
-  | 'checking'
-  | 'awaiting_host'
-  | 'downloading'
-  | 'installing'
-  | 'restarting'
-  | 'completed'
-  | 'failed'
-  | 'declined'
-  | 'expired';
-
-export type UpdateHostAction = 'check' | 'prereleases' | 'auto_update' | 'install';
-
-/** The receipt of a check or a setting change asked of the host's updater. */
-export type UpdateControlRequest = {
-  request_id: string;
-  action: 'check' | 'prereleases' | 'auto_update';
-  enabled: boolean | null;
-  phase: 'checking' | 'completed' | 'failed' | 'expired';
-  error_code: string | null;
-  updated_at: string;
-};
+/** The update snapshot `/api/version` reports, shared with the update panel (components/update/types.ts). */
+export type VersionInfo = UpdateSnapshot;
 
 /** `request_id` when a desktop app takes the request; `snapshot` when a standalone Runtime answers at once. */
 export type UpdateControlResult =
   | { ok: true; request_id?: string; snapshot?: VersionInfo }
   | { ok: false; error: string };
 
-export type DesktopRemoteUpdateRequest = {
-  request_id: string;
-  target: string;
-  phase: DesktopRemoteUpdatePhase;
-  progress: number | null;
-  error_code: string | null;
-  updated_at: string;
-};
 
 export type DesktopRemoteUpdateErrorCode =
   | 'not_desktop_managed'
