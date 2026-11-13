@@ -109,9 +109,12 @@ def import_accounts(value: Any, *, profile: Any = None) -> list[dict[str, Any]]:
             raise ValueError("HD accounts must be numbered 0 through 19 in order with exact public fields")
         keys = {field: _public_key(item[field], field) for field in fields}
         for field, key in keys.items():
-            if profile is not None and key in seen[field]:
+            # Profiled Bitcoin purposes must be distinct across the entire table,
+            # not just within one purpose column. Legacy imports keep their shape.
+            group = "bitcoin" if field in BITCOIN_KEYS.values() else field
+            if profile is not None and key in seen[group]:
                 raise ValueError("duplicate HD public key")
-            seen[field].add(key)
+            seen[group].add(key)
         result.append({
             "account": index, **keys, "enabled": index == 0, "name": None,
             "always_ask": False, "last_signer": None,

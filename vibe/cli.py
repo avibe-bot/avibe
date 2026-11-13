@@ -20033,8 +20033,8 @@ def build_parser():
         description=(
             "Sign with a keypair or HD wallet (--chain required). Solana uses exact --message-hex; "
             "secp256k1 uses --digest. Protected/ask-first keys need browser approval; "
-            "read with 'vibe vault await ID'. Protected Solana also needs a matching "
-            "solana-transaction-v1 --signing-context-json."
+            "read with 'vibe vault await ID'. Protected Solana also needs --signing-context-json "
+            '{"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex.'
         ),
         epilog=(
             "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
@@ -20075,7 +20075,7 @@ def build_parser():
     vault_sign_parser.add_argument(
         "--no-callback",
         action="store_true",
-        help="Don't auto-resume this Session when the signature resolves (you'll re-check it yourself)",
+        help="Don't auto-resume; re-check the signature with 'vault await'",
     )
     _add_json_noop(vault_sign_parser)
 

@@ -232,6 +232,38 @@ def test_preparation_strict_public_response_refusals_are_atomic(runtime, corrupt
     assert len(rows(vault_audit)) == 1
 
 
+@pytest.mark.parametrize("stage", ["create", "prepare"])
+@pytest.mark.parametrize("field,source_field,source_account", [
+    (field, source_field, source_account)
+    for field in ("bitcoin_p2pkh", "bitcoin_p2wpkh")
+    for source_field in ("bitcoin", "bitcoin_p2pkh", "bitcoin_p2wpkh")
+    for source_account in (0, 19)
+    if source_account != 19 or source_field != field
+])
+def test_profiled_bitcoin_points_are_distinct_across_purposes_and_indices(
+    runtime, stage, field, source_field, source_account,
+):
+    # Same-column checks missed valid SEC1 aliases across purpose44/84/86, so
+    # malformed custody tables could advertise a spendable but wrong-purpose key.
+    if stage == "prepare":
+        create(runtime)
+    before, audits = rows(vault_secrets), rows(vault_audit)
+    api._publish_vaults_updated.reset_mock()
+    runtime.reply = public_response()
+    runtime.reply["accounts"][19][field] = runtime.reply["accounts"][source_account][source_field]
+    with pytest.raises(api.VaultApiError) as error:
+        if stage == "create":
+            runtime.reply["envelope"] = copy.deepcopy(FIXTURE["import_response"]["envelope"])
+            api.create_vault_secret({**copy.deepcopy(CREATE),
+                "keypair": {**CREATE["keypair"], "profile": PROFILE}, "expected_account0": expected()})
+        else:
+            api.prepare_vault_hd_bitcoin_types(NAME, {})
+    assert error.value.code == ("avault_failed" if stage == "create" else "hd_bitcoin_types_integrity_failed")
+    assert rows(vault_secrets) == before and rows(vault_audit) == audits
+    assert rows(vault_requests) == []
+    api._publish_vaults_updated.assert_not_called()
+
+
 def test_two_concurrent_equal_preparations_are_idempotent(runtime):
     create(runtime)
     runtime.reply = public_response()
