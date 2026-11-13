@@ -94,6 +94,9 @@ def _generate(request: ControlRequest) -> dict[str, Any]:
                 )
             else:
                 error = cli._avault_cli_error(exc, "avault could not generate and seal the secret", help_command=HELP)
+        elif isinstance(exc, (vs.SecretExistsError, vs.SecretNameCaseConflictError)):
+            error = cli.TaskCliError(str(exc), code="generate_target_not_allowed", help_command=HELP,
+                                     hint="Use vibe vault request for the existing secret; generation cannot overwrite it.")
         elif isinstance(exc, vs.SecretConflictError):
             error = cli.TaskCliError(str(exc), code="secret_conflict", help_command=HELP)
         elif isinstance(exc, vs.VaultServiceError):

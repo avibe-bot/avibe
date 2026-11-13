@@ -164,6 +164,37 @@ def test_provenance_tracks_value_replacement_removal_and_default_rename(engine, 
     assert [item["field"] for item in meta["generated"]] == expected
 
 
+@pytest.mark.parametrize("operation,expected", [
+    ("rename", ["passphrase", "token", "backup"]),
+    ("replace_renamed_default", ["token", "backup"]),
+    ("replace_extra", ["password", "backup"]),
+    ("remove", ["password", "backup"]),
+    ("mixed", ["backup"]),
+])
+def test_atomic_batch_uses_final_labels_to_clear_move_and_remove_provenance(engine, operation, expected):
+    generate(engine, field="password")
+    generate(engine, field="token")
+    generate(engine, field="backup")
+    with engine.begin() as conn:
+        before = vs.get_secret_meta(conn, "LOGIN")
+        changes = {}
+        if operation in {"rename", "replace_renamed_default", "mixed"}:
+            changes["default_field"] = "passphrase"
+        if operation in {"replace_renamed_default", "mixed"}:
+            changes["values"] = [{"field": "passphrase", "record": "LOGIN", "sealed": sealed("new-default")}]
+        elif operation == "replace_extra":
+            changes["values"] = [{"field": "token", "record": "LOGIN.token", "sealed": sealed("new-token")}]
+        if operation in {"remove", "mixed"}:
+            changes["remove"] = ["token"]
+        after = vs.update_secret_fields(conn, "LOGIN", expected_updated_at=before["updated_at"], **changes)
+    assert [item["field"] for item in after["generated"]] == expected
+    if operation == "rename":
+        assert after["updated_at"] == before["updated_at"]
+        assert after["generated"][0]["at"] == before["generated"][0]["at"]
+    else:
+        assert after["updated_at"] != before["updated_at"]
+
+
 def test_metadata_changes_during_custody_fail_without_losing_newer_metadata(engine):
     generate(engine)
     with engine.connect() as conn:

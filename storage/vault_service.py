@@ -4613,6 +4613,9 @@ def update_secret_fields(
     now = _next_updated_at(row["updated_at"])
     updates: dict[str, Any] = {}
     events: list[dict[str, str]] = []
+    public_meta = _public_meta(row.get("public_meta"))
+    if final_default != old_default:
+        _move_generated_field(public_meta, old_default, final_default)
     for item in values:
         if set(item) != {"field", "record", "sealed"} or not isinstance(item["sealed"], Sealed):
             raise InvalidRequestError("value changes require field, record and a sealed envelope")
@@ -4629,16 +4632,19 @@ def update_secret_fields(
             extras.append({"name": field, **opaque, "created_at": now, "updated_at": now})
             op = "add"
         events.append({"field": field, "op": op})
+        _clear_generated_field(public_meta, field)
     extras = [item for item in extras if item["name"] not in remove]
     events.extend({"field": field, "op": "remove"} for field in remove)
+    for field in remove:
+        _clear_generated_field(public_meta, field)
     if events:
         updates.update(fields=_stored_fields_json(extras), updated_at=now)
     if final_default != old_default:
-        public_meta = _public_meta(row.get("public_meta"))
         if final_default == "value":
             public_meta.pop("default_field", None)
         else:
             public_meta["default_field"] = final_default
+    if public_meta != _public_meta(row.get("public_meta")):
         updates["public_meta"] = json.dumps(public_meta) if public_meta else None
     if not updates:
         return _meta_payload(row)

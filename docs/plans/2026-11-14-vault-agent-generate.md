@@ -49,8 +49,8 @@ these scalar fields, `by: agent|cli`, nullable session ID/title, and exactly one
 format parameter (`length` or `bytes`). It never reflects arbitrary nested
 public metadata. Creation cannot supply provenance: it is storage-owned.
 Default-label renames move provenance; field replacement, removal and default
-rotation clear only the affected entry. B3 batch mutation must apply the same
-helpers after its contract lands.
+rotation clear only the affected entry. B3 atomic batch mutation applies the
+same helpers to final labels, including rename-plus-replacement in one commit.
 
 A Session ID comes only from the existing caller environment, never from recipe
 or request arguments; its title is resolved server-side. An owner-terminal call

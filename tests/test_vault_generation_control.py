@@ -148,6 +148,38 @@ def test_existing_target_guards_precede_custody(engine, monkeypatch, field, kind
     custody.assert_not_called()
 
 
+@pytest.mark.parametrize("arguments", [
+    {"name": "bad.name"}, {"field": "Uppercase"}, {"description": 7},
+    {"auth_name": "X-Token"}, {"fetch_auth": "header"},
+    {"allow_host": ["bad host"]},
+])
+def test_invalid_target_or_metadata_is_rejected_before_custody(engine, monkeypatch, arguments):
+    custody = Mock()
+    monkeypatch.setattr(api, "avault_generate_secret", custody)
+    response = _run(arguments)
+    assert response["execution"] == "not_executed"
+    assert response["payload"]["ok"] is False
+    assert response["payload"]["help_command"] == "vibe vault generate --help"
+    custody.assert_not_called()
+    assert _counts(engine) == (0, 0)
+
+
+def test_case_conflicting_name_and_full_field_set_refuse_without_custody(engine, monkeypatch):
+    with engine.begin() as conn:
+        vs.create_secret(conn, name="LOGIN", sealed=Sealed("opaque", "nonce", "wrap"),
+                         fields=[{"name": f"field{i}", "sealed": Sealed("opaque", "nonce", "wrap")} for i in range(31)])
+    custody = Mock()
+    monkeypatch.setattr(api, "avault_generate_secret", custody)
+    before = _counts(engine)
+    case = _run({"name": "login"})
+    assert case["payload"]["code"] == "generate_target_not_allowed"
+    assert "vibe vault request" in case["payload"]["hint"]
+    full = _run({"field": "new"})
+    assert full["payload"]["ok"] is False
+    assert _counts(engine) == before
+    custody.assert_not_called()
+
+
 def test_protected_flag_and_spoofed_provenance_fail_without_generation(engine, monkeypatch):
     custody = Mock(side_effect=AssertionError("custody must not run"))
     monkeypatch.setattr(api, "avault_generate_secret", custody)

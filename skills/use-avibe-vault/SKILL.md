@@ -46,7 +46,7 @@ Rules:
 
 Common commands:
 
-Generate a password into a new Standard login entry, then use it by name without viewing it:
+Generate a password into a new Standard login entry, then use it by name without viewing it. Use generation only when the application accepts a user-chosen random credential; it cannot invent a vendor-issued API key:
 `vibe vault generate LOGIN --field password --length 32 --no-lookalikes --description "Automation login" --tag automation`
 `vibe vault run --env PASSWORD=LOGIN.password -- python login.py`
 
