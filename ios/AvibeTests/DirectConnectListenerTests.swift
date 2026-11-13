@@ -528,6 +528,39 @@ final class DirectConnectListenerTests: XCTestCase {
         live.close()
     }
 
+    /// The relay's own end and an event's close, in both orders: whichever
+    /// comes first decides, and only a close that came first counts.
+    func testARelayEndingAndAnEventCloseAreDecidedOnce() {
+        let endedFirst = DirectRelayClaim()
+        XCTAssertTrue(endedFirst.end())
+        XCTAssertFalse(endedFirst.closeByEvent())
+
+        let closedFirst = DirectRelayClaim()
+        XCTAssertTrue(closedFirst.closeByEvent())
+        XCTAssertFalse(closedFirst.end())
+    }
+
+    /// A relay ends on its own and the event's close arrives before the
+    /// actor has heard of the end (or after; both orders occur here). The
+    /// end is decided before WebKit's side is closed, so once the client
+    /// sees the close the event cannot count the relay, whichever order the
+    /// actor takes them in.
+    func testAnEventCloseRightAfterARelayEndedDoesNotCountIt() async throws {
+        for _ in 0..<10 {
+            let fixture = try await makeListener()
+            let client = LoopbackClient(port: fixture.port)
+            let stream = try await establish(client, fixture)
+
+            stream.cancel()
+            _ = try await client.receiveUntilClosed()
+            let closed = await fixture.listener.closeRelays(backend: .direct, before: 1)
+
+            XCTAssertEqual(closed, [:])
+            client.close()
+            await fixture.listener.stop()
+        }
+    }
+
     func testARetiredScopeEndsOnlyUncommittedWorkOfOlderScopes() async throws {
         let fixture = try await makeListener()
         fixture.plans.set(scope: DirectPlanScope(selection: 3, accountEpoch: 0))

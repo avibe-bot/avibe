@@ -340,6 +340,8 @@ typealias DirectConnectPlanner = @Sendable (DirectAuthority) async -> DirectConn
 /// reads or terminates TLS.
 actor DirectConnectListener {
     private struct Relay {
+        /// Which came first: the relay ending on its own, or a close.
+        let claim: DirectRelayClaim
         let task: Task<Void, Never>
         /// The relay's current plan, once it has one: its scope, its path
         /// generation, and its race, which a newer generation retires.
@@ -597,7 +599,11 @@ actor DirectConnectListener {
             else {
                 continue
             }
-            closed[committed.host, default: 0] += 1
+            // Counted only if this close ends it; one that already ended on
+            // its own, and has not been removed yet, is not this event's.
+            if relay.claim.closeByEvent() {
+                closed[committed.host, default: 0] += 1
+            }
             relay.task.cancel()
             relays.removeValue(forKey: id)
         }
@@ -661,7 +667,8 @@ actor DirectConnectListener {
         let planner = planner
         let allowedHosts = allowedHosts
         let nonce = ownershipNonce
-        relays[id] = Relay(task: Task { [weak self] in
+        let claim = DirectRelayClaim()
+        relays[id] = Relay(claim: claim, task: Task { [weak self] in
             await Self.serve(
                 connection,
                 id: id,
@@ -671,6 +678,10 @@ actor DirectConnectListener {
                 limits: limits,
                 planner: planner
             )
+            // Linearized with `closeRelays`, before anything else: from here
+            // a close does not count this relay, however long the actor
+            // takes to hear `relayDidEnd`.
+            claim.end()
             connection.cancel()
             await self?.relayDidEnd(id)
         })
@@ -1699,5 +1710,41 @@ final class DirectSocketHealth: @unchecked Sendable {
 
     var isServing: Bool {
         lock.withLock { serving != nil }
+    }
+}
+
+/// Decides, once, whether a relay ended on its own or was closed by an
+/// event. Whichever call comes first wins; the other learns it lost.
+final class DirectRelayClaim: @unchecked Sendable {
+    private enum State {
+        case open
+        case ended
+        case closed
+    }
+
+    private let lock = NSLock()
+    private var state = State.open
+
+    /// The relay ended on its own. `false` if a close came first.
+    @discardableResult
+    func end() -> Bool {
+        lock.withLock {
+            guard state == .open else {
+                return false
+            }
+            state = .ended
+            return true
+        }
+    }
+
+    /// An event closes the relay. `false` if it had already ended.
+    func closeByEvent() -> Bool {
+        lock.withLock {
+            guard state == .open else {
+                return false
+            }
+            state = .closed
+            return true
+        }
     }
 }
