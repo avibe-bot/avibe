@@ -148,8 +148,9 @@ def test_complete_registered_api_management_inventory():
     # + 2 HD account metadata mutations (Editor, like other Vault metadata;
     # the service also requires resource-management authority).
     # + 2 Desktop local enrollment methods (Owner and direct-loopback-only).
+    # + 1 HD Bitcoin public preparation mutation (Editor plus resource management).
     # + 3 shared Vault setup and exact-target policy authorization methods.
-    assert len(endpoints) == 330
+    assert len(endpoints) == 331
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
@@ -177,6 +178,7 @@ def test_complete_registered_api_management_inventory():
         assert http_authorization_policy(method, "/api/vault/secrets/LOGIN/fields/username").minimum_role == "editor"
     for method, path in (
         ("POST", "/api/vault/secrets/{name}/accounts"),
+        ("POST", "/api/vault/secrets/{name}/bitcoin-address-types"),
         ("PATCH", "/api/vault/secrets/{name}/accounts/{account}"),
         ("POST", "/api/vault/setup"),
         ("POST", "/api/vault/secrets/{name}/signing-policy"),

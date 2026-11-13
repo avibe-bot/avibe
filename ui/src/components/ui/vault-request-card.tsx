@@ -1,4 +1,4 @@
-import { createContext, Suspense, useCallback, useContext, useMemo, useState } from 'react';
+import { createContext, Suspense, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowRight, ExternalLink, KeyRound, LockKeyhole, PenTool, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -74,20 +74,20 @@ export const VaultProvisionDialogProvider: React.FC<{
       {children}
       {activeRequest ? (
         <Suspense fallback={null}>
-          <LazyVaultSecretDialog
-            open={!disabled}
-            onOpenChange={(open) => {
-              if (!open) setActiveRequestId(null);
-            }}
-            request={activeRequest}
-            onCancel={() => dismissProvisionDialog(activeRequest.id)}
-            onDeny={onProvisionRequestDenied ? () => denyProvisionDialog(activeRequest.id) : undefined}
-            onCreated={() => {
-              onProvisionRequestHidden?.(activeRequest.id);
-              setActiveRequestId(null);
-              onResolved();
-            }}
-          />
+        <LazyVaultSecretDialog
+          open={!disabled}
+          onOpenChange={(open) => {
+            if (!open) setActiveRequestId(null);
+          }}
+          request={activeRequest}
+          onCancel={() => dismissProvisionDialog(activeRequest.id)}
+          onDeny={onProvisionRequestDenied ? () => denyProvisionDialog(activeRequest.id) : undefined}
+          onCreated={() => {
+            onProvisionRequestHidden?.(activeRequest.id);
+            setActiveRequestId(null);
+            onResolved();
+          }}
+        />
         </Suspense>
       ) : null}
     </VaultProvisionDialogContext.Provider>
@@ -102,11 +102,11 @@ export const VaultProvisionDialogProvider: React.FC<{
 export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () => void }> = ({ request, onResolved }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  // The secret dialog's code loads on the first open and then stays mounted (so it can animate out).
-  const [opened, setOpened] = useState(false);
   const type = useMemo(() => requestType(request), [request]);
   const provisionDialog = useContext(VaultProvisionDialogContext);
   const externallyOwnedProvision = type === 'provision' && provisionDialog !== null;
+  // Fetch the dialog's code once the card is up, so opening it is not a wait.
+  useEffect(() => { if (type === 'provision') void LazyVaultSecretDialog.preload(); }, [type]);
   const card = (request.card ?? {}) as {
     kind?: string;
     protection?: string;
@@ -165,10 +165,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
           onClick={() => {
             if (reviewInBrowser) openVaultsInBrowser({ kind: 'request', requestId: request.id });
             else if (externallyOwnedProvision) provisionDialog.open(request);
-            else {
-              setOpened(true);
-              setOpen(true);
-            }
+            else setOpen(true);
           }}
         >
           {reviewInBrowser ? t('vaults.requests.reviewInBrowser') : meta.action}
@@ -177,7 +174,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
       </div>
 
       {type === 'provision' && !externallyOwnedProvision ? (
-        opened ? (
+        open ? (
           <Suspense fallback={null}>
             <LazyVaultSecretDialog
               open={open}

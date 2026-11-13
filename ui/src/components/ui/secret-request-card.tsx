@@ -56,9 +56,9 @@ const LiveSecretRequest: React.FC<{ name: string; requestId?: string }> = ({ nam
   const { t } = useTranslation();
   const api = useApi();
   const [open, setOpen] = useState(false);
-  // The secret dialog's code loads on the first open and then stays mounted (so it can animate out).
-  const [opened, setOpened] = useState(false);
   const [fulfilled, setFulfilled] = useState(false);
+  // Fetch the dialog's code once the badge is up, so opening it is not a wait.
+  useEffect(() => { void LazyVaultSecretDialog.preload(); }, []);
   const [resolvedRequest, setResolvedRequest] = useState<VaultRequest | null>(null);
   const [requestLoaded, setRequestLoaded] = useState(false);
   const [requestAmbiguous, setRequestAmbiguous] = useState(false);
@@ -103,40 +103,37 @@ const LiveSecretRequest: React.FC<{ name: string; requestId?: string }> = ({ nam
     <>
       <button
         type="button"
-        onClick={() => {
-          setOpened(true);
-          setOpen(true);
-        }}
+        onClick={() => setOpen(true)}
         className={cn(badgeVariants({ variant: 'warning' }), 'cursor-pointer align-baseline font-medium')}
       >
         <KeyRound className="mr-1 inline size-3" />
         {name} — {t('vaults.request.provide')}
       </button>
-      {opened ? (
-        <Suspense fallback={null}>
-          <LazyVaultSecretDialog
-            open={open}
-            onOpenChange={setOpen}
-            name={name}
-            request={resolvedRequest}
-            notice={
-              !requestLoaded ? (
-                <div className="flex items-center gap-2 rounded-lg border border-edge bg-surface-2 px-3 py-2 text-sm text-muted shadow-elevation-0">
-                  <Loader2 className="size-4 animate-spin" />
-                  {t('common.loading')}
-                </div>
-              ) : requestAmbiguous ? (
-                <div className="rounded-lg border border-edge bg-surface-2 px-3 py-2 text-sm text-muted shadow-elevation-0">
-                  {t('vaults.request.ambiguousProvision')}
-                </div>
-              ) : undefined
-            }
-            onCreated={() => {
-              setFulfilled(true);
-              setOpen(false);
-            }}
-          />
-        </Suspense>
+      {open ? (
+      <Suspense fallback={null}>
+      <LazyVaultSecretDialog
+        open={open}
+        onOpenChange={setOpen}
+        name={name}
+        request={resolvedRequest}
+        notice={
+          !requestLoaded ? (
+            <div className="flex items-center gap-2 rounded-lg border border-edge bg-surface-2 px-3 py-2 text-sm text-muted shadow-elevation-0">
+              <Loader2 className="size-4 animate-spin" />
+              {t('common.loading')}
+            </div>
+          ) : requestAmbiguous ? (
+            <div className="rounded-lg border border-edge bg-surface-2 px-3 py-2 text-sm text-muted shadow-elevation-0">
+              {t('vaults.request.ambiguousProvision')}
+            </div>
+          ) : undefined
+        }
+        onCreated={() => {
+          setFulfilled(true);
+          setOpen(false);
+        }}
+      />
+      </Suspense>
       ) : null}
     </>
   );

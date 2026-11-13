@@ -934,6 +934,18 @@ never applies a push's badge in the foreground: the Web UI sets the live Inbox
 total through `badge.set` there, and a push's `badge_count`, computed when it
 was sent, can only be as recent or older.
 
+When the selected instance's main frame sets `badge.set({count: 0})`, the
+loud unread total there is zero, and the app removes that instance's and the
+current account's delivered notifications whose `threadIdentifier` starts with
+`session:` (matched on `userInfo`'s `instance_origin` and `account_id`). Only
+notifications delivered before the call arrived are removed: one delivered
+after it is news the zero did not cover. Pending requests, other instances,
+other accounts, the test notification, `harness:failure` notices (not part of
+the Inbox's unread total, so a zero says nothing about them), and undecrypted
+fallbacks (no thread, origin, or account) stay. A Session read while others
+remain unread keeps its notifications until the total reaches zero; the App
+cannot see which Session was read from the URL or the total alone.
+
 ## 8. Tap routing
 
 On tap, native compares the notification's account and instance origin with

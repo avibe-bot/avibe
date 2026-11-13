@@ -66,9 +66,9 @@ const renderProvisionCard = (onProvisionRequestHidden = vi.fn(), onProvisionRequ
 );
 
 describe('VaultRequestCard provision dialog dismissal', () => {
-  // The dialog's code loads on a card's first open; have it here so each case opens it at once.
-  beforeAll(async () => { await LazyVaultSecretDialog.preload(); });
   afterEach(() => cleanup());
+  // The dialog is fetched on first use; load it once so these tests are about dismissal.
+  beforeAll(async () => { await LazyVaultSecretDialog.preload(); });
 
   it('keeps the card after close and hides it after Ignore', async () => {
     const onProvisionRequestHidden = vi.fn();
@@ -79,7 +79,7 @@ describe('VaultRequestCard provision dialog dismissal', () => {
     expect(screen.getByText(request.secret_name)).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /provide/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Ignore' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Ignore' }));
     expect(screen.queryByText(request.secret_name)).toBeNull();
     expect(onProvisionRequestHidden).toHaveBeenCalledWith(request.id);
   });

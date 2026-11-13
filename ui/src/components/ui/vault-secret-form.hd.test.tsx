@@ -62,14 +62,17 @@ const WITH_TEST = 'test abandon abandon abandon abandon abandon abandon abandon 
 const storedFor = (words: string[], passphrase = ''): VaultHdAccount => {
   const seed = wordsToSeed(words, passphrase);
   const a = deriveAccounts(seed, 1)[0];
-  return { account: 0, name: null, eth: a.eth, btc_taproot: a.btc_taproot, solana: a.solana, paths: a.paths, always_ask: false, last_signer: null };
+  return {
+    account: 0, name: null, eth: a.eth, btc_taproot: a.btc_taproot, btc_segwit: a.btc_segwit, btc_legacy: a.btc_legacy,
+    bitcoin_address_types: ['p2pkh', 'p2wpkh', 'p2tr'], solana: a.solana, paths: a.paths, always_ask: false, last_signer: null,
+  };
 };
 
 beforeEach(async () => {
   vi.stubGlobal('crypto', webcrypto);
   vi.stubGlobal('isSecureContext', true);
   sealed.plaintext = null;
-  api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.11' }] });
+  api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.12' }] });
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
@@ -100,7 +103,7 @@ const expectNoSecretsPosted = (words: string[]) => {
   expect(body).not.toContain(bytesToHex(sealed.plaintext!));
   expect(postedPayload()).toEqual(expect.objectContaining({
     kind: 'keypair', protection: 'standard', signer_kind: 'hd-seed',
-    keypair: { type: 'hd-seed', source: 'import', format: 'raw-seed' }, blind_box: blindBox,
+    keypair: { type: 'hd-seed', source: 'import', format: 'raw-seed', profile: 'bitcoin-address-types-v1' }, blind_box: blindBox,
   }));
   for (const field of ['accounts', 'public_meta', 'policy', 'sealed']) expect(postedPayload()).not.toHaveProperty(field);
 };
@@ -183,7 +186,7 @@ it.each([
 });
 
 it.each([
-  ['eth'], ['btc_taproot'], ['solana'], ['missing #0'],
+  ['eth'], ['btc_taproot'], ['btc_segwit'], ['btc_legacy'], ['solana'], ['missing #0'],
 ] as const)('fails closed when the stored #0 differs (%s): deletes it, logs by name, reports no success', async (field) => {
   const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
   localStorage.clear();
@@ -246,7 +249,7 @@ it('keeps what was typed and says to update when avault is too old', async () =>
   await openWallet();
   fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
   fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
-  expect(await screen.findByText(hd.avaultOld.replace('{{version}}', '0.1.11').replace('{{installed}}', '0.1.10'))).toBeTruthy();
+  expect(await screen.findByText(hd.avaultOld.replace('{{version}}', '0.1.12').replace('{{installed}}', '0.1.10'))).toBeTruthy();
   expect((screen.getByRole('button', { name: hd.importCta }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe(OFFICIAL);
 });
@@ -371,7 +374,7 @@ it('always sends account #0 for the server to check, and shows nothing-saved whe
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
   const own = storedFor(OFFICIAL.split(' '));
   expect(api.createVaultSecret).toHaveBeenCalledOnce();
-  expect(postedPayload().expected_account0).toEqual({ eth: own.eth, btc_taproot: own.btc_taproot, solana: own.solana });
+  expect(postedPayload().expected_account0).toEqual({ eth: own.eth, btc_legacy: own.btc_legacy, btc_segwit: own.btc_segwit, btc_taproot: own.btc_taproot, solana: own.solana });
   expect(await screen.findByText(hd.mismatch)).toBeTruthy();
   expect(screen.getByText(hd.mismatchNotSaved)).toBeTruthy();
   // Nothing was stored: no delete, no local block, no retry without the check.
@@ -400,3 +403,18 @@ it('never posts a fixed value that could pass for a phrase word, and finds no le
   expect(bytesToHex(sealed.plaintext!)).toBe(bytesToHex(wordsToSeed(WITH_TEST.split(' '), '')));
 });
 
+
+it('creates with the Bitcoin types profile and all five #0 addresses, and says to update avault when it is refused', async () => {
+  await openWallet('WALLET_P');
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'avault_upgrade_required', message: 'avault 0.1.12 required', minimum_version: '0.1.12' });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  const own = storedFor(OFFICIAL.split(' '));
+  expect(postedPayload().keypair).toEqual({ type: 'hd-seed', source: 'import', format: 'raw-seed', profile: 'bitcoin-address-types-v1' });
+  expect(postedPayload().expected_account0).toEqual({ eth: own.eth, btc_legacy: own.btc_legacy, btc_segwit: own.btc_segwit, btc_taproot: own.btc_taproot, solana: own.solana });
+  // Refused before anything was saved: the upgrade notice, the phrase still there, one attempt only.
+  expect(await screen.findByText(hd.avaultOld.replace('{{version}}', '0.1.12').replace('{{installed}}', '0.1.12'))).toBeTruthy();
+  expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe(OFFICIAL);
+  expect(api.createVaultSecret).toHaveBeenCalledOnce();
+});

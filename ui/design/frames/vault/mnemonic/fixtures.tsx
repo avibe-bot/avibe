@@ -24,6 +24,7 @@ const account = (index: number, extra: Partial<VaultHdAccount> = {}): VaultHdAcc
   name: null,
   ...IMPORTED_ADDRESSES[index],
   paths: { evm: path('evm', index), bitcoin: path('bitcoin', index), solana: path('solana', index) },
+  bitcoin_address_types: ['p2pkh', 'p2wpkh', 'p2tr'],
   always_ask: false,
   last_signer: null,
   ...extra,
@@ -43,6 +44,7 @@ export const walletSecret = (accounts: VaultHdAccount[] = walletAccounts) => sec
   tags: ['crypto'],
   accounts,
   account_limit: 20,
+  bitcoin_profile: 'bitcoin-address-types-v1',
   use_count: 41,
   last_used_at: new Date(DESIGN_NOW - 2 * hour).toISOString(),
 });
@@ -56,7 +58,7 @@ export const walletFixtures = vaultFixtures({
   '/api/sessions/ses-grid': { id: 'ses-grid', title: '网格交易' },
 });
 
-/** An avault new enough for the wallet (0.1.11), or the one before it. */
+/** An avault new enough for the wallet (0.1.12), or one before it. */
 export const avaultFixtures = (version: string, overrides?: Parameters<typeof vaultFixtures>[1]) => vaultFixtures({
   ...vaultApi({ grants: [], requests: [] }),
   '/api/dependencies': { deps: [{ id: 'avault', kind: 'tool', required: true, installed: true, version, status: 'ready' }] },
