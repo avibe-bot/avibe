@@ -67,7 +67,7 @@ export function ProtectedHandoff({ source }: { source: Source }) {
       <TierCards value="protected" />
       <Notice tone="success" icon={ShieldCheck}>
         <span className="font-semibold">{source === 'create' ? d('助记词会在安全窗口里生成和显示。', 'The words are generated and shown in the secure window.') : d('在安全窗口里输入助记词。', 'You type the words in the secure window.')}</span>{' '}
-        {d('它们只在这个独立的安全窗口里处理，不会交给 Avibe 主页面或 Agent；之后每次签名都要你的通行密钥。', 'They are handled only in that separate secure window and never handed to the main Avibe page or an Agent; every signature then needs your passkey.')}
+        {d('它们只在这个独立的安全窗口里处理，不会交给 Avibe 主页面或 Agent；之后每次签名都要你的Passkey。', 'They are handled only in that separate secure window and never handed to the main Avibe page or an Agent; every signature then needs your passkey.')}
       </Notice>
       <Footer
         primary={source === 'create' ? d('在安全窗口中生成', 'Generate in secure window') : d('在安全窗口中导入', 'Import in secure window')}

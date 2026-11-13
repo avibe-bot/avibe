@@ -17,7 +17,7 @@ import { WordGrid } from './parts';
 const account = WALLET_ACCOUNTS[1];
 
 /** The sandbox window's frame (vault-sandbox src/operationUi.ts), in product tokens. */
-export function SandboxCard({ title, subtitle, children, actions }: { title: string; subtitle: string; children: ReactNode; actions: [string, string] }) {
+export function SandboxCard({ title, subtitle, children, actions, primaryDisabled = false, cancel }: { title: string; subtitle: string; children: ReactNode; actions: [string, string]; primaryDisabled?: boolean; cancel?: string }) {
   return (
     <div className="flex min-h-full items-center justify-center bg-background p-6">
       <div className="flex w-full max-w-[400px] flex-col overflow-hidden rounded-2xl border border-edge bg-card shadow-elevation-2">
@@ -33,7 +33,8 @@ export function SandboxCard({ title, subtitle, children, actions }: { title: str
         <div className="flex flex-col gap-3 px-5 py-4">{children}</div>
         <div className="grid grid-cols-[1fr_1.6fr] gap-2.5 border-t border-edge px-5 py-4">
           <Button type="button" variant="secondary">{actions[0]}</Button>
-          <Button type="button">{actions[1]}</Button>
+          <Button type="button" disabled={primaryDisabled}>{actions[1]}</Button>
+          {cancel ? <Button type="button" variant="ghost" className="col-span-2">{cancel}</Button> : null}
         </div>
       </div>
     </div>
@@ -86,7 +87,7 @@ export function SandboxWordsMirror({ mode }: { mode: 'create' | 'import' }) {
     );
   }
   return (
-    <SandboxCard title={d('导入助记词', 'Import a seed phrase')} subtitle="AGENT_WALLET" actions={[d('取消', 'Cancel'), d('用通行密钥保存', 'Save with passkey')]}>
+    <SandboxCard title={d('导入助记词', 'Import a seed phrase')} subtitle="AGENT_WALLET" actions={[d('取消', 'Cancel'), d('用Passkey保存', 'Save with passkey')]}>
       <span className="text-[12.5px] leading-snug text-muted">{d('在这个独立的安全窗口里输入；助记词不会交给 Avibe 主页面或 Agent。', 'Type it in this separate secure window; the words are never handed to the main Avibe page or an Agent.')}</span>
       <WordGrid words={IMPORTED_WORDS} columns={3} />
       <span className="flex items-center gap-1.5 text-[12px] font-medium text-mint-ink">

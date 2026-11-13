@@ -2,20 +2,33 @@
 // rev0.6). The parent page draws the complete Add key dialog and launches the secure window; the
 // words, passphrase, three-word check and account #0 review all happen in that window, never here.
 // Signing stays approval-required in the secure window; Bitcoin is Taproot only on this tier.
-import { AlertTriangle, ChevronRight, CircleCheck, ExternalLink, KeyRound, Loader2, Lock, RefreshCw, ShieldCheck, Signature, TriangleAlert } from 'lucide-react';
+import { AlertTriangle, ChevronRight, CircleCheck, ExternalLink, Eye, KeyRound, Loader2, Lock, RefreshCw, ShieldCheck, Signature, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { TagInput } from '@/components/ui/tag-input';
-import { HdAccountAddressList } from '@/components/ui/vault-hd-wallet-steps';
+import { BtcAddressRow } from '@/components/ui/btc-address-row';
+import { SigningAddressRow } from '@/components/ui/signing-address-list';
 import { HintLine, KeySourceTabs } from '@/components/ui/vault-key-builder-parts';
 
 import { useDraft } from '../draft';
 import { CREATED_ADDRESSES, CREATED_WORDS, IMPORTED_ADDRESSES, IMPORTED_WORDS, path } from './data';
 import { AccountIndex, DialogHeading, Notice, TierCards, WordGrid } from './parts';
 import { MirrorRow, SandboxCard } from './signing';
+
+/** A protected account's addresses: Bitcoin has one signable type, so its label is plain 「BTC · Taproot」. */
+function ProtectedAddressList({ account }: { account: { eth: string; btc_taproot: string; solana: string } }) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <SigningAddressRow label={t('vaults.addresses.eth')} value={account.eth} labelClassName="sm:w-[104px]" />
+      <BtcAddressRow types={['p2tr']} addresses={{ p2tr: account.btc_taproot }} />
+      <SigningAddressRow label={t('vaults.addresses.solana')} value={account.solana} labelClassName="sm:w-[104px]" />
+    </div>
+  );
+}
 
 const FIELD = 'text-[12.5px] font-semibold text-foreground';
 const noop = () => {};
@@ -62,7 +75,7 @@ export function ProtectedHdDialog({ source, state = 'ready' }: { source: 'create
           text={source === 'create'
             ? d('在安全窗口里生成 12 个词，抄下来后点 3 个词核对；Passphrase 也在那里设置（可选）。', 'The secure window makes 12 words, you write them down and tap 3 to check; a passphrase is set there too (optional).')
             : d('在安全窗口里粘贴助记词和 Passphrase（如有），核对账户 #0 后保存。', 'Paste the words and passphrase (if any) in the secure window, compare account #0, then save.')}
-          info={d('助记词和 Passphrase 只在这个独立的安全窗口里处理，不会交给 Avibe 主页面或 Agent。保存时用通行密钥确认。', 'The words and passphrase are handled only in this separate secure window; they are never handed to the main Avibe page or an Agent. Saving is confirmed with your passkey.')}
+          info={d('助记词和 Passphrase 只在这个独立的安全窗口里处理，不会交给 Avibe 主页面或 Agent。保存时用Passkey确认。', 'The words and passphrase are handled only in this separate secure window; they are never handed to the main Avibe page or an Agent. Saving is confirmed with your passkey.')}
         />
       </div>
       <label className="flex flex-col gap-1.5">
@@ -78,7 +91,7 @@ export function ProtectedHdDialog({ source, state = 'ready' }: { source: 'create
       {/* No ask switch on this tier: every signature is approved in the secure window. */}
       <div className="flex items-center gap-2 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 text-[12.5px] text-muted shadow-elevation-0">
         <Lock className="size-3.5 shrink-0" />
-        {d('保护档：每个账户的每次签名，都要你在安全窗口里用通行密钥批准。', 'Protected: every signature by every account is approved in the secure window with your passkey.')}
+        {d('保护档：每个账户的每次签名，都要你在安全窗口里用Passkey批准。', 'Protected: every signature by every account is approved in the secure window with your passkey.')}
       </div>
       <LaunchNotice state={state} />
       <div className="mt-1 flex items-center justify-end gap-2">
@@ -112,7 +125,7 @@ function LaunchNotice({ state }: { state: LaunchState }) {
   if (state === 'reset') return <Notice tone="neutral" icon={AlertTriangle}>{d('保护档在这期间被锁定或重置，这次操作作废，什么都没有保存。', 'The protected vault was locked or reset meanwhile, so this attempt was dropped; nothing was saved.')}</Notice>;
   if (state === 'saving') return <Notice tone="neutral" icon={ShieldCheck}>{d('安全窗口已完成，正在保存加密后的钱包。请不要关闭这个页面。', 'The secure window finished; saving the encrypted wallet. Keep this page open.')}</Notice>;
   if (state === 'checking') return <Notice tone="neutral" icon={ShieldCheck}>{d('没收到保存结果，正在向 Avibe 核对这个钱包是否已经保存。不会重新生成助记词，也不会再保存一份。请不要关闭这个页面。', 'No reply to the save; checking with Avibe whether this wallet was saved. No new words are made and nothing is saved twice. Keep this page open.')}</Notice>;
-  if (state === 'unconfirmed') return <Notice tone="warning" icon={TriangleAlert}>{d('还无法确认是否已保存。请保留抄好的助记词，不要再新建一个同名钱包；可以再核对一次，或稍后在钥匙列表里查看 COLD_WALLET。', 'Can’t confirm yet whether it was saved. Keep the words you wrote down and don’t create another wallet with this name; check again, or look for COLD_WALLET in the key list later.')}</Notice>;
+  if (state === 'unconfirmed') return <Notice tone="warning" icon={TriangleAlert}>{d('还无法确认是否已保存。请保留抄好的助记词，不要再新建一个同名钱包；可以再核对一次，或稍后在保险库里的密钥列表查看 COLD_WALLET。', 'Can’t confirm yet whether it was saved. Keep the words you wrote down and don’t create another wallet with this name; check again, or look for COLD_WALLET in the vault’s key list later.')}</Notice>;
   return <Notice tone="error" icon={TriangleAlert}>{d('Avibe 里保存的 COLD_WALLET 和安全窗口刚生成的钱包对不上，已阻止使用，不要往这些地址转账。请联系支持并保留抄好的助记词。', 'The COLD_WALLET saved in Avibe doesn’t match the wallet the secure window just made. It’s blocked; don’t send funds to it. Keep your written words and contact support.')}</Notice>;
 }
 
@@ -121,7 +134,7 @@ export function WindowWords() {
   const d = useDraft();
   return (
     <SandboxCard title={d('抄下助记词', 'Write the words down')} subtitle="COLD_WALLET · 1/4" actions={[d('取消', 'Cancel'), d('我已抄好', 'I wrote them down')]}>
-      <span className="text-[12.5px] leading-snug text-muted">{d('只在这个安全窗口里出现，保存后不会再显示。这台电脑丢了或通行密钥丢了，只能靠它们（和 Passphrase，如有）找回。', 'They appear only in this secure window and aren’t shown again after saving. If this computer or your passkey is lost, only they (and the passphrase, if any) recover the wallet.')}</span>
+      <span className="text-[12.5px] leading-snug text-muted">{d('只在这个安全窗口里出现，保存后不会再显示。这台电脑丢了或Passkey丢了，只能靠它们（和 Passphrase，如有）找回。', 'They appear only in this secure window and aren’t shown again after saving. If this computer or your passkey is lost, only they (and the passphrase, if any) recover the wallet.')}</span>
       <WordGrid words={CREATED_WORDS} columns={2} />
     </SandboxCard>
   );
@@ -132,7 +145,7 @@ export function WindowCheck({ wrong = false }: { wrong?: boolean }) {
   const quiz = [{ position: 3, options: ['thank', 'theme', 'legal'] }, { position: 7, options: ['wave', 'useful', 'worth'] }, { position: 12, options: ['yellow', 'year', 'winner'] }];
   const chosen: Record<number, string> = wrong ? { 3: 'thank', 7: 'useful' } : { 3: 'thank', 7: 'worth', 12: 'yellow' };
   return (
-    <SandboxCard title={d('核对', 'Check')} subtitle="COLD_WALLET · 2/4" actions={[d('返回', 'Back'), d('下一步', 'Next')]}>
+    <SandboxCard title={d('核对', 'Check')} subtitle="COLD_WALLET · 2/4" actions={[d('返回', 'Back'), d('下一步', 'Next')]} primaryDisabled={wrong} cancel={d('取消', 'Cancel')}>
       <span className="text-[12.5px] text-muted">{d('看着你的纸，选出这 3 个词。', 'Using your paper, pick these 3 words.')}</span>
       {quiz.map((q) => (
         <div key={q.position} className="flex flex-col gap-1.5">
@@ -151,19 +164,33 @@ export function WindowCheck({ wrong = false }: { wrong?: boolean }) {
   );
 }
 
+function SecretField({ label, filled }: { label: string; filled: boolean }) {
+  const d = useDraft();
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-[12.5px] text-muted">{label}</span>
+      <span className="flex items-center gap-2">
+        <Input readOnly type="password" value={filled ? 'xxxxxxxxxxxxxxxxxx' : ''} className="font-mono" />
+        <Button type="button" variant="ghost" size="icon" aria-label={d('显示 Passphrase', 'Show passphrase')}><Eye className="size-4" /></Button>
+      </span>
+    </label>
+  );
+}
+
 export function WindowPassphrase({ mode, state }: { mode: 'create' | 'import'; state: 'empty' | 'match' | 'mismatch' }) {
   const d = useDraft();
   return (
-    <SandboxCard title={d('Passphrase（可选）', 'Passphrase (optional)')} subtitle={`COLD_WALLET · ${mode === 'create' ? '3/4' : '2/3'}`} actions={[d('返回', 'Back'), state === 'empty' ? d('不设置，下一步', 'Skip, next') : d('下一步', 'Next')]}>
+    <SandboxCard title={d('Passphrase（可选）', 'Passphrase (optional)')} subtitle={`COLD_WALLET · ${mode === 'create' ? '3/4' : '2/3'}`} actions={[d('返回', 'Back'), state === 'empty' ? d('不设置，下一步', 'Skip, next') : d('下一步', 'Next')]} primaryDisabled={state === 'mismatch'} cancel={d('取消', 'Cancel')}>
       <span className="text-[12.5px] leading-snug text-muted">
         {mode === 'create'
           ? d('Passphrase 和这些词一起决定钱包的地址。恢复时需要词加上一字不差的 Passphrase；忘了它，钱包就找不回来。大多数人不需要。', 'The passphrase and the words together decide the addresses. Recovery needs the words plus this exact passphrase; forget it and the wallet can’t be recovered. Most people don’t need one.')
           : d('只有原钱包用过才填。填错不会报错，只会得到不同的地址，下一步核对。', 'Only if your old wallet used one. A wrong passphrase gives no error, just different addresses; you compare them next.')}
       </span>
-      <MirrorRow label="Passphrase" value={state === 'empty' ? '' : '••••••••••••••••••'} />
+      <SecretField label="Passphrase" filled={state !== 'empty'} />
       {/* Import takes the old wallet's passphrase once: comparing #0 next is the check. */}
-      {mode === 'create' ? <MirrorRow label={d('再输入一次', 'Enter it again')} value={state === 'empty' ? '' : state === 'match' ? '••••••••••••••••••' : '•••••••••••••••••'} /> : null}
-      {state === 'mismatch' ? <span role="alert" className="text-[12px] text-destructive-ink">{d('两次输入不一样。', 'The two entries don’t match.')}</span> : state === 'match' ? <span className="text-[12px] text-mint-ink">{d('两次输入一致。区分大小写和空格。', 'They match. Case and spaces count.')}</span> : null}
+      {mode === 'create' ? <SecretField label={d('再输入一次', 'Enter it again')} filled={state !== 'empty'} /> : null}
+      {state === 'mismatch' ? <span role="alert" className="text-[12px] text-destructive-ink">{d('两次输入不一样。', 'The two entries don’t match.')}</span> : null}
+      <span className="text-[12px] text-muted">{d('区分大小写和空格。Passphrase 不会被保存。', 'Case and spaces count. The passphrase is not stored.')}</span>
     </SandboxCard>
   );
 }
@@ -172,7 +199,7 @@ export function WindowReview({ mode }: { mode: 'create' | 'import' }) {
   const d = useDraft();
   const a = mode === 'create' ? CREATED_ADDRESSES[0] : IMPORTED_ADDRESSES[0];
   return (
-    <SandboxCard title={mode === 'create' ? d('保存钱包', 'Save the wallet') : d('和原钱包核对，然后保存', 'Compare, then save')} subtitle={`COLD_WALLET · ${mode === 'create' ? '4/4' : '3/3'}`} actions={[d('返回', 'Back'), d('用通行密钥保存', 'Save with passkey')]}>
+    <SandboxCard title={mode === 'create' ? d('保存钱包', 'Save the wallet') : d('和原钱包核对，然后保存', 'Compare, then save')} subtitle={`COLD_WALLET · ${mode === 'create' ? '4/4' : '3/3'}`} actions={[d('返回', 'Back'), d('用Passkey保存', 'Save with passkey')]}>
       <span className="text-[12.5px] text-muted">{mode === 'create' ? d('账户 #0 的地址：', 'Account #0’s addresses:') : d('应该和原钱包的第一个账户一样：', 'These should match your old wallet’s first account:')}</span>
       <MirrorRow label="ETH" value={a.eth} />
       <span className="-mt-2 font-mono text-[11.5px] text-muted">{path('evm', 0)}</span>
@@ -180,7 +207,7 @@ export function WindowReview({ mode }: { mode: 'create' | 'import' }) {
       <span className="-mt-2 font-mono text-[11.5px] text-muted">{path('bitcoin', 0)}</span>
       <MirrorRow label="Solana" value={a.solana} />
       <span className="-mt-2 font-mono text-[11.5px] text-muted">{path('solana', 0)}</span>
-      <span className="flex items-start gap-1.5 text-[12px] leading-snug text-muted"><Lock className="mt-0.5 size-3.5 shrink-0" />{d('保存时用通行密钥确认；随后在安全窗口里重新打开加密结果核对，再把加密结果交给 Avibe。', 'Saving is confirmed with your passkey; the secure window then reopens the encrypted result to check it before handing the encrypted result to Avibe.')}</span>
+      <span className="flex items-start gap-1.5 text-[12px] leading-snug text-muted"><Lock className="mt-0.5 size-3.5 shrink-0" />{d('保存时用Passkey确认；随后在安全窗口里重新打开加密结果核对，再把加密结果交给 Avibe。', 'Saving is confirmed with your passkey; the secure window then reopens the encrypted result to check it before handing the encrypted result to Avibe.')}</span>
     </SandboxCard>
   );
 }
@@ -208,10 +235,10 @@ export function ProtectedDone() {
       </div>
       <div className="flex flex-col gap-2 rounded-[10px] border border-edge bg-surface-2 p-3">
         <span className="flex items-center gap-2 text-[12.5px] font-semibold text-foreground"><AccountIndex index={0} />{d('主账户', 'Main')}</span>
-        <HdAccountAddressList account={CREATED_ADDRESSES[0]} />
+        <ProtectedAddressList account={CREATED_ADDRESSES[0]} />
       </div>
       <Notice tone="warning" icon={TriangleAlert}>
-        {d('通行密钥丢了，靠这些词和原来的 Passphrase（如有）仍能找回钱包。但有词和 Passphrase 的人，可以在 Avibe 之外直接动用资金。只靠数据库备份无法恢复签名。', 'If the passkey is lost, the words plus the original passphrase (if any) still recover the wallet. But anyone with them can move the funds outside Avibe. A database backup alone cannot restore signing.')}
+        {d('Passkey丢了，靠这些词和原来的 Passphrase（如有）仍能找回钱包。但有词和 Passphrase 的人，可以在 Avibe 之外直接动用资金。只靠数据库备份无法恢复签名。', 'If the passkey is lost, the words plus the original passphrase (if any) still recover the wallet. But anyone with them can move the funds outside Avibe. A database backup alone cannot restore signing.')}
       </Notice>
     </div>
   );
@@ -228,7 +255,7 @@ export function ProtectedAccountCard({ index, name }: { index: number; name: str
         <span className="truncate text-[13.5px] font-semibold text-foreground">{name}</span>
         <span className="ml-auto flex items-center gap-1 text-[11.5px] text-muted"><Lock className="size-3" />{d('每次签名都批准', 'Approve every signature')}</span>
       </div>
-      <HdAccountAddressList account={a} />
+      <ProtectedAddressList account={a} />
     </div>
   );
 }
