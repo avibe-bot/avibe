@@ -609,7 +609,7 @@ final class AppModel: ObservableObject {
             return false
         }
         nativeBadge.set(count)
-        if count == 0, let account = sessionCoordinator.currentAccount {
+        if count < 0, let account = sessionCoordinator.currentAccount {
             // Nothing notified on this instance is unread. The zero was
             // computed before this call arrived, so only what was delivered
             // by now is covered by it; anything later stays.
