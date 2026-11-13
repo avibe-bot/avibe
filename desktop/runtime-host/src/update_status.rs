@@ -20,6 +20,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::update::Channel;
+use crate::update_control::{deserialize_control_status, ControlStatus};
 
 const UPDATE_STATUS_SCHEMA_VERSION: u32 = 1;
 pub const UPDATE_STATUS_FILE: &str = "update-status.json";
@@ -115,6 +116,22 @@ where
     }))
 }
 
+fn deserialize_host_actions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(["check", "prereleases", "install"]
+        .into_iter()
+        .filter(|action| {
+            value
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(action)))
+        })
+        .map(str::to_owned)
+        .collect())
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UpdateStatusRecord {
     pub schema_version: u32,
@@ -133,6 +150,18 @@ pub struct UpdateStatusRecord {
     /// The last remote request, including terminal outcomes.
     #[serde(default, deserialize_with = "deserialize_remote_request")]
     pub remote_request: Option<RemoteRequestStatus>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_host_actions",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub host_actions: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_control_status",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub control_request: Option<ControlStatus>,
 }
 
 impl UpdateStatusRecord {
@@ -162,12 +191,22 @@ impl UpdateStatusRecord {
             checked_at: rfc3339(checked_at),
             remote_install_allowed: false,
             remote_request: None,
+            host_actions: Vec::new(),
+            control_request: None,
         }
     }
 
     pub fn with_remote(mut self, remote_install_allowed: bool, remote_request: Option<RemoteRequestStatus>) -> Self {
         self.remote_install_allowed = remote_install_allowed;
         self.remote_request = remote_request;
+        self
+    }
+
+    pub fn with_control(mut self, control_request: Option<ControlStatus>) -> Self {
+        // Install keeps its legacy authorization behavior until that separate
+        // policy change lands; do not advertise unattended explicit installs.
+        self.host_actions = vec!["check".into(), "prereleases".into()];
+        self.control_request = control_request;
         self
     }
 

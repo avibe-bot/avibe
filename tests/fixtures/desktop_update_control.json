@@ -1,0 +1,33 @@
+{
+  "request": {
+    "schema_version": 1,
+    "request_id": "00000000-0000-4000-8000-000000000001",
+    "action": "prereleases",
+    "enabled": false,
+    "state": "pending",
+    "created_at": "1970-01-01T00:16:40Z",
+    "expires_at": "1970-01-01T00:18:40Z"
+  },
+  "status": {
+    "schema_version": 1,
+    "phase": "available",
+    "current": "3.2.6",
+    "latest": "3.2.7",
+    "channel": "test",
+    "has_update": true,
+    "checked_at": "1970-01-01T00:16:40Z",
+    "remote_install_allowed": false,
+    "remote_request": null,
+    "host_actions": ["check", "prereleases"],
+    "control_request": {
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "action": "prereleases",
+      "enabled": false,
+      "phase": "checking",
+      "error_code": null,
+      "created_at": "1970-01-01T00:16:40Z",
+      "expires_at": "1970-01-01T00:18:40Z",
+      "updated_at": "1970-01-01T00:16:40Z"
+    }
+  }
+}

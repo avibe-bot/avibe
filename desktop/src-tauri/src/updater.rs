@@ -1,4 +1,7 @@
 //! Desktop updater owned by the native shell and controlled by its Workbench popover.
+mod control;
+
+use avibe_runtime_host::update_control::ControlStatus;
 use avibe_runtime_host::{
     download::{self, Length},
     update::{self, Channel, Manifest, Release, REPOSITORY},
@@ -168,6 +171,7 @@ struct State {
     remote_request: Option<RemoteRequestStatus>,
     /// The accepted request owns its deadline even if the mailbox is replaced.
     active_request: Option<DesktopUpdateRequest>,
+    control_request: Option<ControlStatus>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -179,6 +183,8 @@ pub struct DesktopUpdateState {
     /// Pre-releases are offered too (the Test channel). Also tells the
     /// Workbench that this shell has `desktop_update_prereleases_set`.
     prereleases: bool,
+    host_actions: Vec<String>,
+    checked_at: Option<String>,
     skipped_version: Option<String>,
     interactive: bool,
     remote_install_allowed: bool,
@@ -254,7 +260,9 @@ fn base_status(app: &AppHandle, state: &State) -> UpdateStatusRecord {
 fn publish_status(app: &AppHandle) {
     let updater = app.state::<Updater>();
     let state = updater.state.lock().expect("updater state");
-    let record = base_status(app, &state).with_remote(state.remote_install_allowed, state.remote_request.clone());
+    let record = base_status(app, &state)
+        .with_remote(state.remote_install_allowed, state.remote_request.clone())
+        .with_control(state.control_request.clone());
     if let Err(error) = updater.status.write(&record) {
         eprintln!("desktop update status: {error}");
     }
@@ -320,6 +328,10 @@ fn settle(
         .remote_request
         .as_ref()
         .is_some_and(|request| !request.phase.is_terminal())
+        || state
+            .control_request
+            .as_ref()
+            .is_some_and(|request| request.phase == avibe_runtime_host::update_control::ControlPhase::Checking)
     {
         return false;
     }
@@ -339,7 +351,9 @@ fn settle_update(app: &AppHandle, context: Option<&RemoteInstallContext>, outcom
         let record = base_status(app, &state);
         let settled = settle(&mut state, &updater.busy, context, outcome, SystemTime::now());
         if settled {
-            let record = record.with_remote(state.remote_install_allowed, state.remote_request.clone());
+            let record = record
+                .with_remote(state.remote_install_allowed, state.remote_request.clone())
+                .with_control(state.control_request.clone());
             if let Err(error) = updater.status.write(&record) {
                 eprintln!("desktop update status: {error}");
             }
@@ -570,7 +584,12 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(not(target_os = "macos"))]
     let status_dir = app.path().app_data_dir()?;
     let status = UpdateStatusStore::new(status_dir.join(UPDATE_STATUS_FILE));
-    let remote_request = status.read().ok().flatten().and_then(|record| record.remote_request);
+    let previous = status.read().ok().flatten();
+    let remote_request = previous.as_ref().and_then(|record| record.remote_request.clone());
+    let control_request = previous
+        .as_ref()
+        .and_then(|record| record.control_request.clone())
+        .map(|receipt| receipt.interrupted(SystemTime::now()));
     let remote_busy = remote_request
         .as_ref()
         .is_some_and(|request| !request.phase.is_terminal());
@@ -589,6 +608,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             remote_install_allowed,
             remote_request,
             active_request: None,
+            control_request,
         }),
         busy: AtomicBool::new(remote_busy),
         source: AtomicUsize::new(0),
@@ -608,6 +628,11 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         )?,
     });
     reconcile_remote_request_on_startup(app);
+    if previous.is_some() {
+        // Advertise new actions on an existing conclusion, never invent a
+        // successful check or checked_at before the first startup check.
+        publish_status(app);
+    }
     Ok(())
 }
 fn set_state(app: &AppHandle, phase: Phase, latest: Option<String>) {
@@ -643,6 +668,8 @@ fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
         latest: state.latest.clone(),
         channel: state.channel,
         prereleases: state.channel == Channel::Test,
+        host_actions: vec!["check".into(), "prereleases".into()],
+        checked_at: updater.status.read().ok().flatten().map(|record| record.checked_at),
         skipped_version: skipped_version(&updater),
         interactive: state.availability_interactive,
         remote_install_allowed: state.remote_install_allowed,
@@ -678,16 +705,27 @@ fn set_available(app: &AppHandle, manifest: Manifest) {
     app.state::<Updater>().state.lock().expect("updater state").manifest = Some(manifest);
     emit_state(app);
 }
+fn persist_channel(path: &Path, channel: Channel) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing config directory"))?;
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(temporary.as_file_mut(), &channel).map_err(io::Error::other)?;
+    temporary.as_file_mut().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
 /// Persist the update channel the menu item and the Workbench switch share.
 fn set_channel(app: &AppHandle, channel: Channel) -> Result<(), String> {
     let updater = app.state::<Updater>();
-    if updater.busy.load(Ordering::SeqCst) {
-        return Err("The update channel cannot change while an update is in progress.".to_owned());
-    }
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let mut state = updater.state.lock().expect("updater state");
-        std::fs::create_dir_all(updater.channel_path.parent().ok_or("missing config directory")?)?;
-        std::fs::write(&updater.channel_path, serde_json::to_vec(&channel)?)?;
+        if updater.busy.load(Ordering::SeqCst) {
+            return Err("The update channel cannot change while an update is in progress.".into());
+        }
+        persist_channel(&updater.channel_path, channel)?;
         state.channel = channel;
         state.latest = None;
         updater.channel_menu.set_checked(channel == Channel::Test)?;
@@ -1116,7 +1154,9 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
         let Some(record) = check_record(&state, &app.package_info().version.to_string(), SystemTime::now()) else {
             return;
         };
-        let record = record.with_remote(state.remote_install_allowed, state.remote_request.clone());
+        let record = record
+            .with_remote(state.remote_install_allowed, state.remote_request.clone())
+            .with_control(state.control_request.clone());
         if let Err(error) = updater.status.write(&record) {
             eprintln!("desktop update status: {error}");
         }
@@ -1413,6 +1453,10 @@ fn fail_remote_request(app: &AppHandle, request: &DesktopUpdateRequest, error_co
         }),
         Settlement::Failed(error_code),
     );
+}
+
+pub fn handle_control_request(app: &AppHandle) {
+    control::poll(app);
 }
 
 pub fn handle_remote_update_request(app: &AppHandle) {
@@ -1743,6 +1787,7 @@ mod tests {
 
     fn state_with_remote_request(request_id: &str, target: &str, phase: RemoteRequestPhase) -> State {
         State {
+            control_request: None,
             active_request: None,
             phase: Phase::Available,
             latest: Some(target.to_owned()),
@@ -1810,6 +1855,7 @@ mod tests {
     #[test]
     fn current_result_uses_native_feedback_only_without_a_usable_workbench_owner() {
         let mut state = State {
+            control_request: None,
             active_request: None,
             phase: Phase::Current,
             latest: None,
@@ -1865,6 +1911,8 @@ mod tests {
             latest: Some("3.2.3".to_owned()),
             channel: Channel::Test,
             prereleases: true,
+            host_actions: vec!["check".into(), "prereleases".into()],
+            checked_at: None,
             skipped_version: Some("3.2.3".to_owned()),
             interactive: true,
             remote_install_allowed: false,
@@ -1877,6 +1925,8 @@ mod tests {
                 "latest": "3.2.3",
                 "channel": "test",
                 "prereleases": true,
+                "hostActions": ["check", "prereleases"],
+                "checkedAt": null,
                 "skippedVersion": "3.2.3",
                 "interactive": true,
                 "remoteInstallAllowed": false,
@@ -1899,6 +1949,7 @@ mod tests {
             Phase::Error,
         ] {
             let state = State {
+                control_request: None,
                 active_request: None,
                 phase,
                 latest: Some("3.2.3".to_owned()),
@@ -1941,6 +1992,7 @@ mod tests {
             SystemTime::UNIX_EPOCH,
         );
         let mut state = State {
+            control_request: None,
             active_request: None,
             phase: Phase::Error,
             latest: Some("3.2.4".to_owned()),
@@ -1952,7 +2004,8 @@ mod tests {
         };
 
         let published = status_for_publish(&state, "3.2.2", Some(previous.clone()), SystemTime::UNIX_EPOCH)
-            .with_remote(state.remote_install_allowed, state.remote_request.clone());
+            .with_remote(state.remote_install_allowed, state.remote_request.clone())
+            .with_control(state.control_request.clone());
         assert_eq!(published.phase, UpdateStatusPhase::Error);
         assert_eq!(published.channel, Channel::Stable);
         assert_eq!(published.latest, None);
@@ -2031,6 +2084,7 @@ mod tests {
         )
         .unwrap();
         let mut state = State {
+            control_request: None,
             active_request: None,
             phase: Phase::Idle,
             latest: None,
@@ -2254,6 +2308,7 @@ mod tests {
             )
         };
         let mut state = State {
+            control_request: None,
             active_request: None,
             phase: Phase::Idle,
             latest: None,

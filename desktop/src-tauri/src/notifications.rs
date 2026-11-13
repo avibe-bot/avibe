@@ -250,6 +250,7 @@ impl NotificationSink for NativeSink {
     fn desktop_update_requested(&self) {
         if self.generation.load(Ordering::SeqCst) == self.observed_generation {
             updater::handle_remote_update_request(&self.app);
+            updater::handle_control_request(&self.app);
         }
     }
 }

@@ -148,7 +148,8 @@ def test_complete_registered_api_management_inventory():
     # + 2 HD account metadata mutations (Editor, like other Vault metadata;
     # the service also requires resource-management authority).
     # + 2 Desktop local enrollment methods (Owner and direct-loopback-only).
-    assert len(endpoints) == 327
+    # + 2 host-owned update check/channel methods (Member).
+    assert len(endpoints) == 329
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
@@ -185,6 +186,9 @@ def test_complete_registered_api_management_inventory():
     assert http_authorization_policy("GET", "/api/desktop/computer-use/status").minimum_role == "member"
     assert ("POST", "/api/desktop/update/request") in endpoints
     assert http_authorization_policy("POST", "/api/desktop/update/request").minimum_role == "member"
+    for action in ("check", "prereleases"):
+        assert ("POST", f"/api/update/{action}") in endpoints
+        assert http_authorization_policy("POST", f"/api/update/{action}").minimum_role == "member"
     # Additive read-only backend projection inherits native backend-management
     # authorization; it does not grant lower-tier credential-management access.
     assert ("GET", "/api/backend/{name}/connection") in endpoints

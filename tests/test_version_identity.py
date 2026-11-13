@@ -125,6 +125,8 @@ DESKTOP_NO_CONCLUSION = {
     "checked_at": None,
     "remote_install_allowed": False,
     "remote_request": None,
+    "host_actions": [],
+    "control_request": None,
     "build": {"kind": "package"},
     "managed_by": "desktop",
 }

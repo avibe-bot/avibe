@@ -42,6 +42,8 @@ def test_old_status_defaults_remote_fields_without_losing_update() -> None:
         "has_update": True,
         "remote_install_allowed": False,
         "remote_request": None,
+        "host_actions": [],
+        "control_request": None,
     }
 
 
@@ -96,6 +98,7 @@ def test_an_unusable_check_field_reads_as_unknown_and_keeps_the_rest(changes: di
             "checked_at": "2026-11-13T06:34:00Z",
             "has_update": False,
             "remote_install_allowed": False,
+            "host_actions": [],
         }.items()
         if key != unknown
     }
@@ -125,6 +128,8 @@ def test_remote_status_is_relayed_and_bad_remote_fields_degrade_independently() 
         "has_update": True,
         "remote_install_allowed": True,
         "remote_request": payload["remote_request"],
+        "host_actions": [],
+        "control_request": None,
     }
 
     payload["remote_install_allowed"] = "yes"
@@ -138,6 +143,8 @@ def test_remote_status_is_relayed_and_bad_remote_fields_degrade_independently() 
         "has_update": True,
         "remote_install_allowed": False,
         "remote_request": None,
+        "host_actions": [],
+        "control_request": None,
     }
 
 
