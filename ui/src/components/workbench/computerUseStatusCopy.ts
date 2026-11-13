@@ -8,8 +8,6 @@ export type ComputerUseCopyKey =
   | 'workbench.home.computerUse.readyDetail'
   | 'workbench.home.computerUse.starting'
   | 'workbench.home.computerUse.startingDetail'
-  | 'workbench.home.computerUse.retrying'
-  | 'workbench.home.computerUse.retryingDetail'
   | 'workbench.home.computerUse.accessibilityDetail'
   | 'workbench.home.computerUse.screenRecordingDetail'
   | 'workbench.home.computerUse.unknownPermissionDetail'
@@ -76,9 +74,6 @@ export const computerUseStatusCopy = (
     return { label: t('workbench.home.computerUse.ready'), detail: t('workbench.home.computerUse.readyDetail'), tone: 'mint' };
   }
   if (status.status === 'starting') {
-    if (status.reason) {
-      return { label: t('workbench.home.computerUse.retrying'), detail: t('workbench.home.computerUse.retryingDetail'), tone: 'gold' };
-    }
     return { label: t('workbench.home.computerUse.starting'), detail: t('workbench.home.computerUse.startingDetail'), tone: 'gold' };
   }
   if (status.status === 'needs_permission') {

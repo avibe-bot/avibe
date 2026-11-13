@@ -183,7 +183,6 @@ struct NativeTrayCatalog {
 struct NativeComputerUseCatalog {
     off: String,
     starting: String,
-    retrying: String,
     ready: String,
     needs_permission: String,
     needs_permission_accessibility: String,
@@ -280,13 +279,7 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
             Some("screen_recording") => catalog.needs_permission_screen_recording.clone(),
             _ => catalog.needs_permission.clone(),
         },
-        avibe_runtime_host::computer_use::ComputerUsePhase::Starting => {
-            if view.reason.is_some() {
-                catalog.retrying.clone()
-            } else {
-                catalog.starting.clone()
-            }
-        }
+        avibe_runtime_host::computer_use::ComputerUsePhase::Starting => catalog.starting.clone(),
         avibe_runtime_host::computer_use::ComputerUsePhase::Ready => catalog.ready.clone(),
         avibe_runtime_host::computer_use::ComputerUsePhase::Error => view
             .reason
@@ -2765,24 +2758,6 @@ mod tests {
         assert!(runtime_too_old_label.contains("restart"));
         assert_ne!(runtime_unavailable_label, runtime_too_old_label);
         assert_eq!(unknown_error_label, catalog.error);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn computer_use_restarting_label_yields_to_ready_without_error_copy() {
-        for locale in ["en-US", "zh-CN"] {
-            let catalog = native_catalog_for_locales([locale.to_owned()]).computer_use;
-            let mut view = computer_use::MenuView {
-                enabled: true,
-                phase: avibe_runtime_host::computer_use::ComputerUsePhase::Starting,
-                reason: Some("health_timeout".to_owned()),
-                ..Default::default()
-            };
-            assert_eq!(computer_use_label(&catalog, &view), catalog.retrying);
-            view.phase = avibe_runtime_host::computer_use::ComputerUsePhase::Ready;
-            view.reason = None;
-            assert_eq!(computer_use_label(&catalog, &view), catalog.ready);
-        }
     }
 
     #[cfg(target_os = "macos")]
