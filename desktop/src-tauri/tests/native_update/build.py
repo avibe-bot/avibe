@@ -80,7 +80,7 @@ def adapt(source: Path) -> dict:
     fixture_source = fixture_path.read_text(encoding="utf-8")
     presentation = validate_presentation_lifecycle(library.read_text(encoding="utf-8"), fixture_source)
     installer_source = (desktop / "tests/native_update/fixture-installer.nsi").read_text(encoding="utf-8")
-    normalized_fixture = re.sub(r"\\s+", "", fixture_source)
+    normalized_fixture = re.sub(r"\s+", "", fixture_source)
     if not all(marker in normalized_fixture for marker in (
         "letnative_installation=native_executable.parent().unwrap().to_path_buf();",
         'std::env::set_var("AVIBE_NATIVE_ACCEPTANCE_INSTALLATION",installation);',
