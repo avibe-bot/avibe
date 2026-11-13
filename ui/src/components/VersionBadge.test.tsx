@@ -628,6 +628,39 @@ describe('remote desktop update contract', () => {
     expect(api.doUpgrade).not.toHaveBeenCalled();
   });
 
+  it('keeps a way to read the host again after an install on an older desktop app loses track of it', async () => {
+    // An older desktop app publishes a phase but declares no actions.
+    api.getVersion.mockResolvedValue({ ...remoteReceipt('restarting'), phase: 'available' });
+    await openTimingPopup();
+    await act(() => vi.advanceTimersByTimeAsync(125_000));
+    expect(screen.getByText(i18n.t('update.failure.timeout.title'))).toBeTruthy();
+    api.getVersion.mockResolvedValue({ ...remoteReceipt('failed'), phase: 'available' });
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    const retry = screen.getByRole('button', { name: i18n.t('update.action.retry') }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(false);
+    expect(api.requestUpdateControl).not.toHaveBeenCalled();
+  });
+
+  it('lets a host check clear an install that lost track of the host', async () => {
+    const host = { phase: 'available' as const, host_actions: ['check', 'prereleases', 'auto_update', 'install'] as VersionInfo['host_actions'] };
+    api.getVersion.mockResolvedValue({ ...remoteReceipt('restarting'), ...host });
+    await openTimingPopup();
+    await act(() => vi.advanceTimersByTimeAsync(125_000));
+    expect(screen.getByText(i18n.t('update.failure.timeout.title'))).toBeTruthy();
+    api.requestUpdateControl.mockResolvedValueOnce({ ok: true, request_id: 'control-1' });
+    api.getVersion.mockResolvedValue({
+      ...remoteReceipt('failed'), ...host, checked_at: '2026-10-29T02:00:00Z',
+      control_request: { request_id: 'control-1', action: 'check', enabled: null, phase: 'completed', error_code: null, updated_at: '2026-10-29T02:05:00Z' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    await act(() => vi.advanceTimersByTimeAsync(2_500));
+    expect(api.requestUpdateControl).toHaveBeenCalledExactlyOnceWith('check', undefined);
+    const retry = screen.getByRole('button', { name: i18n.t('update.action.retry') }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(false);
+  });
+
   it.each(['failed', 'declined', 'expired'] as const)('allows retry when a manual refresh discovers %s after timeout', async (phase) => {
     api.getVersion.mockResolvedValue(remoteReceipt('restarting'));
     await openTimingPopup();

@@ -161,6 +161,13 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   // A check or setting change asked of a desktop-managed host: its receipt arrives in the version snapshot.
   const [controlRequestId, setControlRequestId] = React.useState<string | null>(null);
+  // A settled install receipt ends any wait for the host, however the snapshot was read.
+  const reconcileInstall = (info: VersionInfo) => {
+    if (remoteRequestSettled(info.remote_request, info.current)) {
+      setRemoteUpdateTimedOut(false);
+      setRemoteDisconnected(false);
+    }
+  };
   const failControl = (
     action: 'check' | 'prereleases' | 'auto_update',
     enabled: boolean | undefined,
@@ -228,6 +235,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         const fresh = await api.getVersion({ cache: false, background: true });
         if (stopped) return;
         setVersionInfo(fresh);
+        reconcileInstall(fresh);
         const receipt = fresh.control_request;
         if (receipt?.request_id !== followedControlId || receipt.phase !== 'checking') {
           setControlRequestId(null);
@@ -320,13 +328,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       setVersionInfo(info);
       setVersionLoadFailed(false);
       setCheckedAt(new Date().toISOString());
-      const receipt = info.remote_request;
-      if (receipt && receipt.request_id === versionInfo?.remote_request?.request_id
-        && TERMINAL_REMOTE_PHASES.includes(receipt.phase)
-        && (receipt.phase !== 'completed' || normalizeVersion(info.current) === normalizeVersion(receipt.target))) {
-        setRemoteUpdateTimedOut(false);
-        setRemoteDisconnected(false);
-      }
+      reconcileInstall(info);
     } catch (e) {
       console.error('Failed to check version:', e);
       setVersionLoadFailed(true);
@@ -675,8 +677,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   } else if (remoteDesktopWeb) {
     // The host's desktop app, through its Runtime.
     const actions = versionInfo?.host_actions ?? [];
-    // Only a host that takes a check gets the button, except before its first result, when reading again is the check.
-    if ((manager && actions.includes('check')) || !panelModel.legacyHost) {
+    // Only a host that takes a check gets the button, except before its first result, when reading again is the check,
+    // and after an install lost track of the host, when reading again is how it is found.
+    if ((manager && actions.includes('check')) || !panelModel.legacyHost || remoteUpdateTimedOut || remoteDisconnected) {
       panelActions.check = {
         run: () => (manager && actions.includes('check') ? void sendControl('check') : refresh()),
         disabled: checkDisabled,
