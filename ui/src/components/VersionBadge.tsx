@@ -379,7 +379,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const hasVersionSkew = Boolean(
     shellVersion && runtimeVersion && normalizeVersion(shellVersion) !== normalizeVersion(runtimeVersion),
   );
-  const currentVersion = (hasVersionSkew ? runtimeVersion : shellVersion ?? runtimeVersion) || '...';
+  // A browser on a desktop-managed host names the desktop app's version, as the panel does.
+  const relayedAppVersion = !inDesktopShell && versionInfo?.desktop_version
+    ? normalizeVersion(versionInfo.desktop_version) : undefined;
+  const currentVersion = (hasVersionSkew ? runtimeVersion : shellVersion ?? relayedAppVersion ?? runtimeVersion) || '...';
   const isSourceBuild = !inDesktopShell && versionInfo?.build?.kind === 'source';
   const sourceRevision = versionInfo?.build?.revision;
   const shortSourceRevision = sourceRevision?.slice(0, 12) || t('dashboard.unknownRevision');
