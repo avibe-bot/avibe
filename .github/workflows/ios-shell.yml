@@ -141,7 +141,7 @@ jobs:
             test
 
       - name: Upload XCTest result bundle
-        if: ${{ !cancelled() }}
+        if: ${{ always() && hashFiles(format('{0}/AvibeTests.xcresult', runner.temp)) != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-shell-xcresult
