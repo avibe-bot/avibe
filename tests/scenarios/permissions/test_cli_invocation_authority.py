@@ -393,6 +393,8 @@ _CREATE_AGENT = ["agent", "create", "probe", "--backend", "codex"]
         ("member", ["remote", "direct", "off"], ("remote", "direct", "off"), False),
         ("owner", ["remote", "direct", "on"], ("remote", "direct", "on"), True),
         ("owner", ["remote", "direct", "off"], ("remote", "direct", "off"), True),
+        ("member", ["remote", "direct", "install"], ("remote", "direct", "install"), False),
+        ("owner", ["remote", "direct", "install", "--offline"], ("remote", "direct", "install"), True),
     ],
 )
 def test_permissions_026_each_namespace_admits_at_its_own_floor(

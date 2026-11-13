@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "direct_transport_version": "0.1.0",
+  "release_state": "pending",
+  "source": "avibe-bot/avibe",
+  "source_url": null,
+  "release_tag": null,
+  "archives": {}
+}

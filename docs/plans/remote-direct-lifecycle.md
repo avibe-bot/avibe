@@ -10,14 +10,23 @@ extend a previously received permission past its independent expiry timer.
 
 ## Present product behavior
 
-The production binary resolver deliberately returns no installed transport.
-There is no environment variable or configuration field for an arbitrary
-executable. With the setting off, observation does not bind a socket, spawn a
-child, call the certificate client or create direct certificate files. With it
-on, a managed, paired instance reports `transport-not-installed`: **it still
-orders no certificate and starts neither ingress nor supervisor**. Only tests
-inject a stand-in. Installation, the settings page and the real iroh/Incus
-scenario are later work.
+The production binary resolver consumes only a verified installation matching
+Avibe's packaged published release pin. The pin still ships **pending**, so no
+product binary is available yet. There is no environment variable or
+configuration field for an arbitrary executable, and no automatic installation.
+`vibe remote direct install [--offline] [--json]` is an Owner-only, explicit
+installation command; it does not change the setting or pairing. An already
+opted-in owner can start the installed binary after its ordinary gates pass.
+See [managed runtime preparation](remote-direct-managed-runtime.md) for the
+manifest and the gated regression handoff.
+
+With the setting off, observation does not inspect a binary, bind a socket,
+spawn a child, call the certificate client or create direct certificate files.
+With it on and the pin pending or the matching binary absent, a managed paired
+instance reports `transport-not-installed`: **it orders no certificate and
+starts neither ingress nor supervisor**. Tests use inert archives and injected
+transports. Native installation, the settings page and real iroh/Incus acceptance
+remain separate operational work.
 
 ## Single owner and ordering
 
@@ -64,7 +73,26 @@ into an unbounded retry loop.
 ## Blocking work and cancellation
 
 Startup schedules observation without waiting for configuration, backend,
-certificate or TLS work. Certificate work has one outstanding task; TLS
+certificate or TLS work. Config remains observed at 0.5-second intervals by
+its own retained worker. Binary verification has a **separate** retained worker
+slot, scheduled/collected by the loop on a changed configuration and otherwise
+every five seconds; binary hashes are never read by loop-side gates. A stalled
+binary check cannot delay disk-only CLI opt-out observation or its false report.
+Each successful binary observation expires 15 seconds from
+its start on the loop's monotonic clock. A stalled worker cannot extend it;
+expiry withdraws publication and cancels an awaiting start without waiting for
+filesystem work. A later fresh observation may resume the normal gates.
+Observations are generation-fenced, including off/on ABA and stop/start reuse;
+replacing or losing a previously available binary retires its generation.
+Every retired generation also drops its in-memory certificate observation and
+requires a fresh client poll before a new start. A fenced renewal worker may
+already have persisted its replacement and deleted the old chain, so reusing
+cached file paths while that poll runs could otherwise latch startup failure.
+This drops no on-disk key or certificate: the client revalidates its own state.
+This is bounded observation, not atomicity against arbitrary local filesystem
+mutation between verification and process execution.
+
+Certificate work has one outstanding task; TLS
 preparation has one retained worker slot across starts, reloads and all
 setting generations. Preparation constructs replacement TLS/Uvicorn data,
 but never binds a socket or changes active context/path fields in its worker.
@@ -164,6 +192,7 @@ proven by a Python stand-in.
 polling. It returns the certificate client's result, including
 `certificate_order_in_progress` when active-key renewal causes the client to
 abandon the pending rotation. **Automatic rotation timing remains open** with
-the backend renewal design. No automatic key rotation, sidecar installation,
-backend/iOS change, settings page, real public issuance or Incus scenario is
-part of I3.
+the backend renewal design. No automatic key rotation, backend/iOS change,
+settings page or real public issuance is added. The managed installer is a
+later [I1/I3 consumer change](remote-direct-managed-runtime.md), not an
+installation or enablement of any live instance.

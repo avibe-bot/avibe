@@ -1,6 +1,6 @@
 # Remote direct paths: instance transport contract
 
-Status: **Contract for Phase 1 row I1.** Nothing here is built yet. The owner decided on 2026-11-11 that the instance runs its iroh endpoint in a small Rust sidecar, shipped as a managed runtime ([`remote-direct-phase1.md`](remote-direct-phase1.md), decision D1). This document fixes what the sidecar is, how the instance talks to it, and how it is built and shipped, so the sidecar and the instance-side code can be written in parallel.
+Status: **Contract for Phase 1 row I1.** I1a's sidecar/build gate, I1c's supervisor and I3's lifecycle are merged; release publication and the real artifact pin remain pending. The [managed instance consumer](remote-direct-managed-runtime.md) prepares installation and regression handoff without enabling a live instance. The owner decided on 2026-11-11 that the instance runs its iroh endpoint in a small Rust sidecar, shipped as a managed runtime ([`remote-direct-phase1.md`](remote-direct-phase1.md), decision D1). This document fixes what the sidecar is, how the instance talks to it, and how it is built and shipped.
 
 ## 1. What the sidecar is
 

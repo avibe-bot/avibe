@@ -135,6 +135,7 @@ artifacts = [
     "vibe/git_runtime_manifest.json",
     "vibe/ripgrep_runtime_manifest.json",
     "vibe/cloudflared_runtime_manifest.json",
+    "vibe/direct_transport_runtime_manifest.json",
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
 ]
 
@@ -173,6 +174,7 @@ include = [
     "vibe/git_runtime_manifest.json",
     "vibe/ripgrep_runtime_manifest.json",
     "vibe/cloudflared_runtime_manifest.json",
+    "vibe/direct_transport_runtime_manifest.json",
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
     "README.md",
     "LICENSE",
