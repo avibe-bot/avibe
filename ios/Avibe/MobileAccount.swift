@@ -367,6 +367,11 @@ final class AccountWebsiteDataStore {
     private(set) var identifier: UUID
     private(set) var dataStore: WKWebsiteDataStore
     private(set) var ownedIdentifiers: Set<UUID>
+    /// Runs first in `rotate()`, while the store that is going away is still
+    /// `dataStore`: an account transition. The direct path controller closes
+    /// every relay here. It writes no route: the old store keeps its route
+    /// and is discarded with it, and the new store starts with none.
+    var onWillRotate: (@MainActor () -> Void)?
 
     init(
         defaults: UserDefaults = .standard,
@@ -399,6 +404,7 @@ final class AccountWebsiteDataStore {
     }
 
     func rotate(sweepOwnedStores: Bool = true) async {
+        onWillRotate?()
         let newIdentifier = UUID()
         ownedIdentifiers.insert(newIdentifier)
         identifier = newIdentifier

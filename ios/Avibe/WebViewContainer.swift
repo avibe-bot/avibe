@@ -18,6 +18,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let websiteDataStore: WKWebsiteDataStore
     let pushCoordinator: NativePushCoordinator?
     let showAccount: () -> Void
+    let directStatus: DirectStatusProvider?
+    let directLoadGate: DirectLoadGateProvider?
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
     let accountFallbackVisibilityChanged: (Bool) -> Void
@@ -33,6 +35,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
         websiteDataStore: WKWebsiteDataStore,
         pushCoordinator: NativePushCoordinator? = nil,
         showAccount: @escaping () -> Void,
+        directStatus: DirectStatusProvider? = nil,
+        directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
@@ -47,6 +51,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.websiteDataStore = websiteDataStore
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
+        self.directStatus = directStatus
+        self.directLoadGate = directLoadGate
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.accountFallbackVisibilityChanged =
@@ -69,6 +75,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
             websiteDataStore: websiteDataStore,
             pushCoordinator: pushCoordinator,
             showAccount: showAccount,
+            directStatus: directStatus,
+            directLoadGate: directLoadGate,
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,
             accountFallbackVisibilityChanged:

@@ -14,6 +14,8 @@ struct NativeBridgePolicy {
 struct NativeShellMetadata: Equatable {
     static let contract = 1
     static let platform = "ios"
+    /// Every shell's capabilities. `direct` is added only when the App has a
+    /// direct transport registered (`withDirect(_:)`).
     static let capabilities = [
         "accountPresentation": 2,
         "app": 1,
@@ -27,13 +29,33 @@ struct NativeShellMetadata: Equatable {
 
     let shellVersion: String
     let userAgentVersion: String
+    /// Whether this shell offers `direct` (docs/plans/ios-app.md section 4).
+    let direct: Bool
 
     init(
         shellVersion: String,
-        userAgentVersion: String
+        userAgentVersion: String,
+        direct: Bool = false
     ) {
         self.shellVersion = shellVersion
         self.userAgentVersion = userAgentVersion
+        self.direct = direct
+    }
+
+    func withDirect(_ direct: Bool) -> NativeShellMetadata {
+        NativeShellMetadata(
+            shellVersion: shellVersion,
+            userAgentVersion: userAgentVersion,
+            direct: direct
+        )
+    }
+
+    var capabilities: [String: Int] {
+        var capabilities = Self.capabilities
+        if direct {
+            capabilities["direct"] = 1
+        }
+        return capabilities
     }
 
     init(bundle: Bundle = .main) {
@@ -56,7 +78,7 @@ struct NativeShellMetadata: Equatable {
             "contract": Self.contract,
             "platform": Self.platform,
             "shellVersion": shellVersion,
-            "capabilities": Self.capabilities,
+            "capabilities": capabilities,
         ]
     }
 }
@@ -75,6 +97,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case appSetAccountActionAvailable = "app.setAccountActionAvailable"
     case appShowAccount = "app.showAccount"
     case badgeSet = "badge.set"
+    case directStatus = "direct.status"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
@@ -204,6 +227,7 @@ enum NativeBridgeConfiguration {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        directStatus: DirectStatusProvider? = nil,
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -235,6 +259,9 @@ enum NativeBridgeConfiguration {
             false
         }
     ) -> WKWebViewConfiguration {
+        // `direct` exists only with a provider: a shell with no direct
+        // transport neither advertises it nor answers `direct.status`.
+        let metadata = metadata.withDirect(directStatus != nil)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = websiteDataStore
         let controller = WKUserContentController()
@@ -246,6 +273,7 @@ enum NativeBridgeConfiguration {
             historyDidChange: historyDidChange,
             colorSchemeDidChange: colorSchemeDidChange,
             showAccount: showAccount,
+            directStatus: directStatus,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
             pushUnsubscribe: pushUnsubscribe,
@@ -507,6 +535,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let directStatus: DirectStatusProvider?
     private let pushStatus: @MainActor (
         String?,
         WebOrigin
@@ -536,6 +565,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         historyDidChange: @escaping (WKWebView) -> Bool,
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool,
         showAccount: @escaping () -> Void,
+        directStatus: DirectStatusProvider?,
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -564,6 +594,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.directStatus = directStatus
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
         self.pushUnsubscribe = pushUnsubscribe
@@ -855,6 +886,50 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 return
             }
             reply(replyHandler, result: NSNull())
+        case .directStatus:
+            guard let directStatus else {
+                // No direct transport: no `direct` capability, no status.
+                reply(replyHandler, error: .unsupported)
+                return
+            }
+            guard request.params.isEmpty else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "direct.status does not accept parameters."
+                    )
+                )
+                return
+            }
+            // The instance this WebView was made for. The answer may be held
+            // while the App returns from the background, so it is checked
+            // again when it comes: the WebView must still show a document of
+            // that origin.
+            let instanceOrigin = policy.instanceOrigin
+            Task { @MainActor [weak self, weak sourceWebView] in
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                directStatus(instanceOrigin) { [weak self] status in
+                    guard let self else {
+                        replyHandler(nil, nil)
+                        return
+                    }
+                    guard
+                        let status,
+                        let url = sourceWebView?.url,
+                        WebOrigin(url: url, requiresHTTPS: false) == instanceOrigin
+                    else {
+                        self.reply(
+                            replyHandler,
+                            error: .failed("The direct status is no longer current for this page.")
+                        )
+                        return
+                    }
+                    self.reply(replyHandler, result: status.jsonObject)
+                }
+            }
         case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck:
             reply(replyHandler, error: .unsupported)
         case .hapticsImpact:

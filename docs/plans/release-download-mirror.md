@@ -98,8 +98,15 @@ only the releases that `vibe/ripgrep_runtime_manifest.json` and
 ```
 
 - Releases are ordered newest `published_at` first; assets by name.
-- The index lists exactly the releases the mirror holds. When it is written,
-  every listed asset already exists in the bucket with those bytes.
+- The index lists the releases the mirror holds. When it is written, every
+  listed asset already exists in the bucket with those bytes.
+  One transition exception protects Desktop 3.2.5's latest-release selector:
+  Avibe `v3.2.6` is omitted until its signed updater sets (manifest, detached
+  signature and payload) exist for macOS arm64, macOS x64 and Windows x64.
+  Its core objects still mirror normally, and all other tags are unchanged.
+  PyPI discovery is unaffected, but index-based installation fallback cannot
+  resolve `v3.2.6` until then. The old app's GitHub fallback can still see the
+  partial release. Remove this one-release gate after the 3.2.6 rollout.
 - `sha256` is GitHub's asset digest, re-verified against the downloaded bytes
   before upload. `commit` is the peeled tag target.
 - `update_notification` is present, as `"none"`, only when the release notes

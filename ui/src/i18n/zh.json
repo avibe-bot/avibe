@@ -136,7 +136,7 @@
       "installing": "正在安装更新…",
       "installed": "更新已安装，正在重新启动…",
       "disabled": "桌面自动更新未启用",
-      "checkFailed": "无法验证更新，请检查网络后重试。此版本可能需要手动安装。",
+      "checkFailed": "检查更新失败，请检查网络后重试。",
       "installFailed": "更新安装失败，已保留旧应用。请重试或重新安装之前的版本。",
       "install": "下载并安装",
       "skip": "跳过此版本",
@@ -4577,69 +4577,27 @@
     "mainServiceRestarted": "已保存，主服务已重启",
     "versionAndUpdate": "版本与更新",
     "buildAndVersion": "构建与版本",
-    "currentVersion": "当前版本",
     "versionPrefix": "v",
     "versionTitle": "v{{version}}",
     "versionValue": "{{version}}",
-    "packageVersion": "包版本",
     "sourceRevision": "源码修订",
     "sourceRevisionTitle": "源码修订: {{revision}}",
     "sourceRevisionTitleDirty": "源码修订: {{revision}} (有未提交改动)",
     "sourceRevisionDirty": "{{revision}} (有未提交改动)",
-    "refreshBuildInfo": "刷新构建信息",
     "unknownRevision": "未知",
     "dirtySource": "有未提交改动",
-    "latestVersion": "最新版本",
-    "checkUpdate": "检查更新",
-    "checking": "检查中...",
-    "updateAvailable": "有新版本",
-    "upgradeNow": "立即更新",
-    "upgrading": "更新中...",
     "skipUpdate": "跳过此版本",
-    "upToDate": "已是最新版本",
-    "checkFailed": "检查失败",
-    "upgradeSuccess": "更新成功！",
-    "upgradeFailed": "更新失败",
-    "updateHint": "从 {{from}} 更新到 {{to}}",
-    "restarting": "正在重启...",
     "autoUpdate": "自动更新",
     "autoUpdateHint": "空闲时自动安装",
     "prereleaseUpdates": "接收预览版",
     "prereleaseUpdatesHint": "同时推送 RC 预览版，抢先体验",
-    "latestStableVersion": "最新正式版",
     "awaitingStableRelease": "你在预览版上，下一个正式版发布后会推送给你",
     "prereleaseBadge": "预览版",
     "releaseNotes": "更新说明",
     "releaseNotesFor": "{{version}} 的更新说明",
     "desktopManagedUpdate": "更新由运行 Avibe 的那台电脑上的桌面应用提供，请在那里检查更新。",
-    "desktopManagedUpdateAvailable": "发现新版本",
-    "desktopManagedUpdateOwnerHint": "请求主机更新。桌面应用会按本机设置在主机上提示确认，或直接无人值守安装。",
     "desktopManagedUpdateMemberHint": "请在运行 Avibe 的那台电脑上的桌面应用中更新此主机。",
     "desktopRemoteUpdateLocalRequest": "有人远程请求更新到 {{target}}。你可以立即安装或忽略此请求。",
-    "desktopRemoteUpdateRequiresHost": "此安装需要主机上的用户授予权限或修复安装。",
-    "desktopRemoteUpdateVerifying": "主机已报告完成，正在等待确认已安装的版本…",
-    "desktopRemoteUpdateDownloadingUnknown": "正在下载更新…",
-    "desktopRemoteUpdateShellUnavailable": "桌面应用未响应。请在主机上打开 Avibe 后重试。",
-    "desktopRemoteUpdateNoUpdate": "此更新已不可用，请刷新版本信息。",
-    "desktopRemoteUpdateNotManaged": "此主机已不再由桌面应用管理，请刷新版本信息。",
-    "desktopRemoteUpdateInProgress": "另一个更新正在进行，请等待主机完成。",
-    "desktopRemoteUpdateTitle": "在主机上更新",
-    "desktopRemoteUpdateConfirmDescription": "请求将以{{delivery}}的方式送达。",
-    "desktopRemoteUpdateDeliveryPrompt": "主机提示确认",
-    "desktopRemoteUpdateDeliveryInstall": "无人值守安装",
-    "desktopRemoteUpdateRequesting": "正在请求主机更新…",
-    "desktopRemoteUpdateRequested": "更新请求已发送到主机。",
-    "desktopRemoteUpdateAwaitingHost": "主机正在等待那里的用户确认安装。",
-    "desktopRemoteUpdateChecking": "主机正在检查已签名的版本。",
-    "desktopRemoteUpdateDownloading": "正在下载更新：{{progress}}%",
-    "desktopRemoteUpdateInstalling": "正在安装更新…",
-    "desktopRemoteUpdateRestarting": "主机正在重启，将自动重连…",
-    "desktopRemoteUpdateCompleted": "主机已更新到 {{target}}。",
-    "desktopRemoteUpdateFailed": "主机未能完成更新，请检查主机上的桌面应用。",
-    "desktopRemoteUpdateDeclined": "主机已拒绝更新。",
-    "desktopRemoteUpdateExpired": "主机更新请求已过期。",
-    "desktopRemoteUpdateTimedOut": "尚未确认更新完成，请检查主机上的桌面应用。",
-    "desktopRemoteUpdateError": "主机未能接受更新请求。",
     "desktopRemoteUpdateIgnore": "忽略此请求",
     "runtimeVersionSkew": "本应用为 v{{app}}，但连接的 Avibe 运行时为 v{{runtime}}"
   },
@@ -7415,11 +7373,6 @@
     "signOut": "退出账号",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。本机登记、远程访问设置和正在运行的任务都会保留。",
     "localVersion": "本机 Desktop 版本 {{version}}",
-    "updateAvailable": "Desktop 有更新",
-    "desktopVersion": "Desktop 版本",
-    "updateScope": "这里显示这台 Mac 的 Avibe Desktop。本机更新独立于当前连接的 Runtime。",
-    "reviewUpdate": "查看并安装更新",
-    "checkUpdates": "检查更新",
     "continueLocal": "继续使用本机",
     "loading": "正在加载…",
     "setupReady": "本机已准备好",
@@ -7509,7 +7462,104 @@
       "code": "验证码无效或已过期，请重试或重新发送。",
       "upgrade": "此实例需要更新 Avibe 后才能从 Desktop 连接。你仍可使用本机。"
     },
-    "localStatus": "{{name}} · {{status}}",
-    "versionTransition": "{{current}} → {{latest}}"
+    "localStatus": "{{name}} · {{status}}"
+  },
+  "update": {
+    "row": {
+      "current": "当前版本",
+      "offered": "可更新到",
+      "latestStable": "最新正式版",
+      "checkedAt": "上次检查",
+      "package": "包版本"
+    },
+    "status": {
+      "checking": "正在检查更新…",
+      "current": "已是最新版本",
+      "available": "有新版本可以安装",
+      "availableDetail": "更新后 Avibe 会重新启动，会话和设置都会保留。",
+      "notChecked": "还没有检查过更新",
+      "disabled": "这个版本不能自动更新",
+      "disabledDetail": "请下载并安装新版本。",
+      "checkFailed": "检查更新失败",
+      "checkFailedDetail": "请检查网络后重试。",
+      "requesting": "正在请求运行 Avibe 的电脑更新…",
+      "awaitingHost": "正在等运行 Avibe 的电脑上的人确认",
+      "awaitingHostDetail": "它的桌面应用版本较旧，安装前仍会先询问。",
+      "downloading": "正在下载更新…",
+      "downloadingProgress": "正在下载更新 {{progress}}%",
+      "installing": "正在安装更新…",
+      "restarting": "正在重新启动 Avibe…",
+      "restartingHost": "运行 Avibe 的电脑正在重新启动 Avibe，稍后会自动重新连接…",
+      "verifying": "正在确认新版本…",
+      "updated": "更新已安装",
+      "updatedTo": "已更新到 {{version}}"
+    },
+    "failure": {
+      "failed": {
+        "title": "更新没有完成",
+        "detail": "当前版本仍可正常使用，可以重试。"
+      },
+      "install": {
+        "title": "更新没有完成",
+        "detail": "当前版本仍可正常使用，可以重试。"
+      },
+      "requires-host": {
+        "title": "更新没有完成",
+        "detail": "需要有人在运行 Avibe 的电脑上授予权限或修复安装。"
+      },
+      "declined": {
+        "title": "运行 Avibe 的电脑拒绝了这次更新",
+        "detail": "当前版本仍可正常使用。"
+      },
+      "expired": {
+        "title": "更新请求已过期",
+        "detail": "运行 Avibe 的电脑没有及时响应，可以重试。"
+      },
+      "timeout": {
+        "title": "没能确认更新是否完成",
+        "detail": "请在运行 Avibe 的电脑上的桌面应用中查看。"
+      },
+      "unreachable": {
+        "title": "运行 Avibe 的电脑上的桌面应用没有响应",
+        "detail": "请确认运行 Avibe 的电脑上的桌面应用已打开，然后重试。"
+      },
+      "busy": {
+        "title": "另一个更新正在进行",
+        "detail": "请等它完成。"
+      },
+      "gone": {
+        "title": "这个版本已不能安装",
+        "detail": "刷新后查看现在可以安装的版本。"
+      },
+      "not-managed": {
+        "title": "运行 Avibe 的电脑已不再通过桌面应用更新",
+        "detail": "刷新后查看它的当前状态。"
+      },
+      "rejected": {
+        "title": "运行 Avibe 的电脑没有接受更新请求",
+        "detail": "可以重试。"
+      },
+      "setting": {
+        "title": "设置没有更改成功",
+        "detail": "运行 Avibe 的电脑没有接受这次更改，可以重试。"
+      }
+    },
+    "action": {
+      "update": "更新",
+      "retry": "重试",
+      "check": "检查更新",
+      "refreshBuild": "刷新构建信息"
+    },
+    "setting": {
+      "prereleases": "接收预览版",
+      "prereleasesHint": "同时推送 RC 预览版，抢先体验",
+      "autoUpdate": "自动更新",
+      "autoUpdateHint": "发现新版本后，在 Avibe 空闲时自动安装，不再询问"
+    },
+    "legacyHost": "运行 Avibe 的电脑上的桌面应用版本较旧，不能从这里检查更新或更改设置。请先把那里的桌面应用更新到最新版本。",
+    "trustedView": {
+      "title": "这台电脑上的 Avibe 桌面应用",
+      "body": "你正在使用另一台电脑上的 Avibe，这里更新的是这台电脑上的桌面应用。"
+    }
   }
 }

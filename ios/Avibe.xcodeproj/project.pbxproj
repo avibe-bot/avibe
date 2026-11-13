@@ -9,6 +9,14 @@
 /* Begin PBXBuildFile section */
 		100000000000000000000001 /* AvibeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* AvibeApp.swift */; };
 		100000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* AppModel.swift */; };
+		1000000000000000000000F0 /* DirectConnectListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F0 /* DirectConnectListener.swift */; };
+		1000000000000000000000F1 /* DirectPathController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F1 /* DirectPathController.swift */; };
+		1000000000000000000000F2 /* DirectTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F2 /* DirectTransport.swift */; };
+		1000000000000000000000F3 /* DirectConnectListenerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F3 /* DirectConnectListenerTests.swift */; };
+		1000000000000000000000F4 /* DirectPathControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F4 /* DirectPathControllerTests.swift */; };
+		1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F5 /* DirectPathAppTests.swift */; };
+		1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F6 /* DirectPublicBackend.swift */; };
+		1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F7 /* DirectPublicBackendTests.swift */; };
 		100000000000000000000003 /* NavigationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* NavigationPolicy.swift */; };
 		100000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* RootView.swift */; };
 		100000000000000000000005 /* WebOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
@@ -80,6 +88,14 @@
 /* Begin PBXFileReference section */
 		200000000000000000000001 /* AvibeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeApp.swift; sourceTree = "<group>"; };
 		200000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		2000000000000000000000F0 /* DirectConnectListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectConnectListener.swift; sourceTree = "<group>"; };
+		2000000000000000000000F1 /* DirectPathController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathController.swift; sourceTree = "<group>"; };
+		2000000000000000000000F2 /* DirectTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectTransport.swift; sourceTree = "<group>"; };
+		2000000000000000000000F3 /* DirectConnectListenerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectConnectListenerTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000F4 /* DirectPathControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathControllerTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000F5 /* DirectPathAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathAppTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000F6 /* DirectPublicBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackend.swift; sourceTree = "<group>"; };
+		2000000000000000000000F7 /* DirectPublicBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackendTests.swift; sourceTree = "<group>"; };
 		200000000000000000000003 /* NavigationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationPolicy.swift; sourceTree = "<group>"; };
 		200000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		200000000000000000000005 /* WebOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebOrigin.swift; sourceTree = "<group>"; };
@@ -175,6 +191,10 @@
 				200000000000000000000001 /* AvibeApp.swift */,
 				200000000000000000000002 /* AppModel.swift */,
 				200000000000000000000019 /* Avibe.entitlements */,
+				2000000000000000000000F0 /* DirectConnectListener.swift */,
+				2000000000000000000000F1 /* DirectPathController.swift */,
+				2000000000000000000000F6 /* DirectPublicBackend.swift */,
+				2000000000000000000000F2 /* DirectTransport.swift */,
 				2000000000000000000000A1 /* FormAccessoryBar.swift */,
 				200000000000000000000011 /* MobileAccount.swift */,
 				200000000000000000000012 /* MobileAuthTransport.swift */,
@@ -217,6 +237,10 @@
 		700000000000000000000004 /* AvibeTests */ = {
 			isa = PBXGroup;
 			children = (
+				2000000000000000000000F3 /* DirectConnectListenerTests.swift */,
+				2000000000000000000000F5 /* DirectPathAppTests.swift */,
+				2000000000000000000000F4 /* DirectPathControllerTests.swift */,
+				2000000000000000000000F7 /* DirectPublicBackendTests.swift */,
 				20000000000000000000000C /* NavigationPolicyTests.swift */,
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
@@ -447,6 +471,10 @@
 			files = (
 				100000000000000000000002 /* AppModel.swift in Sources */,
 				100000000000000000000001 /* AvibeApp.swift in Sources */,
+				1000000000000000000000F0 /* DirectConnectListener.swift in Sources */,
+				1000000000000000000000F1 /* DirectPathController.swift in Sources */,
+				1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */,
+				1000000000000000000000F2 /* DirectTransport.swift in Sources */,
 				1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */,
 				10000000000000000000000E /* MobileAccount.swift in Sources */,
 				10000000000000000000000F /* MobileAuthTransport.swift in Sources */,
@@ -477,6 +505,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1000000000000000000000F3 /* DirectConnectListenerTests.swift in Sources */,
+				1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */,
+				1000000000000000000000F4 /* DirectPathControllerTests.swift in Sources */,
+				1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */,
 				10000000000000000000000B /* NavigationPolicyTests.swift in Sources */,
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,

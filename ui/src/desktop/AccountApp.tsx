@@ -12,6 +12,8 @@ import logo from '../assets/logo.png';
 import mailMascot from '../assets/pet/vibey-message.png';
 import { isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type Instance } from './bridge';
 import { useAccountClient } from './useAccountClient';
+import { UpdatePanel } from '../components/update/UpdatePanel';
+import { modelFromDesktopState } from '../components/update/updatePanelModel';
 
 function Heading({ title, children }: { title: string; children?: ReactNode }) {
   const ref = useRef<HTMLHeadingElement>(null);
@@ -92,6 +94,23 @@ export function AccountApp() {
   let content: ReactNode;
   if (!state) {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
+  } else if (view === 'updates') {
+    // The same panel as everywhere else, acting on this computer's desktop app (ui/design: update/panel/trusted-view).
+    const update = state.desktop.update;
+    const model = modelFromDesktopState(update, { current: state.desktop.version });
+    const target = update.latest;
+    const accepts = (action: string) => update.hostActions?.includes(action) ?? false;
+    content = <div className="mx-auto w-full max-w-md pt-12"><Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading><div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><UpdatePanel
+      model={model}
+      actions={{
+        check: { run: () => void act({ type: 'update_check' }), disabled: busy || ['checking', 'downloading', 'installing'].includes(update.phase) },
+        ...(update.phase === 'available' && target ? { update: { run: () => void act({ type: 'update_install', target_version: target }), disabled: busy } } : {}),
+        ...(accepts('prereleases') ? { setPrereleases: (enabled: boolean) => void act({ type: 'update_set_prereleases', enabled }) } : {}),
+        ...(accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void act({ type: 'update_set_auto_update', enabled }) } : {}),
+        settingsBusy: busy,
+        close: () => leave('cancel'),
+      }}
+    /></div>{failure}</div>;
   } else if (view === 'sign-out') {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.signOut')}>{t('desktopClient.signOutBody')}</Heading>{failure}<div className="mt-7 flex gap-3"><Button variant="brand" onClick={() => leave('sign_out')}>{t('desktopClient.signOut')}</Button><Button variant="outline" onClick={() => leave('cancel')}>{t('common.cancel')}</Button></div></div>;
   } else if (view === 'setup-complete') {
