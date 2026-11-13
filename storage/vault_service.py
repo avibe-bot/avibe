@@ -4781,6 +4781,10 @@ def record_signing_use(
         selected = (vault_protected_hd.selected_account(row["name"], _row_sealed(row), meta, derivation)
                     if row.get("protection") == "protected" else vault_hd.selected_account(meta, derivation))
         session_id = requester.get("session_id") if isinstance(requester, dict) else None
+        if row.get("protection") == "protected":
+            # Requester metadata is descriptive, not a typed HD setting. Keep the
+            # original audit payload, but never poison the next account read.
+            session_id = (session_id.strip() or None) if isinstance(session_id, str) else None
         selected["last_signer"] = {"session_id": session_id, "at": now}
         values["public_meta"] = json.dumps(meta)
         delivery = {**(delivery or {}), "derivation": derivation, "signing_key": signing_binding}

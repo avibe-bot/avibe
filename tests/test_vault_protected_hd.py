@@ -366,6 +366,33 @@ def test_selected_protected_hd_pending_release_completion_and_original_provenanc
         complete(signing, request, signature)
 
 
+@pytest.mark.parametrize("entrypoint,session_id,expected", [
+    ("sign", 17, None), ("sign", False, None), ("sign", {}, None),
+    ("sign", ["not-a-session"], None), ("request", "", None),
+    ("request", [], None), ("request", None, None), ("sign", " \t ", None),
+    ("sign", " original-requester ", "original-requester"),
+    ("request", " original-requester ", "original-requester"),
+])
+def test_completion_provenance_cannot_poison_the_next_protected_hd_read(entrypoint, session_id, expected):
+    """A successful use must remain readable; good-string provenance missed this.
+
+    The two API entrypoints preserve different malformed requester values. Their
+    original audit provenance must survive, but cannot become invalid HD settings.
+    """
+    signing, signature, _ = signing_wallet()
+    signing["requester"] = {"session_id": session_id}
+    request = (api.vault_sign(signing) if entrypoint == "sign" else api.request_vault_sign(signing))["request"]
+    assert complete(signing, request, signature)["ok"]
+    secret, = api.get_vault_secrets()["secrets"]
+    assert secret["per_use_sign"] and [item["account"] for item in secret["accounts"]] == [0, 1]
+    assert secret["accounts"][1]["last_signer"]["session_id"] == expected
+    signed, = [item for item in rows(vault_audit) if item["event"] == "signed"]
+    assert json.loads(signed["requester"]) == request["requester"]
+    assert api.update_vault_hd_account(signing["name"], {"name": "Still usable"}, account=1)["secret"]["accounts"][1]["name"] == "Still usable"
+    assert api.vault_sign(signing)["request"]["status"] == "pending"
+    assert stored()["use_count"] == 1
+
+
 @pytest.mark.parametrize("chain", ["evm", "bitcoin", "solana"])
 def test_cli_protected_hd_uses_same_pending_contract_without_avault(chain, capfd):
     signing, _, key = signing_wallet(chain)
