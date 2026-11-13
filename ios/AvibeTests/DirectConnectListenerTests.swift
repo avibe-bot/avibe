@@ -965,6 +965,30 @@ final class DirectConnectListenerTests: XCTestCase {
         second.close()
     }
 
+    /// Every slot is held by relays the App keeps (as public relays are kept
+    /// through the background). The listener's own ownership check still
+    /// gets an answer, on the one spare connection; a CONNECT on it does not.
+    func testTheOwnershipCheckIsAnsweredWithEverySlotHeld() async throws {
+        let fixture = try await makeListener(limits: limits(maxConnections: 1))
+        let client = LoopbackClient(port: fixture.port)
+        _ = try await establish(client, fixture)
+        let nonce = await fixture.listener.ownershipNonce
+
+        let owned = await DirectConnectListener.ownershipCheck(
+            port: fixture.port.rawValue,
+            nonce: nonce,
+            within: 10
+        )
+        XCTAssertTrue(owned)
+
+        let extra = LoopbackClient(port: fixture.port)
+        try? await extra.send(canonicalHead)
+        let answer = try await extra.receiveUntilClosed()
+        XCTAssertEqual(answer, Data())
+        XCTAssertEqual(fixture.direct.opened.count, 1)
+        client.close()
+    }
+
     func testStoppingClosesARefusalThatIsStillWaitingForItsClient() async throws {
         // The client has up to a minute to read a refusal and close.
         let fixture = try await makeListener(limits: limits(headSeconds: 60))

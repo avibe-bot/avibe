@@ -378,6 +378,8 @@ actor DirectConnectListener {
     private var isStopped = false
     /// The close of the previous listening socket, until it has finished.
     private var closing: Task<Void, Never>?
+    /// The one connection beyond the limit, kept for the ownership check.
+    private var spare: Task<Void, Never>?
     /// The highest path generation and the newest scope retired so far.
     private var retiredGeneration = Int.min
     private var retiredScope = DirectPlanScope(selection: .min, accountEpoch: .min)
@@ -573,6 +575,8 @@ actor DirectConnectListener {
             relay.task.cancel()
         }
         relays.removeAll()
+        spare?.cancel()
+        spare = nil
     }
 
     /// Closes the committed relays on `backend` (`nil`: both) whose plan was
@@ -652,9 +656,23 @@ actor DirectConnectListener {
             return
         }
         guard relays.count < limits.maxConnections else {
-            // Closed at once, with no answer and no task of its own, so the
-            // limit bounds every connection this listener holds.
-            connection.cancel()
+            // One spare connection beyond the limit is for the listener's
+            // own ownership check, so relays the App keeps cannot starve a
+            // re-bind's check. It reads a head, answers only a check with
+            // this listener's nonce, and closes; anything else, and any
+            // connection while the spare is in use, is closed with no
+            // answer. The limit plus one bounds what this listener holds.
+            guard spare == nil else {
+                connection.cancel()
+                return
+            }
+            let limits = limits
+            let nonce = ownershipNonce
+            spare = Task { [weak self] in
+                await Self.answerOwnershipCheckOnly(connection, nonce: nonce, limits: limits)
+                connection.cancel()
+                await self?.spareDidEnd()
+            }
             return
         }
         let id = UUID()
@@ -686,6 +704,10 @@ actor DirectConnectListener {
     /// A relay whose stream failed before any event closed it is not counted
     /// by a later event: that event did not close it, and the page already
     /// saw that connection fail.
+    private func spareDidEnd() {
+        spare = nil
+    }
+
     private func relayDidEnd(_ id: UUID) {
         relays.removeValue(forKey: id)
     }
@@ -732,6 +754,25 @@ actor DirectConnectListener {
         /// A candidate was ready but its plan was no longer current.
         case fenced
         case failed(status: Int)
+    }
+
+    /// The spare connection: answers this listener's ownership check and
+    /// nothing else, within the head bound.
+    private static func answerOwnershipCheckOnly(
+        _ connection: NWConnection,
+        nonce: String,
+        limits: DirectConnectLimits
+    ) async {
+        let request = try? await directDeadline(limits.headSeconds) {
+            try await readRequest(from: connection, allowedHosts: [], limits: limits)
+        }
+        guard request == .ownershipCheck(nonce: nonce) else {
+            return
+        }
+        _ = try? await directDeadline(0.25) {
+            try await connection.sendAll(DirectConnectWire.ownershipAnswer(nonce: nonce))
+            try await connection.finishSending()
+        }
     }
 
     private static func serve(
