@@ -555,6 +555,10 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         "cache-dependency-path": "ui/package-lock.json",
     }
 
+    prepare_index, prepare_step = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Prepare published iroh App artifact"
+    )
     bundle_index, bundle_step = next(
         (index, step) for index, step in enumerate(steps)
         if step.get("name") == "Build bundled mobile UI"
@@ -567,9 +571,12 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         (index, step) for index, step in enumerate(steps)
         if step.get("name") == "Generate the App's license notices"
     )
-    assert node_index < bundle_index < generate_index < verify_index
+    assert prepare_index < node_index < bundle_index < generate_index < verify_index
+    assert prepare_step["run"] == (
+        "python3 ios/scripts/prepare_iroh_app.py stage --staging ios/Avibe/IrohLib"
+    )
     assert generate_step["run"] == (
-        "python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp"
+        "python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp --support-zip ios/Avibe/IrohLib/IrohLib-support.zip"
     )
     assert bundle_step["working-directory"] == "ui"
     assert bundle_step["run"].splitlines() == ["npm ci", "npm run build:mobile"]
@@ -583,6 +590,12 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     ]
     assert len(app_builds) == 2
     assert all(verify_index < index for index in app_builds)
+    simulator_build = steps[app_builds[0]]["run"]
+    assert '-derivedDataPath "$RUNNER_TEMP/AvibeDerivedData"' in simulator_build
+    linked_check = next(step for step in steps if step.get("name") == "Verify linked iroh binary in the simulator product")
+    assert linked_check["run"].splitlines()[-1].endswith(
+        '"$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe"'
+    )
 
     test_step, = [
         step for step in steps

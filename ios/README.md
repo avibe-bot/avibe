@@ -929,8 +929,21 @@ project:
 cd ui
 npm run build:mobile
 cd ..
-python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp
+python3 ios/scripts/prepare_iroh_app.py stage --staging ios/Avibe/IrohLib
+python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp --support-zip ios/Avibe/IrohLib/IrohLib-support.zip
 ```
+
+The generated `ios/Avibe/IrohLib` directory is ignored build input. The
+consumer script accepts only the `published` pin in
+`packaging/iroh-apple/release.json`, verifies the binary, generated wrapper,
+support archive, feature graphs and provenance as one release, and stages the
+iOS-only `Iroh.xcframework` plus the unmodified `IrohLib.swift` wrapper. The
+Xcode project compiles that wrapper in its own `IrohLib` Swift module over the
+`Iroh` C module; it links the module into the App and tests, never the
+notification service. The linked App is still dormant: no endpoint,
+transport registration, listener, route write or direct capability is created.
+Xcode rejects missing or stale staging and scans the final App binary for the
+private Apple datapath symbols.
 
 The generated `ios/Avibe/Resources/MobileApp` directory is ignored build
 output. Xcode verifies that `mobile.html`, the asset directory and
@@ -949,10 +962,11 @@ fails the build. The native notices come only from the published
 generator checks the asset's URL, size and SHA-256 against the pin, the pin's
 policy and collector hashes against this checkout, and every notice, MPL-2.0
 source offer, binding statement and Rust distribution text in the archive,
-which it reads in memory and never extracts. While the pin is `pending` nothing
-is downloaded and the page lists the bundled JavaScript only. Texts are grouped
-only when identical. Source links open in Safari through the external URL
-allowlist, which admits exactly the source URLs in the bundled data.
+which it reads in memory and never extracts. A pending pin is rejected rather
+than consumed; the current published pin supplies the native notices. Texts
+are grouped only when identical. Source links open in Safari through the
+external URL allowlist, which admits exactly the source URLs in the bundled
+data.
 
 Then open `ios/Avibe.xcodeproj` in Xcode, select an iPhone simulator, and run
 the shared `Avibe` scheme. The command-line build does not need an Apple
