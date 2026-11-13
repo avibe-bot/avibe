@@ -87,10 +87,14 @@ def _fetch(args: Namespace, engine) -> dict[str, Any]:
         if args.session_id:
             delivery["session_id"] = args.session_id
         approval_wait = cli._vault_approval_wait_seconds(args, help_command=HELP)
-        grant, one_shot_grant, sealed = cli._resolve_single_vault_delivery(
+        grant, one_shot_grant, captured = cli._resolve_single_vault_delivery(
             engine, name, requester=requester, delivery=delivery, purpose="fetch",
         )
-        identities = cli._capture_vault_delivery_identities(engine, [name], [one_shot_grant] if one_shot_grant else [])
+        request = cli._build_vault_fetch_request(
+            engine, name=name, url=args.url, host=host, method=method,
+            headers=headers, body=args.body, help_command=HELP, record_meta=captured.metadata,
+        )
+        sealed = captured.envelope
         handoff_started = True
         if grant is not None:
             response = api.avault_agent_deliver_fetch(
@@ -105,7 +109,7 @@ def _fetch(args: Namespace, engine) -> dict[str, Any]:
         try:
             with engine.begin() as conn:
                 vault_service.record_proxy_use(
-                    conn, identities[0], requester={"source": "cli", "pid": args.caller_pid},
+                    conn, captured.identity, requester={"source": "cli", "pid": args.caller_pid},
                     delivery={"host": host, "method": method, "status": status},
                 )
         except Exception:
