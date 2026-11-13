@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   useApi,
@@ -25,7 +25,8 @@ import {
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
-import { UpdatePanel, type UpdatePanelActions } from './update/UpdatePanel';
+import type { UpdatePanelActions } from './update/UpdatePanel';
+import { lazyPage } from '../lib/lazyPage';
 import {
   modelFromDesktopRelay,
   modelFromDesktopState,
@@ -34,6 +35,10 @@ import {
   type UpdatePanelModel,
 } from './update/updatePanelModel';
 import { normalizeVersion } from './update/versions';
+
+
+// Its own chunk: the first screen draws only the badge (scripts/check-first-load-budget.mjs).
+const UpdatePanel = lazyPage(() => import('./update/UpdatePanel').then((module) => module.UpdatePanel));
 
 // Dev / regression builds carry long versions like
 // `3.0.1.dev33+g1df6865a1.d20260608`. Collapse to the release core
@@ -87,6 +92,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [savingPrereleases, setSavingPrereleases] = React.useState(false);
   const popupRef = React.useRef<HTMLDivElement>(null);
   const popupId = React.useId();
+
+  // The panel's chunk is not on the first screen; fetch it once the badge is up.
+  React.useEffect(() => {
+    void UpdatePanel.preload();
+  }, []);
 
   React.useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -669,6 +679,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           <button
             type="button"
             onClick={handleBadgeClick}
+            // Fetch the panel's chunk as the pointer or focus arrives, before the click opens it.
+            onPointerEnter={() => void UpdatePanel.preload()}
+            onFocus={() => void UpdatePanel.preload()}
             className={cn(
               badgeVariants({ variant: hasUpdate || hasVersionSkew ? 'warning' : 'secondary' }),
               interactiveBadgeTriggerClassName,
@@ -705,7 +718,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 : mobileHeaderPopoverClassName,
             )}
           >
-            <UpdatePanel
+            <Suspense fallback={null}><UpdatePanel
               model={panelModel}
               actions={panelActions}
               title={t(isSourceBuild ? 'dashboard.buildAndVersion' : 'dashboard.versionAndUpdate')}
@@ -734,7 +747,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   <p className="whitespace-pre-wrap break-words text-xs text-muted">{upgradeResult.activation_notice}</p>
                 )}
               </>}
-            />
+            /></Suspense>
           </Popup>
         )}
       </div>

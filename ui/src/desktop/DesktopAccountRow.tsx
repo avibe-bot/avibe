@@ -1,12 +1,16 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Download, Globe, Laptop, LogOut, RefreshCw, UserRound, WifiOff } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { DESKTOP_OPEN_UPDATES_EVENT, desktopUpdateShellActions } from '../lib/desktopShell';
-import { UpdatePanel } from '../components/update/UpdatePanel';
+import { lazyPage } from '../lib/lazyPage';
 import { modelFromDesktopState } from '../components/update/updatePanelModel';
 import { useDesktopClientProjection, usePresentDesktopClient } from './useDesktopClient';
+
+
+// Its own chunk: the first screen draws only the badge (scripts/check-first-load-budget.mjs).
+const UpdatePanel = lazyPage(() => import('../components/update/UpdatePanel').then((module) => module.UpdatePanel));
 
 /** Nonsecret footer: account actions present native-owned UI. This computer's update acts over the
  *  desktop app's IPC only on a page it serves; otherwise it opens the trusted update view. */
@@ -16,6 +20,10 @@ export function DesktopAccountRow() {
   const present = usePresentDesktopClient();
   const [panel, setPanel] = useState<'account' | 'update' | null>(null);
   const servedLocally = state?.connection.committed.kind === 'local';
+  // The panel's chunk is not on the first screen; fetch it once the footer is up.
+  useEffect(() => {
+    void UpdatePanel.preload();
+  }, []);
   useEffect(() => {
     const open = (event: Event) => {
       event.preventDefault();
@@ -70,13 +78,13 @@ export function DesktopAccountRow() {
     </Popover>
     <Popover open={panel === 'update'} onOpenChange={openUpdates}>
       {/* Anchor to the entire row: the version stays right while the popover starts at x=16. */}
-      <PopoverTrigger asChild><Button data-version-trigger variant="ghost" size="sm" className="h-8 shrink-0 gap-1 px-1.5 text-2xs text-muted" aria-label={t('desktopClient.localVersion', { version: state.desktop.version })}>
+      <PopoverTrigger asChild><Button data-version-trigger onPointerEnter={() => void UpdatePanel.preload()} onFocus={() => void UpdatePanel.preload()} variant="ghost" size="sm" className="h-8 shrink-0 gap-1 px-1.5 text-2xs text-muted" aria-label={t('desktopClient.localVersion', { version: state.desktop.version })}>
         {update ? <><Download className="size-3 text-gold-ink" /><span className="size-1.5 rounded-full bg-gold" /></> : state.desktop.version}
       </Button></PopoverTrigger>
       <PopoverAnchor className="pointer-events-none absolute inset-0" />
       {/* The same panel as the version popover (ui/design: update/panel), acting on this computer's desktop app. */}
       <PopoverContent data-update-menu side="top" align="start" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0">
-        <UpdatePanel
+        <Suspense fallback={null}><UpdatePanel
           model={modelFromDesktopState(state.desktop.update, { current: state.desktop.version })}
           actions={{
             check: { run: () => void updater?.check(), disabled: !updater || ['checking', 'downloading', 'installing'].includes(state.desktop.update.phase) },
@@ -85,7 +93,7 @@ export function DesktopAccountRow() {
             ...(updater && accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void updater.setAutoUpdate(enabled) } : {}),
             close: () => setPanel(null),
           }}
-        />
+        /></Suspense>
       </PopoverContent>
     </Popover>
   </div>;

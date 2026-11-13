@@ -147,7 +147,8 @@ export function UpdatePanel({ model, actions, extra, title }: {
   // A desktop app too old to take these from here gets one line; its container offers only what it accepts.
   const legacy = Boolean(model.legacyHost);
   const offered = model.latest;
-  const checkLabel = t('update.action.check');
+  // A source build has no release to check; the button reads its build again.
+  const checkLabel = t(status ? 'update.action.check' : 'update.action.refreshBuild');
   const checking = status?.kind === 'checking';
 
   // One lead action per state: install what is offered, or check again after a failure.
@@ -201,7 +202,8 @@ export function UpdatePanel({ model, actions, extra, title }: {
 
       <div className="space-y-3 p-4">
         {model.current && (
-          <Row label={t('update.row.current')}>
+          // A source build has no release, only the package version its revision was built as.
+          <Row label={t(status ? 'update.row.current' : 'update.row.package')}>
             <span className="break-all font-mono font-medium text-foreground">{model.current}</span>
           </Row>
         )}

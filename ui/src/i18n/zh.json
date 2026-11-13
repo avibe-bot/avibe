@@ -7469,7 +7469,8 @@
       "current": "当前版本",
       "offered": "可更新到",
       "latestStable": "最新正式版",
-      "checkedAt": "上次检查"
+      "checkedAt": "上次检查",
+      "package": "包版本"
     },
     "status": {
       "checking": "正在检查更新…",
@@ -7546,7 +7547,8 @@
     "action": {
       "update": "更新",
       "retry": "重试",
-      "check": "检查更新"
+      "check": "检查更新",
+      "refreshBuild": "刷新构建信息"
     },
     "setting": {
       "prereleases": "接收预览版",

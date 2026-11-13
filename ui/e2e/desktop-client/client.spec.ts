@@ -45,16 +45,11 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       expect(measurements.arrowGap).toBeLessThanOrEqual(6);
       expect(measurements.versionRight).toBe(measurements.footerRight);
       await expect(footer).not.toContainText('max@example.test');
-      await page.locator('[data-version-trigger]').click();
+      // Another computer's page never acts on this computer's updater: the version opens the
+      // trusted update view (ui/design: update/panel/trusted-view), not a popover in this page.
       const popup = page.locator('[data-update-menu]');
-      await expect(popup).toBeVisible();
-      await expect.poll(async () => (await popup.boundingBox())?.x).toBe(16);
-      const box = await popup.boundingBox();
-      expect(box!.x).toBe(16); expect(box!.y).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
-      await expect(popup).toContainText('3.2.6rc9'); await expect(popup).not.toContainText('2.4.0');
-      await page.screenshot({ animations: 'disabled', path: info.outputPath('update.png') });
-      await page.keyboard.press('Escape');
-      await expect(page.locator('[data-version-trigger]')).toBeFocused();
+      await page.locator('[data-version-trigger]').click();
+      await expect(popup).toHaveCount(0);
       await page.locator('[data-account-trigger]').click();
       await expect(page.locator('[data-instance-menu]')).toContainText('max@example.test');
       await expect(page.locator('[data-instance-menu]')).toContainText(lang === 'en' ? 'Phase 1' : '第一阶段');
@@ -63,6 +58,27 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.screenshot({ animations: 'disabled', path: info.outputPath('account-menu.png') });
       await page.keyboard.press('Escape');
       await expect(page.locator('[data-account-trigger]')).toBeFocused();
+      expect(requests).toEqual([]); expect(denied).toEqual([]);
+    });
+    test(`AUTH-SETUP-178 local update panel ${viewport.width} ${lang} ${theme}`, async ({ page }, info) => {
+      await page.setViewportSize(viewport);
+      const denied = await serveProduct(page, lang);
+      const state = clientState(); signIn(state);
+      const requests = await installBridge(page, state, { projection: true });
+      await language(page, lang);
+      await page.goto(`/?theme=${theme}`);
+      await page.locator('[data-version-trigger]').click();
+      // The same panel as the version popover (ui/design: update/panel), for this computer's desktop app.
+      const popup = page.locator('[data-update-menu]');
+      await expect(popup.locator('[data-update-panel]')).toBeVisible();
+      await expect.poll(async () => (await popup.boundingBox())?.x).toBe(16);
+      const box = await popup.boundingBox();
+      expect(box!.x).toBe(16); expect(box!.y).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
+      await expect(popup).toContainText('3.2.6rc9'); await expect(popup).toContainText('3.2.7');
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('update.png') });
+      await page.keyboard.press('Escape');
+      await expect(page.locator('[data-version-trigger]')).toBeFocused();
       expect(requests).toEqual([]); expect(denied).toEqual([]);
     });
     test(`AUTH-SETUP-177 bundled login ${viewport.width} ${lang} ${theme}`, async ({ page }, info) => {

@@ -113,7 +113,7 @@ const designFrames = frames([...states.flatMap((state): FrameSpec[] => [
     title: `更新面板 · ${state.title} · 桌面应用 / 本机 Web / 远程 Web`,
     width: 1136,
     height: 720,
-    status: 'proposed',
+    status: 'approved',
     render: () => <Surfaces state={state} />,
   },
   {
@@ -121,7 +121,7 @@ const designFrames = frames([...states.flatMap((state): FrameSpec[] => [
     title: `更新面板 · ${state.title} · 手机（远程 Web）`,
     width: IPHONE_17_PRO.width,
     height: 800,
-    status: 'proposed',
+    status: 'approved',
     render: () => <Phone state={state} />,
   },
 ]), {
@@ -129,7 +129,7 @@ const designFrames = frames([...states.flatMap((state): FrameSpec[] => [
   title: '更新面板 · 桌面应用连接到另一台电脑时：本机更新在受信界面里打开，同一块面板',
   width: 1136,
   height: 720,
-  status: 'proposed',
+  status: 'approved',
   render: () => <TrustedView desktop={native({ phase: 'available', latest: OFFERED })} />,
 }]);
 

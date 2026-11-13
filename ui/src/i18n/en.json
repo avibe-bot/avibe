@@ -7469,7 +7469,8 @@
       "current": "Current version",
       "offered": "Update to",
       "latestStable": "Latest stable",
-      "checkedAt": "Last checked"
+      "checkedAt": "Last checked",
+      "package": "Package version"
     },
     "status": {
       "checking": "Checking for updates…",
@@ -7546,7 +7547,8 @@
     "action": {
       "update": "Update",
       "retry": "Try again",
-      "check": "Check for updates"
+      "check": "Check for updates",
+      "refreshBuild": "Refresh build information"
     },
     "setting": {
       "prereleases": "Get pre-release updates",
