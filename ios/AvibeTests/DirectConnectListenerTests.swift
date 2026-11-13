@@ -1190,7 +1190,6 @@ final class DirectConnectListenerTests: XCTestCase {
             let failsServing = makeLifecycle(in: "serving", published: published)
             XCTAssertTrue(failsServing.socketFailed(1))
             XCTAssertEqual(failsServing.phase, .failed(generation: 1))
-            XCTAssertEqual(failsServing.hasPublished, published)
 
             // Terminal: no bind, no confirmation, no admission, no
             // publication, no grant, no close, and a stop leaves it failed.
@@ -1209,7 +1208,6 @@ final class DirectConnectListenerTests: XCTestCase {
                 } else {
                     XCTFail("A failed listener left the failed phase: \(failed.phase)")
                 }
-                XCTAssertEqual(failed.hasPublished, published)
             }
         }
     }
@@ -1284,10 +1282,12 @@ final class DirectConnectListenerTests: XCTestCase {
         let g = lifecycle.beginBind()
         XCTAssertEqual(g, 2)
         XCTAssertEqual(lifecycle.phase, .binding(generation: 2, rebind: true))
-        XCTAssertTrue(lifecycle.hasPublished)
+        // The publication is kept: it is never retired.
+        XCTAssertEqual(lifecycle.retire(), .published)
+        XCTAssertEqual(lifecycle.phase, .binding(generation: 2, rebind: true))
         lifecycle.stop()
         XCTAssertNil(lifecycle.beginBind())
-        XCTAssertTrue(lifecycle.hasPublished)
+        XCTAssertEqual(lifecycle.retire(), .published)
     }
 
     // MARK: Retirement and an unconfirmed bind
@@ -1538,7 +1538,6 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(lifecycle.phase, .binding(generation: third, rebind: true))
         clock.advance(by: .milliseconds(1))
         XCTAssertEqual(lifecycle.phase, .failed(generation: third))
-        XCTAssertTrue(lifecycle.hasPublished)
     }
 
     /// Leaving the foreground ends the episode: nothing fails while the App

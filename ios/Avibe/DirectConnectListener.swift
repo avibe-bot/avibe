@@ -2095,12 +2095,6 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         locked { current }
     }
 
-    /// Whether a route was ever published to this listener. Never resets,
-    /// whatever happens to the account's data store.
-    var hasPublished: Bool {
-        locked { published }
-    }
-
     /// The generation of a new bind, or `nil` when no bind may start.
     func beginBind() -> Int? {
         locked {
