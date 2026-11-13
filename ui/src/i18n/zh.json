@@ -6520,7 +6520,7 @@
     "askOff": {
       "turnedOff": "已用 Passkey 关闭，立即生效。",
       "offHintEdit": "关闭需要用 Passkey 确认，确认后立即生效，不用点保存。",
-      "legacyRegistration": "你的 Passkey 是在较早的版本里设置的，这台 Avibe 没有存下确认关闭所需的资料。开关会保持打开，之后的版本会提供修复。",
+      "legacyRegistration": "你的 Passkey 是在很早的预览版里设置的，这台 Avibe 没有存下确认关闭所需的资料。开关会保持打开。",
       "waiting": "等待 Passkey 确认…",
       "popupBlocked": "浏览器拦截了确认窗口。请允许弹出窗口，再关一次。",
       "setupRequired": "关闭需要 Passkey。添加一个保护档密钥时会设置 Passkey，之后就能在这里关闭。",
