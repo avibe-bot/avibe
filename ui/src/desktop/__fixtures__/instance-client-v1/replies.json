@@ -1,0 +1,354 @@
+{
+  "success": {
+    "version": 1,
+    "request_id": "get-state",
+    "ok": true,
+    "state": {
+      "version": 1,
+      "revision": 1,
+      "generation": 1,
+      "account": {
+        "status": "signed_in",
+        "identity": {
+          "id": "account-xiaoming",
+          "email": "xiaoming@example.test"
+        },
+        "email": "xiaoming@example.test",
+        "gate": null,
+        "methods": []
+      },
+      "connection": {
+        "status": "local",
+        "committed": {
+          "kind": "local",
+          "name": "小明的 Mac",
+          "instance_id": null
+        },
+        "pending": null
+      },
+      "enrollment": {
+        "status": "unknown",
+        "instance_id": null,
+        "error_code": null
+      },
+      "catalog": {
+        "status": "ready",
+        "instances": [
+          {
+            "id": "studio-1",
+            "name": "工作室 Studio",
+            "host": "studio.avibe.bot",
+            "url": "https://studio.avibe.bot",
+            "relationship": "shared",
+            "owner_email": "owner@example.test",
+            "available": true
+          }
+        ]
+      },
+      "local": {
+        "name": "小明的 Mac",
+        "remote_access": "off"
+      },
+      "desktop": {
+        "version": "0.1.0",
+        "update": {
+          "phase": "idle",
+          "latest": null,
+          "channel": "stable",
+          "prereleases": false,
+          "skippedVersion": null,
+          "interactive": false,
+          "remoteInstallAllowed": false,
+          "remoteRequest": null
+        }
+      },
+      "consent": null,
+      "remote_auxiliary": "local"
+    }
+  },
+  "stale": {
+    "version": 1,
+    "request_id": "stale",
+    "ok": false,
+    "state": {
+      "version": 1,
+      "revision": 1,
+      "generation": 1,
+      "account": {
+        "status": "signed_in",
+        "identity": {
+          "id": "account-xiaoming",
+          "email": "xiaoming@example.test"
+        },
+        "email": "xiaoming@example.test",
+        "gate": null,
+        "methods": []
+      },
+      "connection": {
+        "status": "local",
+        "committed": {
+          "kind": "local",
+          "name": "小明的 Mac",
+          "instance_id": null
+        },
+        "pending": null
+      },
+      "enrollment": {
+        "status": "unknown",
+        "instance_id": null,
+        "error_code": null
+      },
+      "catalog": {
+        "status": "ready",
+        "instances": [
+          {
+            "id": "studio-1",
+            "name": "工作室 Studio",
+            "host": "studio.avibe.bot",
+            "url": "https://studio.avibe.bot",
+            "relationship": "shared",
+            "owner_email": "owner@example.test",
+            "available": true
+          }
+        ]
+      },
+      "local": {
+        "name": "小明的 Mac",
+        "remote_access": "off"
+      },
+      "desktop": {
+        "version": "0.1.0",
+        "update": {
+          "phase": "idle",
+          "latest": null,
+          "channel": "stable",
+          "prereleases": false,
+          "skippedVersion": null,
+          "interactive": false,
+          "remoteInstallAllowed": false,
+          "remoteRequest": null
+        }
+      },
+      "consent": null,
+      "remote_auxiliary": "local"
+    },
+    "error": {
+      "code": "stale_generation"
+    }
+  },
+  "pending": {
+    "version": 1,
+    "request_id": "retry",
+    "ok": false,
+    "state": {
+      "version": 1,
+      "revision": 1,
+      "generation": 1,
+      "account": {
+        "status": "signed_in",
+        "identity": {
+          "id": "account-xiaoming",
+          "email": "xiaoming@example.test"
+        },
+        "email": "xiaoming@example.test",
+        "gate": null,
+        "methods": []
+      },
+      "connection": {
+        "status": "local",
+        "committed": {
+          "kind": "local",
+          "name": "小明的 Mac",
+          "instance_id": null
+        },
+        "pending": null
+      },
+      "enrollment": {
+        "status": "unknown",
+        "instance_id": null,
+        "error_code": null
+      },
+      "catalog": {
+        "status": "ready",
+        "instances": [
+          {
+            "id": "studio-1",
+            "name": "工作室 Studio",
+            "host": "studio.avibe.bot",
+            "url": "https://studio.avibe.bot",
+            "relationship": "shared",
+            "owner_email": "owner@example.test",
+            "available": true
+          }
+        ]
+      },
+      "local": {
+        "name": "小明的 Mac",
+        "remote_access": "off"
+      },
+      "desktop": {
+        "version": "0.1.0",
+        "update": {
+          "phase": "idle",
+          "latest": null,
+          "channel": "stable",
+          "prereleases": false,
+          "skippedVersion": null,
+          "interactive": false,
+          "remoteInstallAllowed": false,
+          "remoteRequest": null
+        }
+      },
+      "consent": null,
+      "remote_auxiliary": "local"
+    },
+    "error": {
+      "code": "pairing_redeem_pending",
+      "retry_after_seconds": 1
+    }
+  },
+  "totp_enrollment": {
+    "version": 1,
+    "request_id": "totp-start",
+    "ok": true,
+    "state": {
+      "version": 1,
+      "revision": 1,
+      "generation": 1,
+      "account": {
+        "status": "second_factor_required",
+        "identity": null,
+        "email": "xiaoming@example.test",
+        "gate": "enroll",
+        "methods": [
+          "totp",
+          "passkey"
+        ]
+      },
+      "connection": {
+        "status": "local",
+        "committed": {
+          "kind": "local",
+          "name": "小明的 Mac",
+          "instance_id": null
+        },
+        "pending": null
+      },
+      "enrollment": {
+        "status": "unknown",
+        "instance_id": null,
+        "error_code": null
+      },
+      "catalog": {
+        "status": "idle",
+        "instances": []
+      },
+      "local": {
+        "name": "小明的 Mac",
+        "remote_access": "off"
+      },
+      "desktop": {
+        "version": "0.1.0",
+        "update": {
+          "phase": "idle",
+          "latest": null,
+          "channel": "stable",
+          "prereleases": false,
+          "skippedVersion": null,
+          "interactive": false,
+          "remoteInstallAllowed": false,
+          "remoteRequest": null
+        }
+      },
+      "consent": null,
+      "remote_auxiliary": "local"
+    },
+    "result": {
+      "type": "totp_enrollment",
+      "uri": "otpauth://totp/Avibe:fixture?secret=JBSWY3DPEHPK3PXP&issuer=Avibe",
+      "qrSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+      "secret": "JBSWY3DPEHPK3PXP"
+    }
+  },
+  "totp_enrolled": {
+    "version": 1,
+    "request_id": "totp-finish",
+    "ok": true,
+    "state": {
+      "version": 1,
+      "revision": 1,
+      "generation": 1,
+      "account": {
+        "status": "signed_in",
+        "identity": {
+          "id": "account-xiaoming",
+          "email": "xiaoming@example.test"
+        },
+        "email": "xiaoming@example.test",
+        "gate": null,
+        "methods": []
+      },
+      "connection": {
+        "status": "local",
+        "committed": {
+          "kind": "local",
+          "name": "小明的 Mac",
+          "instance_id": null
+        },
+        "pending": null
+      },
+      "enrollment": {
+        "status": "unknown",
+        "instance_id": null,
+        "error_code": null
+      },
+      "catalog": {
+        "status": "ready",
+        "instances": [
+          {
+            "id": "studio-1",
+            "name": "工作室 Studio",
+            "host": "studio.avibe.bot",
+            "url": "https://studio.avibe.bot",
+            "relationship": "shared",
+            "owner_email": "owner@example.test",
+            "available": true
+          }
+        ]
+      },
+      "local": {
+        "name": "小明的 Mac",
+        "remote_access": "off"
+      },
+      "desktop": {
+        "version": "0.1.0",
+        "update": {
+          "phase": "idle",
+          "latest": null,
+          "channel": "stable",
+          "prereleases": false,
+          "skippedVersion": null,
+          "interactive": false,
+          "remoteInstallAllowed": false,
+          "remoteRequest": null
+        }
+      },
+      "consent": null,
+      "remote_auxiliary": "local"
+    },
+    "result": {
+      "type": "totp_enrolled",
+      "method": {
+        "id": "method-fixture",
+        "kind": "totp",
+        "name": "Authenticator",
+        "createdAt": "2026-11-13T00:00:00Z",
+        "lastUsedAt": null
+      },
+      "recoveryCodes": [
+        "fixture-recovery-1",
+        "fixture-recovery-2"
+      ]
+    }
+  }
+}

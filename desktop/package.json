@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && npm --prefix ../ui run build:desktop-account",
     "test:i18n": "node scripts/verify-i18n.mjs",
     "preview": "vite preview",
     "tauri": "tauri",

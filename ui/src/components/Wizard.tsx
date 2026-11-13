@@ -1,3 +1,4 @@
+import { hasDesktopClient, isClientProjection, presentDesktopClient } from '../desktop/bridge';
 import { desktopDragRegion } from '../lib/desktopShell';
 import { DesktopDragRegion } from './DesktopDragRegion';
 import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties, type ReactElement, type Ref } from 'react';
@@ -565,7 +566,12 @@ export function Wizard() {
     }
     // Confirmed persisted, so the journey is over whatever else changed meanwhile:
     // the lease exists to stop the next write, not to take back a finished setup.
-    navigate('/');
+    const desktop = window.__AVIBE_DESKTOP_CLIENT_STATE__;
+    // Completion is already durable. Cloud/back/skip must never re-enter initialization.
+    navigate('/', { replace: true });
+    if (hasDesktopClient() && isClientProjection(desktop) && desktop.connection.committed.kind === 'local') {
+      presentDesktopClient('setup-complete');
+    }
   };
   /**
    * 「稍后再配」: finish setup with no provider. Someone without a subscription or key

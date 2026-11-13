@@ -26,7 +26,7 @@ import {
   useStandaloneSettingsMenu,
 } from '../lib/settingsMenuPlacement';
 import { SETTINGS_LAST_SECTION_STORAGE_KEY } from '../lib/settingsSectionMemory';
-import { AppShell } from './AppShell';
+import { AppShell, AppShellFooter } from './AppShell';
 
 const viewport = vi.hoisted(() => {
   const state = { isDesktop: false };
@@ -1516,4 +1516,13 @@ describe('AppShell route prefetch', () => {
     await act(async () => { vi.advanceTimersByTime(60_000); });
     expect(second).not.toHaveBeenCalled();
   });
+});
+
+it('uses the real footer slot without replacing the Apps/Settings tools', async () => {
+  viewport.isDesktop = true;
+  render(<MemoryRouter><Routes><Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}><span>Injected account row</span></AppShellFooter>} />}><Route path="*" element={<div />} /></Route></Routes></MemoryRouter>);
+  expect(await screen.findByText('Injected account row')).toBeTruthy();
+  const footer = document.querySelector('[data-sidebar-footer]')!;
+  expect(footer.querySelector('[data-settings-toggle]')).toBeTruthy();
+  expect(footer.firstElementChild?.className).toContain('h-[39px]');
 });

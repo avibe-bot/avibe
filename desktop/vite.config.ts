@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite'
+import accountConfig from '../ui/vite.desktop.config'
 
 import en from '../ui/src/i18n/en.json'
 import zh from '../ui/src/i18n/zh.json'
@@ -10,6 +11,9 @@ import zh from '../ui/src/i18n/zh.json'
 const DEV_SERVER_PORT = 1420
 
 export default defineConfig({
+  // The dev account entry shares the same aliases and theme compiler as its bundle.
+  css: accountConfig.css,
+  resolve: accountConfig.resolve,
   // The bootstrap must render while the Runtime is down. Inject only its small
   // section from the central catalogs instead of bundling the whole Workbench
   // translation payload or fetching it from loopback.
