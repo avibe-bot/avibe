@@ -693,6 +693,15 @@ describe('the edit dialog saves its fields with its one Save', () => {
     expect(onSaved).not.toHaveBeenCalled();
   });
 
+  it('still saves metadata when the field metadata is corrupt and no field was changed', async () => {
+    const onSaved = vi.fn();
+    render(form(<VaultSecretForm editSecret={{ ...login, fields_state: 'corrupt' } as VaultSecret} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={onSaved} />));
+    await waitFor(() => expect((screen.getByRole('button', { name: en.vaults.dialog.save }) as HTMLButtonElement).disabled).toBe(false));
+    save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('LOGIN'));
+    expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
+  });
+
   it('cannot be saved while a field change is invalid, and Cancel writes nothing', async () => {
     const onCancel = vi.fn();
     render(form(<VaultSecretForm editSecret={login} onCancel={onCancel} onCreated={vi.fn()} onSaved={vi.fn()} />));

@@ -126,6 +126,12 @@ export function VaultSecretFieldsEditor({
       setDefaultLabel(nextDefault);
     }
     if (ownRename) defaultLabelDirtyRef.current = false;
+    // A staged removal another write already did (or that became the default) is no longer ours to send.
+    const nextNames = vaultFieldNames(next);
+    setRemoved((staged) => {
+      const kept = staged.filter((field) => nextNames.includes(field) && field !== nextDefault);
+      return kept.length === staged.length ? staged : kept;
+    });
     const reconciled = reconcileDrafts(previous, next, draftsRef.current);
     updateDrafts(reconciled.drafts);
     if (reconciled.removed.length > 0) {
@@ -301,7 +307,9 @@ export function VaultSecretFieldsEditor({
         }
       }
       if (adding) {
-        if (names.includes(adding.field) || adding.field === finalDefault) throw conflict();
+        // The names after Save: a renamed default's old label is free again.
+        const finalNames = [...names.filter((name) => name !== oldDefault), finalDefault];
+        if (finalNames.includes(adding.field)) throw conflict();
         entries.push([adding.field, adding.value]);
       }
       for (const [field, value] of entries) {
@@ -369,10 +377,12 @@ export function VaultSecretFieldsEditor({
   const renaming = defaultLabel !== defaultField;
   const hasValues = [...drafts.values()].some(Boolean);
   const dirty = hasValues || renaming || removed.length > 0 || (newField !== null && (Boolean(newValue) || Boolean(newField)));
-  const valid = !fieldsCorrupt
+  // Corrupt field metadata blocks field changes, not the dialog: with nothing drafted here its
+  // Save still saves description, tags and policy.
+  const valid = !dirty || (!fieldsCorrupt
     && (!renaming || labelIssue === null)
     && (newField === null || (newIssue === null && Boolean(newValue)))
-    && (!(hasValues || (newField !== null && newValue)) || canWriteValue);
+    && (!(hasValues || (newField !== null && newValue)) || canWriteValue));
   // The latest commit for the dialog's Save, refreshed after every render.
   useLayoutEffect(() => {
     commitRef.current = { dirty: () => dirty, commit: commitAll };

@@ -176,6 +176,29 @@ it('rejects a new field named like the default field’s new name', async () => 
   expect(lastState().valid).toBe(true);
 });
 
+it('lets a new field take the renamed default’s old label', async () => {
+  renderEditor();
+  change('Default field name', 'credential');
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  change('New field name', 'password');
+  change('New field value', 'seed');
+  expect(lastState().valid).toBe(true);
+  expect(await save()).toBe(true);
+  expect(batch()[1]).toMatchObject({ default_field: 'credential', values: [{ field: 'password', record: 'LOGIN.password', blind_box: box }] });
+});
+
+it('drops a staged removal that another write already did', async () => {
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [{ ...secret, fields: ['password'], updated_at: 'version-2' }] });
+  renderEditor();
+  fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+  await act(async () => { eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' }); });
+  await waitFor(() => expect(screen.queryByText(/Removed when you save/)).toBeNull());
+  expect(lastState().dirty).toBe(false);
+  expect(await save()).toBe(true);
+  expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
+});
+
 // Entry gating must stop ciphertext writes, not metadata management.
 it('blocks protected value writes before refresh but permits a metadata-only rename on LAN HTTP', async () => {
   vi.stubGlobal('location', new URL('http://192.0.2.1:5123'));
@@ -293,7 +316,8 @@ it('warns and disables field changes when field metadata is corrupt', async () =
   expect((screen.getByLabelText('Value for password') as HTMLInputElement).disabled).toBe(true);
   expect((screen.getByRole('button', { name: 'Remove username' }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement).disabled).toBe(true);
-  expect(lastState().valid).toBe(false);
+  // Nothing drafted: the dialog may still save its metadata.
+  expect(lastState()).toEqual({ dirty: false, valid: true });
 });
 
 it.each(['constructor', 'tostring', 'valueof'])('treats %s as a normal field key', async (field) => {
