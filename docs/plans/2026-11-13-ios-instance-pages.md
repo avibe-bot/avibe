@@ -1,6 +1,6 @@
 # iOS App: account and instance pages, redesign
 
-Status: **map and diagnosis** (part 1 of 3). Frames follow in `ui/design/frames/mobile-app/`.
+Status: **proposed** — map and diagnosis (1), structure and frames (2), desktop consistency and build notes (3). Frames: `ui/design/frames/mobile-app/switcher.design.tsx`, kit `ui/design/kit/mobile-instance-sheet.tsx`.
 Date: 2026-11-13. Base: Avibe `d8187b453`. Design only: no product code changes here.
 
 The owner: 「现在这两个页面的逻辑都有点怪，一个是实例列表页，一个是切换实例页，感觉有点复杂，让用户不好理解。重新设计一下吧，然后交互也看一下。」
@@ -96,6 +96,96 @@ Four taps and four screens to look at the list and come back without switching. 
 | C14 | Recovery card | Title always 「暂时无法加载实例」 | Also shown for a failed sign-out. |
 | C15 | Gestures | No edge swipe anywhere in the bundled page | Every ← is a button only; the instance pages have swipe back (#3301). |
 
-## 3. Next
+## 3. Structure (proposed)
 
-Part 2 (frames, zh/en, light/dark): one structure with the current instance named on Home, a sheet that answers "where am I / what else / how back", recency order, error and offline in place, swipe and pull gestures. Part 3: desktop consistency (#3651/#3653/#3661) and the Swift files a build would touch.
+**One sentence:** tap the avatar and a sheet shows where you are, the other instances you can open, and your account; drag it down to return.
+
+| Question | Answer in the design |
+| --- | --- |
+| Where am I? | The sheet's first block, 「正在使用 / You're in」, names the instance (variant B also names it on Home). |
+| What else can I open? | 「其他实例」, one list, most recently opened on this device first. Shared instances say so in their second line; offline ones say 「离线」 and open an explanation in place. |
+| How do I get back? | Drag the sheet down, tap ✕, or tap the current instance. All three return to the instance as it was (the runtime stays alive underneath). |
+| Where is my account? | The last row of the sheet: email, then a page pushed inside the sheet (sign out, licenses, delete). ← or a swipe from the left edge returns to the list. |
+
+Rules:
+
+1. **One list, one row.** The sheet and the first-run page use the same row (icon, name, one line: host / 「xx 共享 · host」 / 「离线 · host」, chevron). No badges; 「当前」 only on the current block. Long names and emails wrap, never truncate.
+2. **Order:** the current instance first (its own block), then the others by last opened on this device (Track A records it per account). First run has no history: online first, then by name.
+3. **Open from what is known.** The sheet draws at once from the native session snapshot; a background refresh updates it (「正在更新…」 by the section label). No skeleton and no first-run title on the way to Account (fixes C2).
+4. **Errors stay where they happen, and say what happened.** A failed refresh is a one-line banner above an intact, usable list. A failed switch is reported on that row while you stay where you were. Nothing replaces the page, and the current instance is always one tap away. Real errors are rare (Track A: C3 was the account coordinator being busy, reported as "can't reach avibe.bot"), so the copy states the fact without guessing a cause.
+5. **Switching:** tap a row → it shows 「正在打开…」, the others wait, ✕ still works. When the new instance starts loading, the sheet closes over it.
+6. **Gestures:** sheet drag-down = back (native). Account page: swipe from the left edge = back. **Pull to refresh only on the full first-run page**: in a sheet, pulling down at the top dismisses; the sheet refreshes when it opens instead.
+7. **First run** (nothing selected yet) is a full page, not a sheet: same rows, 「想从哪里开始？」 kept from the approved A flow, the avatar for Account, pull to refresh. Signed out and no-instances keep their approved pages.
+8. **Native failure screen** uses the same words: 「暂时连不上 {name}」 · 重试 · 其他实例. 其他实例 opens the same sheet over the failed instance without stopping it first, so ✕ returns to the retry screen (fixes C13).
+9. **One vocabulary** across web, native and desktop: 实例 / 切换 / 账户 / 当前 / 离线 / 添加实例. 「更换实例」 and 「账号」 go.
+
+### Variants (the one real choice)
+
+| | A · avatar opens the sheet | B · the name opens the sheet |
+| --- | --- | --- |
+| Home header | unchanged: 「Avibe」 + avatar | 「{instance name} ⌄」 + avatar |
+| Avatar | instances sheet (account is its last row) | Account page directly |
+| Answers "where am I" on Home | no (one tap away) | yes (C1) |
+| Ships with | the next TestFlight build only (bundled page + Swift) | TestFlight **and** a Runtime release: the instance's own header changes. Gated by a new capability (`instancePresentation: 1`, `app.showInstances`, the current instance's name in `app.info`). Older instances keep 「Avibe」 + avatar, and their avatar opens the A sheet, so both kinds work side by side. |
+
+Recommendation: **A now, B next.** A removes every confusion except C1 with no Runtime dependency; B is additive on top of A and can follow the next Runtime release.
+
+### Frame inventory (`mobile-app/switcher/<state>-<zh|en>`, light and dark, status `proposed`)
+
+| States | Shows |
+| --- | --- |
+| `sheet-default`, `sheet-refreshing`, `sheet-only-current` | The sheet over the live instance; background refresh; nothing else to open |
+| `sheet-offline-open` | Offline row explained in place |
+| `sheet-opening`, `sheet-open-failed` | Switching in progress; a failed switch on its row |
+| `sheet-stale` | Refresh failed: banner + Retry, list still usable |
+| `sheet-dismissing`, `account-swipe` | Gesture diagrams: drag down to return; swipe from the left edge to go back |
+| `sheet-long`, `account-long` (375×667) | Long instance names, long shared-by line, long email |
+| `account` | Account pushed inside the sheet |
+| `first-run`, `first-run-pulling`, `first-run-error` | First use as a full page; pull to refresh; load failure without cache |
+| `runtime-failed` | Native failure screen in the same words, 其他实例 → sheet |
+| `b-home`, `b-sheet` | Variant B: the named header; its sheet without the account row |
+
+18 states × zh/en = 36 frames, 72 captures, iPhone 17 Pro (402×874, safe area 62/34) unless noted.
+
+## 4. Desktop consistency
+
+Desktop (#3651/#3653/#3661, `docs/plans/2026-11-11-desktop-instance-switch.md`, frames `desktop/instances/*`): footer row `avatar · instance · dot ⌃` → menu (Switch instance · remote-access status · Sign out) → full Switch instance page (This Mac row, 「我的实例」, 「与我共享」, online/offline badges, current check, Add instance).
+
+| Topic | Same | Different, and why |
+| --- | --- | --- |
+| Model | Current instance always named; switch from the account entry; sign out next to the account; offline shown, not hidden; Add instance at the end | Desktop names the instance in its footer all the time (= variant B). The phone needs a sheet because it has no persistent chrome of its own on Home. |
+| Sections | Own and shared both listed | iOS uses **one** recency list with "xx 共享" in the second line: a phone shows four rows, and two sections push the most-used one off screen. Desktop has room for sections and a pinned This Mac row (iOS has no local Runtime). |
+| Badges | 「当前」, 「离线」 | iOS drops the 「在线」 badge (online is the normal case); proposal: desktop drops it too. |
+| Unreachable instance | Named recovery screen with a way out | Desktop: 「暂时连不上 Studio」 + Back to this Mac. iOS: 「暂时连不上 {name}」 + 重试 + 其他实例 (no local fallback). Same title wording proposed. |
+| Words | 切换实例 / 添加实例 / 退出账号 | iOS sheet title is 「实例」 because it also holds the account; its rows and actions use desktop's words. Native 「更换实例」/「账号」 are retired. |
+
+**Recency.** Track A records last opened per account **on the device**; desktop shows server order (pins, newest) and has no last-used field. Proposal: desktop follows the same **per-device** rule, stored with its profile (`connection.json` already holds the last selection), and no server field. "Recently used" means "on this device": a phone that reorders because the Mac switched would surprise, and a shared field would add a backend write on every switch for no visible gain. The server order stays the first-run order on both.
+
+## 5. Building it: feasibility and the files it touches
+
+**Native sheet (to verify on device before the build):**
+
+- `UISheetPresentationController` (iOS 15+) presenting a view controller that holds the bundled page's `WKWebView`, **large detent only**: the list needs the height, and a medium detent would add a second scroll state to the web content. The runtime stays presented underneath, so returning is a dismissal, not a reload.
+- **Drag versus scroll:** UIKit hands a downward drag to the sheet only when its tracked scroll view is at the top. The bundled page today scrolls an inner `overflow-y-auto` box, which WebKit turns into a child scroll view the sheet does not track. The sheet page must scroll the **document** (`WKWebView.scrollView`) and register it (`setContentScrollView` / `prefersScrollingExpandsWhenScrolledToEdge`). This is the one interaction to prototype first; if it misbehaves, the fallback is a full-screen cover with ✕ and an edge-swipe dismiss.
+- **Keyboard:** none in the sheet. Add instance is guidance with no text field; sign-in is never in the sheet (signed out uses the full pages).
+- **Rotation:** the App allows landscape (`Info.plist`). In compact height iOS shows a sheet full-height; drag-down still dismisses. Nothing extra.
+- **VoiceOver:** the sheet is modal (`accessibilityViewIsModal`); order: title, Close (labelled "Close and return to {name}"), current, other instances (each row reads name and its line; offline rows expose expanded/collapsed), Add, Account. The two-finger scrub dismisses like ✕.
+- **Dynamic Type:** the bundled page sets `-webkit-text-size-adjust: none` and does not follow Dynamic Type today; the native chrome adds no text. Rows have no fixed heights and wrap, so text scaling (if adopted later through `-apple-system-body`) needs no layout change. Verify at the largest accessibility size on device.
+- **Account inside the sheet:** an in-page push with `history.pushState`, and `allowsBackForwardNavigationGestures` on the bundled WebView so the left-edge swipe goes back; or a native navigation controller with two WebView pages. The first is smaller.
+
+**Files a build touches** (Max's area; Track A is changing some of them now, so the redesign builds on top of its merge):
+
+| File | Change |
+| --- | --- |
+| `ios/Avibe/MobileOnboardingContainer.swift` | Present the bundled page in a sheet over the runtime (detent, delegate: dismissed → back to runtime) instead of a full-screen ZStack layer |
+| `ios/Avibe/AppModel.swift` | `accountOverBrowser` becomes an instances sheet over the runtime; `showAccount` opens it; `showInstancePicker` from the failure screen opens it **without** `stopRuntime`; a selection opens the new runtime, then dismisses |
+| `ios/Avibe/RootView.swift` | Failure screen copy and actions (重试 · 其他实例); drop the full-screen onboarding layer for the runtime case; legacy toolbar menu wording |
+| `ios/Avibe/MobileOnboardingBridge.swift` | New start screen (`sheet`), a close/dismiss call, document scrolling and back-forward gestures for the account push |
+| `ios/Avibe/MobileAccount.swift` | Serve the snapshot on open without network; recency (both from Track A) |
+| `ios/Avibe/Resources/Localizable.xcstrings` | `browser.*` copy in the shared vocabulary |
+| `ios/Avibe/NativeBridge.swift`, `WebViewController.swift` | Variant B only: `instancePresentation` capability, `app.showInstances`, the instance name in `app.info` |
+| `ui/src/mobile/MobileOnboarding.tsx`, `bridge.ts`, `ui/src/i18n` | Sheet screen, pushed Account, first-run rows, banners; locale copy |
+| `ui/src/components/MobileChrome.tsx` | Variant B only (Runtime release): the named header |
+| `ios/AvibeTests/*`, `ui/src/mobile/*.test.tsx` | Route and bridge tests for the sheet, dismissal, and failure → sheet |
+
+Not touched: push and badge, entitlements, signing, the direct-path transport.
