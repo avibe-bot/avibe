@@ -1307,6 +1307,16 @@ final class DirectConnectListenerTests: XCTestCase {
         // Once: a second grant, with anything else, changes nothing.
         XCTAssertFalse(lifecycle.grant(id, host: "other.example", backend: .publicOrigin, generation: 9))
         XCTAssertEqual(lifecycle.grants, [id: granted])
+        // A retirement that comes after the grant leaves it alone.
+        XCTAssertFalse(lifecycle.revoke(id))
+        XCTAssertEqual(lifecycle.grants, [id: granted])
+
+        // One that comes first revokes the candidate for good.
+        let retired = UUID()
+        XCTAssertEqual(lifecycle.admit(1, relay: retired), .relay)
+        XCTAssertTrue(lifecycle.revoke(retired))
+        XCTAssertFalse(lifecycle.isCandidate(retired))
+        XCTAssertFalse(lifecycle.grant(retired, host: host, backend: .direct, generation: 3))
 
         lifecycle.end(id)
         XCTAssertEqual(lifecycle.grants, [:])

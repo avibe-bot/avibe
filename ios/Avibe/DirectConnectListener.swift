@@ -677,8 +677,11 @@ actor DirectConnectListener {
                 continue
             }
             if plan.scope.isOlder(than: retiredScope) {
-                // No longer a candidate, so it cannot be granted meanwhile.
-                lifecycle.end(id)
+                // Revoked only while still a candidate: from here it cannot
+                // be granted. One granted meanwhile is kept.
+                guard lifecycle.revoke(id) else {
+                    continue
+                }
                 relay.task.cancel()
                 relays.removeValue(forKey: id)
             } else if plan.generation < retiredGeneration {
@@ -2176,8 +2179,21 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         }
     }
 
-    /// Relay `id` ended, or was closed or retired: it leaves the ledger,
-    /// candidate or granted.
+    /// Revokes candidate `id`: `true` when it was still a candidate, which
+    /// can then never be granted; `false` when it was granted first, or is
+    /// not listed.
+    func revoke(_ id: UUID) -> Bool {
+        lock.withLock {
+            guard case .candidate = ledger[id] else {
+                return false
+            }
+            ledger[id] = nil
+            return true
+        }
+    }
+
+    /// Relay `id` ended, or was closed: it leaves the ledger, candidate or
+    /// granted.
     func end(_ id: UUID) {
         lock.withLock {
             _ = ledger.removeValue(forKey: id)
