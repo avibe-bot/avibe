@@ -2519,6 +2519,11 @@ def reject_disabled_model_hub_api():
 
 @app.before_request
 def enforce_remote_access_cookie():
+    from vibe.authorization import http_authorization_policy
+
+    if http_authorization_policy(request.method, request.path).direct_loopback_only:
+        if not _is_direct_loopback_connection():
+            return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
     config = _load_remote_access_config()
     markdown_show_request = _is_private_show_page_markdown_request()
     if _remote_auth_exempt_before_host_validation():
@@ -3145,6 +3150,16 @@ def protect_mutating_ui_requests():
         return jsonify({"ok": False, "message": "Forbidden: invalid csrf token"}), 403
 
     return None
+
+
+@app.after_request
+def prevent_desktop_enrollment_caching(response: Response) -> Response:
+    if request.path in {
+        "/api/desktop/local-instance", "/api/desktop/local-instance/prepare",
+        "/api/remote-access/vibe-cloud/pair",
+    }:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.after_request
@@ -8191,6 +8206,43 @@ def direct_rendezvous():
     return response
 
 
+def _desktop_local_response(operation):
+    from vibe.desktop_local_instance import LocalInstanceError
+
+    try:
+        response = jsonify(operation())
+    except LocalInstanceError as exc:
+        response = jsonify({"ok": False, "error": exc.code})
+        response.status_code = exc.status
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/desktop/local-instance", methods=["GET"])
+def desktop_local_instance_get():
+    from vibe import desktop_local_instance
+
+    if not _is_direct_loopback_connection():
+        return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
+    return _desktop_local_response(desktop_local_instance.describe)
+
+
+@app.route("/api/desktop/local-instance/prepare", methods=["POST"])
+def desktop_local_instance_prepare():
+    from vibe import desktop_local_instance
+
+    if not _is_direct_loopback_connection() or not _same_origin(
+        _request_origin(request.headers.get("Origin")) or "", request.host_url.rstrip("/")
+    ):
+        return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
+    payload = request.json
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    return _desktop_local_response(lambda: desktop_local_instance.prepare(
+        payload.get("account_id"), payload.get("expected_binding_revision"),
+    ))
+
+
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])
 def remote_access_vibe_cloud_pair():
     from vibe import remote_access
@@ -8199,14 +8251,34 @@ def remote_access_vibe_cloud_pair():
     if authorization_context is None or not authorization_context.can_manage_access_members:
         return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
     payload = request.json or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    desktop = {}
+    if "desktop_enrollment" in payload:
+        if not _is_direct_loopback_connection() or not _same_origin(
+            _request_origin(request.headers.get("Origin")) or "", request.host_url.rstrip("/")
+        ):
+            return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
+        if not isinstance(payload["desktop_enrollment"], dict):
+            return jsonify({"ok": False, "error": "invalid_request"}), 400
+        if any(
+            key in payload and not isinstance(payload[key], str)
+            for key in ("pairing_key", "backend_url", "device_name")
+        ):
+            return jsonify({"ok": False, "error": "invalid_request"}), 400
+        desktop["desktop_enrollment"] = payload["desktop_enrollment"]
     result = remote_access.pair(
         payload.get("pairing_key", ""),
         payload.get("backend_url", "https://avibe.bot"),
         payload.get("device_name", "avibe"),
+        **desktop,
     )
     if result.get("ok"):
         _ensure_remote_access_monitoring()
-    return jsonify(result), 200 if result.get("ok") else 400
+    response = jsonify(result)
+    response.headers["Cache-Control"] = "no-store"
+    conflict = result.get("error") in {"local_binding_changed", "local_instance_conflict"}
+    return response, 200 if result.get("ok") else (409 if conflict else 400)
 
 
 @app.route("/api/remote-access/start", methods=["POST"])
@@ -8496,6 +8568,7 @@ def api_session():
                         "instance_role": context.instance_role,
                         "capabilities": context.capability_projection(),
                         "authorization_state": "current",
+                        "instance_id": config.remote_access.vibe_cloud.instance_id,
                         "authorization_policy": resolution.policy,
                         # Exactly the signed exp of the cookie this request
                         # carried: this route is auth-exempt and never renews

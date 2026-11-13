@@ -1,16 +1,90 @@
 {
-  "schema_version": 1,
-  "release_state": "pending",
-  "release_tag": "iroh-apple-v1.2.0-1",
   "asset_url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/IrohLib.xcframework.zip",
-  "sha256": null,
-  "upstream_commit": "66a8d619a4d791d458d582f312df6e0ab42bc541",
-  "iroh_core_version": "1.4.1",
-  "patch_sha256": "38b18ade6e654173705901dad56da8fb3deeb72eaa157606e52bca31fe40fe48",
+  "assets": {
+    "IrohLib-support.zip": {
+      "sha256": "7579cec286e41d11d48d953fd117435020b1e2379eeb865ea2a0eed272b7e3b3",
+      "size": 1810771,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/IrohLib-support.zip"
+    },
+    "IrohLib.swift": {
+      "sha256": "63fbfbc1a1761165d192682ca0aff360abdfcad805449017a0c7f508754993ca",
+      "size": 323722,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/IrohLib.swift"
+    },
+    "IrohLib.xcframework.zip": {
+      "sha256": "4aab3db2cb9e68f0bc0a3ee54ead2562c3cc217de52109ce771f6121e5f71a71",
+      "size": 25530513,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/IrohLib.xcframework.zip"
+    },
+    "IrohLib.xcframework.zip.sha256": {
+      "sha256": "37b751250d4fac1c61732096ffe1946221f3b2a6b6cec2f80818d060d4589ed8",
+      "size": 136,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/IrohLib.xcframework.zip.sha256"
+    },
+    "feature-graph-aarch64-apple-ios-sim.txt": {
+      "sha256": "e0895ad17b4c8e0c8191db0cb83b26610ca359f56415faba672f56234de81eb2",
+      "size": 225673,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/feature-graph-aarch64-apple-ios-sim.txt"
+    },
+    "feature-graph-aarch64-apple-ios.txt": {
+      "sha256": "e0895ad17b4c8e0c8191db0cb83b26610ca359f56415faba672f56234de81eb2",
+      "size": 225673,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/feature-graph-aarch64-apple-ios.txt"
+    },
+    "feature-graph-x86_64-apple-ios.txt": {
+      "sha256": "6be410d106ebabc7d642fc4b848eed48ff9171f788d97fa4648eefc81bd8b58f",
+      "size": 227664,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/feature-graph-x86_64-apple-ios.txt"
+    },
+    "ios-runtime-test.json": {
+      "sha256": "0c67ec574567325b4fa346c04d7c572dc22488344f6c765dd9b5f2dd6f257875",
+      "size": 204,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/ios-runtime-test.json"
+    },
+    "ios-runtime-test.log": {
+      "sha256": "563f910dae7cc51c59fbd00ebd4f47badf66b9839d8f6f2260f6ec1c60a46946",
+      "size": 88069,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/ios-runtime-test.log"
+    },
+    "manifest.json": {
+      "sha256": "5fe01b7714e0e0fe82a540a905154c9ed50a453ea798516fe0009208a88d9e63",
+      "size": 841,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/manifest.json"
+    },
+    "patched-check.log": {
+      "sha256": "8a5bab9cce415910d79507eb01968febd66ce4f85ac16eb5ec9ebe6b6e95d703",
+      "size": 75,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/patched-check.log"
+    },
+    "positive-control-check.log": {
+      "sha256": "af255b28667d81be551ab25555fa958c4c01fae0e71a4bb4692980901120e161",
+      "size": 900,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/positive-control-check.log"
+    },
+    "xcodebuild-iphoneos.log": {
+      "sha256": "298ebf56df46ce491e06de4c920497e8214a5307827d9f63769e188eac1c6c44",
+      "size": 44200,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/xcodebuild-iphoneos.log"
+    },
+    "xcodebuild-iphonesimulator.log": {
+      "sha256": "958ccaa916c75ca4f6471ae0d813207a03ef257677f9d2fd6c868605f5bb2483",
+      "size": 85508,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/xcodebuild-iphonesimulator.log"
+    }
+  },
+  "build_recipe_sha256": "17368fb4702f7eddbd078553d98e1cc70958240fc8aa61c57fb45aca87079072",
   "deployment_target": "17.0",
-  "tested_runtime": null,
-  "runtime_identifier": null,
-  "source_commit": null,
-  "qualification_run_id": null,
-  "assets": {}
+  "iroh_core_version": "1.4.1",
+  "license_policy_sha256": "03080c51d4a03aac7a23e0d155bd383e495508dc1bef07fa27d9865f0aa2e53e",
+  "notice_collector_sha256": "3f5e11b6c9d86e02871a8f107994d508f5b9d2ede9713befdc931ce4aa26e043",
+  "patch_sha256": "38b18ade6e654173705901dad56da8fb3deeb72eaa157606e52bca31fe40fe48",
+  "qualification_run_id": "43301534729",
+  "release_state": "published",
+  "release_tag": "iroh-apple-v1.2.0-1",
+  "runtime_identifier": "com.apple.CoreSimulator.SimRuntime.iOS-17-0",
+  "schema_version": 1,
+  "sha256": "4aab3db2cb9e68f0bc0a3ee54ead2562c3cc217de52109ce771f6121e5f71a71",
+  "source_commit": "13ff969e482966257e6448d27c01f0f2f7900f7b",
+  "tested_runtime": "17.0",
+  "upstream_commit": "66a8d619a4d791d458d582f312df6e0ab42bc541"
 }

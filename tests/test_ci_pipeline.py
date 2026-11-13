@@ -610,8 +610,38 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     assert 'parallelizable = "NO"' in scheme
 
 
-def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path: Path) -> None:
-    script = ROOT / "ios/scripts/verify_mobile_bundle.sh"
+@pytest.mark.parametrize("pin_state", ["pending", "published"])
+def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pin_state: str,
+) -> None:
+    from tests.test_app_licenses import archive, pending_pin, published_pin, support_members
+
+    # Exercise the real scripts in a test-owned checkout. A repository pin promotion
+    # must not turn this synthetic bundle test into a public-network download.
+    fixture_root = tmp_path / "checkout"
+    for relative in (
+        "ios/scripts/verify_mobile_bundle.sh", "ios/scripts/app_licenses.py",
+        "packaging/iroh-apple/license-sources.json", "scripts/cargo_notices.py",
+    ):
+        destination = fixture_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, destination)
+    pin = pending_pin()
+    support_args = []
+    if pin_state == "published":
+        data = archive(support_members())
+        support = tmp_path / "fixture-support.zip"
+        support.write_bytes(data)
+        pin = published_pin(data)
+        support_args = ["--support-zip", str(support)]
+    (fixture_root / "packaging/iroh-apple/release.json").write_text(json.dumps(pin), encoding="utf-8")
+    # Subprocesses cannot accidentally reach public endpoints, even outside CI's
+    # network namespace. The published fixture still checks its real size/hash.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    script = fixture_root / "ios/scripts/verify_mobile_bundle.sh"
     missing = subprocess.run(
         ["/bin/sh", str(script), str(tmp_path / "MobileApp")],
         capture_output=True,
@@ -650,7 +680,8 @@ def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path
         {"name": "react", "version": "19.3.1", "license": "MIT", "files": [{"name": "LICENSE", "text": "MIT"}]},
     ]}), encoding="utf-8")
     generated = subprocess.run(
-        [sys.executable, str(ROOT / "ios/scripts/app_licenses.py"), "generate", "--bundle", str(bundle)],
+        [sys.executable, str(fixture_root / "ios/scripts/app_licenses.py"), "generate", "--bundle", str(bundle),
+         *support_args],
         capture_output=True,
         text=True,
     )

@@ -228,14 +228,14 @@ async def test_bad_refresh_cannot_reopen_admission_after_unpublished_withdrawal(
     withdrawn = signed(signer, 11, releases=[
         release_entry(manifest), release_entry(manifest_bytes(version="v8.0.30", build=1)),
     ], revoked=[tombstone(candidate.asset_release_tag, "model-hub-engine-v8.0.30-1")])
-    replace = atomic_io.os.replace
+    replace = atomic_io.replace_snapshot
 
     def refuse_channel_publication(source, destination):
         if destination == owner.channel.store.state_path:
             raise OSError("test-owned channel publication refused")
         return replace(source, destination)
 
-    monkeypatch.setattr(atomic_io.os, "replace", refuse_channel_publication)
+    monkeypatch.setattr(atomic_io, "replace_snapshot", refuse_channel_publication)
     owner.channel._fetch = lambda: withdrawn
     await transport._reconcile_engine(explicit=False)
     assert transport._engine_admission.reason == "engine_withdrawn"
@@ -522,9 +522,7 @@ async def test_known_withdrawal_gates_and_expires_while_metadata_publication_is_
     from core.handlers.model_hub.async_owner import run_owned_in_thread
     from tests.engine_channel_support import manifest_bytes, release_entry, signed, tombstone
     from tests.test_model_hub_engine_lifecycle import owner_fixture, signed_candidate
-    from vibe.model_hub_runtime import adapter as module
 
-    monkeypatch.setattr(module, "_ENGINE_WITHDRAWAL_DRAIN_SECONDS", 0.03)
     owner, supervisor, _baseline = owner_fixture(tmp_path, monkeypatch)
     candidate, signer, manifest, _envelope = signed_candidate(owner, tmp_path)
     owner.activate(candidate)
@@ -538,8 +536,31 @@ async def test_known_withdrawal_gates_and_expires_while_metadata_publication_is_
     signalled = asyncio.Event()
     work.abort = signalled.set
     adapter_owner._oauth_flows["fixture-flow"] = SimpleNamespace(lease=work, state="awaiting_action")
+    loop = asyncio.get_running_loop()
+    publication_entered = asyncio.Event()
     publication_allowed = threading.Event()
-    monkeypatch.setattr(owner, "publish_status", lambda: publication_allowed.wait(5))
+
+    def blocked_publication():
+        # The worker queued the real withdrawal callback before reaching this
+        # publisher. FIFO loop callbacks make this a completion signal, not a
+        # one-second throughput assertion over verification and filesystem I/O.
+        loop.call_soon_threadsafe(publication_entered.set)
+        publication_allowed.wait()  # released and joined on every exit below
+
+    monkeypatch.setattr(owner, "publish_status", blocked_publication)
+    scheduled = []
+    call_at = loop.call_at
+
+    def capture_expiry(when, callback, *args, context=None):
+        if callback == adapter_owner._expire_withdrawal:
+            # Keep the actual scheduled callback/arguments, but advance this
+            # one timer explicitly after checking the admitted continuation.
+            handle = asyncio.TimerHandle(when, callback, args, loop, context=context)
+            scheduled.append((when, callback, args, handle))
+            return handle
+        return call_at(when, callback, *args, context=context)
+
+    monkeypatch.setattr(loop, "call_at", capture_expiry)
 
     @engine_operation
     async def fresh(self):
@@ -550,31 +571,43 @@ async def test_known_withdrawal_gates_and_expires_while_metadata_publication_is_
         return flow_id
 
     check = asyncio.create_task(run_owned_in_thread(owner.check))
+    entered = asyncio.create_task(publication_entered.wait())
     try:
-        async def wait_gate():
-            while adapter_owner._engine_admission.reason != "engine_withdrawn":
-                await asyncio.sleep(0)
-
-        await asyncio.wait_for(wait_gate(), 1)
+        # Only a deadlock watchdog: progress is the publisher's signal, and a
+        # worker that exits early must not look like blocked publication.
+        done, _pending = await asyncio.wait({check, entered}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+        assert entered in done, "check exited or stalled before reaching status publication"
         assert not check.done()
+        assert adapter_owner._engine_admission.reason == "engine_withdrawn"
         with pytest.raises(EngineUnavailableError, match="withdrawn"):
             await fresh(adapter_owner)
         assert await oauth_status(adapter_owner, "fixture-flow") == "fixture-flow"
         deadline = adapter_owner._withdrawal_deadline
-        await asyncio.wait_for(signalled.wait(), 1)
+        assert not signalled.is_set() and not work.interrupted
+        assert len(scheduled) == 1
+        when, expire, args, handle = scheduled[0]
+        assert when == deadline and args == (deadline,)
+        assert adapter_owner._withdrawal_timer is handle and not handle.cancelled()
+        expire(*args)
+        assert adapter_owner._withdrawal_interrupt_task is not None
+        await asyncio.wait_for(signalled.wait(), 30)
         assert not check.done() and work.interrupted
         adapter_owner._gate_known_withdrawal()
-        assert adapter_owner._withdrawal_deadline == deadline
+        assert adapter_owner._withdrawal_deadline == deadline and len(scheduled) == 1
         with pytest.raises(EngineUnavailableError):
             await oauth_status(adapter_owner, "fixture-flow")
     finally:
         publication_allowed.set()
-        await check
-        if adapter_owner._withdrawal_timer is not None:
-            adapter_owner._withdrawal_timer.cancel()
-        if adapter_owner._withdrawal_interrupt_task is not None:
-            await adapter_owner._withdrawal_interrupt_task
-        adapter_owner._engine_admission.release(work)
+        entered.cancel()
+        await asyncio.gather(entered, return_exceptions=True)
+        try:
+            await check
+        finally:
+            if adapter_owner._withdrawal_timer is not None:
+                adapter_owner._withdrawal_timer.cancel()
+            if adapter_owner._withdrawal_interrupt_task is not None:
+                await adapter_owner._withdrawal_interrupt_task
+            adapter_owner._engine_admission.release(work)
 
 
 @pytest.mark.asyncio

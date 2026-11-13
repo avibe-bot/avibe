@@ -11,6 +11,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Optional, Dict, Any
 from config import paths
+from config.atomic_io import read_snapshot
 from config.platform_registry import get_platform_descriptor
 from config.v2_config import (
     DEFAULT_AGENT_BACKEND,
@@ -809,7 +810,7 @@ class Controller:
             config_path = paths.get_config_path()
             if not config_path.exists():
                 return
-            config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+            config_payload = json.loads(read_snapshot(config_path, encoding="utf-8"))
             if isinstance(config_payload, dict) and "language" in config_payload:
                 return
 

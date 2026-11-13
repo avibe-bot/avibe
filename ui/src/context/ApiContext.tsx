@@ -153,6 +153,10 @@ export type VaultSecret = {
   signing_addresses?: SigningAddresses | null;
   /** The key's curve from its stored public metadata; present even when no address can be derived. */
   signing_curve?: 'secp256k1' | 'ed25519';
+  /** A seed-phrase wallet (`signer_kind: 'hd-seed'`): its enabled accounts, #0 first, and how many
+   *  it may have (docs/plans/vault-hd-wallets.md). Addresses are derived by avault at import. */
+  accounts?: VaultHdAccount[];
+  account_limit?: number;
   source: string;
   description?: string | null;
   policy: Record<string, unknown>;
@@ -160,6 +164,19 @@ export type VaultSecret = {
   use_count: number;
   created_at: string;
   updated_at: string;
+};
+
+export type VaultHdAccount = {
+  account: number;
+  /** Null: the localized fallback name. */
+  name: string | null;
+  eth: string;
+  btc_taproot: string;
+  solana: string;
+  paths: { evm: string; bitcoin: string; solana: string };
+  always_ask: boolean;
+  /** The Session whose request last signed with this account. `chain` is absent on older rows. */
+  last_signer: { session_id: string; at: string; chain?: 'evm' | 'bitcoin' | 'solana' } | null;
 };
 
 export type VaultAuditEvent = {
@@ -444,13 +461,20 @@ export type VaultCreatePayload = {
   tags?: string[];
   kind?: string;
   signer_kind?: string | null;
+  /** Seed-phrase wallets: account #0 as this browser derived it. The server compares it with what
+   *  avault derives before saving anything, and refuses with 409 `hd_address_check_failed`. */
+  expected_account0?: { eth: string; btc_taproot: string; solana: string };
+  /** Seed-phrase wallets: account #0 asks before every signature from the moment it is saved. */
+  account0_always_ask?: boolean;
   /**
    * A Solana signing key, which avault creates: it generates the key, or imports the secret key
    * sealed in `blind_box`. Standard tier only, and sent without `public_meta`.
    */
   keypair?:
     | { curve: 'ed25519'; source: 'generate' }
-    | { curve: 'ed25519'; source: 'import'; format: 'solana-cli-json' | 'base58-secret' };
+    | { curve: 'ed25519'; source: 'import'; format: 'solana-cli-json' | 'base58-secret' }
+    /** A seed-phrase wallet: the browser sealed the 64-byte BIP39 seed in `blind_box`. */
+    | { type: 'hd-seed'; source: 'import'; format: 'raw-seed' };
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
   /** Bare skill names. Sent alongside the folded `skill:<name>` tags so skill scopes work on
@@ -475,6 +499,9 @@ export type VaultMetadataUpdatePayload = {
   description?: string | null;
   tags?: string[];
   policy?: Record<string, unknown>;
+  /** Ordinary standard keypairs only: may raise ask-before-signing; lowering returns 409
+   *  `vault_policy_downgrade_unavailable` until the Passkey flow exists. */
+  always_ask?: boolean;
 };
 
 export type VaultFieldValuePayload = {
@@ -1019,6 +1046,10 @@ export type ApiContextType = {
   ) => Promise<{ ok: boolean; factor?: Record<string, unknown>; code?: string; message?: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecret: (name: string, payload: VaultMetadataUpdatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  /** Turns on a seed-phrase wallet's next account (no words needed: avault derived all 20 at import). */
+  enableVaultHdAccount: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  /** Renames an enabled account (null resets it) or sets its ask-before-signing. */
+  updateVaultHdAccount: (name: string, account: number, payload: { name?: string | null; always_ask?: boolean }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecretField: (name: string, field: string, payload: { expected_updated_at: string }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
@@ -4742,6 +4773,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     registerVaultAuthzWebAuthnFactor: (payload) => postJson('/api/vault/authz/factors/webauthn', payload),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     updateVaultSecret: (name, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}`, payload, opts),
+    enableVaultHdAccount: (name, opts) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/accounts`, {}, opts),
+    updateVaultHdAccount: (name, account, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}/accounts/${account}`, payload, opts),
     updateVaultSecretField: async (name, field, payload, opts) => {
       const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;
       const { payloadJson } = await requestJson(path, {

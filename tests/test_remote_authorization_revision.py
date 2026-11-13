@@ -300,6 +300,7 @@ def test_session_endpoint_only_adds_fields_to_its_released_shape(
     tmp_path,
     state,
 ):
+    """AUTH-SETUP-175: only current authorization adds the safe instance identity."""
     config = _paired_config(tmp_path)
     config.remote_access.vibe_cloud.instance_kind = "personal"
     config.save()
@@ -346,6 +347,7 @@ def test_session_endpoint_only_adds_fields_to_its_released_shape(
 
     assert _session_set_cookie(response) is None
     if state == "current":
+        assert body.pop("instance_id") == "inst_123"
         assert body.pop("session_expires_at") == _cookie_payload(cookie)["exp"]
         assert body.pop("capabilities")["is_instance_owner"] is True
         assert re.fullmatch(r"[0-9a-f]{32}", body.pop("access_digest"))

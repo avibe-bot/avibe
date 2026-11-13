@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-instance-client",
+  "description": "Account actions only for the app-owned main bundled account page. Rust additionally verifies the exact path and native presentation ownership. No remote origin or child window receives this permission.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": ["allow-desktop-client-request"]
+}

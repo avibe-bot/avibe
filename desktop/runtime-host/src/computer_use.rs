@@ -31,6 +31,8 @@ pub const RUNTIME_TOO_OLD_REASON: &str = "runtime_too_old";
 pub const RUNTIME_UNAVAILABLE_REASON: &str = "runtime_unavailable";
 pub const FAILURE_LIMIT: usize = 3;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
+const ERROR_RECOVERY_LIMIT: u8 = 3;
+const ERROR_RECOVERY_BACKOFF: [Duration; 2] = [Duration::from_secs(30), Duration::from_secs(120)];
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -348,6 +350,21 @@ impl FailureBudget {
 }
 
 #[derive(Clone, Debug)]
+struct ErrorRecovery {
+    reason: String,
+    // None while the admitted start is in flight.
+    not_before: Option<Duration>,
+    allow_hidden: bool,
+}
+
+fn recoverable_error(reason: &str) -> bool {
+    matches!(
+        reason,
+        "health_timeout" | "daemon_exited" | "socket_unreachable" | "spawn_failed" | "endpoint_busy"
+    )
+}
+
+#[derive(Clone, Debug)]
 pub struct ComputerUseLifecycle {
     enabled: bool,
     phase: ComputerUsePhase,
@@ -355,6 +372,8 @@ pub struct ComputerUseLifecycle {
     permission_edge_armed: bool,
     failure_budget: FailureBudget,
     consecutive_ready_failures: u8,
+    recovery_starts: u8,
+    recovery: Option<ErrorRecovery>,
 }
 
 impl ComputerUseLifecycle {
@@ -366,6 +385,8 @@ impl ComputerUseLifecycle {
             permission_edge_armed: false,
             failure_budget: FailureBudget::default(),
             consecutive_ready_failures: 0,
+            recovery_starts: 0,
+            recovery: None,
         }
     }
 
@@ -390,6 +411,8 @@ impl ComputerUseLifecycle {
             permission_edge_armed: false,
             failure_budget: FailureBudget::default(),
             consecutive_ready_failures: 0,
+            recovery_starts: 0,
+            recovery: None,
         }
     }
 
@@ -405,11 +428,84 @@ impl ComputerUseLifecycle {
         self.reason.as_deref()
     }
 
+    /// Called once by shell restoration, after validating the installed assets.
+    /// Runtime and permission prerequisites still own whether a start is possible.
+    pub fn recover_on_launch(&mut self) {
+        if !self.enabled
+            || self.phase != ComputerUsePhase::Error
+            || self.recovery_starts != 0
+            || !self.reason.as_deref().is_some_and(recoverable_error)
+        {
+            return;
+        }
+        self.recovery = Some(ErrorRecovery {
+            reason: self.reason.clone().expect("eligible error reason"),
+            not_before: Some(Duration::ZERO),
+            allow_hidden: true,
+        });
+        self.phase = ComputerUsePhase::NeedsRuntime;
+        self.reason = Some(RUNTIME_UNAVAILABLE_REASON.to_owned());
+    }
+
+    pub fn recovering(&self) -> bool {
+        self.recovery.is_some()
+    }
+
+    /// The only admission for an automatic recovery start. Prerequisite
+    /// transitions prepare Starting, but cannot spend or bypass this budget.
+    pub fn retry_recovery(
+        &mut self,
+        support: RuntimeSupport,
+        grants: Grants,
+        now: Duration,
+        visible: bool,
+    ) -> LifecycleDirective {
+        if !self.enabled || self.phase != ComputerUsePhase::Starting || support != RuntimeSupport::Supported {
+            return LifecycleDirective::default();
+        }
+        let Some(recovery) = self.recovery.as_ref() else {
+            return LifecycleDirective::default();
+        };
+        let Some(deadline) = recovery.not_before else {
+            return LifecycleDirective::default();
+        };
+        if self.recovery_starts >= ERROR_RECOVERY_LIMIT {
+            let reason = recovery.reason.clone();
+            self.set_error(reason);
+            return LifecycleDirective {
+                write_state: true,
+                stop_daemon: true,
+                ..LifecycleDirective::default()
+            };
+        }
+        if now < deadline || (!recovery.allow_hidden && !visible) {
+            return LifecycleDirective::default();
+        }
+        if let Some(reason) = grants.missing_reason() {
+            self.phase = ComputerUsePhase::NeedsPermission;
+            self.reason = Some(reason.to_owned());
+            self.permission_edge_armed = true;
+            return LifecycleDirective {
+                write_state: true,
+                ..LifecycleDirective::default()
+            };
+        }
+        self.recovery_starts += 1;
+        self.recovery.as_mut().expect("pending recovery").not_before = None;
+        LifecycleDirective {
+            write_state: true,
+            spawn_daemon: true,
+            stop_permission_probe: true,
+            ..LifecycleDirective::default()
+        }
+    }
+
     pub fn set_error(&mut self, reason: impl Into<String>) {
         self.enabled = true;
         self.phase = ComputerUsePhase::Error;
         self.reason = Some(reason.into());
         self.permission_edge_armed = false;
+        self.recovery = None;
     }
 
     pub fn toggle_off(&mut self) -> LifecycleDirective {
@@ -419,6 +515,7 @@ impl ComputerUseLifecycle {
         self.permission_edge_armed = false;
         self.failure_budget.clear();
         self.consecutive_ready_failures = 0;
+        self.recovery = None;
         LifecycleDirective {
             write_state: true,
             stop_permission_probe: true,
@@ -492,11 +589,11 @@ impl ComputerUseLifecycle {
             };
         }
         self.phase = ComputerUsePhase::Starting;
-        self.reason = None;
+        self.reason = self.recovery.as_ref().map(|recovery| recovery.reason.clone());
         self.permission_edge_armed = false;
         LifecycleDirective {
             write_state: true,
-            spawn_daemon: true,
+            spawn_daemon: self.recovery.is_none(),
             ..LifecycleDirective::default()
         }
     }
@@ -511,11 +608,11 @@ impl ComputerUseLifecycle {
             }
             self.permission_edge_armed = false;
             self.phase = ComputerUsePhase::Starting;
-            self.reason = None;
+            self.reason = self.recovery.as_ref().map(|recovery| recovery.reason.clone());
             return LifecycleDirective {
                 write_state: true,
                 stop_permission_probe: true,
-                spawn_daemon: true,
+                spawn_daemon: self.recovery.is_none(),
                 ..LifecycleDirective::default()
             };
         };
@@ -540,6 +637,7 @@ impl ComputerUseLifecycle {
                 self.reason = None;
                 self.permission_edge_armed = false;
                 self.consecutive_ready_failures = 0;
+                self.recovery = None;
                 LifecycleDirective {
                     write_state: true,
                     ..LifecycleDirective::default()
@@ -549,6 +647,13 @@ impl ComputerUseLifecycle {
                 self.phase = ComputerUsePhase::NeedsPermission;
                 self.reason = Some(reason);
                 self.permission_edge_armed = false;
+                // A missing grant ends the child, but only a newly observed
+                // grant edge may resume it, still through recovery admission.
+                let delay = self.recovery_backoff();
+                if let Some(recovery) = self.recovery.as_mut() {
+                    recovery.not_before = Some(now + delay);
+                    recovery.allow_hidden = false;
+                }
                 LifecycleDirective {
                     write_state: true,
                     stop_daemon: true,
@@ -614,9 +719,24 @@ impl ComputerUseLifecycle {
     }
 
     fn failed(&mut self, reason: String, now: Duration) -> LifecycleDirective {
-        let exhausted = self.failure_budget.record(now);
+        let recovering = self.recovery.is_some();
+        let exhausted = recovering || self.failure_budget.record(now);
         self.reason = Some(stable_failure_reason(&reason).to_owned());
         self.permission_edge_armed = false;
+        if exhausted && recoverable_error(&reason) && self.recovery_starts < ERROR_RECOVERY_LIMIT {
+            self.recovery = Some(ErrorRecovery {
+                reason: self.reason.clone().expect("failure reason"),
+                not_before: Some(now + self.recovery_backoff()),
+                allow_hidden: false,
+            });
+            self.phase = ComputerUsePhase::Starting;
+            return LifecycleDirective {
+                write_state: true,
+                stop_daemon: true,
+                ..LifecycleDirective::default()
+            };
+        }
+        self.recovery = None;
         self.phase = if exhausted {
             ComputerUsePhase::Error
         } else {
@@ -628,6 +748,10 @@ impl ComputerUseLifecycle {
             stop_daemon: true,
             ..LifecycleDirective::default()
         }
+    }
+
+    fn recovery_backoff(&self) -> Duration {
+        ERROR_RECOVERY_BACKOFF[usize::from(self.recovery_starts.saturating_sub(1)).min(1)]
     }
 }
 
@@ -1026,31 +1150,339 @@ mod tests {
     }
 
     #[test]
-    fn third_failure_in_five_minutes_enters_sticky_error() {
+    fn third_nonrecoverable_failure_in_five_minutes_enters_sticky_error() {
         let mut lifecycle = ComputerUseLifecycle::off();
         lifecycle.enabled = true;
         lifecycle.phase = ComputerUsePhase::Starting;
         for second in [0, 10] {
             let directive = lifecycle.startup_health(
-                HealthResult::Unhealthy("spawn_failed".to_owned()),
+                HealthResult::Unhealthy("health_protocol".to_owned()),
                 Duration::from_secs(second),
             );
             assert!(directive.spawn_daemon);
             assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
         }
         let directive = lifecycle.startup_health(
-            HealthResult::Unhealthy("spawn_failed".to_owned()),
+            HealthResult::Unhealthy("health_protocol".to_owned()),
             Duration::from_secs(20),
         );
         assert!(!directive.spawn_daemon);
         assert_eq!(lifecycle.phase(), ComputerUsePhase::Error);
-        assert_eq!(lifecycle.reason(), Some("spawn_failed"));
+        assert_eq!(lifecycle.reason(), Some("driver_health_failed"));
         assert_eq!(
             lifecycle.capabilities(RuntimeSupport::Supported, Grants::all()),
             LifecycleDirective::default()
         );
         assert!(lifecycle.toggle_off().stop_daemon);
         assert_eq!(lifecycle.phase(), ComputerUsePhase::Off);
+    }
+
+    fn restored_error(reason: &str) -> ComputerUseLifecycle {
+        let mut stored = record(ComputerUsePhase::Error, true);
+        stored.reason = Some(reason.to_owned());
+        let mut lifecycle = ComputerUseLifecycle::from_record(&stored);
+        lifecycle.recover_on_launch();
+        lifecycle
+    }
+
+    #[test]
+    fn only_known_transient_restored_errors_admit_one_launch_recovery() {
+        for (reason, eligible) in [
+            ("health_timeout", true),
+            ("daemon_exited", true),
+            ("socket_unreachable", true),
+            ("spawn_failed", true),
+            ("endpoint_busy", true),
+            ("assets_invalid", false),
+            ("driver_health_failed", false),
+            ("state_unwritable", false),
+            ("socket_path_too_long", false),
+            ("endpoint_unremovable", false),
+            ("bundle_identity", false),
+            ("ax_capability", false),
+            ("capture_failed", false),
+            ("accessibility", false),
+            ("future_error", false),
+        ] {
+            let mut lifecycle = restored_error(reason);
+            assert!(
+                !lifecycle
+                    .retry_recovery(RuntimeSupport::Unknown, Grants::all(), Duration::ZERO, true)
+                    .spawn_daemon
+            );
+            assert!(
+                !lifecycle
+                    .capabilities(RuntimeSupport::Supported, Grants::all())
+                    .spawn_daemon
+            );
+            let first = lifecycle.retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::ZERO, false);
+            assert_eq!(first.spawn_daemon, eligible, "{reason}");
+            assert!(!first.prompt_permissions && !first.spawn_permission_probe);
+            for _ in 0..10 {
+                lifecycle.recover_on_launch();
+                assert!(
+                    !lifecycle
+                        .capabilities(RuntimeSupport::Supported, Grants::all())
+                        .spawn_daemon
+                );
+                assert!(
+                    !lifecycle
+                        .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::ZERO, true)
+                        .spawn_daemon
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_counts_real_starts_and_stays_terminal_after_three_even_when_time_advances() {
+        let mut lifecycle = restored_error("health_timeout");
+        lifecycle.capabilities(RuntimeSupport::Supported, Grants::all());
+        assert!(
+            lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::ZERO, false)
+                .spawn_daemon
+        );
+        for (failed_at, due_at, reason) in [(5, 35, "health_timeout"), (1040, 1160, "daemon_exited")] {
+            let failure = lifecycle.startup_health(
+                HealthResult::Unhealthy(reason.to_owned()),
+                Duration::from_secs(failed_at),
+            );
+            assert!(
+                !failure.spawn_daemon,
+                "recovery must not multiply into the fast retry loop"
+            );
+            assert!(failure.stop_daemon && failure.write_state);
+            assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
+            assert_eq!(lifecycle.reason(), Some(reason));
+            for (now, visible) in [(due_at - 1, true), (due_at, false), (due_at + 1000, false)] {
+                assert!(
+                    !lifecycle
+                        .retry_recovery(
+                            RuntimeSupport::Supported,
+                            Grants::all(),
+                            Duration::from_secs(now),
+                            visible
+                        )
+                        .spawn_daemon
+                );
+            }
+            assert!(
+                lifecycle
+                    .retry_recovery(
+                        RuntimeSupport::Supported,
+                        Grants::all(),
+                        Duration::from_secs(due_at + 1000),
+                        true
+                    )
+                    .spawn_daemon
+            );
+            assert_eq!(
+                lifecycle.retry_recovery(
+                    RuntimeSupport::Supported,
+                    Grants::all(),
+                    Duration::from_secs(due_at + 1000),
+                    true
+                ),
+                LifecycleDirective::default(),
+                "another observation cannot cancel or duplicate an in-flight final attempt"
+            );
+        }
+        assert!(
+            !lifecycle
+                .startup_health(
+                    HealthResult::Unhealthy("socket_unreachable".to_owned()),
+                    Duration::from_secs(2165)
+                )
+                .spawn_daemon
+        );
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Error);
+        assert_eq!(lifecycle.reason(), Some("socket_unreachable"));
+        for now in [2165, 3600, 86400] {
+            lifecycle.recover_on_launch();
+            lifecycle.capabilities(RuntimeSupport::Supported, Grants::all());
+            assert!(
+                !lifecycle
+                    .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(now), true)
+                    .spawn_daemon
+            );
+            assert_eq!(lifecycle.phase(), ComputerUsePhase::Error);
+        }
+    }
+
+    #[test]
+    fn runtime_and_permission_recovery_preserve_backoff_and_grant_edges() {
+        let mut lifecycle = restored_error("health_timeout");
+        lifecycle.capabilities(RuntimeSupport::Supported, Grants::all());
+        assert!(
+            lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::ZERO, false)
+                .spawn_daemon
+        );
+        lifecycle.startup_health(
+            HealthResult::Unhealthy("health_timeout".to_owned()),
+            Duration::from_secs(5),
+        );
+        assert!(
+            lifecycle
+                .capabilities(RuntimeSupport::Unknown, Grants::all())
+                .stop_daemon
+        );
+        assert!(
+            !lifecycle
+                .capabilities(RuntimeSupport::Supported, Grants::all())
+                .spawn_daemon
+        );
+        assert!(
+            !lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(34), true)
+                .spawn_daemon
+        );
+
+        let missing = Grants {
+            accessibility: true,
+            screen_recording: false,
+        };
+        let denied = lifecycle.retry_recovery(RuntimeSupport::Supported, missing, Duration::from_secs(35), true);
+        assert!(denied.write_state);
+        assert!(!denied.spawn_daemon && !denied.prompt_permissions && !denied.spawn_permission_probe);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+        assert!(!lifecycle.observe_permissions(Grants::all()).spawn_daemon);
+        assert!(
+            lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(36), true)
+                .spawn_daemon
+        );
+        lifecycle.startup_health(
+            HealthResult::MissingGrant("screen_recording".to_owned()),
+            Duration::from_secs(37),
+        );
+        for _ in 0..10 {
+            assert_eq!(
+                lifecycle.observe_permissions(Grants::all()),
+                LifecycleDirective::default()
+            );
+            assert!(
+                !lifecycle
+                    .retry_recovery(
+                        RuntimeSupport::Supported,
+                        Grants::all(),
+                        Duration::from_secs(1000),
+                        true
+                    )
+                    .spawn_daemon
+            );
+        }
+        lifecycle.observe_permissions(missing);
+        assert!(!lifecycle.observe_permissions(Grants::all()).spawn_daemon);
+        assert!(
+            !lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(156), true)
+                .spawn_daemon
+        );
+        assert!(
+            lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(157), true)
+                .spawn_daemon
+        );
+    }
+
+    #[test]
+    fn explicit_off_cancels_recovery_and_a_manual_start_keeps_its_own_authority() {
+        let mut lifecycle = restored_error("health_timeout");
+        lifecycle.capabilities(RuntimeSupport::Supported, Grants::all());
+        assert!(
+            lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::ZERO, true)
+                .spawn_daemon
+        );
+        lifecycle.startup_health(
+            HealthResult::Unhealthy("health_timeout".to_owned()),
+            Duration::from_secs(1),
+        );
+        assert!(lifecycle.toggle_off().stop_daemon);
+        lifecycle.recover_on_launch();
+        lifecycle.capabilities(RuntimeSupport::Supported, Grants::all());
+        lifecycle.observe_permissions(Grants::all());
+        assert!(
+            !lifecycle
+                .retry_recovery(
+                    RuntimeSupport::Supported,
+                    Grants::all(),
+                    Duration::from_secs(1000),
+                    true
+                )
+                .spawn_daemon
+        );
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Off);
+        assert!(!lifecycle.enabled());
+        assert!(
+            lifecycle
+                .toggle_on(RuntimeSupport::Supported, Grants::all())
+                .spawn_daemon
+        );
+        assert!(
+            !lifecycle
+                .retry_recovery(
+                    RuntimeSupport::Supported,
+                    Grants::all(),
+                    Duration::from_secs(1001),
+                    true
+                )
+                .spawn_daemon
+        );
+        assert!(
+            lifecycle
+                .startup_health(HealthResult::Pass, Duration::from_secs(1002))
+                .write_state
+        );
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Ready);
+        assert_eq!(lifecycle.reason(), None);
+    }
+
+    #[test]
+    fn successful_recovery_clears_the_error_but_does_not_refill_the_process_budget() {
+        let mut lifecycle = restored_error("health_timeout");
+        lifecycle.capabilities(RuntimeSupport::Supported, Grants::all());
+        assert!(
+            lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::ZERO, false)
+                .spawn_daemon
+        );
+        lifecycle.startup_health(HealthResult::Pass, Duration::from_secs(1));
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Ready);
+        assert_eq!(lifecycle.reason(), None);
+        assert!(!lifecycle.recovering());
+
+        // A later incident first uses the existing fast-failure budget.
+        for second in [2, 3, 4] {
+            lifecycle.daemon_failed("daemon_exited", Duration::from_secs(second));
+        }
+        assert!(lifecycle.recovering());
+        assert!(
+            !lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(33), true)
+                .spawn_daemon
+        );
+        assert!(
+            lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(34), true)
+                .spawn_daemon
+        );
+        lifecycle.startup_health(
+            HealthResult::Unhealthy("health_timeout".to_owned()),
+            Duration::from_secs(35),
+        );
+        assert!(
+            lifecycle
+                .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(155), true)
+                .spawn_daemon
+        );
+        lifecycle.startup_health(
+            HealthResult::Unhealthy("health_timeout".to_owned()),
+            Duration::from_secs(156),
+        );
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Error);
     }
 
     #[test]

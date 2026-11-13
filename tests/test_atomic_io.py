@@ -14,7 +14,7 @@ import threading
 import pytest
 
 from config import atomic_io
-from config.atomic_io import write_atomic
+from config.atomic_io import read_snapshot, write_atomic
 
 
 def test_write_atomic_creates_missing_parent_directories(tmp_path) -> None:
@@ -54,8 +54,8 @@ def test_write_atomic_leaves_the_destination_intact_when_the_swap_fails(
     write_atomic(target, "original")
 
     monkeypatch.setattr(
-        atomic_io.os,
-        "replace",
+        atomic_io,
+        "replace_snapshot",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace failed")),
     )
     with pytest.raises(OSError):
@@ -101,16 +101,20 @@ def test_concurrent_writers_publish_whole_payloads_never_fragments(tmp_path) -> 
     # this file records on CI. Deduplicating keeps it bounded by the payload set
     # and loses nothing: a torn read is a value outside ``whole`` either way.
     observed: set[str] = set()
+    errors: list[BaseException] = []
     stop = threading.Event()
 
     def _write(payload: str) -> None:
-        for _ in range(20):
-            write_atomic(target, payload)
+        try:
+            for _ in range(20):
+                write_atomic(target, payload)
+        except BaseException as exc:
+            errors.append(exc)
 
     def _read() -> None:
         while not stop.is_set():
             try:
-                observed.add(target.read_text(encoding="utf-8"))
+                observed.add(read_snapshot(target, encoding="utf-8"))
             except FileNotFoundError:
                 continue
 
@@ -124,6 +128,7 @@ def test_concurrent_writers_publish_whole_payloads_never_fragments(tmp_path) -> 
     stop.set()
     reader.join(timeout=5)
 
+    assert not errors
     assert target.read_text(encoding="utf-8") in whole
     assert observed, "reader never managed to observe the file"
     assert observed <= whole
@@ -235,7 +240,10 @@ def test_explicit_mode_failure_cleans_temporary_without_changing_target(tmp_path
     def fail(*args, **kwargs):
         raise OSError("fixture publication failed")
 
-    monkeypatch.setattr(atomic_io.os, failure, fail)
+    if failure == "replace":
+        monkeypatch.setattr(atomic_io, "replace_snapshot", fail)
+    else:
+        monkeypatch.setattr(atomic_io.os, failure, fail)
     with pytest.raises(OSError):
         write_atomic(target, b"after", mode=0o644)
     assert target.read_bytes() == b"before"

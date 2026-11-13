@@ -27,6 +27,7 @@ type WorkbenchEventHandlers = {
 
 const eventHandlers = vi.hoisted(() => [] as WorkbenchEventHandlers[]);
 const api = vi.hoisted(() => ({
+  deleteVaultSecret: vi.fn(),
   connectWorkbenchEvents: vi.fn(() => () => undefined),
   createVaultRevealContext: vi.fn(),
   getVaultAudit: vi.fn(),
@@ -210,7 +211,7 @@ describe('PERMISSIONS-013 VaultsPage capability-gated management actions', () =>
     },
     {
       label: 'Member', context: member, canRevoke: true, hasSettings: true,
-      protectedMenu: ['Show value', 'Copy value', 'Edit secret', 'Delete'], standardMenu: ['Edit secret', 'Delete'],
+      protectedMenu: ['Show value', 'Copy value', 'Edit key', 'Delete'], standardMenu: ['Edit key', 'Delete'],
     },
   ] as const;
 
@@ -441,6 +442,38 @@ describe('VaultsPage list discovery', () => {
     await user.click(within(row).getByRole('button', { name: 'release' }));
     expect(params().getAll('skill')).toEqual(['release']);
     expect(count()).toBe('1 / 1 secrets');
+  });
+
+  it('shows a seed-phrase wallet by its accounts, and keeps one whose address check failed blocked until it is deleted', async () => {
+    const accounts = [0, 1].map((n) => ({
+      account: n, name: n ? 'Trading' : null, eth: `0xE${n}`, btc_taproot: `bc1pB${n}`, solana: `S${n}`,
+      paths: { evm: '', bitcoin: '', solana: '' }, always_ask: false, last_signer: null,
+    }));
+    api.listVaultSecrets.mockResolvedValue({ secrets: [makeSecret('AGENT_WALLET', { kind: 'keypair', signer_kind: 'hd-seed', accounts, account_limit: 20 })] });
+    renderPage();
+    await screen.findByText('AGENT_WALLET');
+    expect(screen.getByText('Trading')).toBeTruthy();
+    expect(screen.getByRole('button', { name: en.vaults.hd.wallet.open })).toBeTruthy();
+    cleanup();
+    localStorage.setItem('avibe.vault.hdAddressCheckFailed', JSON.stringify(['AGENT_WALLET']));
+    renderPage();
+    await screen.findByText('AGENT_WALLET');
+    expect(screen.getByText(en.vaults.hd.blocked)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.vaults.hd.wallet.open })).toBeNull();
+    expect(screen.queryByText('Trading')).toBeNull();
+    // A refused delete keeps it blocked.
+    api.deleteVaultSecret.mockResolvedValueOnce({ ok: false, message: 'nope' });
+    // The keypair delete confirm holds for 5 s; run that countdown on fake timers.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.rowActions }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: en.vaults.delete }));
+    const dialog = await screen.findByRole('dialog');
+    await act(async () => { vi.advanceTimersByTime(5000); });
+    vi.useRealTimers();
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: /^Delete/ })); });
+    expect(api.deleteVaultSecret).toHaveBeenCalledWith('AGENT_WALLET');
+    expect(JSON.parse(localStorage.getItem('avibe.vault.hdAddressCheckFailed') ?? '[]').map((b: { name: string }) => b.name)).toEqual(['AGENT_WALLET']);
+    localStorage.clear();
   });
 
   it('composes quick filters and sorting, most recent activity first by default, dates relative even beyond a week', async () => {

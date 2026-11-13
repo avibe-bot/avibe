@@ -23,7 +23,10 @@ computer-use-test-overrides = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+async-trait.workspace = true
+base64 = "0.23"
 avibe-runtime-host = { path = "../runtime-host" }
+cookie = "0.18"
 flate2 = "1"
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde.workspace = true
@@ -53,6 +56,9 @@ async-trait.workspace = true
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 
 [target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Networking_WindowsWebServices", "Win32_Foundation"] }
+keyring = { version = "3.6", features = ["windows-native"] }
 # Match Tauri's Known Folder lookup without initializing the GUI.
 dirs = "7"
 # The pet's drag: the primary button's state and a one-step window frame.
@@ -66,12 +72,17 @@ windows-sys = { version = "0.61", features = [
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-authentication-services = { version = "0.3.2", default-features = false, features = ["std", "ASFoundation", "ASPublicKeyCredential", "ASAuthorization", "ASAuthorizationController", "ASAuthorizationCredential", "ASAuthorizationProvider", "ASAuthorizationRequest", "ASAuthorizationPublicKeyCredentialAssertion", "ASAuthorizationPublicKeyCredentialAssertionRequest", "ASAuthorizationPublicKeyCredentialConstants", "ASAuthorizationPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialAssertion", "ASAuthorizationPlatformPublicKeyCredentialAssertionRequest", "ASAuthorizationPlatformPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialProvider"] }
+keyring = { version = "3.6", features = ["apple-native"] }
 block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSAppleEventDescriptor",
   "NSAppleEventManager",
   "NSArray",
+  "NSDate",
+  "NSData",
+  "NSSet",
   "NSEnumerator",
   "NSError",
   "NSGeometry",
@@ -99,4 +110,6 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "WKNavigationAction",
   "WKNavigationDelegate",
   "WKWebView",
+  "WKWebViewConfiguration",
+  "WKWebsiteDataStore",
 ] }

@@ -1,0 +1,352 @@
+{
+  "signed_out": {
+    "version": 1,
+    "revision": 0,
+    "generation": 0,
+    "account": {
+      "status": "signed_out",
+      "identity": null,
+      "email": null,
+      "gate": null,
+      "methods": []
+    },
+    "connection": {
+      "status": "local",
+      "committed": {
+        "kind": "local",
+        "name": "小明的 Mac",
+        "instance_id": null
+      },
+      "pending": null
+    },
+    "enrollment": {
+      "status": "unknown",
+      "instance_id": null,
+      "error_code": null
+    },
+    "catalog": {
+      "status": "idle",
+      "instances": []
+    },
+    "local": {
+      "name": "小明的 Mac",
+      "remote_access": "off"
+    },
+    "desktop": {
+      "version": "0.1.0",
+      "update": {
+        "phase": "idle",
+        "latest": null,
+        "channel": "stable",
+        "prereleases": false,
+        "skippedVersion": null,
+        "interactive": false,
+        "remoteInstallAllowed": false,
+        "remoteRequest": null
+      }
+    },
+    "consent": null,
+    "remote_auxiliary": "local"
+  },
+  "signed_in": {
+    "version": 1,
+    "revision": 1,
+    "generation": 1,
+    "account": {
+      "status": "signed_in",
+      "identity": {
+        "id": "account-xiaoming",
+        "email": "xiaoming@example.test"
+      },
+      "email": "xiaoming@example.test",
+      "gate": null,
+      "methods": []
+    },
+    "connection": {
+      "status": "local",
+      "committed": {
+        "kind": "local",
+        "name": "小明的 Mac",
+        "instance_id": null
+      },
+      "pending": null
+    },
+    "enrollment": {
+      "status": "unknown",
+      "instance_id": null,
+      "error_code": null
+    },
+    "catalog": {
+      "status": "ready",
+      "instances": [
+        {
+          "id": "studio-1",
+          "name": "工作室 Studio",
+          "host": "studio.avibe.bot",
+          "url": "https://studio.avibe.bot",
+          "relationship": "shared",
+          "owner_email": "owner@example.test",
+          "available": true
+        }
+      ]
+    },
+    "local": {
+      "name": "小明的 Mac",
+      "remote_access": "off"
+    },
+    "desktop": {
+      "version": "0.1.0",
+      "update": {
+        "phase": "idle",
+        "latest": null,
+        "channel": "stable",
+        "prereleases": false,
+        "skippedVersion": null,
+        "interactive": false,
+        "remoteInstallAllowed": false,
+        "remoteRequest": null
+      }
+    },
+    "consent": null,
+    "remote_auxiliary": "local"
+  },
+  "challenge": {
+    "version": 1,
+    "revision": 1,
+    "generation": 1,
+    "account": {
+      "status": "second_factor_required",
+      "identity": null,
+      "email": "xiaoming@example.test",
+      "gate": "challenge",
+      "methods": [
+        "totp",
+        "passkey"
+      ]
+    },
+    "connection": {
+      "status": "local",
+      "committed": {
+        "kind": "local",
+        "name": "小明的 Mac",
+        "instance_id": null
+      },
+      "pending": null
+    },
+    "enrollment": {
+      "status": "unknown",
+      "instance_id": null,
+      "error_code": null
+    },
+    "catalog": {
+      "status": "idle",
+      "instances": []
+    },
+    "local": {
+      "name": "小明的 Mac",
+      "remote_access": "off"
+    },
+    "desktop": {
+      "version": "0.1.0",
+      "update": {
+        "phase": "idle",
+        "latest": null,
+        "channel": "stable",
+        "prereleases": false,
+        "skippedVersion": null,
+        "interactive": false,
+        "remoteInstallAllowed": false,
+        "remoteRequest": null
+      }
+    },
+    "consent": null,
+    "remote_auxiliary": "local"
+  },
+  "enroll": {
+    "version": 1,
+    "revision": 1,
+    "generation": 1,
+    "account": {
+      "status": "second_factor_required",
+      "identity": null,
+      "email": "xiaoming@example.test",
+      "gate": "enroll",
+      "methods": [
+        "totp",
+        "passkey"
+      ]
+    },
+    "connection": {
+      "status": "local",
+      "committed": {
+        "kind": "local",
+        "name": "小明的 Mac",
+        "instance_id": null
+      },
+      "pending": null
+    },
+    "enrollment": {
+      "status": "unknown",
+      "instance_id": null,
+      "error_code": null
+    },
+    "catalog": {
+      "status": "idle",
+      "instances": []
+    },
+    "local": {
+      "name": "小明的 Mac",
+      "remote_access": "off"
+    },
+    "desktop": {
+      "version": "0.1.0",
+      "update": {
+        "phase": "idle",
+        "latest": null,
+        "channel": "stable",
+        "prereleases": false,
+        "skippedVersion": null,
+        "interactive": false,
+        "remoteInstallAllowed": false,
+        "remoteRequest": null
+      }
+    },
+    "consent": null,
+    "remote_auxiliary": "local"
+  },
+  "consent": {
+    "version": 1,
+    "revision": 2,
+    "generation": 2,
+    "account": {
+      "status": "signed_in",
+      "identity": {
+        "id": "account-xiaoming",
+        "email": "xiaoming@example.test"
+      },
+      "email": "xiaoming@example.test",
+      "gate": null,
+      "methods": []
+    },
+    "connection": {
+      "status": "switching",
+      "committed": {
+        "kind": "local",
+        "name": "小明的 Mac",
+        "instance_id": null
+      },
+      "pending": {
+        "kind": "remote",
+        "name": "工作室 Studio",
+        "instance_id": "studio-1",
+        "canonical_origin": "https://studio.avibe.bot"
+      }
+    },
+    "enrollment": {
+      "status": "unknown",
+      "instance_id": null,
+      "error_code": null
+    },
+    "catalog": {
+      "status": "ready",
+      "instances": [
+        {
+          "id": "studio-1",
+          "name": "工作室 Studio",
+          "host": "studio.avibe.bot",
+          "url": "https://studio.avibe.bot",
+          "relationship": "shared",
+          "owner_email": "owner@example.test",
+          "available": true
+        }
+      ]
+    },
+    "local": {
+      "name": "小明的 Mac",
+      "remote_access": "off"
+    },
+    "desktop": {
+      "version": "0.1.0",
+      "update": {
+        "phase": "idle",
+        "latest": null,
+        "channel": "stable",
+        "prereleases": false,
+        "skippedVersion": null,
+        "interactive": false,
+        "remoteInstallAllowed": false,
+        "remoteRequest": null
+      }
+    },
+    "consent": {
+      "instance_id": "studio-1",
+      "instance_name": "工作室 Studio",
+      "host": "studio.avibe.bot",
+      "scope": "openid profile email"
+    },
+    "remote_auxiliary": "local"
+  },
+  "remote_connected": {
+    "version": 1,
+    "revision": 3,
+    "generation": 2,
+    "account": {
+      "status": "signed_in",
+      "identity": {
+        "id": "account-xiaoming",
+        "email": "xiaoming@example.test"
+      },
+      "email": "xiaoming@example.test",
+      "gate": null,
+      "methods": []
+    },
+    "connection": {
+      "status": "remote_connected",
+      "committed": {
+        "kind": "remote",
+        "name": "工作室 Studio",
+        "instance_id": "studio-1",
+        "canonical_origin": "https://studio.avibe.bot"
+      },
+      "pending": null
+    },
+    "enrollment": {
+      "status": "unknown",
+      "instance_id": null,
+      "error_code": null
+    },
+    "catalog": {
+      "status": "ready",
+      "instances": [
+        {
+          "id": "studio-1",
+          "name": "工作室 Studio",
+          "host": "studio.avibe.bot",
+          "url": "https://studio.avibe.bot",
+          "relationship": "shared",
+          "owner_email": "owner@example.test",
+          "available": true
+        }
+      ]
+    },
+    "local": {
+      "name": "小明的 Mac",
+      "remote_access": "off"
+    },
+    "desktop": {
+      "version": "0.1.0",
+      "update": {
+        "phase": "idle",
+        "latest": null,
+        "channel": "stable",
+        "prereleases": false,
+        "skippedVersion": null,
+        "interactive": false,
+        "remoteInstallAllowed": false,
+        "remoteRequest": null
+      }
+    },
+    "consent": null,
+    "remote_auxiliary": "disabled_incomplete"
+  }
+}

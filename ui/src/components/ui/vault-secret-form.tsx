@@ -15,6 +15,7 @@ import {
   ShieldCheck,
   Signature,
   SlidersHorizontal,
+  TriangleAlert,
   UploadCloud,
   X,
 } from 'lucide-react';
@@ -28,12 +29,14 @@ import {
   type VaultRequestSpec,
   type VaultSecret,
   type VaultCreatePayload,
+  type VaultHdAccount,
 } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 import { mergeTags, normalizeTagOrSkillEntry, partitionTags, toSkillTag } from '@/lib/vaultTags';
 import { buildMetadataPatch } from '@/lib/vaultPolicy';
 import {
   generateSigningKey,
+  hdSeedImportBlindBoxContext,
   importSigningKey,
   keypairImportBlindBoxContext,
   sealBlindBox,
@@ -43,6 +46,10 @@ import {
   type SolanaKeyImportFormat,
 } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
+import { blockHdWallet, unblockHdWallet } from '@/lib/vaultHdQuarantine';
+import {
+  checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
+} from '@/lib/vaultHdWallet';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
@@ -68,13 +75,16 @@ import {
 } from './vault-field-list';
 import { HintLine, KeySourceTabs } from './vault-key-builder-parts';
 import { VaultProtectedKeyFields } from './vault-protected-key-fields';
+import {
+  HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdMismatchBlock, HdNotice, HdStepFooter, HdStepper,
+} from './vault-hd-wallet-steps';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 import { VaultSolanaKeyFields } from './vault-solana-key-fields';
 
 type VaultKind = 'static' | 'keypair';
 /** The chain family a signing key is for. It decides the curve, and how the key is created. */
-type KeyChain = 'evm-bitcoin' | 'solana';
+type KeyChain = 'evm-bitcoin' | 'solana' | 'mnemonic';
 type FetchAuthMode = 'bearer' | 'header' | 'query';
 type StaticSecretSource = 'text' | 'file';
 /** A create-form field row. Touched flags hold back blank-field errors until the user has been there. */
@@ -84,6 +94,8 @@ let nextFieldDraftId = 0;
 const fieldDraft = (name: string, value = ''): FieldDraft => ({ id: nextFieldDraftId++, name, value });
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
+/** Seed-phrase wallets: avault imports the seed and signs by derivation path (avault DESIGN). */
+const AVAULT_HD_MIN_VERSION = '0.1.11';
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const HTTP_HEADER_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const QUERY_PARAM_RE = /^[A-Za-z0-9._~-]+$/;
@@ -210,6 +222,25 @@ export const VaultSecretForm: React.FC<{
   const [solanaImportFailed, setSolanaImportFailed] = useState(false);
   const [importHex, setImportHex] = useState('');
   const [signingKey, setSigningKey] = useState<SigningKeyMaterial | null>(null);
+  // A seed-phrase wallet (chain 'mnemonic'). The words live only in this form's state until they are
+  // sealed, and are dropped as soon as they are (or the form closes): never logged, stored or sent.
+  const [hdStep, setHdStep] = useState<'setup' | 'backup' | 'check' | 'done'>('setup');
+  const [hdWords, setHdWords] = useState<string[] | null>(null);
+  const [hdQuiz, setHdQuiz] = useState<HdQuestion[]>([]);
+  const [hdChosen, setHdChosen] = useState<Record<number, string>>({});
+  const [hdImport, setHdImport] = useState('');
+  const [hdPassphrase, setHdPassphrase] = useState('');
+  const [hdAsk, setHdAsk] = useState(false);
+  const [hdCreated, setHdCreated] = useState<VaultHdAccount | null>(null);
+  const [hdMismatch, setHdMismatch] = useState(false);
+  const [hdMismatchNotSaved, setHdMismatchNotSaved] = useState(false);
+  // The wallet exists but #0 came back without the ask-before-signing the create asked for (a server
+  // that ignored account0_always_ask): not done until it is on.
+  const [hdAskFailed, setHdAskFailed] = useState(false);
+  // The name the wallet was created under: every later action (retry, delete, done) uses it, never
+  // whatever the name field says now.
+  const hdSavedNameRef = useRef('');
+  const [hdSavedName, setHdSavedName] = useState('');
   const [signingError, setSigningError] = useState<string | null>(null);
   const [signingAddresses, setSigningAddresses] = useState<SigningAddresses | null>(null);
   const [addressesLoading, setAddressesLoading] = useState(false);
@@ -352,6 +383,7 @@ export const VaultSecretForm: React.FC<{
     setFetchAuthMode(pol.auth?.type ?? 'bearer');
     setFetchAuthName(pol.auth?.name ?? '');
     setAdvancedOpen(Boolean(pol.allowed_hosts?.length || pol.auth));
+    setAlwaysAsk((editSecret.policy as { always_ask?: unknown } | undefined)?.always_ask === true);
   }, [editSecret]);
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
@@ -363,8 +395,30 @@ export const VaultSecretForm: React.FC<{
   const isKeypair = kind === 'keypair';
   // A Solana key: avault creates it on the standard tier, the sandbox on the protected tier.
   const isSolanaKey = !editSecret && isKeypair && chain === 'solana';
+  const isHd = !editSecret && isKeypair && chain === 'mnemonic';
+  const hdReady = avaultDep?.status === 'ready' && versionAtLeast(avaultDep.version, AVAULT_HD_MIN_VERSION);
+  const hdCheck = useMemo<PhraseCheck>(() => checkPhrase(hdImport), [hdImport]);
+  // Account #0 from the pasted words, derived here so it can be compared with the old wallet before
+  // anything is saved. The seed is zeroed as soon as the addresses are read.
+  const hdPreview = useMemo(() => {
+    if (!isHd || signingSource !== 'import' || !hdCheck.ok) return null;
+    const seed = wordsToSeed(hdCheck.words, hdPassphrase);
+    try {
+      return deriveAccounts(seed, 1)[0];
+    } finally {
+      seed.fill(0);
+    }
+  }, [isHd, signingSource, hdCheck, hdPassphrase]);
   const isProvision = Boolean(fixedName);
   const isEdit = Boolean(editSecret);
+  // Editing an ordinary standard keypair may turn ask-before-signing on, never off: turning it
+  // off will need a Passkey confirmation that is not built yet (docs/plans/vault-signing-policy.md).
+  const editAskWasOn = (editSecret?.policy as { always_ask?: unknown } | undefined)?.always_ask === true;
+  const editAskEditable =
+    Boolean(editSecret) &&
+    editSecret?.kind === 'keypair' &&
+    editSecret?.protection === 'standard' &&
+    (editSecret?.signer_kind == null || editSecret?.signer_kind === 'local');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
@@ -420,7 +474,9 @@ export const VaultSecretForm: React.FC<{
     ? fieldRows.every((field) => field.value && VAULT_FIELD_PATTERN.test(field.name)) &&
       new Set(fieldRows.map((field) => field.name)).size === fieldRows.length
     : staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
-  const valueReady = isKeypair
+  const valueReady = isHd
+    ? signingSource === 'generate' || hdCheck.ok
+    : isKeypair
     ? // A generated key, on any chain or tier, is made at submit, so it needs nothing here (owner
       // decision 2026-11-12: an address shown before saving could be noted and then lost to a second
       // Generate). A protected key is only generated, in the sandbox. An import needs the pasted key.
@@ -434,7 +490,10 @@ export const VaultSecretForm: React.FC<{
     ? !submitting && !fieldEditBusy
     : Boolean(secretNameValid && valueReady) &&
       !submitting &&
-      ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
+      (isHd
+        // Standard tier only: protected seed-phrase wallets belong to the sandbox (not yet built).
+        ? protection === 'standard' && hdReady
+        : (protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   const clearSelectedFile = useCallback(() => {
     setSelectedFile(null);
@@ -506,6 +565,138 @@ export const VaultSecretForm: React.FC<{
 
   // Each chain builds its key differently, so nothing made or pasted for one may be submitted as the
   // other: drop a held secp256k1 private key, either pasted import, and a sandbox-sealed envelope.
+  const resetHd = () => {
+    setHdStep('setup');
+    setHdWords(null);
+    setHdQuiz([]);
+    setHdChosen({});
+    setHdImport('');
+    setHdPassphrase('');
+    setHdMismatch(false);
+    setHdMismatchNotSaved(false);
+  };
+
+  // A seed-phrase wallet is saved the way every key is: the browser seals the 64-byte BIP39 seed for
+  // avault, which derives the accounts. Then the addresses avault stored for #0 are compared with the
+  // ones these words give: a wallet whose shown address is not the spendable one is never offered.
+  const submitHd = async () => {
+    const generated = signingSource === 'generate';
+    const words = generated ? hdWords : hdCheck.ok ? hdCheck.words : null;
+    if (!words) return;
+    const name = secretName;
+    hdSavedNameRef.current = name;
+    setHdSavedName(name);
+    const seed = wordsToSeed(words, generated ? '' : hdPassphrase);
+    let expected: HdAccountAddresses;
+    let blindBox: Awaited<ReturnType<typeof sealBlindBox>>;
+    try {
+      expected = deriveAccounts(seed, 1)[0];
+      const pubkey = await api.getVaultPubkey();
+      blindBox = await sealBlindBox(seed, pubkey, hdSeedImportBlindBoxContext(name));
+    } finally {
+      seed.fill(0);
+    }
+    const mergedTags = mergeTags(tags, []);
+    const skillLinks = partitionTags(tags).skills;
+    const created = await api.createVaultSecret(
+      {
+        name,
+        kind: 'keypair',
+        protection: 'standard',
+        signer_kind: 'hd-seed',
+        keypair: { type: 'hd-seed', source: 'import', format: 'raw-seed' },
+        blind_box: blindBox,
+        // Always sent, never dropped on a retry: the server saves nothing unless avault's #0 matches.
+        expected_account0: { eth: expected.eth, btc_taproot: expected.btc_taproot, solana: expected.solana },
+        // Saved with the wallet in one transaction: #0 is never signable without asking, not even briefly.
+        account0_always_ask: hdAsk ? true : undefined,
+        description: description.trim() || undefined,
+        tags: mergedTags.length ? mergedTags : undefined,
+        links: skillLinks.length ? { skills: skillLinks } : undefined,
+        provision_request_id: provisionRequestId || undefined,
+      },
+      { handleError: false },
+    );
+    if (!created.ok && created.code === 'hd_address_check_failed') {
+      // Refused before anything was stored: nothing to block or delete.
+      console.error('[vault] seed-phrase wallet address check failed; nothing was saved', { name });
+      setHdWords(null);
+      setHdImport('');
+      setHdPassphrase('');
+      setHdQuiz([]);
+      setHdChosen({});
+      setHdMismatchNotSaved(true);
+      setHdMismatchDeleted(true);
+      setHdMismatch(true);
+      return;
+    }
+    if (!created.ok) {
+      if (created.code === 'secret_exists') {
+        handleExistingSecret();
+        return;
+      }
+      if (created.code === 'secret_name_case_conflict') {
+        setError(created.message || t('vaults.dialog.errors.secretNameCaseConflict'));
+        return;
+      }
+      throw Object.assign(new Error(vaultErrorMessage(t, created, t('vaults.request.saveFailed'))), { code: created.code });
+    }
+    // The words are sealed: drop them from this form now, whatever the check finds.
+    setHdWords(null);
+    setHdImport('');
+    setHdPassphrase('');
+    setHdQuiz([]);
+    setHdChosen({});
+    const stored = created.secret?.accounts?.find((account) => account.account === 0);
+    if (!stored || !sameHdAddresses(stored, expected)) {
+      // Logged by name only: never the words, the seed or an address the user could be steered to.
+      console.error('[vault] seed-phrase wallet address check failed; the wallet is blocked', { name });
+      // Fail closed: block it in this browser first, then delete it. Only a confirmed delete unblocks.
+      blockHdWallet(name);
+      setHdMismatch(true);
+      await deleteMismatched();
+      return;
+    }
+    setHdCreated(stored);
+    setHdStep('done');
+    if (hdAsk && !stored.always_ask) await applyHdAsk();
+  };
+
+  const [hdMismatchDeleted, setHdMismatchDeleted] = useState(false);
+  const deleteMismatched = async () => {
+    try {
+      const result = await api.deleteVaultSecret(hdSavedNameRef.current);
+      if (result?.ok) {
+        unblockHdWallet(hdSavedNameRef.current);
+        setHdMismatchDeleted(true);
+        setError(null);
+      } else {
+        setError(vaultErrorMessage(t, result, t('vaults.request.saveFailed')));
+      }
+    } catch (err: unknown) {
+      setError(vaultErrorMessage(t, err, t('vaults.request.saveFailed')));
+    }
+  };
+
+  // Fallback only: #0 came back without the ask the create carried. Turn it on, and keep the done
+  // screen from claiming completion until it is.
+  const applyHdAsk = async () => {
+    // A refused answer and a dropped connection both leave #0 without the restriction asked for.
+    try {
+      const asked = await api.updateVaultHdAccount(hdSavedNameRef.current, 0, { always_ask: true }, { handleError: false });
+      if (asked.ok) {
+        setHdAskFailed(false);
+        setError(null);
+        return;
+      }
+      setHdAskFailed(true);
+      setError(vaultErrorMessage(t, asked, t('vaults.dialog.errors.updateFailed')));
+    } catch (err: unknown) {
+      setHdAskFailed(true);
+      setError(vaultErrorMessage(t, err, t('vaults.dialog.errors.updateFailed')));
+    }
+  };
+
   const switchChain = (next: KeyChain) => {
     if (next === chain) return;
     setChain(next);
@@ -514,6 +705,7 @@ export const VaultSecretForm: React.FC<{
     setSolanaImport('');
     setSolanaImportFailed(false);
     setSigningError(null);
+    resetHd();
   };
 
   // avault reports a key it could not import only as a general failure, with no reason the form could
@@ -533,13 +725,14 @@ export const VaultSecretForm: React.FC<{
     // Don't silently drop a half-typed chip the user can still see. Tags sit in the main body
     // (always visible); allowed hosts live in the Advanced collapsible in BOTH modes, so a host
     // draft only blocks submit while Advanced is open (collapsing clears hostsPending).
-    const hostsVisible = advancedOpen;
+    // A seed-phrase wallet has no proxy policy and its form hides Advanced: nothing there may block it.
+    const hostsVisible = advancedOpen && !isHd;
     if (tagsPending || (hostsVisible && hostsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
     const normalizedFetchAuthName = fetchAuthName.trim();
-    if (fetchAuthMode === 'header') {
+    if (!isHd && fetchAuthMode === 'header') {
       if (!normalizedFetchAuthName) {
         setError(t('vaults.dialog.errors.authNameRequired'));
         return;
@@ -553,7 +746,7 @@ export const VaultSecretForm: React.FC<{
         return;
       }
     }
-    if (fetchAuthMode === 'query') {
+    if (!isHd && fetchAuthMode === 'query') {
       if (!normalizedFetchAuthName) {
         setError(t('vaults.dialog.errors.authNameRequired'));
         return;
@@ -563,11 +756,25 @@ export const VaultSecretForm: React.FC<{
         return;
       }
     }
+    if (isHd && signingSource === 'generate' && hdStep === 'setup') {
+      // Nothing leaves the browser yet: the words are made here, shown, then checked.
+      const words = hdWords ?? newPhrase();
+      setHdWords(words);
+      if (hdQuiz.length === 0) setHdQuiz(makeQuiz(words));
+      setHdStep('backup');
+      return;
+    }
+    if (isHd && signingSource === 'generate' && hdStep !== 'check') return;
+    if (isHd && signingSource === 'generate' && !quizPassed(hdQuiz, hdChosen)) return;
     setSubmitting(true);
     setError(null);
     setSolanaImportFailed(false);
     setNeedsAvaultAuthorization(false);
     try {
+      if (isHd) {
+        await submitHd();
+        return;
+      }
       if (isEdit && editSecret) {
         // Value-free metadata edit: the shared validation above already ran; PATCH
         // description / tags / policy. Only the visible fetch policy (allowed_hosts + auth) is
@@ -581,7 +788,11 @@ export const VaultSecretForm: React.FC<{
           fetchAuthName,
           preserveBearerAuth: existingPolicy.auth?.type === 'bearer',
         });
-        const result = await api.updateVaultSecret(editSecret.name, patch, { handleError: false });
+        const result = await api.updateVaultSecret(
+          editSecret.name,
+          editAskEditable && alwaysAsk && !editAskWasOn ? { ...patch, always_ask: true } : patch,
+          { handleError: false },
+        );
         if (!result.ok) {
           setError(vaultErrorMessage(t, result, t('vaults.dialog.errors.updateFailed')));
           return;
@@ -1123,7 +1334,7 @@ export const VaultSecretForm: React.FC<{
   // Writing `policy.always_ask` forces per-use browser approval for every signature; protected
   // keys already always approve, so it isn't shown for them.
   const signApprovalToggle =
-    isKeypair && protection === 'standard' ? (
+    isKeypair && protection === 'standard' && !isHd ? (
       <div className="flex items-center gap-3 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 shadow-elevation-0">
         <span className="flex min-w-0 flex-1 items-center gap-1.5">
           <span className="text-[13px] font-semibold text-foreground">{t('vaults.dialog.alwaysAskSign')}</span>
@@ -1248,6 +1459,28 @@ export const VaultSecretForm: React.FC<{
 
         {tagsField}
 
+        {editAskEditable ? (
+          <div className="flex flex-col gap-1.5 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 shadow-elevation-0">
+            <div className="flex items-center gap-3">
+              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span className="text-[13px] font-semibold text-foreground">{t('vaults.dialog.alwaysAskSign')}</span>
+                <InfoHint hover content={t('vaults.dialog.alwaysAskSignHelp')} label={t('vaults.dialog.moreInfo')} />
+              </span>
+              <Switch
+                checked={alwaysAsk}
+                onCheckedChange={setAlwaysAsk}
+                disabled={submitting || editAskWasOn}
+                label={t('vaults.dialog.alwaysAskSign')}
+              />
+            </div>
+            {editAskWasOn ? (
+              <span className="text-[11px] text-muted">{t('vaults.dialog.alwaysAskSignLocked')}</span>
+            ) : alwaysAsk ? (
+              <span className="text-[11px] font-medium text-accent-ink">{t('vaults.dialog.alwaysAskSignOneWay')}</span>
+            ) : null}
+          </div>
+        ) : null}
+
         {!isKeypair && advancedSection}
 
         {error && (
@@ -1329,6 +1562,73 @@ export const VaultSecretForm: React.FC<{
     );
   }
 
+  // ---- Seed-phrase wallet steps after setup — ui/design: vault/mnemonic/create/* -------
+  if (isHd && (hdMismatch || hdStep !== 'setup')) {
+    const step = hdStep === 'backup' ? 2 : 3;
+    return (
+      <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
+        {hdMismatch ? (
+          <HdMismatchBlock
+            outcome={hdMismatchNotSaved ? 'not-saved' : hdMismatchDeleted ? 'deleted' : 'stored'}
+            error={error}
+            busy={submitting}
+            onClose={onCancel}
+            onDelete={() => {
+              setSubmitting(true);
+              void deleteMismatched().finally(() => setSubmitting(false));
+            }}
+          />
+        ) : hdStep === 'done' && hdCreated ? (
+          <>
+            <HdDoneStep name={hdSavedName} account={hdCreated} />
+            {hdAskFailed ? (
+              <HdNotice tone="error" icon={TriangleAlert}>
+                <span className="font-semibold text-destructive-ink">{t('vaults.hd.askFailed')}</span>
+                {error ? <span>{error}</span> : null}
+              </HdNotice>
+            ) : null}
+            <div className="mt-1 flex justify-end gap-2">
+              {hdAskFailed ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={submitting}
+                  onClick={() => {
+                    setSubmitting(true);
+                    void applyHdAsk().finally(() => setSubmitting(false));
+                  }}
+                >
+                  {t('vaults.hd.askRetry')}
+                </Button>
+              ) : null}
+              <Button type="button" disabled={hdAskFailed || submitting} onClick={() => onCreated(hdSavedName, 'created')}>{t('vaults.hd.done.finish')}</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <HdStepper step={step} />
+            {hdStep === 'backup' && hdWords ? <HdBackupStep words={hdWords} /> : null}
+            {hdStep === 'check' ? (
+              <HdCheckStep quiz={hdQuiz} chosen={hdChosen} onChoose={(position, word) => setHdChosen((prev) => ({ ...prev, [position]: word }))} />
+            ) : null}
+            {needsAvaultAuthorization ? <AvaultAuthorizationNotice forceVisible /> : null}
+            {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
+            <HdStepFooter
+              step={hdStep === 'check' ? 'check' : 'backup'}
+              submitting={submitting}
+              canCreate={quizPassed(hdQuiz, hdChosen)}
+              onBack={() => {
+                setHdChosen({});
+                setHdStep(hdStep === 'check' ? 'backup' : 'setup');
+              }}
+              onNext={() => setHdStep('check')}
+            />
+          </>
+        )}
+      </form>
+    );
+  }
+
   // ---- Create mode — ui/design: vault/secret-dialog/create ----------------------------
   return (
     <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
@@ -1347,6 +1647,8 @@ export const VaultSecretForm: React.FC<{
               setSolanaImport('');
               setSolanaImportFailed(false);
               setSigningError(null);
+              // A seed phrase, its passphrase and the backup check are dropped too, never kept hidden.
+              resetHd();
             } else {
               clearStaticValue();
               setFieldRows(null);
@@ -1376,6 +1678,7 @@ export const VaultSecretForm: React.FC<{
           }}
           autoFocus
           required
+          disabled={submitting}
           aria-invalid={nameInvalid || undefined}
           className={cn('font-mono', nameInvalid && 'border-destructive/60')}
         />
@@ -1401,8 +1704,40 @@ export const VaultSecretForm: React.FC<{
             options={[
               { id: 'evm-bitcoin', label: t('vaults.dialog.chainEvmBitcoin') },
               { id: 'solana', label: t('vaults.dialog.chainSolana') },
+              // Owner decision 2026-11-12: a seed-phrase wallet is the third chain option.
+              { id: 'mnemonic', label: t('vaults.hd.chainMnemonic') },
             ]}
           />
+          {isHd ? <span className="text-[11.5px] text-muted">{t('vaults.hd.chainMnemonicHint')}</span> : null}
+        </div>
+      )}
+
+      {isHd && (
+        <div className="flex flex-col gap-2.5">
+          <KeySourceTabs
+            value={signingSource}
+            disabled={submitting}
+            onChange={(src) => {
+              setSigningSource(src);
+              resetHd();
+            }}
+          />
+          {signingSource === 'generate' ? (
+            <HintLine text={t('vaults.hd.generateHint')} info={t('vaults.hd.generateInfo')} />
+          ) : (
+            <>
+              <HintLine text={t('vaults.hd.importHint')} info={t('vaults.hd.importInfo')} />
+              <HdImportFields
+                text={hdImport}
+                onTextChange={setHdImport}
+                check={hdCheck}
+                passphrase={hdPassphrase}
+                onPassphraseChange={setHdPassphrase}
+                preview={hdPreview}
+                disabled={submitting}
+              />
+            </>
+          )}
         </div>
       )}
 
@@ -1424,7 +1759,7 @@ export const VaultSecretForm: React.FC<{
         />
       )}
 
-      {isKeypair && !isSolanaKey && protection === 'standard' && (
+      {isKeypair && !isSolanaKey && !isHd && protection === 'standard' && (
         <div className="flex flex-col gap-2.5">
           <KeySourceTabs
             value={signingSource}
@@ -1511,7 +1846,7 @@ export const VaultSecretForm: React.FC<{
       {/* Protected signing key: born inside the sandbox when the secret is created (protocol v2
           §7.2), so there is nothing to choose; shown once the vault is unlocked, the gating panel
           below handles the locked case. No import option. */}
-      {isKeypair && protection === 'protected' && protectedCreateReady && <VaultProtectedKeyFields chain={chain} />}
+      {isKeypair && !isHd && protection === 'protected' && protectedCreateReady && <VaultProtectedKeyFields chain={chain === 'solana' ? 'solana' : 'evm-bitcoin'} />}
 
       {/* Description + Tags — core metadata, kept directly below the value (not buried under
           Advanced) so they're easy to set while creating a secret. */}
@@ -1531,10 +1866,28 @@ export const VaultSecretForm: React.FC<{
 
       {signApprovalToggle}
 
-      {/* Advanced — collapsible proxy policy, shared with provide mode. */}
-      {advancedSection}
+      {isHd && protection === 'standard' ? (
+        <div className="flex items-center gap-3 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 shadow-elevation-0">
+          <span className="flex min-w-0 flex-1 items-center gap-1.5">
+            <span className="text-[13px] font-semibold text-foreground">{t('vaults.hd.askAccount0')}</span>
+            <InfoHint hover content={t('vaults.hd.askAccount0Info')} label={t('vaults.dialog.moreInfo')} />
+          </span>
+          <Switch checked={hdAsk} onCheckedChange={setHdAsk} disabled={submitting} label={t('vaults.hd.askAccount0')} />
+        </div>
+      ) : null}
+      {isHd && protection === 'protected' ? (
+        <span role="note" className="text-xs text-muted">{t('vaults.hd.protectedUnsupported')}</span>
+      ) : null}
+      {isHd && avaultDep && !hdReady ? (
+        <HdAvaultOld version={AVAULT_HD_MIN_VERSION} installed={avaultDep.version ?? 'unknown'} />
+      ) : null}
 
-      {gatingNotices}
+      {/* Advanced — collapsible proxy policy, shared with provide mode. */}
+      {!isHd && advancedSection}
+
+      {!isHd && gatingNotices}
+      {isHd && needsAvaultAuthorization ? <AvaultAuthorizationNotice forceVisible /> : null}
+      {isHd && error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
 
       <div className="mt-1 flex justify-end gap-2">
         <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
@@ -1542,9 +1895,13 @@ export const VaultSecretForm: React.FC<{
         </Button>
         <Button type="submit" disabled={!canSubmit}>
           {submitting && <Loader2 className="size-4 animate-spin" />}
-          {t('vaults.dialog.createSecret')}
+          {isHd ? t(signingSource === 'generate' ? 'vaults.hd.generateCta' : 'vaults.hd.importCta') : t('vaults.dialog.createSecret')}
         </Button>
       </div>
     </form>
   );
 };
+
+/** Whether avault stored, for an account, the addresses this browser derived from the words. */
+const sameHdAddresses = (stored: VaultHdAccount, expected: HdAccountAddresses) =>
+  stored.eth === expected.eth && stored.btc_taproot === expected.btc_taproot && stored.solana === expected.solana;

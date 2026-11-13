@@ -2480,6 +2480,7 @@ class VaultApiError(ValueError):
             "invalid_digest": "vault.signing.invalidDigest",
             "invalid_sign_input": "vault.signing.invalidInput",
             "protected_solana_unsupported": "vault.signing.protectedSolanaUnsupported",
+            "hd_address_check_failed": "vault.hd.addressCheckFailed",
             "invalid_hd_wallet": "vault.hd.invalidWallet",
             "invalid_hd_account": "vault.hd.invalidAccount",
             "hd_signing_state_changed": "vault.hd.stateChanged",
@@ -3898,6 +3899,9 @@ def _vault_hd_keypair_spec(payload: dict, *, kind: str, protection: str, public_
         return VaultApiError(message, code="invalid_hd_wallet")
 
     if not hd:
+        for field in ("expected_account0", "account0_always_ask"):
+            if field in payload:
+                raise invalid(f"{field} is only valid for HD seed imports")
         if "hd_accounts" in (public_meta or {}):
             raise invalid("HD account public keys must come from avault")
         return None
@@ -3909,9 +3913,11 @@ def _vault_hd_keypair_spec(payload: dict, *, kind: str, protection: str, public_
         raise invalid("HD keypair requires type hd-seed, source import and format raw-seed")
     if public_meta or set(payload) - {
         "name", "kind", "protection", "signer_kind", "keypair", "blind_box", "description", "tags",
-        "policy", "links", "provision_request_id", "public_meta",
+        "policy", "links", "provision_request_id", "public_meta", "expected_account0", "account0_always_ask",
     }:
-        raise invalid("HD create accepts a blind_box and display metadata only; no seed or client public keys")
+        raise invalid("HD create accepts a blind_box, display metadata, expected account-0 addresses and initial account-0 signing policy only; no seed or client public keys")
+    if "account0_always_ask" in payload and type(payload["account0_always_ask"]) is not bool:
+        raise invalid("account0_always_ask must be a boolean")
     policy = payload.get("policy")
     if policy is not None and (not isinstance(policy, dict) or "always_ask" in policy):
         raise invalid("HD ask-before-signing is configured per account")
@@ -3927,7 +3933,7 @@ def create_vault_secret(
     origin: str | None = None,
     user_context: Any = None,
 ) -> dict:
-    from storage import vault_crypto, vault_service
+    from storage import vault_crypto, vault_hd, vault_service
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
@@ -3974,6 +3980,12 @@ def create_vault_secret(
         default_field=default_field,
     )
     hd_keypair = _vault_hd_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
+    expected_account0 = None
+    if "expected_account0" in payload:
+        try:
+            expected_account0 = vault_hd.validate_expected_account0(payload["expected_account0"])
+        except ValueError as exc:
+            raise VaultApiError(str(exc), code="invalid_hd_wallet") from exc
     solana_keypair = None if hd_keypair is not None else _vault_solana_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
     atomic_protected_establishment = establishing_vmk and protection == "protected"
     try:
@@ -4028,6 +4040,13 @@ def create_vault_secret(
         sealed = created["sealed"]
         signer_kind = "hd-seed"
         public_meta = {"hd_accounts": created["accounts"]}
+        if expected_account0 is not None:
+            account0 = vault_hd.public_accounts(public_meta)[0]
+            if any(account0[field] != address for field, address in expected_account0.items()):
+                raise VaultApiError(
+                    "Account-0 addresses do not match the browser's expected addresses; nothing was saved",
+                    code="hd_address_check_failed", status=409,
+                )
     elif solana_keypair is not None and solana_keypair["source"] != "protected-record":
         try:
             if solana_keypair["source"] == "generate":
@@ -4088,6 +4107,7 @@ def create_vault_secret(
                 authz_factor_origin=origin,
                 provision_request_id=provision_request_id,
                 user_context=user_context,
+                **({"account0_always_ask": payload["account0_always_ask"]} if "account0_always_ask" in payload else {}),
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
@@ -9535,16 +9555,16 @@ AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION = "0.1.8"
 # Developer ID signed release (identifier bot.avibe.avault, Team 68B2SQ6YK3): a
 # master key an ad-hoc release created needs one "Authorize avault" after the
 # upgrade, and later signed releases read it without asking again.
-AVAULT_VERSION = "0.1.10"
+AVAULT_VERSION = "0.1.11"
 # (sha256, size) of each AVAULT_VERSION archive by target: digests verified against
 # the published manifest.json, sizes checked against the downloaded release assets.
 _AVAULT_ARCHIVES = {
-    "linux-arm64": ("ffed26317b9557c76913c07cb2dd640b088c1abe21364cb54ad43603c601d17a", 3321093),
-    "linux-x64": ("3812bfc870210a65b6b1712a913f6db305366223e94b96f99491da756a760f51", 3652699),
-    "macos-arm64": ("a3424c5cbe3abcad3198305603ac8dfa94d96e8a68378fcd2621376e88186e3a", 1569937),
-    "macos-x64": ("1db282933bfa2ed61476d21bdbc6ec2503a4aed1f65c9ee9c803d19ef5694700", 1699588),
-    "windows-arm64": ("4991460026ea9e18bbf0c9f0117706cdb1fb9f5a2dbf31e3889bb00514da4622", 1376774),
-    "windows-x64": ("e4e44f48bdfe3aa6c760b64d4b0fe351e47cf30687ea0823e98f36809dd6e331", 1463132),
+    "linux-arm64": ("06c31e5607b9098d1d14bbec4cfc30c42c796d705fa468c6e682ed8e92093619", 3335557),
+    "linux-x64": ("3c17361f74cdcbcc18f223636c3ba5e49129cbaeddd4b4e75526442469390390", 3668096),
+    "macos-arm64": ("22860f6bdb4bf076f7a28fbf54f383603243edb895b1062a4f45a4c97f067302", 1584052),
+    "macos-x64": ("40c3508391d7ec4a29847f970ce30860ffd2857e9febb101a85ce56ee23aad14", 1710645),
+    "windows-arm64": ("89a8bfae24d8b0c70fd0a2a1bab61ed4b9dfbe91ea7a387b39ba50c95165e53c", 1391154),
+    "windows-x64": ("dfdff8d619a0dbb58202387949ea6beffc6a03e6e9b4dcda7957b4729fd308aa", 1475295),
 }
 
 

@@ -131,6 +131,7 @@ enum Phase {
 enum CheckPresentation {
     Native,
     Workbench,
+    TrustedDecision(u64),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -649,7 +650,12 @@ fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
     }
 }
 
+pub(crate) fn client_snapshot(app: &AppHandle) -> serde_json::Value {
+    serde_json::to_value(state_snapshot(app)).expect("updater state")
+}
+
 fn emit_state(app: &AppHandle) {
+    crate::instance_client::updated(app, client_snapshot(app));
     let _ = app.emit_to(super::MAIN_WINDOW, STATE_EVENT, state_snapshot(app));
 }
 
@@ -983,6 +989,123 @@ pub fn check(app: AppHandle, interactive: bool) {
     check_with_presentation(app, interactive, CheckPresentation::Native);
 }
 
+pub(crate) fn trusted_decision(app: AppHandle) {
+    if let Some(generation) = crate::instance_client::epoch(&app) {
+        let pending = {
+            let updater = app.state::<Updater>();
+            let state = updater.state.lock().expect("updater state");
+            state
+                .remote_request
+                .as_ref()
+                .filter(|request| request.phase == RemoteRequestPhase::AwaitingHost)
+                .and_then(|request| {
+                    state.manifest.clone().map(|manifest| {
+                        (
+                            manifest,
+                            RemoteInstallContext {
+                                request_id: request.request_id.clone(),
+                                target: request.target.clone(),
+                            },
+                        )
+                    })
+                })
+        };
+        if let Some((manifest, remote)) = pending {
+            if let Err(error) = reread_remote_request(&app, &remote) {
+                record_remote_gate_failure(&app, &remote, error);
+                return;
+            }
+            confirm_install(
+                app,
+                manifest,
+                CheckPresentation::TrustedDecision(generation),
+                Some(remote),
+            );
+        } else {
+            check_with_presentation(app, true, CheckPresentation::TrustedDecision(generation));
+        }
+    }
+}
+fn decision_current(app: &AppHandle, presentation: CheckPresentation) -> bool {
+    match presentation {
+        CheckPresentation::TrustedDecision(generation) => crate::instance_client::epoch_matches(app, generation),
+        _ => true,
+    }
+}
+fn handoff_to_workbench(presentation: CheckPresentation, ready: bool) -> bool {
+    ready && !matches!(presentation, CheckPresentation::TrustedDecision(_))
+}
+fn confirm_install(
+    app: AppHandle,
+    manifest: Manifest,
+    presentation: CheckPresentation,
+    remote: Option<RemoteInstallContext>,
+) {
+    let c = catalog();
+    let confirmation = app.clone();
+    let dialog = app
+        .dialog()
+        .message(format!(
+            "{}: {}\n{}: {}\n\n{}",
+            c.current,
+            app.package_info().version,
+            c.latest,
+            manifest.version,
+            c.confirm
+        ))
+        .title(c.title.clone())
+        // The dialog plugin reports Esc/close as the third label, so
+        // that slot must be the harmless "Later", never "Skip".
+        .buttons(if remote.is_some() {
+            MessageDialogButtons::OkCancelCustom(c.install.clone(), c.cancel.clone())
+        } else {
+            MessageDialogButtons::YesNoCancelCustom(c.install.clone(), c.skip.clone(), c.cancel.clone())
+        });
+    let dialog = if matches!(presentation, CheckPresentation::TrustedDecision(_)) {
+        // Keep the account client's confirmation owned by its
+        // current window. Replacing/closing that window dismisses
+        // the sheet; the generation check still fences its result.
+        let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else {
+            if remote.is_none() {
+                settle_update(&app, None, Settlement::Completed);
+            }
+            return;
+        };
+        dialog.parent(&window)
+    } else {
+        dialog
+    };
+    dialog.show_with_result(move |result| {
+        if !decision_current(&confirmation, presentation) {
+            if remote.is_none() {
+                settle_update(&confirmation, None, Settlement::Completed);
+            }
+            return;
+        }
+        if let Some(remote) = remote {
+            // Later/close leaves the original ticket and expiry owner intact. The
+            // install owner atomically claims and revalidates this exact ticket.
+            if choice(&result, &c) == Choice::Install {
+                let generation = match presentation {
+                    CheckPresentation::TrustedDecision(generation) => Some(generation),
+                    _ => None,
+                };
+                install_in_generation(confirmation, manifest, Some(remote), generation);
+            }
+            return;
+        }
+        match choice(&result, &c) {
+            Choice::Install => install(confirmation, manifest, presentation),
+            Choice::Skip => {
+                skip_version(&confirmation, &manifest.version);
+                settle_update(&confirmation, None, Settlement::Completed);
+            }
+            Choice::Later => {
+                settle_update(&confirmation, None, Settlement::Completed);
+            }
+        }
+    });
+}
 fn check_with_presentation(app: AppHandle, interactive: bool, presentation: CheckPresentation) {
     // Install progress and outcomes stay in memory: a failed install keeps
     // the last `Available`, and the new app's startup check publishes
@@ -1028,48 +1151,26 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                     settle_update(&app, None, Settlement::Completed);
                     return;
                 }
-                if workbench_ready(&app) {
+                if !decision_current(&app, presentation) {
+                    settle_update(&app, None, Settlement::Completed);
+                    return;
+                }
+                if handoff_to_workbench(presentation, workbench_ready(&app)) {
                     // The Workbench owns the confirmation UI. Keep the signed
                     // manifest in native state, but release the check lock so
                     // closing the popover cannot strand the updater as busy.
                     settle_update(&app, None, Settlement::Completed);
                     return;
                 }
-                let c = catalog();
-                let confirmation = app.clone();
-                app.dialog()
-                    .message(format!(
-                        "{}: {}\n{}: {}\n\n{}",
-                        c.current,
-                        app.package_info().version,
-                        c.latest,
-                        manifest.version,
-                        c.confirm
-                    ))
-                    .title(c.title.clone())
-                    // The dialog plugin reports Esc/close as the third label, so
-                    // that slot must be the harmless "Later", never "Skip".
-                    .buttons(MessageDialogButtons::YesNoCancelCustom(
-                        c.install.clone(),
-                        c.skip.clone(),
-                        c.cancel.clone(),
-                    ))
-                    .show_with_result(move |result| match choice(&result, &c) {
-                        Choice::Install => install(confirmation, manifest),
-                        Choice::Skip => {
-                            skip_version(&confirmation, &manifest.version);
-                            settle_update(&confirmation, None, Settlement::Completed);
-                        }
-                        Choice::Later => {
-                            settle_update(&confirmation, None, Settlement::Completed);
-                        }
-                    });
+                confirm_install(app, manifest, presentation, None);
             }
             Ok(None) => {
                 set_state(&app, Phase::Current, None);
                 publish_check(&app);
                 settle_update(&app, None, Settlement::Completed);
-                if should_show_current_dialog(interactive, presentation, workbench_ready(&app)) {
+                if decision_current(&app, presentation)
+                    && should_show_current_dialog(interactive, presentation, workbench_ready(&app))
+                {
                     let latest = app
                         .state::<Updater>()
                         .state
@@ -1085,7 +1186,7 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                 set_state(&app, Phase::Error, None);
                 publish_check(&app);
                 settle_update(&app, None, Settlement::Failed("check_failed"));
-                if interactive {
+                if interactive && decision_current(&app, presentation) {
                     show(&app, &catalog().check_failed, None);
                 }
             }
@@ -1147,6 +1248,10 @@ pub fn desktop_remote_install_set(window: WebviewWindow, app: AppHandle, enabled
 #[tauri::command]
 pub fn desktop_update_install(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
     ensure_workbench(&window)?;
+    if crate::instance_client::enabled(&app) {
+        trusted_decision(app);
+        return Ok(());
+    }
     let updater = app.state::<Updater>();
     let (manifest, remote) = {
         let state = updater
@@ -1417,8 +1522,12 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
     }
 }
 
-fn install(app: AppHandle, manifest: Manifest) {
-    install_with_context(app, manifest, None);
+fn install(app: AppHandle, manifest: Manifest, presentation: CheckPresentation) {
+    let generation = match presentation {
+        CheckPresentation::TrustedDecision(generation) => Some(generation),
+        _ => None,
+    };
+    install_in_generation(app, manifest, None, generation);
 }
 
 /// Claim the install transition before a timer/Ignore can settle the prompt.
@@ -1446,6 +1555,26 @@ fn begin_remote_download(state: &mut State, remote: &RemoteInstallContext, now: 
 }
 
 fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<RemoteInstallContext>) {
+    install_in_generation(app, manifest, remote, None);
+}
+
+fn install_generation_current(app: &AppHandle, generation: Option<u64>) -> Result<(), String> {
+    if generation.is_some_and(|generation| !crate::instance_client::epoch_matches(app, generation)) {
+        Err("stale_desktop_generation".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn install_in_generation(
+    app: AppHandle,
+    manifest: Manifest,
+    remote: Option<RemoteInstallContext>,
+    generation: Option<u64>,
+) {
+    if install_generation_current(&app, generation).is_err() {
+        return;
+    }
     if let Some(remote) = &remote {
         let updater = app.state::<Updater>();
         // Claim the worker before rereading the mailbox: a second host action
@@ -1467,6 +1596,7 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
     set_state(&app, Phase::Downloading, None);
     tauri::async_runtime::spawn(async move {
         let result = async {
+            install_generation_current(&app, generation)?;
             let artifact = manifest
                 .validate(manifest.channel, &manifest.tag, &manifest.source_sha, TARGET)?
                 .clone();
@@ -1504,10 +1634,14 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
                 Err(error) => Err(error),
             };
             let handle = app.clone();
+            install_generation_current(&app, generation)?;
             let install_remote = remote.clone();
             let install_version = manifest.version.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 update::install_verified(download, &artifact, KEY, |data| {
+                    // Verification/download may finish after the user leaves
+                    // this account or instance. Recheck at the installer edge.
+                    install_generation_current(&handle, generation)?;
                     if let Some(remote) = &install_remote {
                         if let Err(error) = reread_remote_request(&handle, remote) {
                             let code = record_remote_gate_failure(&handle, remote, error);
@@ -1568,6 +1702,15 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
             }
             Err(error) => {
                 eprintln!("desktop update install: {error}");
+                if error == "stale_desktop_generation" {
+                    set_state(&app, Phase::Available, None);
+                    if let Some(remote) = &remote {
+                        settle_update(&app, Some(remote), Settlement::Failed("install_failed"));
+                    } else {
+                        settle_update(&app, None, Settlement::Completed);
+                    }
+                    return;
+                }
                 if error.strip_prefix("remote_request_gate:").is_some() {
                     return;
                 }
@@ -1696,6 +1839,12 @@ mod tests {
         assert!(should_show_current_dialog(true, CheckPresentation::Workbench, false));
         assert!(should_show_current_dialog(true, CheckPresentation::Native, true));
         assert!(!should_show_current_dialog(false, CheckPresentation::Native, false));
+        // A Phase 1 footer CTA must reach the native decision even when the
+        // current local Workbench is ready to display the legacy popover.
+        assert!(!handoff_to_workbench(CheckPresentation::TrustedDecision(7), true));
+        assert!(handoff_to_workbench(CheckPresentation::Native, true));
+        assert!(handoff_to_workbench(CheckPresentation::Workbench, true));
+        assert!(!handoff_to_workbench(CheckPresentation::Workbench, false));
     }
 
     #[test]

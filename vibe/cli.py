@@ -31,6 +31,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from config import paths
+from config.atomic_io import read_snapshot
 from modules.agents.catalog import (
     AGENT_BACKENDS,
     NATIVE_CLI_BACKENDS,
@@ -574,7 +575,7 @@ def _configured_trace_retention_days() -> int:
 
     try:
         config_path = paths.get_config_path()
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        payload = json.loads(read_snapshot(config_path, encoding="utf-8"))
         runtime = payload.get("runtime") if isinstance(payload, dict) else None
         value = runtime.get("agent_events_trace_retention_days") if isinstance(runtime, dict) else None
 

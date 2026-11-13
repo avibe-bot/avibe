@@ -72,6 +72,32 @@ startup initialization cannot be opened. Avibe reports the failure in the
 control and continues starting the rest of the desktop app; it does not make
 the optional feature failure prevent Avibe from launching.
 
+### Automatic recovery after a driver failure
+
+If Computer Use was enabled but its driver previously timed out, exited, or
+could not start or connect, reopening Avibe makes one automatic recovery
+attempt after the service and existing permissions are available. It does
+not ask for permissions again or turn on a feature you turned off.
+
+After a failed recovery attempt, Avibe waits at least 30 seconds before the
+second attempt and two minutes before the third. These later attempts run
+only while the main Avibe window is visible and not minimized. Returning to
+the app or opening Settings lets recovery continue; visibility is checked
+at least every five seconds. An eligible failure reached while the app is
+already running also receives delayed recovery using the same budget.
+
+The status shows **Restarting the Computer Use driver…** while recovery is
+pending or running, and returns to **Computer Use is ready** on success.
+There are at most three automatic recovery starts per app launch, including
+the initial attempt. Success does not refill that budget. If recovery fails
+repeatedly, the status shows the final error and the next step: turn Computer
+Use off and on, reopen Avibe, or follow the specific repair guidance.
+
+Missing permissions, damaged assets, identity failures, and unclassified
+health-check failures keep their existing guidance instead of automatically
+restarting the driver. Permission setup and macOS **Quit & Reopen** continue
+to work as described above.
+
 Release builds are Developer ID signed with a fixed code identity, so macOS
 keeps both grants across updates. An ad-hoc build (a manual build without
 signing credentials, or a release from before signing) has a different identity

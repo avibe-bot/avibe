@@ -92,3 +92,5 @@ pub fn bundled_runtime_host(
 
 pub mod update;
 pub mod update_status;
+
+pub mod instance_client;
