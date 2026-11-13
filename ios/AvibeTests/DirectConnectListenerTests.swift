@@ -1061,15 +1061,18 @@ final class DirectConnectListenerTests: XCTestCase {
         addTeardownBlock {
             await listener.stop()
         }
+        // The socket state, read across the actor boundary once; the value
+        // itself is synchronized.
+        let health = await listener.health
         // Binds are numbered from one.
         let port = try await listener.bind(port: nil)
         let earlier = 1
-        XCTAssertTrue(listener.health.isServing)
+        XCTAssertTrue(health.isServing)
         await listener.closeListeningSocket()
-        XCTAssertFalse(listener.health.isServing)
+        XCTAssertFalse(health.isServing)
         _ = try await listener.bind(port: port)
         let current = 2
-        XCTAssertTrue(listener.health.isServing)
+        XCTAssertTrue(health.isServing)
 
         await listener.socketDidFail(bindGeneration: earlier, routed: true)
         XCTAssertEqual(failures.values, [])
