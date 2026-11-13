@@ -1077,12 +1077,9 @@ final class DirectConnectListenerTests: XCTestCase {
     /// A lifecycle brought to `phase` through legal calls only.
     private func makeLifecycle(
         in phase: String,
-        published: Bool = false,
-        clock: StandInClock? = nil
+        published: Bool = false
     ) -> DirectListenerLifecycle {
-        let lifecycle = clock.map { clock in
-            DirectListenerLifecycle(now: { clock.now })
-        } ?? DirectListenerLifecycle()
+        let lifecycle = DirectListenerLifecycle()
         func serve() {
             let g = lifecycle.beginBind()!
             XCTAssertTrue(lifecycle.ready(g))
@@ -1461,109 +1458,104 @@ final class DirectConnectListenerTests: XCTestCase {
 
     // MARK: The foreground episode
 
-    /// One fixed bound for a stay in the foreground: before it the listener
-    /// is left alone, and exactly at it the listener has failed, whatever it
-    /// was doing short of serving. A listener that serves, has failed, or
-    /// is stopped has no episode.
-    func testTheForegroundEpisodeFailsTheListenerAtItsDeadlineAndNotBefore() {
+    /// A deadline far away, and one that has already come.
+    private var later: ContinuousClock.Instant {
+        ContinuousClock.now.advanced(by: .seconds(3600))
+    }
+
+    private var reached: ContinuousClock.Instant {
+        ContinuousClock.now
+    }
+
+    /// One deadline for a stay in the foreground. While it is ahead, the
+    /// listener is left alone; once it has come, the listener has failed
+    /// for whoever asks next, whatever it was doing short of serving. A
+    /// listener that serves, has failed, or is stopped has no episode.
+    func testTheForegroundEpisodeFailsTheListenerOnceItsDeadlineHasComeAndNotBefore() {
         for phase in ["idle", "binding", "verifying", "closing", "closed", "rebinding"] {
-            let clock = StandInClock()
-            let lifecycle = makeLifecycle(in: phase, clock: clock)
-            let before = lifecycle.phase
-            let episode = lifecycle.beginEpisode(seconds: 5)
-            XCTAssertEqual(episode?.deadline, clock.now.advanced(by: .seconds(5)), phase)
-            clock.advance(by: .milliseconds(4999))
-            XCTAssertEqual(lifecycle.phase, before, phase)
-            XCTAssertEqual(lifecycle.currentEpisode, episode, phase)
-            clock.advance(by: .milliseconds(1))
-            if case .failed = lifecycle.phase {
+            let ahead = makeLifecycle(in: phase)
+            let before = ahead.phase
+            let episode = ahead.beginEpisode(deadline: later)
+            XCTAssertNotNil(episode, phase)
+            XCTAssertEqual(ahead.phase, before, phase)
+            XCTAssertEqual(ahead.currentEpisode, episode, phase)
+
+            let come = makeLifecycle(in: phase)
+            XCTAssertNotNil(come.beginEpisode(deadline: reached), phase)
+            if case .failed = come.phase {
             } else {
-                XCTFail("\(phase) at the deadline: \(lifecycle.phase)")
+                XCTFail("\(phase) once the deadline has come: \(come.phase)")
             }
-            XCTAssertNil(lifecycle.currentEpisode, phase)
+            XCTAssertNil(come.currentEpisode, phase)
             // Terminal: no bind, no admission, no publication.
-            XCTAssertNil(lifecycle.beginBind(), phase)
-            XCTAssertEqual(lifecycle.admit(1, relay: UUID()), .refused, phase)
-            XCTAssertFalse(lifecycle.publish(1) { true }, phase)
+            XCTAssertNil(come.beginBind(), phase)
+            XCTAssertEqual(come.admit(1, relay: UUID()), .refused, phase)
+            XCTAssertFalse(come.publish(1) { true }, phase)
         }
         for phase in ["serving", "failed", "stopped"] {
-            let clock = StandInClock()
-            let lifecycle = makeLifecycle(in: phase, clock: clock)
+            let lifecycle = makeLifecycle(in: phase)
             let before = lifecycle.phase
-            XCTAssertNil(lifecycle.beginEpisode(seconds: 5), phase)
-            clock.advance(by: .seconds(100))
+            XCTAssertNil(lifecycle.beginEpisode(deadline: reached), phase)
             XCTAssertEqual(lifecycle.phase, before, phase)
         }
     }
 
-    /// The same decision guards the confirmation: one that comes at or
-    /// after the deadline does not make the listener serve. One in time
+    /// The same decision guards the confirmation: one that comes once the
+    /// deadline has come does not make the listener serve. One in time
     /// does, and that ends the episode for good.
     func testALateConfirmationCannotClearAnOverdueEpisode() {
-        let clock = StandInClock()
-        let late = makeLifecycle(in: "verifying", clock: clock)
-        XCTAssertNotNil(late.beginEpisode(seconds: 5))
-        clock.advance(by: .seconds(5))
+        let late = makeLifecycle(in: "verifying")
+        XCTAssertNotNil(late.beginEpisode(deadline: reached))
         XCTAssertFalse(late.confirm(1))
         XCTAssertEqual(late.phase, .failed(generation: 1))
 
-        let inTime = makeLifecycle(in: "verifying", clock: clock)
-        XCTAssertNotNil(inTime.beginEpisode(seconds: 5))
-        clock.advance(by: .milliseconds(4999))
+        let inTime = makeLifecycle(in: "verifying")
+        XCTAssertNotNil(inTime.beginEpisode(deadline: later))
         XCTAssertTrue(inTime.confirm(1))
         XCTAssertNil(inTime.currentEpisode)
-        clock.advance(by: .seconds(100))
+        // Serving: nothing to watch, so no deadline can fail it.
+        XCTAssertNil(inTime.beginEpisode(deadline: reached))
         XCTAssertEqual(inTime.phase, .serving(generation: 1))
         XCTAssertEqual(inTime.admit(1, relay: UUID()), .relay)
     }
 
     /// Attempts, bind generations, and close-to-bind handoffs inside one
-    /// stay do not move its deadline; asking for the episode again returns
-    /// the same one.
+    /// stay do not move its deadline: asking again returns the episode
+    /// already running, with its first deadline.
     func testAttemptsInsideOneStayDoNotMoveItsDeadline() {
-        let clock = StandInClock()
-        let lifecycle = makeLifecycle(in: "closed", published: true, clock: clock)
-        let episode = lifecycle.beginEpisode(seconds: 5)
-        clock.advance(by: .seconds(2))
+        let lifecycle = makeLifecycle(in: "closed", published: true)
+        let first = later
+        let episode = lifecycle.beginEpisode(deadline: first)
         // An attempt binds, is closed on purpose, and another one binds.
         let second = lifecycle.beginBind()!
         XCTAssertTrue(lifecycle.ready(second))
         XCTAssertTrue(lifecycle.beginClose())
         lifecycle.closeCompleted()
-        XCTAssertEqual(lifecycle.beginEpisode(seconds: 5), episode)
+        XCTAssertEqual(lifecycle.beginEpisode(deadline: later), episode)
         let third = lifecycle.beginBind()!
-        XCTAssertEqual(lifecycle.beginEpisode(seconds: 5), episode)
+        XCTAssertEqual(lifecycle.beginEpisode(deadline: reached), episode)
+        XCTAssertEqual(lifecycle.currentEpisode?.deadline, first)
         XCTAssertEqual(lifecycle.phase, .binding(generation: third, rebind: true))
-        clock.advance(by: .milliseconds(2999))
-        XCTAssertEqual(lifecycle.phase, .binding(generation: third, rebind: true))
-        clock.advance(by: .milliseconds(1))
-        XCTAssertEqual(lifecycle.phase, .failed(generation: third))
     }
 
     /// Leaving the foreground ends the episode: nothing fails while the App
-    /// is away, however long, and the next stay has its own deadline. An
-    /// episode already overdue when the App leaves has failed the listener.
+    /// is away, and the next stay has its own. An episode already overdue
+    /// when the App leaves has failed the listener.
     func testLeavingTheForegroundEndsTheEpisodeAndTheNextStayHasItsOwn() {
-        let clock = StandInClock()
-        let lifecycle = makeLifecycle(in: "closed", published: true, clock: clock)
-        let first = lifecycle.beginEpisode(seconds: 5)
-        clock.advance(by: .seconds(3))
+        let lifecycle = makeLifecycle(in: "closed", published: true)
+        let first = lifecycle.beginEpisode(deadline: later)
         lifecycle.endEpisode()
         XCTAssertNil(lifecycle.currentEpisode)
-        clock.advance(by: .seconds(3600))
         XCTAssertEqual(lifecycle.phase, .closed)
 
-        let second = lifecycle.beginEpisode(seconds: 5)
+        let next = later
+        let second = lifecycle.beginEpisode(deadline: next)
         XCTAssertNotEqual(second?.id, first?.id)
-        XCTAssertEqual(second?.deadline, clock.now.advanced(by: .seconds(5)))
-        clock.advance(by: .milliseconds(4999))
+        XCTAssertEqual(second?.deadline, next)
         XCTAssertEqual(lifecycle.phase, .closed)
-        clock.advance(by: .milliseconds(1))
-        XCTAssertEqual(lifecycle.phase, .failed(generation: 1))
 
-        let overdue = makeLifecycle(in: "closed", published: true, clock: clock)
-        XCTAssertNotNil(overdue.beginEpisode(seconds: 5))
-        clock.advance(by: .seconds(5))
+        let overdue = makeLifecycle(in: "closing", published: true)
+        XCTAssertNotNil(overdue.beginEpisode(deadline: reached))
         overdue.endEpisode()
         XCTAssertEqual(overdue.phase, .failed(generation: 1))
     }
@@ -1572,8 +1564,7 @@ final class DirectConnectListenerTests: XCTestCase {
     /// before are kept in the ledger, and nothing new is admitted or
     /// granted.
     func testAnOverdueEpisodeKeepsWhatWasGranted() {
-        let clock = StandInClock()
-        let lifecycle = makeLifecycle(in: "serving", published: true, clock: clock)
+        let lifecycle = makeLifecycle(in: "serving", published: true)
         let granted = UUID()
         let candidate = UUID()
         XCTAssertEqual(lifecycle.admit(1, relay: granted), .relay)
@@ -1581,8 +1572,7 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertTrue(lifecycle.grant(granted, host: host, backend: .direct, generation: 0))
         XCTAssertTrue(lifecycle.beginClose())
         lifecycle.closeCompleted()
-        XCTAssertNotNil(lifecycle.beginEpisode(seconds: 5))
-        clock.advance(by: .seconds(5))
+        XCTAssertNotNil(lifecycle.beginEpisode(deadline: reached))
 
         XCTAssertEqual(lifecycle.relayIDs, [granted])
         XCTAssertEqual(lifecycle.phase, .failed(generation: 1))
@@ -2609,21 +2599,6 @@ final class StandInPlans: @unchecked Sendable {
 
 struct DirectTestTimeout: Error {}
 
-/// A monotonic clock a test moves by hand.
-final class StandInClock: @unchecked Sendable {
-    private let lock = NSLock()
-    private var instant = ContinuousClock.now
-
-    var now: ContinuousClock.Instant {
-        lock.withLock { instant }
-    }
-
-    func advance(by duration: Duration) {
-        lock.withLock {
-            instant = instant.advanced(by: duration)
-        }
-    }
-}
 
 /// Waits for `condition`. A wait that runs out fails at the line that
 /// asked for it, then throws.

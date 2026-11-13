@@ -187,14 +187,6 @@ struct DirectPathTiming: Sendable {
     static let standard = DirectPathTiming(listenerWaitSeconds: 1, rebindSeconds: 2)
 }
 
-/// Asks for one call of `fire`, on the main actor, at or after `deadline`,
-/// and returns what cancels it. A wake-up only: whoever is woken reads the
-/// state again.
-typealias DirectWakeScheduler = @MainActor (
-    _ deadline: ContinuousClock.Instant,
-    _ fire: @escaping @MainActor () -> Void
-) -> DirectWakeCancel
-typealias DirectWakeCancel = @MainActor () -> Void
 
 /// The listener's state, as the controller sees it.
 enum DirectListenerState: Equatable, Sendable {
@@ -291,10 +283,7 @@ final class DirectPathController {
     private var faultDelivery = FaultDelivery.none
     /// The one wake-up scheduled for the foreground watchdog, and the
     /// episode it is for.
-    private var watchdog: (episode: UUID, cancel: DirectWakeCancel)?
-    private let now: @Sendable () -> ContinuousClock.Instant
-    /// `nil`: a task that sleeps until the deadline.
-    private let scheduleWake: DirectWakeScheduler?
+    private var watchdog: (episode: UUID, wake: Task<Void, Never>)?
 
     /// The listener, as the controller sees it: derived from the listener's
     /// lifecycle, the one authority (`DirectListenerLifecycle`).
@@ -359,9 +348,6 @@ final class DirectPathController {
         limits: DirectConnectLimits = .standard,
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
-        isInBackground: Bool? = nil,
-        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
-        scheduleWake: DirectWakeScheduler? = nil,
         onStatusChanged: @escaping () -> Void,
         onFault: @escaping () -> Void = {},
         onAvailabilityChanged: @escaping () -> Void = {}
@@ -374,13 +360,10 @@ final class DirectPathController {
         self.timing = timing
         self.notificationCenter = notificationCenter
         // The App can be launched into the background.
-        self.isInBackground = isInBackground
-            ?? (UIApplication.shared.applicationState == .background)
+        self.isInBackground = UIApplication.shared.applicationState == .background
         self.onStatusChanged = onStatusChanged
         self.onFault = onFault
         self.onAvailabilityChanged = onAvailabilityChanged
-        self.now = now
-        self.scheduleWake = scheduleWake
 
         websiteDataStore.onWillRotate = { [weak self] in
             self?.accountWillChange()
@@ -405,23 +388,6 @@ final class DirectPathController {
                 }
             },
         ]
-    }
-
-    /// The production wake-up: a task that sleeps until the deadline on the
-    /// continuous clock, which keeps counting while the device sleeps.
-    private static func sleepingWake(
-        until deadline: ContinuousClock.Instant,
-        _ fire: @escaping @MainActor () -> Void
-    ) -> DirectWakeCancel {
-        let task = Task { @MainActor in
-            do {
-                try await Task.sleep(until: deadline, clock: ContinuousClock())
-            } catch {
-                return
-            }
-            fire()
-        }
-        return { task.cancel() }
     }
 
     deinit {
@@ -989,7 +955,6 @@ final class DirectPathController {
         let listenerBox = DirectListenerBox()
         let listener = DirectConnectListener(
             limits: limits,
-            now: now,
             planner: { [weak self] authority in
                 await self?.plan(for: authority)
             },
@@ -1172,7 +1137,9 @@ final class DirectPathController {
     private func armWatchdog() {
         guard
             let listener,
-            let episode = listener.lifecycle.beginEpisode(seconds: timing.foregroundSeconds)
+            let episode = listener.lifecycle.beginEpisode(
+                deadline: ContinuousClock.now.advanced(by: .seconds(timing.foregroundSeconds))
+            )
         else {
             disarmWatchdog()
             return
@@ -1187,18 +1154,24 @@ final class DirectPathController {
         guard watchdog?.episode != episode.id else {
             return
         }
-        watchdog?.cancel()
+        watchdog?.wake.cancel()
         let id = episode.id
-        let fire: @MainActor () -> Void = { [weak self, weak listener] in
+        let deadline = episode.deadline
+        // A task that sleeps until the deadline on the continuous clock,
+        // which keeps counting while the device sleeps.
+        let wake = Task { @MainActor [weak self, weak listener] in
+            do {
+                try await Task.sleep(until: deadline, clock: ContinuousClock())
+            } catch {
+                return
+            }
             self?.watchdogDidWake(listener, episode: id)
         }
-        let cancel = scheduleWake?(episode.deadline, fire)
-            ?? Self.sleepingWake(until: episode.deadline, fire)
-        watchdog = (id, cancel)
+        watchdog = (id, wake)
     }
 
     private func disarmWatchdog() {
-        watchdog?.cancel()
+        watchdog?.wake.cancel()
         watchdog = nil
     }
 

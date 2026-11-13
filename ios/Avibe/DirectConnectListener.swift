@@ -400,14 +400,12 @@ actor DirectConnectListener {
 
     init(
         limits: DirectConnectLimits = .standard,
-        ownershipNonce: String = UUID().uuidString,
-        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         planner: @escaping DirectConnectPlanner,
         onListenerFailure: @escaping @Sendable () -> Void
     ) {
         self.limits = limits
-        self.lifecycle = DirectListenerLifecycle(now: now)
-        self.ownershipNonce = ownershipNonce
+        self.lifecycle = DirectListenerLifecycle()
+        self.ownershipNonce = UUID().uuidString
         self.planner = planner
         self.onListenerFailure = onListenerFailure
     }
@@ -2016,16 +2014,11 @@ final class DirectListenerLifecycle: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private let now: @Sendable () -> ContinuousClock.Instant
     private var current = Phase.idle
     private var generation = 0
     private var published = false
     private var ledger: [UUID: Ownership] = [:]
     private var episode: Episode?
-
-    init(now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
-        self.now = now
-    }
 
     /// Every decision is made under the lock, and first applies the one
     /// expiry decision: an episode whose deadline has passed while the
@@ -2049,16 +2042,17 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         case .serving, .failed, .stopped:
             self.episode = nil
         case .idle, .binding, .verifying, .closing, .closed:
-            if now() >= episode.deadline {
+            if ContinuousClock.now >= episode.deadline {
                 fail(generation)
             }
         }
     }
 
-    /// Begins the foreground episode, with its deadline `seconds` from now,
-    /// or returns the one already running, unchanged. `nil` when there is
-    /// nothing to watch: the listener serves, has failed, or is stopped.
-    func beginEpisode(seconds: TimeInterval) -> Episode? {
+    /// Begins the foreground episode, with `deadline` on the continuous
+    /// clock, or returns the one already running, unchanged: a later call
+    /// never moves its deadline. `nil` when there is nothing to watch: the
+    /// listener serves, has failed, or is stopped.
+    func beginEpisode(deadline: ContinuousClock.Instant) -> Episode? {
         locked {
             switch current {
             case .serving, .failed, .stopped:
@@ -2067,10 +2061,7 @@ final class DirectListenerLifecycle: @unchecked Sendable {
                 if let episode {
                     return episode
                 }
-                let begun = Episode(
-                    id: UUID(),
-                    deadline: now().advanced(by: .seconds(seconds))
-                )
+                let begun = Episode(id: UUID(), deadline: deadline)
                 episode = begun
                 return begun
             }

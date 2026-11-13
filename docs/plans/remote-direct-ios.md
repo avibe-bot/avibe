@@ -295,7 +295,7 @@ It does not touch anything that could lose server-side state or repeat an action
 - the listener table in section 4, against real loopback sockets;
 - exclusive bind, the ownership check, and a stand-in that occupies P;
 - the listener fault: every failure the one terminal state, before or after a route; entered once and never left in the process, also when its completion arrives in the background; held and new status answers settled as `failed`, no event, coverage only for a routed host on the current store, and the next launch without a listener, consuming an injected marker;
-- the foreground watchdog, on a clock the test moves: before, at, and after the deadline; a late confirmation; attempts that do not move it; the background ending it; stale and early wake-ups; one delivery;
+- the foreground watchdog, through the lifecycle's own deadline: nothing while it is ahead, the failure once it has come; a late confirmation; attempts that do not move it; the background ending it; grants kept; and, in the controller, a first bind past a zero bound delivered once while a listener that serves in time is never failed;
 - bind exits and resources: the bind's answer and the phase as one decision in both orders; a cancelled bind never left binding or verifying; retirement against a failure in both orders; a cancelled relay keeping its slot until its task ends;
 - the grant: against a failure or close in both orders, a revoked candidate never granted or answered `200`, a granted relay kept and never planned again;
 - the load gate: the open, Retry, and the WebView's automatic loads for no route, a serving listener, a held listener, and the fault, with runtime replacement and sign-out;
