@@ -685,7 +685,10 @@ final class DirectConnectListenerTests: XCTestCase {
 
     // MARK: The reader's early bound, with receives the test completes
 
-    func testAReceiveIssuedBeforeTheTunnelCountsAsEarlyWhenItCompletesAfter() async throws {
+    /// The commit point passes with a receive in flight, and that receive
+    /// then delivers more than the early bound: legal tunnel bytes, since
+    /// WebKit may already have its `200`. They are relayed, not refused.
+    func testALargeReceiveCompletingAfterTheCommitPointIsTheTunnels() async throws {
         let receives = ManualReceives()
         let reader = DirectClientReader(
             maximumLength: 64 * 1024,
@@ -695,12 +698,34 @@ final class DirectConnectListenerTests: XCTestCase {
         )
         reader.start()
         XCTAssertEqual(receives.pending, 1)
-        // The commit point passes while that receive is still in flight.
         XCTAssertTrue(reader.startTunnel())
 
-        receives.complete(with: Data(repeating: 0x41, count: 20))
+        receives.complete(with: Data(repeating: 0x41, count: 40_000))
 
-        XCTAssertEqual(reader.earlyByteCount, 22)
+        XCTAssertEqual(reader.earlyByteCount, 2)
+        let first = try await reader.read()
+        let second = try await reader.read()
+        XCTAssertEqual(first, Data("ab".utf8))
+        XCTAssertEqual(second?.count, 40_000)
+    }
+
+    /// The opposite order: the in-flight receive delivers before the commit
+    /// point, past the bound. The reader fails closed, and the commit point
+    /// cannot pass.
+    func testAReceiveCompletingBeforeTheCommitPointPastTheBoundFailsClosed() async throws {
+        let receives = ManualReceives()
+        let reader = DirectClientReader(
+            maximumLength: 64 * 1024,
+            earlyLimit: 16,
+            initial: Data("ab".utf8),
+            receive: receives.receive
+        )
+        reader.start()
+
+        receives.complete(with: Data(repeating: 0x41, count: 15))
+
+        XCTAssertEqual(reader.earlyByteCount, 17)
+        XCTAssertFalse(reader.startTunnel())
         do {
             let data = try await reader.read()
             XCTFail("Read \(String(describing: data)) past the early bound.")
@@ -709,7 +734,26 @@ final class DirectConnectListenerTests: XCTestCase {
         }
     }
 
-    func testLateEarlyBytesWithinTheBoundAreKeptInOrderAndLaterOnesAreTheTunnels() async throws {
+    func testExactlyTheEarlyBoundIsAccepted() async throws {
+        let receives = ManualReceives()
+        let reader = DirectClientReader(
+            maximumLength: 64 * 1024,
+            earlyLimit: 16,
+            initial: Data("ab".utf8),
+            receive: receives.receive
+        )
+        reader.start()
+        receives.complete(with: Data(repeating: 0x41, count: 14))
+
+        XCTAssertEqual(reader.earlyByteCount, 16)
+        XCTAssertTrue(reader.startTunnel())
+        let first = try await reader.read()
+        let second = try await reader.read()
+        XCTAssertEqual(first?.count, 2)
+        XCTAssertEqual(second?.count, 14)
+    }
+
+    func testAfterTheCommitPointNothingIsReceivedUntilSomeoneReads() async throws {
         let receives = ManualReceives()
         let reader = DirectClientReader(
             maximumLength: 64 * 1024,
@@ -720,20 +764,53 @@ final class DirectConnectListenerTests: XCTestCase {
         reader.start()
         XCTAssertTrue(reader.startTunnel())
         receives.complete(with: Data("cd".utf8))
-        // After the tunnel nothing is received until someone reads.
         XCTAssertEqual(receives.pending, 0)
 
         let first = try await reader.read()
         let second = try await reader.read()
         XCTAssertEqual(first, Data("ab".utf8))
         XCTAssertEqual(second, Data("cd".utf8))
+        XCTAssertEqual(receives.pending, 0)
 
         let reading = Task { try await reader.read() }
         try await eventually { receives.pending == 1 }
         receives.complete(with: Data(repeating: 0x42, count: 100))
         let tunnel = try await reading.value
         XCTAssertEqual(tunnel?.count, 100)
-        XCTAssertEqual(reader.earlyByteCount, 4)
+    }
+
+    /// The watcher's two ends, cancellation and the side ending, in both
+    /// orders: each resumes it exactly once (a second resume would crash).
+    func testTheGoneWatcherIsResumedOnceWhicheverEndComesFirst() async throws {
+        for cancelFirst in [true, false] {
+            let receives = ManualReceives()
+            let reader = DirectClientReader(
+                maximumLength: 64 * 1024,
+                earlyLimit: 16,
+                initial: Data(),
+                receive: receives.receive
+            )
+            reader.start()
+            let ended = Recorder<Bool>()
+            let watching = Task {
+                do {
+                    try await reader.waitUntilGone()
+                    ended.record(true)
+                } catch {
+                    ended.record(false)
+                }
+            }
+            await Task.yield()
+            if cancelFirst {
+                watching.cancel()
+                receives.complete(with: nil, isComplete: true)
+            } else {
+                receives.complete(with: nil, isComplete: true)
+                watching.cancel()
+            }
+            _ = await watching.result
+            XCTAssertEqual(ended.values.count, 1)
+        }
     }
 
     func testSplitChunksPastTheBoundFailClosedEvenWithTheWatcherCancelled() async throws {

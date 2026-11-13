@@ -1425,14 +1425,18 @@ extension NWConnection {
 
 /// WebKit's side of one connection after its request head.
 ///
-/// Before the tunnel starts, the reader receives on its own, whoever reads,
-/// and counts every byte against the early bound: the bytes after the head,
-/// and every byte a receive issued before the tunnel delivers, whenever that
-/// receive completes. Past the bound it fails closed: the bytes are
-/// dropped, every read throws `earlyOverflow`, and the tunnel cannot start.
-/// So no watcher being cancelled, and no receive completing late, lets more
-/// than the bound through. After the tunnel starts, it receives only while
-/// someone reads, so a slow consumer slows WebKit.
+/// The commit point is `startTunnel()`, called after a backend is chosen
+/// and before the `200` is written. Every byte delivered before it is
+/// early: the bytes after the head, and every receive that completes
+/// before it. The reader receives on its own until then, whoever reads, and
+/// counts them against the early bound; past it, it fails closed: the bytes
+/// are dropped, every read throws `earlyOverflow`, and the tunnel cannot
+/// start. So no watcher being cancelled lets more than the bound be held
+/// before a backend is chosen. A receive that completes after the commit
+/// point belongs to the tunnel, whenever it was issued: WebKit may already
+/// have its `200`, and its next bytes are the tunnel's, of any size. After
+/// the commit point the reader receives only while someone reads, so a slow
+/// consumer slows WebKit.
 final class DirectClientReader: @unchecked Sendable {
     /// One receive: up to `maximumLength` bytes, then the completion with
     /// the bytes, whether the peer finished, and an error.
@@ -1452,7 +1456,12 @@ final class DirectClientReader: @unchecked Sendable {
     private var waiter: CheckedContinuation<Data?, Error>?
     private var goneWaiter: CheckedContinuation<Void, Error>?
     private var tunnelStarted = false
-    private(set) var earlyByteCount: Int
+    private var early: Int
+
+    /// Bytes delivered before the commit point so far.
+    var earlyByteCount: Int {
+        lock.withLock { early }
+    }
 
     init(
         maximumLength: Int,
@@ -1463,7 +1472,7 @@ final class DirectClientReader: @unchecked Sendable {
         receiveChunk = receive
         self.maximumLength = maximumLength
         self.earlyLimit = earlyLimit
-        earlyByteCount = initial.count
+        early = initial.count
         if initial.count > earlyLimit {
             ended = true
             failure = DirectConnectError.earlyOverflow
@@ -1506,9 +1515,9 @@ final class DirectClientReader: @unchecked Sendable {
         }
     }
 
-    /// The commit point: from here on bytes are the tunnel's. `false` when
-    /// WebKit's side has already ended or overflowed: the tunnel must not
-    /// start. A receive issued before this still counts as early.
+    /// The commit point: every byte delivered from here on is the tunnel's.
+    /// `false` when WebKit's side has already ended or overflowed: the
+    /// tunnel must not start.
     func startTunnel() -> Bool {
         lock.withLock {
             guard !ended else {
@@ -1592,9 +1601,6 @@ final class DirectClientReader: @unchecked Sendable {
     }
 
     private func receive() {
-        // Whether this receive's bytes are early is decided when it is
-        // issued, not when it completes.
-        let early = lock.withLock { !tunnelStarted }
         receiveChunk(maximumLength) { [self] data, isComplete, error in
             var resumes: [() -> Void] = []
             var again = false
@@ -1603,11 +1609,14 @@ final class DirectClientReader: @unchecked Sendable {
                 guard !ended else {
                     return
                 }
+                // Early or the tunnel's is decided by when the bytes are
+                // delivered, against the commit point, under this lock.
+                let isEarly = !tunnelStarted
                 if let data, !data.isEmpty {
-                    if early {
-                        earlyByteCount += data.count
+                    if isEarly {
+                        early += data.count
                     }
-                    if early, earlyByteCount > earlyLimit {
+                    if isEarly, early > earlyLimit {
                         // Fail closed: nothing of WebKit's is kept.
                         chunks.removeAll()
                         ended = true

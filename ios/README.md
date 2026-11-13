@@ -302,9 +302,10 @@ With a transport:
   ready candidate whose plan is still current wins; the others are closed
   having received nothing. The commit point is the `200` to WebKit: before
   it a failure falls back, after it a connection is never redialled or
-  replayed. The early bound is counted where WebKit's bytes are received,
-  including every receive issued before the `200`, so no cancelled watcher or
-  late receive lets more through; past it the CONNECT is closed. If WebKit
+  replayed. The early bound is counted where WebKit's bytes are received:
+  every byte delivered before the commit point counts, whoever was reading,
+  so no cancelled watcher lets more be held; past it the CONNECT is closed.
+  Bytes delivered after the commit point are the tunnel's, of any size. If WebKit
   closes its side before a backend is chosen, the race is cancelled. Each
   event of the path-generation table cancels races of plans made before it
   at once, and the CONNECT is planned once more, only under the same
