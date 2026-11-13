@@ -1107,18 +1107,26 @@ final class MobileOnboardingTests: XCTestCase {
             return session.instances.map(\.id)
         }
         coordinator.activateAccountSurface()
-        XCTAssertEqual(order(try await coordinator.bootstrap()), ["a", "b", "c", "d"])
+        let read1 = order(try await coordinator.bootstrap())
+
+        XCTAssertEqual(read1, ["a", "b", "c", "d"])
 
         _ = try coordinator.selectInstance(id: "c")
-        XCTAssertEqual(order(try await coordinator.bootstrap()), ["c", "a", "b", "d"])
+        let read2 = order(try await coordinator.bootstrap())
+
+        XCTAssertEqual(read2, ["c", "a", "b", "d"])
         try await Task.sleep(for: .milliseconds(20))
         _ = try coordinator.selectInstance(id: "b")
-        XCTAssertEqual(order(try await coordinator.bootstrap()), ["b", "c", "a", "d"])
+        let read3 = order(try await coordinator.bootstrap())
+
+        XCTAssertEqual(read3, ["b", "c", "a", "d"])
 
         // A relaunch keeps it, recorded under this account only.
         let relaunched = makeCoordinator(defaults: defaults, transports: [transport])
         relaunched.activateAccountSurface()
-        XCTAssertEqual(order(try await relaunched.bootstrap()), ["b", "c", "a", "d"])
+        let read4 = order(try await relaunched.bootstrap())
+
+        XCTAssertEqual(read4, ["b", "c", "a", "d"])
         XCTAssertEqual(
             defaults.dictionary(forKey: "avibe.mobile.instanceUse")?.keys.sorted(),
             ["account-1"]
