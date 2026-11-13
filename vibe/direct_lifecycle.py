@@ -595,6 +595,16 @@ class DirectAccessLifecycle:
             return CertificateResult("unavailable", last_error_code="certificate_order_in_progress")
         return await asyncio.shield(self._schedule_poll(rotate_key=True))
 
+    @property
+    def direct_paths_enabled(self) -> bool:
+        """Loop-only setting observation for request diagnostics, not readiness.
+
+        Reuse the existing config observer; request admission must never load
+        config or acquire the cross-thread status lock. Disk-only writers become
+        visible on that observer's next successful read, not atomically here.
+        """
+        return not self._shutdown and self._signature is not None and bool(self._signature[0])
+
     def status(self) -> DirectAccessStatus:
         with self._state_lock:
             return self._status

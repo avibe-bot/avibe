@@ -88,6 +88,7 @@ from modules.agents.catalog import (
     supports_runtime_refresh,
 )
 from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
+from vibe.http_request_diagnostics import RequestCounterMiddleware, RequestCounters
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
@@ -3360,6 +3361,18 @@ class _DirectIngressLiveHostMiddleware:
 
 
 app.add_middleware(_DirectIngressLiveHostMiddleware)
+
+_request_counters = RequestCounters()
+
+
+def _request_counting_enabled() -> bool:
+    # Both listeners and the lifecycle share the UI loop. No per-request I/O.
+    return _direct_lifecycle is not None and _direct_lifecycle.direct_paths_enabled
+
+
+# Outside the UI host/auth middleware, but still after DirectIngressGuard on
+# the direct listener. Never label unmarked desktop/local traffic Cloudflare.
+app.add_middleware(RequestCounterMiddleware, counters=_request_counters, enabled=_request_counting_enabled)
 
 
 _CONVERSATION_PREFETCH_PATH_RE = re.compile(r"/api/sessions/[^/]+/bootstrap")
@@ -8207,6 +8220,14 @@ async def remote_access_settings():
 @app.route("/api/remote-access/diagnostics", methods=["POST"])
 async def remote_access_diagnostics():
     from vibe import remote_access
+
+    payload = request.json or {}
+    if payload:
+        if payload != {"operation": "snapshot"}:
+            return jsonify({"ok": False, "error": "remote_access_diagnostics_invalid"}), 400
+        # Existing Member/Owner + auth/CSRF admission; no probes, config write,
+        # public status projection, or request-facing lifecycle controls.
+        return jsonify({"ok": True, "request_counts": _request_counters.snapshot(enabled=_request_counting_enabled())})
 
     try:
         result = await asyncio.to_thread(remote_access.connectivity_diagnostics)
@@ -18883,6 +18904,7 @@ async def _start_direct_lifecycle() -> None:
     from vibe.direct_lifecycle import DirectAccessLifecycle, register_active_lifecycle
 
     if _direct_lifecycle is None:
+        _request_counters.reset()
         try:
             lifecycle = DirectAccessLifecycle(app)
             await lifecycle.start()
