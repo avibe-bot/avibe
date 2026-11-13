@@ -220,7 +220,7 @@ final class DirectPathController {
     /// The transport reported the accepted generation usable, and nothing
     /// has suspended that since.
     private var isUsable = false
-    private(set) var pathGeneration = 0
+    private var pathGeneration = 0
     private var accountEpoch = 0
     private var isInBackground: Bool
 

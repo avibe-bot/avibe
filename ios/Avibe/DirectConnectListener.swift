@@ -371,7 +371,6 @@ actor DirectConnectListener {
     /// failure callback reaches anyone.
     let health = DirectSocketHealth()
     private var listener: NWListener?
-    private(set) var port: UInt16?
     private var allowedHosts: Set<String> = []
     private var relays: [UUID: Relay] = [:]
     private var isStopped = false
@@ -394,11 +393,6 @@ actor DirectConnectListener {
         self.ownershipNonce = ownershipNonce
         self.planner = planner
         self.onListenerFailure = onListenerFailure
-    }
-
-    /// The hosts a CONNECT may name, each on port 443 only.
-    func setAllowedHosts(_ hosts: Set<String>) {
-        allowedHosts = hosts
     }
 
     /// Adds one host to those a CONNECT may name.
@@ -522,7 +516,6 @@ actor DirectConnectListener {
             listener.cancel()
             throw CancellationError()
         }
-        port = bound
         return bound
     }
 
@@ -1677,8 +1670,6 @@ final class DirectRaceHandle: @unchecked Sendable {
         }
         cancel?()
     }
-}
-
 }
 
 /// Whether a listener's current socket is serving. Written where Network

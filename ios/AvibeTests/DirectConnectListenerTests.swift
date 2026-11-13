@@ -66,7 +66,7 @@ final class DirectConnectListenerTests: XCTestCase {
         let answer = try await refused.receiveUntilClosed()
         XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 403 "))
 
-        await fixture.listener.setAllowedHosts([host])
+        await fixture.listener.allowHost(host)
         let served = LoopbackClient(port: fixture.port)
         _ = try await establish(served, fixture)
         served.close()
@@ -1379,7 +1379,9 @@ final class DirectConnectListenerTests: XCTestCase {
             },
             onListenerFailure: {}
         )
-        await listener.setAllowedHosts(allowedHosts ?? [host])
+        for allowed in allowedHosts ?? [host] {
+            await listener.allowHost(allowed)
+        }
         let bound = try await listener.bind(port: nil)
         addTeardownBlock {
             await listener.stop()
