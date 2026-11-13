@@ -3,10 +3,10 @@
   "algorithm": "sha256",
   "sandboxOrigin": "https://sandbox.avibe.bot",
   "sandboxVersion": "0.1.0",
-  "buildHash": "2e88ccc707cd0eeeedacf77e87ae80b8e8a14dc769aab6eaf736d7860835e514",
+  "buildHash": "fc013b755a005b6b48dc750c429c46e9ee1401532d944c671207f85e371e7b7a",
   "resources": {
-    "/v/2e88ccc707cd0eeeedacf77e87ae80b8e8a14dc769aab6eaf736d7860835e514/assets/avibe-vault-sandbox.DDzMCVWv.css": "sha256-hjZivQwIYE/CZ2WBj1k2tMIJ6/lPjASzu9bE/epZL8A=",
-    "/v/2e88ccc707cd0eeeedacf77e87ae80b8e8a14dc769aab6eaf736d7860835e514/assets/main.eX081g-7.js": "sha256-2Lji89+FhF8DyrNfGSXQjdF9uOe9uSiCQoNRKbM0vT0=",
-    "/v/2e88ccc707cd0eeeedacf77e87ae80b8e8a14dc769aab6eaf736d7860835e514/index.html": "sha256-7JiosG/thD3f2Fa6hLWJlkwEa1JCP4U/pSDrr7aY7ds="
+    "/v/fc013b755a005b6b48dc750c429c46e9ee1401532d944c671207f85e371e7b7a/assets/avibe-vault-sandbox.CIg2t77e.css": "sha256-507Kte5oQA/Jx95hGJjbupjKc4lKy2GFK706oZ1AWGQ=",
+    "/v/fc013b755a005b6b48dc750c429c46e9ee1401532d944c671207f85e371e7b7a/assets/main.DbNfQY2o.js": "sha256-4KdE8PdBibde7dzoCsHpcczkXnfTqxEyd6I4yK/qwBQ=",
+    "/v/fc013b755a005b6b48dc750c429c46e9ee1401532d944c671207f85e371e7b7a/index.html": "sha256-GUNIFPsmdlrA0eOjpjrA01dednA1Uu21zbABrW/bjFg="
   }
 }

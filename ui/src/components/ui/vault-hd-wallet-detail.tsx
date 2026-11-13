@@ -12,11 +12,13 @@ import { formatRelativeTime } from '@/lib/relativeTime';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { cn } from '@/lib/utils';
 import { useAccountName } from '@/lib/vaultHdAccounts';
+import { useAskTurnOff } from '@/lib/useAskTurnOff';
 import { Badge } from './badge';
 import { Button } from './button';
 import { CopyButton } from './copy-button';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { InlineNameInput } from './inline-name-input';
+import { AskTurnOffNote } from './vault-ask-turn-off-note';
 import { Switch } from './switch';
 import { HdAccountAddressList } from './vault-hd-wallet-steps';
 
@@ -92,6 +94,11 @@ function AccountCard({ wallet, account, fresh, canManage, onChanged }: {
   const [renaming, setRenaming] = useState(Boolean(fresh) && canManage);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Turning it off takes a fresh Passkey confirmation through the pinned sandbox (contract v1.1);
+  // offered only when that build can do it. Turning it on stays an ordinary edit.
+  const askOff = useAskTurnOff({ name: wallet, account: account.account }, account.always_ask && canManage, onChanged);
+  const canTurnOff = askOff.state.phase === 'ready';
+  const turningOff = askOff.state.phase === 'working';
   const patch = async (payload: { name?: string | null; always_ask?: boolean }) => {
     setBusy(true);
     setError(null);
@@ -145,8 +152,8 @@ function AccountCard({ wallet, account, fresh, canManage, onChanged }: {
         )}
         <span className="ml-auto flex shrink-0 items-center gap-2">
           <span className="flex items-center gap-1 text-[11.5px] text-muted">
-            {/* Turning it off needs a Passkey (owner, 2026-11-12); until that check exists it stays on. */}
-            {account.always_ask ? (
+            {/* On and this build can't turn it off: say so; when it can, the switch itself is the way off. */}
+            {account.always_ask && !canTurnOff && !turningOff ? (
               <span title={t('vaults.hd.wallet.askLocked')} className="inline-flex">
                 <Lock className="size-3" aria-label={t('vaults.hd.wallet.askLocked')} />
               </span>
@@ -156,12 +163,13 @@ function AccountCard({ wallet, account, fresh, canManage, onChanged }: {
           <Switch
             size="sm"
             checked={account.always_ask}
-            disabled={busy || account.always_ask || !canManage}
-            onCheckedChange={(checked) => { if (checked) void patch({ always_ask: true }); }}
+            disabled={busy || turningOff || !canManage || (account.always_ask && !canTurnOff)}
+            onCheckedChange={(checked) => { if (checked) void patch({ always_ask: true }); else askOff.turnOff(); }}
             label={t('vaults.hd.wallet.ask')}
           />
         </span>
       </div>
+      {account.always_ask && canManage ? <AskTurnOffNote state={askOff.state} /> : null}
       <LastSigned account={account} />
       <HdAccountAddressList account={account} />
       {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}

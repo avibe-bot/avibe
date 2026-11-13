@@ -500,6 +500,19 @@ def test_runtime_downgrade_hides_new_capabilities_without_changing_addresses_or_
     assert runtime.calls[-1][1]["derivation"] == result["derivation"]
 
 
+def test_policy_turn_off_returns_the_same_capability_projection_as_other_responses(runtime, monkeypatch):
+    create_extended(runtime)
+    with api._vault_engine().connect() as conn:
+        raw = vault_service._meta_payload(vault_service._require_row(conn, NAME))
+    assert raw["accounts"][0]["bitcoin_address_types"] == ["p2tr"]  # storage leaves decoration to the API
+    monkeypatch.setattr(api, "_call_vault_policy_operation", lambda *args, **kwargs: {"ok": True, "secret": copy.deepcopy(raw)})
+    result = api.complete_vault_signing_policy_downgrade(NAME, {})
+    assert result["ok"] is True
+    assert result["secret"]["accounts"][0]["bitcoin_address_types"] == list(vault_hd.BITCOIN_TYPES)
+    assert result["secret"] == api.get_vault_secrets()["secrets"][0] | {"accounts": result["secret"]["accounts"]}
+    assert result["secret"]["accounts"] == api.get_vault_secrets()["secrets"][0]["accounts"]
+
+
 def test_capability_probe_is_cached_by_binary_identity_outside_serialization(tmp_path, monkeypatch):
     path = tmp_path / "avault"
     path.write_bytes(b"public fake executable identity")

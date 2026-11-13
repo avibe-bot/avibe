@@ -118,6 +118,26 @@ ceremony or protected transaction acceptance. The fresh pin requires its own
 exact-head approval before merge; installation and final protected acceptance
 remain separately authorized cohort gates.
 
+## Signing-policy turn-off consumer selection (contract v1.1)
+
+The packaged pin and paired release fixture select sandbox #39's immutable build
+`fc013b755a005b6b48dc750c429c46e9ee1401532d944c671207f85e371e7b7a`,
+from merged source `7e2fb00c687532cd2e40ded5f797c9ff8b680213` (tree-equal
+reviewed head `db76ed326b4cf40f741bb54ad071eb9c05cc82c8`). As before, the pin is
+derived from source and the live publication is only checked for equality.
+
+This build adds one optional operation, `authorizeSigningPolicyDowngrade`: the
+sandbox shows the exact server-issued context in its own top-level window and
+returns a fresh WebAuthn assertion over it. The Web consumer calls it only when
+the pinned build lists it in its capabilities (never in the globally required
+operations), opens the window in the click, and refuses to continue without it;
+the daemon verifies the assertion and applies only the bound `always_ask`
+true-to-false change. Turning ask-before-signing on, every other operation and the
+protected-record, root and key-custody formats are unchanged. A Passkey set up
+before public-key registrations were stored cannot authorize this and is not
+re-registered; there is no repair path. Source/fixture checks do not establish a
+real ceremony; the joint browser exercise is a separate gate.
+
 ## Evidence and scope
 
 - `vaultSandboxIntegrity.test.ts`: actual pinned fixture hashes, malformed/stale/

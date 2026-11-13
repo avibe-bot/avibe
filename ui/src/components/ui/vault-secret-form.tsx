@@ -51,6 +51,7 @@ import {
   checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
 } from '@/lib/vaultHdWallet';
 import { useProtectedVault } from '@/lib/useProtectedVault';
+import { useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
@@ -78,6 +79,7 @@ import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import {
   HdAvaultOld, HdBackupStep, HdCheckStep, HdDoneStep, HdImportFields, HdMismatchBlock, HdNotice, HdStepFooter, HdStepper,
 } from './vault-hd-wallet-steps';
+import { AskTurnOffNote } from './vault-ask-turn-off-note';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 import { VaultSolanaKeyFields } from './vault-solana-key-fields';
@@ -414,14 +416,23 @@ export const VaultSecretForm: React.FC<{
   }, [isHd, signingSource, hdCheck, hdPassphrase]);
   const isProvision = Boolean(fixedName);
   const isEdit = Boolean(editSecret);
-  // Editing an ordinary standard keypair may turn ask-before-signing on, never off: turning it
-  // off will need a Passkey confirmation that is not built yet (docs/plans/vault-signing-policy.md).
-  const editAskWasOn = (editSecret?.policy as { always_ask?: unknown } | undefined)?.always_ask === true;
+  // Editing an ordinary standard keypair turns ask-before-signing on as an ordinary edit; turning
+  // it off takes a fresh Passkey confirmation through the pinned sandbox (contract v1.1), offered
+  // only when that build can do it, and applied on its own (not by Save).
   const editAskEditable =
     Boolean(editSecret) &&
     editSecret?.kind === 'keypair' &&
     editSecret?.protection === 'standard' &&
     (editSecret?.signer_kind == null || editSecret?.signer_kind === 'local');
+  // Turned off for this key only: a different key in the same editor starts from its own state.
+  const [askTurnedOffFor, setAskTurnedOffFor] = useState<string | null>(null);
+  const askTurnedOff = askTurnedOffFor !== null && askTurnedOffFor === editSecret?.name;
+  const editAskWasOn = !askTurnedOff && (editSecret?.policy as { always_ask?: unknown } | undefined)?.always_ask === true;
+  const askOff = useAskTurnOff({ name: editSecret?.name ?? '' }, editAskEditable, (secret) => {
+    setAskTurnedOffFor(secret.name);
+    setAlwaysAsk(false);
+  });
+  const canTurnAskOff = askOff.state.phase === 'ready';
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
@@ -1484,14 +1495,25 @@ export const VaultSecretForm: React.FC<{
               </span>
               <Switch
                 checked={alwaysAsk}
-                onCheckedChange={setAlwaysAsk}
-                disabled={submitting || editAskWasOn}
+                onCheckedChange={(checked) => {
+                  if (checked || !editAskWasOn) setAlwaysAsk(checked);
+                  else askOff.turnOff();
+                }}
+                disabled={submitting || askOff.state.phase === 'working' || (editAskWasOn && !canTurnAskOff)}
                 label={t('vaults.dialog.alwaysAskSign')}
               />
             </div>
-            {editAskWasOn ? (
+            {editAskWasOn && askOff.state.phase === 'working' ? (
+              <AskTurnOffNote state={askOff.state} />
+            ) : editAskWasOn && canTurnAskOff ? (
+              askOff.state.phase === 'ready' && askOff.state.failure && askOff.state.failure !== 'cancelled'
+                ? <AskTurnOffNote state={askOff.state} />
+                : <span className="text-[11px] text-muted">{t('vaults.askOff.offHintEdit')}</span>
+            ) : editAskWasOn && askOff.state.phase === 'unavailable' ? (
               <span className="text-[11px] text-muted">{t('vaults.dialog.alwaysAskSignLocked')}</span>
-            ) : alwaysAsk ? (
+            ) : askTurnedOff && !alwaysAsk ? (
+              <span role="status" className="text-[11px] text-muted">{t('vaults.askOff.turnedOff')}</span>
+            ) : !editAskWasOn && alwaysAsk && !canTurnAskOff ? (
               <span className="text-[11px] font-medium text-accent-ink">{t('vaults.dialog.alwaysAskSignOneWay')}</span>
             ) : null}
           </div>
