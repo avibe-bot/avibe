@@ -155,8 +155,6 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(String(decoding: pong, as: UTF8.self), "pong")
         XCTAssertEqual(fixture.plans.directFailures, 0)
         XCTAssertEqual(fixture.publicOrigin.opened.count, 0)
-        let committed = await fixture.listener.committedCount(backend: .direct)
-        XCTAssertEqual(committed, 1)
         client.close()
     }
 
@@ -332,8 +330,6 @@ final class DirectConnectListenerTests: XCTestCase {
         try await eventually { publicStream.written.count == 5 }
         XCTAssertEqual(String(decoding: publicStream.written, as: UTF8.self), "HELLO")
         XCTAssertEqual(fixture.plans.directFailures, 1)
-        let committed = await fixture.listener.committedCount(backend: .publicOrigin)
-        XCTAssertEqual(committed, 1)
 
         publicStream.instanceSends(Data("WORLD".utf8))
         let reply = try await client.receive(count: 5)
@@ -372,10 +368,6 @@ final class DirectConnectListenerTests: XCTestCase {
         // The loser was cancelled, and a cancelled candidate is not a
         // failure of the path.
         XCTAssertEqual(fixture.plans.directFailures, 0)
-        let direct = await fixture.listener.committedCount(backend: .direct)
-        let publicCount = await fixture.listener.committedCount(backend: .publicOrigin)
-        XCTAssertEqual(direct, 0)
-        XCTAssertEqual(publicCount, 1)
         client.close()
     }
 
@@ -460,8 +452,6 @@ final class DirectConnectListenerTests: XCTestCase {
         try await eventually {
             String(decoding: publicStream.written, as: UTF8.self) == "still"
         }
-        let remaining = await fixture.listener.committedCount(backend: .publicOrigin)
-        XCTAssertEqual(remaining, 1)
 
         // Nothing left to close is an empty count, not a closure.
         let again = await fixture.listener.closeRelays(backend: .direct)
@@ -510,36 +500,32 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(fixture.publicOrigin.attempts, 0)
     }
 
-    /// The transport closes a committed relay's stream itself (it lost the
-    /// path, or was deselected) before the event's close reaches the
-    /// listener. The relay is still counted once.
-    func testARelayWhoseStreamTheTransportClosedFirstIsStillCountedOnce() async throws {
-        let fixture = try await makeListener()
-        let client = LoopbackClient(port: fixture.port)
-        let stream = try await establish(client, fixture)
+    /// Committed relays that ended before any event (the stream failed
+    /// under one, WebKit reset another, a third ended normally) are not
+    /// counted by a later event's close: it did not close them. With a limit
+    /// of one connection, each next CONNECT is served only once the previous
+    /// relay is gone.
+    func testARelayThatEndedBeforeAnEventIsNotCountedByIt() async throws {
+        let fixture = try await makeListener(
+            limits: limits(maxConnections: 1, lingerSeconds: 0.3)
+        )
+        let (failing, failed) = try await serveWhenASlotIsFree(fixture)
+        failed.cancel()
+        _ = try await failing.receiveUntilClosed()
 
-        stream.cancel()
-        try await eventually { await fixture.listener.connectionCount() == 0 }
+        let (resetting, _) = try await serveWhenASlotIsFree(fixture)
+        resetting.close()
 
+        let (ending, ended) = try await serveWhenASlotIsFree(fixture)
+        try await ending.finish()
+        ended.instanceFinishes()
+        _ = try await ending.receiveUntilClosed()
+
+        let (live, _) = try await serveWhenASlotIsFree(fixture)
         let closed = await fixture.listener.closeRelays(backend: .direct, before: 1)
+        // Only the live relay this close ended.
         XCTAssertEqual(closed, [host: 1])
-        let again = await fixture.listener.closeRelays(backend: .direct, before: 1)
-        XCTAssertEqual(again, [:])
-        client.close()
-    }
-
-    func testARelayThatEndsNormallyIsNotCountedLater() async throws {
-        let fixture = try await makeListener(limits: limits(lingerSeconds: 0.3))
-        let client = LoopbackClient(port: fixture.port)
-        let stream = try await establish(client, fixture)
-
-        try await client.finish()
-        stream.instanceFinishes()
-        _ = try await client.receiveUntilClosed()
-        try await eventually { await fixture.listener.connectionCount() == 0 }
-
-        let closed = await fixture.listener.closeRelays(backend: .direct, before: 1)
-        XCTAssertEqual(closed, [:])
+        live.close()
     }
 
     func testARetiredScopeEndsOnlyUncommittedWorkOfOlderScopes() async throws {
@@ -702,7 +688,6 @@ final class DirectConnectListenerTests: XCTestCase {
 
         receives.complete(with: Data(repeating: 0x41, count: 40_000))
 
-        XCTAssertEqual(reader.earlyByteCount, 2)
         let first = try await reader.read()
         let second = try await reader.read()
         XCTAssertEqual(first, Data("ab".utf8))
@@ -724,7 +709,6 @@ final class DirectConnectListenerTests: XCTestCase {
 
         receives.complete(with: Data(repeating: 0x41, count: 15))
 
-        XCTAssertEqual(reader.earlyByteCount, 17)
         XCTAssertFalse(reader.startTunnel())
         do {
             let data = try await reader.read()
@@ -745,7 +729,6 @@ final class DirectConnectListenerTests: XCTestCase {
         reader.start()
         receives.complete(with: Data(repeating: 0x41, count: 14))
 
-        XCTAssertEqual(reader.earlyByteCount, 16)
         XCTAssertTrue(reader.startTunnel())
         let first = try await reader.read()
         let second = try await reader.read()
@@ -832,7 +815,6 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(receives.pending, 1)
         receives.complete(with: Data(repeating: 0x43, count: 6))
 
-        XCTAssertEqual(reader.earlyByteCount, 12)
         XCTAssertFalse(reader.startTunnel())
         do {
             _ = try await reader.read()
@@ -858,20 +840,20 @@ final class DirectConnectListenerTests: XCTestCase {
     }
 
     func testAClientThatClosesBeforeTheAnswerEndsTheRaceAndFreesItsSlot() async throws {
-        let fixture = try await makeListener()
+        let fixture = try await makeListener(limits: limits(maxConnections: 1))
         let client = LoopbackClient(port: fixture.port)
         try await client.send(canonicalHead)
         let stream = try await fixture.direct.waitForStream()
-        let holding = await fixture.listener.connectionCount()
-        XCTAssertEqual(holding, 1)
 
         // WebKit gives up on the CONNECT while the instance has not answered.
         client.close()
 
         try await eventually { stream.isCancelled }
-        try await eventually { await fixture.listener.connectionCount() == 0 }
         XCTAssertEqual(fixture.publicOrigin.attempts, 0)
         XCTAssertEqual(fixture.plans.directFailures, 0)
+        // Its slot is free: with a limit of one, the next CONNECT is served.
+        let (next, _) = try await serveWhenASlotIsFree(fixture)
+        next.close()
     }
 
     func testBytesSentSeparatelyBeforeTheAnswerAreHeldAndForwardedAfterIt() async throws {
@@ -1018,12 +1000,15 @@ final class DirectConnectListenerTests: XCTestCase {
         addTeardownBlock {
             await listener.stop()
         }
+        // Binds are numbered from one.
         let port = try await listener.bind(port: nil)
-        let earlier = await listener.bindGeneration
+        let earlier = 1
+        XCTAssertTrue(listener.health.isServing)
         await listener.closeListeningSocket()
+        XCTAssertFalse(listener.health.isServing)
         _ = try await listener.bind(port: port)
-        let current = await listener.bindGeneration
-        XCTAssertNotEqual(earlier, current)
+        let current = 2
+        XCTAssertTrue(listener.health.isServing)
 
         await listener.socketDidFail(bindGeneration: earlier)
         XCTAssertEqual(failures.values, [])
@@ -1373,6 +1358,34 @@ final class DirectConnectListenerTests: XCTestCase {
             direct: directStreams,
             publicOrigin: publicStreams
         )
+    }
+
+    /// Connects until a CONNECT is served (while every slot is held, a new
+    /// connection is closed at once), and completes it on the direct path.
+    private func serveWhenASlotIsFree(
+        _ fixture: Fixture
+    ) async throws -> (LoopbackClient, StandInDirectStream) {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        while clock.now < deadline {
+            let before = fixture.direct.opened.count
+            let client = LoopbackClient(port: fixture.port)
+            try? await client.send(canonicalHead)
+            let wait = clock.now.advanced(by: .milliseconds(500))
+            while fixture.direct.opened.count == before, clock.now < wait {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            if fixture.direct.opened.count > before {
+                let stream = fixture.direct.opened[before]
+                stream.instanceSends(Data(established.utf8))
+                let answer = try await client.receive(count: established.utf8.count)
+                XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+                return (client, stream)
+            }
+            client.close()
+        }
+        XCTFail("No slot became free.")
+        throw DirectTestTimeout()
     }
 
     /// Completes one CONNECT on the direct path and returns its stream.

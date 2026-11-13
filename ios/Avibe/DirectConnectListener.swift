@@ -364,6 +364,10 @@ actor DirectConnectListener {
     /// Made once per listener. Only this listener's accept loop answers an
     /// ownership check that carries it.
     let ownershipNonce: String
+    /// Whether the current socket is serving, readable at once from any
+    /// thread: its failure is recorded where Network reports it, before the
+    /// failure callback reaches anyone.
+    let health = DirectSocketHealth()
     private var listener: NWListener?
     private(set) var port: UInt16?
     private var allowedHosts: Set<String> = []
@@ -371,15 +375,12 @@ actor DirectConnectListener {
     private var isStopped = false
     /// The close of the previous listening socket, until it has finished.
     private var closing: Task<Void, Never>?
-    /// Committed relays that ended with an error before any close asked for
-    /// them, bounded by the connection limit.
-    private var tombstones: [(host: String, backend: DirectRelayBackend, generation: Int)] = []
     /// The highest path generation and the newest scope retired so far.
     private var retiredGeneration = Int.min
     private var retiredScope = DirectPlanScope(selection: .min, accountEpoch: .min)
     private var pendingBind: DirectOnceAnswer<UInt16>?
     /// Advances with every bind.
-    private(set) var bindGeneration = 0
+    private var bindGeneration = 0
 
     init(
         limits: DirectConnectLimits = .standard,
@@ -457,6 +458,7 @@ actor DirectConnectListener {
         // earlier socket of this actor is recognised as stale.
         bindGeneration += 1
         let generation = bindGeneration
+        let health = health
         // Resolved by the socket's state, by cancellation of this task, or
         // by `closeListeningSocket()` and `stop()`, which replace the state
         // handler: a pending bind always returns.
@@ -468,12 +470,14 @@ actor DirectConnectListener {
                 // From here on, a state change is the socket failing.
                 listener?.stateUpdateHandler = { [weak self] state in
                     if case .failed = state {
+                        health.failed(generation: generation)
                         Task {
                             await self?.socketDidFail(bindGeneration: generation)
                         }
                     }
                 }
                 if let port = listener?.port?.rawValue {
+                    health.serving(generation: generation)
                     answer.resolve(with: .success(port))
                 } else {
                     answer.resolve(with: .failure(CancellationError()))
@@ -528,6 +532,7 @@ actor DirectConnectListener {
     /// pending ends with `CancellationError`.
     func closeListeningSocket() async {
         endPendingBind()
+        health.closed()
         if let listener {
             self.listener = nil
             closing = Task {
@@ -563,6 +568,7 @@ actor DirectConnectListener {
         }
         isStopped = true
         endPendingBind()
+        health.closed()
         listener?.stateUpdateHandler = nil
         listener?.cancel()
         listener = nil
@@ -595,16 +601,6 @@ actor DirectConnectListener {
             relay.task.cancel()
             relays.removeValue(forKey: id)
         }
-        tombstones.removeAll { tombstone in
-            guard
-                backend == nil || tombstone.backend == backend,
-                tombstone.generation < generation
-            else {
-                return false
-            }
-            closed[tombstone.host, default: 0] += 1
-            return true
-        }
         return closed
     }
 
@@ -632,16 +628,6 @@ actor DirectConnectListener {
                 plan.race.retire()
             }
         }
-    }
-
-    /// How many connections this listener holds, committed or not.
-    func connectionCount() -> Int {
-        relays.count
-    }
-
-    /// How many relays are committed, per backend. For diagnostics and tests.
-    func committedCount(backend: DirectRelayBackend) -> Int {
-        relays.values.filter { $0.committed?.backend == backend }.count
     }
 
     private func endPendingBind() {
@@ -676,7 +662,6 @@ actor DirectConnectListener {
         let allowedHosts = allowedHosts
         let nonce = ownershipNonce
         relays[id] = Relay(task: Task { [weak self] in
-            let ending = DirectRelayEnding()
             await Self.serve(
                 connection,
                 id: id,
@@ -684,31 +669,19 @@ actor DirectConnectListener {
                 allowedHosts: allowedHosts,
                 ownershipNonce: nonce,
                 limits: limits,
-                planner: planner,
-                ending: ending
+                planner: planner
             )
             connection.cancel()
-            await self?.relayDidEnd(id, failed: ending.failed)
+            await self?.relayDidEnd(id)
         })
     }
 
-    /// A relay's task ended. A committed relay that ended with an error
-    /// (its stream was closed under it: the transport lost the path or was
-    /// deselected) leaves a tombstone, so the event that caused it still
-    /// counts it as closed (`closeRelays`), whichever of the two runs first
-    /// on this actor. A relay this listener closed itself was already removed
-    /// and leaves none.
-    private func relayDidEnd(_ id: UUID, failed: Bool) {
-        guard let relay = relays.removeValue(forKey: id) else {
-            return
-        }
-        guard failed, let committed = relay.committed else {
-            return
-        }
-        tombstones.append(committed)
-        if tombstones.count > limits.maxConnections {
-            tombstones.removeFirst(tombstones.count - limits.maxConnections)
-        }
+    /// A relay's task ended, on its own or because a close cancelled it.
+    /// A relay whose stream failed before any event closed it is not counted
+    /// by a later event: that event did not close it, and the page already
+    /// saw that connection fail.
+    private func relayDidEnd(_ id: UUID) {
+        relays.removeValue(forKey: id)
     }
 
     /// Records a relay's new plan, and checks it against what was retired
@@ -762,8 +735,7 @@ actor DirectConnectListener {
         allowedHosts: Set<String>,
         ownershipNonce: String,
         limits: DirectConnectLimits,
-        planner: DirectConnectPlanner,
-        ending: DirectRelayEnding
+        planner: DirectConnectPlanner
     ) async {
         let authority: DirectAuthority
         let earlyData: Data
@@ -932,7 +904,6 @@ actor DirectConnectListener {
                 } catch {
                     // Either side ended the tunnel, or the relay was closed.
                     // A tunnel is never redialled and nothing is replayed.
-                    ending.failed = true
                 }
                 return
             }
@@ -1458,11 +1429,6 @@ final class DirectClientReader: @unchecked Sendable {
     private var tunnelStarted = false
     private var early: Int
 
-    /// Bytes delivered before the commit point so far.
-    var earlyByteCount: Int {
-        lock.withLock { early }
-    }
-
     init(
         maximumLength: Int,
         earlyLimit: Int,
@@ -1702,13 +1668,36 @@ final class DirectRaceHandle: @unchecked Sendable {
     }
 }
 
-/// Whether a relay's task ended with an error after its commit point.
-final class DirectRelayEnding: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
+}
 
-    var failed: Bool {
-        get { lock.withLock { value } }
-        set { lock.withLock { value = newValue } }
+/// Whether a listener's current socket is serving. Written where Network
+/// reports the socket's state, read synchronously by the path controller
+/// just before it publishes a route, so a failure that has happened is seen
+/// there even while its callback is still on its way.
+final class DirectSocketHealth: @unchecked Sendable {
+    private let lock = NSLock()
+    private var serving: Int?
+
+    /// The socket of bind `generation` is ready.
+    func serving(generation: Int) {
+        lock.withLock { serving = generation }
+    }
+
+    /// The socket of bind `generation` failed. A failure of an earlier
+    /// socket changes nothing.
+    func failed(generation: Int) {
+        lock.withLock {
+            if serving == generation {
+                serving = nil
+            }
+        }
+    }
+
+    func closed() {
+        lock.withLock { serving = nil }
+    }
+
+    var isServing: Bool {
+        lock.withLock { serving != nil }
     }
 }

@@ -329,7 +329,13 @@ With a transport:
   lost path, a new rendezvous generation, and the background close direct
   relays and count one closure per host; a runtime stop closes direct relays
   and an account change closes all relays, without a closure; validating a
-  path again closes nothing. The background also closes the listening socket;
+  path again closes nothing. Only relays an event itself closes are counted:
+  the background counts its closure before it tells the transport to stop
+  (which closes its streams), and a relay whose stream had already failed is
+  not counted by a later event. A route is published only if, right before
+  it and with no suspension after, the listener's socket still reports
+  serving; Network's failure is recorded there before its callback arrives.
+  The background also closes the listening socket;
   the return re-binds the same port, publishes the closure, and only then
   answers a held `direct.status()`, and only for the runtime and store it was
   asked under: a runtime stop or an account change settles held answers as

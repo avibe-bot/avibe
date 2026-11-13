@@ -395,17 +395,14 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
         XCTAssertNil(harness.controller.plan(for: try XCTUnwrap(DirectAuthority(host: one)))?.openDirect)
 
-        // Nothing undoes it in this process: not another background and
-        // return, not another failure callback.
+        // Nothing undoes it in this process, and it is reported once: not
+        // another background and return.
         squatter.close()
         harness.enterBackground()
         harness.enterForeground()
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertTrue(harness.controller.isFaulted)
         XCTAssertEqual(harness.transport.selections.count, selections)
-        if let listener = harness.controller.listener {
-            harness.controller.listenerDidFail(listener)
-        }
         XCTAssertEqual(harness.faults, 1)
         XCTAssertEqual(harness.announcements, announced)
 
@@ -421,31 +418,19 @@ final class DirectPathControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testAListenerSocketFailureAfterARouteIsOneTerminalFaultAndAStaleOneIsNothing() async throws {
+    func testAFailureOfAListenerTheControllerDoesNotOwnChangesNothing() async throws {
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
         harness.transport.report(.usable(generation: "g1"), for: target)
-        let listener = try XCTUnwrap(harness.controller.listener)
 
-        // A listener this controller does not own fails: nothing happens.
         let stranger = DirectConnectListener(planner: { _ in nil }, onListenerFailure: {})
         harness.controller.listenerDidFail(stranger)
+
         XCTAssertFalse(harness.controller.isFaulted)
+        XCTAssertEqual(harness.faults, 0)
         XCTAssertEqual(harness.status("instance-1").preferred, .direct)
-
-        let announced = harness.announcements
-        harness.controller.listenerDidFail(listener)
-        harness.controller.listenerDidFail(listener)
-
-        XCTAssertTrue(harness.controller.isFaulted)
-        XCTAssertEqual(harness.faults, 1)
-        // No event presents anything after the fault.
-        XCTAssertEqual(harness.announcements, announced)
-        XCTAssertEqual(harness.requestStatus("instance-1").values, [nil])
-        XCTAssertNil(harness.controller.plan(for: try XCTUnwrap(DirectAuthority(host: one)))?.openDirect)
-        XCTAssertTrue(harness.controller.faultCovers(try XCTUnwrap(harness.lastOpened)))
     }
 
     @MainActor
@@ -552,86 +537,75 @@ final class DirectPathControllerTests: XCTestCase {
         client.close()
     }
 
-    /// The listener fails while the first route is being prepared, at a
-    /// different moment each time: whenever it is ready and no route exists
-    /// yet, no route may be written then, and the host keeps WebKit's
-    /// normal path. Route publication checks the listener again, with no
-    /// suspension, after its last wait.
+    /// A second return before the first return's re-bind finished: the
+    /// held answers and the pending closure stay held until that re-bind
+    /// completes, and are then settled once.
     @MainActor
-    func testAListenerFailureWhileTheFirstRouteIsPreparedNeverLeavesARouteToIt() async throws {
-        var hitBeforeRoute = 0
-        for attempt in 0..<30 {
-            let harness = try Harness(test: self)
-            try await harness.signIn()
-            let controller = harness.controller
-            let writes = try ProxyConfigurationWrites.count()
-            let selecting = Task { try await harness.select("instance-1") }
-            // Wait for the listener, then fail it a little later each time.
-            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
-            while controller.listenerState != .ready, ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(1))
-            }
-            for _ in 0..<attempt {
-                await Task.yield()
-            }
-            let routed = controller.routeOwner.routes(one, store: harness.websiteDataStore.identifier)
-            let failed = controller.listener
-            if let failed, controller.listenerState == .ready {
-                controller.listenerDidFail(failed)
-            }
-            try await selecting.value
+    func testASecondReturnDuringTheReBindKeepsTheResumeHeld() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: listening)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let client = LoopbackClient(port: port)
+        let stream = try await establishDirect(client, harness: harness)
+        harness.enterBackground()
+        try await eventually { stream.isCancelled }
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
 
-            guard failed != nil else {
-                continue
-            }
-            if routed {
-                XCTAssertTrue(controller.isFaulted, "attempt \(attempt)")
-            } else {
-                hitBeforeRoute += 1
-                XCTAssertEqual(try ProxyConfigurationWrites.count(), writes, "attempt \(attempt)")
-                XCTAssertTrue(
-                    controller.routeOwner.isExcluded(one, store: harness.websiteDataStore.identifier),
-                    "attempt \(attempt)"
-                )
-                XCTAssertFalse(controller.isFaulted, "attempt \(attempt)")
-                XCTAssertNil(controller.listener, "attempt \(attempt)")
-                XCTAssertEqual(harness.transport.selections.count, 0, "attempt \(attempt)")
-            }
-            harness.stop()
+        // Return, ask, leave and return again, all before the re-bind can
+        // finish on the main actor.
+        harness.enterForeground()
+        let first = harness.requestStatus("instance-1")
+        harness.enterBackground()
+        harness.enterForeground()
+        let second = harness.requestStatus("instance-1")
+        XCTAssertEqual(first.values, [])
+        XCTAssertEqual(second.values, [])
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+
+        try await eventually { first.values.count == 1 && second.values.count == 1 }
+        if harness.controller.isFaulted {
+            XCTAssertEqual(first.values, [nil])
+            XCTAssertEqual(second.values, [nil])
+        } else {
+            XCTAssertEqual(harness.controller.listenerState, .ready)
+            XCTAssertEqual(first.values.first??.closure, 1)
+            XCTAssertEqual(second.values.first??.closure, 1)
         }
-        print("Listener failures before the first route: \(hitBeforeRoute) of 30")
-        XCTAssertGreaterThan(hitBeforeRoute, 0)
+        client.close()
     }
 
+    /// The background counts the direct relays it closes before the
+    /// transport is told to stop, which closes its streams.
     @MainActor
-    func testAListenerFailureWhileALaterRouteIsPreparedIsTheFaultAndWritesNoRoute() async throws {
-        var hitBeforeRoute = 0
-        for attempt in 0..<30 {
-            let harness = try Harness(test: self)
-            try await harness.signIn()
-            try await harness.select("instance-1")
-            let controller = harness.controller
-            let writes = try ProxyConfigurationWrites.count()
-            let selecting = Task { try await harness.select("instance-2") }
-            for _ in 0..<attempt {
-                await Task.yield()
-            }
-            let routed = controller.routeOwner.routes(two, store: harness.websiteDataStore.identifier)
-            if let listener = controller.listener {
-                controller.listenerDidFail(listener)
-            }
-            try await selecting.value
+    func testTheBackgroundCountsItsClosureBeforeTheTransportClosesItsStreams() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: listening)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let client = LoopbackClient(port: port)
+        let stream = try await establishDirect(client, harness: harness)
+        let deselected = harness.transport.deselectCount
 
-            XCTAssertTrue(controller.isFaulted, "attempt \(attempt)")
-            XCTAssertEqual(harness.faults, 1, "attempt \(attempt)")
-            if !routed {
-                hitBeforeRoute += 1
-                XCTAssertEqual(try ProxyConfigurationWrites.count(), writes, "attempt \(attempt)")
-                XCTAssertEqual(harness.currentRoutes.first?.matchDomains, [one], "attempt \(attempt)")
-            }
-            harness.stop()
+        harness.enterBackground()
+        // The transport is stopped only after the close was counted.
+        XCTAssertEqual(harness.transport.deselectCount, deselected)
+        try await eventually { harness.transport.deselectCount == deselected + 1 }
+        try await eventually { stream.isCancelled }
+        harness.enterForeground()
+        let answer = harness.requestStatus("instance-1")
+        try await eventually { answer.values.count == 1 }
+
+        if !harness.controller.isFaulted {
+            XCTAssertEqual(answer.values.first??.closure, 1)
         }
-        XCTAssertGreaterThan(hitBeforeRoute, 0)
+        client.close()
     }
 
     /// A push tap opens an instance whose route exists while the listener

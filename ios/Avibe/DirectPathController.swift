@@ -207,7 +207,7 @@ final class DirectPathController {
     private let onFault: () -> Void
     private var lifecycleObservers: [NSObjectProtocol] = []
 
-    private(set) var listener: DirectConnectListener?
+    private var listener: DirectConnectListener?
     private var listenerPort: UInt16?
     private(set) var listenerState: DirectListenerState = .none
     private var listenerStart: Task<Bool, Never>?
@@ -439,11 +439,15 @@ final class DirectPathController {
         }
         // The runtime loads now, with or without a route, so a host that
         // gets none here never gets one on this store.
+        // The last check before publication, with no suspension after it:
+        // the controller's view, and the socket's own state, which Network
+        // records before its failure callback can reach the controller.
         guard
             listenerState == .ready,
             !isInBackground,
             self.listener === listener,
-            self.listenerPort == listenerPort
+            self.listenerPort == listenerPort,
+            listener.health.isServing
         else {
             routeOwner.exclude(authority.host, store: store)
             return
@@ -525,7 +529,7 @@ final class DirectPathController {
         }
     }
 
-    private func deselect() {
+    private func deselect(stoppingTransport: Bool = true) {
         isUsable = false
         acceptedGeneration = nil
         replacedGenerations.removeAll()
@@ -536,7 +540,9 @@ final class DirectPathController {
         // Ending a selection is a new scope too.
         selection += 1
         scopeDidChange()
-        transport.deselect()
+        if stoppingTransport {
+            transport.deselect()
+        }
     }
 
     private func receive(_ report: DirectPathReport, for target: DirectTarget) {
@@ -714,8 +720,15 @@ final class DirectPathController {
     /// counts as a closure, each host that lost at least one committed relay
     /// gets one closure, however many relays it lost. In the background the
     /// closure waits for the return.
-    private func closeRelays(_ backend: DirectRelayBackend?, countsAsClosure: Bool) {
+    /// `then` runs on the main actor once the close has run (at once when
+    /// there is no listener).
+    private func closeRelays(
+        _ backend: DirectRelayBackend?,
+        countsAsClosure: Bool,
+        then: (@MainActor () -> Void)? = nil
+    ) {
         guard let listener else {
+            then?()
             return
         }
         // Only relays committed under a plan made before this event: one
@@ -723,12 +736,12 @@ final class DirectPathController {
         let generation = pathGeneration
         Task { [weak self] in
             let closed = await listener.closeRelays(backend: backend, before: generation)
-            guard countsAsClosure else {
-                return
-            }
             let hosts = closed.filter { $0.value > 0 }.map(\.key)
             await MainActor.run {
-                self?.recordClosure(hosts: hosts)
+                if countsAsClosure {
+                    self?.recordClosure(hosts: hosts)
+                }
+                then?()
             }
         }
     }
@@ -956,7 +969,10 @@ final class DirectPathController {
             return
         }
         isInBackground = true
-        deselect()
+        // The relays are closed and counted before the transport is told to
+        // stop, which closes its streams: a relay whose stream ended first
+        // would no longer be there to count.
+        deselect(stoppingTransport: false)
         advanceGeneration()
         if let listener, listenerState == .ready {
             listenerState = .closedForBackground
@@ -964,7 +980,14 @@ final class DirectPathController {
                 await listener.closeListeningSocket()
             }
         }
-        closeRelays(.direct, countsAsClosure: true)
+        closeRelays(.direct, countsAsClosure: true) { [weak self] in
+            // Unless a new selection was made meanwhile: selecting already
+            // stops the transport's work for the previous target.
+            guard let self, self.target == nil else {
+                return
+            }
+            self.transport.deselect()
+        }
         updatePreference()
     }
 
@@ -973,6 +996,13 @@ final class DirectPathController {
             return
         }
         isInBackground = false
+        if listenerState == .rebinding {
+            // A return before the previous return's re-bind finished: that
+            // re-bind settles this resume too. Held answers stay held and
+            // pending closures stay pending until the listener is ready.
+            isResuming = true
+            return
+        }
         guard
             let listener,
             let listenerPort,

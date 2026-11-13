@@ -149,11 +149,6 @@ final class AppModel: ObservableObject {
         sessionCoordinator
     }
 
-    /// The path controller; `nil` without a direct transport.
-    var directPaths: DirectPathController? {
-        directPathController
-    }
-
     /// Answers `direct.status` for the runtime's WebViews; `nil` without a
     /// direct transport, so they offer no `direct` capability.
     var directStatusProvider: DirectStatusProvider? {

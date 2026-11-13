@@ -92,7 +92,10 @@ enum DirectPathReport: Equatable, Sendable {
     /// The network changed and the transport is validating the path again.
     /// New connections prefer the public origin meanwhile; nothing is closed.
     case verifying
-    /// The path is gone, or its validation failed.
+    /// The path is gone, or its validation failed. The App then closes the
+    /// relays the path carried and counts them as one closure per host. A
+    /// stream that failed on its own before this report is not counted: its
+    /// page already saw that connection fail, and no event closed it.
     case lost
 }
 

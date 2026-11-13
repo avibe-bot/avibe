@@ -38,7 +38,6 @@ final class DirectPathAppTests: XCTestCase {
         let app = try await makeApp(directTransport: nil) {
             listening = try listeningSockets()
         }
-        XCTAssertNil(app.directPaths)
         XCTAssertNil(app.directStatusProvider)
         let firstStore = app.runtimeWebsiteDataStore
         try assertUntouched("launched and signed in")
@@ -98,7 +97,7 @@ final class DirectPathAppTests: XCTestCase {
 
         _ = try await select("instance-1", in: app)
 
-        XCTAssertNil(app.directPaths)
+        XCTAssertNil(app.directStatusProvider)
         XCTAssertEqual(marker.takes, 0)
         XCTAssertEqual(marker.marks, 0)
         XCTAssertTrue(marker.isMarked)
@@ -122,7 +121,6 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
 
-        XCTAssertNil(bypassed.directPaths)
         XCTAssertNil(bypassed.directStatusProvider)
         XCTAssertEqual(marker.takes, 1)
         XCTAssertFalse(marker.isMarked)
@@ -139,7 +137,7 @@ final class DirectPathAppTests: XCTestCase {
             directTransport: transport,
             directFaultMarker: marker
         )
-        XCTAssertNotNil(next.directPaths)
+        XCTAssertNotNil(next.directStatusProvider)
         XCTAssertEqual(marker.takes, 2)
         _ = try await select("instance-1", in: next)
         XCTAssertEqual(transport.selections.count, 1)
@@ -169,14 +167,44 @@ final class DirectPathAppTests: XCTestCase {
     func testAListenerFaultCoversOnlyARoutedRuntimeOnceAndIsMarkedOnce() async throws {
         let marker = FaultMarkerSpy(marked: false)
         let transport = StandInDirectTransport()
-        let app = try await makeApp(directTransport: transport, directFaultMarker: marker)
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(directTransport: transport, directFaultMarker: marker) {
+            listening = try listeningSockets()
+        }
         let first = try await select("instance-1", in: app)
-        let paths = try XCTUnwrap(app.directPaths)
-        let listener = try XCTUnwrap(paths.listener)
+        let socket = try XCTUnwrap(try newListeners(since: listening).first)
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
         XCTAssertFalse(app.directFaultCovers(first))
 
-        paths.listenerDidFail(listener)
-        paths.listenerDidFail(listener)
+        // The App's port is taken while it is in the background: the return
+        // cannot re-bind it, which is the listener fault.
+        NotificationCenter.default.post(
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: socket.port,
+            reuseAddress: true
+        )
+        defer { squatter.close() }
+        NotificationCenter.default.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        try await eventually { app.directListenerFault }
+        // Another return does not report it again.
+        NotificationCenter.default.post(
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        try await Task.sleep(for: .milliseconds(300))
 
         XCTAssertTrue(app.directListenerFault)
         XCTAssertEqual(marker.marks, 1)
@@ -352,10 +380,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 2)
         // A late report for the first instance changes nothing.
         transport.report(.lost, for: target)
-        XCTAssertEqual(
-            app.directPaths?.currentStatus(for: instance).sequence,
-            2
-        )
+        XCTAssertEqual(directStatus(app, instance)?.sequence, 2)
 
         // Signing out rotates the store; the new one starts with no route
         // and the old one keeps its own until it is discarded.
@@ -431,7 +456,7 @@ final class DirectPathAppTests: XCTestCase {
             runtime: runtime,
             in: app
         )
-        XCTAssertEqual(app.directPaths?.currentStatus(for: instance).preferred, .tunnel)
+        XCTAssertEqual(directStatus(app, instance)?.preferred, .tunnel)
 
         // A return from the background does not select it again.
         let selections = transport.selections.count
@@ -474,7 +499,7 @@ final class DirectPathAppTests: XCTestCase {
             if app.mobileSessionCoordinator.isCurrentRuntime(newer) {
                 transport.report(.usable(generation: "g1"), for: target)
             }
-            return app.directPaths?.currentStatus(for: second).preferred == .direct
+            return self.directStatus(app, second)?.preferred == .direct
         }
     }
 
@@ -807,6 +832,15 @@ final class DirectPathAppTests: XCTestCase {
     // MARK: Fixture
 
     private var storeIdentifiers: Set<UUID> = []
+    /// What `direct.status()` answers for `origin`, through the provider
+    /// the App gives its WebViews. `nil` when it answers later or not at all.
+    @MainActor
+    private func directStatus(_ app: AppModel, _ origin: WebOrigin) -> DirectPathStatus? {
+        var answer: DirectPathStatus?
+        app.directStatusProvider?(origin) { answer = $0 }
+        return answer
+    }
+
     /// The isolated preferences of the last App `makeApp` built.
     private var appDefaults: UserDefaults?
 
