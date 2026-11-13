@@ -675,9 +675,16 @@ actor DirectConnectListener {
 
     private func accept(_ connection: NWConnection, bindGeneration generation: Int) {
         // Admission ends when the socket that accepted the connection begins
-        // to close: an accept queued before the close, delivered after it,
-        // is not admitted, as a relay or as the spare.
-        guard !isStopped, generation == acceptingGeneration else {
+        // to close, fails, or is rejected (its ownership check failed): an
+        // accept queued before that, delivered after it, is not admitted, as
+        // a relay or as the spare. A failure is recorded in `health` where
+        // Network reports it, and a rejection by the controller before it
+        // schedules the stop, so neither waits for this actor.
+        guard
+            !isStopped,
+            generation == acceptingGeneration,
+            health.isServing
+        else {
             connection.cancel()
             return
         }

@@ -1127,6 +1127,31 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(failures.values, [true])
     }
 
+    /// The socket failed, or the controller rejected the listener, and a
+    /// connection arrives before the stop: it is refused with no answer, and
+    /// no plan, relay, or spare is made for it.
+    func testNoConnectionIsAdmittedOnceTheSocketFailedOrWasRejected() async throws {
+        for reject in [true, false] {
+            let fixture = try await makeListener()
+            let health = await fixture.listener.health
+            if reject {
+                health.closed()
+            } else {
+                health.failed(generation: 1)
+            }
+
+            let client = LoopbackClient(port: fixture.port)
+            try? await client.send(canonicalHead)
+            let answer = try await client.receiveUntilClosed()
+
+            XCTAssertEqual(answer, Data())
+            XCTAssertEqual(fixture.plans.planCount, 0)
+            XCTAssertEqual(fixture.direct.attempts, 0)
+            client.close()
+            await fixture.listener.stop()
+        }
+    }
+
     func testABindOnAPortSomeoneElseHoldsFails() async throws {
         let control = try ControlListener(family: AF_INET, address: "127.0.0.1")
         defer { control.close() }

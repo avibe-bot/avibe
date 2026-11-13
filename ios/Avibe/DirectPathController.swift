@@ -878,6 +878,8 @@ final class DirectPathController {
                 guard owned else {
                     self.listenerState = .none
                     self.listener = nil
+                    // Admission ends now, not when the stop runs.
+                    listener.health.closed()
                     Task {
                         await listener.stop()
                     }
@@ -889,6 +891,7 @@ final class DirectPathController {
                     // the port as the background does, for the return to
                     // re-bind. No route is written meanwhile.
                     self.listenerState = .closedForBackground
+                    listener.health.closed()
                     Task {
                         await listener.closeListeningSocket()
                     }
@@ -908,6 +911,7 @@ final class DirectPathController {
                 if !ready, self.listenerState == .binding {
                     self.listenerState = .none
                     self.listener = nil
+                    listener.health.closed()
                     Task {
                         await listener.stop()
                     }
@@ -929,6 +933,9 @@ final class DirectPathController {
             return nil
         }
         let listener = listener
+        // Admission ends now: a connection already queued for this listener
+        // is refused, not served, before its stop runs.
+        listener?.health.closed()
         self.listener = nil
         listenerPort = nil
         listenerStart = nil
@@ -1002,6 +1009,7 @@ final class DirectPathController {
         advanceGeneration()
         if let listener, listenerState == .ready {
             listenerState = .closedForBackground
+            listener.health.closed()
             Task {
                 await listener.closeListeningSocket()
             }
@@ -1064,6 +1072,7 @@ final class DirectPathController {
                 if self.isInBackground {
                     // Back in the background meanwhile: the next return
                     // re-binds, and the held answers wait for it.
+                    listener.health.closed()
                     Task {
                         await listener.closeListeningSocket()
                     }
@@ -1084,6 +1093,7 @@ final class DirectPathController {
                         await retired?.stop()
                     }
                 } else {
+                    listener.health.closed()
                     Task {
                         await listener.closeListeningSocket()
                     }
