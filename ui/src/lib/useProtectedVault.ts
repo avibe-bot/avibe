@@ -277,7 +277,13 @@ export async function setupVaultDurably(
   const committed = await api.completeVaultSetup({ wrap_meta: wrapMeta, authz_factor_registration: registration })
     .catch(() => ({ ok: false as const, code: 'network_error' }));
   if (!committed.ok) {
-    // Nothing durable: this tab's fresh root stays as before (lost on lock), never half-kept.
+    if (committed.code === 'vault_already_initialized') {
+      // Another tab committed its own root first: drop this tab's uncommitted one, so the next
+      // discovery finds the durable root instead of offering a second.
+      clearUnlockState();
+      notifyVaultLockChange();
+    }
+    // Otherwise nothing durable: this tab's fresh root stays as before (lost on lock, retried as is).
     return { ok: false, code: committed.code || 'setup_failed' };
   }
   sessionVault.freshSetup = false;
