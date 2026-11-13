@@ -1730,3 +1730,40 @@ final class DirectSocketHealth: @unchecked Sendable {
         lock.withLock { serving != nil }
     }
 }
+
+
+/// Decides, once, whether a relay ended on its own or was closed by an
+/// event. Whichever call comes first wins; the other learns it lost.
+final class DirectRelayClaim: @unchecked Sendable {
+    private enum State {
+        case open
+        case ended
+        case closed
+    }
+
+    private let lock = NSLock()
+    private var state = State.open
+
+    /// The relay ended on its own. `false` if a close came first.
+    @discardableResult
+    func end() -> Bool {
+        lock.withLock {
+            guard state == .open else {
+                return false
+            }
+            state = .ended
+            return true
+        }
+    }
+
+    /// An event closes the relay. `false` if it had already ended.
+    func closeByEvent() -> Bool {
+        lock.withLock {
+            guard state == .open else {
+                return false
+            }
+            state = .closed
+            return true
+        }
+    }
+}
