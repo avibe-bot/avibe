@@ -136,7 +136,7 @@
       "installing": "Installing update…",
       "installed": "Update installed. Restarting…",
       "disabled": "Desktop updates disabled",
-      "checkFailed": "Could not verify an update. Check your connection and try again. This release may require manual installation.",
+      "checkFailed": "Couldn't check for updates. Check your connection and try again.",
       "installFailed": "The update could not be installed. The previous application has been retained. Please retry or reinstall the previous release.",
       "install": "Download and Install",
       "skip": "Skip This Version",
@@ -4577,69 +4577,27 @@
     "mainServiceRestarted": "Saved. Main service restarted.",
     "versionAndUpdate": "Version & Update",
     "buildAndVersion": "Build & Version",
-    "currentVersion": "Current Version",
     "versionPrefix": "v",
     "versionTitle": "v{{version}}",
     "versionValue": "{{version}}",
-    "packageVersion": "Package Version",
     "sourceRevision": "Source Revision",
     "sourceRevisionTitle": "Source Revision: {{revision}}",
     "sourceRevisionTitleDirty": "Source Revision: {{revision}} (dirty)",
     "sourceRevisionDirty": "{{revision}} (dirty)",
-    "refreshBuildInfo": "Refresh Build Information",
     "unknownRevision": "unknown",
     "dirtySource": "dirty",
-    "latestVersion": "Latest Version",
-    "checkUpdate": "Check for Updates",
-    "checking": "Checking...",
-    "updateAvailable": "Update Available",
-    "upgradeNow": "Upgrade Now",
-    "upgrading": "Upgrading...",
     "skipUpdate": "Skip this version",
-    "upToDate": "You're up to date",
-    "checkFailed": "Check failed",
-    "upgradeSuccess": "Upgrade successful!",
-    "upgradeFailed": "Upgrade failed",
-    "updateHint": "Update from {{from}} to {{to}}",
-    "restarting": "Restarting...",
     "autoUpdate": "Auto Update",
     "autoUpdateHint": "Auto-install when idle",
     "prereleaseUpdates": "Get pre-release updates",
     "prereleaseUpdatesHint": "Also offer release candidates early",
-    "latestStableVersion": "Latest Stable",
     "awaitingStableRelease": "You're on a pre-release. The next stable release will be offered when it's out.",
     "prereleaseBadge": "Pre-release",
     "releaseNotes": "Release notes",
     "releaseNotesFor": "Release notes for {{version}}",
     "desktopManagedUpdate": "Updates come from the Avibe desktop app on the computer running Avibe. Check for updates there.",
-    "desktopManagedUpdateAvailable": "Update available",
-    "desktopManagedUpdateOwnerHint": "Request the update on the host. The desktop app will prompt there or install unattended according to its local setting.",
     "desktopManagedUpdateMemberHint": "Update this host in the Avibe desktop app on the computer running Avibe.",
     "desktopRemoteUpdateLocalRequest": "An update to {{target}} was requested remotely. Install it now or ignore this request.",
-    "desktopRemoteUpdateRequiresHost": "This installation needs someone at the host to grant permission or repair the installation.",
-    "desktopRemoteUpdateVerifying": "The host reported completion. Waiting to confirm the installed version…",
-    "desktopRemoteUpdateDownloadingUnknown": "Downloading the update…",
-    "desktopRemoteUpdateShellUnavailable": "The desktop app did not respond. Open Avibe on the host and try again.",
-    "desktopRemoteUpdateNoUpdate": "This update is no longer available. Refresh the version information.",
-    "desktopRemoteUpdateNotManaged": "This host is no longer managed by the desktop app. Refresh the version information.",
-    "desktopRemoteUpdateInProgress": "Another update is in progress. Wait for the host to finish.",
-    "desktopRemoteUpdateTitle": "Update on host",
-    "desktopRemoteUpdateConfirmDescription": "The request will be delivered as {{delivery}}.",
-    "desktopRemoteUpdateDeliveryPrompt": "a host prompt",
-    "desktopRemoteUpdateDeliveryInstall": "an unattended install",
-    "desktopRemoteUpdateRequesting": "Requesting the host update…",
-    "desktopRemoteUpdateRequested": "The update request was sent to the host.",
-    "desktopRemoteUpdateAwaitingHost": "The host is waiting for someone there to approve the install.",
-    "desktopRemoteUpdateChecking": "The host is checking the signed release.",
-    "desktopRemoteUpdateDownloading": "Downloading the update: {{progress}}%",
-    "desktopRemoteUpdateInstalling": "Installing the update…",
-    "desktopRemoteUpdateRestarting": "Host restarting. Reconnecting automatically…",
-    "desktopRemoteUpdateCompleted": "The host finished updating to {{target}}.",
-    "desktopRemoteUpdateFailed": "The host could not finish the update. Check the desktop app on the host.",
-    "desktopRemoteUpdateDeclined": "The host declined the update.",
-    "desktopRemoteUpdateExpired": "The host update request expired.",
-    "desktopRemoteUpdateTimedOut": "Completion was not confirmed. Check the desktop app on the host.",
-    "desktopRemoteUpdateError": "The host could not accept the update request.",
     "desktopRemoteUpdateIgnore": "Ignore this request",
     "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
   },
@@ -7415,11 +7373,6 @@
     "signOut": "Sign out",
     "signOutBody": "Sign out on this Desktop and return to this Mac. Registration, remote access preferences and running tasks are kept.",
     "localVersion": "Local Desktop version {{version}}",
-    "updateAvailable": "Desktop update available",
-    "desktopVersion": "Desktop version",
-    "updateScope": "This is Avibe Desktop on this Mac. Updates are managed locally, independently of the connected Runtime.",
-    "reviewUpdate": "Review and install update",
-    "checkUpdates": "Check for updates",
     "continueLocal": "Continue on this Mac",
     "loading": "Loading…",
     "setupReady": "This Mac is ready",
@@ -7509,7 +7462,100 @@
       "code": "Invalid or expired code. Try again or resend.",
       "upgrade": "This instance needs an Avibe update before Desktop can connect. You can still use this Mac."
     },
-    "localStatus": "{{name}} · {{status}}",
-    "versionTransition": "{{current}} → {{latest}}"
+    "localStatus": "{{name}} · {{status}}"
+  },
+  "update": {
+    "subject": {
+      "this-desktop": "Avibe Desktop on this computer",
+      "host-desktop": "Installed by the desktop app on the computer running Avibe",
+      "runtime": "Installed directly on the computer running Avibe"
+    },
+    "row": {
+      "current": "Current version",
+      "offered": "Update to",
+      "latestStable": "Latest stable",
+      "checkedAt": "Last checked"
+    },
+    "status": {
+      "checking": "Checking for updates…",
+      "current": "You're up to date",
+      "available": "A new version is ready to install",
+      "availableDetail": "Avibe restarts to finish. Your sessions and settings are kept.",
+      "notChecked": "Not checked for updates yet",
+      "disabled": "This version can't update itself",
+      "disabledDetail": "Download and install a newer version to update.",
+      "checkFailed": "Couldn't check for updates",
+      "checkFailedDetail": "Check your connection and try again.",
+      "checkFailedOnHost": "Try again in the desktop app on the computer running Avibe, then refresh here.",
+      "requesting": "Asking the computer running Avibe to update…",
+      "awaitingHost": "Waiting for someone at the computer running Avibe to approve",
+      "awaitingHostDetail": "Its desktop app is an older version that asks before installing.",
+      "downloading": "Downloading the update…",
+      "downloadingProgress": "Downloading the update: {{progress}}%",
+      "installing": "Installing the update…",
+      "restarting": "Restarting Avibe…",
+      "restartingHost": "The computer running Avibe is restarting it. Reconnecting automatically…",
+      "verifying": "Confirming the new version…",
+      "updated": "Update installed",
+      "updatedTo": "Updated to {{version}}"
+    },
+    "failure": {
+      "failed": {
+        "title": "The update didn't finish",
+        "detail": "Your current version still works. You can try again."
+      },
+      "install": {
+        "title": "The update didn't finish",
+        "detail": "Your current version still works. You can try again."
+      },
+      "requires-host": {
+        "title": "The update didn't finish",
+        "detail": "Someone at the computer running Avibe needs to grant permission or repair the installation."
+      },
+      "declined": {
+        "title": "The update was declined on the computer running Avibe",
+        "detail": "Your current version still works."
+      },
+      "expired": {
+        "title": "The update request expired",
+        "detail": "The computer running Avibe didn't respond in time. You can try again."
+      },
+      "timeout": {
+        "title": "Couldn't confirm the update finished",
+        "detail": "Check the desktop app on the computer running Avibe."
+      },
+      "unreachable": {
+        "title": "The desktop app on the computer running Avibe didn't respond",
+        "detail": "Make sure the desktop app is open on the computer running Avibe, then try again."
+      },
+      "busy": {
+        "title": "Another update is in progress",
+        "detail": "Wait for it to finish."
+      },
+      "gone": {
+        "title": "This version is no longer available",
+        "detail": "Refresh to see what's available now."
+      },
+      "not-managed": {
+        "title": "The computer running Avibe no longer uses the desktop app for updates",
+        "detail": "Refresh to see its current status."
+      },
+      "rejected": {
+        "title": "The computer running Avibe didn't accept the update request",
+        "detail": "You can try again."
+      }
+    },
+    "prereleases": {
+      "on": "On",
+      "off": "Off",
+      "onHost": "Change it in the desktop app on the computer running Avibe.",
+      "inMenu": "Change it from the Avibe app menu."
+    },
+    "action": {
+      "update": "Update",
+      "retry": "Try again",
+      "check": "Check for updates",
+      "refresh": "Refresh"
+    }
   }
 }

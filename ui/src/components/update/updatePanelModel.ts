@@ -1,0 +1,215 @@
+// What the update panel shows, independent of where it came from. The desktop
+// app's own updater state, the Runtime's relay of it (`/api/version` on a
+// desktop-managed host), and a standalone Runtime's package check all map onto
+// this one model, so the same computer reads the same on every surface.
+import type { DesktopUpdateState } from '../../lib/desktopShell';
+import type { DesktopRemoteUpdateRequest, VersionInfo } from '../../context/ApiContext';
+import { isPrereleaseVersion, normalizeVersion, releasePrecedes } from './versions';
+
+/** Who installs the update: this computer's desktop app, the desktop app on the host, or the Runtime itself. */
+export type UpdateSubject = 'this-desktop' | 'host-desktop' | 'runtime';
+
+export type UpdateFailure =
+  | 'failed' | 'install' | 'requires-host' | 'declined' | 'expired' | 'timeout'
+  | 'unreachable' | 'busy' | 'gone' | 'not-managed' | 'rejected';
+
+export type UpdatePanelStatus =
+  | { kind: 'checking' }
+  | { kind: 'current'; awaitingStable?: boolean }
+  | { kind: 'available'; version: string }
+  | { kind: 'not-checked' }
+  /** A desktop-managed host whose desktop app has published no result: the only time the neutral line is true. */
+  | { kind: 'unknown' }
+  | { kind: 'disabled' }
+  | { kind: 'check-failed' }
+  | { kind: 'requesting' }
+  /** An older desktop app that still asks someone at the host before installing. */
+  | { kind: 'awaiting-host' }
+  | { kind: 'downloading'; progress: number | null }
+  | { kind: 'installing' }
+  | { kind: 'restarting' }
+  | { kind: 'verifying' }
+  | { kind: 'updated'; version: string | null; restarting?: boolean }
+  | { kind: 'update-failed'; reason?: UpdateFailure; retry?: boolean };
+
+export type UpdatePanelModel = {
+  subject: UpdateSubject;
+  current: string | null;
+  /** The newer version this computer can install, or the latest stable while running a newer pre-release. */
+  latest: string | null;
+  latestIsStable?: boolean;
+  prereleases: { enabled: boolean } | null;
+  checkedAt: string | null;
+  /** None for a source build, which has no release to check. */
+  status: UpdatePanelStatus | null;
+};
+
+const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
+
+export function remoteRequestSettled(request: DesktopRemoteUpdateRequest | null | undefined, current: string): boolean {
+  return Boolean(request && TERMINAL_REMOTE_PHASES.includes(request.phase)
+    && (request.phase !== 'completed' || normalizeVersion(current) === normalizeVersion(request.target)));
+}
+
+/** While running a pre-release with only an older stable on offer, that stable is "latest stable", not an update. */
+function awaitingStable(current: string | null, latest: string | null, hasUpdate: boolean): boolean {
+  if (hasUpdate || !current || !latest) return false;
+  const [now, offered] = [normalizeVersion(current), normalizeVersion(latest)];
+  return !isPrereleaseVersion(offered) && isPrereleaseVersion(now) && releasePrecedes(offered, now);
+}
+
+/** The desktop app's own updater, read over its IPC or the account client's projection. */
+export function modelFromDesktopState(state: DesktopUpdateState, {
+  subject = 'this-desktop',
+  current,
+  checkedAt = null,
+  installFailed = false,
+  hidden = false,
+}: {
+  subject?: UpdateSubject;
+  current: string;
+  checkedAt?: string | null;
+  /** The panel started an install that ended in `error`. */
+  installFailed?: boolean;
+  /** The offer is a skipped version the desktop app would not prompt for. */
+  hidden?: boolean;
+}): UpdatePanelModel {
+  const latest = state.latest ? normalizeVersion(state.latest) : null;
+  // An install a browser asked for carries its progress and outcome on the request.
+  const remote = state.remoteRequest ?? null;
+  const remoteFailed = remote?.phase === 'failed' && remote.errorCode !== 'check_failed';
+  const status: UpdatePanelStatus = (() => {
+    switch (state.phase) {
+      case 'checking': return { kind: 'checking' };
+      case 'available': return hidden || !latest ? { kind: 'current' } : { kind: 'available', version: latest };
+      case 'downloading':
+        return { kind: 'downloading', progress: remote?.phase === 'downloading' ? remote.progress : null };
+      case 'installing': return { kind: 'installing' };
+      case 'installed': return { kind: 'updated', version: latest, restarting: true };
+      case 'disabled': return { kind: 'disabled' };
+      case 'error':
+        return installFailed || remoteFailed
+          ? { kind: 'update-failed', reason: remote?.errorCode === 'requires_host' ? 'requires-host' : 'install' }
+          : { kind: 'check-failed' };
+      case 'current': return { kind: 'current' };
+      case 'idle': return { kind: 'not-checked' };
+    }
+  })();
+  const offered = ['available', 'downloading', 'installing', 'installed'].includes(status.kind) ? latest : null;
+  return {
+    subject,
+    current: normalizeVersion(current),
+    latest: offered,
+    prereleases: typeof state.prereleases === 'boolean' ? { enabled: state.prereleases } : null,
+    checkedAt,
+    status,
+  };
+}
+
+/** A browser's view of a remote update request, from the request it sent through the receipt the host relays. */
+export type RemoteRequestView = {
+  requesting: boolean;
+  error: string | null;
+  timedOut: boolean;
+  disconnected: boolean;
+};
+
+const REQUEST_ERRORS: Record<string, UpdateFailure> = {
+  desktop_shell_unavailable: 'unreachable',
+  no_update_available: 'gone',
+  not_desktop_managed: 'not-managed',
+  update_in_progress: 'busy',
+};
+
+function remoteStatus(info: VersionInfo, view: RemoteRequestView): UpdatePanelStatus | null {
+  if (view.requesting) return { kind: 'requesting' };
+  if (view.error) {
+    const reason = REQUEST_ERRORS[view.error] ?? 'rejected';
+    return { kind: 'update-failed', reason, retry: reason === 'unreachable' || reason === 'rejected' };
+  }
+  const request = info.remote_request;
+  if (!request) return null;
+  if (view.timedOut) return { kind: 'update-failed', reason: 'timeout' };
+  if (view.disconnected || request.phase === 'restarting') return { kind: 'restarting' };
+  switch (request.phase) {
+    case 'requested':
+    case 'acknowledged': return { kind: 'requesting' };
+    case 'awaiting_host': return { kind: 'awaiting-host' };
+    case 'checking': return { kind: 'checking' };
+    case 'downloading': return { kind: 'downloading', progress: request.progress };
+    case 'installing': return { kind: 'installing' };
+    case 'completed':
+      return remoteRequestSettled(request, info.current)
+        ? { kind: 'updated', version: normalizeVersion(request.target) }
+        : { kind: 'verifying' };
+    case 'failed':
+      return { kind: 'update-failed', reason: request.error_code === 'requires_host' ? 'requires-host' : 'failed', retry: true };
+    case 'declined': return { kind: 'update-failed', reason: 'declined', retry: true };
+    case 'expired': return { kind: 'update-failed', reason: 'expired', retry: true };
+  }
+  return null;
+}
+
+/** A desktop-managed host as its Runtime relays it: the same result its desktop app shows. */
+export function modelFromDesktopRelay(
+  info: VersionInfo,
+  view: RemoteRequestView,
+  subject: UpdateSubject = 'host-desktop',
+): UpdatePanelModel {
+  const latest = info.latest ? normalizeVersion(info.latest) : null;
+  const current = info.desktop_version ?? info.current;
+  const completedTarget = info.remote_request?.phase === 'completed'
+    && remoteRequestSettled(info.remote_request, info.current)
+    && latest === normalizeVersion(info.remote_request.target);
+  const hasUpdate = info.has_update && Boolean(latest) && !completedTarget;
+  const status: UpdatePanelStatus = remoteStatus(info, view)
+    ?? (hasUpdate && latest ? { kind: 'available', version: latest }
+      : info.phase === 'error' ? { kind: 'check-failed' }
+        : info.phase === 'disabled' ? { kind: 'disabled' }
+          : info.phase === 'current' || info.phase === 'available' ? { kind: 'current' }
+            // A Runtime that predates the relayed phase still says "nothing to install" with a known latest.
+            : !info.phase && latest ? { kind: 'current' }
+              : { kind: 'unknown' });
+  // The offered version, while it is still ahead: an installed update is named by its status.
+  const shown = ['current', 'unknown', 'check-failed', 'disabled', 'updated'].includes(status.kind) ? null : latest;
+  return {
+    subject,
+    current: normalizeVersion(current),
+    latest: shown,
+    prereleases: typeof info.prereleases === 'boolean' ? { enabled: info.prereleases } : null,
+    checkedAt: info.checked_at ?? null,
+    status,
+  };
+}
+
+/** A standalone Runtime's own package check. */
+export function modelFromRuntime(info: VersionInfo, {
+  checking, installing, restarting, result, prereleases, checkedAt,
+}: {
+  checking: boolean;
+  installing: boolean;
+  restarting: boolean;
+  result: { ok: boolean } | null;
+  prereleases: boolean | null;
+  checkedAt: string | null;
+}): UpdatePanelModel {
+  const latest = info.latest ? normalizeVersion(info.latest) : null;
+  const stable = awaitingStable(info.current, latest, info.has_update);
+  const status: UpdatePanelStatus = restarting ? { kind: 'updated', version: latest, restarting: true }
+    : installing ? { kind: 'installing' }
+      : result && !result.ok ? { kind: 'update-failed', reason: 'install', retry: true }
+        : result?.ok ? { kind: 'updated', version: latest }
+          : checking ? { kind: 'checking' }
+            : info.has_update && latest ? { kind: 'available', version: latest }
+              : info.error ? { kind: 'check-failed' }
+                : { kind: 'current', awaitingStable: stable };
+  return {
+    subject: 'runtime',
+    current: info.current,
+    latest: info.has_update || stable || status.kind === 'updated' ? latest : null,
+    latestIsStable: stable,
+    prereleases: prereleases === null ? null : { enabled: prereleases },
+    checkedAt,
+    status,
+  };
+}

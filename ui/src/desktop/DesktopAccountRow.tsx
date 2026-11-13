@@ -4,6 +4,8 @@ import { ChevronDown, Download, Globe, Laptop, LogOut, RefreshCw, UserRound, Wif
 import { Button } from '../components/ui/button';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
+import { UpdatePanel } from '../components/update/UpdatePanel';
+import { modelFromDesktopState } from '../components/update/updatePanelModel';
 import { useDesktopClientProjection, usePresentDesktopClient } from './useDesktopClient';
 
 /** Nonsecret footer: every account/updater action presents native-owned UI. */
@@ -59,11 +61,16 @@ export function DesktopAccountRow() {
         {update ? <><Download className="size-3 text-gold-ink" /><span className="size-1.5 rounded-full bg-gold" /></> : state.desktop.version}
       </Button></PopoverTrigger>
       <PopoverAnchor className="pointer-events-none absolute inset-0" />
-      <PopoverContent data-update-menu side="top" align="start" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)] rounded-xl p-4">
-        <p className="text-sm font-semibold">{t(update ? 'desktopClient.updateAvailable' : 'desktopClient.desktopVersion')}</p>
-        <p className="mt-2 text-xs leading-5 text-muted">{t('desktopClient.updateScope')}</p>
-        <p className="mt-3 text-sm">{state.desktop.update.latest ? t('desktopClient.versionTransition', { current: state.desktop.version, latest: state.desktop.update.latest }) : state.desktop.version}</p>
-        <div className="mt-4 flex flex-wrap gap-2"><Button variant="brand" size="sm" onClick={() => open('updates')}>{t(update ? 'desktopClient.reviewUpdate' : 'desktopClient.checkUpdates')}</Button></div>
+      {/* The same panel as the version popover (ui/design: update/panel); every action still opens native-owned UI. */}
+      <PopoverContent data-update-menu side="top" align="start" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0">
+        <UpdatePanel
+          model={modelFromDesktopState(state.desktop.update, { current: state.desktop.version, checkedAt: state.desktop.update.checkedAt ?? null })}
+          actions={{
+            check: { run: () => open('updates'), disabled: ['checking', 'downloading', 'installing'].includes(state.desktop.update.phase) },
+            ...(update ? { update: { run: () => open('updates') } } : {}),
+            close: () => setPanel(null),
+          }}
+        />
       </PopoverContent>
     </Popover>
   </div>;

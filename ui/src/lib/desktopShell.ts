@@ -232,6 +232,8 @@ export type DesktopUpdateState = {
   prereleases?: boolean;
   skippedVersion: string | null;
   interactive: boolean;
+  /** When the last check finished (RFC 3339); absent from shells that do not report it. */
+  checkedAt?: string | null;
   remoteInstallAllowed?: boolean;
   remoteRequest?: {
     requestId: string;

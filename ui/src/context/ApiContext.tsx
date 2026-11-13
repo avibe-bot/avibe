@@ -2150,6 +2150,11 @@ export type VersionInfo = {
   has_update: boolean;
   error: string | null;
   managed_by?: 'desktop';
+  /** Desktop-managed hosts: the desktop app's last completed check, relayed (vibe/desktop_update_status.py). */
+  phase?: 'current' | 'available' | 'disabled' | 'error' | null;
+  desktop_version?: string | null;
+  prereleases?: boolean | null;
+  checked_at?: string | null;
   remote_install_allowed?: boolean;
   remote_request?: DesktopRemoteUpdateRequest | null;
   build?: {

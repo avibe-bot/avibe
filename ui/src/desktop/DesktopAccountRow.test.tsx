@@ -27,7 +27,10 @@ it('AUTH-SETUP-178 native menu opens a local-facts popover; its CTA presents one
   expect(event.defaultPrevented).toBe(true);
   expect(window.__AVIBE_DESKTOP_UPDATES_HANDLED__).toBe(true);
   expect(present).not.toHaveBeenCalled();
-  expect(await screen.findByText('3.2.6rc9 → 3.2.7')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Review and install update' }));
+  // The same panel as the version popover, fed by the local Desktop's own updater.
+  expect(await screen.findByText(en.update.status.available)).toBeTruthy();
+  expect(screen.getByText('3.2.6rc9')).toBeTruthy();
+  expect(screen.getByText('3.2.7')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: en.update.action.update }));
   expect(present).toHaveBeenCalledExactlyOnceWith('updates');
 });
