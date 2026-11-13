@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -5,14 +6,15 @@ use std::time::Duration;
 
 use avibe_runtime_host::notifications::{
     run_notifications, HttpNotificationTransport, NotificationFilter, NotificationGate, NotificationIntent,
-    NotificationSink,
+    NotificationReceipt, NotificationRegistry, NotificationSink, NotificationSnapshot,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, WebviewWindow};
-use tauri_plugin_notification::NotificationExt;
 
 use crate::{native_catalog_for_locales, pet, updater, MAIN_WINDOW};
+
+mod native;
 
 pub const MENU_ID: &str = "notifications";
 pub const SETTINGS_EVENT: &str = "avibe:desktop-notifications";
@@ -102,6 +104,7 @@ pub struct Notifications {
     generation: Arc<AtomicU64>,
     connection: Mutex<Option<Connection>>,
     filter: Arc<Mutex<NotificationFilter>>,
+    registry: Arc<Mutex<NotificationRegistry>>,
 }
 
 impl Notifications {
@@ -116,6 +119,7 @@ impl Notifications {
             generation: Arc::new(AtomicU64::new(0)),
             connection: Mutex::new(None),
             filter: Arc::new(Mutex::new(NotificationFilter::default())),
+            registry: Arc::new(Mutex::new(NotificationRegistry::default())),
         }
     }
 
@@ -153,6 +157,7 @@ impl Notifications {
             enabled: self.enabled.clone(),
             generation: self.generation.clone(),
             observed_generation,
+            registry: self.registry.clone(),
         };
         let filter = self.filter.clone();
         let poll_sink = sink.clone();
@@ -186,9 +191,14 @@ struct NativeSink {
     enabled: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     observed_generation: u64,
+    registry: Arc<Mutex<NotificationRegistry>>,
 }
 
 impl NotificationSink for NativeSink {
+    fn registry(&self) -> &Mutex<NotificationRegistry> {
+        &self.registry
+    }
+
     fn presentation_generation(&self) -> u64 {
         crate::instance_client::epoch(&self.app).unwrap_or(0)
     }
@@ -209,25 +219,68 @@ impl NotificationSink for NativeSink {
         }
     }
 
-    fn deliver(&self, intent: NotificationIntent, source: Option<String>, presentation_generation: u64) {
+    fn deliver(
+        &self,
+        intent: NotificationIntent,
+        source: Option<String>,
+        presentation_generation: u64,
+        receipt: Arc<NotificationReceipt>,
+    ) {
         let sink = self.clone();
-        let _ = self.app.run_on_main_thread(move || {
-            if sink.presentation_generation() != presentation_generation || !sink.gate().allows() {
+        let cleanup = receipt.clone();
+        let queued = self.app.run_on_main_thread(move || {
+            if receipt.retired() || sink.presentation_generation() != presentation_generation || !sink.gate().allows() {
+                sink.registry
+                    .lock()
+                    .expect("notification registry lock")
+                    .forget(receipt.id());
                 return;
             }
             let copy = native_catalog_for_locales(sys_locale::get_locales())
                 .notifications
                 .render(intent, source);
-            if sink
-                .app
-                .notification()
-                .builder()
-                .title(copy.title)
-                .body(copy.body)
-                .show()
-                .is_err()
-            {
+            if native::show(&sink.app, &receipt, copy, sink.registry.clone()).is_err() {
+                sink.registry
+                    .lock()
+                    .expect("notification registry lock")
+                    .forget(receipt.id());
                 eprintln!("The desktop notification could not be submitted to the operating system.");
+            } else {
+                receipt.posted();
+            }
+        });
+        if queued.is_err() {
+            self.registry
+                .lock()
+                .expect("notification registry lock")
+                .forget(cleanup.id());
+        }
+    }
+
+    fn withdraw(&self, snapshot: NotificationSnapshot, unread: HashMap<String, u64>, presentation_generation: u64) {
+        let sink = self.clone();
+        let _ = self.app.run_on_main_thread(move || {
+            if sink.generation.load(Ordering::SeqCst) != sink.observed_generation
+                || sink.presentation_generation() != presentation_generation
+            {
+                return;
+            }
+            let receipts = {
+                let mut registry = sink.registry.lock().expect("notification registry lock");
+                registry.reconcile(snapshot, &unread);
+                registry.posted_snapshot()
+            };
+            if receipts.is_empty() {
+                return;
+            }
+            match native::withdraw(&sink.app, receipts) {
+                Ok(removed) => {
+                    let mut registry = sink.registry.lock().expect("notification registry lock");
+                    for id in removed {
+                        registry.forget(id);
+                    }
+                }
+                Err(_) => eprintln!("The desktop notifications could not be withdrawn from the operating system."),
             }
         });
     }
