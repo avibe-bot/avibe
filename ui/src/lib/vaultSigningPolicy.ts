@@ -41,7 +41,8 @@ const SERVER_REASONS: Record<string, PolicyTurnOffFailure> = {
   vault_policy_context_unsupported: 'unavailable',
   vault_policy_downgrade_unavailable: 'unavailable',
   vault_policy_authz_expired: 'expired',
-  vault_policy_authz_used: 'expired',
+  // Already used (a replay or another tab): not a timeout, so the plain retry line.
+  vault_policy_authz_used: 'failed',
   vault_policy_state_changed: 'changed',
 };
 
@@ -85,6 +86,8 @@ export async function turnOffAskBeforeSigning<S>(
   target: { name: string; account?: number },
   authorizationWindow: string | undefined,
 ): Promise<PolicyTurnOffOutcome<S>> {
+  // The confirmation lives only in its own top-level window; never ask the sandbox inline instead.
+  if (!authorizationWindow) return { ok: false, reason: 'popup_blocked' };
   const challenge = await api.createVaultSigningPolicyChallenge(
     target.name,
     target.account === undefined ? { always_ask: false } : { always_ask: false, account: target.account },

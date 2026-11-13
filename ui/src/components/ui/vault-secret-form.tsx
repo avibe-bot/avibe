@@ -421,10 +421,12 @@ export const VaultSecretForm: React.FC<{
     editSecret?.kind === 'keypair' &&
     editSecret?.protection === 'standard' &&
     (editSecret?.signer_kind == null || editSecret?.signer_kind === 'local');
-  const [askTurnedOff, setAskTurnedOff] = useState(false);
+  // Turned off for this key only: a different key in the same editor starts from its own state.
+  const [askTurnedOffFor, setAskTurnedOffFor] = useState<string | null>(null);
+  const askTurnedOff = askTurnedOffFor !== null && askTurnedOffFor === editSecret?.name;
   const editAskWasOn = !askTurnedOff && (editSecret?.policy as { always_ask?: unknown } | undefined)?.always_ask === true;
-  const askOff = useAskTurnOff({ name: editSecret?.name ?? '' }, editAskEditable, () => {
-    setAskTurnedOff(true);
+  const askOff = useAskTurnOff({ name: editSecret?.name ?? '' }, editAskEditable, (secret) => {
+    setAskTurnedOffFor(secret.name);
     setAlwaysAsk(false);
   });
   const canTurnAskOff = askOff.state.phase === 'ready';

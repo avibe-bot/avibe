@@ -38,6 +38,7 @@ vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
 // The pinned sandbox: whether it can turn ask-before-signing off, and its answer.
 const sandbox = vi.hoisted(() => ({
   canTurnOff: false,
+  windowBlocked: false,
   authorizeSigningPolicyDowngrade: vi.fn(),
   windowClose: vi.fn(),
 }));
@@ -47,7 +48,7 @@ vi.mock('@/lib/vaultSandboxClient', async (original) => ({
     supports: async () => sandbox.canTurnOff,
     authorizeSigningPolicyDowngrade: sandbox.authorizeSigningPolicyDowngrade,
   }),
-  openVaultAuthorizationWindow: () => ({ id: 'win', close: sandbox.windowClose }),
+  openVaultAuthorizationWindow: () => (sandbox.windowBlocked ? null : { id: 'win', close: sandbox.windowClose }),
 }));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
 vi.mock('@/lib/vaultCrypto', async (original) => ({
@@ -560,7 +561,7 @@ describe('turning ask-before-signing off with a Passkey', () => {
     response: { clientDataJSON: 'e30=', authenticatorData: 'AAAA', signature: 'MEUCIQ==', userHandle: null },
   };
   const on = { ...standardKey, policy: { always_ask: true } };
-  afterEach(() => { sandbox.canTurnOff = false; });
+  afterEach(() => { sandbox.canTurnOff = false; sandbox.windowBlocked = false; });
 
   it('turns it off through the sandbox, only for this key, and Save no longer sends it', async () => {
     sandbox.canTurnOff = true;
@@ -593,6 +594,39 @@ describe('turning ask-before-signing off with a Passkey', () => {
     expect(await screen.findByText(en.vaults.askOff.setupRequired)).toBeTruthy();
     expect(askSwitch().getAttribute('aria-checked')).toBe('true');
     expect(sandbox.authorizeSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
+
+  it('says the browser blocked the window and asks the server nothing when the pop-up is blocked', async () => {
+    sandbox.canTurnOff = true;
+    sandbox.windowBlocked = true;
+    api.createVaultSigningPolicyChallenge.mockClear();
+    sandbox.authorizeSigningPolicyDowngrade.mockClear();
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    expect(await screen.findByText(en.vaults.askOff.popupBlocked)).toBeTruthy();
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(api.createVaultSigningPolicyChallenge).not.toHaveBeenCalled();
+    expect(sandbox.authorizeSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
+
+  it('never applies a late answer for the previous key to the key now in the editor', async () => {
+    sandbox.canTurnOff = true;
+    let finish: (value: unknown) => void = () => {};
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: true, context });
+    sandbox.authorizeSigningPolicyDowngrade.mockResolvedValue({ challengeId: context.challengeId, assertion });
+    api.completeVaultSigningPolicyDowngrade.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const other = { ...on, name: 'OTHER_KEY' };
+    const view = render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    await waitFor(() => expect(api.completeVaultSigningPolicyDowngrade).toHaveBeenCalled());
+    // The same editor now shows another key, then the first key's turn-off succeeds.
+    view.rerender(form(<VaultSecretForm editSecret={other} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await act(async () => { finish({ ok: true, secret: { ...on, policy: {} } }); });
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(screen.queryByText(en.vaults.askOff.turnedOff)).toBeNull();
+    expect(screen.getByText(en.vaults.askOff.offHintEdit)).toBeTruthy();
   });
 
   it('stays on without a message when the Passkey prompt is cancelled', async () => {

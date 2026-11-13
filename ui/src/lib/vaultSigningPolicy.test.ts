@@ -51,9 +51,16 @@ describe('turnOffAskBeforeSigning', () => {
     });
   });
 
+  it('asks nothing without its own authorization window (blocked pop-up), never the inline sandbox', async () => {
+    const { api, getSandbox, sandbox } = fakes();
+    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, undefined)).resolves.toEqual({ ok: false, reason: 'popup_blocked' });
+    expect(api.createVaultSigningPolicyChallenge).not.toHaveBeenCalled();
+    expect(sandbox.authorizeSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
+
   it('sends no account for an ordinary key', async () => {
     const { api, getSandbox } = fakes();
-    await turnOffAskBeforeSigning(api, getSandbox, { name: 'ETH_KEY' }, undefined);
+    await turnOffAskBeforeSigning(api, getSandbox, { name: 'ETH_KEY' }, 'win');
     expect(api.createVaultSigningPolicyChallenge).toHaveBeenCalledWith('ETH_KEY', { always_ask: false });
   });
 
@@ -66,7 +73,7 @@ describe('turnOffAskBeforeSigning', () => {
     ['forbidden', 'failed'],
   ])('stops before the sandbox when the challenge is refused with %s', async (code, reason) => {
     const { api, sandbox, getSandbox } = fakes({ challenge: { ok: false, code } });
-    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, undefined)).resolves.toEqual({ ok: false, reason });
+    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, 'win')).resolves.toEqual({ ok: false, reason });
     expect(sandbox.authorizeSigningPolicyDowngrade).not.toHaveBeenCalled();
     expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
   });
@@ -81,30 +88,30 @@ describe('turnOffAskBeforeSigning', () => {
     ['policy_result_invalid', 'failed'],
   ])('commits nothing when the sandbox fails with %s', async (code, reason) => {
     const { api, getSandbox } = fakes({ sandbox: async () => { throw Object.assign(new Error(code), { code }); } });
-    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, undefined)).resolves.toEqual({ ok: false, reason });
+    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, 'win')).resolves.toEqual({ ok: false, reason });
     expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
   });
 
   it('commits nothing when the assertion matches no offered factor', async () => {
     const { api, getSandbox } = fakes({ sandbox: async () => ({ challengeId: context.challengeId, assertion: { ...assertion, rawId: 'AQID' } }) });
-    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, undefined)).resolves.toEqual({ ok: false, reason: 'failed' });
+    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, 'win')).resolves.toEqual({ ok: false, reason: 'failed' });
     expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
   });
 
   it.each([
     ['vault_policy_authz_expired', 'expired'],
-    ['vault_policy_authz_used', 'expired'],
+    ['vault_policy_authz_used', 'failed'],
     ['vault_policy_authz_invalid', 'failed'],
     ['vault_policy_state_changed', 'changed'],
   ])('reports %s from the commit as not done', async (code, reason) => {
     const { api, getSandbox } = fakes({ complete: { ok: false, code } });
-    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, undefined)).resolves.toEqual({ ok: false, reason });
+    await expect(turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, 'win')).resolves.toEqual({ ok: false, reason });
   });
 
   it('asks for a new challenge on every attempt (a retry never reuses an assertion)', async () => {
     const { api, sandbox, getSandbox } = fakes({ complete: { ok: false, code: 'vault_policy_authz_expired' } });
-    await turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, undefined);
-    await turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, undefined);
+    await turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, 'win');
+    await turnOffAskBeforeSigning(api, getSandbox, { name: 'K' }, 'win');
     expect(api.createVaultSigningPolicyChallenge).toHaveBeenCalledTimes(2);
     expect(sandbox.authorizeSigningPolicyDowngrade).toHaveBeenCalledTimes(2);
   });

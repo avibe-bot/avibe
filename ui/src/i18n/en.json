@@ -6524,7 +6524,7 @@
       "waiting": "Waiting for your Passkey…",
       "popupBlocked": "Your browser blocked the confirmation window. Allow pop-ups and turn it off again.",
       "setupRequired": "Turning this off needs a Passkey. You set one up when you add a protected key; after that you can turn it off here.",
-      "factorUnavailable": "The Passkey this Avibe has on record is disabled, so it can’t confirm turning this off. The switch stays on.",
+      "factorUnavailable": "The Passkey on record isn’t available to this Avibe, so it can’t confirm turning this off. The switch stays on.",
       "expired": "The confirmation timed out, so nothing changed. Turn it off again.",
       "clockSkew": "This device’s clock is off, so nothing changed. Fix the time and try again.",
       "changed": "This key changed elsewhere just now, so nothing changed. Check the latest state and try again.",

@@ -15,7 +15,9 @@ export type AskTurnOffState =
 /** A fixed state for every switch below it (design frames draw each state from this). */
 export const AskTurnOffStateOverride = createContext<AskTurnOffState | null>(null);
 
-type Attempt = { phase: 'working' } | { phase: 'done'; failure?: PolicyTurnOffFailure } | null;
+// An attempt belongs to the target it started on (`key`) and its own `id`: a late answer for an
+// earlier target or attempt never reaches the switch now shown.
+type Attempt = { key: string; id: number } & ({ phase: 'working' } | { phase: 'done'; failure?: PolicyTurnOffFailure });
 
 /**
  * `enabled`: only ask the sandbox when there is something this switch could turn off.
@@ -25,12 +27,19 @@ export function useAskTurnOff(target: { name: string; account?: number }, enable
   const api = useApi();
   const override = useContext(AskTurnOffStateOverride);
   const [supported, setSupported] = useState<boolean | null>(null);
-  const [attempt, setAttempt] = useState<Attempt>(null);
-  const live = useRef(true);
+  const [stored, setAttempt] = useState<Attempt | null>(null);
+  const { name, account } = target;
+  const key = `${name}\u0000${account ?? ''}`;
+  const current = useRef({ key, id: 0, live: true });
   useEffect(() => {
-    live.current = true;
-    return () => { live.current = false; };
+    current.current.key = key;
+  }, [key]);
+  useEffect(() => {
+    const ref = current.current;
+    ref.live = true;
+    return () => { ref.live = false; };
   }, []);
+  const attempt = stored?.key === key ? stored : null;
 
   useEffect(() => {
     if (!enabled || override) return;
@@ -42,25 +51,32 @@ export function useAskTurnOff(target: { name: string; account?: number }, enable
     return () => { cancelled = true; };
   }, [enabled, override]);
 
-  const { name, account } = target;
   const turnOff = useCallback(() => {
     if (override) return;
-    // This click is the gesture: open the sandbox window before any await.
+    const ref = current.current;
+    const id = ++ref.id;
+    const started = key;
+    // This click is the gesture: open the sandbox window before any await. Without that window
+    // there is no confirmation: say the browser blocked it and ask nothing of the server.
     const authorizationWindow = openVaultAuthorizationWindow();
-    setAttempt({ phase: 'working' });
-    void turnOffAskBeforeSigning(api, getVaultSandboxClient, { name, account }, authorizationWindow?.id)
+    if (!authorizationWindow) {
+      setAttempt({ key: started, id, phase: 'done', failure: 'popup_blocked' });
+      return;
+    }
+    setAttempt({ key: started, id, phase: 'working' });
+    void turnOffAskBeforeSigning(api, getVaultSandboxClient, { name, account }, authorizationWindow.id)
       .then((outcome) => {
-        if (!live.current) return;
+        if (!ref.live || ref.id !== id || ref.key !== started) return;
         if (outcome.ok) {
           setAttempt(null);
           onDone(outcome.secret);
           return;
         }
         if (outcome.reason === 'unavailable') setSupported(false);
-        setAttempt({ phase: 'done', failure: outcome.reason === 'unavailable' ? undefined : outcome.reason });
+        setAttempt({ key: started, id, phase: 'done', failure: outcome.reason === 'unavailable' ? undefined : outcome.reason });
       })
-      .finally(() => authorizationWindow?.close());
-  }, [api, name, account, onDone, override]);
+      .finally(() => authorizationWindow.close());
+  }, [api, name, account, key, onDone, override]);
 
   let state: AskTurnOffState;
   if (override) state = override;
