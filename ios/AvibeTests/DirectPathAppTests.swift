@@ -1107,34 +1107,54 @@ final class DirectPathAppTests: XCTestCase {
 
     /// The App goes to the background with a direct relay committed on the
     /// iroh transport's path. The transport and the controller both hear
-    /// it; whichever acts first, the relay is counted as closed by the
-    /// background, once, and the return publishes it.
+    /// it, in either order. The relay is counted once, and the first status
+    /// the return settles already includes that closure.
     @MainActor
-    func testTheBackgroundCountsTheDirectRelayOnTheIrohTransportsPathOnce() async throws {
-        let fixture = try await makeAppWithACommittedDirectRelay()
-        defer { fixture.close() }
+    func testTheBackgroundCountsTheDirectRelayOnTheIrohTransportsPathOnceInEitherOrder() async throws {
+        enum Order: CaseIterable {
+            case transportFirst
+            case controllerFirst
+        }
+        for order in Order.allCases {
+            // The transport hears the App's lifecycle on its own center, so
+            // that the test decides which of the two hears it first.
+            let transportNotifications = NotificationCenter()
+            let fixture = try await makeAppWithACommittedDirectRelay(
+                transportNotifications: transportNotifications
+            )
+            let centers = order == .transportFirst
+                ? [transportNotifications, NotificationCenter.default]
+                : [NotificationCenter.default, transportNotifications]
 
-        NotificationCenter.default.post(
-            name: UIApplication.didEnterBackgroundNotification,
-            object: nil
-        )
-        try await eventually { fixture.log.count(of: "connection.close") == 1 }
-        NotificationCenter.default.post(
-            name: UIApplication.willEnterForegroundNotification,
-            object: nil
-        )
-        try await eventually {
-            fixture.app.directListenerFault
-                || self.directStatus(fixture.app, self.instance) != nil
+            for center in centers {
+                center.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+            }
+            // Closed by the transport in its own turn, after the claim.
+            XCTAssertEqual(fixture.log.count(of: "connection.close"), 1, "\(order)")
+            // Counted, and not published while the App is away: no document
+            // is told to reconnect while the listener cannot be reached.
+            XCTAssertEqual(directStatus(fixture.app, instance)?.closure, 0, "\(order)")
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(directStatus(fixture.app, instance)?.closure, 0, "\(order)")
+            for center in centers {
+                center.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+            }
+            // The first status the return settles.
+            let first = Recorder<DirectPathStatus?>()
+            fixture.app.directStatusProvider?(instance) { first.record($0) }
+            try await eventually { first.values.count == 1 }
+            if let status = first.values.first ?? nil {
+                XCTAssertEqual(status.closure, 1, "\(order)")
+                try await Task.sleep(for: .milliseconds(300))
+                XCTAssertEqual(directStatus(fixture.app, instance)?.closure, 1, "\(order)")
+            } else {
+                // The simulator refused the re-bind: the held answer is the
+                // bridge's `failed`, and the App shows the reopen message.
+                // This run covers no successful return.
+                XCTAssertTrue(fixture.app.directListenerFault, "\(order)")
+            }
+            fixture.close()
         }
-        // The simulator can refuse the re-bind; that is the listener fault,
-        // with tests of its own.
-        guard !fixture.app.directListenerFault else {
-            return
-        }
-        try await eventually { self.directStatus(fixture.app, self.instance)?.closure == 1 }
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertEqual(directStatus(fixture.app, instance)?.closure, 1)
     }
 
     /// The instance answers that it offers no direct path while a relay is
@@ -1541,7 +1561,9 @@ final class DirectPathAppTests: XCTestCase {
     /// primary WebView, and one direct relay committed through the App's
     /// own listener on that path.
     @MainActor
-    private func makeAppWithACommittedDirectRelay() async throws -> CommittedDirectRelay {
+    private func makeAppWithACommittedDirectRelay(
+        transportNotifications: NotificationCenter = .default
+    ) async throws -> CommittedDirectRelay {
         let log = DirectIrohEventLog()
         let engine = DirectIrohFakeEngine(log: log)
         let scheduler = DirectIrohManualScheduler()
@@ -1558,6 +1580,7 @@ final class DirectPathAppTests: XCTestCase {
             network: DirectIrohFakeNetwork(),
             scheduler: scheduler,
             timing: Self.patientIrohTiming,
+            notificationCenter: transportNotifications,
             isInBackground: false
         )
         var listening: Set<ListeningSocket> = []

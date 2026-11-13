@@ -343,6 +343,11 @@ final class DirectPathController {
 
     private var heldReplies: [HeldReply] = []
     private var isResuming = false
+    /// Relay closes decided on the main actor whose close has not yet been
+    /// issued by the listener. A return settles only when there are none.
+    private var closesInFlight = 0
+    /// A return that was ready to settle while a close was in flight.
+    private var resumeAwaitsCloses = false
     /// Route preparations under way; the listener is kept while any is.
     private var preparations = 0
 
@@ -706,7 +711,18 @@ final class DirectPathController {
         case .lost:
             isUsable = false
             advanceGeneration()
+            // The preference is published before the closure, which is now
+            // published in this turn: no status says `direct` for a path
+            // that is gone.
+            updatePreference()
             closeRelays(.direct, countsAsClosure: true)
+        case .lostToBackground:
+            // The transport heard the background first. It is this App's
+            // background: entered here now, as the background observer
+            // would, so the closure waits for the return. The observer, when
+            // it comes, finds it entered.
+            applicationDidEnterBackground()
+            return
         }
         updatePreference()
     }
@@ -853,15 +869,17 @@ final class DirectPathController {
     /// counts as a closure, each host that lost at least one committed relay
     /// gets one closure, however many relays it lost. In the background the
     /// closure waits for the return.
-    /// `then` runs on the main actor once the close has run (at once when
-    /// there is no listener).
+    /// `then` runs on the main actor once the listener has closed them (at
+    /// once when there is no listener).
     ///
-    /// Which relays this event closes is decided here, in the event's own
-    /// turn: their claims are taken before anything that runs after it can
-    /// end them. The transport may close its streams right after reporting
-    /// a loss, and a relay whose stream ended before the close reached it
-    /// would otherwise look as if it had ended on its own, and its page
-    /// would not be told.
+    /// Which relays this event closes, and the closure they make, are
+    /// decided here, in the event's own turn: their claims are taken before
+    /// anything that runs after it can end them. The transport may close
+    /// its streams right after reporting a loss, and a relay whose stream
+    /// ended before the close reached it would otherwise look as if it had
+    /// ended on its own, and its page would not be told. A closure made in
+    /// the foreground is published at once, while the listener closes the
+    /// relays.
     private func closeRelays(
         _ backend: DirectRelayBackend?,
         countsAsClosure: Bool,
@@ -875,15 +893,34 @@ final class DirectPathController {
         // committed after it is kept.
         let generation = pathGeneration
         let claimed = listener.lifecycle.claimForEvent(backend: backend, before: generation)
-        let hosts = claimed.filter { $0.value > 0 }.map(\.key)
+        // Recorded in the same turn as the claim: a background closure is
+        // pending before the return can settle, so the first status after
+        // the return includes it.
+        if countsAsClosure {
+            recordClosure(hosts: claimed.filter { $0.value > 0 }.map(\.key))
+        }
+        // Until the listener has issued this close (cancelled the relays and
+        // ended their authority; not until every one has drained), a return
+        // does not settle: the closure it would publish is for connections
+        // that have been told to end.
+        closesInFlight += 1
         Task { [weak self] in
             _ = await listener.closeRelays(backend: backend, before: generation)
             await MainActor.run {
-                if countsAsClosure {
-                    self?.recordClosure(hosts: hosts)
-                }
+                self?.closeDidIssue()
                 then?()
             }
+        }
+    }
+
+    private func closeDidIssue() {
+        closesInFlight -= 1
+        guard closesInFlight == 0, resumeAwaitsCloses else {
+            return
+        }
+        resumeAwaitsCloses = false
+        if isResuming, !isInBackground {
+            finishResume()
         }
     }
 
@@ -1218,6 +1255,9 @@ final class DirectPathController {
             return
         }
         isInBackground = true
+        // A return still waiting for a close is not settled now: the next
+        // return settles once its own listener is ready.
+        resumeAwaitsCloses = false
         // Nothing is watched while the App is away. An episode already
         // overdue fails the listener here, before the close below; the
         // background itself is never a failure.
@@ -1396,9 +1436,21 @@ final class DirectPathController {
         }
     }
 
+    /// Settles the return: at once, or, while a relay close decided before
+    /// it has not been issued by the listener yet, as soon as it has
+    /// (`closeDidIssue`).
+    private func finishResume() {
+        guard closesInFlight == 0 else {
+            resumeAwaitsCloses = true
+            return
+        }
+        settleResume()
+    }
+
     /// Publishes the closures the background caused, answers the held
     /// status requests, sends the state once more, and selects again.
-    private func finishResume() {
+    private func settleResume() {
+        resumeAwaitsCloses = false
         isResuming = false
         if !pendingClosureHosts.isEmpty {
             for host in pendingClosureHosts {

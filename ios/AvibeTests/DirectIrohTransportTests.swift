@@ -1493,7 +1493,12 @@ final class DirectIrohTransportTests: XCTestCase {
             try await eventually("the loss is reported: \(loss)") {
                 harness.reports.count >= 2
             }
-            XCTAssertEqual(harness.reports[1], .lost, "\(loss)")
+            // The background says so: the App handles it as its own.
+            XCTAssertEqual(
+                harness.reports[1],
+                loss == .background ? .lostToBackground : .lost,
+                "\(loss)"
+            )
             // Nothing of the path was closed when the loss was reported.
             XCTAssertEqual(
                 harness.logAtReports[1].filter { $0 == "connection.close" },
@@ -1506,6 +1511,72 @@ final class DirectIrohTransportTests: XCTestCase {
         }
     }
 
+    /// Whatever the report of a loss leads to, in its own turn, owns what
+    /// it started: the transport closes the lost path and does nothing
+    /// more. A return to the foreground keeps its watch and its request,
+    /// another selection keeps its own, and an answer for the old selection
+    /// schedules nothing.
+    func testWhatALossReportLeadsToIsNotUndoneByTheLoss() async throws {
+        enum Reentry: CaseIterable {
+            case foregroundFromBackground
+            case foregroundAndAnotherSelectionFromBackground
+            case anotherSelectionFromAnUnavailableAnswer
+        }
+        for reentry in Reentry.allCases {
+            let harness = Harness()
+            _ = try await harness.bringUp(generation: "boot:1")
+            let asked = harness.rendezvous.requests.count
+            harness.onReport = { [unowned harness] report in
+                guard report == .lost || report == .lostToBackground else {
+                    return
+                }
+                harness.onReport = nil
+                switch reentry {
+                case .foregroundFromBackground:
+                    harness.notifications.post(
+                        name: UIApplication.willEnterForegroundNotification,
+                        object: nil
+                    )
+                case .foregroundAndAnotherSelectionFromBackground:
+                    harness.notifications.post(
+                        name: UIApplication.willEnterForegroundNotification,
+                        object: nil
+                    )
+                    harness.select(DirectIrohFixtures.selection(2))
+                case .anotherSelectionFromAnUnavailableAnswer:
+                    harness.select(DirectIrohFixtures.selection(2))
+                }
+            }
+            switch reentry {
+            case .foregroundFromBackground, .foregroundAndAnotherSelectionFromBackground:
+                harness.notifications.post(
+                    name: UIApplication.didEnterBackgroundNotification,
+                    object: nil
+                )
+            case .anotherSelectionFromAnUnavailableAnswer:
+                harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 60))
+                XCTAssertTrue(harness.scheduler.fire(240), "\(reentry)")
+            }
+            try await eventually("the request after the report is made: \(reentry)") {
+                harness.rendezvous.requests.count == asked + (reentry == .anotherSelectionFromAnUnavailableAnswer ? 2 : 1)
+            }
+            // The lost path is closed, once.
+            XCTAssertEqual(harness.log.count(of: "connection.close"), 1, "\(reentry)")
+            // The work the report started is still there.
+            XCTAssertTrue(harness.network.isWatching, "\(reentry)")
+            XCTAssertEqual(
+                harness.rendezvous.requests.last?.selection,
+                reentry == .foregroundFromBackground
+                    ? DirectIrohFixtures.selection(1)
+                    : DirectIrohFixtures.selection(2),
+                "\(reentry)"
+            )
+            XCTAssertEqual(harness.rendezvous.held.count, 1, "\(reentry)")
+            // The old answer's "ask again in 60 seconds" was not scheduled.
+            XCTAssertFalse(harness.scheduler.pending.contains(60), "\(reentry)")
+        }
+    }
+
     // MARK: The background
 
     func testNothingLivesInTheBackground() async throws {
@@ -1514,7 +1585,7 @@ final class DirectIrohTransportTests: XCTestCase {
         let stream = try await harness.transport.openStream(for: harness.tag("boot:1"))
 
         harness.notifications.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
-        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .lost])
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .lostToBackground])
         XCTAssertEqual(harness.log.count(of: "connection.close"), 1)
         try await eventually("the endpoint is closed") {
             harness.log.count(of: "endpoint.close") == 1
@@ -1581,6 +1652,8 @@ final class DirectIrohTransportTests: XCTestCase {
         private(set) var reports: [DirectIrohReport] = []
         /// What the stand-ins had been asked to do when each report came.
         private(set) var logAtReports: [[String]] = []
+        /// What the one hearing the reports does, in the report's own turn.
+        var onReport: ((DirectIrohReport) -> Void)?
         private(set) var selection = DirectIrohFixtures.selection(1)
 
         init(timing: DirectIrohTiming = Harness.patientTiming, isInBackground: Bool = false) {
@@ -1610,6 +1683,7 @@ final class DirectIrohTransportTests: XCTestCase {
                 }
                 self.reports.append(report)
                 self.logAtReports.append(self.log.all)
+                self.onReport?(report)
             }
         }
 

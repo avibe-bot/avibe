@@ -42,6 +42,9 @@ enum DirectIrohReport: Equatable, Sendable {
     case verifying
     /// The path is gone, or its probe failed.
     case lost
+    /// The App went to the background: everything stopped, and the path is
+    /// gone.
+    case lostToBackground
 }
 
 /// Fetches the rendezvous answer for a selection, natively and on that
@@ -1130,6 +1133,16 @@ final class DirectIrohTransport {
     /// Closes the live path, if there is one: its streams, its connection,
     /// and its endpoint. Reports nothing.
     private func endSession() {
+        if let ending = detachSession() {
+            close(ending)
+        }
+    }
+
+    /// Detaches the live path, if there is one, and returns it: from here
+    /// nothing is opened, probed, or timed on it, and nothing of it is
+    /// left in this transport's state. Its streams and connection stay
+    /// open until `close(_:)`. Reports nothing.
+    private func detachSession() -> Session? {
         cancelProbe()
         debounceTimer?.cancel()
         debounceTimer = nil
@@ -1139,32 +1152,38 @@ final class DirectIrohTransport {
         spacingTimer = nil
         isSpacingFailureProbes = false
         guard let session else {
-            return
+            return nil
         }
         dropLease()
         self.session = nil
         raiseFloor()
+        return session
+    }
+
+    private func close(_ session: Session) {
         session.cancelStreams()
         session.link.close()
     }
 
-    /// Ends the live path, if there is one, and reports `lost` for it,
-    /// first. Whoever hears the report closes and counts the relays the
-    /// path carried in that same turn (`DirectPathController` takes their
-    /// claims there); a stream closed before that would look to it as one
-    /// that ended on its own, and its page would not be told to reconnect.
-    /// `false` when the report itself replaced or ended the selection:
-    /// whatever did that has already stopped this work.
-    private func endSessionReportingLoss() -> Bool {
-        if let ending = session {
-            let current = selection
-            emit(.lost)
-            guard selection == current, session === ending else {
-                return false
-            }
+    /// Ends the live path, if there is one, and reports its loss (`lost`, or
+    /// `report`) between detaching it and closing it. Whoever hears the report closes
+    /// and counts the relays the path carried in that same turn
+    /// (`DirectPathController` takes their claims there); a stream closed
+    /// before that would look to it as one that ended on its own, and its
+    /// page would not be told to reconnect. The path is closed whatever the
+    /// report led to. `false` when the report led to new work here (another
+    /// selection, a return to the foreground, a new attempt): that work is
+    /// its owner's, and the caller does nothing more.
+    private func endSessionReportingLoss(_ report: DirectIrohReport = .lost) -> Bool {
+        guard let ending = detachSession() else {
+            return true
         }
-        endSession()
-        return true
+        let current = (selection: selection, stamp: stamp, isInBackground: isInBackground)
+        emit(report)
+        close(ending)
+        return selection == current.selection
+            && stamp == current.stamp
+            && isInBackground == current.isInBackground
     }
 
     private func stopWork() {
@@ -1236,12 +1255,16 @@ final class DirectIrohTransport {
             return
         }
         isInBackground = true
-        // Reported before anything is closed, as for every loss. Nothing is
-        // watched in the background, whatever the report led to.
-        if endSessionReportingLoss() {
-            stopWork()
-        }
+        // Everything that needs no report stops first, the path included,
+        // which is detached. Then the loss is reported, and after it only
+        // that path is closed: whatever the report led to (a return to the
+        // foreground, another selection) owns what it started.
+        fetchTimer?.cancel()
+        fetchTimer = nil
+        cancelFetch()
+        cancelDial()
         network.stop()
+        _ = endSessionReportingLoss(.lostToBackground)
     }
 
     private func applicationWillEnterForeground() {
@@ -1298,6 +1321,8 @@ extension DirectPathReport {
             self = .verifying
         case .lost:
             self = .lost
+        case .lostToBackground:
+            self = .lostToBackground
         }
     }
 }

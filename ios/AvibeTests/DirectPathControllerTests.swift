@@ -618,6 +618,52 @@ final class DirectPathControllerTests: XCTestCase {
         client.close()
     }
 
+    /// The transport hears the background first and says so: the
+    /// controller enters its own background then, so the relay's closure is
+    /// counted once, held while the App is away, and in the first status
+    /// the return settles. Its own observer, when it comes, changes nothing.
+    @MainActor
+    func testABackgroundTheTransportReportsFirstIsTheControllersBackground() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: listening)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let client = LoopbackClient(port: port)
+        let stream = try await establishDirect(client, harness: harness)
+        let deselected = harness.transport.deselectCount
+
+        harness.transport.report(.lostToBackground, for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        try await eventually { stream.isCancelled }
+        try await eventually { harness.transport.deselectCount == deselected + 1 }
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        // Counted, not published while away.
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+
+        // The controller's own observer: already entered.
+        let announced = harness.availabilityChanges
+        harness.enterBackground()
+        XCTAssertEqual(harness.availabilityChanges, announced)
+        XCTAssertEqual(harness.transport.deselectCount, deselected + 1)
+
+        harness.enterForeground()
+        let first = harness.requestStatus("instance-1")
+        XCTAssertEqual(first.values, [])
+        try await eventually { first.values.count == 1 }
+        if harness.controller.isFaulted {
+            // The re-bind failed: the held answer is `failed`. This run
+            // covers no successful return.
+            XCTAssertEqual(first.values, [nil])
+        } else {
+            XCTAssertEqual(first.values.first??.closure, 1)
+        }
+        client.close()
+    }
+
     // MARK: The load gate
 
     /// The gate the shell asks before it creates or reloads a WebView: open
