@@ -3,8 +3,9 @@
 // it for avault, as import already does. The protected-tier create happens in the sandbox window.
 // The passphrase is taken exactly as typed, with the same NFKD the import path applies; it is entered
 // twice because, unlike an import, there is no older wallet to compare #0 against.
-import { ChevronDown, ChevronRight, KeyRound, Sparkles, TriangleAlert } from 'lucide-react';
+import { ChevronDown, ChevronRight, Eye, EyeOff, KeyRound, Sparkles, TriangleAlert } from 'lucide-react';
 
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
 import { useDraft } from '../draft';
@@ -12,6 +13,22 @@ import { Footer, SourceCards, WalletDialogHeading } from './create';
 import { Notice, TierCards } from './parts';
 
 export type PassphraseState = 'folded' | 'empty' | 'match' | 'mismatch';
+
+/** A passphrase field with the same show/hide eye as other secret inputs: a typo costs the wallet. */
+function SecretField({ label, value, shown, invalid }: { label: string; value: string; shown?: boolean; invalid?: boolean }) {
+  const d = useDraft();
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[12px] font-medium text-foreground">{label}</span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Input type={shown ? 'text' : 'password'} readOnly value={value} autoComplete="off" spellCheck={false} aria-label={label} aria-invalid={invalid || undefined} className="min-w-0 flex-1 font-mono text-xs" />
+        <Button type="button" variant="ghost" size="icon" aria-label={shown ? d('隐藏', 'Hide') : d('显示', 'Show')}>
+          {shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+        </Button>
+      </span>
+    </label>
+  );
+}
 
 /** The folded section under the source hint: empty by default, two fields when opened. */
 export function CreatePassphrase({ state }: { state: PassphraseState }) {
@@ -30,25 +47,16 @@ export function CreatePassphrase({ state }: { state: PassphraseState }) {
         <div className="flex flex-col gap-2.5 px-3 pb-3">
           <span className="text-[11.5px] leading-snug text-muted">
             {d(
-              'Passphrase 和这些词一起决定钱包的地址。恢复时需要词，加上一字不差的 passphrase；忘了它，钱包就找不回来。',
+              'Passphrase 和这些词一起决定钱包的地址。恢复时需要词，加上一字不差的 Passphrase；忘了它，钱包就找不回来。',
               'The passphrase and the words together decide the wallet’s addresses. Recovering it needs the words plus this exact passphrase; forget it and the wallet can’t be recovered.',
             )}
           </span>
-          <label className="flex flex-col gap-1">
-            <span className="text-[12px] font-medium text-foreground">{d('Passphrase', 'Passphrase')}</span>
-            <Input type="password" readOnly value={filled ? 'correct horse battery' : ''} autoComplete="off" aria-label="passphrase" />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[12px] font-medium text-foreground">{d('再输入一次', 'Enter it again')}</span>
-            <Input
-              type="password"
-              readOnly
-              value={state === 'match' ? 'correct horse battery' : state === 'mismatch' ? 'correct horse batery' : ''}
-              autoComplete="off"
-              aria-label="passphrase again"
-              aria-invalid={state === 'mismatch' || undefined}
-            />
-          </label>
+          <SecretField label={d('Passphrase', 'Passphrase')} value={filled ? 'correct horse battery' : ''} shown={state === 'match'} />
+          <SecretField
+            label={d('再输入一次', 'Enter it again')}
+            value={state === 'match' ? 'correct horse battery' : state === 'mismatch' ? 'correct horse batery' : ''}
+            invalid={state === 'mismatch'}
+          />
           {state === 'mismatch' ? (
             <span role="alert" className="text-[11.5px] text-destructive-ink">{d('两次输入不一样。', 'The two entries don’t match.')}</span>
           ) : state === 'match' ? (
@@ -82,7 +90,7 @@ export function PassphraseBackupReminder() {
   return (
     <Notice tone="warning" icon={KeyRound}>
       {d(
-        '这个钱包还设置了 passphrase。把它和这些词分开记下：恢复时两样都要，passphrase 要一字不差。',
+        '这个钱包还设置了 Passphrase。把它和这些词分开记下：恢复时两样都要，Passphrase 要一字不差。',
         'This wallet also has a passphrase. Write it down separately from the words: recovering needs both, and the passphrase must be exact.',
       )}
     </Notice>
@@ -95,7 +103,7 @@ export function PassphraseRecoveryLine() {
   return (
     <Notice tone="warning" icon={TriangleAlert}>
       {d(
-        '这台电脑丢失时，只有这 12 个词加上你设置的 passphrase（一字不差）能找回资金。只靠数据库备份无法恢复签名。',
+        '这台电脑丢失时，只有这 12 个词加上你设置的 Passphrase（一字不差）能找回资金。只靠数据库备份无法恢复签名。',
         'If this computer is lost, only these 12 words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing.',
       )}
     </Notice>
