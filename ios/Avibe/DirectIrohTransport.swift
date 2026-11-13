@@ -858,15 +858,22 @@ final class DirectIrohTransport {
         timing: DirectIrohTiming,
         authority: DirectIrohAuthority
     ) async -> Result<Link, Error> {
+        // An endpoint or a connection that arrives when nobody takes it any
+        // more is closed, whichever step it was lost at: a call that was
+        // left, or a deadline that was taken in the same instant.
+        let closeEndpoint: @Sendable (any DirectIrohEndpoint) -> Void = { late in
+            _ = Task {
+                await late.close()
+            }
+        }
+        let closeConnection: @Sendable (any DirectIrohConnection) -> Void = { late in
+            late.close()
+        }
         let endpoint: any DirectIrohEndpoint
         do {
-            endpoint = try await directIrohDeadline(timing.bindSeconds) {
+            endpoint = try await directIrohDeadline(timing.bindSeconds, discard: closeEndpoint) {
                 try await directIrohCall(
-                    discard: { (late: any DirectIrohEndpoint) -> Void in
-                        _ = Task {
-                            await late.close()
-                        }
-                    },
+                    discard: closeEndpoint,
                     { () async throws -> any DirectIrohEndpoint in
                         guard authority.allowsStart else {
                             throw DirectIrohError.stale
@@ -881,11 +888,12 @@ final class DirectIrohTransport {
         do {
             let addresses = offer.addresses.map(\.socketAddress)
             let alpn = Data(DirectRendezvous.alpn.utf8)
-            let connection: any DirectIrohConnection = try await directIrohDeadline(timing.dialSeconds) {
+            let connection: any DirectIrohConnection = try await directIrohDeadline(
+                timing.dialSeconds,
+                discard: closeConnection
+            ) {
                 try await directIrohCall(
-                    discard: { (late: any DirectIrohConnection) -> Void in
-                        late.close()
-                    },
+                    discard: closeConnection,
                     { () async throws -> any DirectIrohConnection in
                         guard authority.allowsStart else {
                             throw DirectIrohError.stale

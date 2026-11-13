@@ -257,29 +257,50 @@ func directIrohCall<Value: Sendable>(
 /// Runs `operation` with a deadline. The operation must end promptly when
 /// its task is cancelled (wrap binding calls in `directIrohCall`); the call
 /// returns once it has.
+///
+/// The deadline and the operation can finish in the same instant. If the
+/// deadline is taken first, a value the operation still returns goes to
+/// `discard`, so what it holds is closed and not dropped. Exactly one of
+/// the two happens to a value: it is returned, or it is discarded.
 func directIrohDeadline<Value: Sendable>(
     _ seconds: TimeInterval,
+    discard: @escaping @Sendable (Value) -> Void = { _ in },
     _ operation: @escaping @Sendable () async throws -> Value
 ) async throws -> Value {
-    try await withThrowingTaskGroup(of: Value?.self) { group in
+    let outcome: Result<Value, Error> = await withTaskGroup(
+        of: Result<Value, Error>?.self
+    ) { group in
         group.addTask {
-            try await operation()
+            do {
+                return .success(try await operation())
+            } catch {
+                return .failure(error)
+            }
         }
         group.addTask {
-            try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-            return nil
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            } catch {
+                // Cancelled: the operation finished first.
+                return nil
+            }
+            return .failure(DirectIrohError.timedOut)
         }
-        defer {
-            group.cancelAll()
+        var first: Result<Value, Error>?
+        while let next = await group.next() {
+            guard let result = next else {
+                continue
+            }
+            if first == nil {
+                first = result
+                group.cancelAll()
+            } else if case .success(let late) = result {
+                discard(late)
+            }
         }
-        guard
-            let first = try await group.next(),
-            let value = first
-        else {
-            throw DirectIrohError.timedOut
-        }
-        return value
+        return first ?? .failure(DirectIrohError.timedOut)
     }
+    return try outcome.get()
 }
 
 // MARK: The right to start something on the network

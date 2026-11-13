@@ -85,6 +85,47 @@ final class DirectIrohByteStreamTests: XCTestCase {
         XCTAssertEqual(Self.failure(of: failed) as? DirectIrohTestError, .scripted)
     }
 
+    func testAValueThatLosesToItsDeadlineIsDiscardedNotDropped() async throws {
+        // The operation returns a value although the deadline was already
+        // taken: the two finished together, or the operation did not stop
+        // when told to. The caller gets the timeout, and the value goes to
+        // `discard`, which closes what it holds.
+        let operation = DirectIrohPending<Int>()
+        let discarded = DirectIrohPending<Int>()
+        let task = Task<Int, Error> {
+            try await directIrohDeadline(
+                0.05,
+                discard: { (late: Int) -> Void in
+                    discarded.resolve(late)
+                },
+                {
+                    try await operation.wait()
+                }
+            )
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        operation.resolve(7)
+        let late = try await discarded.wait()
+        XCTAssertEqual(late, 7)
+        let outcome = await directIrohOutcome(of: task)
+        XCTAssertEqual(Self.failure(of: outcome) as? DirectIrohError, .timedOut)
+
+        // A value that wins is returned and never discarded.
+        let unused = DirectIrohEventLog()
+        let value = try await directIrohDeadline(
+            30,
+            discard: { (_: Int) -> Void in
+                unused.add("discarded")
+            },
+            {
+                5
+            }
+        )
+        XCTAssertEqual(value, 5)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(unused.all, [])
+    }
+
     // MARK: Bytes
 
     func testBytesPassBothWaysAndTheEndIsNil() async throws {
