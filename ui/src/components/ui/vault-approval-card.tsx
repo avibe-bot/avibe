@@ -156,7 +156,7 @@ export function VaultSigningIdentity({ scheme, addresses, protectedKey }: {
   return <>
     {protectedKey ? (
       <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-xs text-gold-ink">
-        {t(scheme === 'schnorr-secp256k1-bip341-keypath' ? 'vaults.approval.protectedBitcoinWarning' : 'vaults.approval.protectedWarning')}
+        {t('vaults.approval.protectedWarning')}
       </div>
     ) : null}
     {Object.values(shown).some(Boolean) ? (

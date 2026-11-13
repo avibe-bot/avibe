@@ -23,11 +23,20 @@ interface InfoHintProps {
 
 // A small "ⓘ" affordance that reveals a hint on click / tap — uniform across
 // desktop and mobile (Workbench pages are routinely opened from an IM app on a
-// phone, where hover doesn't exist). Built on a MODAL Popover on purpose: these
-// hints live inside modal Dialogs, and a non-modal popover portals its content
-// as a sibling of the dialog, where Radix marks it aria-hidden/inert — the same
-// reason AgentRoutePicker takes a `modal` prop. Click toggles; Escape / outside
-// click dismiss via Radix.
+// phone, where hover doesn't exist). A NON-modal popover: a modal one makes
+// everything outside it, the ⓘ included, ignore the pointer, so a hover hint
+// lost its own hover and opened and closed in a loop, and on a phone blocked
+// the page. Opened from inside a modal Dialog, the panel is added after the
+// dialog hid its siblings, so it stays visible and takes the pointer. Click /
+// tap toggles; Escape / outside click dismiss via Radix.
+const isKeyboardFocus = (element: Element) => {
+  try {
+    return element.matches(':focus-visible');
+  } catch {
+    return true;
+  }
+};
+
 export const InfoHint: React.FC<InfoHintProps> = ({
   content,
   label,
@@ -57,6 +66,7 @@ export const InfoHint: React.FC<InfoHintProps> = ({
   // popover then blocked every other tap. The return is done here, marked so it doesn't reopen.
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   const returningFocus = React.useRef(false);
+  const openedByFocus = React.useRef(false);
 
   // Only a mouse hovers. A tap reports pointerType 'touch' and is left to the
   // click handler, so a phone gets one clean toggle instead of open-then-close.
@@ -68,23 +78,31 @@ export const InfoHint: React.FC<InfoHintProps> = ({
       onPointerLeave: (event: React.PointerEvent) => {
         if (event.pointerType === 'mouse') scheduleClose();
       },
-      onFocus: () => {
-        if (returningFocus.current) return;
+      // Keyboard focus only: a tap or click also focuses the ⓘ, and opening on that focus fought
+      // the tap's own toggle (Chromium on a phone opened and closed it in one tap).
+      onFocus: (event: React.FocusEvent<HTMLButtonElement>) => {
+        if (returningFocus.current || !isKeyboardFocus(event.currentTarget)) return;
+        openedByFocus.current = true;
         cancelClose();
         setOpen(true);
       },
-      onBlur: scheduleClose,
+      // Only a focus-opened hint closes on blur: on a phone the ⓘ loses focus on the next tap,
+      // which closed a tap-opened hint a moment after it appeared.
+      onBlur: () => {
+        if (!openedByFocus.current) return;
+        openedByFocus.current = false;
+        scheduleClose();
+      },
     }
     : {};
 
   return (
-    <Popover open={open} onOpenChange={setOpen} modal>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           ref={triggerRef}
           type="button"
           aria-label={label}
-          onClick={() => setOpen((prev) => !prev)}
           {...hoverProps}
           className={cn(
             trigger

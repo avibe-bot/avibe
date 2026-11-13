@@ -234,12 +234,8 @@ describe('VaultApprovalCard signing-address contract', () => {
     for (const address of Object.values(addresses)) {
       expect(screen.queryByText(address) !== null).toBe(visible.some((value) => value === address));
     }
-    expect(screen.queryByText(en.vaults.approval.protectedBitcoinWarning) !== null).toBe(
-      protection === 'protected' && scheme === 'schnorr-secp256k1-bip341-keypath',
-    );
-    expect(screen.queryByText(en.vaults.approval.protectedWarning) !== null).toBe(
-      protection === 'protected' && scheme !== 'schnorr-secp256k1-bip341-keypath',
-    );
+    // The secure window's own review states the network caveat; this card keeps the general note.
+    expect(screen.queryByText(en.vaults.approval.protectedWarning) !== null).toBe(protection === 'protected');
   });
 });
 

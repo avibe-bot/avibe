@@ -6131,8 +6131,7 @@
       "btcTaproot": "BTC Taproot",
       "btcLegacy": "BTC Legacy",
       "solana": "Solana",
-      "copy": "复制 {{label}} 地址",
-      "protectedBitcoinWarning": "类型化 Bitcoin Taproot 交易详情会在安全审批窗口中独立核对。网络标签只是请求方选择，不是链上证明。"
+      "copy": "复制 {{label}} 地址"
     },
     "chat": {
       "floatApprovals": "等你授权 · {{count}}"
@@ -6485,7 +6484,6 @@
       "accessNote": "在你的浏览器里解锁——密钥的值绝不会展示给 AI 或聊天。",
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
       "protectedWarning": "保护档签名在安全浏览器沙箱中完成，只有公开签名会返回 Avibe。",
-      "protectedBitcoinWarning": "类型化 Bitcoin Taproot 交易详情会在安全审批窗口中独立核对。网络标签只是请求方选择，不是链上证明。",
       "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
       "continueInBrowser": "在浏览器中继续",
       "errors": {
@@ -6590,6 +6588,8 @@
       "askAccount0": "账户 #0 签名前问我",
       "askAccount0Info": "默认 Agent 可以直接签名。打开后，账户 #0 每次签名都要你在浏览器里批准；之后要关闭，需要你的 Passkey 确认。每个账户都能在钱包里单独设置。",
       "mainAccount": "主账户",
+      "btcTaproot": "BTC · Taproot",
+      "btcTaprootInfo": "这是 Taproot 地址（bc1p 开头）。Phantom 等钱包默认显示 SegWit 地址（bc1q 开头），核对时请先在钱包里切换到 Taproot。",
       "accountFallback": "账户 #{{account}}",
       "back": "上一步",
       "wallet": {

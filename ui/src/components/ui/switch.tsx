@@ -15,15 +15,15 @@ export interface SwitchProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonE
 }
 
 const SIZES = {
-  default: { rail: 'h-6 w-11 p-0.5', thumb: 'size-5', on: 'translate-x-5' },
-  sm: { rail: 'h-4 w-7 p-0.5', thumb: 'size-3', on: 'translate-x-3' },
+  default: { rail: 'h-6 w-11 p-0.5', on: 'ml-5' },
+  sm: { rail: 'h-4 w-7 p-0.5', on: 'ml-3' },
 } as const;
 
 type SwitchSize = keyof typeof SIZES;
 
 const railClass = (checked: boolean, size: SwitchSize) =>
   cn(
-    'relative inline-flex shrink-0 items-center rounded-full transition-colors',
+    'relative inline-flex shrink-0 items-stretch rounded-full transition-colors',
     SIZES[size].rail,
     checked ? 'bg-primary' : 'bg-border-strong',
   );
@@ -31,9 +31,11 @@ const railClass = (checked: boolean, size: SwitchSize) =>
 const Thumb: React.FC<{ checked: boolean; size: SwitchSize }> = ({ checked, size }) => (
   <span
     className={cn(
-      'inline-block rounded-full bg-background shadow-elevation-1 transition-transform',
-      SIZES[size].thumb,
-      checked ? SIZES[size].on : 'translate-x-0',
+      // The thumb fills the rail's height inside its padding (stretched, square) instead of a fixed
+      // size centred in it, so the gaps above and below are the same padding and round the same
+      // way at any zoom or pixel ratio; it moves by margin, not a transform on its own layer.
+      'block aspect-square rounded-full bg-background shadow-elevation-1 transition-[margin]',
+      checked ? SIZES[size].on : 'ml-0',
     )}
   />
 );
