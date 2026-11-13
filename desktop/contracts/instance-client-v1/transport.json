@@ -1,0 +1,111 @@
+{
+  "account_session": {
+    "account": {
+      "id": "account-xiaoming",
+      "email": "xiaoming@example.test"
+    },
+    "instances": [
+      {
+        "id": "studio-1",
+        "name": "工作室 Studio",
+        "host": "studio.avibe.bot",
+        "url": "https://studio.avibe.bot",
+        "relationship": "shared",
+        "owner_email": "owner@example.test",
+        "available": true
+      }
+    ]
+  },
+  "second_factor": {
+    "error": "two_factor_required",
+    "email": "xiaoming@example.test",
+    "gate": "challenge",
+    "methods": [
+      "totp",
+      "passkey"
+    ]
+  },
+  "local": {
+    "schema_version": 1,
+    "installation_id": "6b3606d9-37b1-46eb-9e56-bf0e497b91e5",
+    "device_name": "小明的 Mac",
+    "binding_revision": "fixture-revision",
+    "pairing": null,
+    "remote_access": {
+      "configured_enabled": false,
+      "requested": false,
+      "running": false
+    },
+    "enrollment": {
+      "operation_id": "operation-1",
+      "account_id": "account-xiaoming",
+      "state": "prepared"
+    }
+  },
+  "prepare": {
+    "local": {
+      "schema_version": 1,
+      "installation_id": "6b3606d9-37b1-46eb-9e56-bf0e497b91e5",
+      "device_name": "小明的 Mac",
+      "binding_revision": "fixture-revision",
+      "pairing": null,
+      "remote_access": {
+        "configured_enabled": false,
+        "requested": false,
+        "running": false
+      },
+      "enrollment": {
+        "operation_id": "operation-1",
+        "account_id": "account-xiaoming",
+        "state": "prepared"
+      }
+    },
+    "operation_id": "operation-1"
+  },
+  "ensure_pairing": {
+    "outcome": "pairing_required",
+    "operation_id": "operation-1",
+    "instance": {
+      "id": "local-1",
+      "slug": "xiaoming-mac",
+      "public_url": "https://xiaoming-mac.avibe.bot"
+    },
+    "pairing": {
+      "pairing_key": "fixture-key-only",
+      "expires_at": "2026-11-13T00:15:00Z"
+    }
+  },
+  "ensure_pending": {
+    "outcome": "pending",
+    "operation_id": "operation-1",
+    "retry_after_seconds": 1
+  },
+  "backend_redeem_pending": {
+    "error": "pairing_redeem_pending",
+    "retry_after_seconds": 1
+  },
+  "runtime_pair_pending": {
+    "ok": false,
+    "error": "pairing_redeem_pending",
+    "status": 409,
+    "retry_after_seconds": 1,
+    "pairing": {
+      "ok": false,
+      "recoverable": true,
+      "cause": "pairing_redeem_pending"
+    }
+  },
+  "consent": {
+    "status": "consent_required",
+    "account": {
+      "id": "account-xiaoming",
+      "email": "xiaoming@example.test"
+    },
+    "instance": {
+      "id": "studio-1",
+      "name": "工作室 Studio",
+      "host": "studio.avibe.bot"
+    },
+    "scope": "openid profile email"
+  }
+}

@@ -104,6 +104,14 @@ unsafe extern "C-unwind" fn decide_policy(
             .and_then(|url| Url::parse(&url.to_string()).ok());
         (action.targetFrame().is_none(), should_download, url)
     };
+    // Wry drops the initiating-frame identity before the generic navigation
+    // callback. Reject presentation from embedded content at this native edge.
+    if url.as_ref().is_some_and(|url| url.scheme() == "avibe")
+        && unsafe { !action.sourceFrame().is_some_and(|frame| frame.isMainFrame()) }
+    {
+        handler.call((WKNavigationActionPolicy::Cancel,));
+        return;
+    }
     if allows_new_context(opens_new_context, should_download, url.as_ref()) {
         handler.call((WKNavigationActionPolicy::Allow,));
         return;

@@ -166,16 +166,22 @@ impl NotificationPreferences {
 struct RunPreferences {
     current: Arc<RwLock<NotificationPreferences>>,
     at_receipt: NotificationPreferences,
+    presentation_generation: u64,
 }
 
 pub trait NotificationSink: Send + Sync {
     fn gate(&self) -> NotificationGate;
+    /// Capture before asynchronous detail/badge reads. The sink rechecks this
+    /// receipt at the final output boundary, including queued main-thread work.
+    fn presentation_generation(&self) -> u64 {
+        0
+    }
     /// `source` names where a run happened ("Project · Session"), already
     /// sanitized by [`RunDetail::source`]; `None` keeps the generic copy.
-    fn deliver(&self, intent: NotificationIntent, source: Option<String>);
+    fn deliver(&self, intent: NotificationIntent, source: Option<String>, presentation_generation: u64);
     /// The Runtime's badge total (loud-category unread), for the app icon.
     /// It is state rather than an interruption: no device/focus gate applies.
-    fn show_unread(&self, total: u64);
+    fn show_unread(&self, total: u64, presentation_generation: u64);
     /// A remote desktop update event is only a nudge. The shell must re-read
     /// and validate its request file; the SSE payload never reaches this API.
     fn desktop_update_requested(&self) {}
@@ -617,6 +623,7 @@ pub async fn run_notifications(
                         continue;
                     }
                     let at_receipt = *preferences.read().await;
+                    let presentation_generation = sink.presentation_generation();
                     let allowed_at_receipt = sink.gate().allows() && at_receipt.enabled;
                     if frame.event == "desktop.update.requested" {
                         sink.desktop_update_requested();
@@ -631,7 +638,7 @@ pub async fn run_notifications(
                         None => {}
                         Some(Candidate::Approval) => {
                             if sink.gate().allows() {
-                                sink.deliver(NotificationIntent::ApprovalRequested, None);
+                                sink.deliver(NotificationIntent::ApprovalRequested, None, presentation_generation);
                             }
                         }
                         Some(Candidate::Run {
@@ -647,7 +654,7 @@ pub async fn run_notifications(
                                 // generic copy; a run only its read could
                                 // qualify fails closed.
                                 if background && at_receipt.allows_run(None) && sink.gate().allows() {
-                                    sink.deliver(intent, None);
+                                    sink.deliver(intent, None, presentation_generation);
                                 }
                                 continue;
                             }
@@ -655,6 +662,7 @@ pub async fn run_notifications(
                             let preferences = RunPreferences {
                                 current: preferences.clone(),
                                 at_receipt,
+                                presentation_generation,
                             };
                             lookups.spawn(async move {
                                 // Queue behind the request limit rather than
@@ -698,8 +706,9 @@ async fn follow_unread(
 ) {
     loop {
         changed.notified().await;
+        let presentation_generation = sink.presentation_generation();
         if let Some(total) = transport.unread_total().await {
-            sink.show_unread(total);
+            sink.show_unread(total, presentation_generation);
         }
         tokio::time::sleep(UNREAD_REFRESH_INTERVAL).await;
     }
@@ -732,7 +741,7 @@ async fn notify_run(
         stamps.fill_missing(detail.stamps);
     }
     if (background || stamps.is_long_running()) && sink.gate().allows() {
-        sink.deliver(intent, source);
+        sink.deliver(intent, source, preferences.presentation_generation);
     }
 }
 

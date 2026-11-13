@@ -10,15 +10,19 @@ publish.workspace = true
 async-trait.workspace = true
 base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+cookie = "0.18"
+cookie_store = { version = "0.22", default-features = false, features = ["serde_json"] }
 minisign-verify = "0.3"
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 semver = "1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tempfile = "3"
 tokio = { workspace = true, features = ["sync"] }
 url.workspace = true
+uuid = { version = "1", features = ["v4"] }
 zip.workspace = true
 
 [dev-dependencies]

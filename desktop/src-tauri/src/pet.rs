@@ -225,6 +225,12 @@ pub fn tray_items(app: &AppHandle) -> tauri::Result<(CheckMenuItem<tauri::Wry>, 
     Ok((toggle, shortcut_settings))
 }
 
+pub(crate) fn set_native_available(app: &AppHandle, available: bool) {
+    if let Some(menus) = app.try_state::<PetMenus>() {
+        let _ = menus.toggle.set_enabled(available);
+    }
+}
+
 fn refresh_menu(app: &AppHandle) {
     let Some(menus) = app.try_state::<PetMenus>() else {
         return;
@@ -506,6 +512,9 @@ fn shortcut_action(pet: &Pet, shortcut: &Shortcut, event: ShortcutState) -> Opti
 }
 
 pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
+    if !crate::instance_client::local_selected(app) {
+        return;
+    }
     let handle = app.clone();
     let shortcut = *shortcut;
     let _ = app.run_on_main_thread(move || {
@@ -562,7 +571,9 @@ fn window_change(
 /// The only creator and destroyer of `pet`; see [`window_change`].
 fn reconcile_now(app: &AppHandle) -> Option<WebviewWindow> {
     let (pet, shell) = (app.try_state::<Pet>()?, app.try_state::<Shell>()?);
-    let workbench = lock(&shell.active_origin).clone();
+    let workbench = lock(&shell.active_origin)
+        .clone()
+        .filter(|_| crate::instance_client::local_selected(app));
     let built_for = lock(&pet.window_origin).clone();
     let window = app.get_webview_window(PET_WINDOW);
     let change = window_change(
