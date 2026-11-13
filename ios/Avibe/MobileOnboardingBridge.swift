@@ -434,7 +434,9 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     }
 }
 
-final class MobileOnboardingViewController: UIViewController, WKNavigationDelegate {
+final class MobileOnboardingViewController: UIViewController, WKNavigationDelegate,
+    UIGestureRecognizerDelegate
+{
     private let coordinator: MobileSessionCoordinator
     /// Over a live runtime the hidden transport waits for the first account
     /// transition, which releases that runtime before it starts one.
@@ -497,6 +499,18 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         view.addSubview(webView)
+        // The pages change screens in place, not in the WebView's history,
+        // so WebKit's own back swipe has nothing to go back to. A swipe in
+        // from the left edge presses the page's Back button instead, where
+        // one is shown; it starts only at the edge, so the pages' own
+        // horizontal scrolling keeps its touches.
+        let backSwipe = UIScreenEdgePanGestureRecognizer(
+            target: self,
+            action: #selector(handleBackSwipe(_:))
+        )
+        backSwipe.edges = .left
+        backSwipe.delegate = self
+        view.addGestureRecognizer(backSwipe)
         let keyboardViewportLayoutController =
             KeyboardViewportLayoutController(
                 contentView: webView,
@@ -536,6 +550,53 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         }
         hasLoadedBundledPage = true
         webView.load(URLRequest(url: resourceURL))
+    }
+
+    @objc
+    private func handleBackSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard gesture.state == .ended else {
+            return
+        }
+        let travel = gesture.translation(in: view).x
+        let speed = gesture.velocity(in: view).x
+        guard travel > Self.backSwipeDistance || speed > Self.backSwipeSpeed else {
+            return
+        }
+        pressPageBackFromSwipe()
+    }
+
+    /// How far, or how fast, a swipe from the left edge must go to mean Back.
+    static let backSwipeDistance: CGFloat = 60
+    static let backSwipeSpeed: CGFloat = 500
+
+    /// Presses the page's Back button if it shows an enabled one; otherwise
+    /// does nothing. Reports whether there was one.
+    @discardableResult
+    func pressPageBack() async -> Bool {
+        let pressed = try? await webView.evaluateJavaScript(Self.pressBackScript)
+        return pressed as? Bool == true
+    }
+
+    private func pressPageBackFromSwipe() {
+        Task { @MainActor [weak self] in
+            await self?.pressPageBack()
+        }
+    }
+
+    static let pressBackScript = """
+        (() => {
+          const back = document.querySelector("[data-mobile-back]");
+          if (!(back instanceof HTMLButtonElement) || back.disabled) return false;
+          back.click();
+          return true;
+        })()
+        """
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
     }
 
     deinit {
