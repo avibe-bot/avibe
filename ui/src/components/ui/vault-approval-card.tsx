@@ -31,7 +31,7 @@ import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
 import { useAccountName } from '@/lib/vaultHdAccounts';
 import { isHdWalletBlocked } from '@/lib/vaultHdQuarantine';
-import { AccountIndex } from './vault-hd-wallet-detail';
+import { AccountIndex } from './vault-hd-account-index';
 import { Button } from './button';
 import { ConfirmDialog } from './confirm-dialog';
 import { SegmentedRadio } from './segmented';
@@ -156,7 +156,7 @@ export function VaultSigningIdentity({ scheme, addresses, protectedKey }: {
   return <>
     {protectedKey ? (
       <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-xs text-gold-ink">
-        {t(scheme === 'schnorr-secp256k1-bip341-keypath' ? 'vaults.approval.protectedBitcoinWarning' : 'vaults.approval.protectedWarning')}
+        {t('vaults.approval.protectedWarning')}
       </div>
     ) : null}
     {Object.values(shown).some(Boolean) ? (

@@ -42,3 +42,17 @@ it('closes on Escape and does not reopen when focus returns', async () => {
   await act(async () => { fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' }); });
   expect(screen.queryByText('Help text')).toBeNull();
 });
+
+it('opens on mouse hover without taking the page (and the ⓘ itself) away from the pointer', async () => {
+  renderHint();
+  const trigger = screen.getByLabelText('More info');
+  await act(async () => { fireEvent.pointerEnter(trigger, { pointerType: 'mouse' }); });
+  const panel = screen.getByText('Help text');
+  // A modal hint hid everything else, the ⓘ included: the pointer "left" it, the hint closed and
+  // reopened in a loop. Now neither the ⓘ nor the panel is hidden.
+  expect(panel.closest('[aria-hidden="true"]')).toBeNull();
+  expect(trigger.closest('[aria-hidden="true"]')).toBeNull();
+  expect(trigger.closest('[data-aria-hidden="true"]')).toBeNull();
+  await act(async () => { fireEvent.pointerEnter(trigger, { pointerType: 'mouse' }); });
+  expect(screen.getByText('Help text')).toBeTruthy();
+});

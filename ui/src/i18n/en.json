@@ -6131,8 +6131,7 @@
       "btcTaproot": "BTC Taproot",
       "btcLegacy": "BTC Legacy",
       "solana": "Solana",
-      "copy": "Copy {{label}} address",
-      "protectedBitcoinWarning": "Typed Bitcoin Taproot transaction details are independently checked in the secure approval window. The network label is the requester's selection, not chain proof."
+      "copy": "Copy {{label}} address"
     },
     "chat": {
       "floatApprovals": "Waiting for your approval · {{count}}"
@@ -6485,7 +6484,6 @@
       "accessNote": "Unlocked in your browser — the secret's value is never shown to the AI or the chat.",
       "signNote": "The private key never leaves your browser — only the signature is returned.",
       "protectedWarning": "Protected signing happens in the secure browser sandbox. Only the public signature returns to Avibe.",
-      "protectedBitcoinWarning": "Typed Bitcoin Taproot transaction details are independently checked in the secure approval window. The network label is the requester's selection, not chain proof.",
       "browserNote": "This needs your passkey, which the desktop app can't use. Review and approve it in your browser.",
       "continueInBrowser": "Continue in browser",
       "errors": {
@@ -6590,6 +6588,8 @@
       "askAccount0": "Ask before account #0 signs",
       "askAccount0Info": "By default Agents sign on their own. When on, every signature with account #0 needs your approval in the browser, and turning it off later needs your Passkey. Each account has its own setting in the wallet.",
       "mainAccount": "Main",
+      "btcTaproot": "BTC · Taproot",
+      "btcTaprootInfo": "This is a Taproot address (starts with bc1p). Phantom and some other wallets show a SegWit address (bc1q) by default; switch them to Taproot before comparing.",
       "accountFallback": "Account #{{account}}",
       "back": "Back",
       "wallet": {

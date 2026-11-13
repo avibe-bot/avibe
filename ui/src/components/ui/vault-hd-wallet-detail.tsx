@@ -20,15 +20,8 @@ import { InlineNameInput } from './inline-name-input';
 import { Switch } from './switch';
 import { HdAccountAddressList } from './vault-hd-wallet-steps';
 
-/** `#1`: an account's position, the number an Agent passes as --account. */
-export function AccountIndex({ index, className }: { index: number; className?: string }) {
-  const { t } = useTranslation();
-  return (
-    <span className={cn('inline-flex h-5 min-w-7 shrink-0 items-center justify-center rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] font-semibold text-violet-ink', className)}>
-      {t('vaults.hd.accountIndex', { account: index })}
-    </span>
-  );
-}
+export { AccountIndex } from './vault-hd-account-index';
+import { AccountIndex } from './vault-hd-account-index';
 
 export function HdWalletBadges({ count }: { count: number }) {
   const { t } = useTranslation();

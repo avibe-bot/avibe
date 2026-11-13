@@ -16,13 +16,22 @@ const ROWS: ReadonlyArray<{ key: keyof SigningAddresses; labelKey: TranslationKe
   { key: 'solana', labelKey: 'vaults.addresses.solana' },
 ];
 
-/** One labeled address, truncated, with its copy button. */
-export const SigningAddressRow: React.FC<{ label: string; value: string }> = ({ label, value }) => {
+/** One labeled address, truncated, with its copy button. `hint` sits after the label (an ⓘ), and
+ *  `labelClassName` widens the label column when it has one. */
+export const SigningAddressRow: React.FC<{ label: string; value: string; hint?: React.ReactNode; labelClassName?: string }> = ({
+  label,
+  value,
+  hint,
+  labelClassName,
+}) => {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <span className="w-[68px] shrink-0 text-[11px] font-medium text-muted">{label}</span>
+      <span className={cn('flex w-[68px] shrink-0 items-center gap-1 text-[11px] font-medium text-muted', labelClassName)}>
+        {label}
+        {hint}
+      </span>
       <code className="min-w-0 flex-1 truncate rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11.5px] text-foreground" title={value}>
         {value}
       </code>

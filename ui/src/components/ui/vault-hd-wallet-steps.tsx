@@ -12,7 +12,8 @@ import type { HdAccountAddresses, HdQuestion, PhraseCheck } from '@/lib/vaultHdW
 import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Button } from './button';
 import { Input } from './input';
-import { SigningAddressList } from './signing-address-list';
+import { SigningAddressRow } from './signing-address-list';
+import { InfoHint } from './info-hint';
 import { Textarea } from './textarea';
 
 /** A one-line notice in the dialog. */
@@ -192,8 +193,23 @@ export function HdCheckStep({ quiz, chosen, onChoose }: {
 
 
 /** Account #0's three addresses, in the shipped address list. */
+/** A wallet account's three addresses, for comparing with another wallet: the Bitcoin row says it
+ *  is Taproot, since Phantom and others show a SegWit (bc1q) address by default. */
 export function HdAccountAddressList({ account }: { account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> }) {
-  return <SigningAddressList addresses={{ eth: account.eth, btc_taproot: account.btc_taproot, solana: account.solana }} />;
+  const { t } = useTranslation();
+  const label = 'w-[104px] whitespace-nowrap';
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <SigningAddressRow label={t('vaults.addresses.eth')} value={account.eth} labelClassName={label} />
+      <SigningAddressRow
+        label={t('vaults.hd.btcTaproot')}
+        value={account.btc_taproot}
+        labelClassName={label}
+        hint={<InfoHint hover content={t('vaults.hd.btcTaprootInfo')} label={t('vaults.dialog.moreInfo')} />}
+      />
+      <SigningAddressRow label={t('vaults.addresses.solana')} value={account.solana} labelClassName={label} />
+    </div>
+  );
 }
 
 /** Done: account #0 is ready and checked, and the user learns how to point an Agent at it. */
