@@ -315,6 +315,18 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     Results (including late recovery rows) follow their response in call
     order; a missing result is INTERRUPTED; a result whose call was summarized
     leaves with it. The latest edit of a tool result replaces its content.
+    Units (including their rows/messages) and state are detached; the compaction
+    row retains its existing borrowed ownership.
+    """
+    view = _borrowed_context_view(entries, fork_point=fork_point)
+    return replace(view, units=deepcopy(view.units), state=deepcopy(view.state))
+
+
+def _borrowed_context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] = None) -> ContextView:
+    """Validate and build without mutating or detaching the input graph.
+
+    Only append validation may discard this borrowed view directly. Public
+    projection must detach its units and state before exposing them to callers.
     """
     rows = _ordered(entries, fork_point)
     results, _ = _index_results(rows)
@@ -374,10 +386,10 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     return ContextView(
         compaction=compaction,
         checkpoint=checkpoint,
-        units=tuple(deepcopy(units)),
+        units=tuple(units),
         cleared=frozenset(row_id for row_id, reason in reasons.items() if reason == "clear_old_tool_result"),
         context_seq=rows[-1].context_seq if rows else 0,
-        state=deepcopy(state),
+        state=state,
         pinned=len(kept),
         opaque_refused=frozenset(refused),
         edited=frozenset(reasons),
@@ -417,4 +429,4 @@ def validate_message_append(
     """
     seq = max((entry.context_seq for entry in entries), default=0) + 1
     candidate = ContextEntry(session_id, seq, kind, f"uncommitted-{kind}", message)
-    project([*entries, candidate])
+    _borrowed_context_view([*entries, candidate])

@@ -1,12 +1,35 @@
 """C-5 orphan/ancestry projection risks not covered by message serialization."""
 
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
-from core.agent_core.harness.projection import INTERRUPTED, ProjectionError, context_view, project
+from core.agent_core.harness import projection as projection_module
+from core.agent_core.harness.projection import (
+    INTERRUPTED,
+    ProjectionError,
+    context_view,
+    open_tool_calls,
+    project,
+    validate_message_append,
+)
 from core.agent_core.harness.store import ContextEntry
-from core.agent_core.messages import ImageBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
+from core.agent_core.messages import (
+    HostedAction,
+    HostedNative,
+    HostedRecord,
+    HostedSummary,
+    HostedToolBlock,
+    ImageBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultMessage,
+    Usage,
+    UserMessage,
+    message_to_dict,
+    text,
+)
 from tests.agent_core.fakes import assistant, user
 
 
@@ -171,9 +194,16 @@ def test_a_fork_before_a_checkpoint_or_edit_projects_the_original_context(fork_p
         ContextEntry("session", 2, "agent_state", "state", payload={"version": 1, "state": {}, "unexpected": True}),
     ],
 )
-def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_context(row):
+@pytest.mark.parametrize("validation_only", [False, True], ids=["project", "append-validation"])
+def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_context(row, validation_only):
+    rows = [ContextEntry("session", 1, "input", "in-1", user("start")), row]
+    before = deepcopy(rows)
     with pytest.raises(ProjectionError):
-        project([ContextEntry("session", 1, "input", "in-1", user("start")), row])
+        if validation_only:
+            validate_message_append(rows, session_id="session", kind="input", message=user("next"))
+        else:
+            project(rows)
+    assert rows == before
 
 
 def test_a_complete_checkpoint_row_loads():
@@ -249,7 +279,8 @@ def test_malformed_or_duplicate_results_are_not_silently_dropped():
 
 
 @pytest.mark.parametrize("arguments", [{"nested": {1: "value"}}, {"nested": (1, 2)}])
-def test_projection_revalidates_mutable_arguments_in_loaded_ancestry(arguments):
+@pytest.mark.parametrize("validation_only", [False, True], ids=["project", "append-validation"])
+def test_projection_revalidates_mutable_arguments_in_loaded_ancestry(arguments, validation_only):
     # Admission cannot protect rows supplied by a store/fork loader from later
     # mutation. Projection must reject them without normalizing the input.
     call = ToolCallBlock("call", "echo")
@@ -257,5 +288,156 @@ def test_projection_revalidates_mutable_arguments_in_loaded_ancestry(arguments):
     rows = [ContextEntry("parent", 1, "response", "response", assistant(calls=[call]))]
     original = deepcopy(rows)
     with pytest.raises(ProjectionError, match="call.*response"):
-        project(rows)
+        if validation_only:
+            validate_message_append(rows, session_id="child", kind="input", message=user("next"))
+        else:
+            project(rows)
     assert rows == original
+
+
+def _mutable_rows():
+    """Small graph covering nested mutable fields even on frozen canonical messages."""
+    call = ToolCallBlock("call", "echo", {"nested": {"values": [1]}}, signature="signed-call")
+    hosted = HostedToolBlock(
+        "search", "web_search", HostedAction("search", queries=("query",)), HostedRecord("completed"),
+        HostedNative("src_abcdefgh", ({"nested": {"values": [1]}},)),
+    )
+    response = replace(
+        assistant(calls=[call]),
+        content=(ThinkingBlock("reasoning", signature="signed-thinking"), call, hosted),
+        usage=Usage(cache_write_tokens=3, cache_writes_by_ttl={"5m": 1}),
+        hosted_summary=HostedSummary(counts={"searches": 1}),
+    )
+    return [
+        ContextEntry("parent", 1, "response", "response", response, payload={"extra": {"values": [1]}}),
+        ContextEntry("child", 2, "agent_state", "state", payload={"version": 1, "state": {"values": [1]}}),
+    ]
+
+
+def _mutate_message(message):
+    message.tool_calls[0].arguments["nested"]["values"].append(2)
+    message.content[2].native.payload[0]["nested"]["values"].append(2)
+    message.hosted_summary.counts["searches"] = 2
+    message.usage.cache_writes_by_ttl["5m"] = 2
+
+
+@pytest.mark.parametrize("boundary", ["context_view", "project", "rehydrated", "open_tool_calls"])
+def test_public_projection_boundaries_detach_nested_messages_and_metadata_in_both_directions(boundary):
+    # A borrowed validation builder must never accidentally become a public return path.
+    rows = _mutable_rows()
+    before = deepcopy(rows)
+    original_message = rows[0].message
+    original_wire = message_to_dict(original_message)
+    if boundary == "context_view":
+        result = context_view(rows)
+        message = result.messages[0]
+        entry = result.units[0].lead
+        assert entry is not rows[0] and entry.message is message
+        entry.payload["extra"]["values"].append(2)
+        result.state["values"].append(2)
+        assert context_view(rows).state == {"values": [1]}
+    elif boundary == "project":
+        result = project(rows)
+        message = result.messages[0]
+        result.state["values"].append(2)
+        assert project(rows).state == {"values": [1]}
+    elif boundary == "rehydrated":
+        result = project([], rehydrated=[original_message])
+        message = result.messages[0]
+    else:
+        ((entry, call),) = open_tool_calls(rows)
+        message = entry.message
+        assert entry is not rows[0] and call is message.tool_calls[0]
+        entry.payload["extra"]["values"].append(2)
+    assert message_to_dict(message) == original_wire
+    assert message.usage.cache_writes_by_ttl == {"5m": 1}
+    _mutate_message(message)
+    assert rows == before
+    # Usage TTL diagnostics intentionally do not participate in dataclass equality/serialization.
+    assert original_message.usage.cache_writes_by_ttl == {"5m": 1}
+    assert message_to_dict(project(rows).messages[0]) == original_wire
+    assert message_to_dict(open_tool_calls(rows)[0][0].message) == original_wire
+    detached_wire = message_to_dict(message)
+    original_message.tool_calls[0].arguments["nested"]["values"].append(3)
+    original_message.content[2].native.payload[0]["nested"]["values"].append(3)
+    original_message.hosted_summary.counts["searches"] = 3
+    original_message.usage.cache_writes_by_ttl["5m"] = 3
+    rows[0].payload["extra"]["values"].append(3)
+    rows[1].payload["state"]["values"].append(3)
+    if boundary in {"context_view", "project"}:
+        assert result.state == {"values": [1, 2]}
+    if boundary in {"context_view", "open_tool_calls"}:
+        assert entry.payload["extra"]["values"] == [1, 2]
+    assert message_to_dict(message) == detached_wire
+    assert message.usage.cache_writes_by_ttl == {"5m": 2}
+
+
+def test_context_view_preserves_compaction_alias_but_detaches_edited_unit_rows():
+    rows = _checkpointed_rows()
+    before = deepcopy(rows)
+    view = context_view(rows)
+    assert view.compaction is rows[8]  # Existing contract; not a deeply detached ContextView as a whole.
+    result_row, shown = view.units[1].entries[1]
+    assert result_row is not rows[5]
+    assert result_row.message.content[0].text == "B"
+    assert shown.content[0].text == "latest placeholder"
+    result_row.payload["local-only"] = [1]
+    assert rows == before
+    assert context_view(rows).units[1].entries[1][0].payload == {}
+
+
+@pytest.mark.parametrize("case,kind,error", [
+    ("input", "input", None),
+    ("response", "response", None),
+    ("late-result", "tool_result", None),
+    ("duplicate-open-call", "response", "duplicate open tool call id"),
+    ("wrong-name", "tool_result", "result identity does not match"),
+    ("unknown-call", "tool_result", "no preceding call"),
+    ("duplicate-result", "tool_result", "duplicate tool result"),
+    ("duplicate-sequence", "input", "duplicate context_seq"),
+    ("invalid-candidate-arguments", "response", "invalid arguments for tool call next"),
+])
+def test_append_validation_checks_candidate_and_ancestry_without_mutation(case, kind, error):
+    rows = _mutable_rows()
+    message = {
+        "input": user("next"),
+        "response": assistant(calls=[ToolCallBlock("next", "echo", {"nested": [1]})]),
+        "tool_result": ToolResultMessage("call", "echo", (text("result"),)),
+    }[kind]
+    if case == "duplicate-open-call":
+        message = assistant(calls=[ToolCallBlock("call", "echo")])
+    elif case == "wrong-name":
+        message = ToolResultMessage("call", "other", (text("result"),))
+    elif case == "unknown-call":
+        message = ToolResultMessage("unknown", "echo", (text("result"),))
+    elif case == "duplicate-result":
+        rows.append(ContextEntry("parent", 3, "tool_result", "existing-result", message))
+    elif case == "duplicate-sequence":
+        rows.append(ContextEntry("parent", 1, "input", "duplicate-seq", user("duplicate")))
+    elif case == "invalid-candidate-arguments":
+        message.tool_calls[0].arguments["nested"] = (1, 2)
+    elif case == "late-result":
+        rows.append(ContextEntry("child", 3, "input", "later-input", user("next")))
+    before = deepcopy((rows, message))
+    if error:
+        with pytest.raises(ProjectionError, match=error):
+            validate_message_append(rows, session_id="child", kind=kind, message=message)
+    else:
+        assert validate_message_append(rows, session_id="child", kind=kind, message=message) is None
+    assert (rows, message) == before
+
+
+def test_append_validation_does_not_copy_a_discarded_projection(monkeypatch):
+    rows = _checkpointed_rows()
+    rows.extend(replace(row, context_seq=row.context_seq + 10, row_id="new-" + row.row_id) for row in _mutable_rows())
+    copied = []
+
+    def observed_copy(value):
+        copied.append(type(value))
+        return deepcopy(value)
+
+    monkeypatch.setattr(projection_module, "deepcopy", observed_copy)
+    before = deepcopy(rows)
+    validate_message_append(rows, session_id="child", kind="input", message=user("next"))
+    assert copied == []
+    assert rows == before
