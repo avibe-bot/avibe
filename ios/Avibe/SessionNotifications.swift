@@ -36,7 +36,7 @@ final class SessionNotificationCleaner {
                     guard let deliveredAt = entry.deliveredAt else {
                         return false
                     }
-                    return deliveredAt <= readAt
+                    return deliveredAt <= .distantFuture
                         && entry.threadIdentifier.hasPrefix(SessionNotificationThread.prefix)
                         && entry.userInfo["instance_origin"] as? String == instanceOrigin
                         && entry.userInfo["account_id"] as? String == accountID
