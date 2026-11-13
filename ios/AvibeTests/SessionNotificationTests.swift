@@ -30,11 +30,14 @@ final class SessionNotificationTests: XCTestCase {
         let center = RecordingNotificationCenter(entries: notificationsAcrossInstances())
         let cleaner = SessionNotificationCleaner(center: center)
 
-        cleaner.clearSession("ses_a", instanceOrigin: one, accountID: "account-1")
-        try await waitUntil { center.reads == 1 }
+        cleaner.clearSession("ses_a", instanceOrigin: one, accountID: "account-1", readAt: Date())
+        try await waitUntil { center.passes == 1 }
 
+        // A result for the same Session delivered after it was on screen
+        // ("one-a-late") is news the read did not cover; a pending request
+        // has not been delivered at all.
         XCTAssertEqual(center.removedDelivered, ["one-a", "one-a-2"])
-        XCTAssertEqual(center.removedPending, ["one-a-pending"])
+        XCTAssertEqual(center.removedPending, [])
     }
 
     @MainActor
@@ -42,13 +45,14 @@ final class SessionNotificationTests: XCTestCase {
         let center = RecordingNotificationCenter(entries: notificationsAcrossInstances())
         let cleaner = SessionNotificationCleaner(center: center)
 
-        cleaner.clearAllSessions(instanceOrigin: one, accountID: "account-1")
-        try await waitUntil { center.reads == 1 }
+        cleaner.clearAllSessions(instanceOrigin: one, accountID: "account-1", readAt: Date())
+        try await waitUntil { center.passes == 1 }
 
         // Another instance, another account, a workspace notice, the test
-        // notification, and one the extension could not decrypt all stay.
+        // notification, one the extension could not decrypt, and a Session
+        // notification delivered after the zero was computed all stay.
         XCTAssertEqual(center.removedDelivered, ["one-a", "one-a-2", "one-b"])
-        XCTAssertEqual(center.removedPending, ["one-a-pending"])
+        XCTAssertEqual(center.removedPending, [])
     }
 
     @MainActor
@@ -104,9 +108,9 @@ final class SessionNotificationTests: XCTestCase {
             }
             return false
         }
-        // The coordinator's own startup reads (push recovery) are not ours.
+        // Let the push coordinator finish its own startup work first.
         try await Task.sleep(for: .milliseconds(200))
-        let startupReads = center.reads
+        let startupPasses = center.passes
 
         // No instance is open: a Session page clears nothing.
         appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/chat/ses_a")))
@@ -123,17 +127,16 @@ final class SessionNotificationTests: XCTestCase {
         appModel.primaryLocationDidChange(
             try XCTUnwrap(URL(string: "\(one)/chat/ses_a?msg=m1&from=notification"))
         )
-        try await waitUntil { center.reads == startupReads + 1 }
+        try await waitUntil { center.passes == startupPasses + 1 }
         XCTAssertEqual(center.removedDelivered, ["one-a", "one-a-2"])
         center.removedDelivered = []
-        center.removedPending = []
 
         // A count above zero, or a zero from another instance, clears
         // nothing; the selected instance's zero clears all its Sessions.
         XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
         XCTAssertFalse(appModel.setBadgeCount(0, origin: originTwo))
         XCTAssertTrue(appModel.setBadgeCount(0, origin: originOne))
-        try await waitUntil { center.reads == startupReads + 2 }
+        try await waitUntil { center.passes == startupPasses + 2 }
         XCTAssertEqual(center.removedDelivered, ["one-a", "one-a-2", "one-b"])
     }
 
@@ -192,15 +195,13 @@ final class SessionNotificationTests: XCTestCase {
 
     /// Delivered notifications across two instances, two accounts, the
     /// non-Session threads, and an undecrypted fallback, plus pending ones.
-    private func notificationsAcrossInstances() -> (
-        delivered: [PushNotificationCenterEntry],
-        pending: [PushNotificationCenterEntry]
-    ) {
+    private func notificationsAcrossInstances() -> NotificationFixture {
         func entry(
             _ id: String,
             thread: String,
             origin: String?,
-            account: String? = "account-1"
+            account: String? = "account-1",
+            deliveredAt: Date? = Date(timeIntervalSinceNow: -60)
         ) -> PushNotificationCenterEntry {
             var userInfo: [AnyHashable: Any] = [:]
             if let origin {
@@ -213,10 +214,11 @@ final class SessionNotificationTests: XCTestCase {
             return PushNotificationCenterEntry(
                 identifier: id,
                 userInfo: userInfo,
-                threadIdentifier: thread
+                threadIdentifier: thread,
+                deliveredAt: deliveredAt
             )
         }
-        return (
+        return NotificationFixture(
             delivered: [
                 entry("one-a", thread: "session:ses_a", origin: one),
                 entry("one-a-2", thread: "session:ses_a", origin: one),
@@ -228,9 +230,14 @@ final class SessionNotificationTests: XCTestCase {
                 entry("fallback", thread: "", origin: nil),
             ],
             pending: [
-                entry("one-a-pending", thread: "session:ses_a", origin: one),
-                entry("two-a-pending", thread: "session:ses_a", origin: two),
-            ]
+                entry("one-a-pending", thread: "session:ses_a", origin: one, deliveredAt: nil),
+                entry("two-a-pending", thread: "session:ses_a", origin: two, deliveredAt: nil),
+            ],
+            // Delivered after the read was observed, by the time the
+            // delivered list is read: dated when that read happens.
+            arrivingLate: { [one] in
+                entry("one-a-late", thread: "session:ses_a", origin: one, deliveredAt: Date())
+            }
         )
     }
 
@@ -250,38 +257,38 @@ final class SessionNotificationTests: XCTestCase {
     }
 }
 
-/// A notification center holding fixed notifications that records what is
-/// removed. `reads` counts completed reads of the delivered list.
+private struct NotificationFixture {
+    let delivered: [PushNotificationCenterEntry]
+    let pending: [PushNotificationCenterEntry]
+    /// A notification that lands between a read and the list being read.
+    let arrivingLate: () -> PushNotificationCenterEntry
+}
+
+/// A notification center holding fixed notifications, plus one that lands
+/// just before each read of the delivered list, recording what is removed.
+/// `passes` counts finished removals (each pass removes once, maybe nothing).
 @MainActor
 private final class RecordingNotificationCenter: PushNotificationCentering {
-    private let delivered: [PushNotificationCenterEntry]
-    private let pending: [PushNotificationCenterEntry]
-    private(set) var reads = 0
+    private let fixture: NotificationFixture
+    private(set) var passes = 0
     var removedDelivered: [String] = []
     var removedPending: [String] = []
 
-    init(
-        entries: (
-            delivered: [PushNotificationCenterEntry],
-            pending: [PushNotificationCenterEntry]
-        )
-    ) {
-        delivered = entries.delivered
-        pending = entries.pending
+    init(entries: NotificationFixture) {
+        fixture = entries
     }
 
     func deliveredNotifications() async -> [PushNotificationCenterEntry] {
-        delivered
+        fixture.delivered + [fixture.arrivingLate()]
     }
 
     func pendingNotificationRequests() async -> [PushNotificationCenterEntry] {
-        // Read second, so a finished read means both lists were read.
-        defer { reads += 1 }
-        return pending
+        fixture.pending
     }
 
     func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
         removedDelivered += identifiers
+        passes += 1
     }
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {

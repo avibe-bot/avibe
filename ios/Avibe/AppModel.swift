@@ -610,11 +610,14 @@ final class AppModel: ObservableObject {
         }
         nativeBadge.set(count)
         if count == 0, let account = sessionCoordinator.currentAccount {
+            // The zero was computed before this call arrived: only what was
+            // delivered by now is covered by it.
             // Nothing on this instance is unread: its Session notifications
             // have all been read, here or elsewhere.
             sessionNotifications.clearAllSessions(
                 instanceOrigin: origin.serialized,
-                accountID: account.id
+                accountID: account.id,
+                readAt: Date()
             )
         }
         return true
@@ -634,10 +637,12 @@ final class AppModel: ObservableObject {
         else {
             return
         }
+        // Only what was delivered while it is on screen, now, is read.
         sessionNotifications.clearSession(
             sessionID,
             instanceOrigin: origin.serialized,
-            accountID: account.id
+            accountID: account.id,
+            readAt: Date()
         )
     }
 

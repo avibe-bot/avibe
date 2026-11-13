@@ -32,7 +32,12 @@ enum SessionNotificationThread {
 }
 
 /// Removes this account's notifications for one instance's Sessions from
-/// Notification Center (and any still pending) once they are read in the App.
+/// Notification Center once they are read in the App.
+///
+/// Only notifications delivered by the moment of the read are removed: one
+/// that lands after it (a new result just after the Session was left, or
+/// after the zero was computed) is news the read did not cover, and stays.
+/// A request still pending has not been delivered, so it is never removed.
 @MainActor
 final class SessionNotificationCleaner {
     private let center: PushNotificationCentering
@@ -41,23 +46,27 @@ final class SessionNotificationCleaner {
         self.center = center
     }
 
-    /// The Session `sessionID` was opened on `instanceOrigin`.
+    /// The Session `sessionID` was on screen on `instanceOrigin` at `readAt`.
     func clearSession(
         _ sessionID: String,
         instanceOrigin: String,
-        accountID: String
+        accountID: String,
+        readAt: Date
     ) {
         let thread = SessionNotificationThread.identifier(forSession: sessionID)
-        clear(instanceOrigin: instanceOrigin, accountID: accountID) {
+        clear(instanceOrigin: instanceOrigin, accountID: accountID, deliveredBy: readAt) {
             $0 == thread
         }
     }
 
-    /// Nothing on `instanceOrigin` is unread any more. Only Session threads
-    /// are cleared: a workspace notice such as `harness:failure` is not part
-    /// of the Inbox's unread total, so a zero says nothing about it.
-    func clearAllSessions(instanceOrigin: String, accountID: String) {
-        clear(instanceOrigin: instanceOrigin, accountID: accountID) {
+    /// Nothing notified on `instanceOrigin` was unread at `readAt`. The badge
+    /// is the loud, preference-filtered total, and pushes go out only for
+    /// loud categories, so a zero covers every Session notification; it is
+    /// still only a hint, so only Session threads go. A workspace notice such
+    /// as `harness:failure` is not part of the Inbox's unread total, so a zero
+    /// says nothing about it.
+    func clearAllSessions(instanceOrigin: String, accountID: String, readAt: Date) {
+        clear(instanceOrigin: instanceOrigin, accountID: accountID, deliveredBy: readAt) {
             $0.hasPrefix(SessionNotificationThread.prefix)
         }
     }
@@ -65,26 +74,22 @@ final class SessionNotificationCleaner {
     private func clear(
         instanceOrigin: String,
         accountID: String,
+        deliveredBy cutoff: Date,
         thread matches: @escaping (String) -> Bool
     ) {
-        let selected = { (entry: PushNotificationCenterEntry) -> Bool in
-            matches(entry.threadIdentifier)
-                && entry.userInfo["instance_origin"] as? String == instanceOrigin
-                && entry.userInfo["account_id"] as? String == accountID
-        }
         Task { [center] in
             let delivered = await center.deliveredNotifications()
-                .filter(selected)
+                .filter { entry in
+                    guard let deliveredAt = entry.deliveredAt else {
+                        return false
+                    }
+                    return deliveredAt <= cutoff
+                        && matches(entry.threadIdentifier)
+                        && entry.userInfo["instance_origin"] as? String == instanceOrigin
+                        && entry.userInfo["account_id"] as? String == accountID
+                }
                 .map(\.identifier)
-            let pending = await center.pendingNotificationRequests()
-                .filter(selected)
-                .map(\.identifier)
-            if !delivered.isEmpty {
-                center.removeDeliveredNotifications(withIdentifiers: delivered)
-            }
-            if !pending.isEmpty {
-                center.removePendingNotificationRequests(withIdentifiers: pending)
-            }
+            center.removeDeliveredNotifications(withIdentifiers: delivered)
         }
     }
 }

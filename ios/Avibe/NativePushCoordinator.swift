@@ -28,6 +28,8 @@ struct PushNotificationCenterEntry {
     /// The thread the notification service extension gave it: the
     /// instance's tag, such as `session:<id>`; empty when it had none.
     var threadIdentifier: String = ""
+    /// When it was delivered; `nil` for a request still pending.
+    var deliveredAt: Date?
 }
 
 @MainActor
@@ -54,7 +56,8 @@ final class SystemPushNotificationCenter: PushNotificationCentering {
                         PushNotificationCenterEntry(
                             identifier: $0.request.identifier,
                             userInfo: $0.request.content.userInfo,
-                            threadIdentifier: $0.request.content.threadIdentifier
+                            threadIdentifier: $0.request.content.threadIdentifier,
+                            deliveredAt: $0.date
                         )
                     }
                 )

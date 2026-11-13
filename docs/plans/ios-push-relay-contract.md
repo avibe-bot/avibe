@@ -937,12 +937,14 @@ was sent, can only be as recent or older.
 A Session's notifications leave Notification Center once it is read in the
 app. When the selected instance's primary WebView shows `/chat/<id>`, on a URL
 change (including the Web UI's `pushState`) or when the app returns to the
-foreground on that page, the app removes the delivered and pending
-notifications whose `threadIdentifier` is `session:<id>` and whose `userInfo`
-names that instance origin and the current account. When the selected
-instance's main frame sets `badge.set({count: 0})`, nothing there is unread,
-and the app removes all of that instance's and account's `session:*`
-notifications. Other instances, other accounts, the test notification,
+foreground on that page, the app removes the delivered notifications whose
+`threadIdentifier` is `session:<id>` and whose `userInfo` names that instance
+origin and the current account. When the selected instance's main frame sets
+`badge.set({count: 0})`, the loud unread total there is zero, and the app
+removes all of that instance's and account's `session:*` notifications. Either
+way, only notifications delivered by that moment (the URL observation, or the
+bridge call's arrival) are removed: one delivered after it is news the read did
+not cover. Pending requests, other instances, other accounts, the test notification,
 `harness:failure` notices (not part of the Inbox's unread total, so a zero
 says nothing about them), and undecrypted fallbacks (no thread, origin, or
 account) stay.
