@@ -13,7 +13,17 @@ import { Button } from '../ui/button';
 import { badgeVariants } from '../ui/badge-variants';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { isPrereleaseVersion, releaseNotesUrl } from './versions';
+import * as panelModels from './updatePanelModel';
 import type { UpdatePanelModel, UpdatePanelStatus, UpdateSubject } from './updatePanelModel';
+
+export type PanelModels = typeof panelModels;
+
+/** The panel with its model built inside this chunk, so a surface's first screen carries neither. */
+export function UpdatePanelFor({ build, ...props }: Omit<Parameters<typeof UpdatePanel>[0], 'model'> & {
+  build: (models: PanelModels) => UpdatePanelModel;
+}) {
+  return <UpdatePanel model={build(panelModels)} {...props} />;
+}
 
 /** The same actions on every surface; each container sends them to that computer's updater. */
 export type UpdatePanelActions = {

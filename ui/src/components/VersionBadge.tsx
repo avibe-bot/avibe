@@ -25,20 +25,14 @@ import {
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
-import type { UpdatePanelActions } from './update/UpdatePanel';
+import type { PanelModels, UpdatePanelActions } from './update/UpdatePanel';
 import { lazyPage } from '../lib/lazyPage';
-import {
-  modelFromDesktopRelay,
-  modelFromDesktopState,
-  modelFromRuntime,
-  remoteRequestSettled,
-  type UpdatePanelModel,
-} from './update/updatePanelModel';
-import { normalizeVersion } from './update/versions';
+import type { UpdatePanelModel } from './update/updatePanelModel';
+import { normalizeVersion, remoteRequestSettled } from './update/versions';
 
 
 // Its own chunk: the first screen draws only the badge (scripts/check-first-load-budget.mjs).
-const UpdatePanel = lazyPage(() => import('./update/UpdatePanel').then((module) => module.UpdatePanel));
+const UpdatePanel = lazyPage(() => import('./update/UpdatePanel').then((module) => module.UpdatePanelFor));
 
 // Dev / regression builds carry long versions like
 // `3.0.1.dev33+g1df6865a1.d20260608`. Collapse to the release core
@@ -616,7 +610,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   // One panel for every owner (ui/design: update/panel): the desktop app's own
   // updater, a desktop-managed host as its Runtime relays it, or a standalone Runtime.
   const nativeModel = desktopActions && desktopUpdateState;
-  const panelModel: UpdatePanelModel = !versionInfo && !nativeModel
+  const buildPanelModel = ({ modelFromDesktopRelay, modelFromDesktopState, modelFromRuntime }: PanelModels): UpdatePanelModel => {
+  const model: UpdatePanelModel = !versionInfo && !nativeModel
     ? {
       subject: isDesktopManaged ? 'host-desktop' : 'runtime', current: null, latest: null, prereleases: null, checkedAt: null,
       // A first read that failed is a failed check the user can retry, not a check still running.
@@ -646,9 +641,14 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           checkedAt,
         });
   if (isSourceBuild) {
-    panelModel.status = null;
-    panelModel.latest = null;
+    model.status = null;
+    model.latest = null;
   }
+  return model;
+  };
+  // Whether the host's desktop app predates checks and settings from here (as modelFromDesktopRelay decides).
+  const legacyHost = !nativeModel && isDesktopManaged && Boolean(versionInfo?.phase)
+    && !(['check', 'prereleases', 'auto_update'] as const).every((action) => versionInfo?.host_actions?.includes(action));
   const refresh = () => {
     // A new check supersedes the last install's result.
     setUpgradeResult(null);
@@ -679,7 +679,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     const actions = versionInfo?.host_actions ?? [];
     // Only a host that takes a check gets the button, except before its first result, when reading again is the check,
     // and after an install lost track of the host, when reading again is how it is found.
-    if ((manager && actions.includes('check')) || !panelModel.legacyHost || remoteUpdateTimedOut || remoteDisconnected) {
+    if ((manager && actions.includes('check')) || !legacyHost || remoteUpdateTimedOut || remoteDisconnected) {
       panelActions.check = {
         run: () => (manager && actions.includes('check') ? void sendControl('check') : refresh()),
         disabled: checkDisabled,
@@ -751,7 +751,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             )}
           >
             <Suspense fallback={null}><UpdatePanel
-              model={panelModel}
+              build={buildPanelModel}
               actions={panelActions}
               title={t(isSourceBuild ? 'dashboard.buildAndVersion' : 'dashboard.versionAndUpdate')}
               extra={<>
@@ -772,7 +772,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                     {t('dashboard.desktopRemoteUpdateLocalRequest', { target: localRemoteRequest.target })}
                   </p>
                 )}
-                {remoteDesktopWeb && !capabilities.can_manage_instance && panelModel.status?.kind === 'available' && (
+                {remoteDesktopWeb && !capabilities.can_manage_instance && versionInfo?.has_update === true && (
                   <p className="text-xs text-muted">{t('dashboard.desktopManagedUpdateMemberHint')}</p>
                 )}
                 {upgradeResult?.ok && upgradeResult.activation_notice && (

@@ -3,8 +3,10 @@
 // desktop-managed host), and a standalone Runtime's package check all map onto
 // this one model, so the same computer reads the same on every surface.
 import type { DesktopUpdateState } from '../../lib/desktopShell';
-import type { DesktopRemoteUpdateRequest, UpdateSnapshot as VersionInfo } from './types';
-import { isPrereleaseVersion, normalizeVersion, releasePrecedes } from './versions';
+import type { UpdateSnapshot as VersionInfo } from './types';
+import { isPrereleaseVersion, normalizeVersion, releasePrecedes, remoteRequestSettled } from './versions';
+
+export { remoteRequestSettled };
 
 /** Who installs the update: this computer's desktop app, the desktop app on the host, or the Runtime itself. */
 export type UpdateSubject = 'this-desktop' | 'host-desktop' | 'runtime';
@@ -48,12 +50,6 @@ export type UpdatePanelModel = {
   status: UpdatePanelStatus | null;
 };
 
-const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
-
-export function remoteRequestSettled(request: DesktopRemoteUpdateRequest | null | undefined, current: string): boolean {
-  return Boolean(request && TERMINAL_REMOTE_PHASES.includes(request.phase)
-    && (request.phase !== 'completed' || normalizeVersion(current) === normalizeVersion(request.target)));
-}
 
 /** While running a pre-release with only an older stable on offer, that stable is "latest stable", not an update. */
 function awaitingStable(current: string | null, latest: string | null, hasUpdate: boolean): boolean {

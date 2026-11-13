@@ -1,3 +1,5 @@
+import type { DesktopRemoteUpdateRequest } from './types';
+
 // Version helpers every update surface shares. The desktop app stamps SemVer
 // (`3.1.2-rc.3`) and the Runtime reports PEP 440 (`3.1.2rc3`); surfaces show
 // and compare the PEP 440 form so the same release reads the same everywhere.
@@ -40,4 +42,12 @@ export function releasePrecedes(version: string, other: string): boolean {
 export function releaseNotesUrl(version: string): string {
   const tag = isPrereleaseVersion(version) ? `gh-v${version}` : `v${version}`;
   return `https://github.com/avibe-bot/avibe/releases/tag/${encodeURIComponent(tag)}`;
+}
+
+const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
+
+/** A remote install request has ended: failed, declined, expired, or completed and confirmed by the running version. */
+export function remoteRequestSettled(request: DesktopRemoteUpdateRequest | null | undefined, current: string): boolean {
+  return Boolean(request && TERMINAL_REMOTE_PHASES.includes(request.phase)
+    && (request.phase !== 'completed' || normalizeVersion(current) === normalizeVersion(request.target)));
 }

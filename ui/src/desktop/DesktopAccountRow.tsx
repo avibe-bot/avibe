@@ -5,12 +5,11 @@ import { Button } from '../components/ui/button';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { DESKTOP_OPEN_UPDATES_EVENT, desktopUpdateShellActions } from '../lib/desktopShell';
 import { lazyPage } from '../lib/lazyPage';
-import { modelFromDesktopState } from '../components/update/updatePanelModel';
 import { useDesktopClientProjection, usePresentDesktopClient } from './useDesktopClient';
 
 
 // Its own chunk: the first screen draws only the badge (scripts/check-first-load-budget.mjs).
-const UpdatePanel = lazyPage(() => import('../components/update/UpdatePanel').then((module) => module.UpdatePanel));
+const UpdatePanel = lazyPage(() => import('../components/update/UpdatePanel').then((module) => module.UpdatePanelFor));
 
 /** Nonsecret footer: account actions present native-owned UI. This computer's update acts over the
  *  desktop app's IPC only on a page it serves; otherwise it opens the trusted update view. */
@@ -85,7 +84,7 @@ export function DesktopAccountRow() {
       {/* The same panel as the version popover (ui/design: update/panel), acting on this computer's desktop app. */}
       <PopoverContent data-update-menu side="top" align="start" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0">
         <Suspense fallback={null}><UpdatePanel
-          model={modelFromDesktopState(state.desktop.update, { current: state.desktop.version })}
+          build={({ modelFromDesktopState }) => modelFromDesktopState(state.desktop.update, { current: state.desktop.version })}
           actions={{
             check: { run: () => void updater?.check(), disabled: !updater || ['checking', 'downloading', 'installing'].includes(state.desktop.update.phase) },
             ...(update && updater && latest ? { update: { run: () => void updater.install(latest) } } : {}),
