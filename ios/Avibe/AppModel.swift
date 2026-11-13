@@ -459,6 +459,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The WebView the direct transport's rendezvous request runs in: the
+    /// primary WebView of the runtime the path controller selected for the
+    /// transport, and only while all of this holds: `selection` is the
+    /// controller's current target, the account's data store is the
+    /// target's, the target's runtime is the account's current one, and it
+    /// is the runtime shown (or covered by Account). Otherwise `nil`, which
+    /// the transport takes as a page that is not ready yet. Always `nil`
+    /// without a transport.
+    func directRendezvousWebView(for selection: DirectIrohSelection) -> WKWebView? {
+        guard
+            let target = directPathController?.selectedTarget,
+            DirectIrohSelection(target) == selection,
+            target.storeIdentifier == websiteDataStore.identifier,
+            route.runtime == target.runtime,
+            sessionCoordinator.isCurrentRuntime(target.runtime),
+            let runtimeController
+        else {
+            return nil
+        }
+        return runtimeController.livePrimaryWebView
+    }
+
     /// Whether the shell's own reload of `runtime` (Retry) may be offered
     /// now. Synchronous and without side effects, for the view: only when
     /// the host is on WebKit's normal path or its route points at a serving

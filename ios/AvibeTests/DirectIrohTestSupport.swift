@@ -573,6 +573,7 @@ enum DirectIrohFixtures {
         generation: String = "boot:1",
         client: DirectEndpointID,
         instanceID: String = DirectIrohFixtures.instanceID,
+        hostname: String = DirectIrohFixtures.host,
         endpoint: DirectEndpointID = DirectIrohFixtures.instanceEndpoint,
         addresses: [[String: String]] = [
             ["kind": "lan", "address": "192.168.1.20:51234"],
@@ -592,7 +593,7 @@ enum DirectIrohFixtures {
             "version": 1,
             "status": "ready",
             "instance_id": instanceID,
-            "hostname": host,
+            "hostname": hostname,
             "generation": generation,
             "issued_at": 1_800_000_000,
             "expires_at": 1_800_000_300,

@@ -309,6 +309,12 @@ final class DirectPathController {
         }
     }
 
+    /// The target the transport is working for, if any. Read only: the
+    /// controller alone selects and deselects.
+    var selectedTarget: DirectTarget? {
+        target
+    }
+
     private var runtime: MobileRuntimeContext?
     private var target: DirectTarget?
     private var selection = 0

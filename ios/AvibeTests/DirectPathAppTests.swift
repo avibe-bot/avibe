@@ -873,6 +873,236 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    // MARK: The transport's rendezvous WebView
+
+    /// The rendezvous request runs in the primary WebView of the runtime
+    /// the controller selected, and only for the controller's current
+    /// target.
+    @MainActor
+    func testTheRendezvousWebViewIsTheSelectedRuntimesPrimaryAndNothingElse() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        let target = try XCTUnwrap(transport.selections.last)
+        let selection = DirectIrohSelection(target)
+        XCTAssertEqual(selection.number, target.selection)
+        XCTAssertEqual(selection.instanceID, "instance-1")
+        XCTAssertEqual(selection.host, "instance-one.example")
+        XCTAssertEqual(selection.storeIdentifier, app.websiteDataStore.identifier)
+
+        // Selected, but the runtime's WebView is not made yet.
+        XCTAssertNil(app.directRendezvousWebView(for: selection))
+
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        let page = try RuntimePage(controller: controller)
+        let primary = try XCTUnwrap(controller.livePrimaryWebView)
+        XCTAssertTrue(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first === primary
+        )
+        XCTAssertTrue(app.directRendezvousWebView(for: selection) === primary)
+
+        // A selection that differs from the target in any field is refused.
+        let others = [
+            DirectIrohSelection(
+                number: selection.number + 1,
+                instanceID: selection.instanceID,
+                host: selection.host,
+                storeIdentifier: selection.storeIdentifier
+            ),
+            DirectIrohSelection(
+                number: selection.number,
+                instanceID: "instance-2",
+                host: selection.host,
+                storeIdentifier: selection.storeIdentifier
+            ),
+            DirectIrohSelection(
+                number: selection.number,
+                instanceID: selection.instanceID,
+                host: "instance-two.example",
+                storeIdentifier: selection.storeIdentifier
+            ),
+            DirectIrohSelection(
+                number: selection.number,
+                instanceID: selection.instanceID,
+                host: selection.host,
+                storeIdentifier: UUID()
+            ),
+        ]
+        for other in others {
+            XCTAssertNil(app.directRendezvousWebView(for: other), "\(other)")
+        }
+
+        // Covered by Account, the runtime keeps its document and its WebView.
+        app.showAccount()
+        XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+        XCTAssertTrue(app.directRendezvousWebView(for: selection) === primary)
+        XCTAssertTrue(app.returnToRuntime())
+        XCTAssertTrue(app.directRendezvousWebView(for: selection) === primary)
+
+        // Another instance: the first target is over, its WebView is
+        // released, and the second runtime has no WebView yet.
+        page.close()
+        _ = try await select("instance-2", in: app)
+        let second = DirectIrohSelection(try XCTUnwrap(transport.selections.last))
+        XCTAssertNotEqual(second, selection)
+        XCTAssertNil(controller.livePrimaryWebView)
+        XCTAssertNil(app.directRendezvousWebView(for: selection))
+        XCTAssertNil(app.directRendezvousWebView(for: second))
+
+        // The instance picker ends the selection.
+        app.showInstancePicker()
+        XCTAssertNil(app.directRendezvousWebView(for: second))
+    }
+
+    /// Without a transport there is no target, so no WebView is handed
+    /// out, and a source bound to the App asks nothing.
+    @MainActor
+    func testWithoutATransportNoRendezvousWebViewIsHandedOut() async throws {
+        let app = try await makeApp(directTransport: nil)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        guard case .browser(let runtime) = app.route else {
+            return XCTFail("The runtime did not open at once.")
+        }
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        let page = try RuntimePage(controller: controller)
+        defer { page.close() }
+        XCTAssertNotNil(controller.livePrimaryWebView)
+
+        let unbound = DirectRendezvousWebViewSource()
+        let bound = DirectRendezvousWebViewSource()
+        bound.appModel = app
+        let client = try XCTUnwrap(DirectEndpointID(bytes: Data(repeating: 0xAB, count: 32)))
+        for number in 0..<4 {
+            let selection = DirectIrohSelection(
+                number: number,
+                instanceID: "instance-1",
+                host: "instance-one.example",
+                storeIdentifier: app.websiteDataStore.identifier
+            )
+            XCTAssertNil(app.directRendezvousWebView(for: selection))
+            for source in [unbound, bound] {
+                do {
+                    _ = try await source.fetch(selection, client)
+                    XCTFail("A rendezvous request was made.")
+                } catch {
+                    XCTAssertEqual(error as? DirectRendezvousFetchError, .pageNotReady)
+                }
+            }
+        }
+    }
+
+    /// The iroh transport, over a stand-in for the binding, as the App's
+    /// transport: the controller's target reaches it as its selection, its
+    /// rendezvous request gets the runtime's primary WebView, its report
+    /// reaches the page, a stream and a failed candidate pass through the
+    /// seam, and signing out closes its connection.
+    @MainActor
+    func testTheIrohTransportBehindTheSeamWorksForTheControllersTarget() async throws {
+        let log = DirectIrohEventLog()
+        let engine = DirectIrohFakeEngine(log: log)
+        let scheduler = DirectIrohManualScheduler()
+        let source = DirectRendezvousWebViewSource()
+        let asked = RendezvousRequests()
+        let transport = DirectIrohTransport(
+            engine: engine,
+            fetchRendezvous: { selection, clientEndpointID in
+                let webView = source.webView(for: selection)
+                asked.record(selection, webView: webView)
+                guard webView != nil else {
+                    throw DirectRendezvousFetchError.pageNotReady
+                }
+                return DirectIrohFixtures.ready(
+                    generation: "g1",
+                    client: clientEndpointID,
+                    instanceID: selection.instanceID,
+                    hostname: selection.host
+                )
+            },
+            network: DirectIrohFakeNetwork(),
+            scheduler: scheduler,
+            timing: Self.patientIrohTiming,
+            isInBackground: false
+        )
+        let app = try await makeApp(directTransport: transport)
+        source.appModel = app
+        let connection = DirectIrohFakeConnection(
+            log: log,
+            remote: DirectIrohFixtures.instanceEndpoint,
+            answers: [
+                DirectIrohFakeConnection.established,
+                Data("hello".utf8),
+                DirectIrohFakeConnection.established,
+            ]
+        )
+        engine.prepare().connection.resolve(connection)
+
+        // The runtime's WebView is not made yet: the request is refused
+        // before anything is bound, and asked again soon.
+        let runtime = try await select("instance-1", in: app)
+        try await eventually { asked.requests.count == 1 }
+        let selection = try XCTUnwrap(asked.requests.first?.selection)
+        XCTAssertEqual(selection.instanceID, "instance-1")
+        XCTAssertEqual(selection.host, "instance-one.example")
+        XCTAssertEqual(selection.storeIdentifier, app.websiteDataStore.identifier)
+        XCTAssertNil(asked.requests.first?.webView)
+        XCTAssertEqual(log.all, ["key"])
+        XCTAssertEqual(scheduler.pending, [Self.patientIrohTiming.pageRetrySeconds])
+
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        let page = try RuntimePage(controller: controller)
+        try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+        let primary = try XCTUnwrap(controller.livePrimaryWebView)
+
+        // Asked again, the request gets the primary WebView; the path comes
+        // up and the page is told.
+        XCTAssertTrue(scheduler.fire(Self.patientIrohTiming.pageRetrySeconds))
+        try await eventually {
+            try await page.changes()
+                == #"[{"closure":0,"preferred":"direct","sequence":1}]"#
+        }
+        XCTAssertEqual(asked.requests.count, 2)
+        XCTAssertEqual(asked.requests.last?.selection, selection)
+        XCTAssertEqual(asked.requests.last?.webView, ObjectIdentifier(primary))
+        XCTAssertEqual(connection.streams.count, 1)
+
+        // A stream through the seam, for the controller's target.
+        let target = DirectTarget(
+            selection: selection.number,
+            runtime: runtime,
+            storeIdentifier: app.websiteDataStore.identifier,
+            authority: try XCTUnwrap(DirectAuthority(instanceURL: runtime.instance.url))
+        )
+        XCTAssertEqual(DirectIrohSelection(target), selection)
+        let tag = DirectStreamTag(target: target, rendezvousGeneration: "g1", pathGeneration: 1)
+        let seam: any DirectTransporting = transport
+        let stream = try await seam.openStream(for: tag)
+        XCTAssertTrue(stream is DirectIrohByteStream)
+        try await stream.write(Data("ping".utf8))
+        let read = try await stream.read(maxLength: 1_024)
+        XCTAssertEqual(read, Data("hello".utf8))
+        XCTAssertEqual(connection.streams.count, 2)
+        XCTAssertEqual(connection.streams.last?.send.written, Data("ping".utf8))
+        stream.cancel()
+
+        // A failed candidate is probed; the path answers and stays.
+        seam.pathDidFail(for: tag)
+        try await eventually { connection.streams.count == 3 }
+        try await Task.sleep(for: .milliseconds(200))
+        let changes = try await page.changes()
+        XCTAssertEqual(changes, #"[{"closure":0,"preferred":"direct","sequence":1}]"#)
+        page.close()
+
+        // Signing out ends the selection: the connection closes, and no
+        // WebView is handed out for it.
+        _ = try await app.mobileSessionCoordinator.logout()
+        trackStore(of: app)
+        try await eventually { log.count(of: "connection.close") == 1 }
+        XCTAssertNil(source.webView(for: selection))
+    }
+
     // MARK: The bridge
 
     @MainActor
@@ -1211,6 +1441,18 @@ final class DirectPathAppTests: XCTestCase {
         return answer
     }
 
+    /// Bounds no test of the iroh transport should reach, so that a slow
+    /// simulator does not turn a stand-in that answers at once into a
+    /// timeout.
+    private static let patientIrohTiming: DirectIrohTiming = {
+        var timing = DirectIrohTiming()
+        timing.fetchSeconds = 120
+        timing.bindSeconds = 120
+        timing.dialSeconds = 120
+        timing.probeSeconds = 120
+        return timing
+    }()
+
     /// The isolated preferences of the last App `makeApp` built.
     private var appDefaults: UserDefaults?
 
@@ -1502,6 +1744,22 @@ private struct PushHold: Sendable {
             headersSentEvent: inFlight,
             bodyRelease: release
         )
+    }
+}
+
+/// The rendezvous requests a stand-in fetch was asked for, with the WebView
+/// it was given for each.
+@MainActor
+private final class RendezvousRequests {
+    struct Request {
+        let selection: DirectIrohSelection
+        let webView: ObjectIdentifier?
+    }
+
+    private(set) var requests: [Request] = []
+
+    func record(_ selection: DirectIrohSelection, webView: WKWebView?) {
+        requests.append(Request(selection: selection, webView: webView.map(ObjectIdentifier.init)))
     }
 }
 

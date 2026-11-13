@@ -1,6 +1,7 @@
 import Foundation
 import os
 import UIKit
+import WebKit
 
 // The direct transport over iroh (rows A1 and A2 of
 // docs/plans/remote-direct-phase1.md; docs/plans/remote-direct-ios.md
@@ -1239,5 +1240,106 @@ final class DirectIrohTransport {
         pageRetries = 0
         startNetworkWatch()
         startFetch()
+    }
+}
+
+// MARK: - The App's seam
+
+// What joins this transport to the local proxy's seam
+// (`DirectTransport.swift`). The transport keeps its own value types; this
+// is the whole mapping. Nothing in the App creates the transport yet.
+
+extension DirectIrohSelection {
+    /// The selection for a target the path controller issued. The
+    /// controller issues a new `selection` number for every target, so two
+    /// equal selections come from the same target.
+    init(_ target: DirectTarget) {
+        self.init(
+            number: target.selection,
+            instanceID: target.runtime.instance.id,
+            host: target.authority.host,
+            storeIdentifier: target.storeIdentifier
+        )
+    }
+}
+
+extension DirectIrohStreamTag {
+    init(_ tag: DirectStreamTag) {
+        self.init(
+            selection: DirectIrohSelection(tag.target),
+            rendezvousGeneration: tag.rendezvousGeneration,
+            pathGeneration: tag.pathGeneration
+        )
+    }
+}
+
+extension DirectPathReport {
+    init(_ report: DirectIrohReport) {
+        switch report {
+        case .usable(let generation):
+            self = .usable(generation: generation)
+        case .verifying:
+            self = .verifying
+        case .lost:
+            self = .lost
+        }
+    }
+}
+
+extension DirectIrohByteStream: DirectByteStream {}
+
+extension DirectIrohTransport: DirectTransporting {
+    func select(
+        _ target: DirectTarget,
+        report: @escaping @MainActor (DirectPathReport) -> Void
+    ) {
+        select(DirectIrohSelection(target)) { (irohReport: DirectIrohReport) in
+            report(DirectPathReport(irohReport))
+        }
+    }
+
+    func pathDidFail(for tag: DirectStreamTag) {
+        pathDidFail(for: DirectIrohStreamTag(tag))
+    }
+
+    nonisolated func openStream(for tag: DirectStreamTag) async throws -> any DirectByteStream {
+        let stream: DirectIrohByteStream = try await openStream(for: DirectIrohStreamTag(tag))
+        return stream
+    }
+}
+
+/// Where the transport's rendezvous request runs: the selected runtime's
+/// primary WebView, as `AppModel.directRendezvousWebView(for:)` hands it
+/// out, and nothing else.
+///
+/// The transport is made before the `AppModel`, which takes it at init, so
+/// this link is bound once both exist. While it is unbound, and once the
+/// model is gone, every request is `pageNotReady`: nothing is asked of the
+/// network.
+@MainActor
+final class DirectRendezvousWebViewSource {
+    weak var appModel: AppModel?
+
+    init() {}
+
+    func webView(for selection: DirectIrohSelection) -> WKWebView? {
+        appModel?.directRendezvousWebView(for: selection)
+    }
+
+    /// The transport's `fetchRendezvous`.
+    var fetch: DirectIrohRendezvousFetch {
+        { [weak self] selection, clientEndpointID in
+            guard
+                let webView = self?.webView(for: selection),
+                let origin = WebOrigin(scheme: "https", host: selection.host, port: nil)
+            else {
+                throw DirectRendezvousFetchError.pageNotReady
+            }
+            return try await DirectRendezvousFetcher.fetch(
+                in: webView,
+                origin: origin,
+                clientEndpointID: clientEndpointID
+            )
+        }
     }
 }
