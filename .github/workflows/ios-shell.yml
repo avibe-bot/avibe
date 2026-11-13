@@ -94,7 +94,8 @@ jobs:
           ios/scripts/verify_iroh_app_product.sh \
             ios/Avibe/IrohLib \
             "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe" \
-            "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib"
+            "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib" \
+            YES
 
       - name: Select an available iPhone simulator
         run: |

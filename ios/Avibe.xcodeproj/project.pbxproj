@@ -609,7 +609,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"$SRCROOT/scripts/verify_iroh_app_product.sh\" \"$SRCROOT/Avibe/IrohLib\" \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\" \"$IROH_DEBUG_DYLIB_PATH\"\n";
+			shellScript = "\"$SRCROOT/scripts/verify_iroh_app_product.sh\" \"$SRCROOT/Avibe/IrohLib\" \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\" \"$IROH_DEBUG_DYLIB_PATH\" \"$ENABLE_DEBUG_DYLIB\"\n";
 			showEnvVarsInLog = 0;
 		};
 

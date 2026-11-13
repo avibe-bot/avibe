@@ -229,6 +229,8 @@ def test_product_verifier_phase_propagates_pending_pin_failure(tmp_path):
             str(scripts / "verify_iroh_app_product.sh"),
             str(tmp_path / "staging"),
             str(tmp_path / "Avibe"),
+            "",
+            "NO",
         ],
         capture_output=True,
         text=True,
@@ -242,20 +244,54 @@ def test_product_verifier_phase_propagates_pending_pin_failure(tmp_path):
     fake_python = fake_bin / "python3"
     fake_python.write_text("#!/bin/sh\nexit 0\n")
     fake_python.chmod(0o755)
+    fake_env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
     result = subprocess.run(
         [
             str(product_script),
             str(tmp_path / "staging"),
             str(tmp_path / "Avibe"),
             str(tmp_path / "missing-debug.dylib"),
+            "YES",
         ],
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env=fake_env,
         check=False,
     )
     assert result.returncode != 0
     assert "Debug dylib does not exist" in result.stderr
+
+    result = subprocess.run(
+        [
+            str(product_script),
+            str(tmp_path / "staging"),
+            str(tmp_path / "Avibe"),
+            "",
+            "YES",
+        ],
+        capture_output=True,
+        text=True,
+        env=fake_env,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "has no configured Debug dylib input" in result.stderr
+
+    result = subprocess.run(
+        [
+            str(product_script),
+            str(tmp_path / "staging"),
+            str(tmp_path / "Avibe"),
+            str(tmp_path / "unexpected-debug.dylib"),
+            "NO",
+        ],
+        capture_output=True,
+        text=True,
+        env=fake_env,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "incompatible Debug dylib input" in result.stderr
 
     project = (Path(__file__).parents[1] / "ios/Avibe.xcodeproj/project.pbxproj").read_text()
     assert "name = IrohLib;" in project
@@ -287,6 +323,7 @@ def test_product_verifier_phase_propagates_pending_pin_failure(tmp_path):
     assert "verify_iroh_app_product.sh" in final_phase
     assert "IROH_DEBUG_DYLIB_INPUT" in final_phase
     assert "IROH_DEBUG_DYLIB_PATH" in final_phase
+    assert "$ENABLE_DEBUG_DYLIB" in final_phase
 
     notification = project.split("500000000000000000000003 /* NotificationService */ = {", 1)[1].split(
         "500000000000000000000004 /* IrohLib */ = {", 1

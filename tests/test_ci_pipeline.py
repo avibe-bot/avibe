@@ -597,7 +597,8 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     assert lines[1] == "ios/scripts/verify_iroh_app_product.sh \\"
     assert lines[2] == "  ios/Avibe/IrohLib \\"
     assert lines[3].startswith('  "') and lines[3].endswith('Avibe.app/Avibe" \\')
-    assert lines[4].endswith('Avibe.app/Avibe.debug.dylib"')
+    assert lines[4].endswith('Avibe.app/Avibe.debug.dylib" \\')
+    assert lines[5] == "  YES"
 
     test_step, = [
         step for step in steps
