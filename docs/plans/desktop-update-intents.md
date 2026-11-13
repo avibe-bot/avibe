@@ -44,7 +44,11 @@ contract.
   legacy raw check record enum. Expired/interrupted work cannot leave an eternal
   spinner.
 - Native IPC/account projection gets `hostActions` and `checkedAt` from the same
-  native owner and recorded check, not the selected remote Runtime.
+  native owner, not the selected remote Runtime. `hostActions` describes local
+  IPC methods, available before a first check; `checkedAt` is null until a
+  usable record exists. Native adapters invoke those methods directly. Runtime
+  HTTP-to-native capabilities come from its separate persisted status snapshot
+  and are absent until the native owner has published a usable record.
 - `POST /api/update/check` and
   `POST /api/update/prereleases {"enabled": boolean}` are instance-management
   actions under existing origin, CSRF and authorization checks. Desktop-managed
@@ -109,12 +113,13 @@ editor/viewer or bypasses origin/CSRF protection.
 - 331 focused Python tests pass (control/status/request, HTTP actions, version
   identity, manager authorization); 106 existing updater/platform tests pass,
   with four pre-existing platform/fixture skips.
-- Rust: 11 control/status tests, 36 native updater tests, 12 signed updater
+- Rust: 11 control/status tests, 37 native updater tests, 12 signed updater
   fixture tests pass; changed crates pass Clippy with warnings denied.
 - A credential-free local Incus `worktree` instance exercised the running HTTP
   server: fresh source-owner check, preview on/off, unchanged unrelated config,
-  restored original channel, and CSRF/origin rejection. Initial evidence is on
-  the uncommitted source; repeat against the submitted head before Merge-ready.
+  restored original channel, and CSRF/origin rejection. The same exercise also
+  passed on the initial submitted commit with a clean deployed source receipt;
+  repeat after any production-code change before Merge-ready.
 - Disposable macOS/Windows CI and exact-head Codex review are still gates, not
   claimed results. No signed application replacement has been exercised in this
   step; that belongs to the separate install-policy acceptance.

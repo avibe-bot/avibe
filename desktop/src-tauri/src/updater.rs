@@ -668,6 +668,8 @@ fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
         latest: state.latest.clone(),
         channel: state.channel,
         prereleases: state.channel == Channel::Test,
+        // These are local IPC methods, usable before the first check. Runtime
+        // HTTP capabilities are separately gated by the persisted status record.
         host_actions: vec!["check".into(), "prereleases".into()],
         checked_at: updater.status.read().ok().flatten().map(|record| record.checked_at),
         skipped_version: skipped_version(&updater),

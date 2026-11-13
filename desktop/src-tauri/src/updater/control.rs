@@ -238,6 +238,25 @@ mod tests {
     }
 
     #[test]
+    fn restart_keeps_a_tombstone_until_a_new_control_identity_arrives() {
+        let request = request();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let mut state = state();
+        state.control_request = Some(ControlStatus::new(&request, ControlPhase::Checking, None, now).interrupted(now));
+        let busy = AtomicBool::new(false);
+        assert_eq!(
+            state.control_request.as_ref().unwrap().error_code.as_deref(),
+            Some("shell_interrupted")
+        );
+        assert_eq!(claim(&mut state, &busy, &request, now), Claim::Ignore);
+        assert!(!busy.load(Ordering::SeqCst));
+        let mut new_request = request.clone();
+        new_request.request_id = "00000000-0000-4000-8000-000000000002".into();
+        assert_eq!(claim(&mut state, &busy, &new_request, now), Claim::Start);
+        assert!(busy.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn stale_local_settlement_cannot_release_a_control_owner() {
         let request = request();
         let mut state = state();
