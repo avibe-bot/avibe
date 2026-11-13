@@ -6517,6 +6517,17 @@
       "title": "Recent activity",
       "empty": "No activity yet."
     },
+    "askOff": {
+      "waiting": "Waiting for your Passkey…",
+      "offHint": "Turning this off needs your Passkey.",
+      "popupBlocked": "Your browser blocked the confirmation window. Allow pop-ups and turn it off again.",
+      "setupRequired": "Turning this off needs a Passkey. You set one up when you add a protected key; after that you can turn it off here.",
+      "factorUnavailable": "This Avibe’s Passkey can’t confirm this right now, so it can’t be turned off here yet.",
+      "expired": "The confirmation timed out, so nothing changed. Turn it off again.",
+      "clockSkew": "This device’s clock is off, so nothing changed. Fix the time and try again.",
+      "changed": "This key changed elsewhere just now, so nothing changed. Check the latest state and try again.",
+      "failed": "It couldn’t be turned off; signing still asks you first. Try again."
+    },
     "hd": {
       "chainMnemonic": "Seed phrase wallet",
       "chainMnemonicHint": "One phrase covers EVM, Bitcoin and Solana, with as many accounts as you add.",

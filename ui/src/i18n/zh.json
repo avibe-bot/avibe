@@ -6517,6 +6517,17 @@
       "title": "最近活动",
       "empty": "暂无活动。"
     },
+    "askOff": {
+      "waiting": "等待 Passkey 确认…",
+      "offHint": "关闭需要用 Passkey 确认。",
+      "popupBlocked": "浏览器拦截了确认窗口。请允许弹出窗口，再关一次。",
+      "setupRequired": "关闭需要 Passkey。添加一个保护档密钥时会设置 Passkey，之后就能在这里关闭。",
+      "factorUnavailable": "这台 Avibe 的 Passkey 现在不能用来确认这个操作，暂时无法在这里关闭。",
+      "expired": "确认超时了，没有关闭。再关一次即可。",
+      "clockSkew": "这台设备的时间不准，没有关闭。校准时间后再试。",
+      "changed": "这把密钥刚在别处改过，没有关闭。看一下最新状态再试。",
+      "failed": "没能关闭，签名前仍会问你。再试一次。"
+    },
     "hd": {
       "chainMnemonic": "助记词钱包",
       "chainMnemonicHint": "一组助记词覆盖 EVM、Bitcoin、Solana，可在里面添加多个账户。",
