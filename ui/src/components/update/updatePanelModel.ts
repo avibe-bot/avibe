@@ -185,7 +185,11 @@ export function modelFromDesktopRelay(
     : controlSettled && (control.phase === 'failed' || control.phase === 'expired')
       ? control.action === 'check' ? { kind: 'check-failed' } : { kind: 'update-failed', reason: 'setting' }
       : null;
-  const status: UpdatePanelStatus = (superseded && !view.requesting && !view.error ? null : remoteStatus(info, view))
+  // The newer of an install request and a check or setting request speaks first.
+  const controlFirst = Boolean(controlStatus && control
+    && (!request || Date.parse(control.updated_at) >= Date.parse(request.updated_at)));
+  const status: UpdatePanelStatus = (controlFirst ? controlStatus : null)
+    ?? (superseded && !view.requesting && !view.error ? null : remoteStatus(info, view))
     ?? controlStatus
     ?? (hasUpdate && latest ? { kind: 'available', version: latest }
       : info.phase === 'error' ? { kind: 'check-failed' }

@@ -799,6 +799,34 @@ describe('one panel on a desktop-managed host', () => {
     expect(api.mutateConfig).not.toHaveBeenCalled();
   });
 
+  it('retries a check that never reached the host as a check, never as an install', async () => {
+    api.getVersion.mockResolvedValue(hostWith({ phase: 'available', latest: '3.2.7', has_update: true }));
+    api.requestUpdateControl.mockRejectedValueOnce(new Error('offline'));
+    await openBrowserPopup('v3.2.6');
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    expect(await screen.findByText(i18n.t('update.status.checkFailed'))).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.retry') }));
+    await vi.waitFor(() => expect(api.requestUpdateControl).toHaveBeenCalledTimes(2));
+    expect(api.requestUpdateControl).toHaveBeenLastCalledWith('check', undefined);
+    expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
+  });
+
+  it('leaves an unanswered check retryable once its wait runs out', async () => {
+    api.getVersion.mockResolvedValue(hostWith());
+    vi.useFakeTimers();
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    fireEvent.click(screen.getByTitle('v3.2.6'));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    api.getVersion.mockRejectedValue(new Error('offline'));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getByText(i18n.t('update.status.checking'))).toBeTruthy();
+    await act(() => vi.advanceTimersByTimeAsync(125_000));
+    expect(screen.getByText(i18n.t('update.status.checkFailed'))).toBeTruthy();
+    expect((screen.getByRole('button', { name: i18n.t('update.action.retry') }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('names a desktop app too old to take these, and still offers its install', async () => {
     api.getVersion.mockResolvedValue(hostWith({ phase: 'available', latest: '3.2.7', has_update: true, host_actions: undefined, auto_update: null }));
     await openBrowserPopup('v3.2.6');

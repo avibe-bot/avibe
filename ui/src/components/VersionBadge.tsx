@@ -161,19 +161,22 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   // A check or setting change asked of a desktop-managed host: its receipt arrives in the version snapshot.
   const [controlRequestId, setControlRequestId] = React.useState<string | null>(null);
+  const failControl = (action: 'check' | 'prereleases' | 'auto_update', enabled: boolean | undefined, code: string) => {
+    setVersionInfo((previous) => previous && {
+      ...previous,
+      control_request: {
+        request_id: `local-${Date.now()}`, action, enabled: enabled ?? null, phase: 'failed',
+        error_code: code, updated_at: new Date().toISOString(),
+      },
+    });
+  };
   const sendControl = async (action: 'check' | 'prereleases' | 'auto_update', enabled?: boolean) => {
     setRemoteRequestError(null);
     setUpgradeResult(null);
     try {
       const result = await api.requestUpdateControl(action, enabled);
       if (!result.ok) {
-        setVersionInfo((previous) => previous && {
-          ...previous,
-          control_request: {
-            request_id: 'rejected', action, enabled: enabled ?? null, phase: 'failed',
-            error_code: result.error, updated_at: new Date().toISOString(),
-          },
-        });
+        failControl(action, enabled, result.error);
         return;
       }
       if (result.snapshot) {
@@ -194,8 +197,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         setControlRequestId(id);
       }
     } catch (e) {
+      // A check or a setting that never reached the host fails as itself: retrying it must
+      // never become an install request.
       console.error('Failed to send the update request:', e);
-      setRemoteRequestError('request_failed');
+      failControl(action, enabled, 'request_failed');
     }
   };
   React.useEffect(() => {
@@ -218,6 +223,15 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       }
       if (stopped) return;
       if (Date.now() >= deadline) {
+        // Unanswered in time: say so, and leave the action free to retry.
+        setVersionInfo((previous) => previous && previous.control_request?.request_id === controlRequestId
+          && previous.control_request.phase === 'checking'
+          ? {
+            ...previous,
+            phase: previous.phase === 'checking' ? null : previous.phase,
+            control_request: { ...previous.control_request, phase: 'expired', error_code: 'timeout', updated_at: new Date().toISOString() },
+          }
+          : previous);
         setControlRequestId(null);
         return;
       }
