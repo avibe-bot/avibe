@@ -32,6 +32,16 @@
 		100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */; };
 		1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C0 /* NativePushCoordinatorTests.swift */; };
 		100000000000000000000015 /* MobilePasskey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
+		100000000000000000000120 /* DirectIrohByteStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000120 /* DirectIrohByteStream.swift */; };
+		100000000000000000000121 /* DirectIrohEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000121 /* DirectIrohEngine.swift */; };
+		100000000000000000000122 /* DirectIrohTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000122 /* DirectIrohTransport.swift */; };
+		100000000000000000000123 /* DirectRendezvous.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000123 /* DirectRendezvous.swift */; };
+		100000000000000000000124 /* DirectRendezvousFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000124 /* DirectRendezvousFetcher.swift */; };
+		100000000000000000000125 /* DirectIrohByteStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000125 /* DirectIrohByteStreamTests.swift */; };
+		100000000000000000000126 /* DirectIrohTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000126 /* DirectIrohTestSupport.swift */; };
+		100000000000000000000127 /* DirectIrohTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000127 /* DirectIrohTransportTests.swift */; };
+		100000000000000000000128 /* DirectRendezvousFetcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000128 /* DirectRendezvousFetcherTests.swift */; };
+		100000000000000000000129 /* DirectRendezvousTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000129 /* DirectRendezvousTests.swift */; };
 		1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A1 /* FormAccessoryBar.swift */; };
 		1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A2 /* NativePushCoordinator.swift */; };
 		1000000000000000000000A3 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
@@ -96,6 +106,16 @@
 		200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransportIntegrationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000C0 /* NativePushCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinatorTests.swift; sourceTree = "<group>"; };
 		200000000000000000000018 /* MobilePasskey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePasskey.swift; sourceTree = "<group>"; };
+		200000000000000000000120 /* DirectIrohByteStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohByteStream.swift; sourceTree = "<group>"; };
+		200000000000000000000121 /* DirectIrohEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohEngine.swift; sourceTree = "<group>"; };
+		200000000000000000000122 /* DirectIrohTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohTransport.swift; sourceTree = "<group>"; };
+		200000000000000000000123 /* DirectRendezvous.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectRendezvous.swift; sourceTree = "<group>"; };
+		200000000000000000000124 /* DirectRendezvousFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectRendezvousFetcher.swift; sourceTree = "<group>"; };
+		200000000000000000000125 /* DirectIrohByteStreamTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohByteStreamTests.swift; sourceTree = "<group>"; };
+		200000000000000000000126 /* DirectIrohTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohTestSupport.swift; sourceTree = "<group>"; };
+		200000000000000000000127 /* DirectIrohTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohTransportTests.swift; sourceTree = "<group>"; };
+		200000000000000000000128 /* DirectRendezvousFetcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectRendezvousFetcherTests.swift; sourceTree = "<group>"; };
+		200000000000000000000129 /* DirectRendezvousTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectRendezvousTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000A1 /* FormAccessoryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormAccessoryBar.swift; sourceTree = "<group>"; };
 		2000000000000000000000A2 /* NativePushCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinator.swift; sourceTree = "<group>"; };
 		2000000000000000000000A3 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCrypto.swift; sourceTree = "<group>"; };
@@ -171,6 +191,11 @@
 				200000000000000000000005 /* WebOrigin.swift */,
 				200000000000000000000006 /* WebViewContainer.swift */,
 				200000000000000000000007 /* WebViewController.swift */,
+				200000000000000000000120 /* DirectIrohByteStream.swift */,
+				200000000000000000000121 /* DirectIrohEngine.swift */,
+				200000000000000000000122 /* DirectIrohTransport.swift */,
+				200000000000000000000123 /* DirectRendezvous.swift */,
+				200000000000000000000124 /* DirectRendezvousFetcher.swift */,
 				700000000000000000000003 /* Resources */,
 			);
 			path = Avibe;
@@ -199,6 +224,11 @@
 				2000000000000000000000E1 /* WebKitReadiness.swift */,
 				2000000000000000000000C0 /* NativePushCoordinatorTests.swift */,
 				2000000000000000000000B3 /* PushNotificationTests.swift */,
+				200000000000000000000125 /* DirectIrohByteStreamTests.swift */,
+				200000000000000000000126 /* DirectIrohTestSupport.swift */,
+				200000000000000000000127 /* DirectIrohTransportTests.swift */,
+				200000000000000000000128 /* DirectRendezvousFetcherTests.swift */,
+				200000000000000000000129 /* DirectRendezvousTests.swift */,
 			);
 			path = AvibeTests;
 			sourceTree = "<group>";
@@ -435,6 +465,11 @@
 				100000000000000000000005 /* WebOrigin.swift in Sources */,
 				100000000000000000000006 /* WebViewContainer.swift in Sources */,
 				100000000000000000000007 /* WebViewController.swift in Sources */,
+				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
+				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
+				100000000000000000000122 /* DirectIrohTransport.swift in Sources */,
+				100000000000000000000123 /* DirectRendezvous.swift in Sources */,
+				100000000000000000000124 /* DirectRendezvousFetcher.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -449,6 +484,11 @@
 				1000000000000000000000E1 /* WebKitReadiness.swift in Sources */,
 				1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */,
 				1000000000000000000000AA /* PushNotificationTests.swift in Sources */,
+				100000000000000000000125 /* DirectIrohByteStreamTests.swift in Sources */,
+				100000000000000000000126 /* DirectIrohTestSupport.swift in Sources */,
+				100000000000000000000127 /* DirectIrohTransportTests.swift in Sources */,
+				100000000000000000000128 /* DirectRendezvousFetcherTests.swift in Sources */,
+				100000000000000000000129 /* DirectRendezvousTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -108,11 +108,11 @@ A ready answer admits `client_endpoint_id` to the transport until `admitted_unti
 
 1. Ask through Cloudflare first. The direct path does not exist until a ready answer arrives. Later refreshes may use either path; both reach the same instance behind the same public certificate.
 2. Make the request from native code, as a same-origin request to the instance on the account's data store, and use only the answer that request returned. Do not accept an answer handed over by page content: Show Pages are same-origin with the Workbench and can reach the native bridge, so an Agent-authored page could supply a forged one.
-3. Accept a ready answer only if `version` is one it supports, `instance_id` and `hostname` match the instance the user selected, and `expires_at` is in the future.
+3. Accept a ready answer only if `version` is one it supports, `instance_id` and `hostname` match the instance the user selected, `client.endpoint_id` is the one it sent, and the answer has not run out. The client measures that on a clock that never runs backwards, without comparing its wall clock with the instance's: the answer lasts `min(expires_at - issued_at, client.admitted_until - issued_at, 300)` seconds from the moment the client sent the request. The instance issued the answer after that moment, so the client's deadline is never later than the instance's own.
 4. Probe only addresses it can check for itself: private IPv4 or unique-local IPv6 for `lan`, global unicast IPv6 for `ipv6`, at most eight per answer. The App holds the user's Local Network grant; an answer must not be able to point it at anything else.
 5. Dial `endpoint.id` with `alpn` at those addresses, using no public or multicast discovery. Reject a peer with any other identity.
 6. Tag every probe and transport decision with the account, instance, and `generation` it belongs to. Drop state tagged with a generation the latest answer no longer carries, and never let a late result for an old account, instance, or generation install a route.
-7. Ask again on expiry, on a network change, and when the direct path fails; fall back to Cloudflare at once in the meantime.
+7. Ask again before the answer runs out, on a network change, and when the direct path fails; fall back to Cloudflare at once in the meantime. Only a newly accepted answer extends the deadline of rule 3: a request that fails, an answer that arrives after its own span, and an answer for another selection extend nothing. Once the deadline has passed, open, dial, and probe nothing under that answer.
 8. Ignore fields and address kinds it does not know.
 9. Never treat the answer, an address in it, or a successful transport handshake as a login or as proof of anything about the user.
 
