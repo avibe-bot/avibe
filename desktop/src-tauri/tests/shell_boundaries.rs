@@ -396,7 +396,7 @@ fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
         "receive_native_deep_link(app, argv.iter().skip(1))",
         "builder.plugin(macos_deep_link::init())",
         "std::env::args_os()",
-        "links.bootstrap_navigation(ready)",
+        "links.bootstrap_navigation_owned(ready, instance_client::presentation_owner(app))",
         "links.workbench_navigation(&origin, &current_url)",
         "links.observe_bootstrap(&status)",
         "PageLoadEvent::Finished",
@@ -484,7 +484,7 @@ fn assert_native_link_consumption_boundary(source: &str) {
         .split("fn workbench_navigation_failure_status")
         .next()
         .unwrap();
-    assert!(cold.find("let Some(window)").unwrap() < cold.find("links.bootstrap_navigation(ready)").unwrap());
+    assert!(cold.find("let Some(window)").unwrap() < cold.find("links.bootstrap_navigation_owned(").unwrap());
     assert!(
         cold.find("window.navigate(navigation.url().clone())").unwrap()
             < cold.find("commit_deep_link_navigation(").unwrap()
@@ -1236,7 +1236,8 @@ fn settings_open_in_the_shown_workbench_and_only_while_one_is_shown() {
     assert!(page_load
         .contains("webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished"));
     assert!(
-        page_load.contains("refresh_native_controls(webview.app_handle(), None);"),
+        page_load.contains("main_document_finished(webview);")
+            && body("main_document_finished").contains("refresh_native_controls(webview.app_handle(), None);"),
         "a finished Workbench load must refresh the native controls"
     );
     let handler = body("open_workbench_settings");

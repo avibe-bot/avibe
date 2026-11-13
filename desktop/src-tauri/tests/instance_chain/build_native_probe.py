@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--shell-consumers", action="store_true")
     parser.add_argument("--shell-fixture", type=Path)
     args = parser.parse_args()
+    assert not any(part.endswith(".app") for part in args.output.resolve().parts), "native fixture must stay outside an application bundle"
     args.output.mkdir(parents=True, exist_ok=False)
     source = args.output / "source"
     source.mkdir()
@@ -175,6 +176,7 @@ def main():
         subprocess.run(command, cwd=source, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
     executable = args.output / "instance_client_probe"
     shutil.copy2(args.target_dir / "debug/examples/instance_client_probe", executable)
+    assert not any(part.endswith(".app") for part in executable.resolve().parts)
     record = {
         "head": args.head, "bundle_sha256": args.bundle_sha256, "command": command,
         "updater_original_sha256": hashlib.sha256(original.encode()).hexdigest(),

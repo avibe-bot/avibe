@@ -442,3 +442,27 @@ fixture adds shared production receive/Finished callbacks and an inert Shell;
 only final OS notification/badge/shortcut effects are intercepted. Installed
 Runtime bootstrap is unavailable and would panic if invoked. All new real-window
 consumers and fresh exact-head review/CI remain pending at this checkpoint.
+
+The first immutable third-round checkpoint passed five actual receive/Finished
+cases (remote, account, lifecycle interruption, newer link, newer explicit
+escape), actual SSE/prompt delivery, and delayed ordinary-output/stop/rebind
+checks. Its automatic-ticket test wrongly assumed ReturnLocal cancels the
+existing automatic updater owner. It reached the installer, which rejected the
+non-application-bundle executable before staging or external commands; no install
+replacement occurred. That failure is retained. The corrected consumer expires
+and reads back the same actual Runtime request before releasing the held inert
+artifact, then requires native Expired and no Installing/Installed. Automatic
+ticket authority and UI TrustedDecision generation are distinct existing owners;
+no updater product code changes. Both builder and runner reject resolved binary
+paths inside an `.app` bundle. The pre-install expiry and repeated different-port
+rebind consumers pass on the same native checkpoint.
+
+Hot link delivery now schedules on the native main thread and holds the existing
+window guard through navigation/commit, so an async completion cannot race a
+newer main-window delivery. The commit also checks the receiving action owner.
+The fixed native suite passed 548 tests with three existing ignored cases,
+including the original boundary assertions updated for the extracted callback.
+The final candidate must run all 28 actual chain consumers (original 20 plus
+8 production-entry cases), from its archived source, before handoff. The cookie
+probe/helper, dependency lock and updater installer bytes are unchanged; their
+independent 4fc cookie evidence remains scoped to that unchanged boundary.

@@ -23,6 +23,9 @@ def main():
     parser.add_argument("--backend-head", required=True)
     parser.add_argument("--updater", action="store_true")
     args, pytest_args = parser.parse_known_args()
+    # Even a failing pre-install assertion must hit the actual installer's
+    # non-bundle rejection before it can stage, unpack or replace an app.
+    assert not any(part.endswith(".app") for part in args.native_probe.resolve().parts), "native fixture must stay outside an application bundle"
     for checkout, head in (
         (args.runtime_checkout, args.runtime_head),
         (args.backend_checkout, args.backend_head),

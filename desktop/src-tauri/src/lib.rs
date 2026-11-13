@@ -2064,6 +2064,13 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
 }
 
 fn apply_pending_deep_link(app: &AppHandle) {
+    // NativeView completion can arrive from an async worker. Serialize its
+    // navigation/consumption with actual receive and Finished event delivery.
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || apply_pending_deep_link_on_main(&handle));
+}
+
+fn apply_pending_deep_link_on_main(app: &AppHandle) {
     if !app.try_state::<Mutex<DeepLinks>>().is_some_and(|links| {
         links
             .lock()
@@ -2074,6 +2081,10 @@ fn apply_pending_deep_link(app: &AppHandle) {
     }
     if !instance_client::foreground_local(app) {
         instance_client::return_local_for_link(app);
+        return;
+    }
+    let _client_navigation = instance_client::bootstrap_navigation(app);
+    if instance_client::enabled(app) && _client_navigation.is_none() {
         return;
     }
     let Some(shell) = app.try_state::<Shell>() else {
@@ -2114,6 +2125,9 @@ fn commit_deep_link_navigation(
 ) {
     let shell = app.state::<Shell>();
     if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+        if !links.pending_for_owner(instance_client::presentation_owner(app)) {
+            return;
+        }
         links.commit_navigation(
             navigation,
             navigation_succeeded,

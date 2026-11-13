@@ -6,6 +6,7 @@ producer handler execute their candidate code. No running Avibe is contacted.
 """
 
 from pathlib import Path
+import http.server
 import json
 import os
 import queue
@@ -313,6 +314,9 @@ def test_production_local_update_post_reaches_connection_while_remote(production
     assert Path(status["data"]).is_relative_to(f["root"])
     assert status["notifications_enabled"] is True
     assert status["mini_window"] is False
+    if f["options"]["automatic"]:
+        f["send"](action="shell_control", operation="notifications", enabled=False)
+        f["wait"]("shell_control")
     session = requests.Session()
     session.trust_env = False
     token = session.get(f["local"] + "/api/csrf-token", timeout=5).json()["csrf_token"]
@@ -331,14 +335,23 @@ def test_production_local_update_post_reaches_connection_while_remote(production
     assert remote["state"]["remoteRequest"]["target"] == f["updater"]["version"]
     if f["options"]["automatic"]:
         assert f["updater"]["requested"].wait(timeout=5)
-        f["send"](action="escape")
-        assert f["wait"]("escaped")["ok"] is True
+        # Automatic preference belongs to the accepted local mailbox ticket,
+        # independently of the viewed instance. Expire that exact ticket at
+        # the real Runtime owner before permitting the held inert download.
+        from vibe.desktop_update_request import expire_desktop_update_request
+        assert expire_desktop_update_request(result["request_id"])
+        expired = json.loads((Path(status["data"]) / "desktop-update-request.json").read_text())
+        assert (expired["request_id"], expired["target"], expired["state"]) == (
+            result["request_id"], f["updater"]["version"], "expired",
+        )
         f["updater"]["release"].set()
-        f["wait"]("update", lambda event: (event["state"].get("remoteRequest") or {}).get("phase") == "failed")
+        f["wait"]("update", lambda event: (event["state"].get("remoteRequest") or {}).get("phase") == "expired")
     else:
         assert not f["updater"]["requested"].is_set()
         assert any(event.get("event") == "sse_update_nudge" for event in f["history"])
     assert not any(update["phase"] in ("installing", "installed") for update in f["updates"])
+    if f["options"]["automatic"]:
+        assert json.loads((f["root"] / "notifications.json").read_text()) == {"enabled": False}
 
 
 def test_production_notification_output_is_fenced_without_retiring_local_control(production_shell_chain, monkeypatch):
@@ -409,14 +422,23 @@ def test_production_notification_output_is_fenced_without_retiring_local_control
     time.sleep(5.2)
     assert sum(event.get("event") == "mailbox_poll" for event in f["history"]) == stopped
     connections = f["runtime"].streams["native_connections"]
-    for _ in range(3):
-        f["send"](action="shell_control", operation="rebind", origin=f["local"])
+    replacement = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=replacement.serve_forever, daemon=True).start()
+    try:
+        origin = f"http://127.0.0.1:{replacement.server_port}"
+        for _ in range(3):
+            f["send"](action="shell_control", operation="rebind", origin=origin)
+            f["wait"]("shell_control")
+        deadline = time.monotonic() + 5
+        while f["runtime"].streams["native_connections"] == connections:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert f["runtime"].streams["native_connections"] == connections + 1
+        f["send"](action="shell_control", operation="stop")
         f["wait"]("shell_control")
-    deadline = time.monotonic() + 5
-    while f["runtime"].streams["native_connections"] == connections:
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
-    assert f["runtime"].streams["native_connections"] == connections + 1
+    finally:
+        replacement.shutdown()
+        replacement.server_close()
     f["send"](action="shell_status")
     assert f["wait"]("shell_status")["notifications_enabled"] is True
 
