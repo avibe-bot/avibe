@@ -1,45 +1,11 @@
-import UIKit
-import WebKit
 import XCTest
 @testable import Avibe
 
-/// A Session's notifications leave Notification Center once it is read in the
-/// App: when its page has shown it and then read its Inbox, and when the
-/// instance has nothing unread.
+/// An instance's Session notifications leave Notification Center once its
+/// Web UI reports nothing unread (`badge.set({count: 0})`).
 final class SessionNotificationTests: XCTestCase {
     private let one = "https://instance-one.example"
     private let two = "https://instance-two.example"
-
-    func testTheShownSessionIsReadFromTheChatPath() throws {
-        func shown(_ string: String) throws -> String? {
-            SessionNotificationThread.sessionID(shownAt: try XCTUnwrap(URL(string: string)))
-        }
-        XCTAssertEqual(
-            try shown("\(one)/chat/ses_123?msg=msg_456&from=notification"),
-            "ses_123"
-        )
-        XCTAssertEqual(try shown("\(one)/chat/ses%20a#top"), "ses a")
-        XCTAssertNil(try shown("\(one)/chat"))
-        XCTAssertNil(try shown("\(one)/chat/"))
-        XCTAssertNil(try shown("\(one)/chat/ses_123/files"))
-        XCTAssertNil(try shown("\(one)/inbox"))
-        XCTAssertNil(try shown("\(one)/projects/chat/ses_123"))
-    }
-
-    @MainActor
-    func testOpeningASessionClearsOnlyItsNotificationsOnThatInstanceAndAccount() async throws {
-        let center = RecordingNotificationCenter(entries: notificationsAcrossInstances())
-        let cleaner = SessionNotificationCleaner(center: center)
-
-        cleaner.clearSession("ses_a", instanceOrigin: one, accountID: "account-1", readAt: Date())
-        try await waitUntil { center.passes == 1 }
-
-        // A result for the same Session delivered after it was on screen
-        // ("one-a-late") is news the read did not cover; a pending request
-        // has not been delivered at all.
-        XCTAssertEqual(center.removedDelivered, ["one-a", "one-a-2"])
-        XCTAssertEqual(center.removedPending, [])
-    }
 
     @MainActor
     func testNothingUnreadClearsEverySessionOfThatInstanceButNotNotices() async throws {
@@ -57,7 +23,7 @@ final class SessionNotificationTests: XCTestCase {
     }
 
     @MainActor
-    func testTheSelectedInstancesPageAndItsZeroBadgeClearItsSessions() async throws {
+    func testTheSelectedInstancesZeroBadgeClearsItsSessions() async throws {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
@@ -113,128 +79,25 @@ final class SessionNotificationTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(200))
         let startupPasses = center.passes
 
-        // No instance is open: a Session page is not the selected one's.
-        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/chat/ses_a")))
+        // No instance is open: its zero is not accepted.
+        XCTAssertFalse(appModel.setBadgeCount(0, origin: originOne))
 
         _ = try appModel.mobileSessionCoordinator.selectInstance(id: "instance-1")
         try await waitUntil {
             appModel.route.runtime?.instance.id == "instance-1"
         }
-        XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
 
-        // A Session covered by a child window (whose page may send the
-        // badge), one left before the page read its Inbox, and another
-        // instance's page, are not read here.
-        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/chat/ses_a")))
-        appModel.primaryLocationDidChange(nil)
+        // A count above zero, and another instance's zero, clear nothing.
         XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
-        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/chat/ses_a")))
-        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/inbox")))
-        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(two)/chat/ses_a")))
-        XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
-
-        // Shown alone, a Session is not yet read: the page may not have
-        // loaded it (offline after a return to the foreground).
-        appModel.primaryLocationDidChange(
-            try XCTUnwrap(URL(string: "\(one)/chat/ses_a?msg=m1&from=notification"))
-        )
+        XCTAssertFalse(appModel.setBadgeCount(0, origin: originTwo))
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(center.passes, startupPasses)
 
-        // The page's next badge, read after showing it, retires that
-        // Session's notifications delivered by then; another instance's
-        // badge does not.
-        XCTAssertFalse(appModel.setBadgeCount(2, origin: originTwo))
-        XCTAssertTrue(appModel.setBadgeCount(2, origin: originOne))
-        try await waitUntil { center.passes == startupPasses + 1 }
-        XCTAssertEqual(center.removedDelivered, ["one-a", "one-a-2"])
-        center.removedDelivered = []
-
-        // Nothing unread retires every Session of the instance; another
-        // instance's zero does not.
-        appModel.primaryLocationDidChange(try XCTUnwrap(URL(string: "\(one)/inbox")))
-        XCTAssertFalse(appModel.setBadgeCount(0, origin: originTwo))
+        // The selected instance's zero retires its Session notifications
+        // delivered before the call; one landing after it stays.
         XCTAssertTrue(appModel.setBadgeCount(0, origin: originOne))
-        try await waitUntil { center.passes == startupPasses + 2 }
+        try await waitUntil { center.passes == startupPasses + 1 }
         XCTAssertEqual(center.removedDelivered, ["one-a", "one-a-2", "one-b"])
-    }
-
-    @MainActor
-    func testTheRuntimeReportsWhereItsPageIsAgainOnForegroundAndWhileCovered() async throws {
-        let instance = try XCTUnwrap(WebOrigin.parseConfigured(one))
-        var reported: [String] = []
-        let controller = WebViewController(
-            instanceOrigin: instance,
-            websiteDataStore: .nonPersistent(),
-            primaryLocationChanged: { reported.append($0?.absoluteString ?? "covered") },
-            didStartLoading: {},
-            didFinishLoading: {},
-            didFailLoading: {}
-        )
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
-        window.rootViewController = controller
-        window.makeKeyAndVisible()
-        controller.loadViewIfNeeded()
-        defer {
-            window.rootViewController = nil
-            window.isHidden = true
-        }
-        let webView = try XCTUnwrap(
-            controller.view.subviews.compactMap { $0 as? WKWebView }.first
-        )
-        let probe = SessionWebViewLoadProbe()
-        webView.navigationDelegate = probe
-        try await probe.loadHTML(
-            """
-            <!doctype html><title>Workbench</title>
-            <button id="open-child" onclick="window.open('/chat/ses_b', '_blank')">Open</button>
-            """,
-            baseURL: instance.url,
-            in: webView
-        )
-
-        // The Web UI routes without a load: `pushState`.
-        _ = try await webView.evaluateJavaScript(
-            "history.pushState({}, '', '/chat/ses_a'); location.href"
-        )
-        try await waitUntil { reported.last == "\(one)/chat/ses_a" }
-
-        var before = reported.count
-        NotificationCenter.default.post(
-            name: UIApplication.willEnterForegroundNotification,
-            object: nil
-        )
-        XCTAssertEqual(reported.count, before + 1)
-        XCTAssertEqual(reported.last, "\(one)/chat/ses_a")
-
-        // A child window covers the page, and its own page may send the
-        // badge: no Session of the primary is on screen until it closes.
-        _ = try await webView.evaluateJavaScript(
-            "document.querySelector('#open-child').click()"
-        )
-        try await waitUntil { reported.last == "covered" }
-        var popupNavigation: UINavigationController?
-        try await waitUntil {
-            popupNavigation = controller.presentedViewController as? UINavigationController
-            return popupNavigation != nil
-        }
-        var child: WKWebView?
-        try await waitUntil {
-            child = popupNavigation?.topViewController?.viewIfLoaded?.subviews
-                .compactMap { $0 as? WKWebView }.first
-            return child != nil
-        }
-        _ = try await child?.evaluateJavaScript("window.close(); true")
-        try await waitUntil { reported.last == "\(one)/chat/ses_a" }
-
-        // Released for an account transition: it reports nothing more.
-        _ = controller.invalidateForAccountTransition()
-        before = reported.count
-        NotificationCenter.default.post(
-            name: UIApplication.willEnterForegroundNotification,
-            object: nil
-        )
-        XCTAssertEqual(reported.count, before)
     }
 
     /// Delivered notifications across two instances, two accounts, the
@@ -346,42 +209,4 @@ private final class SessionTestBadgeCenter: AppBadgeCentering {
     }
 
     func setBadgeCount(_ count: Int) async throws {}
-}
-
-private final class SessionWebViewLoadProbe: NSObject, WKNavigationDelegate {
-    private var continuation: CheckedContinuation<Void, Error>?
-
-    func loadHTML(
-        _ html: String,
-        baseURL: URL,
-        in webView: WKWebView
-    ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            webView.loadHTMLString(html, baseURL: baseURL)
-        }
-    }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        continuation?.resume()
-        continuation = nil
-    }
-
-    func webView(
-        _ webView: WKWebView,
-        didFail navigation: WKNavigation?,
-        withError error: Error
-    ) {
-        continuation?.resume(throwing: error)
-        continuation = nil
-    }
-
-    func webView(
-        _ webView: WKWebView,
-        didFailProvisionalNavigation navigation: WKNavigation?,
-        withError error: Error
-    ) {
-        continuation?.resume(throwing: error)
-        continuation = nil
-    }
 }

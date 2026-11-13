@@ -934,22 +934,17 @@ never applies a push's badge in the foreground: the Web UI sets the live Inbox
 total through `badge.set` there, and a push's `badge_count`, computed when it
 was sent, can only be as recent or older.
 
-A Session's notifications leave Notification Center once it is read in the
-app. The app follows which Session the selected instance's primary WebView
-shows (`/chat/<id>`), on each URL change (including the Web UI's `pushState`)
-and on a return to the foreground. Showing it is not yet reading it: the page
-may not have loaded it (offline after a return to the foreground). The next
-`badge.set` from that page, sent after it has read its Inbox, is what retires
-it: the app removes the delivered notifications whose `threadIdentifier` is
-`session:<id>` and whose `userInfo` names that instance origin and the current
-account. A `badge.set({count: 0})` also removes all of that instance's and
-account's `session:*` notifications: the loud unread total there is zero.
-Either way, only notifications delivered by the moment the `badge.set` call
-arrived are removed: one delivered after it is news the read did not cover.
-Pending requests, other instances, other accounts, the test notification,
-`harness:failure` notices (not part of the Inbox's unread total, so a zero
-says nothing about them), and undecrypted fallbacks (no thread, origin, or
-account) stay.
+When the selected instance's main frame sets `badge.set({count: 0})`, the
+loud unread total there is zero, and the app removes that instance's and the
+current account's delivered notifications whose `threadIdentifier` starts with
+`session:` (matched on `userInfo`'s `instance_origin` and `account_id`). Only
+notifications delivered before the call arrived are removed: one delivered
+after it is news the zero did not cover. Pending requests, other instances,
+other accounts, the test notification, `harness:failure` notices (not part of
+the Inbox's unread total, so a zero says nothing about them), and undecrypted
+fallbacks (no thread, origin, or account) stay. A Session read while others
+remain unread keeps its notifications until the total reaches zero; the App
+cannot see which Session was read from the URL or the total alone.
 
 ## 8. Tap routing
 

@@ -90,11 +90,8 @@ final class AppModel: ObservableObject {
     /// The App icon badge: the selected instance's Inbox total, which its Web
     /// UI sets through `badge.set` (and a push sets while the App is away).
     private let nativeBadge: NativeBadge
-    /// Retires a Session's notifications once it is read in the App.
+    /// Retires an instance's Session notifications once nothing there is unread.
     private let sessionNotifications: SessionNotificationCleaner
-    /// The Session the selected instance's page shows, if any. Cleared
-    /// whenever the runtime stops, so it is always the selected instance's.
-    private var shownSession: String?
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -338,7 +335,6 @@ final class AppModel: ObservableObject {
 
     private func stopRuntime() {
         deferredOpen = nil
-        shownSession = nil
         directPathController?.runtimeDidStop()
         if let runtimeController {
             recordRuntimeReleaseBarrier(
@@ -613,56 +609,17 @@ final class AppModel: ObservableObject {
             return false
         }
         nativeBadge.set(count)
-        retireReadNotifications(count: count, origin: origin)
-        return true
-    }
-
-    /// A `badge.set` is the page's word that it has read its Inbox, after
-    /// whatever it showed: the moment its notifications can be retired.
-    /// Everything delivered by now is covered; anything later stays.
-    private func retireReadNotifications(count: Int, origin: WebOrigin) {
-        guard let account = sessionCoordinator.currentAccount else {
-            return
-        }
-        let readAt = Date()
-        // The Session on screen: shown, and its page live enough to have
-        // read the Inbox since. A page on a chat it cannot load (offline
-        // after a return to the foreground) sends nothing, so clears nothing.
-        if let shownSession {
-            sessionNotifications.clearSession(
-                shownSession,
-                instanceOrigin: origin.serialized,
-                accountID: account.id,
-                readAt: readAt
-            )
-        }
-        // Nothing notified on this instance is unread.
-        if count == 0 {
+        if count == 0, let account = sessionCoordinator.currentAccount {
+            // Nothing notified on this instance is unread. The zero was
+            // computed before this call arrived, so only what was delivered
+            // by now is covered by it; anything later stays.
             sessionNotifications.clearAllSessions(
                 instanceOrigin: origin.serialized,
                 accountID: account.id,
-                readAt: readAt
+                readAt: Date()
             )
         }
-    }
-
-    /// The selected instance's page now shows `url` (on each URL change and
-    /// on a return to the foreground), or `nil` while a child window covers
-    /// it. A Session it shows is retired on the page's next `badge.set`, once
-    /// it has read its Inbox after showing it. Anything else, another origin
-    /// included, shows no Session.
-    func primaryLocationDidChange(_ url: URL?) {
-        guard
-            let url,
-            let origin = WebOrigin(url: url),
-            let runtime = route.runtime,
-            sessionCoordinator.isSelectedRuntime(runtime),
-            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
-        else {
-            shownSession = nil
-            return
-        }
-        shownSession = SessionNotificationThread.sessionID(shownAt: url)
+        return true
     }
 
     private func handlePushTap(_ tap: PushNotificationTap) {
