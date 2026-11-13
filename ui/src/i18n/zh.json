@@ -6524,12 +6524,17 @@
       "empty": "暂无活动。"
     },
     "askOff": {
+      "setupFailed": "没能设置 Passkey。再试一次。",
+      "setupConflict": "Passkey 刚在别处设置好了。再关一次试试。",
+      "setupDone": "Passkey 已设置好。再关一次就能关闭。",
+      "settingUp": "正在设置 Passkey…",
+      "setupAction": "设置 Passkey",
       "turnedOff": "已用 Passkey 关闭，立即生效。",
       "offHintEdit": "关闭需要用 Passkey 确认，确认后立即生效，不用点保存。",
       "legacyRegistration": "你的 Passkey 是在很早的预览版里设置的，这台 Avibe 没有存下确认关闭所需的资料。开关会保持打开。",
       "waiting": "等待 Passkey 确认…",
       "popupBlocked": "浏览器拦截了确认窗口。请允许弹出窗口，再关一次。",
-      "setupRequired": "关闭需要 Passkey。添加一个保护档密钥时会设置 Passkey，之后就能在这里关闭。",
+      "setupRequired": "关闭需要 Passkey，这台 Avibe 还没有设置。现在设置一个，之后就能在这里关闭。",
       "factorUnavailable": "这台 Avibe 记录的 Passkey 现在用不了，不能用来确认关闭。开关会保持打开。",
       "expired": "确认超时了，没有关闭。再关一次即可。",
       "clockSkew": "这台设备的时间不准，没有关闭。校准时间后再试。",

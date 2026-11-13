@@ -30,11 +30,12 @@ const sealBlindBox = vi.hoisted(() => vi.fn(async () => blindBox));
 const vault = vi.hoisted(() => ({
   status: 'unlocked', refresh: vi.fn(), afterCreated: vi.fn(),
   sealValue: vi.fn(),
+  setupVaultDurably: vi.fn(),
 }));
 vi.mock('@/context/ApiContext', async (original) => ({
   ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api,
 }));
-vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
+vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, setupVaultDurably: vault.setupVaultDurably }));
 // The pinned sandbox: whether it can turn ask-before-signing off, and its answer.
 const sandbox = vi.hoisted(() => ({
   canTurnOff: false,
@@ -627,6 +628,29 @@ describe('turning ask-before-signing off with a Passkey', () => {
     expect(askSwitch().getAttribute('aria-checked')).toBe('true');
     expect(screen.queryByText(en.vaults.askOff.turnedOff)).toBeNull();
     expect(screen.getByText(en.vaults.askOff.offHintEdit)).toBeTruthy();
+  });
+
+  it('sets up a Passkey from here when none was ever set up, then turns it off on the next toggle', async () => {
+    sandbox.canTurnOff = true;
+    api.createVaultSigningPolicyChallenge.mockReset();
+    api.createVaultSigningPolicyChallenge
+      .mockResolvedValueOnce({ ok: false, code: 'vault_policy_setup_required' })
+      .mockResolvedValueOnce({ ok: true, context });
+    vault.setupVaultDurably.mockResolvedValue({ ok: true });
+    sandbox.authorizeSigningPolicyDowngrade.mockResolvedValue({ challengeId: context.challengeId, assertion });
+    api.completeVaultSigningPolicyDowngrade.mockResolvedValue({ ok: true, secret: { ...on, policy: {} } });
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: en.vaults.askOff.setupAction })); });
+    expect(vault.setupVaultDurably).toHaveBeenCalledOnce();
+    // Setting up is not consent to turn it off: still on, and it asks for the toggle again.
+    expect(await screen.findByText(en.vaults.askOff.setupDone)).toBeTruthy();
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+    expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(askSwitch()); });
+    await waitFor(() => expect(askSwitch().getAttribute('aria-checked')).toBe('false'));
+    expect(api.createVaultSigningPolicyChallenge).toHaveBeenCalledTimes(2);
   });
 
   it.each(['passkey_cancelled', 'authorization_window_closed'])('stays on without a message when the confirmation ends with %s', async (code) => {
