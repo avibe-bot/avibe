@@ -401,19 +401,7 @@ pub(crate) fn present_guarded(app: &AppHandle, view: &'static str) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    // The bundled account entry is already a trusted native document and does
-    // not mount the Workbench's guarded presentation consumer. Keep the
-    // unsaved-work handoff for Runtime documents, but let this known entry
-    // navigate through the same owner-fenced queue without inventing a
-    // Runtime fallback.
-    let guarded = app
-        .get_webview_window(MAIN_WINDOW)
-        .and_then(|window| window.url().ok())
-        .is_none_or(|current| {
-            let state = client.view.presentation.lock().expect("presentation");
-            !(state.account && account_view(&current, &client.view.bundle).is_some())
-        });
-    present_owned(app, view, client.coordinator.presentation_owner(), guarded, None)
+    present_owned(app, view, client.coordinator.presentation_owner(), true, None)
 }
 pub(crate) fn return_local_for_link(app: &AppHandle) {
     let Some(client) = app.try_state::<Client>() else {
@@ -755,7 +743,15 @@ fn apply_presentation(app: &AppHandle) {
             .complete(intent.id);
         return;
     }
-    if intent.guarded {
+    // Decide the bundled-account exemption only after taking the physical
+    // window serializer and reading the actual receiver. A request queued
+    // during restore must not inherit either the old account route or a later
+    // Runtime route's policy.
+    let native_account_entry = route.as_ref().is_some_and(|current| {
+        let state = native.presentation.lock().expect("presentation");
+        state.account && account_view(current, &native.bundle).is_some()
+    });
+    if intent.guarded && !native_account_entry {
         let Some(receiver) = route else { return };
         let allowed = {
             let state = native.presentation.lock().expect("presentation");
