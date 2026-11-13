@@ -16,8 +16,8 @@ from pathlib import Path
 from threading import Barrier
 from unittest.mock import Mock
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 import pytest
 
 from storage import resource_access_service, vault_hd, vault_service
@@ -72,6 +72,9 @@ def sign_input(kind, account=0, **extra):
 
 
 def sign_reply(kind, account=0):
+    if kind == "p2tr":
+        return next(item["signature"] for item in FIXTURE["signatures"]
+                    if item["chain"] == "bitcoin" and item["account"] == account)
     item = next(item for item in DER["signatures"] if item["address_type"] == kind and item["account"] == account)
     return {key: item[key] for key in ("signature", "recovery_id")}
 
@@ -337,11 +340,19 @@ def test_all_twenty_new_type_signatures_use_selected_key_and_scheme(runtime):
         runtime.reply = sign_reply(kind, account)
         result = api.vault_sign(sign_input(kind, account))
         assert result["signature"] == runtime.reply
+        assert result["signing_public_key"] == {"curve": "secp256k1", "public_key": vector["public_key"]}
         assert result["derivation"] == {"chain": "bitcoin", "account": account, "address_type": kind}
         _, wire = runtime.calls[-1]
         assert wire["derivation"] == result["derivation"] and wire["scheme"] == "ecdsa-secp256k1-der"
         assert wire["digest"] == DIGEST and "message_hex" not in wire
-    assert meta()["use_count"] == 40
+        with api._vault_engine().connect() as conn:
+            binding = vault_service.hd_signing_binding(
+                vault_service.require_secret_access(conn, NAME),
+                {"chain": "bitcoin", "account": account, "address_type": kind},
+            )
+        audit_delivery = json.loads(rows(vault_audit)[-1]["delivery"])
+        assert audit_delivery["signing_key"] == binding
+
     assert sum(row["event"] == "signed" for row in rows(vault_audit)) == 40
 
 
@@ -371,8 +382,24 @@ def test_invalid_selection_refuses_before_custody_request_or_use(runtime, change
     assert runtime.calls == [] and rows(vault_requests) == [] and meta()["use_count"] == 0
 
 
-@pytest.mark.parametrize("kind", ["p2pkh", "p2wpkh"])
-def test_approval_binds_script_type_card_and_same_scheme_completion(runtime, kind):
+@pytest.mark.parametrize("kind", TYPES)
+def test_explicit_signing_withholds_signature_when_record_changes_after_custody(runtime, kind):
+    create_extended(runtime)
+    runtime.reply = sign_reply(kind)
+
+    def replace_record():
+        with api._vault_engine().begin() as conn:
+            conn.execute(vault_secrets.update().where(vault_secrets.c.name == NAME).values(id="replacement-record"))
+
+    runtime.hook = replace_record
+    with pytest.raises(api.VaultApiError, match="state changed"):
+        api.vault_sign(sign_input(kind))
+    assert meta()["use_count"] == 0
+    assert not any(row["event"] == "signed" for row in rows(vault_audit))
+
+
+@pytest.mark.parametrize("kind", TYPES)
+def test_approval_binds_script_type_card_and_same_scheme_completion(runtime, kind, capfd):
     create_extended(runtime)
     api.update_vault_hd_account(NAME, {})
     api.update_vault_hd_account(NAME, {"always_ask": True}, account=0)
@@ -383,8 +410,8 @@ def test_approval_binds_script_type_card_and_same_scheme_completion(runtime, kin
     assert delivery["derivation"] == {"chain": "bitcoin", "account": 0, "address_type": kind}
     card = delivery["card"]["account"]
     assert card["bitcoin_address_type"] == kind
-    assert card["bitcoin_address"] == ENTRY["accounts"][0]["btc_" + kind]
-    assert card["bitcoin_path"] == ENTRY["accounts"][0]["paths"]["bitcoin_" + kind]
+    assert card["bitcoin_address"] == ENTRY["accounts"][0]["btc_taproot" if kind == "p2tr" else "btc_" + kind]
+    assert card["bitcoin_path"] == ENTRY["accounts"][0]["paths"]["bitcoin" if kind == "p2tr" else "bitcoin_" + kind]
     for changed in ({"address_type": "p2wpkh" if kind == "p2pkh" else "p2pkh"}, {"account": 1}):
         with pytest.raises(api.VaultApiError, match="does not match"):
             api.vault_sign({**sign_input(kind), **changed, "request_id": pending["id"]})
@@ -396,9 +423,23 @@ def test_approval_binds_script_type_card_and_same_scheme_completion(runtime, kin
     runtime.reply = sign_reply(kind)
     approved = api.vault_sign(sign_input(kind, request_id=pending["id"]))
     assert approved["request"]["status"] == "approved" and approved["signature"] == runtime.reply
+    frozen_key = {"curve": "secp256k1", "public_key": table()[0][vault_hd.BITCOIN_KEYS[kind]]}
+    assert approved["signing_public_key"] == frozen_key
     with pytest.raises(api.VaultApiError):
         api.vault_sign(sign_input(kind, request_id=pending["id"]))
     assert len(runtime.calls) == 1 and meta()["use_count"] == 1
+    # Historical signature results use their verified request snapshot, never a
+    # second lookup of a same-name/current account whose point later changed.
+    with api._vault_engine().begin() as conn:
+        row = vault_service.require_secret_access(conn, NAME)
+        public = json.loads(row["public_meta"])
+        public["hd_accounts"][0][vault_hd.BITCOIN_KEYS[kind]] = public["hd_accounts"][0]["evm"]
+        conn.execute(vault_secrets.update().where(vault_secrets.c.id == row["id"]).values(public_meta=json.dumps(public)))
+    result = api.get_vault_request(pending["id"])["result"]
+    assert result["signing_public_key"] == frozen_key
+    assert result["derivation"] == delivery["derivation"]
+    assert cli.cmd_vault_await(cli.build_parser().parse_args(["vault", "await", pending["id"]])) == 0
+    assert json.loads(capfd.readouterr().out)["result"] == result
 
 
 def test_cli_type_selection_list_projection_and_ordinary_refusal(runtime, capfd):
@@ -436,6 +477,7 @@ def test_runtime_downgrade_hides_new_capabilities_without_changing_addresses_or_
     runtime.reply = next(item["signature"] for item in FIXTURE["signatures"] if item["chain"] == "bitcoin" and item["account"] == 0)
     result = api.vault_sign({"name": NAME, "chain": "bitcoin", "digest": DIGEST})
     assert result["derivation"] == {"chain": "bitcoin", "account": 0}
+    assert "signing_public_key" not in result
     assert runtime.calls[-1][1]["derivation"] == result["derivation"]
 
 
@@ -468,16 +510,34 @@ def test_protected_ordinary_capabilities_do_not_offer_ecdsa_bitcoin_or_probe_ava
     probe.assert_not_called()
 
 
-def test_independent_transaction_ders_verify_at_actual_selected_key_boundary(runtime):
+def test_headless_transaction_assembly_uses_the_supported_cli_sign_result_key(runtime, capfd):
     create_extended(runtime)
     for _ in range(19):
         api.update_vault_hd_account(NAME, {})
     for vector in TRANSACTIONS["synthetic_public_corpus_vectors"]:
         runtime.reply = {"signature": vector["der"], "recovery_id": None}
-        result = api.vault_sign({**sign_input(vector["address_type"], vector["account"]), "digest": vector["digest"]})
-        assert result["signature"]["signature"] + "01" == vector["der_with_sighash_byte"]
-        assert hashlib.sha256(hashlib.sha256(bytes.fromhex(vector["preimage"])).digest()).hexdigest() == vector["digest"]
-        assert "01" == vector["der_with_sighash_byte"][-2:]
+        digest = hashlib.sha256(hashlib.sha256(bytes.fromhex(vector["preimage"])).digest()).digest()
+        assert digest.hex() == vector["digest"]
+        args = cli.build_parser().parse_args(["vault", "sign", NAME, "--chain", "bitcoin",
+            "--account", str(vector["account"]), "--address-type", vector["address_type"], "--digest", digest.hex()])
+        assert cli.cmd_vault_sign(args) == 0
+        result = json.loads(capfd.readouterr().out)
+        # Only supported CLI response data supplies the assembly key; the golden
+        # fixture's public_key is not an input to scriptSig/witness construction.
+        public_key = bytes.fromhex(result["signing_public_key"]["public_key"])
+        der = bytes.fromhex(result["signature"]["signature"])
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), public_key).verify(
+            der, digest, ec.ECDSA(utils.Prehashed(hashes.SHA256())),
+        )
+        key_hash = hashlib.new("ripemd160", hashlib.sha256(public_key).digest()).hexdigest()
+        assert vector["script_code"] == "76a914" + key_hash + "88ac"
+        signature = der + b"\x01"
+        if vector["address_type"] == "p2pkh":
+            script_sig = bytes([len(signature)]) + signature + bytes([len(public_key)]) + public_key
+            assert script_sig.hex() == vector["script_sig"]
+        else:
+            assert [signature.hex(), public_key.hex()] == vector["witness"]
+            assert vector["prevout_script_pubkey"] == "0014" + key_hash
 
 
 def test_prepared_valid_point_substitution_is_reauthenticated_and_refused(runtime):

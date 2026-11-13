@@ -595,6 +595,7 @@ def test_signs_only_selected_account_and_records_original_session(custody, chain
         payload = {**sign_input(chain, account), "request_id": request["id"], "requester": {"session_id": "approving-browser"}}
     result = api.vault_sign(payload)
     assert result["ok"] and result["signature"] == custody.reply
+    assert "signing_public_key" not in result  # Omitted BTC selector and EVM/Solana keep their shipped result wire.
     command, wire = custody.calls[0]
     assert command == ["sign"]
     assert wire == {

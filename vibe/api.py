@@ -4525,6 +4525,23 @@ def _vault_request_grant_members_and_purpose(request: dict) -> tuple[list[str], 
     return ([secret_name] if secret_name else []), purpose
 
 
+def _hd_bitcoin_signing_result_fields(derivation: dict | None, signing_binding: dict | None) -> dict:
+    """Expose only the explicit BTC result's verified, frozen compressed point."""
+    if not isinstance(derivation, dict) or derivation.get("chain") != "bitcoin" or "address_type" not in derivation:
+        return {}
+    from storage import vault_hd, vault_service
+
+    try:
+        vault_hd.validate_derivation(derivation)
+    except ValueError as exc:
+        raise vault_service.InvalidRequestError(str(exc)) from exc
+    public_key = vault_service.require_compressed_signing_public_key({
+        "curve": "secp256k1",
+        "public_key": signing_binding.get("public_key") if isinstance(signing_binding, dict) else None,
+    })
+    return {"signing_public_key": {"curve": "secp256k1", "public_key": public_key}}
+
+
 def _vault_request_result(conn, request: dict) -> dict | None:
     from storage import vault_service
 
@@ -4562,7 +4579,7 @@ def _vault_request_result(conn, request: dict) -> dict | None:
         if isinstance(signature, dict):
             return {"type": "signature", "signature": signature, **(
                 {"derivation": delivery["derivation"]} if delivery.get("derivation") is not None else {}
-            )}
+            ), **_hd_bitcoin_signing_result_fields(delivery.get("derivation"), delivery.get("signing_key"))}
     return None
 
 
@@ -6337,7 +6354,8 @@ def vault_sign(payload: dict) -> dict:
             request_status=request.get("status"),
             secret_name=request.get("secret_name"),
         )
-        return {"ok": True, "signature": signature, "request": request}
+        return {"ok": True, "signature": signature, "request": request,
+                **_hd_bitcoin_signing_result_fields(derivation, signing_binding)}
     try:
         with engine.begin() as conn:
             vault_service.record_signing_use(
@@ -6352,7 +6370,8 @@ def vault_sign(payload: dict) -> dict:
         if derivation is not None:
             raise VaultApiError("HD signing state changed or its audit could not be saved; signature was not delivered", code="hd_signing_state_changed", status=409) from exc
         logger.warning("vault_sign: signature produced but usage audit failed for %s: %s", name, exc)
-    return {"ok": True, "signature": signature, **({"derivation": derivation} if derivation is not None else {})}
+    return {"ok": True, "signature": signature, **({"derivation": derivation} if derivation is not None else {}),
+            **_hd_bitcoin_signing_result_fields(derivation, signing_binding)}
 
 
 def store_vault_pubkey_pin(payload: dict) -> dict:

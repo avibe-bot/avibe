@@ -11789,6 +11789,7 @@ def cmd_vault_sign(args):
                     **sign_input,
                     signature=result["signature"],
                     **({"derivation": derivation} if derivation is not None else {}),
+                    **({"signing_public_key": result["signing_public_key"]} if "signing_public_key" in result else {}),
                 )
                 return 0
             # The user may enable ask-before-signing after our initial read. The
