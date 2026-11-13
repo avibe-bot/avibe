@@ -780,7 +780,7 @@ def test_hd_policy_can_only_be_raised_and_rejected_edit_is_atomic(custody):
     before_rows, before_audit = rows(vault_secrets), rows(vault_audit)
     with pytest.raises(api.VaultApiError) as error:
         api.update_vault_hd_account("HD_TEST_WALLET", {"always_ask": False, "name": "Must not change"}, account=0)
-    assert error.value.code == "vault_policy_downgrade_unavailable"
+    assert error.value.code == "vault_policy_authz_required"
     assert error.value.status == 409
     with pytest.raises(vault_service.SigningPolicyDowngradeUnavailableError):
         with api._vault_engine().begin() as conn:
@@ -815,7 +815,7 @@ def test_http_account_routes_use_real_storage_and_reject_nonobjects(custody):
     assert response.get_json()["secret"]["accounts"][1]["name"] == "Daily"
     response = client.patch("/api/vault/secrets/HD_TEST_WALLET/accounts/1", json={"always_ask": False}, headers=headers)
     assert response.status_code == 409
-    assert response.get_json()["code"] == "vault_policy_downgrade_unavailable"
+    assert response.get_json()["code"] == "vault_policy_authz_required"
     assert meta()["accounts"][1]["always_ask"] is True
     response = client.post("/api/vault/secrets/HD_TEST_WALLET/accounts", json=[], headers=headers)
     assert response.status_code == 400

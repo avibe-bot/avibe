@@ -1,4 +1,4 @@
-"""Staged signing-policy edits may raise confirmation but cannot lower it.
+"""Unproved metadata edits may raise confirmation but cannot lower it.
 
 The policy owner is storage (also called without HTTP); REST must preserve that
 refusal and atomicity when a browser submits display edits in the same payload.
@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import select
 
-from storage import resource_access_service, vault_service
+from storage import resource_access_service, vault_policy, vault_service
 from storage.models import vault_audit, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.ui_server_test_helpers import csrf_headers
@@ -49,6 +49,8 @@ def test_storage_keypair_policy_is_monotonic_and_preserves_envelope(protection, 
             conn, "POLICY_KEY", always_ask=True, description="Raised",
             policy={"allowed_hosts": ["new.example"]},
         )
+        revision = updated["policy"].pop(vault_policy.REVISION_KEY)
+        assert len(revision) == 32
         assert updated["policy"] == {"allowed_hosts": ["new.example"], "always_ask": True}
         assert vault_service.sign_needs_approval(conn, "POLICY_KEY") is True
     raised = snapshot()
@@ -123,7 +125,7 @@ def test_http_raise_and_lower_error_do_not_invoke_custody(monkeypatch):
     before = snapshot()
     response = client.patch("/api/vault/secrets/POLICY_KEY", json={"always_ask": False, "description": "No"}, headers=headers)
     assert response.status_code == 409
-    assert response.get_json()["code"] == "vault_policy_downgrade_unavailable"
+    assert response.get_json()["code"] == "vault_policy_authz_required"
     assert snapshot() == before
     custody.assert_not_called()
 
@@ -157,4 +159,5 @@ def test_racing_policy_update_is_not_overwritten_by_raise(monkeypatch):
     stored, _ = snapshot()
     assert json.loads(stored[0]["policy"]) == {"allowed_hosts": ["winner.example"]}
     updated = api.update_vault_secret("POLICY_KEY", {"always_ask": True})
+    assert len(updated["secret"]["policy"].pop(vault_policy.REVISION_KEY)) == 32
     assert updated["secret"]["policy"] == {"allowed_hosts": ["winner.example"], "always_ask": True}

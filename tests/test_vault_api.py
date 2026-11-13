@@ -216,7 +216,7 @@ def _establish_protected_secret_with_factor(
         {
             "name": name,
             "protection": "protected",
-            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": {"v": 1, "copies": [], "wrapped_dek": "d"}},
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": {**credential.wrap_meta(), "wrapped_dek": "d"}},
             "establishing_vmk": True,
             "authz_factor_registration": credential.registration_payload(
                 challenge_id=options["challenge_id"],
@@ -1170,7 +1170,7 @@ def test_delete_protected_secret_with_registered_factor_deletes_without_assertio
             vault_service.get_secret_meta(conn, "PROTECTED_DELETE")
 
 
-def test_deleting_last_protected_secret_allows_fresh_vault_establishment(monkeypatch):
+def test_deleting_last_protected_secret_preserves_shared_setup_and_factor(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     first, first_factor = _establish_protected_secret_with_factor("FIRST_PROTECTED")
 
@@ -1181,12 +1181,13 @@ def test_deleting_last_protected_secret_allows_fresh_vault_establishment(monkeyp
         old_factor = conn.execute(
             select(vault_auth_factors).where(vault_auth_factors.c.id == first_factor["id"])
         ).mappings().one()
-        assert old_factor["disabled_at"] is not None
+        assert old_factor["disabled_at"] is None
+    assert json.loads(api.get_vault_vmk()["wrap_meta"]) == first.wrap_meta()
 
     second = WebAuthnTestCredential(credential_id=b"second-vault-first-factor")
-    _credential, second_factor = _establish_protected_secret_with_factor("SECOND_PROTECTED", second)
-
-    assert second_factor["credential_id"] == second.credential_id_b64
+    with pytest.raises(api.VaultApiError) as error:
+        _establish_protected_secret_with_factor("SECOND_PROTECTED", second)
+    assert error.value.code == "vault_already_initialized"
 
 
 def test_forged_webauthn_factor_registration_still_requires_existing_factor(monkeypatch):
@@ -1699,7 +1700,7 @@ def test_create_vault_reveal_context_rejects_protected_keypair(monkeypatch):
 
 @pytest.mark.parametrize("second_name", ["FIRST_PROTECTED", "SECOND_PROTECTED"])
 def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch, second_name):
-    _establish_protected_secret_with_factor("FIRST_PROTECTED")
+    first, _factor = _establish_protected_secret_with_factor("FIRST_PROTECTED")
     with api._vault_engine().connect() as conn:
         assert vault_service.get_secret_meta(conn, "FIRST_PROTECTED")["protection"] == "protected"
 
@@ -1710,9 +1711,10 @@ def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch, seco
             {
                 "name": second_name,
                 "protection": "protected",
-                "sealed": {"ciphertext": "ct2", "nonce": "n2", "wrap_meta": {"v": 1, "copies": [], "wrapped_dek": "d2"}},
+                "sealed": {"ciphertext": "ct2", "nonce": "n2", "wrap_meta": {**first.wrap_meta(marker=2), "wrapped_dek": "d2"}},
                 "establishing_vmk": True,
-            }
+            },
+            origin=first.origin,
         )
     assert exc.value.code == "vault_already_initialized"
     assert exc.value.status == 409

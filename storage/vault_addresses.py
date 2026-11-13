@@ -222,6 +222,61 @@ def taproot_output_key_xonly(public_key: bytes | str) -> int:
     return output[0]
 
 
+def validate_public_address(field: str, value: str) -> None:
+    """Require the exact mainnet public encoding used by our address projection.
+
+    This is encoding/checksum validation only, not proof that an address belongs
+    to a particular key. Keep the encoders above as the canonical authority.
+    """
+    if not isinstance(value, str) or not 1 <= len(value) <= 128:
+        raise ValueError("invalid public address")
+    if field == "eth":
+        if len(value) != 42 or not value.startswith("0x"):
+            raise ValueError("invalid EIP-55 address")
+        try:
+            raw = bytes.fromhex(value[2:])
+        except ValueError as exc:
+            raise ValueError("invalid EIP-55 address") from exc
+        if len(raw) != 20 or "0x" + _eip55(raw.hex()) != value:
+            raise ValueError("noncanonical EIP-55 address")
+        return
+    if field in {"btc_legacy", "solana"}:
+        number = 0
+        for char in value:
+            try:
+                number = number * 58 + _B58_CHARSET.index(char)
+            except ValueError as exc:
+                raise ValueError("invalid base58 address") from exc
+        raw = b"\x00" * (len(value) - len(value.lstrip("1"))) + number.to_bytes((number.bit_length() + 7) // 8, "big")
+        if field == "solana":
+            valid = len(raw) == 32 and base58_encode(raw) == value
+        else:
+            valid = len(raw) == 25 and raw[0] == 0 and _b58check(raw[:21]) == value
+        if not valid:
+            raise ValueError("invalid canonical base58 address")
+        return
+    if field in {"btc_segwit", "btc_taproot"}:
+        version, program_size = (0, 20) if field == "btc_segwit" else (1, 32)
+        if not value.startswith("bc1") or value != value.lower() or len(value) < 10:
+            raise ValueError("invalid mainnet witness address")
+        try:
+            words = [_BECH32_CHARSET.index(char) for char in value[3:]]
+        except ValueError as exc:
+            raise ValueError("invalid witness address alphabet") from exc
+        data = words[1:-6]
+        number = 0
+        for word in data:
+            number = (number << 5) | word
+        size, padding = divmod(len(data) * 5, 8)
+        if words[0] != version or size != program_size:
+            raise ValueError("invalid witness version/program length")
+        program = (number >> padding).to_bytes(size, "big")
+        if _segwit_encode("bc", version, program) != value:
+            raise ValueError("invalid witness checksum or noncanonical padding")
+        return
+    raise ValueError("unsupported public address field")
+
+
 def derive_addresses(public_key_hex: str) -> dict[str, str]:
     """Derive the standard mainnet addresses for a compressed secp256k1 public key.
 

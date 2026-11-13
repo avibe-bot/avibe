@@ -2816,8 +2816,11 @@ def get_vault_vmk() -> dict:
     from storage import vault_service
 
     engine = _vault_engine()
-    with engine.connect() as conn:
-        wrap_meta = vault_service.latest_protected_vmk_wrap_meta(conn)
+    try:
+        with engine.connect() as conn:
+            wrap_meta = vault_service.latest_protected_vmk_wrap_meta(conn)
+    except vault_service.SigningPolicyError as exc:
+        raise _vault_policy_api_error(exc) from exc
     return {"ok": True, "exists": wrap_meta is not None, "wrap_meta": wrap_meta}
 
 
@@ -3692,6 +3695,66 @@ def register_vault_authz_webauthn_factor(payload: dict, *, origin: str | None = 
     return result
 
 
+def _vault_policy_api_error(exc) -> VaultApiError:
+    return VaultApiError(str(exc), code=exc.code, status=exc.status, message_key=f"vault.policy.{exc.code.removeprefix('vault_policy_')}")
+
+
+def _call_vault_policy_operation(operation, name: str, payload: dict, *, origin: str | None, user_context: Any) -> dict:
+    from storage import vault_service
+
+    context = _vault_webauthn_context(origin)
+    try:
+        with _vault_engine().begin() as conn:
+            result = operation(conn, name, payload, rp_id=context.rp_id, origin=context.origin, user_context=user_context)
+    except vault_service.SigningPolicyError as exc:
+        raise _vault_policy_api_error(exc) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=400, message_key="vault.policy.invalid_request") from exc
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError("secret not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
+    return result
+
+
+def create_vault_signing_policy_challenge(name: str, payload: dict, *, origin: str | None = None, user_context: Any = None) -> dict:
+    from storage import vault_service
+
+    return _call_vault_policy_operation(vault_service.create_signing_policy_challenge, name, payload, origin=origin, user_context=user_context)
+
+
+def complete_vault_signing_policy_downgrade(name: str, payload: dict, *, origin: str | None = None, user_context: Any = None) -> dict:
+    from storage import vault_service
+
+    result = _call_vault_policy_operation(vault_service.complete_signing_policy_downgrade, name, payload, origin=origin, user_context=user_context)
+    _publish_vaults_updated(scope="secret", secret_name=name)
+    return result
+
+
+def complete_vault_setup(payload: dict, *, origin: str | None = None, user_context: Any = None) -> dict:
+    from storage import vault_service
+
+    context = _vault_webauthn_context(origin)
+    _reject_plaintext_value_fields(payload)
+    try:
+        with _vault_engine().begin() as conn:
+            result = vault_service.complete_vault_setup(conn, payload, rp_id=context.rp_id, origin=context.origin, user_context=user_context)
+    except vault_service.SigningPolicyError as exc:
+        raise _vault_policy_api_error(exc) from exc
+    except vault_service.VaultAlreadyInitializedError as exc:
+        raise VaultApiError(str(exc), code="vault_already_initialized", status=409, message_key="vault.policy.setup_conflict") from exc
+    except vault_service.ProtectedAuthzSetupRequiredError as exc:
+        raise VaultApiError(str(exc), code="protected_authz_setup_required", status=409, message_key="vault.policy.setup_required") from exc
+    except vault_service.InvalidProtectedAuthzError as exc:
+        raise VaultApiError(str(exc), code="invalid_protected_authz", status=403, message_key="vault.policy.authz_invalid") from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=400, message_key="vault.policy.invalid_request") from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
+    _publish_vaults_updated(scope="setup")
+    return result
+
+
 def _reject_plaintext_value_fields(payload: object) -> None:
     if isinstance(payload, dict):
         if "value" in payload:
@@ -4072,6 +4135,8 @@ def create_vault_secret(
         if fulfilled_count > 0:
             _publish_vaults_updated(scope="secret", secret_name=name, request_status="fulfilled")
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
+    except vault_service.SigningPolicyError as exc:
+        raise _vault_policy_api_error(exc) from exc
     except vault_service.VaultAlreadyInitializedError as exc:
         raise VaultApiError(str(exc), code="vault_already_initialized", status=409) from exc
     except vault_service.ProtectedAuthzSetupRequiredError as exc:
@@ -4112,7 +4177,7 @@ def update_vault_hd_account(
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.SigningPolicyDowngradeUnavailableError as exc:
-        raise VaultApiError(str(exc), code="vault_policy_downgrade_unavailable", status=409) from exc
+        raise VaultApiError(str(exc), code="vault_policy_authz_required", status=409, message_key="vault.policy.authz_required") from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_hd_account", status=409) from exc
     _publish_vaults_updated(scope="secret", secret_name=name)
@@ -4163,7 +4228,7 @@ def update_vault_secret(name: str, payload: dict, *, user_context: Any = None) -
     ) as exc:
         raise _vault_field_service_error(exc) from exc
     except vault_service.SigningPolicyDowngradeUnavailableError as exc:
-        raise VaultApiError(str(exc), code="vault_policy_downgrade_unavailable", status=409) from exc
+        raise VaultApiError(str(exc), code="vault_policy_authz_required", status=409, message_key="vault.policy.authz_required") from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
     release_vault_agent_scopes(release_scopes, reason="update_vault_secret")
