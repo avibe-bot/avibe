@@ -158,9 +158,14 @@ test('unsupported reveal/edit stops before preparation, but metadata and cancel 
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByText(en.vaults.entry.addressTitle)).toBeVisible();
   await dialog.getByLabel('Default field name').fill('password');
+  await expect(dialog.getByLabel('Default field name')).toHaveValue('password');
   await expect(dialog.getByRole('button', { name: en.vaults.dialog.cancel, exact: true })).toBeEnabled();
-  // One Save: the field change (a rename, no envelope) and then the metadata.
-  await dialog.getByRole('button', { name: en.vaults.dialog.save, exact: true }).click();
+  // One Save: the field change (a rename, no envelope) and then the metadata. The editor reports
+  // the rename's validity to the dialog after it renders, so wait for Save to settle enabled.
+  const saveButton = dialog.getByRole('button', { name: en.vaults.dialog.save, exact: true });
+  await expect(saveButton).toBeEnabled();
+  await expect(dialog.getByText(en.vaults.fields.editHelp)).toBeVisible();
+  await saveButton.click();
   const saved = [`POST /api/vault/secrets/${secret.name}/fields`, `PATCH /api/vault/secrets/${secret.name}`];
   await expect.poll(() => observed.writes).toEqual(saved);
   await expect(dialog).toHaveCount(0);
