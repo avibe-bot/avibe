@@ -464,10 +464,6 @@ impl RuntimeState {
             StoredComputerUseState::Invalid(_) => {
                 runtime.update_view(|view| view.invalid_state = true);
             }
-            StoredComputerUseState::Current(record) if !record.enabled => {
-                let _ = runtime.write_current_state();
-            }
-            StoredComputerUseState::Current(record) if record.state == ComputerUsePhase::Error => {}
             StoredComputerUseState::Current(_) => {
                 let _ = runtime.write_current_state();
             }
@@ -591,6 +587,7 @@ impl RuntimeState {
         };
         let directive = self.lifecycle.capabilities(support, grants);
         self.apply(directive).await;
+        self.recover_if_due().await;
     }
 
     async fn runtime_lost(&mut self) {
@@ -617,6 +614,7 @@ impl RuntimeState {
         }
         let directive = self.lifecycle.observe_permissions(silent_grants());
         self.apply(directive).await;
+        self.recover_if_due().await;
     }
 
     async fn tick(&mut self) {
@@ -656,6 +654,23 @@ impl RuntimeState {
             ComputerUsePhase::Ready => self.ready_tick().await,
             _ => {}
         }
+        self.recover_if_due().await;
+    }
+
+    async fn recover_if_due(&mut self) {
+        if self.shutdown_requested.load(Ordering::SeqCst) || !self.lifecycle.recovering() {
+            return;
+        }
+        let visible = self
+            .app
+            .get_webview_window("main")
+            .is_some_and(|window| window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true));
+        let directive =
+            self.lifecycle
+                .retry_recovery(self.capabilities.current(), silent_grants(), self.elapsed(), visible);
+        if directive != LifecycleDirective::default() {
+            self.apply(directive).await;
+        }
     }
 
     async fn retry_start(&mut self, id: u64) {
@@ -693,6 +708,9 @@ impl RuntimeState {
     }
 
     async fn apply(&mut self, mut directive: LifecycleDirective) {
+        if self.lifecycle.recovering() {
+            self.invalidate_start_retry();
+        }
         let spawn_daemon = directive.spawn_daemon;
         directive.spawn_daemon = false;
         if spawn_daemon {
@@ -705,7 +723,14 @@ impl RuntimeState {
             return;
         }
 
-        let health = self.start_once().await;
+        let health = start_driver_once(
+            &self.paths,
+            &self.host_bundle_id,
+            &mut self.daemon,
+            &self.shutdown_requested,
+            &self.diagnostics,
+        )
+        .await;
         if self.shutdown_requested.load(Ordering::SeqCst) {
             self.stop_daemon().await;
             return;
@@ -791,82 +816,6 @@ impl RuntimeState {
             sleep(START_BACKOFF).await;
             let _ = events.send(Event::RetryStart { id });
         });
-    }
-
-    async fn start_once(&mut self) -> HealthResult {
-        if self.shutdown_requested.load(Ordering::SeqCst) {
-            return HealthResult::Unhealthy("shutdown_requested".to_owned());
-        }
-        self.stop_daemon().await;
-        if let Err(reason) = socket_path_preflight(&self.paths.socket) {
-            self.diagnostics.record(
-                "computer-use.socket-preflight",
-                &[
-                    ("reason", reason.to_owned()),
-                    ("path_bytes", self.paths.socket.as_os_str().as_bytes().len().to_string()),
-                ],
-            );
-            return HealthResult::Unhealthy(reason.to_owned());
-        }
-        if let Err(reason) = self.reclaim_endpoint().await {
-            return HealthResult::Unhealthy(reason);
-        }
-        let daemon = match spawn_daemon(
-            &self.paths.driver,
-            &self.paths.socket,
-            &self.host_bundle_id,
-            &self.paths.policy,
-        ) {
-            Ok(daemon) => daemon,
-            Err(_) => {
-                return HealthResult::Unhealthy("spawn_failed".to_owned());
-            }
-        };
-        self.daemon = Some(daemon);
-
-        timeout(HEALTH_TIMEOUT, async {
-            loop {
-                if self.shutdown_requested.load(Ordering::SeqCst) {
-                    return HealthResult::Unhealthy("shutdown_requested".to_owned());
-                }
-                if self
-                    .daemon
-                    .as_mut()
-                    .and_then(|daemon| daemon.child.try_wait().ok().flatten())
-                    .is_some()
-                {
-                    return HealthResult::Unhealthy("daemon_exited".to_owned());
-                }
-                if socket_accepts(&self.paths.socket).await {
-                    break;
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
-            health_check_inner(&self.paths.driver, &self.paths.socket, &self.host_bundle_id, true).await
-        })
-        .await
-        .unwrap_or_else(|_| HealthResult::Unhealthy("health_timeout".to_owned()))
-    }
-
-    async fn reclaim_endpoint(&self) -> Result<(), String> {
-        if socket_accepts(&self.paths.socket).await {
-            let deadline = Instant::now() + ENDPOINT_RECLAIM_TIMEOUT;
-            while Instant::now() < deadline {
-                sleep(Duration::from_millis(100)).await;
-                if !socket_accepts(&self.paths.socket).await {
-                    break;
-                }
-            }
-        }
-        if socket_accepts(&self.paths.socket).await {
-            return Err("endpoint_busy".to_owned());
-        }
-        match std::fs::remove_file(&self.paths.socket) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err("endpoint_unremovable".to_owned()),
-        }
-        Ok(())
     }
 
     async fn stop_daemon(&mut self) {
@@ -1067,6 +1016,8 @@ fn restored_lifecycle(stored: &StoredComputerUseState, assets_valid: bool) -> Co
         // automatic daemon launch. Keep the feature enabled so the user can
         // turn it off, but fail closed with the same visible asset error.
         lifecycle.set_error("assets_invalid");
+    } else {
+        lifecycle.recover_on_launch();
     }
     lifecycle
 }
@@ -1108,7 +1059,86 @@ async fn enable_support(capabilities: &mut CapabilityCache, origin: Option<&Loop
 }
 
 fn retry_is_current(id: u64, current_id: u64, lifecycle: &ComputerUseLifecycle) -> bool {
-    id == current_id && lifecycle.enabled() && lifecycle.phase() == ComputerUsePhase::Starting
+    id == current_id
+        && lifecycle.enabled()
+        && lifecycle.phase() == ComputerUsePhase::Starting
+        && !lifecycle.recovering()
+}
+
+/// The native process boundary is shared by ordinary starts and error recovery.
+/// Paths are supplied by the shell; tests exercise it with disposable children.
+async fn start_driver_once(
+    paths: &Paths,
+    host_bundle_id: &str,
+    daemon: &mut Option<Daemon>,
+    shutdown_requested: &AtomicBool,
+    diagnostics: &BootstrapLog,
+) -> HealthResult {
+    if shutdown_requested.load(Ordering::SeqCst) {
+        return HealthResult::Unhealthy("shutdown_requested".to_owned());
+    }
+    if let Some(previous) = daemon.take() {
+        stop_daemon_process(previous, &paths.socket, diagnostics, PROCESS_STOP_TIMEOUT).await;
+    }
+    if let Err(reason) = socket_path_preflight(&paths.socket) {
+        diagnostics.record(
+            "computer-use.socket-preflight",
+            &[
+                ("reason", reason.to_owned()),
+                ("path_bytes", paths.socket.as_os_str().as_bytes().len().to_string()),
+            ],
+        );
+        return HealthResult::Unhealthy(reason.to_owned());
+    }
+    if let Err(reason) = reclaim_endpoint(&paths.socket).await {
+        return HealthResult::Unhealthy(reason);
+    }
+    *daemon = match spawn_daemon(&paths.driver, &paths.socket, host_bundle_id, &paths.policy) {
+        Ok(child) => Some(child),
+        Err(_) => return HealthResult::Unhealthy("spawn_failed".to_owned()),
+    };
+    timeout(HEALTH_TIMEOUT, async {
+        loop {
+            if shutdown_requested.load(Ordering::SeqCst) {
+                return HealthResult::Unhealthy("shutdown_requested".to_owned());
+            }
+            if daemon
+                .as_mut()
+                .and_then(|daemon| daemon.child.try_wait().ok().flatten())
+                .is_some()
+            {
+                return HealthResult::Unhealthy("daemon_exited".to_owned());
+            }
+            if socket_accepts(&paths.socket).await {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        health_check_inner(&paths.driver, &paths.socket, host_bundle_id, true).await
+    })
+    .await
+    .unwrap_or_else(|_| HealthResult::Unhealthy("health_timeout".to_owned()))
+}
+
+async fn reclaim_endpoint(socket: &Path) -> Result<(), String> {
+    if socket_accepts(socket).await {
+        let deadline = Instant::now() + ENDPOINT_RECLAIM_TIMEOUT;
+        while Instant::now() < deadline {
+            sleep(Duration::from_millis(100)).await;
+            if !socket_accepts(socket).await {
+                break;
+            }
+        }
+    }
+    if socket_accepts(socket).await {
+        return Err("endpoint_busy".to_owned());
+    }
+    match std::fs::remove_file(socket) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err("endpoint_unremovable".to_owned()),
+    }
+    Ok(())
 }
 
 async fn probe_capabilities(origin: &LoopbackOrigin) -> CapabilityProbe {
@@ -3090,6 +3120,7 @@ done
         assert!(!setup_resume_settled(ComputerUsePhase::NeedsRuntime, true, false));
         assert!(!setup_resume_settled(ComputerUsePhase::NeedsPermission, true, false));
         assert!(!setup_resume_settled(ComputerUsePhase::Error, true, false));
+        assert!(!setup_resume_settled(ComputerUsePhase::Starting, true, false));
         assert!(setup_resume_settled(ComputerUsePhase::NeedsRuntime, true, true));
         assert!(setup_resume_settled(ComputerUsePhase::NeedsPermission, true, true));
         assert!(setup_resume_settled(ComputerUsePhase::Ready, true, true));
@@ -3125,6 +3156,283 @@ done
                 .capabilities(RuntimeSupport::Supported, Grants::all())
                 .spawn_daemon
         );
+    }
+
+    #[test]
+    fn restored_error_recovery_respects_assets_enablement_and_fast_retry_epochs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut record = recovery_record(temporary.path());
+        for (enabled, reason, assets, eligible) in [
+            (true, "health_timeout", true, true),
+            (false, "health_timeout", true, false),
+            (true, "health_timeout", false, false),
+            (true, "assets_invalid", true, false),
+            (true, "driver_health_failed", true, false),
+        ] {
+            record.enabled = enabled;
+            record.reason = Some(reason.to_owned());
+            let mut lifecycle = restored_lifecycle(&StoredComputerUseState::Current(Box::new(record.clone())), assets);
+            lifecycle.capabilities(RuntimeSupport::Supported, Grants::all());
+            assert!(!retry_is_current(7, 7, &lifecycle), "fast timer cannot admit recovery");
+            let start = lifecycle.retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::ZERO, true);
+            assert_eq!(start.spawn_daemon, eligible, "{enabled}/{reason}/{assets}");
+            if !assets {
+                assert_eq!(lifecycle.reason(), Some("assets_invalid"));
+            }
+            lifecycle.toggle_off();
+            assert!(!retry_is_current(7, 8, &lifecycle));
+            assert!(
+                !lifecycle
+                    .retry_recovery(RuntimeSupport::Supported, Grants::all(), Duration::from_secs(999), true)
+                    .spawn_daemon
+            );
+            if assets {
+                assert!(
+                    lifecycle
+                        .toggle_on(RuntimeSupport::Supported, Grants::all())
+                        .spawn_daemon
+                );
+                assert!(
+                    !retry_is_current(7, 8, &lifecycle),
+                    "old event cannot enter a manual start"
+                );
+                assert!(
+                    retry_is_current(9, 9, &lifecycle),
+                    "manual startup keeps its own retry epoch"
+                );
+            }
+        }
+    }
+
+    fn recovery_record(root: &Path) -> ComputerUseRecord {
+        ComputerUseRecord {
+            schema_version: COMPUTER_USE_SCHEMA_VERSION,
+            enabled: true,
+            state: ComputerUsePhase::Error,
+            reason: Some("health_timeout".to_owned()),
+            shell_pid: std::process::id(),
+            instance_id: "isolated-recovery-shell".to_owned(),
+            generation: 0,
+            driver_version: COMPUTER_USE_DRIVER_VERSION.to_owned(),
+            tool_snapshot: ToolSnapshot {
+                path: root.join("tools.json"),
+                sha256: COMPUTER_USE_TOOL_SNAPSHOT_SHA256.to_owned(),
+            },
+            socket_path: None,
+            proxy_executable: None,
+            host_bundle_id: None,
+        }
+    }
+
+    fn write_recovery_driver(root: &Path) -> PathBuf {
+        let path = root.join("fake-cua-driver");
+        let executable = std::env::current_exe().unwrap();
+        let body = r#"#!/bin/sh
+set -eu
+case "$1" in
+  serve)
+    printf 'start\n' >> __LAUNCHES__
+    if [ -f __FAIL__ ]; then exit 7; fi
+    AVIBE_TEST_RECOVERY_SOCKET=__SOCKET__ exec __EXE__ --exact computer_use::tests::recovery_daemon_child --nocapture
+    ;;
+  mcp)
+    while IFS= read -r line; do
+      case "$line" in
+        *'"id":1'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}' ;;
+        *'"id":2'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"checks":[{"name":"tcc_accessibility","status":"pass"},{"name":"tcc_screen_recording","status":"pass"},{"name":"bundle_identity","status":"pass","data":{"identity_source":"parent_application"}},{"name":"ax_capability","status":"pass"}]}}}' ;;
+        *'"id":3'*) printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"image","data":"fixture-image"}]}}' ;;
+      esac
+    done
+    ;;
+  *) exit 64 ;;
+esac
+"#
+        .replace("__LAUNCHES__", &shell_quote(&root.join("launches")))
+        .replace("__FAIL__", &shell_quote(&root.join("fail")))
+        .replace("__SOCKET__", &shell_quote(&root.join("driver.sock")))
+        .replace("__EXE__", &shell_quote(&executable));
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn recovery_daemon_child() {
+        let Some(socket) = std::env::var_os("AVIBE_TEST_RECOVERY_SOCKET") else {
+            return;
+        };
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap() == 0 {
+                continue; // Socket readiness probes do not send a request.
+            }
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let (response, shutdown) = pinned_shutdown_response(&request, std::process::id());
+            write_json_line(&mut writer, &response).await.unwrap();
+            if shutdown {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_recovery_runs_real_children_and_persists_ready_or_the_final_failure() {
+        for succeeds in [true, false] {
+            // A short test-owned root also stays below Darwin's socket path limit.
+            let temporary = tempfile::Builder::new()
+                .prefix("avibe-recovery-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let root = temporary.path();
+            let paths = Paths {
+                state_dir: root.to_owned(),
+                state_file: root.join(COMPUTER_USE_STATE_FILE),
+                socket: root.join("driver.sock"),
+                driver: write_recovery_driver(root),
+                policy: root.join("policy.yaml"),
+                snapshot: root.join("tools.json"),
+            };
+            std::fs::write(&paths.policy, "version: 1\n").unwrap();
+            std::fs::write(&paths.snapshot, include_bytes!("../../cua-driver/tools-v0.31.0.json")).unwrap();
+            std::fs::write(root.join("fail"), "exit before ready").unwrap();
+            let diagnostics = BootstrapLog::at(root.join(BOOTSTRAP_LOG_NAME));
+            let _lock = ComputerUseShellLock::acquire(&root.join(COMPUTER_USE_LOCK_FILE)).unwrap();
+            let store = ComputerUseStateStore::new(paths.state_file.clone());
+            let mut record = recovery_record(root);
+            store.write(&record).unwrap();
+            let marker_time = UNIX_EPOCH + Duration::from_secs(1000);
+            arm_setup_resume(root, marker_time).unwrap();
+            let marker = std::fs::read(root.join(SETUP_RESUME_FILE)).unwrap();
+            let mut lifecycle = restored_lifecycle(&store.read(), paths.assets_valid());
+            assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsRuntime);
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = LoopbackOrigin::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+            let server = tokio::spawn(async move {
+                use tokio::io::AsyncReadExt as _;
+                // The first transient answer must not strand the restored retry.
+                for status in ["503 Service Unavailable", "200 OK"] {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = [0_u8; 1024];
+                    let read = stream.read(&mut request).await.unwrap();
+                    assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /api/desktop/capabilities "));
+                    let body = r#"{"controller_id":"recovery-fixture","computer_use_schema":1}"#;
+                    stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+            });
+            let mut capabilities = CapabilityCache::default();
+            for expected in [ComputerUsePhase::NeedsRuntime, ComputerUsePhase::Starting] {
+                let directive =
+                    runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), Grants::all)
+                        .await
+                        .unwrap();
+                assert!(!directive.spawn_daemon, "the prerequisite cannot bypass admission");
+                assert_eq!(lifecycle.phase(), expected);
+            }
+            server.await.unwrap();
+            let shutdown = AtomicBool::new(false);
+            let mut daemon = None;
+            for (attempt, now) in [(1, 0), (2, 31), (3, 152)] {
+                if attempt > 1 {
+                    assert!(
+                        !lifecycle
+                            .retry_recovery(
+                                capabilities.current(),
+                                Grants::all(),
+                                Duration::from_secs(now - 1),
+                                true
+                            )
+                            .spawn_daemon
+                    );
+                    assert!(
+                        !lifecycle
+                            .retry_recovery(capabilities.current(), Grants::all(), Duration::from_secs(now), false)
+                            .spawn_daemon
+                    );
+                }
+                let directive = lifecycle.retry_recovery(
+                    capabilities.current(),
+                    Grants::all(),
+                    Duration::from_secs(now),
+                    attempt > 1,
+                );
+                assert!(directive.spawn_daemon);
+                assert!(!retry_is_current(7, 7, &lifecycle));
+                record.state = lifecycle.phase();
+                record.reason = lifecycle.reason().map(str::to_owned);
+                record.generation += 1;
+                store.write(&record).unwrap();
+                if succeeds && attempt == 2 {
+                    std::fs::remove_file(root.join("fail")).unwrap();
+                }
+                let health =
+                    start_driver_once(&paths, "bot.avibe.desktop.test", &mut daemon, &shutdown, &diagnostics).await;
+                let passed = health == HealthResult::Pass;
+                let follow_up = lifecycle.startup_health(health, Duration::from_secs(now + 1));
+                assert!(!follow_up.spawn_daemon, "no hidden fast retry cycle");
+                if follow_up.stop_daemon {
+                    stop_daemon_process(
+                        daemon.take().unwrap(),
+                        &paths.socket,
+                        &diagnostics,
+                        PROCESS_STOP_TIMEOUT,
+                    )
+                    .await;
+                }
+                record.state = lifecycle.phase();
+                record.reason = lifecycle.reason().map(str::to_owned);
+                if passed {
+                    record.socket_path = Some(paths.socket.clone());
+                    record.proxy_executable = Some(paths.driver.clone());
+                    record.host_bundle_id = Some("bot.avibe.desktop.test".to_owned());
+                }
+                store.write(&record).unwrap();
+                assert_eq!(std::fs::read(root.join(SETUP_RESUME_FILE)).unwrap(), marker);
+                if passed {
+                    break;
+                }
+            }
+            let StoredComputerUseState::Current(persisted) = store.read() else {
+                panic!("valid result")
+            };
+            assert_eq!(
+                persisted.state,
+                if succeeds {
+                    ComputerUsePhase::Ready
+                } else {
+                    ComputerUsePhase::Error
+                }
+            );
+            assert_eq!(
+                persisted.reason.as_deref(),
+                if succeeds { None } else { Some("daemon_exited") }
+            );
+            let starts = std::fs::read_to_string(root.join("launches")).unwrap().lines().count();
+            assert_eq!(starts, if succeeds { 2 } else { 3 });
+            for now in [153, 3600, 86400] {
+                assert!(
+                    !lifecycle
+                        .retry_recovery(capabilities.current(), Grants::all(), Duration::from_secs(now), true)
+                        .spawn_daemon
+                );
+            }
+            if let Some(child) = daemon.take() {
+                stop_daemon_process(child, &paths.socket, &diagnostics, PROCESS_STOP_TIMEOUT).await;
+            }
+            assert!(!paths.socket.exists());
+            assert!(
+                take_setup_resume_at(root, marker_time),
+                "recovery did not consume the marker"
+            );
+            println!(
+                "isolated recovery: starts={starts}, phase={:?}, reason={:?}",
+                persisted.state, persisted.reason
+            );
+        }
     }
 
     #[tokio::test]

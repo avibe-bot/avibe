@@ -2,9 +2,36 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
-import { computerUseStatusCopy } from './computerUseStatusCopy';
+import { computerUseStatusCopy, type ComputerUseCopyKey } from './computerUseStatusCopy';
 
 describe('computerUseStatusCopy', () => {
+  it('shows restarting without a red error, then clears all recovery copy on Ready', () => {
+    const t = (key: ComputerUseCopyKey) => key;
+    const retrying = computerUseStatusCopy({ status: 'starting', reason: 'health_timeout' }, t);
+    expect(retrying).toEqual({
+      label: 'workbench.home.computerUse.retrying',
+      detail: 'workbench.home.computerUse.retryingDetail',
+      tone: 'gold',
+    });
+    expect(computerUseStatusCopy({ status: 'starting', reason: null }, t).label).toContain('.starting');
+    const ready = computerUseStatusCopy({ status: 'ready', reason: null }, t);
+    expect(ready).toEqual({
+      label: 'workbench.home.computerUse.ready',
+      detail: 'workbench.home.computerUse.readyDetail',
+      tone: 'mint',
+    });
+    const failed = computerUseStatusCopy({ status: 'error', reason: 'health_timeout' }, t);
+    expect(failed.tone).toBe('destructive');
+    expect(failed.detail).toContain('healthTimeoutDetail');
+    for (const locale of [en, zh]) {
+      expect(locale.workbench.home.computerUse.retrying).toBeTruthy();
+      expect(locale.workbench.home.computerUse.retryingDetail).toBeTruthy();
+      expect(locale.desktopBootstrap.computerUse.retrying).toBeTruthy();
+    }
+    expect(en.workbench.home.computerUse.healthTimeoutDetail).toContain('off and on');
+    expect(zh.workbench.home.computerUse.healthTimeoutDetail).toContain('重新');
+  });
+
   it('maps permission reasons to localized copy without exposing raw reason codes', () => {
     const copy = computerUseStatusCopy(
       { status: 'needs_permission', reason: 'screen_recording' },
