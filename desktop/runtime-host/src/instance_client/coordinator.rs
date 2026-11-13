@@ -238,10 +238,17 @@ impl Coordinator {
         self.request_owned(request, false).await
     }
 
-    /// A native link captures this authority before scheduling its local return.
+    /// A native link captures both values before scheduling its local return.
+    /// Only lifecycle may advance generation while this action owner remains.
+    /// Completion receives the actual accepted owner, not expected + 1.
     /// User Cancel/ReturnLocal keep their unconditional escape semantics.
-    pub async fn return_local_if_current(&self, expected_generation: u64) -> Result<(), ClientError> {
-        self.escape(ClientAction::ReturnLocal, Some(expected_generation)).await
+    pub async fn return_local_if_current(
+        &self,
+        expected_generation: u64,
+        action_owner: u64,
+    ) -> Result<u64, ClientError> {
+        self.escape(ClientAction::ReturnLocal, Some(expected_generation), Some(action_owner))
+            .await
     }
 
     async fn request_owned(&self, request: ClientRequest, restoring: bool) -> ClientReply {
@@ -257,7 +264,7 @@ impl Coordinator {
             ClientAction::Cancel | ClientAction::ReturnLocal | ClientAction::SignOut
         ) {
             let expected = matches!(request.action, ClientAction::SignOut).then_some(request.expected_generation);
-            let result = self.escape(request.action, expected).await.map(|_| None);
+            let result = self.escape(request.action, expected, None).await.map(|_| None);
             return self.reply(request.request_id, result);
         }
         if self.signing_out.load(Ordering::SeqCst) {
@@ -307,7 +314,7 @@ impl Coordinator {
             .err()
             .is_some_and(|error| matches!(error.code.as_str(), "signed_out" | "account_changed"))
         {
-            let cleanup = self.escape(ClientAction::SignOut, None).await;
+            let cleanup = self.escape(ClientAction::SignOut, None, None).await;
             return self.reply(request.request_id, cleanup.and(result));
         }
         if result.is_err() {
@@ -586,7 +593,12 @@ impl Coordinator {
         saved
     }
 
-    async fn escape(&self, action: ClientAction, expected: Option<u64>) -> Result<(), ClientError> {
+    async fn escape(
+        &self,
+        action: ClientAction,
+        expected: Option<u64>,
+        native_owner: Option<u64>,
+    ) -> Result<u64, ClientError> {
         let signing_out = matches!(action, ClientAction::SignOut);
         if signing_out && self.signing_out.swap(true, Ordering::SeqCst) {
             return Err(ClientError::new("busy"));
@@ -600,6 +612,20 @@ impl Coordinator {
             // Acceptance and state mutation share one owner/critical section.
             // invalidate may call back or let a newer action run; it must not
             // leave an older escape able to overwrite that action afterward.
+            let expected = if let Some(owner) = native_owner {
+                // The received link already has action authority. Binding a
+                // local Runtime before this task runs does not replace it.
+                // Check both under the acceptance lock: never refresh the
+                // owner, accept a future generation, or retry a failed escape.
+                if self.action_generation.load(Ordering::SeqCst) != owner
+                    || expected.is_none_or(|value| value > inner.state.generation)
+                {
+                    return Err(ClientError::new("stale_generation"));
+                }
+                None
+            } else {
+                expected
+            };
             let epoch = self.advance_locked(&mut inner, expected, false)?;
             inner.selection = None;
             inner.state.consent = None;
@@ -726,7 +752,7 @@ impl Coordinator {
             inner.state.clone()
         };
         self.view.changed(&state);
-        result
+        result.map(|()| epoch.value)
     }
 
     /// Called once at native initialization; cached URLs never authorize restore.
@@ -785,7 +811,7 @@ impl Coordinator {
         working.account.fence(epoch.clone());
         if let Err(error) = working.account.discover(&mut working.state).await {
             if matches!(error.code.as_str(), "signed_out" | "account_changed") {
-                self.escape(ClientAction::SignOut, None).await?;
+                self.escape(ClientAction::SignOut, None, None).await?;
             }
             return Err(error);
         }
@@ -797,7 +823,7 @@ impl Coordinator {
                 .as_ref()
                 .is_none_or(|account| account.id != id)
         {
-            self.escape(ClientAction::SignOut, None).await?;
+            self.escape(ClientAction::SignOut, None, None).await?;
             return Err(ClientError::new("account_changed"));
         }
         self.persist(&mut working, &epoch).await?;

@@ -295,6 +295,65 @@ def test_production_deep_link_finished_defers_to_one_local_owner(production_shel
     assert f["js"]("return location.href;") == target
 
 
+@pytest.mark.parametrize("presentation,interruption", [
+    ("remote", "lifecycle_twice"), ("account", "new_link"), ("remote", "explicit"),
+])
+def test_production_deep_link_lifecycle_before_admission_keeps_received_authority(
+    production_shell_chain, presentation, interruption,
+):
+    """Pause the production task after claim, where earlier load holds cannot reach."""
+    f = production_shell_chain
+    login(f)
+    select_studio(f)
+    if presentation == "account":
+        f["send"](action="present", view="instances")
+        f["wait"]("loaded", lambda event: "account/index.html" in event["url"])
+    before = f["state"](lambda _: True)["state"]["generation"]
+    f["send"](action="shell_control", operation="hold_link_return")
+    f["wait"]("shell_control")
+    f["send"](action="native_link", url="avibe://settings/shortcuts")
+    f["wait"]("link_received")
+    f["wait"]("link_return_held")
+    rounds = 2 if interruption == "lifecycle_twice" else 1
+    for _ in range(rounds):
+        f["send"](action="local_unavailable")
+        f["wait"]("local_unavailable")
+        f["send"](action="shell_control", operation="rebind", origin=f["local"])
+        f["wait"]("shell_control")
+        f["send"](action="shell_control", operation="finished")
+        f["wait"]("shell_control")
+    expected = before + rounds * 2
+    assert f["state"](lambda _: True)["state"]["generation"] == expected
+    target = f["local"] + "/settings/shortcuts"
+    if interruption == "new_link":
+        target = f["local"] + "/settings/computer-use"
+        f["send"](action="native_link", url="avibe://settings/computer-use")
+        f["wait"]("link_received")
+    elif interruption == "explicit":
+        f["send"](action="escape")
+        assert f["wait"]("escaped")["ok"]
+        target = f["local"] + "/"
+    f["send"](action="shell_control", operation="release_link_return")
+    f["wait"]("shell_control")
+    f["wait"]("link_return_finished")
+    if interruption != "explicit":
+        f["wait"]("loaded", lambda event: event["url"] == target, timeout=10)
+    for _ in range(3):
+        f["send"](action="shell_control", operation="finished")
+        f["wait"]("shell_control")
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending"] is (interruption == "explicit")
+    current = f["state"](lambda _: True)
+    assert current["visible"] is True
+    assert current["state"]["generation"] == expected + 1
+    assert f["js"]("return location.href;") == target
+    time.sleep(0.2)
+    assert f["js"]("return location.href;") == target
+    assert sum(event.get("event") == "link_return_held" for event in f["history"]) == 1
+    if interruption != "new_link":
+        assert sum(event.get("event") == "link_return_finished" for event in f["history"]) == 1
+
+
 @pytest.mark.skipif(os.environ.get("DESKTOP_FIXTURE_UPDATER") != "1", reason="requires signed updater transport fixture build")
 @pytest.mark.parametrize("production_shell_chain", [
     {"sse": True, "automatic": False},

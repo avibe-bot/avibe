@@ -96,6 +96,26 @@ def main():
             library_source = library_source.replace("fn receive_native_deep_link(", helper + "fn receive_native_deep_link(", 1)
             shell_adaptations["extracted_frozen_finished_callback"] = True
         library.write_text(library_source + '\n#[path = "../examples/support/fixture_shell.rs"]\npub mod fixture_shell;\n')
+        native_client = source / "desktop/src-tauri/src/instance_client.rs"
+        client_source = native_client.read_text()
+        shell_adaptations["instance_client_original_sha256"] = hashlib.sha256(native_client.read_bytes()).hexdigest()
+        start = client_source.index("pub(crate) fn return_local_for_link(")
+        end = client_source.index("pub fn page_loaded", start)
+        return_source = client_source[start:end]
+        needle = "    tauri::async_runtime::spawn(async move {\n"
+        assert return_source.count(needle) == 1
+        return_source = return_source.replace(
+            needle, needle + "        crate::fixture_shell::before_link_return(&app).await;\n",
+        )
+        client_source = client_source[:start] + return_source + client_source[end:]
+        needle = "        crate::apply_pending_deep_link(&app);\n    });\n}\npub fn page_loaded"
+        assert client_source.count(needle) == 1
+        client_source = client_source.replace(
+            needle, '        println!("{}", serde_json::json!({"event":"link_return_finished"}));\n' + needle,
+        )
+        native_client.write_text(client_source)
+        shell_adaptations["instance_client_fixture_sha256"] = hashlib.sha256(native_client.read_bytes()).hexdigest()
+        shell_adaptations["link_admission_instrumentation"] = "bounded pause after the actual claim, before the actual coordinator call"
         example = source / "desktop/src-tauri/examples/instance_client_probe.rs"
         example_source = example.read_text()
         replacements = {

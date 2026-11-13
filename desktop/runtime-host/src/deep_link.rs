@@ -87,7 +87,7 @@ impl DeepLinkNavigation {
 pub struct DeepLinkReturn {
     delivery: Arc<DeepLinkTarget>,
     pub expected_generation: u64,
-    action_owner: u64,
+    pub action_owner: u64,
 }
 
 struct LocalReturn {
@@ -164,7 +164,7 @@ impl DeepLinks {
         Some(ticket)
     }
 
-    pub fn finish_local_return(&mut self, ticket: &DeepLinkReturn, succeeded: bool) {
+    pub fn finish_local_return(&mut self, ticket: &DeepLinkReturn, accepted_owner: Option<u64>) {
         let Some(current) = self
             .local_return
             .as_mut()
@@ -173,11 +173,12 @@ impl DeepLinks {
             return;
         };
         current.in_flight = false;
-        current.succeeded = succeeded;
-        if succeeded && self.action_owner == Some(ticket.action_owner) {
+        current.succeeded = accepted_owner.is_some();
+        if accepted_owner.is_some() && self.action_owner == Some(ticket.action_owner) {
             // A newer link received during this same accepted transition can
             // share its local presentation, but never a newer explicit action.
-            self.action_owner = Some(ticket.expected_generation + 1);
+            // Lifecycle may have advanced before acceptance; use its receipt.
+            self.action_owner = accepted_owner;
         }
     }
 

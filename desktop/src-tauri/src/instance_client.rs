@@ -311,10 +311,14 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
     };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result = coordinator.return_local_if_current(ticket.expected_generation).await;
-        let succeeded = result.is_ok() && coordinator.presentation_epoch(ticket.expected_generation + 1).is_ok();
+        let result = coordinator
+            .return_local_if_current(ticket.expected_generation, ticket.action_owner)
+            .await;
+        let accepted_owner = result
+            .ok()
+            .filter(|owner| coordinator.presentation_epoch(*owner).is_ok());
         if let Ok(mut links) = app.state::<Mutex<crate::DeepLinks>>().lock() {
-            links.finish_local_return(&ticket, succeeded);
+            links.finish_local_return(&ticket, accepted_owner);
         }
         crate::apply_pending_deep_link(&app);
     });

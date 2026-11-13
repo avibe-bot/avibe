@@ -466,3 +466,43 @@ The final candidate must run all 28 actual chain consumers (original 20 plus
 8 production-entry cases), from its archived source, before handoff. The cookie
 probe/helper, dependency lock and updater installer bytes are unchanged; their
 independent 4fc cookie evidence remains scoped to that unchanged boundary.
+
+## Pre-admission lifecycle continuation
+
+Lead independently passed the c689a37 candidate's 28 actual-chain cases,
+11 coordinator cases, 30 notification cases, exact-head review and native CI.
+It then reproduced an uncovered interval: a link is claimed, local lifecycle
+advances generation before the spawned return is accepted, and the old strict
+generation check rejects it. Treating that rejection as a terminal failed
+delivery strands the still-current link. This is an independent consumer
+finding, not another findings-bearing Codex head; the historical count stays
+three. The released scope is the same link/NativeView/coordinator ownership
+boundary, without changes to updater policy, peers or the frozen wire.
+
+Native return now supplies both the generation and action owner captured at
+claim. The original escape acceptance lock checks that owner and rejects future
+generations, while permitting intervening lifecycle-only changes. Acceptance
+and state mutation remain atomic. The escape returns its actual accepted action
+receipt, which DeepLinks uses for completion instead of inferring captured
+generation plus one. Newer explicit actions still reject old work without state,
+record or view effects. Cleanup/presentation failures remain terminal for the
+same link; there is no retry loop or second queue.
+
+The existing coordinator fixture now composes actual DeepLinks and Coordinator
+for lifecycle once/twice, newer explicit action, newer link, and cleanup failure.
+The lifecycle case fails on c689a37 and all 12 coordinator cases pass after the
+correction. The archived native fixture adds a bounded scheduling pause after
+the production claim and before the real coordinator call. It changes no
+authority/result and is absent from the shipped library. Three real
+receive/Finished controls cover repeated lifecycle changes, latest-link
+precedence from account presentation, and a newer explicit escape. The frozen
+c689a37 remote case fails to deliver the route; the explicit escape remains
+valid. An initial newer-link assertion counted rejected and accepted attempts
+together; it was narrowed to actual accepted-generation and delivery precedence,
+and that fixture-only failure is retained separately.
+
+Final validation uses the same immutable B1/B2 assembly, R1 and both U1 bundles.
+Run the affected native controls before the original 28-case chain on one fixed
+artifact, then fresh exact-head review and macOS/Windows CI. Unchanged
+cookie/store, notification/updater and B2/R1 A2/A3 evidence retains its previous
+scope. Independent Lead execution and final lane quiescence remain required.

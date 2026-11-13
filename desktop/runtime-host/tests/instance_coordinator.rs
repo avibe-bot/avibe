@@ -213,6 +213,105 @@ fn signed_in() -> Value {
         .clone()
 }
 
+// The link is received before its native task runs. A lifecycle-only change
+// must preserve that captured action authority; a newer explicit action or a
+// real cleanup failure must not. The window tests cover the separate delivery
+// callback boundary; this exercises the actual admission and durable owner.
+#[tokio::test]
+async fn native_link_admission_preserves_only_its_received_action_authority() {
+    use avibe_runtime_host::{deep_link::DeepLinks, BootstrapNoticeCode, BootstrapStatus, LoopbackOrigin};
+
+    for interruption in [
+        "lifecycle",
+        "lifecycle_twice",
+        "explicit",
+        "new_link",
+        "cleanup_failure",
+    ] {
+        let f = fixture(first_factor());
+        if interruption == "cleanup_failure" {
+            f.view.retirement_failure.store(true, Ordering::SeqCst);
+            assert_eq!(
+                action(&f.client, ClientAction::SignOut).await.error.unwrap().code,
+                "window_unavailable"
+            );
+        }
+        let mut links = DeepLinks::default();
+        let owner = f.client.presentation_owner();
+        let generation = f.client.state().generation;
+        links.receive_owned(["avibe://settings/shortcuts"], Some(owner));
+        let ticket = links.claim_local_return(generation, owner).unwrap();
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap();
+        f.client.local_origin(Some(origin.clone()));
+        if interruption == "lifecycle_twice" {
+            f.client.local_origin(None);
+            f.client.local_origin(Some(origin.clone()));
+        }
+        let target = if interruption == "new_link" {
+            links.receive_owned(["avibe://settings/computer-use"], Some(owner));
+            "/settings/computer-use"
+        } else {
+            "/settings/shortcuts"
+        };
+        if interruption == "explicit" {
+            assert!(
+                action(
+                    &f.client,
+                    ClientAction::RequestOtp {
+                        email: "later@example.test".into()
+                    }
+                )
+                .await
+                .ok
+            );
+        }
+        assert!(links
+            .claim_local_return(f.client.state().generation, f.client.presentation_owner())
+            .is_none());
+        let before = serde_json::to_value(f.client.state()).unwrap();
+        let record = std::fs::read(f._root.path().join("connection.json")).unwrap();
+        let restores = f.view.restored.lock().unwrap().len();
+        let result = f
+            .client
+            .return_local_if_current(ticket.expected_generation, ticket.action_owner)
+            .await;
+        if interruption == "explicit" {
+            assert_eq!(result.unwrap_err().code, "stale_generation");
+            assert_eq!(serde_json::to_value(f.client.state()).unwrap(), before);
+            assert_eq!(std::fs::read(f._root.path().join("connection.json")).unwrap(), record);
+            assert_eq!(f.view.restored.lock().unwrap().len(), restores);
+            links.finish_local_return(&ticket, None);
+            assert!(!links.pending_for_owner(Some(f.client.presentation_owner())));
+        } else if interruption == "cleanup_failure" {
+            assert_eq!(result.unwrap_err().code, "window_unavailable");
+            links.finish_local_return(&ticket, None);
+            assert!(!links.pending_for_owner(Some(f.client.presentation_owner())));
+        } else {
+            assert!(
+                result.is_ok(),
+                "same received action lost to {interruption}: {result:?}"
+            );
+            let accepted_owner = result.unwrap();
+            links.finish_local_return(&ticket, Some(accepted_owner));
+            assert_eq!(accepted_owner, f.client.presentation_owner());
+            assert_eq!(accepted_owner, before["generation"].as_u64().unwrap() + 1);
+            assert!(links.pending_for_owner(Some(accepted_owner)));
+            assert_eq!(f.view.restored.lock().unwrap().len(), restores + 1);
+            assert!(f.store.load("unused").unwrap().last_committed.is_local());
+            let ready = BootstrapStatus::ready(&origin, 1, BootstrapNoticeCode::Ready);
+            let bootstrap = links.bootstrap_navigation_owned(&ready, Some(accepted_owner)).unwrap();
+            let navigation = links.workbench_navigation(&origin, &origin.navigation_url()).unwrap();
+            assert_eq!(bootstrap.url().path(), target);
+            assert_eq!(navigation.url().path(), target);
+            assert!(!links.commit_navigation(&navigation, false, 1, 1));
+            assert!(links.has_pending());
+            assert!(links.commit_navigation(&navigation, true, 1, 1));
+            assert!(!links.commit_navigation(&bootstrap, true, 1, 1));
+            assert!(!links.has_pending());
+        }
+    }
+}
+
 // Admission must reject obsolete native work without changing anything. Once
 // accepted, lifecycle can interrupt callbacks, but only a newer explicit
 // action may replace the accepted state/record. Existing credential tests hold
@@ -225,7 +324,7 @@ async fn native_return_admission_and_state_commit_keep_their_action_owner() {
         let before = f.client.state();
         assert_eq!(
             f.client
-                .return_local_if_current(before.generation + 1)
+                .return_local_if_current(before.generation + 1, f.client.presentation_owner())
                 .await
                 .unwrap_err()
                 .code,
@@ -243,7 +342,7 @@ async fn native_return_admission_and_state_commit_keep_their_action_owner() {
         *f.view.invalidation.lock().unwrap() = Some((entered, released));
         let client = f.client.clone();
         let runtime = tokio::runtime::Handle::current();
-        let returning = tokio::task::spawn_blocking(move || runtime.block_on(client.return_local_if_current(0)));
+        let returning = tokio::task::spawn_blocking(move || runtime.block_on(client.return_local_if_current(0, 0)));
         reached.await.unwrap();
         if explicit {
             assert!(

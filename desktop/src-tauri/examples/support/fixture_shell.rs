@@ -5,6 +5,8 @@ use avibe_runtime_host::{HealthProbe, LaunchError, Presence, ResolvedRuntimeLaun
 use std::path::Path;
 
 struct NoRuntime;
+#[derive(Default)]
+struct LinkAdmission(Mutex<Option<(bool, Arc<tokio::sync::Notify>)>>);
 #[async_trait::async_trait]
 impl HealthProbe for NoRuntime {
     async fn presence(&self, _: &LoopbackOrigin, _: Option<&str>) -> Presence {
@@ -47,6 +49,7 @@ pub fn attach(app: &AppHandle, local: LoopbackOrigin, root: &Path) -> Arc<Mutex<
     app.manage(PendingDesktopUpdateOpen(AtomicBool::new(false)));
     app.manage(notifications::Notifications::new(root.join("notifications.json")));
     app.manage(pet::Pet::new(root.join("pet.json")));
+    app.manage(LinkAdmission::default());
     active
 }
 
@@ -75,6 +78,31 @@ pub fn receive(app: &AppHandle, link: String) {
     }).unwrap();
 }
 
+/// The archived fixture pauses the real task after claim and before acceptance.
+/// It does not supply an owner, a result, or an alternative return path.
+pub async fn before_link_return(app: &AppHandle) {
+    if !enabled() {
+        return;
+    }
+    let release = {
+        let gate = app.state::<LinkAdmission>();
+        let mut held = gate.0.lock().unwrap();
+        held.as_mut().and_then(|(armed, release)| {
+            if !*armed {
+                return None;
+            }
+            *armed = false;
+            Some(release.clone())
+        })
+    };
+    if let Some(release) = release {
+        println!("{}", serde_json::json!({"event":"link_return_held"}));
+        tokio::time::timeout(std::time::Duration::from_secs(30), release.notified())
+            .await
+            .expect("fixture link admission hold timed out");
+    }
+}
+
 pub fn status(app: &AppHandle) -> serde_json::Value {
     let shell = app.state::<Shell>();
     serde_json::json!({
@@ -94,6 +122,16 @@ pub fn control(app: &AppHandle, command: serde_json::Value) {
         match command["operation"].as_str().unwrap() {
             "finished" => {
                 super::main_document_finished(handle.get_webview_window(MAIN_WINDOW).unwrap().as_ref());
+            }
+            "hold_link_return" => {
+                let gate = handle.state::<LinkAdmission>();
+                let mut held = gate.0.lock().unwrap();
+                assert!(held.is_none());
+                *held = Some((true, Arc::new(tokio::sync::Notify::new())));
+            }
+            "release_link_return" => {
+                let (_, release) = handle.state::<LinkAdmission>().0.lock().unwrap().take().unwrap();
+                release.notify_one();
             }
             "hide" => handle.get_webview_window(MAIN_WINDOW).unwrap().hide().unwrap(),
             "notifications" => {
