@@ -941,20 +941,33 @@ final class DirectPathController {
     /// two. Before any route this is not a fault: the listener goes, and
     /// hosts keep WebKit's normal path. After one, it is.
     func listenerDidFail(_ failed: DirectConnectListener, routed: Bool) {
-        guard failed === listener, listenerState == .ready else {
+        guard
+            failed === listener,
+            listenerState == .ready || listenerState == .rebinding
+        else {
             return
         }
+        // A socket bound again on the return failed before the return
+        // completed: this settles the return, and the re-bind's own
+        // completion, finding the listener retired or faulted, does nothing.
+        let settlesResume = listenerState == .rebinding && !isInBackground
         // Decided by the listener, against the last route publication.
         guard routed else {
             // Retired at once, so a route preparation waiting to publish
             // sees it gone; only the socket's stop is asynchronous.
             let retired = retireListener()
+            if settlesResume {
+                finishResume()
+            }
             Task {
                 await retired?.stop()
             }
             return
         }
         enterFault("the listening socket failed")
+        if settlesResume {
+            finishResume()
+        }
     }
 
     /// Terminal for this process, and entered once. No new connection is
@@ -1057,7 +1070,9 @@ final class DirectPathController {
                     self.listenerState = .closedForBackground
                     return
                 }
-                if ready {
+                // The socket's own state too: one that failed after the
+                // ownership check answered is not a recovered listener.
+                if ready, listener.health.isServing {
                     self.listenerState = .ready
                     self.finishResume()
                 } else if self.routeOwner.allowedHosts.isEmpty {
