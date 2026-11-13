@@ -343,11 +343,14 @@ final class DirectPathController {
 
     private var heldReplies: [HeldReply] = []
     private var isResuming = false
-    /// Relay closes decided on the main actor whose close has not yet been
-    /// issued by the listener. A return settles only when there are none.
+    /// Relay closes decided on the main actor that the listener has not
+    /// issued yet: the relays not yet cancelled, their authority not yet
+    /// ended. Bookkeeping only; the claims decided what each close counts.
     private var closesInFlight = 0
-    /// A return that was ready to settle while a close was in flight.
-    private var resumeAwaitsCloses = false
+    /// The current re-bind attempt's successful completion, kept while a
+    /// close is in flight (`rebindDidComplete`). The attempt stays current
+    /// and its episode open meanwhile.
+    private var completionAwaitingCloses: DirectRebindCompletion?
     /// Route preparations under way; the listener is kept while any is.
     private var preparations = 0
 
@@ -901,7 +904,7 @@ final class DirectPathController {
         }
         // Until the listener has issued this close (cancelled the relays and
         // ended their authority; not until every one has drained), a return
-        // does not settle: the closure it would publish is for connections
+        // is not confirmed: the closure it publishes is for connections
         // that have been told to end.
         closesInFlight += 1
         Task { [weak self] in
@@ -913,15 +916,15 @@ final class DirectPathController {
         }
     }
 
+    /// A close was issued. With none left, a kept completion is handled
+    /// again, from the start: whatever happened meanwhile is decided there.
     private func closeDidIssue() {
         closesInFlight -= 1
-        guard closesInFlight == 0, resumeAwaitsCloses else {
+        guard closesInFlight == 0, let kept = completionAwaitingCloses else {
             return
         }
-        resumeAwaitsCloses = false
-        if isResuming, !isInBackground {
-            finishResume()
-        }
+        completionAwaitingCloses = nil
+        rebindDidComplete(kept)
     }
 
     /// One closure per host for one event. While the App is in the
@@ -1113,6 +1116,7 @@ final class DirectPathController {
             listenerGeneration = nil
             listenerStart = nil
             rebinds.abandon()
+            completionAwaitingCloses = nil
             return listener
         case .failed:
             enterFault("the listener failed before it could be retired")
@@ -1160,6 +1164,7 @@ final class DirectPathController {
         disarmWatchdog()
         // Whatever return was under way is settled by this.
         rebinds.abandon()
+        completionAwaitingCloses = nil
         if let listener {
             // The socket goes, and the revoked work with it.
             Task {
@@ -1255,9 +1260,6 @@ final class DirectPathController {
             return
         }
         isInBackground = true
-        // A return still waiting for a close is not settled now: the next
-        // return settles once its own listener is ready.
-        resumeAwaitsCloses = false
         // Nothing is watched while the App is away. An episode already
         // overdue fails the listener here, before the close below; the
         // background itself is never a failure.
@@ -1287,6 +1289,12 @@ final class DirectPathController {
             } else if listenerState == .binding {
                 retireAndStop()
             }
+        }
+        // A return that waited only for closes is parked now, not when they
+        // are issued.
+        if let kept = completionAwaitingCloses {
+            completionAwaitingCloses = nil
+            rebindDidComplete(kept)
         }
         closeRelays(.direct, countsAsClosure: true) { [weak self] in
             // Unless a new selection was made meanwhile: selecting already
@@ -1331,6 +1339,7 @@ final class DirectPathController {
     private func startRebind(_ listener: DirectConnectListener, port listenerPort: UInt16) {
         // Each attempt has its own identity: only the current attempt's
         // completion may settle anything.
+        completionAwaitingCloses = nil
         let attempt = rebinds.begin()
         let rebindSeconds = timing.rebindSeconds
         let nonce = listener.ownershipNonce
@@ -1358,35 +1367,49 @@ final class DirectPathController {
             let generation = bound.value
             await MainActor.run {
                 self?.rebindDidComplete(
-                    attempt,
-                    listener,
-                    port: listenerPort,
-                    generation: generation,
-                    ready: ready
+                    DirectRebindCompletion(
+                        attempt: attempt,
+                        listener: listener,
+                        port: listenerPort,
+                        generation: generation,
+                        ready: ready
+                    )
                 )
             }
         }
     }
 
-    private func rebindDidComplete(
-        _ attempt: Int,
-        _ listener: DirectConnectListener,
-        port listenerPort: UInt16,
-        generation: Int?,
-        ready: Bool
-    ) {
+    private func rebindDidComplete(_ completion: DirectRebindCompletion) {
+        let attempt = completion.attempt
+        let listener = completion.listener
+        let listenerPort = completion.port
+        let generation = completion.generation
+        let ready = completion.ready
         // Only the current attempt settles anything. A stale one (settled by
         // a failure, or replaced by a newer attempt) changes no state here;
         // the socket it bound, if any, is the listener's, which the newer
         // attempt closes before binding, and its generation can no longer
         // be confirmed or rejected.
-        guard self.listener === listener, rebinds.end(attempt) else {
+        guard self.listener === listener, rebinds.current == attempt else {
             return
         }
         // A bind that already failed (its lifecycle recorded it) is the
         // fault, in the foreground or the background: failure wins over
-        // parking.
+        // parking, and over waiting for closes.
         if deliverFault(of: listener, "the port could not be re-bound and checked") {
+            return
+        }
+        // Success waits until every relay close decided so far has been
+        // issued: the closure the return publishes is then for connections
+        // already told to end. The attempt stays current and the episode
+        // open, so its watchdog still bounds the wait; the last close
+        // handles this completion again (`closeDidIssue`), and a background
+        // handles it at once.
+        if ready, !isInBackground, closesInFlight > 0 {
+            completionAwaitingCloses = completion
+            return
+        }
+        guard rebinds.end(attempt) else {
             return
         }
         if isInBackground {
@@ -1436,21 +1459,9 @@ final class DirectPathController {
         }
     }
 
-    /// Settles the return: at once, or, while a relay close decided before
-    /// it has not been issued by the listener yet, as soon as it has
-    /// (`closeDidIssue`).
-    private func finishResume() {
-        guard closesInFlight == 0 else {
-            resumeAwaitsCloses = true
-            return
-        }
-        settleResume()
-    }
-
     /// Publishes the closures the background caused, answers the held
     /// status requests, sends the state once more, and selects again.
-    private func settleResume() {
-        resumeAwaitsCloses = false
+    private func finishResume() {
         isResuming = false
         if !pendingClosureHosts.isEmpty {
             for host in pendingClosureHosts {
@@ -1533,6 +1544,15 @@ private final class DirectBindingBox: @unchecked Sendable {
     var value: Int? {
         lock.withLock { generation }
     }
+}
+
+/// What one re-bind attempt ended with.
+struct DirectRebindCompletion: Sendable {
+    let attempt: Int
+    let listener: DirectConnectListener
+    let port: UInt16
+    let generation: Int?
+    let ready: Bool
 }
 
 /// The controller's own bookkeeping of a return's re-bind attempts: which

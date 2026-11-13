@@ -1600,6 +1600,11 @@ final class DirectPathAppTests: XCTestCase {
         let controller = try makeRuntimeController(app, runtime)
         app.registerRuntimeController(controller, for: runtime)
         let page = try RuntimePage(controller: controller)
+        // A document of the instance's origin, loaded here before the path
+        // comes up: the runtime's own load of the instance would otherwise
+        // send WebKit's own CONNECT through the route, and could take the
+        // relay's stream below.
+        try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
         try await eventually {
             // A request made before the WebView existed is asked again.
             scheduler.fire(Self.patientIrohTiming.pageRetrySeconds)
