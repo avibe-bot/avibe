@@ -52,6 +52,11 @@ export const InfoHint: React.FC<InfoHintProps> = ({
     closeTimer.current = window.setTimeout(() => setOpen(false), 120);
   }, [cancelClose]);
   React.useEffect(() => cancelClose, [cancelClose]);
+  // Closing returns focus to the trigger. With `hover`, focus opens the hint, so that return
+  // reopened it at once: an outside tap could never close it, and on a phone (no Escape) the modal
+  // popover then blocked every other tap. The return is done here, marked so it doesn't reopen.
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const returningFocus = React.useRef(false);
 
   // Only a mouse hovers. A tap reports pointerType 'touch' and is left to the
   // click handler, so a phone gets one clean toggle instead of open-then-close.
@@ -63,7 +68,11 @@ export const InfoHint: React.FC<InfoHintProps> = ({
       onPointerLeave: (event: React.PointerEvent) => {
         if (event.pointerType === 'mouse') scheduleClose();
       },
-      onFocus: () => { cancelClose(); setOpen(true); },
+      onFocus: () => {
+        if (returningFocus.current) return;
+        cancelClose();
+        setOpen(true);
+      },
       onBlur: scheduleClose,
     }
     : {};
@@ -72,6 +81,7 @@ export const InfoHint: React.FC<InfoHintProps> = ({
     <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger asChild>
         <button
+          ref={triggerRef}
           type="button"
           aria-label={label}
           onClick={() => setOpen((prev) => !prev)}
@@ -91,6 +101,12 @@ export const InfoHint: React.FC<InfoHintProps> = ({
         sideOffset={6}
         // Don't steal focus from the trigger on hover-open, so tabbing isn't trapped.
         onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          returningFocus.current = true;
+          triggerRef.current?.focus({ preventScroll: true });
+          returningFocus.current = false;
+        }}
         onPointerEnter={hover ? cancelClose : undefined}
         onPointerLeave={hover ? scheduleClose : undefined}
         className={cn('w-64 p-3 text-[12px] font-normal leading-relaxed text-muted', contentClassName)}
