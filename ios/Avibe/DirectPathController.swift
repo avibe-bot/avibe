@@ -109,9 +109,19 @@ final class DirectRouteOwner {
         excluded.insert(StoreHost(store: store, host: host))
     }
 
+    /// Whether `add` would add `host` to `store`'s route: it is not excluded
+    /// there, and the process-wide cap leaves room for it.
+    func canAdd(_ host: String, store: UUID) -> Bool {
+        guard !routes(host, store: store), !isExcluded(host, store: store) else {
+            return false
+        }
+        return allowedHosts.contains(host) || allowedHosts.count < Self.maxHosts
+    }
+
     /// Adds `host` to `store`'s route, written to `dataStore`, pointing at
     /// `port`. `false` when the host is excluded for this store or the
     /// process-wide cap is reached; the host then keeps WebKit's normal path.
+    @discardableResult
     func add(_ host: String, store: UUID, dataStore: WKWebsiteDataStore, port: UInt16) -> Bool {
         if routes(host, store: store) {
             return true
@@ -439,27 +449,28 @@ final class DirectPathController {
         }
         // The runtime loads now, with or without a route, so a host that
         // gets none here never gets one on this store.
-        // The last check before publication, with no suspension after it:
-        // the controller's view, and the socket's own state, which Network
-        // records before its failure callback can reach the controller.
+        // The last checks and the publication, in one main-actor turn with
+        // no suspension. The claim is ordered against the socket's failure
+        // under the listener's own lock (`DirectSocketHealth`): a failure
+        // recorded first stops the route here; a failure after the claim is
+        // one after a route, whenever its callback arrives.
         guard
             listenerState == .ready,
             !isInBackground,
             self.listener === listener,
             self.listenerPort == listenerPort,
-            listener.health.isServing
+            routeOwner.canAdd(authority.host, store: store),
+            listener.health.claimPublication()
         else {
             routeOwner.exclude(authority.host, store: store)
             return
         }
-        if !routeOwner.add(
+        routeOwner.add(
             authority.host,
             store: store,
             dataStore: websiteDataStore.dataStore,
             port: listenerPort
-        ) {
-            routeOwner.exclude(authority.host, store: store)
-        }
+        )
     }
 
     /// A runtime opened, after its route was prepared.
@@ -838,12 +849,12 @@ final class DirectPathController {
             planner: { [weak self] authority in
                 await self?.plan(for: authority)
             },
-            onListenerFailure: { [weak self, listenerBox] in
+            onListenerFailure: { [weak self, listenerBox] routed in
                 Task { @MainActor in
                     guard let failed = listenerBox.listener else {
                         return
                     }
-                    self?.listenerDidFail(failed)
+                    self?.listenerDidFail(failed, routed: routed)
                 }
             }
         )
@@ -925,14 +936,16 @@ final class DirectPathController {
         return listener
     }
 
-    /// The listening socket of `failed` failed. Before any route exists this
-    /// is not a fault: the listener goes, and hosts keep WebKit's normal
-    /// path. After one, it is.
-    func listenerDidFail(_ failed: DirectConnectListener) {
+    /// The listening socket of `failed` failed. `routed` says whether a
+    /// route had been published to it first, as its own lock ordered the
+    /// two. Before any route this is not a fault: the listener goes, and
+    /// hosts keep WebKit's normal path. After one, it is.
+    func listenerDidFail(_ failed: DirectConnectListener, routed: Bool) {
         guard failed === listener, listenerState == .ready else {
             return
         }
-        guard !routeOwner.allowedHosts.isEmpty else {
+        // Decided by the listener, against the last route publication.
+        guard routed else {
             // Retired at once, so a route preparation waiting to publish
             // sees it gone; only the socket's stop is asynchronous.
             let retired = retireListener()

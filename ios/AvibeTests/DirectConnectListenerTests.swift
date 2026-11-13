@@ -1008,7 +1008,7 @@ final class DirectConnectListenerTests: XCTestCase {
             let listener = DirectConnectListener(
                 limits: .patient,
                 planner: { _ in nil },
-                onListenerFailure: {}
+                onListenerFailure: { _ in }
             )
             let binding = Task {
                 try await listener.bind(port: nil)
@@ -1023,12 +1023,40 @@ final class DirectConnectListenerTests: XCTestCase {
         }
     }
 
+    /// Route publication and the socket's failure, in both orders: the
+    /// listener's lock decides once, and the failure reports which came
+    /// first. A failure of an earlier socket changes nothing.
+    func testRoutePublicationAndASocketFailureAreOrderedOnce() {
+        let failedFirst = DirectSocketHealth()
+        failedFirst.serving(generation: 1)
+        XCTAssertFalse(failedFirst.failed(generation: 1))
+        XCTAssertFalse(failedFirst.claimPublication())
+
+        let claimedFirst = DirectSocketHealth()
+        claimedFirst.serving(generation: 1)
+        XCTAssertTrue(claimedFirst.claimPublication())
+        XCTAssertTrue(claimedFirst.failed(generation: 1))
+        XCTAssertFalse(claimedFirst.claimPublication())
+
+        // A later socket of the same listener: routes were published to the
+        // listener before, so its failure is one after a route too.
+        claimedFirst.serving(generation: 2)
+        XCTAssertTrue(claimedFirst.failed(generation: 1) && claimedFirst.isServing)
+        XCTAssertTrue(claimedFirst.failed(generation: 2))
+        XCTAssertFalse(claimedFirst.isServing)
+
+        let closed = DirectSocketHealth()
+        closed.serving(generation: 1)
+        closed.closed()
+        XCTAssertFalse(closed.claimPublication())
+    }
+
     func testAFailureOfAnEarlierSocketOfTheSameListenerIsStale() async throws {
         let failures = Recorder<Bool>()
         let listener = DirectConnectListener(
             limits: .patient,
             planner: { _ in nil },
-            onListenerFailure: { failures.record(true) }
+            onListenerFailure: { failures.record($0) }
         )
         addTeardownBlock {
             await listener.stop()
@@ -1043,9 +1071,9 @@ final class DirectConnectListenerTests: XCTestCase {
         let current = 2
         XCTAssertTrue(listener.health.isServing)
 
-        await listener.socketDidFail(bindGeneration: earlier)
+        await listener.socketDidFail(bindGeneration: earlier, routed: true)
         XCTAssertEqual(failures.values, [])
-        await listener.socketDidFail(bindGeneration: current)
+        await listener.socketDidFail(bindGeneration: current, routed: true)
         XCTAssertEqual(failures.values, [true])
     }
 
@@ -1055,7 +1083,7 @@ final class DirectConnectListenerTests: XCTestCase {
         let listener = DirectConnectListener(
             limits: .patient,
             planner: { _ in nil },
-            onListenerFailure: {}
+            onListenerFailure: { _ in }
         )
         addTeardownBlock {
             await listener.stop()
@@ -1377,7 +1405,7 @@ final class DirectConnectListenerTests: XCTestCase {
             planner: { authority in
                 plans.plan(for: authority)
             },
-            onListenerFailure: {}
+            onListenerFailure: { _ in }
         )
         for allowed in allowedHosts ?? [host] {
             await listener.allowHost(allowed)

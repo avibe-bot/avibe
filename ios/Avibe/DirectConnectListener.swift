@@ -361,7 +361,9 @@ actor DirectConnectListener {
 
     private let limits: DirectConnectLimits
     private let planner: DirectConnectPlanner
-    private let onListenerFailure: @Sendable () -> Void
+    /// Called with whether a route had been published to this listener
+    /// before its socket failed (`DirectSocketHealth`).
+    private let onListenerFailure: @Sendable (_ routed: Bool) -> Void
     private let queue = DispatchQueue(label: "bot.avibe.ios.direct-connect")
     /// Made once per listener. Only this listener's accept loop answers an
     /// ownership check that carries it.
@@ -387,7 +389,7 @@ actor DirectConnectListener {
         limits: DirectConnectLimits = .standard,
         ownershipNonce: String = UUID().uuidString,
         planner: @escaping DirectConnectPlanner,
-        onListenerFailure: @escaping @Sendable () -> Void
+        onListenerFailure: @escaping @Sendable (_ routed: Bool) -> Void
     ) {
         self.limits = limits
         self.ownershipNonce = ownershipNonce
@@ -466,9 +468,9 @@ actor DirectConnectListener {
                 // From here on, a state change is the socket failing.
                 listener?.stateUpdateHandler = { [weak self] state in
                     if case .failed = state {
-                        health.failed(generation: generation)
+                        let routed = health.failed(generation: generation)
                         Task {
-                            await self?.socketDidFail(bindGeneration: generation)
+                            await self?.socketDidFail(bindGeneration: generation, routed: routed)
                         }
                     }
                 }
@@ -637,11 +639,11 @@ actor DirectConnectListener {
     /// The socket of bind `bindGeneration` failed. Reported only while that
     /// socket is the current one: a failure of an earlier socket of this
     /// listener, closed for the background and replaced, is stale.
-    func socketDidFail(bindGeneration generation: Int) {
+    func socketDidFail(bindGeneration generation: Int, routed: Bool) {
         guard !isStopped, listener != nil, generation == bindGeneration else {
             return
         }
-        onListenerFailure()
+        onListenerFailure(routed)
     }
 
     private func accept(_ connection: NWConnection) {
@@ -1672,70 +1674,59 @@ final class DirectRaceHandle: @unchecked Sendable {
     }
 }
 
-/// Whether a listener's current socket is serving. Written where Network
-/// reports the socket's state, read synchronously by the path controller
-/// just before it publishes a route, so a failure that has happened is seen
-/// there even while its callback is still on its way.
+/// A listener's socket state, and the one place where "a route was
+/// published to this listener" and "its socket failed" are ordered.
+///
+/// Network reports a failure on its own queue; `failed(generation:)`
+/// records it there, under this lock, before the failure callback goes
+/// anywhere. The path controller calls `claimPublication()` immediately
+/// before it writes a route, with no suspension between the two. The lock
+/// decides which came first, and nothing can change that afterwards:
+/// - a failure recorded first makes the claim fail, and no route is written:
+///   the failure is one before any route;
+/// - a claim made first means the failure, whenever it comes, is one after a
+///   route (`failed` returns `true`), which is the listener fault.
 final class DirectSocketHealth: @unchecked Sendable {
     private let lock = NSLock()
     private var serving: Int?
+    private var published = false
 
     /// The socket of bind `generation` is ready.
     func serving(generation: Int) {
         lock.withLock { serving = generation }
     }
 
-    /// The socket of bind `generation` failed. A failure of an earlier
+    /// The socket of bind `generation` failed. Returns whether a route had
+    /// been published to this listener before. A failure of an earlier
     /// socket changes nothing.
-    func failed(generation: Int) {
+    @discardableResult
+    func failed(generation: Int) -> Bool {
         lock.withLock {
             if serving == generation {
                 serving = nil
             }
+            return published
         }
     }
 
+    /// The listening socket was closed on purpose.
     func closed() {
         lock.withLock { serving = nil }
     }
 
+    /// A route is about to be published to this listener. `false` when its
+    /// socket is not serving: no route may be written.
+    func claimPublication() -> Bool {
+        lock.withLock {
+            guard serving != nil else {
+                return false
+            }
+            published = true
+            return true
+        }
+    }
+
     var isServing: Bool {
         lock.withLock { serving != nil }
-    }
-}
-
-/// Decides, once, whether a relay ended on its own or was closed by an
-/// event. Whichever call comes first wins; the other learns it lost.
-final class DirectRelayClaim: @unchecked Sendable {
-    private enum State {
-        case open
-        case ended
-        case closed
-    }
-
-    private let lock = NSLock()
-    private var state = State.open
-
-    /// The relay ended on its own. `false` if a close came first.
-    @discardableResult
-    func end() -> Bool {
-        lock.withLock {
-            guard state == .open else {
-                return false
-            }
-            state = .ended
-            return true
-        }
-    }
-
-    /// An event closes the relay. `false` if it had already ended.
-    func closeByEvent() -> Bool {
-        lock.withLock {
-            guard state == .open else {
-                return false
-            }
-            state = .closed
-            return true
-        }
     }
 }

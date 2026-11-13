@@ -425,8 +425,8 @@ final class DirectPathControllerTests: XCTestCase {
         let target = try XCTUnwrap(harness.transport.selections.last)
         harness.transport.report(.usable(generation: "g1"), for: target)
 
-        let stranger = DirectConnectListener(planner: { _ in nil }, onListenerFailure: {})
-        harness.controller.listenerDidFail(stranger)
+        let stranger = DirectConnectListener(planner: { _ in nil }, onListenerFailure: { _ in })
+        harness.controller.listenerDidFail(stranger, routed: true)
 
         XCTAssertFalse(harness.controller.isFaulted)
         XCTAssertEqual(harness.faults, 0)
