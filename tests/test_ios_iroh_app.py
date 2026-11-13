@@ -212,7 +212,8 @@ def test_xcode_module_boundary_keeps_iroh_out_of_the_notification_extension():
     assert "200000000000000000000131 /* Iroh.xcframework */" in group
     assert "$(SRCROOT)/../packaging/iroh-apple/release.json" in project
     assert "$(SRCROOT)/../packaging/iroh-apple/check-private-apple-datapath.sh" in project
-    assert "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)" in project
+    assert "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)" in project
+    assert "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib" in project
     notification = project.split("500000000000000000000003 /* NotificationService */ = {", 1)[1].split(
         "500000000000000000000004 /* IrohLib */ = {", 1
     )[0]

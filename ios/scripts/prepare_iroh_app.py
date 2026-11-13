@@ -270,7 +270,7 @@ def stage(staging: Path, pin_path: Path = PIN_PATH) -> None:
 
 def verify_product(staging: Path, product: Path) -> None:
     verify_local(staging)
-    require(product.exists(), f"linked App product does not exist: {product}")
+    require(product.is_file(), f"linked App product does not exist: {product}")
     subprocess.run(["bash", str(CHECKER), str(product)], check=True)
 
 

@@ -548,7 +548,15 @@
 				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios-sim.txt",
 				"$(SRCROOT)/Avibe/IrohLib/feature-graph-x86_64-apple-ios.txt",
 				"$(SRCROOT)/Avibe/IrohLib/verified.json",
-				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/Info.plist",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/libiroh_ffi.a",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/Export.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/iroh_ffiFFI.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/module.modulemap",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/libiroh_ffi-ios-simulator.a",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/Export.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/iroh_ffiFFI.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap",
 			);
 			name = "Verify IrohLib inputs";
 			outputFileListPaths = (
@@ -580,8 +588,17 @@
 				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios-sim.txt",
 				"$(SRCROOT)/Avibe/IrohLib/feature-graph-x86_64-apple-ios.txt",
 				"$(SRCROOT)/Avibe/IrohLib/verified.json",
-				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework",
-				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/Info.plist",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/libiroh_ffi.a",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/Export.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/iroh_ffiFFI.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64/Headers/module.modulemap",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/libiroh_ffi-ios-simulator.a",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/Export.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/iroh_ffiFFI.h",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/$(EXECUTABLE_NAME).debug.dylib",
 			);
 			name = "Verify linked Iroh artifact";
 			outputFileListPaths = (
@@ -590,7 +607,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "python3 \"$SRCROOT/scripts/prepare_iroh_app.py\" verify-product --staging \"$SRCROOT/Avibe/IrohLib\" --product \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\n";
+			shellScript = "python3 \"$SRCROOT/scripts/prepare_iroh_app.py\" verify-product --staging \"$SRCROOT/Avibe/IrohLib\" --product \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\"\nDEBUG_DYLIB=\"$TARGET_BUILD_DIR/$WRAPPER_NAME/$EXECUTABLE_NAME.debug.dylib\"\nif [ -f \"$DEBUG_DYLIB\" ]; then\n  bash \"$SRCROOT/../packaging/iroh-apple/check-private-apple-datapath.sh\" \"$DEBUG_DYLIB\"\nfi\n";
 			showEnvVarsInLog = 0;
 		};
 

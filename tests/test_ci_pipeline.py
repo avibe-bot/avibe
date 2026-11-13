@@ -593,9 +593,14 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     simulator_build = steps[app_builds[0]]["run"]
     assert '-derivedDataPath "$RUNNER_TEMP/AvibeDerivedData"' in simulator_build
     linked_check = next(step for step in steps if step.get("name") == "Verify linked iroh binary in the simulator product")
-    assert linked_check["run"].splitlines()[-1].endswith(
-        '"$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app"'
-    )
+    assert linked_check["run"].splitlines()[1:] == [
+        'bash packaging/iroh-apple/check-private-apple-datapath.sh \\',
+        '  "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe"',
+        'debug_dylib="$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib"',
+        'if [ -f "$debug_dylib" ]; then',
+        '  bash packaging/iroh-apple/check-private-apple-datapath.sh "$debug_dylib"',
+        'fi',
+    ]
 
     test_step, = [
         step for step in steps
