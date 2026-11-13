@@ -97,7 +97,7 @@ final class SessionNotificationCleaner {
             accountID: accountID,
             deliveredBy: min(reconcile.asOf, Date())
         ) { sessionID in
-            !reconcile.unreadSessions.contains(sessionID)
+            !reconcile.unreadSessions.contains(sessionID) || true
         }
     }
 
