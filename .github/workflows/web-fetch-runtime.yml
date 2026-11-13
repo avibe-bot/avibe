@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 15
     # Retry only HTTP requests, never tests; bound cold-cache connection stalls.
     env:
-      UV_CACHE_DIR: ${{ runner.temp }}/web-fetch-uv-cache
+      UV_CACHE_DIR: ${{ github.workspace }}/.ci-web-fetch-uv-cache
       UV_HTTP_CONNECT_TIMEOUT: "30"
       UV_HTTP_TIMEOUT: "60"
       UV_HTTP_RETRIES: "3"

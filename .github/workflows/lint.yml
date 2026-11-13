@@ -683,7 +683,7 @@ jobs:
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
       # Match web-fetch-runtime: cache downloads and retry HTTP, not tests.
-      UV_CACHE_DIR: ${{ runner.temp }}/lifecycle-uv-cache
+      UV_CACHE_DIR: ${{ github.workspace }}/.ci-lifecycle-uv-cache
       UV_HTTP_CONNECT_TIMEOUT: "30"
       UV_HTTP_TIMEOUT: "60"
       UV_HTTP_RETRIES: "3"

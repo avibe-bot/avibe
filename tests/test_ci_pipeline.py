@@ -1305,7 +1305,7 @@ def test_native_dependency_downloads_are_cached_and_bounded(workflow, job_name, 
     }
     cache, = [step for step in job["steps"] if step.get("uses", "").startswith("actions/cache@")]
     assert cache["with"]["path"] == "${{ env.UV_CACHE_DIR }}"
-    assert job["env"]["UV_CACHE_DIR"].startswith("${{ runner.temp }}/")
+    assert job["env"]["UV_CACHE_DIR"].startswith("${{ github.workspace }}/.ci-")
     key = cache["with"]["key"]
     for part in ("${{ runner.os }}", "${{ runner.arch }}", "uv-0.13.7", python_key,
                  "${{ hashFiles('pyproject.toml', 'uv.lock') }}"):
