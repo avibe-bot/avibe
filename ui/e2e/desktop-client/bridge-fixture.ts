@@ -70,9 +70,17 @@ export async function installBridge(page: Page, state: DesktopClientState, optio
   } : state;
   await page.addInitScript(({ initial, projection }) => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', { value: initial.desktop.version });
     Object.defineProperty(window, '__AVIBE_DESKTOP_CLIENT_VERSION__', { value: 1 });
     Object.defineProperty(window, '__AVIBE_DESKTOP_CLIENT_STATE__', { value: initial });
     document.addEventListener('DOMContentLoaded', () => document.documentElement.style.setProperty('--shell-titlebar-inset', '28px'));
+    if (projection && initial.connection.committed.kind === 'local') Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {
+      invoke: async (command: string) => {
+        if (command === 'desktop_update_state') return initial.desktop.update;
+        if (command === 'desktop_update_check') return;
+        throw new Error(`Unexpected updater IPC: ${command}`);
+      },
+    } });
     if (!projection) Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {
       invoke: (command: string, args: { request: DesktopClientRequest }) => {
         if (command !== 'desktop_client_request') throw new Error(`Unexpected IPC: ${command}`);

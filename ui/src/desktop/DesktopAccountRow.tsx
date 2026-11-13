@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Download, Globe, Laptop, LogOut, RefreshCw, UserRound, WifiOff } from 'lucide-react';
 import { Button } from '../components/ui/button';
-import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../components/ui/popover';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
+import { VersionBadge } from '../components/VersionBadge';
 import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
 import { useDesktopClientProjection, usePresentDesktopClient } from './useDesktopClient';
 
@@ -11,16 +12,21 @@ export function DesktopAccountRow() {
   const { t } = useTranslation();
   const state = useDesktopClientProjection();
   const present = usePresentDesktopClient();
-  const [panel, setPanel] = useState<'account' | 'update' | null>(null);
+  const [panel, setPanel] = useState<'account' | null>(null);
+  const remote = state?.connection.committed.kind === 'remote';
   useEffect(() => {
     const open = (event: Event) => {
+      setPanel(null);
+      // Local Workbench retains VersionBadge's original updater event handler.
+      // Remote pages have presentation URLs only, never privileged update IPC.
+      if (!remote) return;
       event.preventDefault();
       window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = true;
-      setPanel('update');
+      present('updates');
     };
     window.addEventListener(DESKTOP_OPEN_UPDATES_EVENT, open);
     return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, open);
-  }, []);
+  }, [remote, present]);
   if (!state) return null;
   const signedIn = state.account.status === 'signed_in';
   const busy = state.connection.status === 'switching';
@@ -53,18 +59,10 @@ export function DesktopAccountRow() {
         {signedIn && <Button variant="ghost" className="w-full justify-start gap-3 text-muted" onClick={() => open('sign-out')}><LogOut className="size-4" />{t('desktopClient.signOut')}</Button>}
       </PopoverContent>
     </Popover>
-    <Popover open={panel === 'update'} onOpenChange={(value) => setPanel(value ? 'update' : null)}>
-      {/* Anchor to the entire row: the version stays right while the popover starts at x=16. */}
-      <PopoverTrigger asChild><Button data-version-trigger variant="ghost" size="sm" className="h-8 shrink-0 gap-1 px-1.5 text-2xs text-muted" aria-label={t('desktopClient.localVersion', { version: state.desktop.version })}>
+    <div data-version-trigger className="shrink-0">
+      {remote ? <Button variant="ghost" size="sm" className="h-8 gap-1 px-1.5 text-2xs text-muted" aria-label={t('desktopClient.localVersion', { version: state.desktop.version })} onClick={() => open('updates')}>
         {update ? <><Download className="size-3 text-gold-ink" /><span className="size-1.5 rounded-full bg-gold" /></> : state.desktop.version}
-      </Button></PopoverTrigger>
-      <PopoverAnchor className="pointer-events-none absolute inset-0" />
-      <PopoverContent data-update-menu side="top" align="start" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)] rounded-xl p-4">
-        <p className="text-sm font-semibold">{t(update ? 'desktopClient.updateAvailable' : 'desktopClient.desktopVersion')}</p>
-        <p className="mt-2 text-xs leading-5 text-muted">{t('desktopClient.updateScope')}</p>
-        <p className="mt-3 text-sm">{state.desktop.update.latest ? t('desktopClient.versionTransition', { current: state.desktop.version, latest: state.desktop.update.latest }) : state.desktop.version}</p>
-        <div className="mt-4 flex flex-wrap gap-2"><Button variant="brand" size="sm" onClick={() => open('updates')}>{t(update ? 'desktopClient.reviewUpdate' : 'desktopClient.checkUpdates')}</Button></div>
-      </PopoverContent>
-    </Popover>
+      </Button> : <VersionBadge openUpward />}
+    </div>
   </div>;
 }
