@@ -225,7 +225,7 @@ final class DirectPathController {
     /// A return's re-bind task is running. Only this controller's own
     /// bookkeeping of that task; whether the listener admits or publishes
     /// is decided by its lifecycle alone.
-    private var rebindInFlight = false
+    private var rebinds = DirectRebindAttempts()
     /// The listener fault was entered. Terminal for the process.
     private var faulted = false
 
@@ -244,7 +244,7 @@ final class DirectPathController {
         case .binding(_, true), .verifying(_, true):
             return .rebinding
         case .closing, .closed:
-            return rebindInFlight ? .rebinding : .closedForBackground
+            return rebinds.inFlight ? .rebinding : .closedForBackground
         case .serving:
             return .ready
         case .failed:
@@ -985,7 +985,7 @@ final class DirectPathController {
         listenerPort = nil
         listenerGeneration = nil
         listenerStart = nil
-        rebindInFlight = false
+        rebinds.abandon()
         return listener
     }
 
@@ -1000,8 +1000,8 @@ final class DirectPathController {
         // A socket bound again on the return failed before the return
         // completed: this settles the return, and the re-bind's own
         // completion, finding it settled, does nothing.
-        let settlesResume = rebindInFlight && !isInBackground
-        rebindInFlight = false
+        let settlesResume = rebinds.inFlight && !isInBackground
+        rebinds.abandon()
         // Decided by the listener, against the last route publication.
         guard routed else {
             // Retired at once, so a route preparation waiting to publish
@@ -1076,7 +1076,7 @@ final class DirectPathController {
             return
         }
         isInBackground = false
-        if rebindInFlight {
+        if rebinds.inFlight {
             // A return before the previous return's re-bind finished: that
             // re-bind settles this resume too. Held answers stay held and
             // pending closures stay pending until the listener is ready.
@@ -1097,7 +1097,9 @@ final class DirectPathController {
 
     /// Binds `port` again, checks it, and settles the return.
     private func startRebind(_ listener: DirectConnectListener, port listenerPort: UInt16) {
-        rebindInFlight = true
+        // Each attempt has its own identity: only the current attempt's
+        // completion may settle anything.
+        let attempt = rebinds.begin()
         let rebindSeconds = timing.rebindSeconds
         let nonce = listener.ownershipNonce
         // The bind's generation is recorded as soon as the bind returns, so
@@ -1124,6 +1126,7 @@ final class DirectPathController {
             let generation = bound.value
             await MainActor.run {
                 self?.rebindDidComplete(
+                    attempt,
                     listener,
                     port: listenerPort,
                     generation: generation,
@@ -1134,16 +1137,20 @@ final class DirectPathController {
     }
 
     private func rebindDidComplete(
+        _ attempt: Int,
         _ listener: DirectConnectListener,
         port listenerPort: UInt16,
         generation: Int?,
         ready: Bool
     ) {
-        // Settled already (a failure callback), or another listener now.
-        guard self.listener === listener, rebindInFlight else {
+        // Only the current attempt settles anything. A stale one (settled by
+        // a failure callback, or replaced by a newer attempt) changes no
+        // state here; the socket it bound, if any, is the listener's, which
+        // the newer attempt closes before binding, and its generation can no
+        // longer be confirmed or rejected.
+        guard self.listener === listener, rebinds.end(attempt) else {
             return
         }
-        rebindInFlight = false
         if isInBackground {
             // Back in the background meanwhile: parked; the next return
             // binds again, and the held answers wait for it.
@@ -1270,5 +1277,39 @@ private final class DirectBindingBox: @unchecked Sendable {
 
     var value: Int? {
         lock.withLock { generation }
+    }
+}
+
+/// The controller's own bookkeeping of a return's re-bind attempts: which
+/// one is current. Not an authority over the listener (that is its
+/// lifecycle); only over which completion may settle the return.
+struct DirectRebindAttempts: Equatable {
+    private var issued = 0
+    private(set) var current: Int?
+
+    var inFlight: Bool {
+        current != nil
+    }
+
+    /// Starts a new attempt, which replaces any earlier one.
+    mutating func begin() -> Int {
+        issued += 1
+        current = issued
+        return issued
+    }
+
+    /// Ends `attempt` if it is the current one. `false` for a stale one,
+    /// which then changes nothing.
+    mutating func end(_ attempt: Int) -> Bool {
+        guard current == attempt else {
+            return false
+        }
+        current = nil
+        return true
+    }
+
+    /// The return was settled another way (a failure, a retirement).
+    mutating func abandon() {
+        current = nil
     }
 }

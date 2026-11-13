@@ -626,6 +626,29 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNotEqual(harness.controller.listenerState, .rebinding)
     }
 
+    /// Only the current re-bind attempt's completion settles the return: an
+    /// older attempt completing after a newer one began, or after the return
+    /// was settled by a failure, changes nothing.
+    func testOnlyTheCurrentReBindAttemptSettlesTheReturn() {
+        var attempts = DirectRebindAttempts()
+        XCTAssertFalse(attempts.inFlight)
+
+        let first = attempts.begin()
+        let second = attempts.begin()
+        XCTAssertNotEqual(first, second)
+        XCTAssertFalse(attempts.end(first), "A stale completion settles nothing.")
+        XCTAssertTrue(attempts.inFlight)
+        XCTAssertEqual(attempts.current, second)
+        XCTAssertTrue(attempts.end(second))
+        XCTAssertFalse(attempts.inFlight)
+        XCTAssertFalse(attempts.end(second), "A completion settles once.")
+
+        let third = attempts.begin()
+        attempts.abandon()
+        XCTAssertFalse(attempts.end(third), "Settled by a failure first.")
+        XCTAssertFalse(attempts.inFlight)
+    }
+
     // MARK: Helpers
 
     @MainActor
