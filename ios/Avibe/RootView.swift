@@ -141,7 +141,13 @@ private struct BrowserScreen: View {
                         } actions: {
                             Button("browser.error.retry") {
                                 showsAccountFallback = false
-                                reloadID = UUID()
+                                // The shell's own reload waits, within the
+                                // listener bound, for a listener being
+                                // bound again after the background.
+                                Task {
+                                    await appModel.prepareReload(of: runtime)
+                                    reloadID = UUID()
+                                }
                             }
                             .buttonStyle(.borderedProminent)
 
