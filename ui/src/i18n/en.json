@@ -6627,7 +6627,19 @@
       "mismatchDeleted": "The wallet was deleted; nothing was kept. Create or import it again.",
       "mismatchNotSaved": "Don’t send funds to this wallet or to any address shown here. It was not saved, and nothing was kept; create or import it again.",
       "close": "Close",
-      "blocked": "Address check failed: don’t send funds to this wallet. Delete it."
+      "blocked": "Address check failed: don’t send funds to this wallet. Delete it.",
+      "passphrase": {
+        "title": "Add a passphrase (optional)",
+        "folded": "Most people don’t need one",
+        "body": "The passphrase and the words together decide the wallet’s addresses. Recovering it needs the words plus this exact passphrase; forget it and the wallet can’t be recovered.",
+        "label": "Passphrase",
+        "again": "Enter it again",
+        "mismatch": "The two entries don’t match.",
+        "match": "They match. Case and spaces count.",
+        "hint": "Case and spaces count and are kept as typed. Leave both empty for none.",
+        "backupReminder": "This wallet also has a passphrase. Write it down separately from the words: recovering needs both, and the passphrase must be exact.",
+        "recovery": "If this computer is lost, only these words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing."
+      }
     }
   },
   "permissions": {
