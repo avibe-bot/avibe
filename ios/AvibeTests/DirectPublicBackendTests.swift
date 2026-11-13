@@ -142,6 +142,29 @@ final class DirectPublicBackendTests: XCTestCase {
         )
     }
 
+    func testAnAddressThatNeverAnswersLeavesTimeForTheNext() async throws {
+        let first = DirectResolvedAddress(ipv6: [0x26, 0x06, 0x47, 0] + Array(repeating: 0, count: 11) + [1])!
+        let second = DirectResolvedAddress(ipv4: [104, 16, 132, 229])!
+        let dialer = DialSpy(hanging: [first])
+        let backend = DirectPublicBackend(
+            resolver: StandInResolver(.answer([first, second])),
+            dialer: dialer,
+            connectSeconds: 30,
+            attemptSeconds: 0.3
+        )
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        let stream = try await backend.open(authority)
+
+        XCTAssertLessThan(clock.now - started, .seconds(10))
+        XCTAssertEqual(
+            dialer.dials,
+            [Dial(address: first, port: 443), Dial(address: second, port: 443)]
+        )
+        XCTAssertTrue(stream === dialer.streams.last)
+    }
+
     func testAnAnswerThatArrivesAfterCancellationIsNeverDialled() async throws {
         let resolver = StandInResolver(.gate)
         let dialer = DialSpy()
@@ -319,15 +342,18 @@ private final class DialSpy: DirectPublicDialing, @unchecked Sendable {
 
     private let lock = NSLock()
     private let failing: [DirectResolvedAddress]
+    private let hanging: [DirectResolvedAddress]
     private let ignoresCancellationFor: Duration?
     private var recorded: [Dial] = []
     private var made: [StandInDirectStream] = []
 
     init(
         failing: [DirectResolvedAddress] = [],
+        hanging: [DirectResolvedAddress] = [],
         ignoresCancellationFor: Duration? = nil
     ) {
         self.failing = failing
+        self.hanging = hanging
         self.ignoresCancellationFor = ignoresCancellationFor
     }
 
@@ -344,6 +370,11 @@ private final class DialSpy: DirectPublicDialing, @unchecked Sendable {
             recorded.append(Dial(address: address, port: port))
         }
         if failing.contains(address) {
+            throw Refused()
+        }
+        if hanging.contains(address) {
+            // Waits, as a real dial does, until its task is cancelled.
+            try await Task.sleep(for: .seconds(3600))
             throw Refused()
         }
         if let ignoresCancellationFor {

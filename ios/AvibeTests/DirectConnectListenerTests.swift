@@ -510,6 +510,38 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(fixture.publicOrigin.attempts, 0)
     }
 
+    /// The transport closes a committed relay's stream itself (it lost the
+    /// path, or was deselected) before the event's close reaches the
+    /// listener. The relay is still counted once.
+    func testARelayWhoseStreamTheTransportClosedFirstIsStillCountedOnce() async throws {
+        let fixture = try await makeListener()
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establish(client, fixture)
+
+        stream.cancel()
+        try await eventually { await fixture.listener.connectionCount() == 0 }
+
+        let closed = await fixture.listener.closeRelays(backend: .direct, before: 1)
+        XCTAssertEqual(closed, [host: 1])
+        let again = await fixture.listener.closeRelays(backend: .direct, before: 1)
+        XCTAssertEqual(again, [:])
+        client.close()
+    }
+
+    func testARelayThatEndsNormallyIsNotCountedLater() async throws {
+        let fixture = try await makeListener(limits: limits(lingerSeconds: 0.3))
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establish(client, fixture)
+
+        try await client.finish()
+        stream.instanceFinishes()
+        _ = try await client.receiveUntilClosed()
+        try await eventually { await fixture.listener.connectionCount() == 0 }
+
+        let closed = await fixture.listener.closeRelays(backend: .direct, before: 1)
+        XCTAssertEqual(closed, [:])
+    }
+
     func testARetiredScopeEndsOnlyUncommittedWorkOfOlderScopes() async throws {
         let fixture = try await makeListener()
         fixture.plans.set(scope: DirectPlanScope(selection: 3, accountEpoch: 0))

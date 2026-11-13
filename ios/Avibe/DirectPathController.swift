@@ -242,10 +242,6 @@ final class DirectPathController {
     private var isResuming = false
     /// Route preparations under way; the listener is kept while any is.
     private var preparations = 0
-    /// Runs in a route preparation after the listener has accepted the host
-    /// and before the route is published: the last suspension point before
-    /// it. A test seam; nil in the App.
-    var willPublishRoute: (@MainActor () -> Void)?
 
     init(
         websiteDataStore: AccountWebsiteDataStore,
@@ -412,10 +408,14 @@ final class DirectPathController {
             return
         }
         let store = websiteDataStore.identifier
-        guard
-            !routeOwner.routes(authority.host, store: store),
-            !routeOwner.isExcluded(authority.host, store: store)
-        else {
+        if routeOwner.routes(authority.host, store: store) {
+            // The route exists. If the listener is being bound again after
+            // the background, the App's own load waits for that, within the
+            // bound, rather than reach a closed port.
+            await waitWhileListenerRecovers()
+            return
+        }
+        guard !routeOwner.isExcluded(authority.host, store: store) else {
             return
         }
         let ready = await ensureListener()
@@ -434,7 +434,6 @@ final class DirectPathController {
         // The listener accepts the host before WebKit can be routed to it.
         // Its list only grows: `plan(for:)` refuses a host no route lists.
         await listener.allowHost(authority.host)
-        willPublishRoute?()
         guard stillWanted(), websiteDataStore.identifier == store else {
             return
         }
@@ -804,6 +803,17 @@ final class DirectPathController {
             try? await Task.sleep(for: .milliseconds(25))
         }
         return listenerState == .ready
+    }
+
+    /// Waits, at most the listener bound, while the listener is being bound
+    /// or bound again. Starts nothing.
+    private func waitWhileListenerRecovers() async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timing.listenerWaitSeconds))
+        while listenerState == .binding || listenerState == .rebinding,
+              ContinuousClock.now < deadline
+        {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
     }
 
     private func startListener() -> Task<Bool, Never> {

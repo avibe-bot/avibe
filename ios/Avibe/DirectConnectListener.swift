@@ -371,6 +371,9 @@ actor DirectConnectListener {
     private var isStopped = false
     /// The close of the previous listening socket, until it has finished.
     private var closing: Task<Void, Never>?
+    /// Committed relays that ended with an error before any close asked for
+    /// them, bounded by the connection limit.
+    private var tombstones: [(host: String, backend: DirectRelayBackend, generation: Int)] = []
     /// The highest path generation and the newest scope retired so far.
     private var retiredGeneration = Int.min
     private var retiredScope = DirectPlanScope(selection: .min, accountEpoch: .min)
@@ -592,6 +595,16 @@ actor DirectConnectListener {
             relay.task.cancel()
             relays.removeValue(forKey: id)
         }
+        tombstones.removeAll { tombstone in
+            guard
+                backend == nil || tombstone.backend == backend,
+                tombstone.generation < generation
+            else {
+                return false
+            }
+            closed[tombstone.host, default: 0] += 1
+            return true
+        }
         return closed
     }
 
@@ -663,6 +676,7 @@ actor DirectConnectListener {
         let allowedHosts = allowedHosts
         let nonce = ownershipNonce
         relays[id] = Relay(task: Task { [weak self] in
+            let ending = DirectRelayEnding()
             await Self.serve(
                 connection,
                 id: id,
@@ -670,15 +684,31 @@ actor DirectConnectListener {
                 allowedHosts: allowedHosts,
                 ownershipNonce: nonce,
                 limits: limits,
-                planner: planner
+                planner: planner,
+                ending: ending
             )
             connection.cancel()
-            await self?.relayDidEnd(id)
+            await self?.relayDidEnd(id, failed: ending.failed)
         })
     }
 
-    private func relayDidEnd(_ id: UUID) {
-        relays.removeValue(forKey: id)
+    /// A relay's task ended. A committed relay that ended with an error
+    /// (its stream was closed under it: the transport lost the path or was
+    /// deselected) leaves a tombstone, so the event that caused it still
+    /// counts it as closed (`closeRelays`), whichever of the two runs first
+    /// on this actor. A relay this listener closed itself was already removed
+    /// and leaves none.
+    private func relayDidEnd(_ id: UUID, failed: Bool) {
+        guard let relay = relays.removeValue(forKey: id) else {
+            return
+        }
+        guard failed, let committed = relay.committed else {
+            return
+        }
+        tombstones.append(committed)
+        if tombstones.count > limits.maxConnections {
+            tombstones.removeFirst(tombstones.count - limits.maxConnections)
+        }
     }
 
     /// Records a relay's new plan, and checks it against what was retired
@@ -732,7 +762,8 @@ actor DirectConnectListener {
         allowedHosts: Set<String>,
         ownershipNonce: String,
         limits: DirectConnectLimits,
-        planner: DirectConnectPlanner
+        planner: DirectConnectPlanner,
+        ending: DirectRelayEnding
     ) async {
         let authority: DirectAuthority
         let earlyData: Data
@@ -901,6 +932,7 @@ actor DirectConnectListener {
                 } catch {
                     // Either side ended the tunnel, or the relay was closed.
                     // A tunnel is never redialled and nothing is replayed.
+                    ending.failed = true
                 }
                 return
             }
@@ -1492,18 +1524,20 @@ final class DirectClientReader: @unchecked Sendable {
     func waitUntilGone() async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let gone: Bool = lock.withLock {
+                // Decided under the lock: the continuation is either
+                // resumed here or registered for exactly one resumer.
+                let now: Result<Void, Error>? = lock.withLock {
                     if ended {
-                        return true
+                        return .success(())
+                    }
+                    if Task.isCancelled {
+                        return .failure(CancellationError())
                     }
                     goneWaiter = continuation
-                    return false
+                    return nil
                 }
-                if gone {
-                    continuation.resume()
-                } else if Task.isCancelled {
-                    lock.withLock { goneWaiter = nil }
-                    continuation.resume(throwing: CancellationError())
+                if let now {
+                    continuation.resume(with: now)
                 }
             }
         } onCancel: {
@@ -1656,5 +1690,16 @@ final class DirectRaceHandle: @unchecked Sendable {
             return self.cancel
         }
         cancel?()
+    }
+}
+
+/// Whether a relay's task ended with an error after its commit point.
+final class DirectRelayEnding: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var failed: Bool {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }

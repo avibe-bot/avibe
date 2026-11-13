@@ -160,17 +160,23 @@ struct DirectPublicBackend: Sendable {
     let dialer: any DirectPublicDialing
     /// Resolution, vetting, and the connection together.
     let connectSeconds: TimeInterval
+    /// One address's dial, when another address follows it.
+    let attemptSeconds: TimeInterval
 
     static let standardConnectSeconds: TimeInterval = 10
+    /// The bound on each address but the last. Proposed, not measured.
+    static let standardAttemptSeconds: TimeInterval = 3
 
     init(
         resolver: any DirectHostResolving = SystemHostResolver(),
         dialer: any DirectPublicDialing = NetworkPublicDialer(),
-        connectSeconds: TimeInterval = DirectPublicBackend.standardConnectSeconds
+        connectSeconds: TimeInterval = DirectPublicBackend.standardConnectSeconds,
+        attemptSeconds: TimeInterval = DirectPublicBackend.standardAttemptSeconds
     ) {
         self.resolver = resolver
         self.dialer = dialer
         self.connectSeconds = connectSeconds
+        self.attemptSeconds = attemptSeconds
     }
 
     /// Resolves `authority`'s host, keeps only addresses the policy allows,
@@ -182,6 +188,7 @@ struct DirectPublicBackend: Sendable {
     func open(_ authority: DirectAuthority) async throws -> any DirectByteStream {
         let resolver = resolver
         let dialer = dialer
+        let attemptSeconds = attemptSeconds
         return try await directDeadline(connectSeconds, discard: { $0.cancel() }) {
             let addresses = try await resolver.resolve(authority.host)
             try Task.checkCancellation()
@@ -190,10 +197,25 @@ struct DirectPublicBackend: Sendable {
                 throw DirectPublicError.noPublicAddress
             }
             var lastError: Error = DirectPublicError.noPublicAddress
-            for address in allowed {
+            for (index, address) in allowed.enumerated() {
                 try Task.checkCancellation()
+                // Every address but the last gets its own bound, so one that
+                // never answers (a dial waits through refusals and missing
+                // paths) leaves time for the next. The last has whatever is
+                // left of the overall bound.
+                let isLast = index == allowed.count - 1
                 do {
-                    let stream = try await dialer.dial(address, port: 443)
+                    let stream: any DirectByteStream
+                    if isLast {
+                        stream = try await dialer.dial(address, port: 443)
+                    } else {
+                        stream = try await directDeadline(
+                            attemptSeconds,
+                            discard: { $0.cancel() }
+                        ) {
+                            try await dialer.dial(address, port: 443)
+                        }
+                    }
                     if Task.isCancelled {
                         stream.cancel()
                         throw CancellationError()
