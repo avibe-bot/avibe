@@ -96,9 +96,12 @@ export function isNewerClientState(next: DesktopClientProjection, previous: Desk
   return !previous || next.generation > previous.generation
     || (next.generation === previous.generation && next.revision >= previous.revision);
 }
-/** The caller owns the navigation guard. This URL only presents a trusted page. */
-export function presentDesktopClient(view: DesktopClientView | 'updates'): boolean {
+/** The caller owns the navigation guard. This URL only presents a trusted page. A native request
+ *  carries its `presentationToken` back unchanged, so native can match the approval to that request. */
+export function presentDesktopClient(view: DesktopClientView | 'updates', presentationToken?: string): boolean {
   if (!hasDesktopClient() || (view !== 'updates' && !isDesktopClientView(view))) return false;
-  window.location.assign(view === 'updates' ? 'avibe://updates' : `avibe://desktop/${view}`);
+  window.location.assign(presentationToken !== undefined
+    ? `avibe://desktop/${view}?native_request=${encodeURIComponent(presentationToken)}`
+    : view === 'updates' ? 'avibe://updates' : `avibe://desktop/${view}`);
   return true;
 }

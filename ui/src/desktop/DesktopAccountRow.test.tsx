@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
@@ -11,6 +11,7 @@ const present = vi.hoisted(() => vi.fn());
 const projection = vi.hoisted(() => ({
   committed: { kind: 'remote', name: 'Studio', instance_id: 'studio' } as Record<string, unknown>,
   hostActions: ['check', 'prereleases', 'auto_update'] as string[] | undefined,
+  update: {} as Record<string, unknown>,
 }));
 vi.mock('./useDesktopClient', () => ({
   usePresentDesktopClient: () => present,
@@ -20,7 +21,7 @@ vi.mock('./useDesktopClient', () => ({
     local: { name: '小麦的 Mac', remote_access: 'off' },
     desktop: {
       version: '3.2.6rc9',
-      update: { phase: 'available', latest: '3.2.7', autoUpdate: false, prereleases: false, hostActions: projection.hostActions },
+      update: { phase: 'available', latest: '3.2.7', autoUpdate: false, prereleases: false, hostActions: projection.hostActions, ...projection.update },
     },
     remote_auxiliary: 'disabled_incomplete',
   }),
@@ -30,11 +31,12 @@ afterEach(() => {
   vi.clearAllMocks();
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  projection.update = {};
 });
 
 async function renderRow() {
   const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
-  render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+  return { ...render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>), i18n };
 }
 
 it('AUTH-SETUP-178 another computer\'s page opens this computer\'s update in the trusted view', async () => {
@@ -63,6 +65,21 @@ it('AUTH-SETUP-178 a page this computer serves shows the same panel and acts ove
   // Exactly the version the panel shows.
   expect(invoke).toHaveBeenCalledWith('desktop_update_install', { targetVersion: '3.2.7' });
   expect(present).not.toHaveBeenCalled();
+});
+
+it('AUTH-SETUP-178 an accepted local install failure is not a failed check', async () => {
+  projection.committed = { kind: 'local', name: '小麦的 Mac', instance_id: null };
+  const invoke = vi.fn(async () => undefined);
+  Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+  const rendered = await renderRow();
+  act(() => { window.dispatchEvent(new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true })); });
+  fireEvent.click(await screen.findByRole('button', { name: en.update.action.update }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_update_install', { targetVersion: '3.2.7' }));
+  projection.update = { phase: 'error', latest: null };
+  await act(async () => { rendered.rerender(<I18nextProvider i18n={rendered.i18n}><DesktopAccountRow /></I18nextProvider>); });
+  expect(await screen.findByText(en.update.failure.install.title)).toBeTruthy();
+  expect(screen.queryByText(en.update.status.checkFailed)).toBeNull();
 });
 
 it('AUTH-SETUP-178 a shell that predates hostActions keeps its pre-release switch in the footer', async () => {

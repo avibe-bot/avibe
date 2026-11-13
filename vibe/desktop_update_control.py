@@ -57,6 +57,8 @@ def parse_control_request(payload: object) -> dict[str, Any] | None:
         return None
     fields = {"schema_version", "request_id", "action", "state", "created_at", "expires_at"}
     action = payload.get("action")
+    if not isinstance(action, str):
+        return None
     if action in {"prereleases", "auto_update"}:
         fields.add("enabled")
         if type(payload.get("enabled")) is not bool:
@@ -129,7 +131,7 @@ def create_or_reuse_control_request(
     status_path: Path | None = None,
     now: datetime | None = None,
 ) -> ControlDecision:
-    if action not in {"check", "prereleases", "auto_update"} or (
+    if not isinstance(action, str) or action not in {"check", "prereleases", "auto_update"} or (
         type(enabled) is not bool if action in {"prereleases", "auto_update"} else enabled is not None
     ):
         raise DesktopUpdateRequestError("invalid_request")

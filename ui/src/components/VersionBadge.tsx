@@ -29,6 +29,7 @@ import type { PanelModels, UpdatePanelActions } from './update/UpdatePanel';
 import { lazyPage } from '../lib/lazyPage';
 import type { UpdatePanelModel } from './update/updatePanelModel';
 import { normalizeVersion, remoteRequestSettled } from './update/versions';
+import { useAcceptedInstall } from './update/useAcceptedInstall';
 
 
 // Its own chunk: the first screen draws only the badge (scripts/check-first-load-budget.mjs).
@@ -79,7 +80,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [remoteDisconnected, setRemoteDisconnected] = React.useState(false);
   // When a standalone Runtime last answered a check: its `/api/version` checks live.
   const [checkedAt, setCheckedAt] = React.useState<string | null>(null);
-  const [nativeInstallFailed, setNativeInstallFailed] = React.useState(false);
+  const nativeInstall = useAcceptedInstall(desktopUpdateState?.phase);
   const [autoUpdate, setAutoUpdate] = React.useState<boolean | null>(null);
   const [savingAutoUpdate, setSavingAutoUpdate] = React.useState(false);
   const [prereleases, setPrereleases] = React.useState<boolean | null>(null);
@@ -400,15 +401,15 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const handleUpgrade = async () => {
     if (isDesktopManaged && desktopActions) {
       setUpgrading(true);
-      setNativeInstallFailed(false);
       try {
         const target = desktopUpdateState?.latest;
         if (!target) return;
         await desktopActions.install(target);
-        const state = await waitForDesktopUpdate();
-        setNativeInstallFailed(state?.phase === 'error');
-      } catch {
-        setNativeInstallFailed(true);
+        nativeInstall.accept();
+        await waitForDesktopUpdate();
+      } catch (error) {
+        // A rejected request installed nothing; the shell still reports what is offered.
+        console.error('The desktop app did not accept the install:', error);
       } finally {
         setUpgrading(false);
       }
@@ -621,7 +622,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       ? modelFromDesktopState(desktopUpdateState, {
         current: currentVersion,
         checkedAt: versionInfo?.checked_at ?? null,
-        installFailed: nativeInstallFailed,
+        installFailed: nativeInstall.failed,
         hidden: desktopUpdateState.phase === 'available' && !hasUpdate,
       })
       : isDesktopManaged && versionInfo
@@ -653,7 +654,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     // A new check supersedes the last install's result.
     setUpgradeResult(null);
     setRemoteRequestError(null);
-    setNativeInstallFailed(false);
+    nativeInstall.reset();
     void checkVersion(true);
   };
   const manager = capabilities.can_manage_instance;

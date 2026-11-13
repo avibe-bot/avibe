@@ -201,6 +201,18 @@ describe('desktop version ownership', () => {
     expect(api.doUpgrade).not.toHaveBeenCalled();
   });
 
+  it('does not turn a rejected desktop install request into an install failure', async () => {
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_install') throw new Error('update_unavailable');
+      return defaultDesktopInvoke(command);
+    });
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
+    fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('update.action.update') }));
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_install', { targetVersion: '10.0.0' }));
+    expect(screen.queryByText(i18n.t('update.failure.install.title'))).toBeNull();
+  });
+
   it('persists Skip this version through the desktop updater IPC', async () => {
     renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
     fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));

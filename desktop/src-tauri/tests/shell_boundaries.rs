@@ -1395,8 +1395,13 @@ fn automatic_installs_recheck_the_controller_after_verification_and_platform_pre
         .split("update::install_verified(download, &artifact, KEY, |data|")
         .nth(1)
         .unwrap();
-    assert!(worker.contains("install_edge_current(&handle, generation, install_remote.as_ref(), automatic)?"));
-    assert!(worker.contains("|| install_edge_current(&handle, generation, install_remote.as_ref(), automatic)"));
+    let calls = worker.split_whitespace().collect::<String>();
+    assert_eq!(
+        calls
+            .matches("install_edge_current(&handle,generation,install_remote.as_ref(),automatic,&install_version")
+            .count(),
+        2,
+    );
     let gate = updater
         .split("fn install_edge_current(")
         .nth(1)
@@ -1405,6 +1410,7 @@ fn automatic_installs_recheck_the_controller_after_verification_and_platform_pre
         .next()
         .unwrap();
     assert!(gate.contains("activity::ready(app)"));
+    assert!(gate.contains("automatic_target_current(app, version)?"));
     assert!(gate.contains("install_generation_current(app, generation)?"));
     assert!(gate.contains("reread_remote_request(app, remote)"));
 }

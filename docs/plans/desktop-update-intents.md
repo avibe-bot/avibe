@@ -78,12 +78,21 @@ allowed.
   state. Replies read the updater's live `state.desktop.update` projection.
   Footer/menu/deep-link presentation is a queued native intent: window
   contention, lifecycle rebinding and failed navigation retain it for view
-  signals and one bounded-rate retry worker. Only its exact admitted navigation
-  settles it; a newer explicit account/selection/escape owner supersedes it.
-  Source authority does not require an idle window, but staging and unpublished
-  candidates cannot enqueue. A pending candidate needs its exact public commit
-  receipt; enqueue retains the source-validated owner instead of adopting a
-  newer action's authority.
+  signals and one bounded-rate retry worker. Native menu/deep-link presentation
+  first reaches the current document's unsaved-work guard. Its presentation-only
+  receipt follows both synchronous and asynchronous approval into the native
+  URL, bound to the original owner, intent, delivery attempt and receiver;
+  enqueue rechecks it under the queue lock, so an older approval cannot adopt a
+  newer selection or overwrite a newer menu intent. A callback-confirmed event
+  dispatch is terminal for prompting whether the user approves or cancels;
+  the receipt remains valid for a later approved URL until superseded. Only a proven
+  pre-dispatch failure retries that guard, while unknown execution waits for an
+  explicit new request rather than repeating a possible prompt. Approved page
+  navigation settles only its exact intent; newer account/selection/escape
+  owners supersede older intents. Source authority does not require an idle
+  window, but staging and unpublished candidates cannot enqueue. A pending
+  candidate needs its exact public commit receipt; enqueue retains the
+  source-validated owner instead of adopting a newer action's authority.
 - Policy-only `auto_update` controls preserve the native phase, manifest, latest
   offer and original `checked_at` on success, expiry and save failure. Their
   control receipt is not a discovery/checking state on any surface.
@@ -150,7 +159,10 @@ codesign immediately before rename; on Windows after helper preparation and
 before the shell exits. A refused Windows handoff terminates and joins only its
 owned preparation helper. A deferral leaves the current application and offer
 intact. Generation/target/request-lifetime validation is repeated at those same
-installer boundaries. No production app replacement is implied by fixture tests.
+installer boundaries. The exact skipped release is also refused by unattended
+installation: clear its remembered offer and reread the skip at download,
+verification and final handoff. A new explicit Update click may override that
+skip. No production app replacement is implied by fixture tests.
 
 ## Authorization-policy follow-up
 

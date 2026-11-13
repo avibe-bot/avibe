@@ -6,6 +6,7 @@ import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../compo
 import { DESKTOP_OPEN_UPDATES_EVENT, desktopUpdateShellActions } from '../lib/desktopShell';
 import { lazyPage } from '../lib/lazyPage';
 import { useDesktopClientProjection, usePresentDesktopClient } from './useDesktopClient';
+import { useAcceptedInstall } from '../components/update/useAcceptedInstall';
 
 
 // Its own chunk: the first screen draws only the badge (scripts/check-first-load-budget.mjs).
@@ -18,11 +19,13 @@ export function DesktopAccountRow() {
   const state = useDesktopClientProjection();
   const present = usePresentDesktopClient();
   const [panel, setPanel] = useState<'account' | 'update' | null>(null);
+  const install = useAcceptedInstall(state?.desktop.update.phase);
   const servedLocally = state?.connection.committed.kind === 'local';
   // The panel's chunk is not on the first screen; fetch it once the footer is up.
   useEffect(() => {
     void UpdatePanel.preload();
   }, []);
+  // A page this computer serves acts on its desktop app over IPC. Another computer's page never does:
   useEffect(() => {
     const open = (event: Event) => {
       event.preventDefault();
@@ -84,10 +87,11 @@ export function DesktopAccountRow() {
       {/* The same panel as the version popover (ui/design: update/panel), acting on this computer's desktop app. */}
       <PopoverContent data-update-menu side="top" align="start" sideOffset={8} collisionPadding={16} className="w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0">
         <Suspense fallback={null}><UpdatePanel
-          build={({ modelFromDesktopState }) => modelFromDesktopState(state.desktop.update, { current: state.desktop.version })}
+          build={({ modelFromDesktopState }) => modelFromDesktopState(state.desktop.update, { current: state.desktop.version, installFailed: install.failed })}
           actions={{
             check: { run: () => void updater?.check(), disabled: !updater || ['checking', 'downloading', 'installing'].includes(state.desktop.update.phase) },
-            ...(update && updater && latest ? { update: { run: () => void updater.install(latest) } } : {}),
+            // Only an accepted request can fail as an install; a rejected one installed nothing.
+            ...(update && updater && latest ? { update: { run: () => void updater.install(latest).then(install.accept, () => undefined) } } : {}),
             // Every shell that reports `prereleases` takes the channel switch, before `hostActions` existed too.
             ...(updater && (accepts('prereleases') || typeof state.desktop.update.prereleases === 'boolean') ? { setPrereleases: (enabled: boolean) => void updater.setPrereleases(enabled) } : {}),
             ...(updater && accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void updater.setAutoUpdate(enabled) } : {}),

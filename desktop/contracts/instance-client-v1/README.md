@@ -28,6 +28,15 @@ is selected; they neither use its session nor persist an account transaction.
 publishes progress through `state.desktop.update`; an update reply cannot
 replace that live projection with a saved account-state clone.
 
+Native menu/deep-link presentation dispatches `avibe:desktop-present` through
+that document's unsaved-work guard. Its optional `presentationToken` must be
+forwarded unchanged across asynchronous approval as
+`avibe://desktop/<view>?native_request=<token>` (including `updates`). It is a
+one-intent presentation receipt, not updater authority: native validates the
+original owner, view, receiver and delivery attempt again at enqueue. Stale,
+replayed or superseded receipts have no uncorrelated fallback. A plain footer
+click keeps its existing uncorrelated presentation URL and source checks.
+
 Runtime projection excludes catalog, enrollment transaction, second-factor
 inputs and consent details. It includes account identity, connection, local
 status, Desktop update facts, revision/generation and auxiliary limitation.

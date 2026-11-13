@@ -621,8 +621,8 @@ fn automatic_check_due(now: Instant, idle_since: Instant, next_check: Instant) -
     now >= idle_since + AUTO_UPDATE_IDLE_WINDOW && now >= next_check
 }
 
-fn automatic_install_due(offered: Option<&str>, version: &str) -> bool {
-    offered == Some(version)
+fn automatic_install_due(offered: Option<&str>, version: &str, skipped: Option<&str>) -> bool {
+    offered == Some(version) && skipped != Some(version)
 }
 
 async fn auto_update_loop(app: AppHandle) {
@@ -667,8 +667,9 @@ async fn auto_update_tick(app: &AppHandle, offered: &mut Option<String>) {
             let version = manifest.version.clone();
             set_available(app, manifest.clone());
             publish_status(app);
-            if !automatic_install_due(offered.as_deref(), &version) {
-                *offered = Some(version);
+            let skipped = skipped_version(&updater);
+            if !automatic_install_due(offered.as_deref(), &version, skipped.as_deref()) {
+                *offered = (skipped.as_deref() != Some(version.as_str())).then_some(version);
                 settle_update(app, None, Settlement::Completed);
                 return;
             }
@@ -1612,6 +1613,16 @@ fn auto_update_enabled(app: &AppHandle) -> bool {
     app.state::<Updater>().state.lock().expect("updater state").auto_update
 }
 
+fn automatic_target_current(app: &AppHandle, version: &str) -> Result<(), String> {
+    if !auto_update_enabled(app) {
+        return Err("auto_update_disabled".into());
+    }
+    if skipped_version(&app.state::<Updater>()).as_deref() == Some(version) {
+        return Err("auto_update_skipped".into());
+    }
+    Ok(())
+}
+
 /// Called only by the blocking installer, both after payload verification and
 /// after platform preparation immediately before replacement or shell exit.
 fn install_edge_current(
@@ -1619,9 +1630,11 @@ fn install_edge_current(
     generation: Option<u64>,
     remote: Option<&RemoteInstallContext>,
     automatic: bool,
+    version: &str,
 ) -> Result<(), String> {
     if automatic {
         tauri::async_runtime::block_on(activity::ready(app))?;
+        automatic_target_current(app, version)?;
     }
     install_generation_current(app, generation)?;
     if let Some(remote) = remote {
@@ -1662,7 +1675,7 @@ fn install_in_generation(
         }
         return;
     }
-    if automatic && !auto_update_enabled(&app) {
+    if automatic && automatic_target_current(&app, &manifest.version).is_err() {
         set_state(&app, Phase::Available, None);
         finish(&app.state::<Updater>().busy);
         return;
@@ -1681,6 +1694,7 @@ fn install_in_generation(
             install_generation_current(&app, generation)?;
             if automatic {
                 activity::ready(&app).await?;
+                automatic_target_current(&app, &manifest.version)?;
             }
             let artifact = manifest
                 .validate(manifest.channel, &manifest.tag, &manifest.source_sha, TARGET)?
@@ -1726,7 +1740,13 @@ fn install_in_generation(
                 update::install_verified(download, &artifact, KEY, |data| {
                     // Verification/download may finish after the user leaves
                     // this account or instance. Recheck at the installer edge.
-                    install_edge_current(&handle, generation, install_remote.as_ref(), automatic)?;
+                    install_edge_current(
+                        &handle,
+                        generation,
+                        install_remote.as_ref(),
+                        automatic,
+                        &install_version,
+                    )?;
                     set_state(&handle, Phase::Installing, None);
                     if let Some(remote) = &install_remote {
                         set_remote_phase(
@@ -1744,7 +1764,15 @@ fn install_in_generation(
                         &handle,
                         data,
                         &install_version,
-                        || install_edge_current(&handle, generation, install_remote.as_ref(), automatic),
+                        || {
+                            install_edge_current(
+                                &handle,
+                                generation,
+                                install_remote.as_ref(),
+                                automatic,
+                                &install_version,
+                            )
+                        },
                         move || {
                             if let Some(remote) = before_exit_remote {
                                 set_remote_phase(
@@ -1787,7 +1815,10 @@ fn install_in_generation(
             }
             Err(error) => {
                 eprintln!("desktop update install: {error}");
-                if matches!(error.as_str(), "auto_update_disabled" | "runtime_not_idle") {
+                if matches!(
+                    error.as_str(),
+                    "auto_update_disabled" | "auto_update_skipped" | "runtime_not_idle"
+                ) {
                     set_state(&app, Phase::Available, None);
                     settle_update(&app, None, Settlement::Completed);
                     return;
@@ -2064,10 +2095,14 @@ mod tests {
     }
 
     #[test]
-    fn automatic_scheduler_offers_once_before_installing_the_same_version() {
-        assert!(!automatic_install_due(None, "3.2.7"));
-        assert!(!automatic_install_due(Some("3.2.6"), "3.2.7"));
-        assert!(automatic_install_due(Some("3.2.7"), "3.2.7"));
+    fn automatic_scheduler_offers_once_and_never_installs_the_exact_skipped_version() {
+        assert!(!automatic_install_due(None, "3.2.7", None));
+        assert!(!automatic_install_due(Some("3.2.6"), "3.2.7", None));
+        assert!(automatic_install_due(Some("3.2.7"), "3.2.7", None));
+        assert!(!automatic_install_due(Some("3.2.7"), "3.2.7", Some("3.2.7")));
+        assert!(automatic_install_due(Some("3.2.7"), "3.2.7", Some("3.2.6")));
+        assert!(!automatic_install_due(None, "3.2.8", Some("3.2.7")));
+        assert!(automatic_install_due(Some("3.2.8"), "3.2.8", Some("3.2.7")));
     }
 
     #[test]

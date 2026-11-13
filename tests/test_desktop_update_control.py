@@ -72,12 +72,13 @@ def test_controls_can_never_parse_as_legacy_installs(action):
 
 @pytest.mark.parametrize("changes", [
     {"schema_version": True}, {"schema_version": 2}, {"request_id": "opaque"}, {"request_id": 2},
-    {"action": "install"}, {"state": "completed"}, {"target": TARGET}, {"enabled": False},
+    {"action": "install"}, {"action": []}, {"action": {}}, {"action": None}, {"action": True}, {"action": 1},
+    {"state": "completed"}, {"target": TARGET}, {"enabled": False},
     {"created_at": "2026-11-13T08:00:00"}, {"expires_at": "2026-11-13T08:00:00Z"},
     {"expires_at": "2026-11-13T08:02:01Z"}, {"expires_at": "yesterday"},
 ])
 def test_invalid_control_requests_fail_closed(changes):
-    assert control.parse_control_request(request(**changes)) is None
+    assert control.parse_control_request({**request(), **changes}) is None
 
 
 @pytest.mark.parametrize("action", ["prereleases", "auto_update"])
@@ -92,6 +93,12 @@ def test_oversized_or_invalid_control_file_is_ignored(tmp_path):
     assert control.read_control_request(path) is None
     path.write_bytes(b"{broken")
     assert control.read_control_request(path) is None
+    # A bounded but structurally invalid mailbox must not strand either the
+    # control or install API behind an uncaught unhashable-action TypeError.
+    for action in ([], {}):
+        path.write_text(json.dumps({**request(), "action": action}))
+        assert control.read_control_request(path) is None
+        assert not control.control_in_flight(path, None, NOW)
 
 
 def test_legacy_capability_absence_never_writes_a_request(tmp_path):

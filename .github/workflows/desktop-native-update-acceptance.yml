@@ -1,0 +1,115 @@
+name: Desktop native update acceptance
+
+# A label is the pre-merge manual trigger; workflow_dispatch requires this file
+# to be registered on the default branch first. Never run on push or release.
+on:
+  pull_request:
+    types: [labeled]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-update-acceptance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+  ACCEPTANCE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  ACCEPTANCE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+  ACCEPTANCE_WORKFLOW_REF: ${{ github.workflow_ref }}
+  ACCEPTANCE_EVENT_SHA: ${{ github.sha }}
+
+jobs:
+  admission:
+    if: >-
+      github.repository == 'avibe-bot/avibe' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.label.name == 'native-update-acceptance' &&
+        github.event.pull_request.base.ref == 'master' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.ACCEPTANCE_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Refuse active or unreadable Desktop Stage 2
+        run: python desktop/src-tauri/tests/native_update/guard.py --output stage2-admission.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: native-update-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stage2-admission.json
+          retention-days: 7
+
+  native:
+    needs: admission
+    name: native-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            target: aarch64-apple-darwin
+            developer_dir: /Applications/Xcode_26.6.app/Contents/Developer
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            developer_dir: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer_dir }}
+      AVIBE_NATIVE_ACCEPTANCE_HOSTED: '1'
+      ACCEPTANCE_TARGET: ${{ matrix.target }}
+      ACCEPTANCE_ROOT: ${{ runner.temp }}/native-update-acceptance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.ACCEPTANCE_SOURCE_SHA }}
+          persist-credentials: false
+      # Repeat after runner allocation; an earlier admission is not a lease.
+      - name: Recheck Stage 2 before any dependency install or native build
+        run: python desktop/src-tauri/tests/native_update/guard.py --output "${{ env.ACCEPTANCE_ROOT }}/evidence/stage2-before-build.json"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '22.23.4'
+      - name: Report pinned Apple toolchain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          test "$(xcodebuild -version | head -1)" = 'Xcode 26.6'
+          xcodebuild -version
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+      - name: Install locked Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          uv sync --frozen --no-install-project
+      - name: Create immutable fixture assembly and signed test payload
+        shell: bash
+        run: |
+          uv run --no-sync python desktop/src-tauri/tests/native_update/build.py --source "$GITHUB_WORKSPACE" --root "$ACCEPTANCE_ROOT" --head "$ACCEPTANCE_SOURCE_SHA" --target "$ACCEPTANCE_TARGET"
+      - name: Recheck Stage 2 before native acceptance
+        run: python desktop/src-tauri/tests/native_update/guard.py --output "${{ env.ACCEPTANCE_ROOT }}/evidence/stage2-before-run.json"
+      - name: Native panel, explicit policy, normal automatic policy and handoff
+        shell: bash
+        run: |
+          uv run --no-sync python desktop/src-tauri/tests/native_update/run.py --source "$GITHUB_WORKSPACE" --root "$ACCEPTANCE_ROOT"
+      - name: Upload allowlisted evidence only (never keys, state trees or binaries)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-update-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ACCEPTANCE_ROOT }}/evidence/
+          if-no-files-found: error
+          retention-days: 7

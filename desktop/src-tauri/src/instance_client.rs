@@ -28,6 +28,18 @@ struct PresentationIntent {
     id: u64,
     view: &'static str,
     owner: u64,
+    guarded: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GuardAttempt {
+    sequence: u64,
+    intent: PresentationIntent,
+    receiver: String,
+}
+impl GuardAttempt {
+    fn token(&self) -> String {
+        format!("{}-{}", self.intent.id, self.sequence)
+    }
 }
 #[derive(Default)]
 struct PresentationQueue {
@@ -35,26 +47,86 @@ struct PresentationQueue {
     pending: Option<PresentationIntent>,
     scheduled: bool,
     retrying: bool,
+    guard_sequence: u64,
+    guard: Option<GuardAttempt>,
+    approval: Option<GuardAttempt>,
 }
 impl PresentationQueue {
-    fn enqueue(&mut self, view: &'static str, owner: u64) {
+    fn enqueue(&mut self, view: &'static str, owner: u64, guarded: bool) {
         self.sequence += 1;
+        self.guard = None;
+        self.approval = None;
         self.pending = Some(PresentationIntent {
             id: self.sequence,
             view,
             owner,
+            guarded,
         });
     }
     fn current(&mut self, owner: u64) -> Option<PresentationIntent> {
         if self.pending.is_some_and(|intent| intent.owner != owner) {
             self.pending = None;
+            self.guard = None;
+        }
+        if self
+            .approval
+            .as_ref()
+            .is_some_and(|attempt| attempt.intent.owner != owner)
+        {
+            self.approval = None;
         }
         self.pending
     }
     fn complete(&mut self, id: u64) {
         if self.pending.is_some_and(|intent| intent.id == id) {
             self.pending = None;
+            self.guard = None;
         }
+    }
+    fn begin_guard(&mut self, intent: PresentationIntent, receiver: String) -> Option<GuardAttempt> {
+        if self.pending != Some(intent) || self.guard.is_some() {
+            return None;
+        }
+        self.guard_sequence += 1;
+        let attempt = GuardAttempt {
+            sequence: self.guard_sequence,
+            intent,
+            receiver,
+        };
+        self.guard = Some(attempt.clone());
+        Some(attempt)
+    }
+    fn guard_result(&mut self, attempt: &GuardAttempt, result: &str) {
+        if self.guard.as_ref() != Some(attempt) || self.pending != Some(attempt.intent) {
+            return;
+        }
+        match serde_json::from_str::<String>(result).as_deref() {
+            Ok("dispatched") => {
+                self.complete(attempt.intent.id);
+                // A consumed event may await asynchronous user approval. Keep
+                // its exact authority until that URL arrives or is superseded.
+                self.approval = Some(attempt.clone());
+            }
+            Ok("not_dispatched") => self.guard = None,
+            // Missing/malformed/unknown callbacks may follow a shown guard.
+            // Never automatically repeat a possible unsaved-work prompt.
+            _ => {}
+        }
+    }
+    fn guard_authority(&self, token: &str, view: &str, owner: u64, receiver: &Url) -> Option<GuardAttempt> {
+        self.guard
+            .as_ref()
+            .or(self.approval.as_ref())
+            .filter(|attempt| {
+                attempt.token() == token
+                    && attempt.intent.view == view
+                    && attempt.intent.owner == owner
+                    && attempt.receiver == receiver.as_str()
+            })
+            .cloned()
+    }
+    fn owns_guard_authority(&self, attempt: &GuardAttempt) -> bool {
+        self.guard.as_ref() == Some(attempt) || self.approval.as_ref() == Some(attempt)
     }
 }
 #[derive(Clone)]
@@ -322,14 +394,14 @@ pub(crate) fn native_copy(key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 pub(crate) fn menu_present(app: &AppHandle, view: &'static str) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        if window.url().is_ok_and(|url| caller_can_present(app, MAIN_WINDOW, &url)) {
-            let view = serde_json::to_string(view).expect("view");
-            let _ = window.eval(format!("if(window.dispatchEvent(new CustomEvent('avibe:desktop-present',{{cancelable:true,detail:{{view:{view}}}}}))) window.location.assign('avibe://desktop/'+{view});"));
-            return;
-        }
-    }
-    present(app, view);
+    let _ = present_guarded(app, view);
+}
+
+pub(crate) fn present_guarded(app: &AppHandle, view: &'static str) -> bool {
+    let Some(client) = app.try_state::<Client>() else {
+        return false;
+    };
+    present_owned(app, view, client.coordinator.presentation_owner(), true, None)
 }
 pub(crate) fn return_local_for_link(app: &AppHandle) {
     let Some(client) = app.try_state::<Client>() else {
@@ -473,6 +545,25 @@ fn presentation_source_allowed(
     }
 }
 
+/// Only native-generated guarded requests carry a correlation token. It is a
+/// presentation receipt, never updater authority, and has no uncorrelated
+/// fallback if it is stale or malformed.
+fn presentation_destination(destination: &Url) -> Option<(&'static str, Option<String>)> {
+    let mut base = destination.clone();
+    let token = if destination.query().is_some() {
+        let pairs: Vec<_> = destination.query_pairs().collect();
+        if pairs.len() != 1 || pairs[0].0 != "native_request" || pairs[0].1.is_empty() || pairs[0].1.len() > 128 {
+            return None;
+        }
+        base.set_query(None);
+        Some(pairs[0].1.to_string())
+    } else {
+        None
+    };
+    let view = presentation_view(&base).or_else(|| (base.as_str() == crate::updater::OPEN_URL).then_some("updates"))?;
+    Some((view, token))
+}
+
 /// Native presentation requests share one source check in every shell assembly.
 /// Returning true means the URL was consumed, never that an action was approved.
 pub fn presentation_request(
@@ -484,11 +575,9 @@ pub fn presentation_request(
     if !enabled(app) || label != MAIN_WINDOW {
         return false;
     }
-    let view = presentation_view(destination);
-    let updates = destination.as_str() == crate::updater::OPEN_URL;
-    if view.is_none() && !updates {
+    let Some((view, token)) = presentation_destination(destination) else {
         return false;
-    }
+    };
     // Wry's macOS URL getter has no value during the initial navigation.
     // Presentation can only originate from an already loaded document; do not
     // ask for its current URL when admitting bootstrap/ordinary navigation.
@@ -498,7 +587,8 @@ pub fn presentation_request(
     // Capture before reading the document. A newer explicit action must not be
     // recaptured as authority after this source was inspected.
     let owner = client.coordinator.presentation_owner();
-    let allowed = current().is_some_and(|url| {
+    let Some(receiver) = current() else { return true };
+    let allowed = {
         let view = client.view.presentation.lock().expect("presentation");
         let local = client.view.local_origin.lock().expect("local origin");
         presentation_source_allowed(
@@ -507,11 +597,24 @@ pub fn presentation_request(
             local.as_ref(),
             client.coordinator.committed_view_generation(),
             label,
-            &url,
+            &receiver,
         )
-    });
+    };
     if allowed {
-        present_owned(app, view.unwrap_or("updates"), owner);
+        let approval = if let Some(token) = token {
+            let Some(approval) = client
+                .presentations
+                .lock()
+                .expect("presentation intent")
+                .guard_authority(&token, view, owner, &receiver)
+            else {
+                return true;
+            };
+            Some(approval)
+        } else {
+            None
+        };
+        present_owned(app, view, owner, false, approval.as_ref());
     }
     true
 }
@@ -522,10 +625,16 @@ pub fn present(app: &AppHandle, view: &'static str) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    present_owned(app, view, client.coordinator.presentation_owner())
+    present_owned(app, view, client.coordinator.presentation_owner(), false, None)
 }
 
-fn present_owned(app: &AppHandle, view: &'static str, owner: u64) -> bool {
+fn present_owned(
+    app: &AppHandle,
+    view: &'static str,
+    owner: u64,
+    guarded: bool,
+    approval: Option<&GuardAttempt>,
+) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
@@ -538,10 +647,12 @@ fn present_owned(app: &AppHandle, view: &'static str, owner: u64) -> bool {
     }
     {
         let mut queue = client.presentations.lock().expect("presentation intent");
-        if client.coordinator.presentation_owner() != owner {
+        if client.coordinator.presentation_owner() != owner
+            || approval.is_some_and(|attempt| !queue.owns_guard_authority(attempt))
+        {
             return false;
         }
-        queue.enqueue(view, owner);
+        queue.enqueue(view, owner, guarded);
     }
     schedule_presentation(app);
     ensure_presentation_retry(app);
@@ -588,7 +699,7 @@ fn schedule_presentation(app: &AppHandle) {
     };
     {
         let mut queue = client.presentations.lock().expect("presentation intent");
-        if queue.scheduled || queue.pending.is_none() {
+        if queue.scheduled || queue.pending.is_none() || queue.guard.is_some() {
             return;
         }
         queue.scheduled = true;
@@ -607,7 +718,11 @@ fn apply_presentation(app: &AppHandle) {
     let intent = {
         let mut queue = client.presentations.lock().expect("presentation intent");
         queue.scheduled = false;
-        queue.current(client.coordinator.presentation_owner())
+        let intent = queue.current(client.coordinator.presentation_owner());
+        if queue.guard.is_some() {
+            return;
+        }
+        intent
     };
     let Some(intent) = intent else { return };
     let native = &client.view;
@@ -626,6 +741,53 @@ fn apply_presentation(app: &AppHandle) {
             .lock()
             .expect("presentation intent")
             .complete(intent.id);
+        return;
+    }
+    if intent.guarded {
+        let Some(receiver) = route else { return };
+        let allowed = {
+            let state = native.presentation.lock().expect("presentation");
+            let local = native.local_origin.lock().expect("local origin");
+            presentation_source_allowed(
+                &state,
+                &native.bundle,
+                local.as_ref(),
+                client.coordinator.committed_view_generation(),
+                MAIN_WINDOW,
+                &receiver,
+            )
+        };
+        if !allowed {
+            return;
+        }
+        let attempt = client
+            .presentations
+            .lock()
+            .expect("presentation intent")
+            .begin_guard(intent, receiver.to_string());
+        let Some(attempt) = attempt else { return };
+        let script = guarded_presentation_script(&attempt);
+        let handle = app.clone();
+        let callback_attempt = attempt.clone();
+        if window
+            .eval_with_callback(script, move |result| {
+                if let Some(client) = handle.try_state::<Client>() {
+                    let mut queue = client.presentations.lock().expect("presentation intent");
+                    queue.current(client.coordinator.presentation_owner());
+                    queue.guard_result(&callback_attempt, &result);
+                }
+                schedule_presentation(&handle);
+            })
+            .is_err()
+        {
+            // The runtime did not accept the script. Execution errors delivered
+            // as empty/null callbacks are different and must stay ambiguous.
+            client
+                .presentations
+                .lock()
+                .expect("presentation intent")
+                .guard_result(&attempt, "\"not_dispatched\"");
+        }
         return;
     }
     let previous = {
@@ -655,6 +817,25 @@ fn apply_presentation(app: &AppHandle) {
     // A newer presentation may have arrived during native admission.
     schedule_presentation(app);
 }
+/// The callback reports actual dispatch, not merely native eval submission.
+/// Once an event is consumed, either approving or cancelling its unsaved-work
+/// guard is terminal. Only a proven receiver mismatch can be retried safely.
+fn guarded_presentation_script(attempt: &GuardAttempt) -> String {
+    let receiver = serde_json::to_string(&attempt.receiver).expect("receiver");
+    let view = serde_json::to_string(attempt.intent.view).expect("view");
+    let token = serde_json::to_string(&attempt.token()).expect("token");
+    format!(
+        r#"(() => {{
+        try {{
+            if (window.self !== window.top || window.location.href !== {receiver}) return "not_dispatched";
+            const event = new CustomEvent('avibe:desktop-present', {{ cancelable: true, detail: {{ view: {view}, presentationToken: {token} }} }});
+            if (window.dispatchEvent(event)) window.location.assign('avibe://desktop/' + {view} + '?native_request=' + encodeURIComponent({token}));
+            return "dispatched";
+        }} catch (_) {{ return "unknown"; }}
+    }})()"#
+    )
+}
+
 /// Called before legacy navigation. None keeps the legacy shell policy.
 pub fn navigation(app: &AppHandle, label: &str, destination: &Url) -> Option<bool> {
     let client = app.try_state::<Client>()?;
@@ -1259,14 +1440,14 @@ mod tests {
     #[test]
     fn presentation_intents_survive_retries_until_the_exact_navigation_is_admitted() {
         let mut queue = PresentationQueue::default();
-        queue.enqueue("updates", 4);
+        queue.enqueue("updates", 4, false);
         let first = queue.current(4).unwrap();
         // Lock contention, pending presentation and failed navigation leave the
         // same intent available. Lifecycle generation is deliberately not owner.
         for _ in 0..3 {
             assert_eq!(queue.current(4), Some(first));
         }
-        queue.enqueue("account", 4);
+        queue.enqueue("account", 4, false);
         let newer = queue.current(4).unwrap();
         queue.complete(first.id);
         assert_eq!(queue.current(4), Some(newer));
@@ -1277,13 +1458,116 @@ mod tests {
     #[test]
     fn a_new_explicit_action_supersedes_an_old_presentation_without_reviving_it() {
         let mut queue = PresentationQueue::default();
-        queue.enqueue("updates", 4);
+        queue.enqueue("updates", 4, false);
         let old = queue.current(4).unwrap();
         assert!(queue.current(5).is_none());
-        queue.enqueue("updates", 5);
+        queue.enqueue("updates", 5, false);
         let current = queue.current(5).unwrap();
         queue.complete(old.id);
         assert_eq!(queue.current(5), Some(current));
+    }
+
+    // Native eval acceptance is not event delivery. Unknown execution could
+    // already have shown the unsaved-work prompt, so only an explicit
+    // not-dispatched callback may retry; stale acknowledgements own nothing.
+    #[test]
+    fn guarded_presentation_retries_only_proven_non_dispatch_and_fences_callbacks() {
+        let mut queue = PresentationQueue::default();
+        queue.enqueue("updates", 4, true);
+        let intent = queue.current(4).unwrap();
+        let first = queue
+            .begin_guard(intent, "https://fixture.avibe.bot/apps/1".into())
+            .unwrap();
+        for ambiguous in ["", "null", "not json", "\"unknown\""] {
+            queue.guard_result(&first, ambiguous);
+            assert!(queue.begin_guard(intent, first.receiver.clone()).is_none());
+            assert_eq!(queue.current(4), Some(intent));
+        }
+        queue.guard_result(&first, "\"not_dispatched\"");
+        let retry = queue
+            .begin_guard(intent, "https://fixture.avibe.bot/apps/2".into())
+            .unwrap();
+        queue.guard_result(&first, "\"dispatched\"");
+        assert_eq!(queue.guard.as_ref(), Some(&retry));
+        // Delivered means the page owns approval/cancellation, not permission
+        // to bypass its guard. No further prompt is scheduled in either case.
+        queue.guard_result(&retry, "\"dispatched\"");
+        assert!(queue.current(4).is_none());
+        assert!(queue.guard.is_none());
+
+        queue.enqueue("updates", 4, true);
+        let intent = queue.current(4).unwrap();
+        let old = queue.begin_guard(intent, retry.receiver.clone()).unwrap();
+        queue.enqueue("instances", 4, true);
+        let successor = queue.current(4).unwrap();
+        queue.guard_result(&old, "\"dispatched\"");
+        assert_eq!(queue.current(4), Some(successor));
+        queue.begin_guard(successor, retry.receiver).unwrap();
+        assert!(queue.current(5).is_none());
+        assert!(queue.guard.is_none());
+    }
+
+    // A callback is not the approved navigation: browser approval can arrive
+    // before or after that callback. Both paths must retain the original owner
+    // and intent instead of adopting whichever selection is current later.
+    #[test]
+    fn guarded_approval_keeps_its_receipt_across_callback_order_and_rejects_stale_handoffs() {
+        for callback_first in [false, true] {
+            let mut queue = PresentationQueue::default();
+            let receiver = Url::parse("tauri://localhost/account/index.html?view=instances").unwrap();
+            queue.enqueue("updates", 4, true);
+            let intent = queue.current(4).unwrap();
+            let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+            let token = attempt.token();
+            if callback_first {
+                queue.guard_result(&attempt, "\"dispatched\"");
+                assert!(queue.pending.is_none());
+            }
+            assert_eq!(
+                queue.guard_authority(&token, "updates", 4, &receiver),
+                Some(attempt.clone())
+            );
+            assert!(queue.guard_authority(&token, "updates", 5, &receiver).is_none());
+            assert!(queue.guard_authority(&token, "account", 4, &receiver).is_none());
+            assert!(queue
+                .guard_authority(&token, "updates", 4, &Url::parse("https://fixture.avibe.bot/").unwrap())
+                .is_none());
+            // Approved navigation consumes the receipt in the same queue lock.
+            queue.enqueue("updates", 4, false);
+            let approved = queue.current(4).unwrap();
+            queue.guard_result(&attempt, "\"dispatched\"");
+            assert_eq!(queue.current(4), Some(approved));
+            assert!(!queue.owns_guard_authority(&attempt));
+            assert!(queue.guard_authority(&token, "updates", 4, &receiver).is_none());
+        }
+        let mut queue = PresentationQueue::default();
+        let receiver = Url::parse("https://fixture.avibe.bot/apps/1").unwrap();
+        queue.enqueue("updates", 4, true);
+        let intent = queue.current(4).unwrap();
+        let old = queue.begin_guard(intent, receiver.to_string()).unwrap();
+        queue.guard_result(&old, "\"dispatched\"");
+        queue.enqueue("instances", 4, true);
+        assert!(queue.guard_authority(&old.token(), "updates", 4, &receiver).is_none());
+        assert!(!queue.owns_guard_authority(&old));
+    }
+
+    #[test]
+    fn native_presentation_tokens_have_no_malformed_or_uncorrelated_fallback() {
+        let parse = |url| presentation_destination(&Url::parse(url).unwrap());
+        assert_eq!(parse("avibe://updates"), Some(("updates", None)));
+        assert_eq!(
+            parse("avibe://desktop/updates?native_request=1-2"),
+            Some(("updates", Some("1-2".into())))
+        );
+        for url in [
+            "avibe://desktop/updates?native_request=",
+            "avibe://desktop/updates?native_request=1-2&native_request=3-4",
+            "avibe://desktop/updates?native_request=1-2&view=account",
+            "avibe://desktop/unknown?native_request=1-2",
+            "avibe://desktop/updates?native_request=1-2#fragment",
+        ] {
+            assert!(parse(url).is_none(), "{url}");
+        }
     }
 
     // Queue-only tests cannot detect rejecting a valid source before enqueue.

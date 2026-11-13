@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VersionInfo } from '../../context/ApiContext';
-import { modelFromDesktopRelay } from './updatePanelModel';
+import type { DesktopUpdateState } from '../../lib/desktopShell';
+import { modelFromDesktopRelay, modelFromDesktopState } from './updatePanelModel';
 
 const quiet = { requesting: false, error: null, timedOut: false, disconnected: false };
 const relay = (info: Partial<VersionInfo>): VersionInfo => ({
@@ -48,5 +49,22 @@ describe('a setting change on its way to the host', () => {
     }), quiet);
     expect(model.autoUpdate).toEqual({ enabled: true });
     expect(model.status).toEqual({ kind: 'current' });
+  });
+});
+
+describe("the desktop app's own error", () => {
+  const native = (state: Partial<DesktopUpdateState>): DesktopUpdateState => ({
+    phase: 'error', latest: null, channel: 'stable', skippedVersion: null, interactive: true, remoteRequest: null, ...state,
+  });
+
+  it('uses this surface\'s accepted install outcome, not a bare error phase', () => {
+    expect(modelFromDesktopState(native({}), { current: '3.2.6', installFailed: false }).status).toEqual({ kind: 'check-failed' });
+    expect(modelFromDesktopState(native({}), { current: '3.2.6', installFailed: true }).status).toEqual({ kind: 'update-failed', reason: 'install' });
+  });
+
+  it('lets a remote terminal receipt remain authoritative', () => {
+    expect(modelFromDesktopState(native({ remoteRequest: {
+      requestId: 'request-1', target: '3.2.7', phase: 'failed', progress: null, errorCode: 'install_failed', updatedAt: '2026-11-13T07:00:00Z',
+    } }), { current: '3.2.6', installFailed: false }).status).toEqual({ kind: 'update-failed', reason: 'install' });
   });
 });
