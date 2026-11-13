@@ -642,7 +642,6 @@ final class AppModel: ObservableObject {
         guard
             let runtime = route.runtime,
             sessionCoordinator.isSelectedRuntime(runtime),
-            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized,
             let account = sessionCoordinator.currentAccount
         else {
             return false
