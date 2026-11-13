@@ -1136,6 +1136,27 @@ scenarios:
       - tests/test_vault_setup.py
       - tests/test_vault_policy_authorization.py
       - tests/test_vault_policy_context.py
+  - id: AUTH-SETUP-406
+    name: Guided Passkey setup recovers from a lost commit reply and from a refused registration without a second credential
+    status: covered
+    kind: recovery_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_vault_guided_setup_recovery_lost_reply_and_expired_registration_close_loop
+    reason: >-
+      Covered through the real management routes, registration-challenge expiry
+      and persisted setup state with synthetic WebAuthn bytes: an expired
+      registration is refused and persists no root or factor (and stays refused,
+      so the Web starts a fresh ceremony); a fresh setup whose reply is lost is
+      posted again and answered with the same durable root and a single factor;
+      a later different setup is refused as already initialized. The Web's choice
+      between same-setup retry and fresh ceremony is unit-tested in
+      useProtectedVault.setup*.test.ts. No browser consent, PRF or custody
+      operation is performed.
+    supporting_tests:
+      - ui/src/lib/useProtectedVault.setup-failure.test.ts
+      - ui/src/lib/useProtectedVault.setup-race.test.ts
+      - tests/test_vault_setup.py
   - id: AUTH-SETUP-170
     name: Desktop account invitation preserves confirmed local Setup completion across both exit choices
     status: gap

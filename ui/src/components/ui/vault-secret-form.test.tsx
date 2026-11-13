@@ -642,7 +642,12 @@ describe('turning ask-before-signing off with a Passkey', () => {
     render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
     await screen.findByText(en.vaults.askOff.offHintEdit);
     await act(async () => { fireEvent.click(askSwitch()); });
-    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: en.vaults.askOff.setupAction })); });
+    // The no-recovery warning must be acknowledged first, as in the Vault's own setup.
+    const setupButton = await screen.findByRole('button', { name: en.vaults.askOff.setupAction }) as HTMLButtonElement;
+    expect(screen.getByText(en.vaults.protectedUnlock.passkeyUnrecoverableWarning)).toBeTruthy();
+    expect(setupButton.disabled).toBe(true);
+    fireEvent.click(screen.getByRole('checkbox', { name: en.vaults.protectedUnlock.passkeyAck }));
+    await act(async () => { fireEvent.click(setupButton); });
     expect(vault.setupVaultDurably).toHaveBeenCalledOnce();
     // Setting up is not consent to turn it off: still on, and it asks for the toggle again.
     expect(await screen.findByText(en.vaults.askOff.setupDone)).toBeTruthy();

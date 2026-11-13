@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -45,9 +46,7 @@ export function AskTurnOffNote({ state, onSetup, className }: { state: AskTurnOf
       <span className={cn('flex flex-col items-start gap-1.5', className)}>
         <span role="note" className="text-[11.5px] text-muted">{t('vaults.askOff.setupRequired')}</span>
         {state.setup === 'failed' ? <span role="alert" className="text-[11.5px] text-destructive-ink">{t('vaults.askOff.setupFailed')}</span> : null}
-        {onSetup ? (
-          <Button type="button" variant="secondary" size="xs" onClick={onSetup}>{t('vaults.askOff.setupAction')}</Button>
-        ) : null}
+        {onSetup ? <SetupWithAck onSetup={onSetup} /> : null}
       </span>
     );
   }
@@ -57,6 +56,25 @@ export function AskTurnOffNote({ state, onSetup, className }: { state: AskTurnOf
   return (
     <span role={warn ? 'alert' : 'note'} className={cn('text-[11.5px]', warn ? 'text-destructive-ink' : 'text-muted', className)}>
       {t(FAILURE_KEYS[state.failure])}
+    </span>
+  );
+}
+
+/**
+ * The same no-recovery warning and acknowledgment as the Vault's own Passkey setup: this creates the
+ * root every protected key will use, so it is not set up before the user has read that.
+ */
+function SetupWithAck({ onSetup }: { onSetup: () => void }) {
+  const { t } = useTranslation();
+  const [ack, setAck] = useState(false);
+  return (
+    <span className="flex flex-col items-start gap-1.5 rounded-lg border border-gold/40 bg-gold/10 p-2">
+      <span className="text-[11.5px] leading-snug text-gold-ink">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
+      <label className="flex items-start gap-2 text-[11.5px] leading-snug text-muted-foreground">
+        <input type="checkbox" checked={ack} onChange={(event) => setAck(event.target.checked)} className="mt-0.5 shrink-0" />
+        <span>{t('vaults.protectedUnlock.passkeyAck')}</span>
+      </label>
+      <Button type="button" variant="secondary" size="xs" disabled={!ack} onClick={onSetup}>{t('vaults.askOff.setupAction')}</Button>
     </span>
   );
 }

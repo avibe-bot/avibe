@@ -6122,6 +6122,60 @@ def test_vault_shared_setup_reload_policy_confirmation_and_last_delete_close_loo
         assert factor["disabled_at"] is None and factor["sign_count"] == 3
 
 
+def test_vault_guided_setup_recovery_lost_reply_and_expired_registration_close_loop(monkeypatch):
+    """AUTH-SETUP-406: guided setup recovery -> same-setup retry after a lost reply; a refused
+    (expired) registration persists nothing and a fresh ceremony then succeeds.
+
+    The Web retries the exact uncommitted setup only when the commit got no answer, and starts a
+    fresh ceremony after any server refusal. This drives both branches through the real management
+    routes, registration-challenge expiry and persisted setup state, with synthetic WebAuthn bytes.
+    """
+    from sqlalchemy import func, select, update
+    from storage.models import vault_auth_factors, vault_operation_challenges
+    from tests.vault_webauthn_helpers import WebAuthnTestCredential
+    from vibe import api
+
+    credential = WebAuthnTestCredential(rp_id="sandbox.avibe.bot", origin="https://sandbox.avibe.bot")
+    monkeypatch.setattr(ui_server, "_vault_sandbox_webauthn_origin", lambda: credential.origin)
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    def factors() -> int:
+        with api._vault_engine().connect() as conn:
+            return conn.execute(select(func.count()).select_from(vault_auth_factors)).scalar_one()
+
+    # Refused: the registration challenge expired (2 minutes) before the commit. Nothing persists.
+    options = client.post("/api/vault/authz/factors/webauthn/options", json={}, headers=headers).get_json()
+    stale = credential.registration_payload(challenge_id=options["challenge_id"], challenge_b64=options["webauthn"]["challenge"])
+    with api._vault_engine().begin() as conn:
+        conn.execute(update(vault_operation_challenges).where(vault_operation_challenges.c.id == options["challenge_id"])
+                     .values(expires_at="2000-01-01T00:00:00+00:00"))
+    refused = client.post("/api/vault/setup", json={"wrap_meta": credential.wrap_meta(), "authz_factor_registration": stale}, headers=headers)
+    assert refused.status_code == 403 and refused.get_json()["code"] == "invalid_protected_authz"
+    assert client.get("/api/vault/vmk").get_json()["exists"] is False and factors() == 0
+    # Retrying that same registration can never succeed: the Web must start a fresh ceremony.
+    again = client.post("/api/vault/setup", json={"wrap_meta": credential.wrap_meta(), "authz_factor_registration": stale}, headers=headers)
+    assert again.status_code == 403 and factors() == 0
+
+    # Fresh ceremony: new options and registration; the commit's reply is lost, so the Web posts the
+    # same setup again, which the server answers with the same durable root and no second factor.
+    options = client.post("/api/vault/authz/factors/webauthn/options", json={}, headers=headers).get_json()
+    registration = credential.registration_payload(challenge_id=options["challenge_id"], challenge_b64=options["webauthn"]["challenge"])
+    payload = {"wrap_meta": credential.wrap_meta(), "authz_factor_registration": registration}
+    first = client.post("/api/vault/setup", json=payload, headers=headers)
+    assert first.status_code == 200
+    retried = client.post("/api/vault/setup", json=payload, headers=headers)
+    assert retried.status_code == 200 and retried.get_json() == first.get_json()
+    assert factors() == 1
+    # Another tab's different setup after that is refused as already initialized.
+    other = WebAuthnTestCredential(rp_id="sandbox.avibe.bot", origin="https://sandbox.avibe.bot")
+    options = client.post("/api/vault/authz/factors/webauthn/options", json={}, headers=headers).get_json()
+    late = client.post("/api/vault/setup", json={"wrap_meta": other.wrap_meta(), "authz_factor_registration": other.registration_payload(
+        challenge_id=options["challenge_id"], challenge_b64=options["webauthn"]["challenge"])}, headers=headers)
+    assert late.status_code == 409 and late.get_json()["code"] == "vault_already_initialized"
+    assert client.get("/api/vault/vmk").get_json() == first.get_json() and factors() == 1
+
+
 @pytest.mark.parametrize("first_outcome", ["lost_reply", "pending"])
 def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monkeypatch, first_outcome):
     """AUTH-SETUP-172, AUTH-SETUP-174: lost reply -> recovered pair -> Off -> relogin.
