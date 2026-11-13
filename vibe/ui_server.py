@@ -6061,7 +6061,10 @@ def _vault_error_response(exc):
         message = str(exc)
         if exc.message_key:
             message = t(exc.message_key, settings_service.load_config_or_default().language)
-        return jsonify({"ok": False, "code": exc.code, "message": message}), exc.status
+        payload = {"ok": False, "code": exc.code, "message": message}
+        if exc.minimum_version is not None:
+            payload["minimum_version"] = exc.minimum_version
+        return jsonify(payload), exc.status
     return jsonify({"ok": False, "code": "vault_error", "message": str(exc)}), 400
 
 
@@ -6271,6 +6274,22 @@ def vault_secret_patch(name):
         )
     except ValueError as exc:
         return _vault_error_response(exc)
+
+
+@app.post("/api/vault/secrets/{name}/bitcoin-address-types", include_in_schema=False)
+async def vault_hd_bitcoin_types_post(name: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(await asyncio.to_thread(
+                api.prepare_vault_hd_bitcoin_types, name, request.json if request.json is not None else {},
+                user_context=getattr(g, "authorization_context", None),
+            ))
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.post("/api/vault/secrets/{name}/accounts", include_in_schema=False)

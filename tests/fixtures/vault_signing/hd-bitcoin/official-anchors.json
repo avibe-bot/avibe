@@ -1,0 +1,61 @@
+{
+  "warning": "PUBLIC SYNTHETIC / PUBLISHED REFERENCE TEST FIXTURES ONLY. Synthetic entropy was generated exclusively for this corpus and has never intentionally been funded. All words, passphrases and seeds are intentionally public: NEVER RECEIVE FUNDS, never import into a real wallet, and never reuse these keys. Published reference addresses may already have third-party on-chain activity; no chain lookup was performed.",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/bitcoin/bips/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0084.mediawiki",
+      "sha256": "1900feec6cafca65b8c09906ca0658d2d742b4c9b44cb15678996985b6bfe627",
+      "file": "sources/bip-0084.mediawiki"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bitcoin/bips/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0086.mediawiki",
+      "sha256": "d8d01dee331da07c2562615bc1f064c1868ec3fce61184973da76d1196c7f5b0",
+      "file": "sources/bip-0086.mediawiki"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bitcoin/bips/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0039/english.txt",
+      "sha256": "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda",
+      "file": "sources/english.txt"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/satoshilabs/slips/e2824d0027c90187caa9ea300a889dfda61976a0/slip-0132.md",
+      "sha256": "e22db297863b7e200637bd4b507cb31a5bea31a91c0398e27a6657403d8ce167",
+      "file": "sources/slip-0132.md"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bitcoin/bips/b34d9f751791d4feb22feff4f2ed00bcac83961b/bip-0143.mediawiki",
+      "sha256": "62bc71351563e68baeb12643c68355d217953ae9eb6a6e68b2b0323275b6beec",
+      "file": "sources/bip-0143.mediawiki"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bitcoin/bitcoin/d0f6d9953a15d7c7111d46dcb76ab2bb18e5dee3/src/kernel/chainparams.cpp",
+      "sha256": "e646ed7e7e8d829851c723d72f10be63ed88d42b978cfe14598c7e25173df79f",
+      "file": "sources/bitcoin-core-chainparams.cpp"
+    }
+  ],
+  "bip84": [
+    {
+      "path": "m/84'/0'/0'/0/0",
+      "public_key": "0330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c",
+      "mainnet_address": "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu",
+      "script_pubkey": "0014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2"
+    },
+    {
+      "path": "m/84'/0'/0'/0/1",
+      "public_key": "03e775fd51f0dfb8cd865d9ff1cca2a158cf651fe997fdc9fee9c1d3b5e995ea77",
+      "mainnet_address": "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g",
+      "script_pubkey": "00149c90f934ea51fa0f6504177043e0908da6929983"
+    },
+    {
+      "path": "m/84'/0'/0'/1/0",
+      "public_key": "03025324888e429ab8e3dbaf1f7802648b9cd01e9b418485c5fa4c1b9b5700e1a6",
+      "mainnet_address": "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el",
+      "script_pubkey": "00143e34985dca6fddc9fb369940e4c7d8e2873f529c"
+    }
+  ],
+  "slip132_bip44": {
+    "path": "m/44'/0'/0'/0/0",
+    "mainnet_address": "1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA",
+    "public_key": "03aaeb52dd7494c361049de67cc680e83ebcbbbdbeb13637d92cd845f70308af5e",
+    "note": "Address is literal from SLIP132; child public key is independently derived, not printed by that source. No xpub is exported."
+  }
+}

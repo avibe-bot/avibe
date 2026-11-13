@@ -735,7 +735,8 @@ def test_cli_default_account_list_and_plain_keypair_option_refusal(custody, capf
     assert cli.cmd_vault_list(parser.parse_args(["vault", "list"])) == 0
     listed = json.loads(capfd.readouterr().out)["secrets"][0]
     assert listed["signer_kind"] == "hd-seed"
-    assert set(listed["accounts"][0]) == {"account", "name", "eth", "btc_taproot", "solana"}
+    assert set(listed["accounts"][0]) == {"account", "name", "eth", "btc_taproot", "solana", "paths", "bitcoin_address_types"}
+    assert listed["accounts"][0]["bitcoin_address_types"] == ["p2tr"]
     with api._vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PLAIN", kind="keypair", sealed=Sealed("ct", "nonce", "meta"))
     before = len(custody.calls)

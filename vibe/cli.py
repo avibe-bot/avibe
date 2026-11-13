@@ -9814,6 +9814,9 @@ def _vault_secret_row(secret: dict) -> dict:
     keypair says ``per_use_sign: true`` when ``vibe vault sign`` can use it.
     """
 
+    from vibe import api
+
+    secret = api.vault_public_capabilities(secret)
     default_field = secret.get("default_field") or "value"
     fields = (secret.get("fields") or [default_field]) if secret.get("kind") != "keypair" else []
     return _present_fields(
@@ -9829,11 +9832,14 @@ def _vault_secret_row(secret: dict) -> dict:
             "policy": secret.get("policy"),
             "signer_kind": secret.get("signer_kind") if secret.get("signer_kind") == "hd-seed" else None,
             "accounts": [
-                {key: account.get(key) for key in ("account", "name", "eth", "btc_taproot", "solana")}
+                {key: account[key] for key in ("account", "name", "eth", "btc_taproot", "btc_legacy", "btc_segwit", "solana",
+                                               "paths", "bitcoin_paths", "bitcoin_address_types") if key in account}
                 for account in secret.get("accounts", [])
             ] if secret.get("signer_kind") == "hd-seed" else None,
             "signing_curve": secret.get("signing_curve"),
             "signing_addresses": secret.get("signing_addresses"),
+            "bitcoin_address_types": secret.get("bitcoin_address_types"),
+            "bitcoin_profile": secret.get("bitcoin_profile"),
             "solana_signing_note": (
                 None
                 if secret.get("signing_curve") != "ed25519"
@@ -11716,7 +11722,7 @@ def cmd_vault_sign(args):
         if not vault_crypto.is_valid_secret_name(name):
             raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
         selection = {
-            key: value for key in ("chain", "account")
+            key: value for key in ("chain", "account", "address_type")
             if (value := getattr(args, key, None)) is not None
         }
         derivation = api._sign_derivation_from_payload(selection)
@@ -20025,10 +20031,10 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message with a keypair secret (standard signs inline; protected needs approval)",
         description=(
-            "Sign with a keypair or HD wallet (--chain required). Solana signs exact --message-hex "
-            "bytes, never a hash; secp256k1 uses --digest. Protected/ask-first keys need browser "
-            "approval; use 'vibe vault await REQUEST_ID'. Protected Solana needs "
-            "--signing-context-json: {\"kind\":\"solana-transaction-v1\",\"messageHex\":<same lowercase hex>}."
+            "Sign with a keypair or HD wallet (--chain required). Solana uses exact --message-hex; "
+            "secp256k1 uses --digest. Protected/ask-first keys need browser approval; "
+            "read with 'vibe vault await ID'. Protected Solana also needs a matching "
+            "solana-transaction-v1 --signing-context-json."
         ),
         epilog=(
             "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
@@ -20038,8 +20044,9 @@ def build_parser():
         error_help_command="vibe vault sign --help",
     )
     vault_sign_parser.add_argument("name", help="Keypair secret name")
-    vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="Required for HD seed wallets; fixes the signing scheme")
-    vault_sign_parser.add_argument("--account", type=int, help="Enabled HD account index, 0..19 (default: 0); not valid for plain keypairs")
+    vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="HD only; selects chain and scheme")
+    vault_sign_parser.add_argument("--account", type=int, help="HD index 0..19 (default: 0)")
+    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="HD Bitcoin type (default: p2tr)")
     vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",
@@ -20055,7 +20062,7 @@ def build_parser():
             "schnorr-secp256k1-bip341-keypath",
             "ed25519",
         ],
-        help="Signature scheme (plain keypair default: ecdsa-secp256k1-recoverable); must match --chain for HD wallets",
+        help="Ordinary key scheme; HD chain/type fixes it",
     )
     vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")

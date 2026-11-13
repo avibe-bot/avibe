@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from http.client import HTTPSConnection
 from pathlib import Path
 from typing import Any, Callable, List, Optional
@@ -2468,11 +2469,13 @@ def set_default_vibe_agent(name: str, *, user_context: Any = None) -> dict:
 class VaultApiError(ValueError):
     """A vault REST error carrying a stable code + HTTP status for the route layer."""
 
-    def __init__(self, message: str, *, code: str = "vault_error", status: int = 400, message_key: str | None = None):
+    def __init__(self, message: str, *, code: str = "vault_error", status: int = 400, message_key: str | None = None,
+                 minimum_version: str | None = None):
         # str(exc) stays English for CLI callers; only the Web boundary localizes it.
         super().__init__(message)
         self.code = code
         self.status = status
+        self.minimum_version = minimum_version
         self.message_key = message_key or {
             "invalid_signing_key": "vault.signing.invalidKey",
             "protected_signing_unsupported": "vault.signing.protectedUnsupported",
@@ -2565,7 +2568,8 @@ def _vault_api_error_from_avault(exc: "AvaultError", *, prefix: str) -> VaultApi
     if isinstance(exc, AvaultAuthorizationRequiredError):
         return VaultApiError(f"{prefix}: {message}", code=exc.code, status=409)
     if "requires avault >=" in message:
-        return VaultApiError(f"{prefix}: {message}", code="avault_upgrade_required", status=409)
+        return VaultApiError(f"{prefix}: {message}", code="avault_upgrade_required", status=409,
+                             minimum_version=getattr(exc, "minimum_version", None))
     return VaultApiError(f"{prefix}: {message}", code="avault_failed")
 
 
@@ -2742,6 +2746,38 @@ def _vault_engine():
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
+@lru_cache(maxsize=16)
+def _cached_hd_bitcoin_capability(path: str, mtime_ns: int, size: int, inode: int, interval: int) -> bool:
+    # Cache only a public version capability, never keys, custody state or authorization.
+    # File identity invalidates upgrades/downgrades immediately; the time bucket retries failures.
+    return _version_at_least(_probe_avault_version(path), AVAULT_HD_BITCOIN_TYPES_MIN_VERSION)
+
+
+def _hd_bitcoin_types_available() -> bool:
+    path = _resolve_avault_cli_path()
+    if not path:
+        return False
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return False
+    return _cached_hd_bitcoin_capability(path, stat.st_mtime_ns, stat.st_size, stat.st_ino, int(time.monotonic() // 30))
+
+
+def vault_public_capabilities(secret: dict) -> dict:
+    """Decorate a PUBLIC projection after leaving storage; no custody probe per account."""
+    from storage import vault_hd
+
+    if (secret.get("signer_kind") != vault_hd.SIGNER_KIND or secret.get("protection") != "standard"
+            or secret.get("bitcoin_profile") != vault_hd.BITCOIN_PROFILE):
+        return secret
+    supported = _hd_bitcoin_types_available()
+    return {**secret, "accounts": [
+        {**account, "bitcoin_address_types": list(vault_hd.BITCOIN_TYPES) if supported else ["p2tr"]}
+        for account in secret.get("accounts", [])
+    ]}
+
+
 def get_vault_secrets(
     *,
     tag: Optional[str] = None,
@@ -2765,7 +2801,7 @@ def get_vault_secrets(
             )
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
-    return {"ok": True, "secrets": secrets}
+    return {"ok": True, "secrets": [vault_public_capabilities(secret) for secret in secrets]}
 
 
 def get_vault_tags(*, query: Optional[str] = None, tag_type: Optional[str] = None) -> dict:
@@ -3846,8 +3882,13 @@ def _vault_hd_keypair_spec(payload: dict, *, kind: str, protection: str, public_
         raise invalid("HD seed wallets support only standard-tier keypairs")
     if payload.get("signer_kind") not in (None, vault_hd.SIGNER_KIND):
         raise invalid("HD seed wallets require signer_kind hd-seed")
-    if spec != {"type": "hd-seed", "source": "import", "format": "raw-seed"}:
-        raise invalid("HD keypair requires type hd-seed, source import and format raw-seed")
+    expected_spec = {"type": "hd-seed", "source": "import", "format": "raw-seed"}
+    if isinstance(spec, dict) and "profile" in spec:
+        expected_spec["profile"] = vault_hd.BITCOIN_PROFILE
+    if spec != expected_spec:
+        raise invalid("HD keypair requires type hd-seed, source import, format raw-seed and optional supported profile")
+    if "profile" in spec and "expected_account0" not in payload:
+        raise invalid("extended HD create requires all five expected_account0 addresses")
     if public_meta or set(payload) - {
         "name", "kind", "protection", "signer_kind", "keypair", "blind_box", "description", "tags",
         "policy", "links", "provision_request_id", "public_meta", "expected_account0", "account0_always_ask",
@@ -3920,7 +3961,9 @@ def create_vault_secret(
     expected_account0 = None
     if "expected_account0" in payload:
         try:
-            expected_account0 = vault_hd.validate_expected_account0(payload["expected_account0"])
+            expected_account0 = vault_hd.validate_expected_account0(
+                payload["expected_account0"], profile=payload.get("keypair", {}).get("profile"),
+            )
         except ValueError as exc:
             raise VaultApiError(str(exc), code="invalid_hd_wallet") from exc
     solana_keypair = None if hd_keypair is not None else _vault_solana_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
@@ -3971,12 +4014,15 @@ def create_vault_secret(
 
     if hd_keypair is not None:
         try:
-            created = avault_hd_seed_import(name, hd_keypair)
+            profile = payload["keypair"].get("profile")
+            created = avault_hd_seed_import(name, hd_keypair, **({"profile": profile} if profile is not None else {}))
         except AvaultError as exc:
             raise _vault_api_error_from_avault(exc, prefix="avault HD import failed") from exc
         sealed = created["sealed"]
         signer_kind = "hd-seed"
         public_meta = {"hd_accounts": created["accounts"]}
+        if profile is not None:
+            public_meta["bitcoin_profile"] = profile
         if expected_account0 is not None:
             account0 = vault_hd.public_accounts(public_meta)[0]
             if any(account0[field] != address for field, address in expected_account0.items()):
@@ -4093,7 +4139,38 @@ def create_vault_secret(
         request_id=str(payload.get("provision_request_id") or "") or None,
         request_status="fulfilled" if payload.get("provision_request_id") else None,
     )
-    return {"ok": True, "secret": meta}
+    return {"ok": True, "secret": vault_public_capabilities(meta)}
+
+
+def prepare_vault_hd_bitcoin_types(name: str, payload: dict, *, user_context: Any = None) -> dict:
+    """Prepare fixed public identities without re-importing or holding a custody-time writer."""
+    from storage import vault_service
+
+    if not isinstance(payload, dict) or payload:
+        raise VaultApiError("Bitcoin preparation takes an empty object only", code="invalid_payload")
+    engine = _vault_engine()
+    try:
+        with engine.connect() as conn:
+            snapshot = vault_service.capture_hd_bitcoin_types(conn, name, user_context=user_context)
+        # Even an idempotent explicit prepare authenticates existing extension points
+        # against the stored seed; structural SEC1 validity is not a custody binding.
+        accounts = avault_hd_seed_derive_public(name, snapshot["envelope"])
+        with engine.begin() as conn:
+            meta = vault_service.commit_hd_bitcoin_types(conn, snapshot, accounts, user_context=user_context)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise VaultApiError("Bitcoin preparation requires management authority", code="forbidden", status=403) from exc
+    except (vault_service.HdBitcoinTypesStateChangedError, vault_service.HdBitcoinTypesIntegrityError) as exc:
+        raise VaultApiError(str(exc), code=exc.code, status=409, message_key="vault.hd.invalidWallet") from exc
+    except AvaultHdPublicIntegrityError as exc:
+        raise VaultApiError(str(exc), code="hd_bitcoin_types_integrity_failed", status=409, message_key="vault.hd.invalidWallet") from exc
+    except AvaultError as exc:
+        raise _vault_api_error_from_avault(exc, prefix="HD public preparation unavailable") from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_hd_wallet", status=409) from exc
+    _publish_vaults_updated(scope="secret", secret_name=name)
+    return {"ok": True, "secret": vault_public_capabilities(meta)}
 
 
 def update_vault_hd_account(
@@ -4116,7 +4193,7 @@ def update_vault_hd_account(
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_hd_account", status=409) from exc
     _publish_vaults_updated(scope="secret", secret_name=name)
-    return {"ok": True, "secret": meta}
+    return {"ok": True, "secret": vault_public_capabilities(meta)}
 
 
 def update_vault_secret(name: str, payload: dict, *, user_context: Any = None) -> dict:
@@ -4168,7 +4245,7 @@ def update_vault_secret(name: str, payload: dict, *, user_context: Any = None) -
         raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
     release_vault_agent_scopes(release_scopes, reason="update_vault_secret")
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or secret_name)
-    return {"ok": True, "secret": meta}
+    return {"ok": True, "secret": vault_public_capabilities(meta)}
 
 
 def update_vault_secret_field(
@@ -4278,7 +4355,7 @@ def update_vault_secret_field(
         raise _vault_field_service_error(exc) from exc
     release_vault_agent_scopes(release_scopes, reason="update_vault_secret_field")
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or secret_name)
-    return {"ok": True, "secret": meta}
+    return {"ok": True, "secret": vault_public_capabilities(meta)}
 
 
 def delete_vault_secret_field(
@@ -4640,7 +4717,7 @@ def _validate_sign_parameters(payload: dict) -> None:
     allowed = {
         "name", "digest", "message_hex", "scheme", "request_id", "signature", "requester", "delivery",
         "signing_context", "signingContext", "session_id", "run_id", "skill", "command",
-        "egress", "mode", "request_ttl_seconds", "chain", "account",
+        "egress", "mode", "request_ttl_seconds", "chain", "account", "address_type",
     }
     extra = set(payload) - allowed
     delivery = payload.get("delivery")
@@ -4667,7 +4744,7 @@ def _preflight_hd_signing(engine, name: str, derivation: dict | None, scheme: st
             return
         vault_service.get_signing_public_key(conn, name, derivation=derivation, scheme=scheme, user_context=user_context)
     try:
-        _require_avault_hd_seed_surface()
+        _require_avault_hd_seed_surface(bitcoin_types="address_type" in (derivation or {}))
     except AvaultError as exc:
         raise _vault_api_error_from_avault(exc, prefix="HD signing unavailable") from exc
 
@@ -5434,10 +5511,12 @@ def _sign_digest_from_payload(value: object) -> str:
 def _sign_derivation_from_payload(payload: dict) -> dict | None:
     from storage import vault_hd
 
-    if "chain" not in payload and "account" not in payload:
+    if not any(key in payload for key in ("chain", "account", "address_type")):
         return None
     try:
-        return vault_hd.derivation(payload.get("chain"), payload.get("account", 0))
+        return vault_hd.derivation(payload.get("chain"), payload.get("account", 0), **(
+            {"address_type": payload["address_type"]} if "address_type" in payload else {}
+        ))
     except ValueError as exc:
         raise VaultApiError(str(exc), code="invalid_hd_wallet", status=409) from exc
 
@@ -5453,7 +5532,7 @@ def _sign_input_from_payload(payload: dict) -> tuple[str, str | None, str | None
     derivation = _sign_derivation_from_payload(payload)
     scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
     if derivation is not None:
-        expected = vault_hd.SCHEMES[derivation["chain"]]
+        expected = vault_hd.signing_scheme(derivation)
         if payload.get("scheme") is not None and payload["scheme"] != expected:
             raise VaultApiError("signature scheme does not match the HD chain", code="invalid_hd_wallet", status=409)
         scheme = expected
@@ -6297,7 +6376,7 @@ def store_vault_pubkey_pin(payload: dict) -> dict:
     except vault_service.SecretConflictError as exc:
         raise _vault_field_service_error(exc) from exc
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or name)
-    return {"ok": True, "secret": meta}
+    return {"ok": True, "secret": vault_public_capabilities(meta)}
 
 
 def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
@@ -10134,7 +10213,9 @@ def _require_avault_min_version(feature: str, minimum: str, *, managed_available
         detail = f"{feature} requires avault >= {minimum}; installed {version or 'unknown'}"
         if not managed_available:
             detail = f"{detail}; managed avault install is pinned to {AVAULT_VERSION}"
-        raise AvaultPreHandoffError(detail)
+        error = AvaultPreHandoffError(detail)
+        error.minimum_version = minimum
+        raise error
 
 
 def _require_avault_p2_surface(feature: str) -> None:
@@ -10207,6 +10288,10 @@ _AVAULT_LINUX_TPM_DEVICE_PATHS = (Path("/dev/tpm0"), Path("/dev/tpmrm0"))
 class AvaultError(Exception):
     """An ``avault`` invocation failed. Messages never carry secret material —
     avault is designed to keep secrets out of its stdout/stderr and errors."""
+
+
+class AvaultHdPublicIntegrityError(AvaultError):
+    """A versioned PUBLIC response failed strict validation, before storage mutation."""
 
 
 class AvaultPreHandoffError(AvaultError):
@@ -10503,42 +10588,69 @@ def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):
 # keys and exact-message ``sign`` through ``message_hex``.
 AVAULT_ED25519_MIN_VERSION = "0.1.10"
 AVAULT_HD_SEED_MIN_VERSION = "0.1.11"
+AVAULT_HD_BITCOIN_TYPES_MIN_VERSION = "0.1.12"
 
 
-def _require_avault_hd_seed_surface() -> None:
+def _require_avault_hd_seed_surface(*, bitcoin_types: bool = False) -> None:
+    minimum = AVAULT_HD_BITCOIN_TYPES_MIN_VERSION if bitcoin_types else AVAULT_HD_SEED_MIN_VERSION
     _require_avault_min_version(
-        "HD seed wallet creation and signing", AVAULT_HD_SEED_MIN_VERSION,
-        managed_available=_version_at_least(AVAULT_VERSION, AVAULT_HD_SEED_MIN_VERSION),
+        "HD Bitcoin address types" if bitcoin_types else "HD seed wallet creation and signing", minimum,
+        managed_available=_version_at_least(AVAULT_VERSION, minimum),
     )
 
 
-def avault_hd_seed_import(name: str, blind_box: dict) -> dict:
+def avault_hd_seed_import(name: str, blind_box: dict, *, profile: str | None = None) -> dict:
     """Import browser-sealed seed bytes; retain only typed ciphertext and public keys."""
     from storage import vault_hd
     from storage.vault_crypto import Sealed
 
-    _require_avault_hd_seed_surface()
-    proc = _run_avault(
-        ["keypair", "import", "--name", name, "--type", "hd-seed", "--format", "raw-seed", "--blind-box"],
-        stdin=json.dumps(blind_box).encode("utf-8"),
-    )
+    try:
+        vault_hd.public_fields(profile)
+    except ValueError as exc:
+        raise AvaultError(str(exc)) from exc
+    _require_avault_hd_seed_surface(bitcoin_types=profile is not None)
+    args = ["keypair", "import", "--name", name, "--type", "hd-seed", "--format", "raw-seed", "--blind-box"]
+    if profile is not None:
+        args += ["--profile", profile]
+    proc = _run_avault(args, stdin=json.dumps(blind_box).encode("utf-8"))
     if proc.returncode != 0:
         raise AvaultError(_avault_detail(proc) or "avault HD seed import failed")
     try:
         result = json.loads(proc.stdout)
-        if result["type"] != "hd-seed":
-            raise ValueError("wrong type")
+        fields = {"type", "accounts", "envelope"} | ({"profile"} if profile is not None else set())
+        if not isinstance(result, dict) or set(result) != fields or result["type"] != "hd-seed" or result.get("profile") != profile:
+            raise ValueError("wrong HD response type/profile/fields")
         envelope = result["envelope"]
         sealed = Sealed(ciphertext=envelope["ciphertext"], nonce=envelope["nonce"], wrap_meta=envelope["wrap_meta"])
         vault_hd.validate_envelope(sealed)
-        accounts = vault_hd.import_accounts(result["accounts"])
+        accounts = vault_hd.import_accounts(result["accounts"], profile=profile)
     except (ValueError, KeyError, TypeError) as exc:
         raise AvaultError("avault HD seed import returned malformed output") from exc
     return {"sealed": sealed, "accounts": accounts}
 
 
+def avault_hd_seed_derive_public(name: str, key_envelope) -> list[dict]:
+    """Open only inside avault; return the exact versioned public table, never an envelope."""
+    from storage import vault_hd
+
+    _require_avault_hd_seed_surface(bitcoin_types=True)
+    body = {"name": name, "key_envelope": _envelope_payload(key_envelope), "profile": vault_hd.BITCOIN_PROFILE}
+    proc = _run_avault(["keypair", "derive-public"], stdin=json.dumps(body).encode("utf-8"))
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault HD public derivation failed")
+    try:
+        result = json.loads(proc.stdout)
+        if (not isinstance(result, dict) or set(result) != {"type", "profile", "accounts"}
+                or result["type"] != "hd-seed" or result["profile"] != vault_hd.BITCOIN_PROFILE):
+            raise ValueError("wrong HD public response")
+        vault_hd.import_accounts(result["accounts"], profile=vault_hd.BITCOIN_PROFILE)
+        return result["accounts"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AvaultHdPublicIntegrityError("avault HD public derivation returned malformed output") from exc
+
+
 def avault_sign_hd_seed(key_envelope, *, name: str, derivation: dict, scheme: str, digest: str | None, message_hex: str | None) -> dict:
-    _require_avault_hd_seed_surface()
+    _require_avault_hd_seed_surface(bitcoin_types="address_type" in derivation)
     sign_input = {"digest": digest} if message_hex is None else {"message_hex": message_hex}
     return _avault_sign({**sign_input, "scheme": scheme, "derivation": derivation}, key_envelope, name)
 
