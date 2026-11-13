@@ -176,8 +176,15 @@ final class DirectPathAppTests: XCTestCase {
         let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
         XCTAssertFalse(app.directFaultCovers(first))
         var shownWhileMarking: [Bool] = []
-        marker.whileMarking = {
+        // The App owns this spy; its observer must not retain the App back.
+        marker.whileMarking = { [weak app] in
+            guard let app else {
+                return XCTFail("The App was released before the fault was marked")
+            }
             shownWhileMarking.append(app.directListenerFault)
+        }
+        addTeardownBlock { @MainActor [weak app] in
+            XCTAssertNil(app, "The fault-marker observer must not keep the fixture App alive")
         }
 
         // The App's port is taken while it is in the background: the return
@@ -1919,9 +1926,9 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     private func removeTrackedStores() async {
-        // Later RuntimePage teardown blocks have already detached their
-        // windows. Release every App's runtime/account views before removing
-        // any store (some tests create more than one App).
+        // Release every App's runtime/account views before removing any
+        // store (some tests create more than one App). RuntimePage owners
+        // close their windows before this cleanup.
         for release in releaseFixtureApps { release() }
         releaseFixtureApps.removeAll()
         print("[iOS fixture] stage=App views invalidated before store removal")
