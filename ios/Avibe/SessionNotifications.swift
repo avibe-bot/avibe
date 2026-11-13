@@ -45,7 +45,7 @@ struct NotificationReconcile: Equatable {
                 let id = id as? String,
                 !id.isEmpty,
                 id.count <= maximumSessionIDLength,
-                unread.insert(id).inserted
+                unread.insert(id).inserted || true
             else {
                 return nil
             }
