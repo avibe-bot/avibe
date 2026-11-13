@@ -1055,7 +1055,7 @@ final class DirectConnectListenerTests: XCTestCase {
             let listener = DirectConnectListener(
                 limits: .patient,
                 planner: { _ in nil },
-                onListenerFailure: { _ in }
+                onListenerFailure: {}
             )
             let binding = Task {
                 try await listener.bind(port: nil)
@@ -1111,12 +1111,7 @@ final class DirectConnectListenerTests: XCTestCase {
             _ = lifecycle.beginBind()
         case "failed":
             serve()
-            XCTAssertTrue(lifecycle.publish(1) { true })
-            XCTAssertEqual(lifecycle.socketFailed(1), .fault)
-        case "rejected":
-            XCTAssertEqual(lifecycle.reject(1), .none)
-            let g = lifecycle.beginBind()!
-            XCTAssertEqual(lifecycle.reject(g), .fallback)
+            XCTAssertTrue(lifecycle.socketFailed(1))
         case "stopped":
             lifecycle.stop()
         default:
@@ -1138,7 +1133,6 @@ final class DirectConnectListenerTests: XCTestCase {
             ("closed", .refused, false),
             ("rebinding", .refused, false),
             ("failed", .refused, false),
-            ("rejected", .refused, false),
             ("stopped", .refused, false),
         ]
         for row in table {
@@ -1150,8 +1144,17 @@ final class DirectConnectListenerTests: XCTestCase {
             default:
                 generation = 1
             }
-            XCTAssertEqual(lifecycle.admit(generation), row.admit, row.phase)
-            XCTAssertEqual(lifecycle.admit(generation + 1), .refused, "\(row.phase), a stale generation")
+            let id = UUID()
+            XCTAssertEqual(lifecycle.admit(generation, relay: id), row.admit, row.phase)
+            // Only an admitted relay is a candidate.
+            XCTAssertEqual(lifecycle.isCandidate(id), row.admit == .relay, row.phase)
+            let stale = UUID()
+            XCTAssertEqual(
+                lifecycle.admit(generation + 1, relay: stale),
+                .refused,
+                "\(row.phase), a stale generation"
+            )
+            XCTAssertFalse(lifecycle.isCandidate(stale), row.phase)
             var staleWrote = false
             XCTAssertFalse(lifecycle.publish(generation + 1) { staleWrote = true; return true })
             XCTAssertFalse(staleWrote, "\(row.phase): a stale generation never writes")
@@ -1159,69 +1162,101 @@ final class DirectConnectListenerTests: XCTestCase {
             XCTAssertEqual(lifecycle.publish(generation) { wrote = true; return true }, row.publish, row.phase)
             XCTAssertEqual(wrote, row.publish, "\(row.phase): the write ran only when allowed")
         }
+        // A serving listener with no room for a relay admits the connection
+        // for the ownership check only, and records no candidate.
+        let full = makeLifecycle(in: "serving")
+        XCTAssertEqual(full.admit(1, relay: nil), .ownershipOnly)
+        XCTAssertEqual(full.relayIDs, [])
     }
 
-    /// A failure is a fallback before any route and the fault after one,
-    /// decided under the lock: whatever the call (bind failure, rejection,
-    /// socket failure), and from either side of a publication.
-    func testAFailureIsAFallbackBeforeAnyRouteAndTheFaultAfterOne() {
-        // Before any route.
-        let bindFails = DirectListenerLifecycle()
-        let g = bindFails.beginBind()!
-        XCTAssertEqual(bindFails.bindFailed(g), .fallback)
-        XCTAssertEqual(bindFails.phase, .rejected(generation: g))
+    /// Every failure of the current bind (a bind failure, a rejected
+    /// ownership check, a socket failure) is the same terminal state,
+    /// before a route or after one, and nothing leaves it.
+    func testEveryFailureIsTheOneTerminalStateBeforeOrAfterARoute() {
+        for published in [false, true] {
+            let bindFails = makeLifecycle(in: published ? "rebinding" : "binding", published: published)
+            let g = published ? 2 : 1
+            XCTAssertTrue(bindFails.bindFailed(g))
+            XCTAssertEqual(bindFails.phase, .failed(generation: g))
 
-        let rejected = makeLifecycle(in: "verifying")
-        XCTAssertEqual(rejected.reject(1), .fallback)
+            let rejected = makeLifecycle(in: published ? "rebinding" : "binding", published: published)
+            XCTAssertTrue(rejected.ready(g))
+            XCTAssertTrue(rejected.reject(g))
+            XCTAssertEqual(rejected.phase, .failed(generation: g))
 
-        let failsServing = makeLifecycle(in: "serving")
-        XCTAssertEqual(failsServing.socketFailed(1), .fallback)
-        XCTAssertFalse(failsServing.publish(1) { true })
+            let failsServing = makeLifecycle(in: "serving", published: published)
+            XCTAssertTrue(failsServing.socketFailed(1))
+            XCTAssertEqual(failsServing.phase, .failed(generation: 1))
+            XCTAssertEqual(failsServing.hasPublished, published)
 
-        // After a route: the same calls are the fault.
-        let routedRebind = makeLifecycle(in: "rebinding", published: true)
-        XCTAssertEqual(routedRebind.bindFailed(2), .fault)
-        XCTAssertEqual(routedRebind.phase, .failed(generation: 2))
-
-        let routedReject = makeLifecycle(in: "rebinding", published: true)
-        XCTAssertTrue(routedReject.ready(2))
-        XCTAssertEqual(routedReject.reject(2), .fault)
-
-        let routedFailure = makeLifecycle(in: "serving", published: true)
-        XCTAssertEqual(routedFailure.socketFailed(1), .fault)
-
-        // A publication that did not write is no route.
-        let notWritten = makeLifecycle(in: "serving")
-        XCTAssertFalse(notWritten.publish(1) { false })
-        XCTAssertFalse(notWritten.hasPublished)
-        XCTAssertEqual(notWritten.socketFailed(1), .fallback)
+            // Terminal: no bind, no confirmation, no admission, no
+            // publication, no grant, no close, and a stop leaves it failed.
+            for failed in [bindFails, rejected, failsServing] {
+                let id = UUID()
+                XCTAssertNil(failed.beginBind())
+                XCTAssertFalse(failed.ready(g))
+                XCTAssertFalse(failed.confirm(g))
+                XCTAssertEqual(failed.admit(g, relay: id), .refused)
+                XCTAssertFalse(failed.publish(g) { true })
+                XCTAssertFalse(failed.grant(id, host: "instance.example", backend: .direct, generation: 0))
+                XCTAssertFalse(failed.beginClose())
+                failed.closeCompleted()
+                failed.stop()
+                if case .failed = failed.phase {
+                } else {
+                    XCTFail("A failed listener left the failed phase: \(failed.phase)")
+                }
+                XCTAssertEqual(failed.hasPublished, published)
+            }
+        }
     }
 
     /// The transitions that must not happen: confirm after a failure, a
-    /// failure of a stale socket, a second failure, binding while serving,
-    /// a close of what is not open, and anything after stop.
+    /// failure of a stale socket, a second failure, a failure of a listener
+    /// closed on purpose, binding while serving, a close of what is not
+    /// open, and anything after stop.
     func testIllegalTransitionsLeaveThePhaseUnchanged() {
         let confirmAfterFailure = makeLifecycle(in: "verifying")
-        XCTAssertEqual(confirmAfterFailure.socketFailed(1), .fallback)
+        XCTAssertTrue(confirmAfterFailure.socketFailed(1))
         XCTAssertFalse(confirmAfterFailure.confirm(1))
-        XCTAssertEqual(confirmAfterFailure.phase, .rejected(generation: 1))
+        XCTAssertEqual(confirmAfterFailure.phase, .failed(generation: 1))
 
         let staleFailure = makeLifecycle(in: "rebinding", published: true)
         XCTAssertTrue(staleFailure.ready(2))
         // A stale bind's completion: neither confirms nor rejects the newer
         // bind.
         XCTAssertFalse(staleFailure.confirm(1))
-        XCTAssertEqual(staleFailure.reject(1), .none)
+        XCTAssertFalse(staleFailure.reject(1))
+        XCTAssertFalse(staleFailure.bindFailed(1))
         XCTAssertEqual(staleFailure.phase, .verifying(generation: 2, rebind: true))
         XCTAssertTrue(staleFailure.confirm(2))
-        XCTAssertEqual(staleFailure.socketFailed(1), .none)
+        XCTAssertFalse(staleFailure.socketFailed(1))
         XCTAssertEqual(staleFailure.phase, .serving(generation: 2))
 
         let twice = makeLifecycle(in: "serving", published: true)
-        XCTAssertEqual(twice.socketFailed(1), .fault)
-        XCTAssertEqual(twice.socketFailed(1), .none)
-        XCTAssertEqual(twice.reject(1), .none)
+        XCTAssertTrue(twice.socketFailed(1))
+        XCTAssertFalse(twice.socketFailed(1))
+        XCTAssertFalse(twice.reject(1))
         XCTAssertFalse(twice.beginClose())
+
+        // A listener closed on purpose does not fail: what its bind or its
+        // socket reports afterwards is not a failure.
+        for phase in ["closing", "closed"] {
+            let closedOnPurpose = makeLifecycle(in: phase, published: true)
+            let before = closedOnPurpose.phase
+            XCTAssertFalse(closedOnPurpose.bindFailed(1), phase)
+            XCTAssertFalse(closedOnPurpose.reject(1), phase)
+            XCTAssertFalse(closedOnPurpose.socketFailed(1), phase)
+            XCTAssertFalse(closedOnPurpose.confirm(1), phase)
+            XCTAssertEqual(closedOnPurpose.phase, before, phase)
+        }
+        // The same for a re-bind under way that the background closes.
+        let rebindClosed = makeLifecycle(in: "rebinding", published: true)
+        XCTAssertTrue(rebindClosed.beginClose())
+        XCTAssertFalse(rebindClosed.bindFailed(2))
+        XCTAssertFalse(rebindClosed.reject(2))
+        XCTAssertFalse(rebindClosed.ready(2))
+        XCTAssertEqual(rebindClosed.phase, .closing(generation: 2))
 
         let serving = makeLifecycle(in: "serving")
         XCTAssertNil(serving.beginBind())
@@ -1234,7 +1269,7 @@ final class DirectConnectListenerTests: XCTestCase {
         let stopped = makeLifecycle(in: "stopped")
         XCTAssertNil(stopped.beginBind())
         XCTAssertFalse(stopped.beginClose())
-        XCTAssertEqual(stopped.reject(1), .none)
+        XCTAssertFalse(stopped.reject(1))
         XCTAssertEqual(stopped.phase, .stopped)
     }
 
@@ -1249,6 +1284,76 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertTrue(lifecycle.hasPublished)
         lifecycle.stop()
         XCTAssertNil(lifecycle.beginBind())
+        XCTAssertTrue(lifecycle.hasPublished)
+    }
+
+    // MARK: The relay ledger
+
+    /// A grant is made once, for a candidate, while the bind that admitted
+    /// it serves; nothing but the relay's end removes it.
+    func testAGrantIsMadeOnceForACandidateOfTheServingBind() {
+        let lifecycle = makeLifecycle(in: "serving")
+        let id = UUID()
+        // Not admitted: nothing to grant.
+        XCTAssertFalse(lifecycle.grant(id, host: host, backend: .direct, generation: 3))
+        XCTAssertEqual(lifecycle.admit(1, relay: id), .relay)
+        XCTAssertTrue(lifecycle.isCandidate(id))
+        XCTAssertEqual(lifecycle.grants, [:])
+
+        XCTAssertTrue(lifecycle.grant(id, host: host, backend: .direct, generation: 3))
+        let granted = DirectListenerLifecycle.Grant(host: host, backend: .direct, generation: 3)
+        XCTAssertEqual(lifecycle.grants, [id: granted])
+        XCTAssertFalse(lifecycle.isCandidate(id))
+        // Once: a second grant, with anything else, changes nothing.
+        XCTAssertFalse(lifecycle.grant(id, host: "other.example", backend: .publicOrigin, generation: 9))
+        XCTAssertEqual(lifecycle.grants, [id: granted])
+
+        lifecycle.end(id)
+        XCTAssertEqual(lifecycle.grants, [:])
+        XCTAssertEqual(lifecycle.relayIDs, [])
+        // An ended relay is neither a candidate nor grantable again.
+        XCTAssertFalse(lifecycle.grant(id, host: host, backend: .direct, generation: 3))
+    }
+
+    /// Leaving `serving` (a failure, a close) revokes every candidate in
+    /// that same step and keeps every grant; a revoked candidate is never
+    /// granted, even when the listener serves again.
+    func testLeavingServingRevokesEveryCandidateAndKeepsEveryGrant() {
+        for transition in ["socket failed", "close and serve again", "stop"] {
+            let lifecycle = makeLifecycle(in: "serving", published: true)
+            let granted = UUID()
+            let candidate = UUID()
+            XCTAssertEqual(lifecycle.admit(1, relay: granted), .relay)
+            XCTAssertEqual(lifecycle.admit(1, relay: candidate), .relay)
+            XCTAssertTrue(lifecycle.grant(granted, host: host, backend: .publicOrigin, generation: 0))
+
+            switch transition {
+            case "socket failed":
+                XCTAssertTrue(lifecycle.socketFailed(1))
+            case "close and serve again":
+                XCTAssertTrue(lifecycle.beginClose())
+                XCTAssertFalse(lifecycle.isCandidate(candidate), transition)
+                lifecycle.closeCompleted()
+                let g = lifecycle.beginBind()!
+                XCTAssertTrue(lifecycle.ready(g))
+                XCTAssertTrue(lifecycle.confirm(g))
+            default:
+                lifecycle.stop()
+            }
+
+            XCTAssertFalse(lifecycle.isCandidate(candidate), transition)
+            XCTAssertFalse(
+                lifecycle.grant(candidate, host: host, backend: .direct, generation: 0),
+                transition
+            )
+            if transition == "stop" {
+                // A stop ends every relay, granted or not.
+                XCTAssertEqual(lifecycle.relayIDs, [], transition)
+            } else {
+                XCTAssertEqual(lifecycle.relayIDs, [granted], transition)
+                XCTAssertEqual(lifecycle.grants[granted]?.backend, .publicOrigin, transition)
+            }
+        }
     }
 
     func testAFailureOfAnEarlierSocketOfTheSameListenerIsStale() async throws {
@@ -1256,7 +1361,7 @@ final class DirectConnectListenerTests: XCTestCase {
         let listener = DirectConnectListener(
             limits: .patient,
             planner: { _ in nil },
-            onListenerFailure: { failures.record($0) }
+            onListenerFailure: { failures.record(true) }
         )
         addTeardownBlock {
             await listener.stop()
@@ -1274,29 +1379,25 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertFalse(lifecycle.confirm(first.generation))
 
         // What Network's queue does for each socket's failure.
-        XCTAssertEqual(lifecycle.socketFailed(1), .none)
-        XCTAssertEqual(lifecycle.socketFailed(2), .fallback)
-        await listener.socketDidFail(routed: false)
-        XCTAssertEqual(failures.values, [false])
+        XCTAssertFalse(lifecycle.socketFailed(1))
+        XCTAssertEqual(failures.values, [])
+        XCTAssertTrue(lifecycle.socketFailed(2))
+        await listener.socketDidFail()
+        XCTAssertEqual(failures.values, [true])
+        XCTAssertEqual(lifecycle.phase, .failed(generation: 2))
     }
 
-    /// The socket failed, was rejected, began to close, or stopped, and a
-    /// connection arrives before anything else happens: the actor's one
-    /// admission call refuses it with no answer, and no plan, relay, spare,
-    /// or dial is made for it.
+    /// The socket failed, a re-bind was rejected, a close began, or the
+    /// listener stopped, and a connection arrives before anything else
+    /// happens: the actor's one admission call refuses it with no answer,
+    /// and no plan, relay, spare, or dial is made for it.
     func testNoConnectionIsAdmittedOnceTheListenerLeftServing() async throws {
-        for transition in ["socket failed", "rejected", "closing", "stopped"] {
+        for transition in ["socket failed", "closing", "stopped"] {
             let fixture = try await makeListener()
             let lifecycle = await fixture.listener.lifecycle
             switch transition {
             case "socket failed":
-                XCTAssertEqual(lifecycle.socketFailed(1), .fallback)
-            case "rejected":
-                // What a re-bind's failed ownership check records.
-                XCTAssertTrue(lifecycle.beginClose())
-                lifecycle.closeCompleted()
-                let g = lifecycle.beginBind()!
-                XCTAssertEqual(lifecycle.reject(g), .fallback)
+                XCTAssertTrue(lifecycle.socketFailed(1))
             case "closing":
                 XCTAssertTrue(lifecycle.beginClose())
             default:
@@ -1307,17 +1408,18 @@ final class DirectConnectListenerTests: XCTestCase {
             try? await client.send(canonicalHead)
             let answer = try await client.receiveUntilClosed()
 
-            XCTAssertEqual(answer, Data())
-            XCTAssertEqual(fixture.plans.planCount, 0)
-            XCTAssertEqual(fixture.direct.attempts, 0)
+            XCTAssertEqual(answer, Data(), transition)
+            XCTAssertEqual(fixture.plans.planCount, 0, transition)
+            XCTAssertEqual(fixture.direct.attempts, 0, transition)
+            XCTAssertEqual(lifecycle.relayIDs, [], transition)
             client.close()
             await fixture.listener.stop()
         }
     }
 
     /// Work admitted while serving, when the listener then leaves serving:
-    /// its cleanup owner is this actor, which hears of every such transition
-    /// after the admission's turn. Uncommitted work ends; a committed relay
+    /// the authority revokes it in that step, and this actor, which hears
+    /// of every such transition afterwards, ends its task. A granted relay
     /// stays. Shown for a socket failure and for a deliberate close.
     func testUncommittedWorkEndsWhenTheListenerLeavesServingAndCommittedRelaysStay() async throws {
         for transition in ["socket failed", "close"] {
@@ -1330,10 +1432,13 @@ final class DirectConnectListenerTests: XCTestCase {
             try await eventually { fixture.direct.attempts == 2 }
 
             let lifecycle = await fixture.listener.lifecycle
+            XCTAssertEqual(lifecycle.relayIDs.count, 2, transition)
             if transition == "socket failed" {
                 // What Network's queue records, then what reaches the actor.
-                XCTAssertEqual(lifecycle.socketFailed(1), .fallback)
-                await fixture.listener.socketDidFail(routed: false)
+                XCTAssertTrue(lifecycle.socketFailed(1))
+                // Revoked already, before the actor's cleanup has run.
+                XCTAssertEqual(lifecycle.relayIDs, Set(lifecycle.grants.keys), transition)
+                await fixture.listener.socketDidFail()
             } else {
                 await fixture.listener.closeListeningSocket()
             }
@@ -1342,6 +1447,7 @@ final class DirectConnectListenerTests: XCTestCase {
             XCTAssertEqual(rest, Data(), transition)
             XCTAssertEqual(fixture.publicOrigin.attempts, 0, transition)
             XCTAssertFalse(committed.isCancelled, transition)
+            XCTAssertEqual(lifecycle.grants.count, 1, transition)
             try await committedClient.send("ping")
             try await eventually {
                 String(decoding: committed.written, as: UTF8.self).hasSuffix("ping")
@@ -1351,11 +1457,14 @@ final class DirectConnectListenerTests: XCTestCase {
         }
     }
 
-    /// A candidate admitted while serving reaches its commit point after the
-    /// socket's failure was recorded (before the actor has heard of it):
-    /// the commit is refused, no `200` is sent, and the stream is closed. A
-    /// relay that committed before the failure stays usable.
-    func testACandidateThatReachesItsCommitPointAfterAFailureIsRefused() async throws {
+    // MARK: The final grant
+
+    /// The grant against a failure, failure first, with the actor's cleanup
+    /// not yet run: a candidate admitted while serving has its stream ready
+    /// after the socket's failure was recorded. It is never granted, no
+    /// `200` is sent, and its stream is closed. A relay granted before the
+    /// failure stays usable.
+    func testACandidateThatReachesItsCommitPointAfterAFailureIsNeverGranted() async throws {
         let fixture = try await makeListener()
         let controlClient = LoopbackClient(port: fixture.port)
         let control = try await establish(controlClient, fixture)
@@ -1365,18 +1474,171 @@ final class DirectConnectListenerTests: XCTestCase {
 
         // What Network's queue records; the actor has not heard of it.
         let lifecycle = await fixture.listener.lifecycle
-        XCTAssertEqual(lifecycle.socketFailed(1), .fallback)
+        XCTAssertTrue(lifecycle.socketFailed(1))
         candidate.instanceSends(Data(established.utf8))
 
         let answer = try await client.receiveUntilClosed()
         XCTAssertEqual(answer, Data())
         try await eventually { candidate.isCancelled }
+        XCTAssertEqual(lifecycle.grants.count, 1)
         XCTAssertFalse(control.isCancelled)
         try await controlClient.send("ping")
         try await eventually {
             String(decoding: control.written, as: UTF8.self).hasSuffix("ping")
         }
         controlClient.close()
+    }
+
+    /// The same order inside the commit point's own turn: the plan's last
+    /// validation passes, and a failure or a close recorded before the
+    /// grant that follows it, in that turn, still refuses the grant. No
+    /// `200`, the stream is closed, and the CONNECT is not planned again.
+    func testAFailureOrCloseRecordedBeforeTheGrantRefusesItInItsOwnTurn() async throws {
+        for transition in ["socket failed", "close"] {
+            let fixture = try await makeListener()
+            let lifecycle = await fixture.listener.lifecycle
+            // The second validation of a CONNECT is the one made in the
+            // turn that grants it.
+            fixture.plans.atValidation(2) {
+                if transition == "socket failed" {
+                    XCTAssertTrue(lifecycle.socketFailed(1))
+                } else {
+                    XCTAssertTrue(lifecycle.beginClose())
+                }
+            }
+            let client = LoopbackClient(port: fixture.port)
+            try await client.send(canonicalHead)
+            let candidate = try await fixture.direct.waitForStream()
+            candidate.instanceSends(Data(established.utf8))
+
+            let answer = try await client.receiveUntilClosed()
+            XCTAssertEqual(answer, Data(), transition)
+            try await eventually { candidate.isCancelled }
+            XCTAssertEqual(fixture.plans.validationCount, 2, transition)
+            XCTAssertEqual(fixture.plans.planCount, 1, transition)
+            XCTAssertEqual(fixture.direct.attempts, 1, transition)
+            XCTAssertEqual(fixture.publicOrigin.attempts, 0, transition)
+            XCTAssertEqual(lifecycle.grants, [:], transition)
+            client.close()
+            await fixture.listener.stop()
+        }
+    }
+
+    /// The other order: a relay granted before the failure, or before the
+    /// close, is kept by both, and its bytes keep flowing.
+    func testARelayGrantedBeforeAFailureOrACloseIsKept() async throws {
+        for transition in ["socket failed", "close"] {
+            let fixture = try await makeListener()
+            let lifecycle = await fixture.listener.lifecycle
+            let client = LoopbackClient(port: fixture.port)
+            let stream = try await establish(client, fixture)
+            XCTAssertEqual(lifecycle.grants.count, 1, transition)
+
+            if transition == "socket failed" {
+                XCTAssertTrue(lifecycle.socketFailed(1))
+                await fixture.listener.socketDidFail()
+            } else {
+                await fixture.listener.closeListeningSocket()
+            }
+
+            XCTAssertEqual(lifecycle.grants.count, 1, transition)
+            XCTAssertFalse(stream.isCancelled, transition)
+            try await client.send("ping")
+            try await eventually {
+                String(decoding: stream.written, as: UTF8.self).hasSuffix("ping")
+            }
+            // It leaves the ledger when it ends, and only then.
+            stream.cancel()
+            try await eventually { lifecycle.grants.isEmpty }
+            client.close()
+            await fixture.listener.stop()
+        }
+    }
+
+    /// A plan that is no longer current in the turn that would grant it is
+    /// not granted and leaves nothing behind. That is still before the
+    /// commit point, so the CONNECT is planned once more.
+    func testAPlanNoLongerCurrentAtTheGrantIsNotGrantedAndIsPlannedOnceMore() async throws {
+        let fixture = try await makeListener()
+        let lifecycle = await fixture.listener.lifecycle
+        let plans = fixture.plans
+        plans.atValidation(2) {
+            plans.set(current: false)
+        }
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let first = try await fixture.direct.waitForStream()
+        first.instanceSends(Data(established.utf8))
+
+        // Planned once more; that plan is fenced as well: no `200` at all.
+        let second = try await fixture.direct.waitForStream(count: 2)
+        XCTAssertEqual(lifecycle.grants, [:])
+        second.instanceSends(Data(established.utf8))
+        let answer = try await client.receiveUntilClosed()
+        XCTAssertTrue(
+            String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 503 "),
+            String(decoding: answer, as: UTF8.self)
+        )
+        try await eventually { first.isCancelled && second.isCancelled }
+        XCTAssertEqual(plans.planCount, 2)
+        XCTAssertEqual(lifecycle.grants, [:])
+        client.close()
+    }
+
+    /// Nothing undoes a grant. Once granted, a plan that stops being
+    /// current changes nothing for this relay, and a backend that fails
+    /// only ends it: it is not validated or planned again, nothing is
+    /// dialled again, and it leaves the ledger by ending.
+    func testAGrantIsNeverUndoneAndTheRelayIsNeverPlannedAgain() async throws {
+        let fixture = try await makeListener()
+        let lifecycle = await fixture.listener.lifecycle
+        let plans = fixture.plans
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establish(client, fixture)
+        XCTAssertEqual(lifecycle.grants.count, 1)
+        XCTAssertEqual(plans.validationCount, 2)
+
+        // What made the plan current is gone; the relay stays as granted.
+        plans.set(current: false, generation: 7)
+        try await client.send("ping")
+        try await eventually {
+            String(decoding: stream.written, as: UTF8.self).hasSuffix("ping")
+        }
+        XCTAssertEqual(lifecycle.grants.count, 1)
+
+        // Its backend fails: the relay ends, and that is all.
+        stream.cancel()
+        let rest = try await client.receiveUntilClosed()
+        XCTAssertEqual(rest, Data())
+        try await eventually { lifecycle.relayIDs.isEmpty }
+        XCTAssertEqual(plans.validationCount, 2)
+        XCTAssertEqual(plans.planCount, 1)
+        XCTAssertEqual(fixture.direct.attempts, 1)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+    }
+
+    /// WebKit's side goes away in the very turn that grants the relay, so
+    /// the tunnel cannot start or its `200` cannot be delivered: the relay
+    /// only ends. It is not validated or planned again, and nothing is
+    /// dialled again.
+    func testAClientGoneAtTheGrantOnlyEndsTheRelay() async throws {
+        let fixture = try await makeListener(limits: limits(lingerSeconds: 0.5))
+        let lifecycle = await fixture.listener.lifecycle
+        let plans = fixture.plans
+        let client = LoopbackClient(port: fixture.port)
+        plans.atValidation(2) {
+            client.close()
+        }
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+        stream.instanceSends(Data(established.utf8))
+
+        try await eventually { stream.isCancelled }
+        try await eventually { lifecycle.relayIDs.isEmpty }
+        XCTAssertEqual(plans.validationCount, 2)
+        XCTAssertEqual(plans.planCount, 1)
+        XCTAssertEqual(fixture.direct.attempts, 1)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
     }
 
     /// A connection admitted while serving finishes its request head after
@@ -1389,7 +1651,7 @@ final class DirectConnectListenerTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
 
         let lifecycle = await fixture.listener.lifecycle
-        XCTAssertEqual(lifecycle.socketFailed(1), .fallback)
+        XCTAssertTrue(lifecycle.socketFailed(1))
         try await client.send("Host: instance.example:443\r\n\r\n")
 
         let answer = try await client.receiveUntilClosed()
@@ -1407,7 +1669,7 @@ final class DirectConnectListenerTests: XCTestCase {
         let listener = DirectConnectListener(
             limits: .patient,
             planner: { _ in nil },
-            onListenerFailure: { _ in }
+            onListenerFailure: {}
         )
         addTeardownBlock {
             await listener.stop()
@@ -1738,7 +2000,7 @@ final class DirectConnectListenerTests: XCTestCase {
             planner: { authority in
                 plans.plan(for: authority)
             },
-            onListenerFailure: { _ in }
+            onListenerFailure: {}
         )
         for allowed in allowedHosts ?? [host] {
             await listener.allowHost(allowed)
@@ -1848,6 +2110,8 @@ final class StandInPlans: @unchecked Sendable {
     private var failures = 0
     private var scope = DirectPlanScope(selection: 0, accountEpoch: 0)
     private var generation = 0
+    private var validations = 0
+    private var validationActions: [Int: () -> Void] = [:]
 
     init(direct: StandInStreamSource, publicOrigin: StandInStreamSource) {
         self.direct = direct
@@ -1921,8 +2185,28 @@ final class StandInPlans: @unchecked Sendable {
         )
     }
 
+    /// How many times a plan of this stand-in was validated.
+    var validationCount: Int {
+        lock.withLock { validations }
+    }
+
+    /// Runs `action` inside validation number `index` (counted from one),
+    /// before that validation's answer is read. A CONNECT's first validation
+    /// is made when its candidate is ready; its second is the one made in
+    /// the main-actor turn that grants it.
+    func atValidation(_ index: Int, _ action: @escaping () -> Void) {
+        lock.withLock {
+            validationActions[index] = action
+        }
+    }
+
     private func currentNow() -> Bool {
-        lock.withLock { isCurrent }
+        let action = lock.withLock { () -> (() -> Void)? in
+            validations += 1
+            return validationActions[validations]
+        }
+        action?()
+        return lock.withLock { isCurrent }
     }
 
     private func recordDirectFailure() {

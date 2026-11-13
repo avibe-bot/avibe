@@ -425,8 +425,12 @@ final class DirectPathControllerTests: XCTestCase {
         let target = try XCTUnwrap(harness.transport.selections.last)
         harness.transport.report(.usable(generation: "g1"), for: target)
 
-        let stranger = DirectConnectListener(planner: { _ in nil }, onListenerFailure: { _ in })
-        harness.controller.listenerDidFail(stranger, routed: true)
+        // Another listener, whose own lifecycle has failed.
+        let stranger = DirectConnectListener(planner: { _ in nil }, onListenerFailure: {})
+        let lifecycle = await stranger.lifecycle
+        let generation = try XCTUnwrap(lifecycle.beginBind())
+        XCTAssertTrue(lifecycle.bindFailed(generation))
+        harness.controller.listenerDidFail(stranger)
 
         XCTAssertFalse(harness.controller.isFaulted)
         XCTAssertEqual(harness.faults, 0)
@@ -458,7 +462,7 @@ final class DirectPathControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testNoBindHappensInTheBackgroundAndABindThatEndsThereIsParked() async throws {
+    func testNoBindHappensInTheBackgroundAndAFirstBindUnderWayThereIsRetired() async throws {
         let listening = try listeningSockets()
         let routeWrites = try ProxyConfigurationWrites.count()
         let harness = try Harness(test: self)
@@ -476,8 +480,9 @@ final class DirectPathControllerTests: XCTestCase {
         )
         harness.enterForeground()
 
-        // A bind under way when the App goes to the background ends parked:
-        // its socket closed, no route written, and the host excluded.
+        // A first bind under way when the App goes to the background ends
+        // there, on purpose and not as a failure: its listener is retired,
+        // no route is written, and the host is excluded.
         _ = try harness.coordinator.selectInstance(id: "instance-2")
         let runtime = try XCTUnwrap(harness.lastOpened)
         let coordinator = harness.coordinator
@@ -497,9 +502,11 @@ final class DirectPathControllerTests: XCTestCase {
         await preparing.value
 
         XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
-        // Parked, and then, with no route pointing at it, stopped: nothing
-        // listens until a later open in the foreground binds again.
+        // With no route pointing at it, stopped: nothing listens until a
+        // later open in the foreground binds again. Not the fault.
         XCTAssertEqual(harness.controller.listenerState, .none)
+        XCTAssertFalse(harness.controller.isFaulted)
+        XCTAssertEqual(harness.faults, 0)
         XCTAssertTrue(
             harness.controller.routeOwner.isExcluded(two, store: harness.websiteDataStore.identifier)
         )
@@ -608,22 +615,182 @@ final class DirectPathControllerTests: XCTestCase {
         client.close()
     }
 
-    /// A push tap opens an instance whose route exists while the listener
-    /// is still being bound again after the background: the open waits for
-    /// it rather than load against a closed port.
+    // MARK: The load gate
+
+    /// The gate the shell asks before it creates or reloads a WebView: open
+    /// without a route or with a serving listener, held from the background
+    /// until the return settles, and never decided by a wait. Each change
+    /// that is not a fault is announced once.
     @MainActor
-    func testOpeningARoutedInstanceDuringTheReturnWaitsForTheListener() async throws {
+    func testTheLoadGateIsHeldFromTheBackgroundUntilTheReturnSettles() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        // No route for this host yet: WebKit's normal path.
+        _ = try harness.coordinator.selectInstance(id: "instance-1")
+        let unrouted = try XCTUnwrap(harness.lastOpened)
+        XCTAssertEqual(harness.controller.loadGate(for: unrouted), .open)
+
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        XCTAssertEqual(harness.controller.listenerState, .ready)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .open)
+        let announced = harness.availabilityChanges
+
+        // Closed for the background, in the same turn.
+        harness.enterBackground()
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+        XCTAssertEqual(harness.availabilityChanges, announced + 1)
+
+        // The return starts the one re-bind; until it settles, still held.
+        harness.enterForeground()
+        XCTAssertEqual(harness.controller.listenerState, .rebinding)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+        XCTAssertEqual(harness.availabilityChanges, announced + 1)
+
+        // Preparing a route that exists does not wait for the listener and
+        // changes nothing: the gate is asked instead.
+        await harness.controller.prepareRoute(for: runtime) { true }
+        try await eventually { harness.controller.loadGate(for: runtime) != .held }
+        if harness.controller.isFaulted {
+            XCTAssertEqual(harness.controller.loadGate(for: runtime), .fault)
+            XCTAssertEqual(harness.faults, 1)
+        } else {
+            XCTAssertEqual(harness.controller.listenerState, .ready)
+            XCTAssertEqual(harness.controller.loadGate(for: runtime), .open)
+            XCTAssertEqual(harness.availabilityChanges, announced + 2)
+        }
+
+        // An instance with no route on this store is open throughout.
+        _ = try harness.coordinator.selectInstance(id: "instance-custom-port")
+        let other = try XCTUnwrap(harness.lastOpened)
+        harness.enterBackground()
+        XCTAssertEqual(harness.controller.loadGate(for: other), .open)
+        harness.enterForeground()
+    }
+
+    /// The port is taken while the App is in the background: the gate of the
+    /// routed runtime goes from held to fault, never to open, and stays
+    /// there; a host without a route stays open.
+    @MainActor
+    func testTheLoadGateOfARoutedRuntimeEndsAsTheFaultWhenTheReBindFails() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let port = try harness.listenerPort(since: listening)
+
+        harness.enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port.rawValue,
+            reuseAddress: true
+        )
+        defer { squatter.close() }
+        harness.enterForeground()
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+
+        var seen: Set<String> = []
+        try await eventually {
+            let gate = harness.controller.loadGate(for: runtime)
+            seen.insert("\(gate)")
+            return gate == .fault
+        }
+        XCTAssertFalse(seen.contains("open"))
+        XCTAssertEqual(harness.faults, 1)
+
+        squatter.close()
         harness.enterBackground()
         harness.enterForeground()
-        XCTAssertEqual(harness.controller.listenerState, .rebinding)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .fault)
+        _ = try harness.coordinator.selectInstance(id: "instance-2")
+        let unrouted = try XCTUnwrap(harness.lastOpened)
+        XCTAssertEqual(harness.controller.loadGate(for: unrouted), .open)
+    }
 
+    /// Backgrounds and returns in quick succession, including a return
+    /// before the previous close or re-bind has finished: a routed listener
+    /// in the foreground always has a current attempt, so the gate leaves
+    /// held (serving, or the fault) every time, and nothing is stranded.
+    @MainActor
+    func testRapidBackgroundsAndReturnsNeverStrandARoutedListener() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
         let runtime = try XCTUnwrap(harness.lastOpened)
-        await harness.controller.prepareRoute(for: runtime) { true }
 
-        XCTAssertNotEqual(harness.controller.listenerState, .rebinding)
+        for round in 0..<4 {
+            // A return before the close has run, then another round trip
+            // before that return's re-bind can finish.
+            harness.enterBackground()
+            harness.enterForeground()
+            harness.enterBackground()
+            harness.enterForeground()
+            if round.isMultiple(of: 2) {
+                await Task.yield()
+                harness.enterBackground()
+                harness.enterForeground()
+            }
+            let held = harness.requestStatus("instance-1")
+            try await eventually { harness.controller.loadGate(for: runtime) != .held }
+            // The held answer is settled with the return.
+            try await eventually { held.values.count == 1 }
+            guard !harness.controller.isFaulted else {
+                XCTAssertEqual(harness.faults, 1)
+                return
+            }
+            XCTAssertEqual(harness.controller.listenerState, .ready)
+            XCTAssertEqual(harness.controller.loadGate(for: runtime), .open)
+        }
+        XCTAssertEqual(harness.faults, 0)
+    }
+
+    // MARK: A failure before any route
+
+    /// The first bind is not confirmed (its ownership check gets no time at
+    /// all): the one terminal failure, before any route. Direct ends for
+    /// this process and the fault is reported once, for the marker; but no
+    /// route exists, so the page is not interrupted: it loads on WebKit's
+    /// normal path, its status is an ordinary `tunnel`, and no listener is
+    /// ever made again.
+    @MainActor
+    func testAFirstBindThatIsNotConfirmedEndsDirectForTheProcessAndInterruptsNoPage() async throws {
+        let listening = try listeningSockets()
+        let routeWrites = try ProxyConfigurationWrites.count()
+        let harness = try Harness(
+            timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 0),
+            test: self
+        )
+        try await harness.signIn()
+
+        try await harness.select("instance-1")
+
+        XCTAssertTrue(harness.controller.isFaulted)
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        let first = try XCTUnwrap(harness.lastOpened)
+        XCTAssertFalse(harness.controller.faultCovers(first))
+        XCTAssertEqual(harness.controller.loadGate(for: first), .open)
+        XCTAssertEqual(harness.requestStatus("instance-1").values.first??.preferred, .tunnel)
+        XCTAssertEqual(harness.transport.selections.count, 0)
+        try await eventually { try newListeners(since: listening).isEmpty }
+
+        // No second attempt in this process: not for another host, and not
+        // after a background and a return.
+        try await harness.select("instance-2")
+        let second = try XCTUnwrap(harness.lastOpened)
+        XCTAssertEqual(harness.controller.loadGate(for: second), .open)
+        harness.enterBackground()
+        harness.enterForeground()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(try newListeners(since: listening), [])
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertEqual(harness.transport.selections.count, 0)
+        XCTAssertNil(harness.controller.plan(for: try XCTUnwrap(DirectAuthority(host: one))))
     }
 
     /// A routed re-bind's bind fails, and the App goes back to the
@@ -660,36 +827,6 @@ final class DirectPathControllerTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(harness.faults, 1)
         XCTAssertEqual(harness.transport.selections.count, selections)
-    }
-
-    /// Retry on a routed instance while the listener is bound again: the
-    /// App leaves the foreground before the re-bind settles, so the reload
-    /// is not allowed; once the listener serves again, it is.
-    @MainActor
-    func testRetryOnARoutedInstanceReloadsOnlyOnceTheListenerServes() async throws {
-        let harness = try Harness(test: self)
-        try await harness.signIn()
-        try await harness.select("instance-1")
-        let runtime = try XCTUnwrap(harness.lastOpened)
-        let controller = harness.controller
-
-        harness.enterBackground()
-        harness.enterForeground()
-        let reloading = Task { @MainActor in
-            await controller.prepareReload(of: runtime) { true }
-        }
-        harness.enterBackground()
-        let disposition = await reloading.value
-        XCTAssertEqual(disposition, .notReady)
-
-        harness.enterForeground()
-        let again = await controller.prepareReload(of: runtime) { true }
-        if controller.isFaulted {
-            XCTAssertEqual(again, .fault)
-        } else {
-            XCTAssertEqual(again, .reload)
-            XCTAssertEqual(controller.listenerState, .ready)
-        }
     }
 
     /// Only the current re-bind attempt's completion settles the return: an
@@ -767,6 +904,8 @@ private final class Harness {
     private(set) var announcements = 0
     /// How many times the controller reported the listener fault.
     private(set) var faults = 0
+    /// How many times the controller said a load gate may have changed.
+    private(set) var availabilityChanges = 0
     private(set) var lastOpened: MobileRuntimeContext?
 
     private(set) lazy var controller: DirectPathController = DirectPathController(
@@ -789,6 +928,9 @@ private final class Harness {
         },
         onFault: { [unowned self] in
             self.faults += 1
+        },
+        onAvailabilityChanged: { [unowned self] in
+            self.availabilityChanges += 1
         }
     )
 

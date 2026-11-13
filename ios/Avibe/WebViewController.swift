@@ -557,6 +557,14 @@ final class WebViewController: UIViewController {
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
     private let directStatus: DirectStatusProvider?
+    /// Whether this runtime's WebView may be loaded now; `nil` without a
+    /// direct transport, which loads as before.
+    private let directLoadGate: DirectLoadGateProvider?
+    /// An automatic load of the instance (the first load, or the reload
+    /// after the web content process ended) that met a held gate. One bit,
+    /// not a queue: repeated requests coalesce, and it is consumed before
+    /// the one load it stands for.
+    private var hasPendingAutoLoad = false
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -635,6 +643,7 @@ final class WebViewController: UIViewController {
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
         directStatus: DirectStatusProvider? = nil,
+        directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
@@ -648,6 +657,7 @@ final class WebViewController: UIViewController {
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
         self.directStatus = directStatus
+        self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])
         self.accountFallbackVisibilityChanged =
@@ -774,11 +784,41 @@ final class WebViewController: UIViewController {
         retainedWebViewFactory?.resetLockedContentOffsetsForKeyboardChange()
     }
 
+    /// Every load of the instance the shell itself starts: the first load,
+    /// and the reload after the web content process ended. With a direct
+    /// transport it passes the load gate here, in this same turn. Held (the
+    /// host has a route and the listener is closed or being bound again):
+    /// nothing is loaded against that port; one pending bit is kept, and
+    /// `directAvailabilityDidChange()` loads once when the gate opens.
+    /// Fault: nothing is loaded; the reopen message covers the runtime.
     private func loadConfiguredInstance() {
         guard !isInvalidatedForAccountTransition else {
+            hasPendingAutoLoad = false
             return
         }
-        retainedWebView?.load(URLRequest(url: instanceOrigin.url))
+        switch directLoadGate?() ?? .open {
+        case .open:
+            hasPendingAutoLoad = false
+            retainedWebView?.load(URLRequest(url: instanceOrigin.url))
+        case .held:
+            hasPendingAutoLoad = true
+        case .fault:
+            hasPendingAutoLoad = false
+        }
+    }
+
+    /// The load gate may have changed. A held automatic load is decided
+    /// again from the gate as it is now: loaded once when it is open (the
+    /// bit is consumed first), dropped under the fault, kept while held.
+    func directAvailabilityDidChange() {
+        guard hasPendingAutoLoad else {
+            return
+        }
+        guard !isInvalidatedForAccountTransition else {
+            hasPendingAutoLoad = false
+            return
+        }
+        loadConfiguredInstance()
     }
 
     func deliverPushOpened(id: String, path: String) {
@@ -1049,6 +1089,7 @@ final class WebViewController: UIViewController {
                 + popupRecords.values.map(\.webView)
         )
         isInvalidatedForAccountTransition = true
+        hasPendingAutoLoad = false
         primaryNavigationInProgress = false
         blockedBackForwardNavigation = false
         accountFallbackWorkItem?.cancel()

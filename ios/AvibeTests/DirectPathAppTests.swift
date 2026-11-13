@@ -195,9 +195,11 @@ final class DirectPathAppTests: XCTestCase {
             object: nil
         )
         try await eventually { app.directListenerFault }
-        // Retry does not rebuild under the reopen message.
-        let reload = await app.prepareReload(of: first)
-        XCTAssertFalse(reload)
+        // Retry does not rebuild under the reopen message, and the runtime
+        // that was open keeps its WebView under it.
+        XCTAssertEqual(app.directLoadGate(for: first), .fault)
+        XCTAssertFalse(app.mayReload(first))
+        XCTAssertFalse(app.presentsDirectFaultOnly(first))
         // Another return does not report it again.
         NotificationCenter.default.post(
             name: UIApplication.didEnterBackgroundNotification,
@@ -219,47 +221,364 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(surface, #"{"capability":1,"status":"failed"}"#)
         page.close()
 
-        // An instance the fault left unrouted opens and is not covered.
+        // An instance the fault left unrouted opens and is not covered: an
+        // ordinary page, with its WebView and its Retry.
         let second = try await select("instance-2", in: app)
         XCTAssertFalse(app.directFaultCovers(second))
+        XCTAssertFalse(app.presentsDirectFaultOnly(second))
+        XCTAssertTrue(app.mayReload(second))
         XCTAssertTrue(app.directListenerFault)
+        XCTAssertEqual(marker.marks, 1)
+
+        // The routed instance opened again under the fault: the reopen
+        // message alone, with no WebView made for it and no Retry.
+        let reopened = try await select("instance-1", in: app)
+        XCTAssertTrue(app.directFaultCovers(reopened))
+        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
+        XCTAssertFalse(app.mayReload(reopened))
         XCTAssertEqual(marker.marks, 1)
     }
 
-    /// Retry right after the return, while the listener is bound again:
-    /// the reload waits for it, so it never rebuilds against the closed
-    /// port, and by then the held status answer is settled.
-    @MainActor
-    func testRetryDuringTheReturnWaitsForTheReBindBeforeItReloads() async throws {
-        let transport = StandInDirectTransport()
-        let app = try await makeApp(directTransport: transport)
-        let runtime = try await select("instance-1", in: app)
+    // MARK: The creation and reload boundaries
+
+    private func enterBackground() {
         NotificationCenter.default.post(
             name: UIApplication.didEnterBackgroundNotification,
             object: nil
         )
+    }
+
+    private func enterForeground() {
         NotificationCenter.default.post(
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
-        var held: DirectPathStatus??
-        app.directStatusProvider?(instance) { held = .some($0) }
-        XCTAssertNil(held, "The status answer is held during the re-bind.")
-
-        let reload = await app.prepareReload(of: runtime)
-
-        XCTAssertTrue(reload)
-        XCTAssertNotNil(held, "The re-bind had completed before the reload.")
-        XCTAssertFalse(app.directListenerFault)
     }
 
-    /// Without a transport Retry reloads at once, as before.
+    /// Lets the main actor run what is already scheduled, then a little
+    /// longer: for checks that something did not happen.
     @MainActor
-    func testRetryWithoutATransportReloadsAtOnce() async throws {
+    private func settle() async throws {
+        for _ in 0..<200 {
+            await Task.yield()
+        }
+        try await Task.sleep(for: .milliseconds(200))
+    }
+
+    /// A routed instance while the listener is closed for the background or
+    /// being bound again: Retry is not allowed and an open makes no browser,
+    /// both decided at once and by no wait. The held open stays on the
+    /// loading route; when the return settles, it becomes the browser if
+    /// the listener serves, or the reopen message alone if it failed.
+    @MainActor
+    func testARoutedOpenAndRetryAreHeldUntilTheReturnSettles() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        XCTAssertEqual(app.directLoadGate(for: runtime), .open)
+        XCTAssertTrue(app.mayReload(runtime))
+
+        enterBackground()
+        XCTAssertEqual(app.directLoadGate(for: runtime), .held)
+        XCTAssertFalse(app.mayReload(runtime))
+
+        // The instance is opened again (a push tap): nothing is created
+        // against the closed port.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await settle()
+        XCTAssertEqual(app.route, .loading)
+
+        // The return starts the re-bind; in that same turn, still held.
+        enterForeground()
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertFalse(app.mayReload(runtime))
+
+        let reopened = try await waitForBrowser("instance-1", in: app)
+        if app.directListenerFault {
+            XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
+            XCTAssertFalse(app.mayReload(reopened))
+        } else {
+            XCTAssertEqual(app.directLoadGate(for: reopened), .open)
+            XCTAssertFalse(app.presentsDirectFaultOnly(reopened))
+            XCTAssertTrue(app.mayReload(reopened))
+        }
+    }
+
+    /// A held open belongs to the runtime identity it was made under: an
+    /// open that replaces it, or a sign-out, ends it, and the return then
+    /// creates nothing for it.
+    @MainActor
+    func testAHeldOpenIsEndedByANewerOpenOrASignOut() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let first = try await select("instance-1", in: app)
+
+        enterBackground()
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await settle()
+        XCTAssertEqual(app.route, .loading)
+
+        // A newer open, of an instance with no route on this store: it
+        // loads on WebKit's normal path at once, background or not.
+        let second = try await select("instance-2", in: app)
+        XCTAssertEqual(app.directLoadGate(for: second), .open)
+        enterForeground()
+        try await eventually { app.directLoadGate(for: first) != .held }
+        try await settle()
+        XCTAssertEqual(app.route, .browser(second))
+
+        // Held again, then signed out: the return leaves the account page.
+        guard !app.directListenerFault else {
+            return
+        }
+        enterBackground()
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await settle()
+        XCTAssertEqual(app.route, .loading)
+        _ = try await app.mobileSessionCoordinator.logout()
+        trackStore(of: app)
+        enterForeground()
+        try await settle()
+        XCTAssertNil(app.route.runtime)
+        XCTAssertNotEqual(app.route, .loading)
+    }
+
+    /// A held open whose return fails: the loading route ends as the reopen
+    /// message alone, with no WebView and no Retry, the fault is marked
+    /// once, and an instance without a route still opens as an ordinary
+    /// page.
+    @MainActor
+    func testAHeldOpenEndsAsTheReopenMessageWhenTheReBindFails() async throws {
+        let marker = FaultMarkerSpy(marked: false)
+        let transport = StandInDirectTransport()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(directTransport: transport, directFaultMarker: marker) {
+            listening = try listeningSockets()
+        }
+        _ = try await select("instance-1", in: app)
+        let socket = try XCTUnwrap(try newListeners(since: listening).first)
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: socket.port,
+            reuseAddress: true
+        )
+        defer { squatter.close() }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await settle()
+        XCTAssertEqual(app.route, .loading)
+
+        enterForeground()
+        try await eventually { app.directListenerFault }
+        let runtime = try await waitForBrowser("instance-1", in: app)
+        XCTAssertTrue(app.presentsDirectFaultOnly(runtime))
+        XCTAssertEqual(app.directLoadGate(for: runtime), .fault)
+        XCTAssertFalse(app.mayReload(runtime))
+        XCTAssertEqual(marker.marks, 1)
+
+        let second = try await select("instance-2", in: app)
+        XCTAssertFalse(app.presentsDirectFaultOnly(second))
+        XCTAssertTrue(app.mayReload(second))
+        XCTAssertEqual(marker.marks, 1)
+    }
+
+    /// Without a transport nothing is gated: Retry reloads at once, and the
+    /// runtime's WebView is given no gate at all, as before.
+    @MainActor
+    func testWithoutATransportNothingIsGated() async throws {
         let app = try await makeApp(directTransport: nil)
         let runtime = try await select("instance-1", in: app)
-        let reload = await app.prepareReload(of: runtime)
-        XCTAssertTrue(reload)
+        XCTAssertTrue(app.mayReload(runtime))
+        XCTAssertEqual(app.directLoadGate(for: runtime), .open)
+        XCTAssertNil(app.directLoadGateProvider(for: runtime))
+        XCTAssertFalse(app.presentsDirectFaultOnly(runtime))
+        enterBackground()
+        XCTAssertTrue(app.mayReload(runtime))
+        enterForeground()
+        XCTAssertTrue(app.mayReload(runtime))
+    }
+
+    /// The WebView's own automatic loads (its first load, and the reload
+    /// after its web content process ended) pass the same gate where they
+    /// are made. Held: nothing is loaded, and one pending load is kept
+    /// however often it is asked for; it is made once when the gate opens.
+    /// The fault, or the controller's invalidation, drops it.
+    @MainActor
+    func testAnAutomaticLoadThatMeetsAHeldGateIsMadeOnceWhenTheGateOpens() async throws {
+        let server = try LocalHTTPServer { _ in
+            .html(RuntimePage.listeningDocument(title: "Instance"))
+        }
+        let url = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: url, requiresHTTPS: false))
+        var gate = DirectLoadGate.held
+        var starts = 0
+        var finishes = 0
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            navigationPolicy: NavigationPolicy(
+                instanceOrigins: [origin],
+                authenticationOrigins: []
+            ),
+            directLoadGate: { gate },
+            didStartLoading: { starts += 1 },
+            didFinishLoading: { finishes += 1 },
+            didFailLoading: {}
+        )
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.loadViewIfNeeded()
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let primary = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+
+        // The first load met a held gate: nothing was loaded, and a change
+        // that leaves the gate held loads nothing either.
+        controller.directAvailabilityDidChange()
+        try await settle()
+        XCTAssertEqual(starts, 0)
+        XCTAssertNil(primary.url)
+
+        // The gate opens: the one load, once.
+        gate = .open
+        controller.directAvailabilityDidChange()
+        try await eventually { finishes == 1 }
+        controller.directAvailabilityDidChange()
+        try await settle()
+        XCTAssertEqual(starts, 1)
+
+        // The web content process ends while held, reported more than once:
+        // nothing is reloaded until the gate opens, and then once.
+        gate = .held
+        controller.webViewWebContentProcessDidTerminate(primary)
+        controller.webViewWebContentProcessDidTerminate(primary)
+        try await settle()
+        XCTAssertEqual(starts, 1)
+        gate = .open
+        controller.directAvailabilityDidChange()
+        try await eventually { starts == 2 }
+        controller.directAvailabilityDidChange()
+        try await settle()
+        XCTAssertEqual(starts, 2)
+
+        // With an open gate the reload is made at once, as before.
+        controller.webViewWebContentProcessDidTerminate(primary)
+        try await eventually { starts == 3 }
+
+        // The fault drops a held load for good.
+        gate = .held
+        controller.webViewWebContentProcessDidTerminate(primary)
+        gate = .fault
+        controller.directAvailabilityDidChange()
+        gate = .open
+        controller.directAvailabilityDidChange()
+        try await settle()
+        XCTAssertEqual(starts, 3)
+
+        // So does the controller's invalidation.
+        gate = .held
+        controller.webViewWebContentProcessDidTerminate(primary)
+        _ = controller.invalidateForAccountTransition()
+        gate = .open
+        controller.directAvailabilityDidChange()
+        try await settle()
+        XCTAssertEqual(starts, 3)
+    }
+
+    /// The App allowed the open, and the App went to the background before
+    /// the WebView's first load: that load is held where it is made, the
+    /// return makes it once, and a later round trip makes no other. A
+    /// reload held when the runtime is replaced is never made.
+    @MainActor
+    func testAHeldFirstLoadIsMadeOnceByTheReturnAndNeverForAReplacedRuntime() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
+        var starts = 0
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: app.runtimeWebsiteDataStore,
+            directStatus: app.directStatusProvider,
+            directLoadGate: app.directLoadGateProvider(for: runtime),
+            didStartLoading: { starts += 1 },
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        app.registerRuntimeController(controller, for: runtime)
+
+        enterBackground()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.loadViewIfNeeded()
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        try await settle()
+        XCTAssertEqual(starts, 0)
+
+        enterForeground()
+        try await eventually { app.directLoadGate(for: runtime) != .held }
+        guard !app.directListenerFault else {
+            // The fault dropped the held load.
+            try await settle()
+            XCTAssertEqual(starts, 0)
+            return
+        }
+        try await eventually { starts == 1 }
+
+        // Consumed: another background and return loads nothing more.
+        enterBackground()
+        enterForeground()
+        try await eventually { app.directLoadGate(for: runtime) != .held }
+        try await settle()
+        guard !app.directListenerFault else {
+            return
+        }
+        XCTAssertEqual(starts, 1)
+
+        // A reload held in the background, and the runtime is replaced
+        // before the return: it is never made.
+        let primary = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        enterBackground()
+        controller.webViewWebContentProcessDidTerminate(primary)
+        app.showInstancePicker()
+        enterForeground()
+        try await eventually { app.directLoadGate(for: runtime) != .held }
+        try await settle()
+        XCTAssertEqual(starts, 1)
+    }
+
+    /// The gate the runtime's WebView is given is the App's own: held while
+    /// the App is in the background with a route, open again once the
+    /// listener serves.
+    @MainActor
+    func testTheRuntimeWebViewIsGivenTheAppsLoadGate() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        let provider = try XCTUnwrap(app.directLoadGateProvider(for: runtime))
+        XCTAssertEqual(provider(), .open)
+        enterBackground()
+        XCTAssertEqual(provider(), .held)
+        enterForeground()
+        XCTAssertEqual(provider(), .held)
+        try await eventually { provider() != .held }
+        XCTAssertEqual(provider(), app.directListenerFault ? .fault : .open)
     }
 
     /// A child window is presented above the view the reopen message

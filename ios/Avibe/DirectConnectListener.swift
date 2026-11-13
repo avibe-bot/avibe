@@ -323,9 +323,11 @@ struct DirectConnectPlan: Sendable {
     /// Opens a connection to the host's public origin.
     let openPublic: @Sendable () async throws -> any DirectByteStream
     /// Whether the selection, lease and path generation this plan was made
-    /// under are all still current. Checked when a candidate is ready and
-    /// again just before the commit point.
-    let isCurrent: @Sendable () async -> Bool
+    /// under are all still current. Synchronous on the main actor, where
+    /// every event that changes them runs. Checked when a candidate is
+    /// ready, and for the last time in the main-actor turn that grants the
+    /// relay (the commit point), with no suspension between the two.
+    let isCurrent: @MainActor @Sendable () -> Bool
     /// The direct candidate failed before anything was forwarded.
     let directFailed: @Sendable () -> Void
 }
@@ -342,14 +344,10 @@ actor DirectConnectListener {
     private struct Relay {
         /// Which came first: the relay ending on its own, or a close.
         let claim: DirectRelayClaim
-        /// The bind whose `admit` let it in.
-        let generation: Int
         let task: Task<Void, Never>
         /// The relay's current plan, once it has one: its scope, its path
         /// generation, and its race, which a newer generation retires.
         var plan: (scope: DirectPlanScope, generation: Int, race: DirectRaceHandle)?
-        /// Set at the commit point; until then the relay is a candidate.
-        var committed: (host: String, backend: DirectRelayBackend, generation: Int)?
     }
 
     /// What `planned` decided for a relay's new plan.
@@ -363,16 +361,18 @@ actor DirectConnectListener {
 
     private let limits: DirectConnectLimits
     private let planner: DirectConnectPlanner
-    /// Called with whether a route had been published to this listener
-    /// before its socket failed, as `lifecycle` decided.
-    private let onListenerFailure: @Sendable (_ routed: Bool) -> Void
+    /// Called when this listener's socket failed, after `lifecycle` recorded
+    /// it.
+    private let onListenerFailure: @Sendable () -> Void
     private let queue = DispatchQueue(label: "bot.avibe.ios.direct-connect")
     /// Made once per listener. Only this listener's accept loop answers an
     /// ownership check that carries it.
     let ownershipNonce: String
-    /// Whether the current socket is serving, readable at once from any
-    /// thread: its failure is recorded where Network reports it, before the
-    /// failure callback reaches anyone.
+    /// The one authority over this listener's phase and over which relays
+    /// are candidates or granted, readable at once from any thread: a
+    /// failure is recorded where Network reports it, before the failure
+    /// callback reaches anyone. This actor keeps the tasks and connections
+    /// of the relays, not a second record of their ownership.
     let lifecycle = DirectListenerLifecycle()
     private var listener: NWListener?
     private var allowedHosts: Set<String> = []
@@ -396,7 +396,7 @@ actor DirectConnectListener {
         limits: DirectConnectLimits = .standard,
         ownershipNonce: String = UUID().uuidString,
         planner: @escaping DirectConnectPlanner,
-        onListenerFailure: @escaping @Sendable (_ routed: Bool) -> Void
+        onListenerFailure: @escaping @Sendable () -> Void
     ) {
         self.limits = limits
         self.ownershipNonce = ownershipNonce
@@ -428,10 +428,9 @@ actor DirectConnectListener {
         // Each bind has its own generation: a failure reported by an
         // earlier socket, or a connection it accepted, is recognised as
         // stale by `lifecycle`.
-        guard let generation = lifecycle.beginBind() else {
-            throw CancellationError()
-        }
-        let lifecycle = lifecycle
+        // Checked before the bind begins, so every throw after `beginBind`
+        // leaves the phase failed, closing, closed, or stopped, never
+        // binding.
         let endpointPort: NWEndpoint.Port
         if let requested {
             guard let exact = NWEndpoint.Port(rawValue: requested) else {
@@ -441,6 +440,10 @@ actor DirectConnectListener {
         } else {
             endpointPort = .any
         }
+        guard let generation = lifecycle.beginBind() else {
+            throw CancellationError()
+        }
+        let lifecycle = lifecycle
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = false
         parameters.requiredLocalEndpoint = .hostPort(
@@ -490,12 +493,11 @@ actor DirectConnectListener {
                     if case .failed = state {
                         // Decided here, on Network's queue, before anyone
                         // hears of it.
-                        let failure = lifecycle.socketFailed(generation)
-                        guard failure != .none else {
+                        guard lifecycle.socketFailed(generation) else {
                             return
                         }
                         Task {
-                            await self?.socketDidFail(routed: failure == .fault)
+                            await self?.socketDidFail()
                         }
                     }
                 }
@@ -530,9 +532,22 @@ actor DirectConnectListener {
             }
             if self.listener === listener {
                 self.listener = nil
+                // Its socket may be open: it became ready after a close had
+                // begun (the background, during a re-bind), so the lifecycle
+                // refused it. The next bind of this port waits until that
+                // socket has closed, as it does after
+                // `closeListeningSocket()`; a bind straight after `cancel()`
+                // can still find the port in use.
+                let previous = closing
+                closing = Task {
+                    await previous?.value
+                    await Self.cancelAndWait(listener)
+                }
+            } else {
+                listener.cancel()
             }
-            _ = lifecycle.bindFailed(generation)
-            listener.cancel()
+            // Not a failure if the bind was closed or stopped on purpose.
+            lifecycle.bindFailed(generation)
             throw error
         }
         if pendingBind === answer {
@@ -619,19 +634,24 @@ actor DirectConnectListener {
         before generation: Int = .max
     ) -> [String: Int] {
         var closed: [String: Int] = [:]
+        // Every relay granted before the event that asked for this close is
+        // in the ledger by now: the grant and the event both ran on the main
+        // actor, the grant first. One granted since has a later plan.
+        let grants = lifecycle.grants
         for (id, relay) in relays {
             guard
-                let committed = relay.committed,
-                backend == nil || committed.backend == backend,
-                committed.generation < generation
+                let grant = grants[id],
+                backend == nil || grant.backend == backend,
+                grant.generation < generation
             else {
                 continue
             }
             // Counted only if this close ends it; one that already ended on
             // its own, and has not been removed yet, is not this event's.
             if relay.claim.closeByEvent() {
-                closed[committed.host, default: 0] += 1
+                closed[grant.host, default: 0] += 1
             }
+            lifecycle.end(id)
             relay.task.cancel()
             relays.removeValue(forKey: id)
         }
@@ -651,11 +671,14 @@ actor DirectConnectListener {
         if retiredScope.isOlder(than: scope) {
             retiredScope = scope
         }
-        for (id, relay) in relays where relay.committed == nil {
+        let grants = lifecycle.grants
+        for (id, relay) in relays where grants[id] == nil {
             guard let plan = relay.plan else {
                 continue
             }
             if plan.scope.isOlder(than: retiredScope) {
+                // No longer a candidate, so it cannot be granted meanwhile.
+                lifecycle.end(id)
                 relay.task.cancel()
                 relays.removeValue(forKey: id)
             } else if plan.generation < retiredGeneration {
@@ -669,35 +692,34 @@ actor DirectConnectListener {
         pendingBind = nil
     }
 
-    /// The current socket failed; `lifecycle` already decided, on Network's
-    /// queue, that it was current and whether a route had been published.
-    func socketDidFail(routed: Bool) {
+    /// The current socket failed; `lifecycle` already recorded it, on
+    /// Network's queue, and revoked every candidate there.
+    func socketDidFail() {
         guard !isStopped else {
             return
         }
         reconcileAdmissions()
-        onListenerFailure(routed)
+        onListenerFailure()
     }
 
-    /// The cleanup owner of admissions. `admit` is decided under the
-    /// lifecycle's lock and the record made in the same actor turn, but a
-    /// failure, rejection, or close can be recorded on another thread just
-    /// after `admit`. Every such transition reaches this actor after that
-    /// turn (`socketDidFail`, `closeListeningSocket`, `stop`, or the
-    /// controller's retirement), and this runs there: work that is not
-    /// committed and whose bind no longer serves (or, for the spare, no
-    /// longer verifies or serves) ends. Committed relays are kept.
+    /// The cleanup of revoked work. The authority revokes every candidate
+    /// in the same locked step in which the listener leaves serving (a
+    /// failure, a close, a stop), so none of them can be granted from then
+    /// on. Every such transition reaches this actor afterwards
+    /// (`socketDidFail`, `closeListeningSocket`, `stop`), and this ends the
+    /// tasks of the relays the ledger no longer lists. It decides nothing:
+    /// a relay granted before the transition is in the ledger and is kept.
+    /// A cancelled relay stays recorded, and counted against the limit,
+    /// until its own task has closed its connection (`relayDidEnd`).
     private func reconcileAdmissions() {
-        let phase = lifecycle.phase
-        for (id, relay) in relays where relay.committed == nil {
-            guard phase != .serving(generation: relay.generation) else {
-                continue
-            }
+        // One read of the ledger: a candidate granted meanwhile is still
+        // listed, so it is never mistaken for revoked work.
+        let listed = lifecycle.relayIDs
+        for (id, relay) in relays where !listed.contains(id) {
             relay.task.cancel()
-            relays.removeValue(forKey: id)
         }
         if let spare {
-            switch phase {
+            switch lifecycle.phase {
             case .serving(spare.generation), .verifying(spare.generation, _):
                 break
             default:
@@ -712,14 +734,20 @@ actor DirectConnectListener {
         // stop that `lifecycle` recorded first refuses the connection, with
         // no plan, relay, or spare; while ownership is not yet confirmed only
         // the ownership check is answered.
+        // A relay is recorded as a candidate by the same call, only when the
+        // listener has room for it.
+        let id = UUID()
         let admission = isStopped
             ? DirectListenerLifecycle.Admission.refused
-            : lifecycle.admit(generation)
+            : lifecycle.admit(
+                generation,
+                relay: relays.count < limits.maxConnections ? id : nil
+            )
         guard admission != .refused else {
             connection.cancel()
             return
         }
-        guard admission == .relay, relays.count < limits.maxConnections else {
+        guard admission == .relay else {
             // One spare connection beyond the limit is for the listener's
             // own ownership check, so relays the App keeps cannot starve a
             // re-bind's check. It reads a head, answers only a check with
@@ -731,21 +759,20 @@ actor DirectConnectListener {
                 return
             }
             let nonce = ownershipNonce
-            let id = UUID()
-            spare = (id, generation, Task { [weak self] in
+            let spareID = UUID()
+            spare = (spareID, generation, Task { [weak self] in
                 await Self.answerOwnershipCheckOnly(connection, nonce: nonce)
                 connection.cancel()
-                await self?.spareDidEnd(id)
+                await self?.spareDidEnd(spareID)
             })
             return
         }
-        let id = UUID()
         let limits = limits
         let planner = planner
         let allowedHosts = allowedHosts
         let nonce = ownershipNonce
         let claim = DirectRelayClaim()
-        relays[id] = Relay(claim: claim, generation: generation, task: Task { [weak self] in
+        relays[id] = Relay(claim: claim, task: Task { [weak self] in
             await Self.serve(
                 connection,
                 id: id,
@@ -795,6 +822,7 @@ actor DirectConnectListener {
     /// by a later event: that event did not close it, and the page already
     /// saw that connection fail.
     private func relayDidEnd(_ id: UUID) {
+        lifecycle.end(id)
         relays.removeValue(forKey: id)
     }
 
@@ -806,12 +834,13 @@ actor DirectConnectListener {
         generation: Int,
         race: DirectRaceHandle
     ) -> PlanAdmission {
-        // The bind that admitted the relay must still serve: once the
-        // listener left serving, no plan is made for work admitted before.
+        // Only a candidate is planned: once the listener left serving, no
+        // plan is made for work admitted before, and a granted relay is
+        // never planned again.
         guard
             !isStopped,
-            let relay = relays[id],
-            lifecycle.serves(relay.generation),
+            relays[id] != nil,
+            lifecycle.isCandidate(id),
             !scope.isOlder(than: retiredScope)
         else {
             return .refused
@@ -820,35 +849,18 @@ actor DirectConnectListener {
         return generation < retiredGeneration ? .obsolete : .admitted
     }
 
-    /// Records the commit point. `false` when the relay was closed meanwhile
-    /// (an account transition, a stop), so nothing may be forwarded.
-    private func commit(
-        _ id: UUID,
-        host: String,
-        backend: DirectRelayBackend,
-        generation: Int
-    ) -> Bool {
-        // Ordered against a failure or close under the lifecycle's lock: a
-        // relay commits only while the bind that admitted it serves. One
-        // that commits first is a relay of before the transition, and is
-        // kept; after it, the candidate is refused and closed.
-        guard
-            !isStopped,
-            let relay = relays[id],
-            lifecycle.serves(relay.generation)
-        else {
-            return false
-        }
-        relays[id]?.committed = (host, backend, generation)
-        return true
-    }
-
-    private func uncommit(_ id: UUID) {
-        relays[id]?.committed = nil
-    }
-
     // Everything below runs off the actor: one task per connection, so
     // copying bytes for one connection never waits for another.
+
+    /// What the commit point decided for a ready candidate.
+    private enum FinalGrant: Sendable {
+        case granted
+        /// The plan is no longer current.
+        case fenced
+        /// The authority refused: the listener no longer serves the bind
+        /// that admitted the relay, or the relay is no longer a candidate.
+        case refused
+    }
 
     private enum RaceOutcome {
         case won(DirectRelayBackend, any DirectByteStream, leftover: Data)
@@ -1017,24 +1029,46 @@ actor DirectConnectListener {
                 await awaitClose(reader, within: limits.headSeconds)
                 return
             case .won(let backend, let stream, let leftover):
-                // The commit point. Registered first, so an event that comes
-                // after the check below finds this relay and closes it.
-                guard
-                    await listener.commit(
+                // The commit point: one main-actor turn that makes the last
+                // validation and then the grant, with no suspension between
+                // them. Every event that changes what the plan was made
+                // under runs on the main actor, so it comes wholly before
+                // this turn (the validation fails) or wholly after it (its
+                // close finds the grant in the ledger). A failure or close
+                // of the listener is ordered against the grant by the
+                // authority's lock. Nothing is recorded before the grant,
+                // and nothing undoes it.
+                let lifecycle = listener.lifecycle
+                let host = authority.host
+                let generation = plan.generation
+                let isCurrent = plan.isCurrent
+                let grant: FinalGrant = await MainActor.run {
+                    guard isCurrent() else {
+                        return .fenced
+                    }
+                    return lifecycle.grant(
                         id,
-                        host: authority.host,
+                        host: host,
                         backend: backend,
-                        generation: plan.generation
-                    )
-                else {
-                    stream.cancel()
-                    return
+                        generation: generation
+                    ) ? .granted : .refused
                 }
-                guard await plan.isCurrent() else {
-                    await listener.uncommit(id)
+                switch grant {
+                case .fenced:
+                    // Not granted: still before the commit point, so one
+                    // fresh plan is allowed.
                     stream.cancel()
                     continue
+                case .refused:
+                    // The listener left serving, or the relay was retired.
+                    stream.cancel()
+                    return
+                case .granted:
+                    break
                 }
+                // Granted. From here the backend is fixed: whatever fails,
+                // this relay only ends; it is never planned or dialled
+                // again, and nothing is replayed.
                 defer {
                     stream.cancel()
                 }
@@ -1845,13 +1879,16 @@ final class DirectRaceHandle: @unchecked Sendable {
     }
 }
 
-/// The listener's one lifecycle authority: its phase, its bind generation,
-/// and whether a route was ever published to it. Every admission, route
+/// The listener's one authority: its phase, its bind generation, whether a
+/// route was ever published to it, and which of its relays are candidates
+/// and which have been granted. Every admission, final grant, route
 /// publication, bind, ownership result, socket failure, close, and stop is
 /// one call here, decided under one lock, and made before any `await` by
 /// whoever makes it (Network's queue, the listener actor, the main-actor
-/// controller). Nothing else decides those things. The controller's view of
-/// the listener is derived from `phase`.
+/// controller). Nothing else decides those things, and nothing else keeps a
+/// copy: the listener actor holds the tasks and connections, and the
+/// controller's view of the listener is derived from `phase`. No I/O runs
+/// under the lock except the route write `publish` is given.
 ///
 /// Legal transitions; any other call leaves the phase unchanged:
 /// - `idle` or `closed` to `binding(g+1)` (`beginBind`); `closed` marks it a
@@ -1859,13 +1896,20 @@ final class DirectRaceHandle: @unchecked Sendable {
 /// - `binding(g)` to `verifying(g)` when the socket is ready (`ready`).
 /// - `verifying(g)` to `serving(g)` once its ownership is confirmed
 ///   (`confirm(g)`).
-/// - `binding(g)`, `verifying(g)`, or `serving(g)` to a failure (`bindFailed`,
-///   `reject(g)`, `socketFailed(g)`): `failed(g)` when a route was ever published
-///   (the listener fault), `rejected(g)` when not (the host keeps WebKit's
-///   normal path). The outcome is fixed under the lock.
+/// - `binding(g)`, `verifying(g)`, or `serving(g)` to `failed(g)`
+///   (`bindFailed`, `reject(g)`, `socketFailed(g)`): terminal for the
+///   process, before or after a route. A stale generation, or a listener
+///   already closing, closed, or stopped, does not fail.
 /// - `binding`, `verifying`, or `serving` to `closing(g)` (`beginClose`), and
 ///   `closing` to `closed` (`closeCompleted`): reusable.
-/// - Anything to `stopped` (`stop`): terminal.
+/// - Anything but `failed` to `stopped` (`stop`): terminal.
+///
+/// Relays: `admit` records a candidate only while its bind serves. Leaving
+/// `serving` (a failure, a close, a stop) revokes every candidate in the
+/// same locked step, so none can be granted afterwards, whether or not the
+/// actor's cleanup has run. `grant` turns a candidate into a granted relay,
+/// once and for good: that is the commit point. A granted relay leaves the
+/// ledger only when it ends or an event closes it (`end`).
 final class DirectListenerLifecycle: @unchecked Sendable {
     enum Phase: Equatable, Sendable {
         case idle
@@ -1876,21 +1920,10 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         case serving(generation: Int)
         case closing(generation: Int)
         case closed
-        /// Failed after a route was published: the listener fault.
+        /// A bind, its ownership check, or its socket failed: the listener
+        /// fault. Nothing leaves it.
         case failed(generation: Int)
-        /// Failed or rejected before any route.
-        case rejected(generation: Int)
         case stopped
-    }
-
-    /// What a failure transition decided.
-    enum Failure: Equatable, Sendable {
-        /// Not applicable: a stale generation, or already out of service.
-        case none
-        /// No route was ever published: WebKit's normal path.
-        case fallback
-        /// A route was published: the listener fault.
-        case fault
     }
 
     /// What `admit` decided for one accepted connection.
@@ -1900,16 +1933,31 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         case refused
     }
 
+    /// What a granted relay was granted with. Fixed at the grant.
+    struct Grant: Equatable, Sendable {
+        let host: String
+        let backend: DirectRelayBackend
+        /// The path generation of the plan the relay was granted under.
+        let generation: Int
+    }
+
+    private enum Ownership {
+        case candidate(bind: Int)
+        case granted(Grant)
+    }
+
     private let lock = NSLock()
     private var current = Phase.idle
     private var generation = 0
     private var published = false
+    private var ledger: [UUID: Ownership] = [:]
 
     var phase: Phase {
         lock.withLock { current }
     }
 
-    /// Whether a route was ever published to this listener. Never resets.
+    /// Whether a route was ever published to this listener. Never resets,
+    /// whatever happens to the account's data store.
     var hasPublished: Bool {
         lock.withLock { published }
     }
@@ -1956,59 +2004,75 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         }
     }
 
-    /// The ownership check of bind `g` failed or ran out of time. A stale
-    /// generation changes nothing.
-    func reject(_ g: Int) -> Failure {
+    /// The ownership check of bind `g` failed or ran out of time. `true`
+    /// when this call made the listener fail; a stale generation changes
+    /// nothing.
+    @discardableResult
+    func reject(_ g: Int) -> Bool {
         lock.withLock {
             switch current {
             case .binding(g, _), .verifying(g, _):
-                return fail(g)
+                fail(g)
+                return true
             default:
-                return .none
+                return false
             }
         }
     }
 
-    /// The bind of generation `g` failed before its socket was ready.
-    func bindFailed(_ g: Int) -> Failure {
+    /// The bind of generation `g` failed before its socket was ready. `true`
+    /// when this call made the listener fail.
+    @discardableResult
+    func bindFailed(_ g: Int) -> Bool {
         lock.withLock {
             guard case .binding(g, _) = current else {
-                return .none
+                return false
             }
-            return fail(g)
+            fail(g)
+            return true
         }
     }
 
     /// The socket of bind `g` failed after it was ready. Called on Network's
-    /// queue, before the failure callback goes anywhere.
-    func socketFailed(_ g: Int) -> Failure {
+    /// queue, before the failure callback goes anywhere. `true` when this
+    /// call made the listener fail.
+    func socketFailed(_ g: Int) -> Bool {
         lock.withLock {
             switch current {
             case .verifying(g, _), .serving(g):
-                return fail(g)
+                fail(g)
+                return true
             default:
-                return .none
+                return false
             }
         }
     }
 
     /// With the lock held.
-    private func fail(_ g: Int) -> Failure {
-        if published {
-            current = .failed(generation: g)
-            return .fault
-        }
-        current = .rejected(generation: g)
-        return .fallback
+    private func fail(_ g: Int) {
+        current = .failed(generation: g)
+        revokeCandidates()
     }
 
-    /// A deliberate close begins: nothing is admitted or published from here.
+    /// With the lock held: no candidate outlives the phase that admitted it.
+    private func revokeCandidates() {
+        ledger = ledger.filter { entry in
+            if case .granted = entry.value {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// A deliberate close begins: nothing is admitted, granted, or published
+    /// from here.
     @discardableResult
     func beginClose() -> Bool {
         lock.withLock {
             switch current {
             case .binding(let g, _), .verifying(let g, _), .serving(let g):
                 current = .closing(generation: g)
+                revokeCandidates()
                 return true
             default:
                 return false
@@ -2025,23 +2089,32 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         }
     }
 
+    /// Stops for good. Every relay is the stopper's to end, so the ledger
+    /// goes too. A failed listener stays failed.
     func stop() {
-        lock.withLock { current = .stopped }
-    }
-
-    /// Whether bind `g` serves now. Planning and the commit point of work
-    /// that bind admitted ask this, under the same lock as every failure and
-    /// close.
-    func serves(_ g: Int) -> Bool {
-        lock.withLock { current == .serving(generation: g) }
+        lock.withLock {
+            ledger.removeAll()
+            if case .failed = current {
+                return
+            }
+            current = .stopped
+        }
     }
 
     /// The only admission decision, made once per connection by the
     /// listener actor, with the relay or spare recorded in the same turn.
-    func admit(_ g: Int) -> Admission {
+    /// With `relay`, a connection admitted while bind `g` serves becomes
+    /// that candidate; without it (the listener is at its limit), or while
+    /// `g` is only verifying, the connection may only answer the ownership
+    /// check.
+    func admit(_ g: Int, relay id: UUID?) -> Admission {
         lock.withLock {
             switch current {
             case .serving(g):
+                guard let id else {
+                    return .ownershipOnly
+                }
+                ledger[id] = .candidate(bind: g)
                 return .relay
             case .verifying(g, _):
                 return .ownershipOnly
@@ -2051,11 +2124,69 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         }
     }
 
+    /// Whether `id` is still a candidate: admitted, not granted, and not
+    /// revoked by a failure, a close, or a stop.
+    func isCandidate(_ id: UUID) -> Bool {
+        lock.withLock {
+            if case .candidate = ledger[id] {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// The commit point: grants candidate `id`, once, while the bind that
+    /// admitted it still serves. `false` leaves nothing behind. Whoever
+    /// calls this has made its last validation in the same turn, with no
+    /// suspension between the two.
+    func grant(
+        _ id: UUID,
+        host: String,
+        backend: DirectRelayBackend,
+        generation: Int
+    ) -> Bool {
+        lock.withLock {
+            guard
+                case .candidate(let bind) = ledger[id],
+                current == .serving(generation: bind)
+            else {
+                return false
+            }
+            ledger[id] = .granted(
+                Grant(host: host, backend: backend, generation: generation)
+            )
+            return true
+        }
+    }
+
+    /// Every relay the ledger lists, candidate or granted, as of now.
+    var relayIDs: Set<UUID> {
+        lock.withLock { Set(ledger.keys) }
+    }
+
+    /// The granted relays, as of now.
+    var grants: [UUID: Grant] {
+        lock.withLock {
+            ledger.compactMapValues { (ownership: Ownership) -> Grant? in
+                if case .granted(let grant) = ownership {
+                    return grant
+                }
+                return nil
+            }
+        }
+    }
+
+    /// Relay `id` ended, or was closed or retired: it leaves the ledger,
+    /// candidate or granted.
+    func end(_ id: UUID) {
+        lock.withLock {
+            _ = ledger.removeValue(forKey: id)
+        }
+    }
+
     /// Publishes a route: runs `write` under the lock, only while bind `g` is
-    /// serving,
-    /// and records the publication only if `write` reports that it wrote.
-    /// A failure recorded first stops the write; one recorded after it is a
-    /// failure after a route.
+    /// serving, and records the publication only if `write` reports that it
+    /// wrote. A failure recorded first stops the write.
     func publish(_ g: Int, _ write: () -> Bool) -> Bool {
         lock.withLock {
             guard case .serving(g) = current else {

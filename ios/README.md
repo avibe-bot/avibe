@@ -300,8 +300,11 @@ With a transport:
   candidate, when one is authorized, against the public origin, which is
   dialled after a 500 ms head start or as soon as direct fails. The first
   ready candidate whose plan is still current wins; the others are closed
-  having received nothing. The commit point is the `200` to WebKit: before
-  it a failure falls back, after it a connection is never redialled or
+  having received nothing. The commit point is the grant: one main-actor
+  turn validates the plan for the last time and records the relay as
+  granted in the listener's authority, with no suspension between the two;
+  the `200` follows. Before the grant a failure falls back; nothing undoes
+  a grant, and after it a connection is never planned again, redialled, or
   replayed. The early bound is counted where WebKit's bytes are received:
   every byte delivered before the commit point counts, whoever was reading,
   so no cancelled watcher lets more be held; past it the CONNECT is closed.
@@ -338,38 +341,57 @@ With a transport:
   answers a held `direct.status()`, and only for the runtime and store it was
   asked under: a runtime stop or an account change settles held answers as
   `failed`. Nothing is bound and no route is written in the background; a
-  bind that completes there is parked for the return.
-- **One lifecycle authority per listener** (`DirectListenerLifecycle`):
-  `idle`, `binding`, `verifying`, `serving`, `closing`, `closed`, `failed`,
-  `rejected`, `stopped`, with one bind generation and a monotonic
-  "a route was published" fact. Every admission, route publication, bind,
-  ownership result, socket failure, close, and stop is one call under its
-  lock, made before any `await`; the controller's view of the listener is
-  derived from it. Only `serving` admits relays and publishes routes (the
-  route write itself runs under the lock and counts only if it wrote);
-  `verifying`, between a bind and its confirmed ownership check, answers
-  only the ownership check. A failure, a rejected ownership check, or a
-  failed bind is a fallback when no route was ever published and the
-  listener fault when one was, decided once under the lock. Closing,
-  re-binding, and the fault keep committed relays; only `stop` and the
-  event closes end them. `closed` can bind again; `stopped` is terminal. The
-  shell's Retry is one logical retry at a time: it waits, within the
-  listener bound, while the listener is being bound or bound again, and
-  does not rebuild under the reopen message.
-- **The listener fault** (accepted for the internal trial, 2026-11-12). A
-  failure before any route exists only leaves that host on WebKit's normal
-  path. Once a route exists, the listener's socket failing, or a failed
-  re-bind or ownership check on return, is terminal for the process: direct
-  is never authorized again and nothing is re-bound or rewritten. Each
-  runtime whose host is routed on the current store is covered by the
-  existing failure view with "Connection lost — reopen the app" (`zh-Hans`:
-  "连接中断，请重新打开 App") and no Retry; status reads get the bridge error
-  `failed` and no event follows. The fault writes one marker in the App's
-  preferences; the next launch with a transport consumes it in `AppModel.init`
-  and runs that whole launch without a path controller, on the public origin.
-  The launch after that uses the transport again. Reopening is the remedy for
-  this rare fault only: an ordinary loss of the direct path falls back to the
-  public origin for new connections, without a relaunch.
+  first bind under way there is retired (no route points at it), and a
+  return's re-bind that ends there is parked for the next return. That
+  re-bind of the same port is the only recovery in a process.
+- **One authority per listener** (`DirectListenerLifecycle`): the phase
+  (`idle`, `binding`, `verifying`, `serving`, `closing`, `closed`, `failed`,
+  `stopped`), one bind generation, a monotonic "a route was published" fact
+  that an account-store rotation does not reset, and the ledger of relays,
+  each a candidate or granted. Every admission, grant, route publication,
+  bind, ownership result, socket failure, close, and stop is one call under
+  its lock, made before any `await`; the listener actor keeps tasks and
+  connections, not a second record, and the controller's view of the
+  listener is derived from the phase. Only `serving` admits relays as
+  candidates, grants them, and publishes routes (the route write itself runs
+  under the lock and counts only if it wrote); `verifying` answers only the
+  ownership check. Leaving `serving` revokes every candidate in that same
+  step, so none is granted later, whether or not the actor's cleanup has
+  run; granted relays are kept by closes and by the fault, and end only by
+  themselves, by an event's close, or by `stop`. `closed` can bind again. A
+  listener a route was ever published to is never stopped or replaced.
+- **The load gate** decides, synchronously and from the route table and
+  the phase alone, whether the shell may create or reload a runtime's
+  WebView: open with no route on the current store or a serving listener;
+  held while a routed listener is closed for the background or being bound
+  again; the fault once it failed. An open that meets a held gate stays on
+  the loading route in one slot owned by its runtime identity; Retry is
+  shown and acted on only while open; the WebView's own automatic loads
+  (its first load and the reload after its web content process ended) pass
+  the same gate where they are made, and one that meets a held gate is kept
+  as one pending bit, made once when the gate opens and dropped by the
+  fault or the controller's invalidation. The controller announces each
+  change that is not the fault (the background close, a settled return);
+  nothing waits on a timer.
+- **The listener fault** (accepted for the internal trial, 2026-11-12;
+  narrowed to one terminal failure, 2026-11-13). Any failure of the current
+  bind, of its ownership check, or of the listening socket, before or after
+  a route, is terminal for the process: direct is never authorized again,
+  no listener is made again, and nothing is re-bound or rewritten. A
+  deliberate close, a stale generation, or a replaced attempt is never a
+  failure, and an ordinary loss of the direct path is not one either: it
+  falls back to the public origin for new connections, without a relaunch.
+  Each runtime whose host is routed on the current store shows the existing
+  failure view with "Connection lost — reopen the app" (`zh-Hans`:
+  "连接中断，请重新打开 App") and no Retry; one opened under the fault gets no
+  WebView. Status reads for a routed host get the bridge error `failed` from
+  the moment the failure is recorded, and no event follows. A host with no
+  route keeps WebKit's normal path and is not interrupted. The fault writes
+  one marker in the App's preferences; the next launch with a transport
+  consumes it in `AppModel.init` and runs that whole launch without a path
+  controller, on the public origin. The launch after that uses the
+  transport again. The cost: a single transient failure of the first bind
+  loses direct for that launch and the next one.
 - `DirectRouteOwner` is the only writer of `proxyConfigurations` on an
   account data store, which the runtime WebViews and the hidden account
   transport share. A store's route lists exact instance hosts (at most 16 per
