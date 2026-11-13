@@ -25,6 +25,9 @@ struct PushNotificationTap: Equatable {
 struct PushNotificationCenterEntry {
     let identifier: String
     let userInfo: [AnyHashable: Any]
+    /// The thread the notification service extension gave it: the
+    /// instance's tag, such as `session:<id>`; empty when it had none.
+    var threadIdentifier: String = ""
 }
 
 @MainActor
@@ -50,7 +53,8 @@ final class SystemPushNotificationCenter: PushNotificationCentering {
                     returning: notifications.map {
                         PushNotificationCenterEntry(
                             identifier: $0.request.identifier,
-                            userInfo: $0.request.content.userInfo
+                            userInfo: $0.request.content.userInfo,
+                            threadIdentifier: $0.request.content.threadIdentifier
                         )
                     }
                 )
@@ -65,7 +69,8 @@ final class SystemPushNotificationCenter: PushNotificationCentering {
                     returning: requests.map {
                         PushNotificationCenterEntry(
                             identifier: $0.identifier,
-                            userInfo: $0.content.userInfo
+                            userInfo: $0.content.userInfo,
+                            threadIdentifier: $0.content.threadIdentifier
                         )
                     }
                 )

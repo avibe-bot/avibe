@@ -568,6 +568,10 @@ final class WebViewController: UIViewController {
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
+    /// Told where the primary WebView is, on each change of its URL and
+    /// when the App returns to the foreground; the App retires the
+    /// notifications of a Session it shows.
+    private let primaryLocationChanged: (URL) -> Void
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
@@ -646,6 +650,7 @@ final class WebViewController: UIViewController {
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
+        primaryLocationChanged: @escaping (URL) -> Void = { _ in },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
@@ -665,6 +670,7 @@ final class WebViewController: UIViewController {
         self.pageColorSchemeChanged = pageColorSchemeChanged
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
+        self.primaryLocationChanged = primaryLocationChanged
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
@@ -731,6 +737,12 @@ final class WebViewController: UIViewController {
             self,
             selector: #selector(resetOuterScrollPosition),
             name: UIResponder.keyboardDidHideNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(reportPrimaryLocation),
+            name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
 
@@ -920,6 +932,7 @@ final class WebViewController: UIViewController {
                 return
             }
             self.updateBackNavigationGesture(in: webView)
+            self.reportPrimaryLocation()
         }
         primaryBackItemObservation = webView.backForwardList.observe(
             \.backItem,
@@ -939,6 +952,14 @@ final class WebViewController: UIViewController {
             }
             self.updateBackNavigationGesture(in: webView)
         }
+    }
+
+    @objc
+    private func reportPrimaryLocation() {
+        guard let url = livePrimaryWebView?.url else {
+            return
+        }
+        primaryLocationChanged(url)
     }
 
     private func updateBackNavigationGesture(in webView: WKWebView) {

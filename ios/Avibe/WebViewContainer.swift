@@ -22,6 +22,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let directLoadGate: DirectLoadGateProvider?
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
+    let primaryLocationChanged: (URL) -> Void
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let didCreateController: (WebViewController) -> Void
@@ -39,6 +40,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
+        primaryLocationChanged: @escaping (URL) -> Void = { _ in },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         didCreateController: @escaping (WebViewController) -> Void,
@@ -55,6 +57,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.directLoadGate = directLoadGate
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
+        self.primaryLocationChanged = primaryLocationChanged
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
@@ -79,6 +82,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             directLoadGate: directLoadGate,
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,
+            primaryLocationChanged: primaryLocationChanged,
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,
             pageColorSchemeChanged: pageColorSchemeChanged,

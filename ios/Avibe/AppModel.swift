@@ -90,6 +90,8 @@ final class AppModel: ObservableObject {
     /// The App icon badge: the selected instance's Inbox total, which its Web
     /// UI sets through `badge.set` (and a push sets while the App is away).
     private let nativeBadge: NativeBadge
+    /// Retires a Session's notifications once it is read in the App.
+    private let sessionNotifications: SessionNotificationCleaner
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -226,6 +228,9 @@ final class AppModel: ObservableObject {
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
         nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())
+        sessionNotifications = SessionNotificationCleaner(
+            center: pushNotificationCenter ?? SystemPushNotificationCenter()
+        )
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
         _ = nativePushCoordinator
         _ = directPathController
@@ -604,7 +609,36 @@ final class AppModel: ObservableObject {
             return false
         }
         nativeBadge.set(count)
+        if count == 0, let account = sessionCoordinator.currentAccount {
+            // Nothing on this instance is unread: its Session notifications
+            // have all been read, here or elsewhere.
+            sessionNotifications.clearAllSessions(
+                instanceOrigin: origin.serialized,
+                accountID: account.id
+            )
+        }
         return true
+    }
+
+    /// The selected instance's page now shows `url`. Showing a Session reads
+    /// it, so its notifications leave Notification Center. Only the selected
+    /// instance's page counts, and only this account's notifications go.
+    func primaryLocationDidChange(_ url: URL) {
+        guard
+            let sessionID = SessionNotificationThread.sessionID(shownAt: url),
+            let origin = WebOrigin(url: url),
+            let runtime = route.runtime,
+            sessionCoordinator.isSelectedRuntime(runtime),
+            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized,
+            let account = sessionCoordinator.currentAccount
+        else {
+            return
+        }
+        sessionNotifications.clearSession(
+            sessionID,
+            instanceOrigin: origin.serialized,
+            accountID: account.id
+        )
     }
 
     private func handlePushTap(_ tap: PushNotificationTap) {

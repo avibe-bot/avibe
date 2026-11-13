@@ -30,6 +30,8 @@
 		10000000000000000000000D /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
 		1000000000000000000000D0 /* NativeBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
 		1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D1 /* NativeBadgeTests.swift */; };
+		1000000000000000000000D2 /* SessionNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D2 /* SessionNotifications.swift */; };
+		1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D3 /* SessionNotificationTests.swift */; };
 		1000000000000000000000E1 /* WebKitReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000E1 /* WebKitReadiness.swift */; };
 		10000000000000000000000E /* MobileAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		10000000000000000000000F /* MobileAuthTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
@@ -132,6 +134,8 @@
 		200000000000000000000010 /* NativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridge.swift; sourceTree = "<group>"; };
 		2000000000000000000000D0 /* NativeBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBadge.swift; sourceTree = "<group>"; };
 		2000000000000000000000D1 /* NativeBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBadgeTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000D2 /* SessionNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotifications.swift; sourceTree = "<group>"; };
+		2000000000000000000000D3 /* SessionNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotificationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000E1 /* WebKitReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebKitReadiness.swift; sourceTree = "<group>"; };
 		200000000000000000000011 /* MobileAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccount.swift; sourceTree = "<group>"; };
 		200000000000000000000012 /* MobileAuthTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransport.swift; sourceTree = "<group>"; };
@@ -237,6 +241,7 @@
 				200000000000000000000014 /* MobileOnboardingContainer.swift */,
 				200000000000000000000018 /* MobilePasskey.swift */,
 				2000000000000000000000D0 /* NativeBadge.swift */,
+				2000000000000000000000D2 /* SessionNotifications.swift */,
 				200000000000000000000010 /* NativeBridge.swift */,
 				2000000000000000000000A2 /* NativePushCoordinator.swift */,
 				200000000000000000000003 /* NavigationPolicy.swift */,
@@ -281,6 +286,7 @@
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 				2000000000000000000000D1 /* NativeBadgeTests.swift */,
+				2000000000000000000000D3 /* SessionNotificationTests.swift */,
 				2000000000000000000000E1 /* WebKitReadiness.swift */,
 				2000000000000000000000C0 /* NativePushCoordinatorTests.swift */,
 				2000000000000000000000B3 /* PushNotificationTests.swift */,
@@ -631,6 +637,7 @@
 				100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */,
 				100000000000000000000015 /* MobilePasskey.swift in Sources */,
 				1000000000000000000000D0 /* NativeBadge.swift in Sources */,
+				1000000000000000000000D2 /* SessionNotifications.swift in Sources */,
 				10000000000000000000000D /* NativeBridge.swift in Sources */,
 				1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */,
 				100000000000000000000003 /* NavigationPolicy.swift in Sources */,
@@ -662,6 +669,7 @@
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
+				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
 				1000000000000000000000E1 /* WebKitReadiness.swift in Sources */,
 				1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */,
 				1000000000000000000000AA /* PushNotificationTests.swift in Sources */,
