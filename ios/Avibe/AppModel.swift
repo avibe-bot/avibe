@@ -92,8 +92,9 @@ final class AppModel: ObservableObject {
     private let nativeBadge: NativeBadge
     /// Retires a Session's notifications once it is read in the App.
     private let sessionNotifications: SessionNotificationCleaner
-    /// The Session the selected instance's page shows, if any.
-    private var shownSession: (sessionID: String, origin: String)?
+    /// The Session the selected instance's page shows, if any. Cleared
+    /// whenever the runtime stops, so it is always the selected instance's.
+    private var shownSession: String?
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -627,9 +628,9 @@ final class AppModel: ObservableObject {
         // The Session on screen: shown, and its page live enough to have
         // read the Inbox since. A page on a chat it cannot load (offline
         // after a return to the foreground) sends nothing, so clears nothing.
-        if let shownSession, shownSession.origin == origin.serialized {
+        if let shownSession {
             sessionNotifications.clearSession(
-                shownSession.sessionID,
+                shownSession,
                 instanceOrigin: origin.serialized,
                 accountID: account.id,
                 readAt: readAt
@@ -657,9 +658,7 @@ final class AppModel: ObservableObject {
         else {
             return
         }
-        shownSession = SessionNotificationThread.sessionID(shownAt: url).map {
-            (sessionID: $0, origin: origin.serialized)
-        }
+        shownSession = SessionNotificationThread.sessionID(shownAt: url)
     }
 
     private func handlePushTap(_ tap: PushNotificationTap) {
