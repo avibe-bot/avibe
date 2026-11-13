@@ -87,7 +87,7 @@ export function SandboxWordsMirror({ mode }: { mode: 'create' | 'import' }) {
   }
   return (
     <SandboxCard title={d('导入助记词', 'Import a seed phrase')} subtitle="AGENT_WALLET" actions={[d('取消', 'Cancel'), d('用通行密钥保存', 'Save with passkey')]}>
-      <span className="text-[12.5px] leading-snug text-muted">{d('在这里输入，Avibe 和这台电脑都看不到。', 'Type it here; Avibe and this computer never see it.')}</span>
+      <span className="text-[12.5px] leading-snug text-muted">{d('在这个独立的安全窗口里输入；助记词不会交给 Avibe 主页面或 Agent。', 'Type it in this separate secure window; the words are never handed to the main Avibe page or an Agent.')}</span>
       <WordGrid words={IMPORTED_WORDS} columns={3} />
       <span className="flex items-center gap-1.5 text-[12px] font-medium text-mint-ink">
         <CircleCheck className="size-3.5" />

@@ -62,7 +62,7 @@ export function ProtectedHdDialog({ source, state = 'ready' }: { source: 'create
           text={source === 'create'
             ? d('在安全窗口里生成 12 个词，抄下来后点 3 个词核对；Passphrase 也在那里设置（可选）。', 'The secure window makes 12 words, you write them down and tap 3 to check; a passphrase is set there too (optional).')
             : d('在安全窗口里粘贴助记词和 Passphrase（如有），核对账户 #0 后保存。', 'Paste the words and passphrase (if any) in the secure window, compare account #0, then save.')}
-          info={d('这个页面、Avibe 和这台电脑都看不到助记词和 Passphrase。保存时要用你的通行密钥。', 'This page, Avibe and this computer never see the words or the passphrase. Saving needs your passkey.')}
+          info={d('助记词和 Passphrase 只在这个独立的安全窗口里处理，不会交给 Avibe 主页面或 Agent。保存时用通行密钥确认。', 'The words and passphrase are handled only in this separate secure window; they are never handed to the main Avibe page or an Agent. Saving is confirmed with your passkey.')}
         />
       </div>
       <label className="flex flex-col gap-1.5">
@@ -176,7 +176,7 @@ export function WindowReview({ mode }: { mode: 'create' | 'import' }) {
       <MirrorRow label="ETH" value={a.eth} />
       <MirrorRow label="BTC · Taproot" value={a.btc_taproot} />
       <MirrorRow label="Solana" value={a.solana} />
-      <span className="flex items-center gap-1.5 text-[12px] text-muted"><Lock className="size-3.5" />{d('保存时会再用一次通行密钥（和解锁是两次不同的确认）。保存后会重新打开核对一遍再交给 Avibe。', 'Saving asks for your passkey once more (separate from unlocking). It reopens and checks the result before handing it to Avibe.')}</span>
+      <span className="flex items-center gap-1.5 text-[12px] text-muted"><Lock className="size-3.5" />{d('保存时用通行密钥确认；随后在安全窗口里重新打开加密结果核对，再把加密结果交给 Avibe。', 'Saving is confirmed with your passkey; the secure window then reopens the encrypted result to check it before handing the encrypted result to Avibe.')}</span>
     </SandboxCard>
   );
 }
@@ -185,7 +185,7 @@ export function WindowImport() {
   const d = useDraft();
   return (
     <SandboxCard title={d('导入助记词', 'Import a seed phrase')} subtitle="COLD_WALLET · 1/3" actions={[d('取消', 'Cancel'), d('下一步', 'Next')]}>
-      <span className="text-[12.5px] leading-snug text-muted">{d('在这里粘贴，Avibe 和这台电脑都看不到。', 'Paste it here; Avibe and this computer never see it.')}</span>
+      <span className="text-[12.5px] leading-snug text-muted">{d('在这个独立的安全窗口里粘贴；助记词不会交给 Avibe 主页面或 Agent。', 'Paste it in this separate secure window; the words are never handed to the main Avibe page or an Agent.')}</span>
       <WordGrid words={IMPORTED_WORDS} columns={3} />
       <span className="flex items-center gap-1.5 text-[12px] font-medium text-mint-ink"><CircleCheck className="size-3.5" />{d('12 个词 · 校验通过', '12 words · checksum OK')}</span>
     </SandboxCard>
