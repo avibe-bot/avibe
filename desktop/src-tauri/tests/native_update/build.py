@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import tarfile
@@ -79,9 +80,10 @@ def adapt(source: Path) -> dict:
     fixture_source = fixture_path.read_text(encoding="utf-8")
     presentation = validate_presentation_lifecycle(library.read_text(encoding="utf-8"), fixture_source)
     installer_source = (desktop / "tests/native_update/fixture-installer.nsi").read_text(encoding="utf-8")
-    if not all(marker in fixture_source for marker in (
-        "let native_installation = native_executable.parent().unwrap().to_path_buf();",
-        "std::env::set_var(\"AVIBE_NATIVE_ACCEPTANCE_INSTALLATION\", installation);",
+    normalized_fixture = re.sub(r"\\s+", "", fixture_source)
+    if not all(marker in normalized_fixture for marker in (
+        "letnative_installation=native_executable.parent().unwrap().to_path_buf();",
+        'std::env::set_var("AVIBE_NATIVE_ACCEPTANCE_INSTALLATION",installation);',
         "installation.canonicalize()",
     )) or not all(marker in installer_source for marker in (
         'StrCmp $0 "" refused',

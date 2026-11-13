@@ -401,7 +401,19 @@ pub(crate) fn present_guarded(app: &AppHandle, view: &'static str) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    present_owned(app, view, client.coordinator.presentation_owner(), true, None)
+    // The bundled account entry is already a trusted native document and does
+    // not mount the Workbench's guarded presentation consumer. Keep the
+    // unsaved-work handoff for Runtime documents, but let this known entry
+    // navigate through the same owner-fenced queue without inventing a
+    // Runtime fallback.
+    let guarded = app
+        .get_webview_window(MAIN_WINDOW)
+        .and_then(|window| window.url().ok())
+        .is_none_or(|current| {
+            let state = client.view.presentation.lock().expect("presentation");
+            !(state.account && account_view(&current, &client.view.bundle).is_some())
+        });
+    present_owned(app, view, client.coordinator.presentation_owner(), guarded, None)
 }
 pub(crate) fn return_local_for_link(app: &AppHandle) {
     let Some(client) = app.try_state::<Client>() else {
