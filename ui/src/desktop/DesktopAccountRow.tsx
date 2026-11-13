@@ -89,7 +89,8 @@ export function DesktopAccountRow() {
           actions={{
             check: { run: () => void updater?.check(), disabled: !updater || ['checking', 'downloading', 'installing'].includes(state.desktop.update.phase) },
             ...(update && updater && latest ? { update: { run: () => void updater.install(latest) } } : {}),
-            ...(updater && accepts('prereleases') ? { setPrereleases: (enabled: boolean) => void updater.setPrereleases(enabled) } : {}),
+            // Every shell that reports `prereleases` takes the channel switch, before `hostActions` existed too.
+            ...(updater && (accepts('prereleases') || typeof state.desktop.update.prereleases === 'boolean') ? { setPrereleases: (enabled: boolean) => void updater.setPrereleases(enabled) } : {}),
             ...(updater && accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void updater.setAutoUpdate(enabled) } : {}),
             close: () => setPanel(null),
           }}

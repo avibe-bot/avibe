@@ -10,6 +10,7 @@ import { DesktopAccountRow } from './DesktopAccountRow';
 const present = vi.hoisted(() => vi.fn());
 const projection = vi.hoisted(() => ({
   committed: { kind: 'remote', name: 'Studio', instance_id: 'studio' } as Record<string, unknown>,
+  hostActions: ['check', 'prereleases', 'auto_update'] as string[] | undefined,
 }));
 vi.mock('./useDesktopClient', () => ({
   usePresentDesktopClient: () => present,
@@ -19,7 +20,7 @@ vi.mock('./useDesktopClient', () => ({
     local: { name: '小麦的 Mac', remote_access: 'off' },
     desktop: {
       version: '3.2.6rc9',
-      update: { phase: 'available', latest: '3.2.7', autoUpdate: false, prereleases: false, hostActions: ['check', 'prereleases', 'auto_update'] },
+      update: { phase: 'available', latest: '3.2.7', autoUpdate: false, prereleases: false, hostActions: projection.hostActions },
     },
     remote_auxiliary: 'disabled_incomplete',
   }),
@@ -62,4 +63,18 @@ it('AUTH-SETUP-178 a page this computer serves shows the same panel and acts ove
   // Exactly the version the panel shows.
   expect(invoke).toHaveBeenCalledWith('desktop_update_install', { targetVersion: '3.2.7' });
   expect(present).not.toHaveBeenCalled();
+});
+
+it('AUTH-SETUP-178 a shell that predates hostActions keeps its pre-release switch in the footer', async () => {
+  projection.committed = { kind: 'local', name: '小麦的 Mac', instance_id: null };
+  projection.hostActions = undefined;
+  const invoke = vi.fn(async () => undefined);
+  Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+  await renderRow();
+  act(() => { window.dispatchEvent(new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true })); });
+  fireEvent.click(await screen.findByRole('switch', { name: en.update.setting.prereleases }));
+  expect(invoke).toHaveBeenCalledWith('desktop_update_prereleases_set', { enabled: true });
+  expect((screen.getByRole('switch', { name: en.update.setting.autoUpdate }) as HTMLButtonElement).disabled).toBe(true);
+  projection.hostActions = ['check', 'prereleases', 'auto_update'];
 });

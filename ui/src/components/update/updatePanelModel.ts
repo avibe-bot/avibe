@@ -99,16 +99,15 @@ export function modelFromDesktopState(state: DesktopUpdateState, {
     }
   })();
   const offered = ['available', 'downloading', 'installing', 'installed'].includes(status.kind) ? latest : null;
-  // A shell that cannot take every setting is the one exception the panel names.
-  const actions = state.hostActions ?? [];
   return {
     subject,
     current: normalizeVersion(current),
     latest: offered,
     prereleases: typeof state.prereleases === 'boolean' ? { enabled: state.prereleases } : null,
     autoUpdate: { enabled: state.autoUpdate === true },
-    // Its own IPC always takes a check; only the settings it lacks make it the exception.
-    legacyHost: !(['prereleases', 'auto_update'] as const).every((action) => actions.includes(action)),
+    // The desktop app's own panel ships with its own updater, so it is never the old-host exception:
+    // each control is offered as far as this shell's IPC takes it.
+    legacyHost: false,
     checkedAt: state.checkedAt ?? checkedAt,
     status,
   };
