@@ -1856,6 +1856,44 @@ def test_cmd_check_update_reports_desktop_managed_runtime(monkeypatch, capsys):
     assert "Updates are delivered with the Avibe desktop app." in capsys.readouterr().out
 
 
+def test_cmd_check_update_json_reports_the_desktop_check(monkeypatch, tmp_path, capsys):
+    """An agent on a desktop-managed host reads the check ``/api/version`` relays (desktop_update_snapshot)."""
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "on")
+    monkeypatch.setenv("AVIBE_COMPUTER_USE_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(cli, "get_latest_version", lambda: (_ for _ in ()).throw(AssertionError("must not check PyPI")))
+    status = tmp_path / "update-status.json"
+    record = {
+        "schema_version": 1,
+        "phase": "available",
+        "current": "3.2.5",
+        "latest": "3.2.6",
+        "channel": "stable",
+        "has_update": True,
+        "checked_at": "2026-11-13T06:34:00Z",
+    }
+    status.write_text(json.dumps(record), encoding="utf-8")
+
+    assert cli.cmd_check_update(SimpleNamespace(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {key: payload[key] for key in ("latest", "has_update", "error", "phase", "desktop_version", "prereleases", "checked_at", "desktop_managed")} == {
+        "latest": "3.2.6",
+        "has_update": True,
+        "error": None,
+        "phase": "available",
+        "desktop_version": "3.2.5",
+        "prereleases": False,
+        "checked_at": "2026-11-13T06:34:00Z",
+        "desktop_managed": True,
+    }
+
+    status.write_text(json.dumps({**record, "phase": "error", "latest": None, "has_update": False}), encoding="utf-8")
+    assert cli.cmd_check_update(SimpleNamespace(json=True)) == 1
+    failure = json.loads(capsys.readouterr().err or "{}")
+    assert failure["code"] == "update_check_failed"
+    assert failure["details"]["phase"] == "error"
+    assert failure["details"]["checked_at"] == "2026-11-13T06:34:00Z"
+
+
 def test_desktop_managed_runtime_messages_are_english_in_the_cli_and_localized_on_the_web(monkeypatch, capsys):
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     monkeypatch.setattr(v2_config.V2Config, "load", lambda: SimpleNamespace(language="zh"))

@@ -119,10 +119,22 @@ DESKTOP_NO_CONCLUSION = {
     "latest": None,
     "has_update": False,
     "error": None,
+    "phase": None,
+    "desktop_version": None,
+    "prereleases": None,
+    "checked_at": None,
     "remote_install_allowed": False,
     "remote_request": None,
     "build": {"kind": "package"},
     "managed_by": "desktop",
+}
+
+# The fixture's check, as every surface relays it.
+DESKTOP_FIXTURE_CHECK = {
+    "phase": "available",
+    "desktop_version": "3.2.2-rc.13",
+    "prereleases": True,
+    "checked_at": "2026-10-21T02:36:00Z",
 }
 
 
@@ -136,7 +148,12 @@ def test_desktop_managed_runtime_relays_the_desktop_update_status(monkeypatch, t
     _desktop_managed(monkeypatch, tmp_path)
     (tmp_path / "update-status.json").write_bytes(DESKTOP_UPDATE_STATUS_FIXTURE.read_bytes())
 
-    assert api.get_version_info() == {**DESKTOP_NO_CONCLUSION, "latest": "3.2.3", "has_update": True}
+    assert api.get_version_info() == {
+        **DESKTOP_NO_CONCLUSION,
+        **DESKTOP_FIXTURE_CHECK,
+        "latest": "3.2.3",
+        "has_update": True,
+    }
 
 
 def test_desktop_managed_runtime_relays_an_up_to_date_desktop(monkeypatch, tmp_path) -> None:
@@ -146,7 +163,29 @@ def test_desktop_managed_runtime_relays_an_up_to_date_desktop(monkeypatch, tmp_p
     status.update(phase="current", latest="3.2.2-rc.13", has_update=False, written_by_a_newer_app=True)
     (tmp_path / "update-status.json").write_text(json.dumps(status), encoding="utf-8")
 
-    assert api.get_version_info() == {**DESKTOP_NO_CONCLUSION, "latest": "3.2.2-rc.13"}
+    assert api.get_version_info() == {
+        **DESKTOP_NO_CONCLUSION,
+        **DESKTOP_FIXTURE_CHECK,
+        "phase": "current",
+        "latest": "3.2.2-rc.13",
+    }
+
+
+def test_desktop_managed_runtime_relays_a_failed_desktop_check(monkeypatch, tmp_path) -> None:
+    """The browser shows the app's failure, not neutral guidance (#2895 dropped it)."""
+    _desktop_managed(monkeypatch, tmp_path)
+    (tmp_path / "update-status.json").write_text(
+        _fixture_with(phase="error", latest=None, has_update=False, channel="stable"),
+        encoding="utf-8",
+    )
+
+    assert api.get_version_info() == {
+        **DESKTOP_NO_CONCLUSION,
+        **DESKTOP_FIXTURE_CHECK,
+        "phase": "error",
+        "prereleases": False,
+        "error": "The desktop app's last update check failed.",
+    }
 
 
 def test_desktop_managed_runtime_relays_remote_update_progress(monkeypatch, tmp_path) -> None:
@@ -196,6 +235,7 @@ def test_version_endpoint_keeps_the_ordinary_result_for_a_malformed_remote_subse
     assert response.status_code == 200
     assert response.get_json() == {
         **DESKTOP_NO_CONCLUSION,
+        **DESKTOP_FIXTURE_CHECK,
         "latest": "3.2.3",
         "has_update": True,
         "remote_install_allowed": True,

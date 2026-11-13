@@ -72,7 +72,7 @@ from vibe.desktop_backends import (
     is_desktop_backend_path,
 )
 from vibe.desktop_runtime import is_private_desktop_runtime_path
-from vibe.desktop_update_status import read_desktop_update_status
+from vibe.desktop_update_status import desktop_update_snapshot
 from vibe.cli_health import CliHealth, probe_cli, probe_cli_sync
 from vibe.cli_repair import REPAIR_PATH_CONFLICT, identify_repair_source, native_bootstrap_env
 from vibe.cli_paths import (
@@ -7584,7 +7584,8 @@ def get_version_info() -> dict:
         }
 
     A desktop-managed Runtime reports the desktop app's last completed check
-    (``vibe/desktop_update_status.py``) and never queries PyPI.
+    (``vibe/desktop_update_status.py``), with its phase, version, channel and
+    time, and never queries PyPI.
     """
     from vibe import __version__
 
@@ -7593,17 +7594,7 @@ def get_version_info() -> dict:
     if managed_by:
         # The desktop app alone decides what this computer can install; relay
         # its last conclusion, never PyPI's.
-        status = read_desktop_update_status()
-        result = {
-            "current": __version__,
-            "latest": status["latest"] if status else None,
-            "has_update": status["has_update"] if status else False,
-            "error": None,
-            "remote_install_allowed": (
-                status["remote_install_allowed"] if status else False
-            ),
-            "remote_request": status["remote_request"] if status else None,
-        }
+        result = desktop_update_snapshot(__version__)
     elif build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:
