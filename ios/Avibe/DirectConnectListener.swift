@@ -342,6 +342,8 @@ actor DirectConnectListener {
     private struct Relay {
         /// Which came first: the relay ending on its own, or a close.
         let claim: DirectRelayClaim
+        /// The bind whose `admit` let it in.
+        let generation: Int
         let task: Task<Void, Never>
         /// The relay's current plan, once it has one: its scope, its path
         /// generation, and its race, which a newer generation retires.
@@ -380,7 +382,7 @@ actor DirectConnectListener {
     private var closing: Task<Void, Never>?
     /// The one connection beyond the limit, kept for the ownership check.
     /// Recorded from admission until its task has closed its connection.
-    private var spare: (id: UUID, task: Task<Void, Never>)?
+    private var spare: (id: UUID, generation: Int, task: Task<Void, Never>)?
     /// How long the spare connection waits for a request head. Far shorter
     /// than an ownership check's window, which retries: a slow or
     /// incomplete request cannot hold the spare through a check.
@@ -408,10 +410,12 @@ actor DirectConnectListener {
     }
 
     /// Binds `127.0.0.1` on exactly `port`, or on a port the system chooses
-    /// when `port` is `nil`, and returns the bound port. The socket does not
+    /// when `port` is `nil`, and returns the bound port and the bind's
+    /// generation, which `confirm` and `reject` need. The socket is then
+    /// `verifying`: it answers only the ownership check until confirmed. The socket does not
     /// share its address (`allowLocalEndpointReuse` is off), so a port held by
     /// anyone else fails the bind.
-    func bind(port requested: UInt16?) async throws -> UInt16 {
+    func bind(port requested: UInt16?) async throws -> DirectBinding {
         // A listening socket still closing, or a spare it accepted, holds
         // the port.
         await closing?.value
@@ -539,7 +543,7 @@ actor DirectConnectListener {
             listener.cancel()
             throw CancellationError()
         }
-        return bound
+        return DirectBinding(port: bound, generation: generation)
     }
 
     /// Closes the listening socket and keeps every accepted connection
@@ -551,6 +555,7 @@ actor DirectConnectListener {
     func closeListeningSocket() async {
         // Before any suspension: nothing is admitted or published from here.
         lifecycle.beginClose()
+        reconcileAdmissions()
         endPendingBind()
         if let listener {
             self.listener = nil
@@ -670,7 +675,35 @@ actor DirectConnectListener {
         guard !isStopped else {
             return
         }
+        reconcileAdmissions()
         onListenerFailure(routed)
+    }
+
+    /// The cleanup owner of admissions. `admit` is decided under the
+    /// lifecycle's lock and the record made in the same actor turn, but a
+    /// failure, rejection, or close can be recorded on another thread just
+    /// after `admit`. Every such transition reaches this actor after that
+    /// turn (`socketDidFail`, `closeListeningSocket`, `stop`, or the
+    /// controller's retirement), and this runs there: work that is not
+    /// committed and whose bind no longer serves (or, for the spare, no
+    /// longer verifies or serves) ends. Committed relays are kept.
+    private func reconcileAdmissions() {
+        let phase = lifecycle.phase
+        for (id, relay) in relays where relay.committed == nil {
+            guard phase != .serving(generation: relay.generation) else {
+                continue
+            }
+            relay.task.cancel()
+            relays.removeValue(forKey: id)
+        }
+        if let spare {
+            switch phase {
+            case .serving(spare.generation), .verifying(spare.generation, _):
+                break
+            default:
+                spare.task.cancel()
+            }
+        }
     }
 
     private func accept(_ connection: NWConnection, bindGeneration generation: Int) {
@@ -699,7 +732,7 @@ actor DirectConnectListener {
             }
             let nonce = ownershipNonce
             let id = UUID()
-            spare = (id, Task { [weak self] in
+            spare = (id, generation, Task { [weak self] in
                 await Self.answerOwnershipCheckOnly(connection, nonce: nonce)
                 connection.cancel()
                 await self?.spareDidEnd(id)
@@ -712,7 +745,7 @@ actor DirectConnectListener {
         let allowedHosts = allowedHosts
         let nonce = ownershipNonce
         let claim = DirectRelayClaim()
-        relays[id] = Relay(claim: claim, task: Task { [weak self] in
+        relays[id] = Relay(claim: claim, generation: generation, task: Task { [weak self] in
             await Self.serve(
                 connection,
                 id: id,
@@ -1810,9 +1843,9 @@ final class DirectRaceHandle: @unchecked Sendable {
 ///   re-bind.
 /// - `binding(g)` to `verifying(g)` when the socket is ready (`ready`).
 /// - `verifying(g)` to `serving(g)` once its ownership is confirmed
-///   (`confirm`).
+///   (`confirm(g)`).
 /// - `binding(g)`, `verifying(g)`, or `serving(g)` to a failure (`bindFailed`,
-///   `reject`, `socketFailed`): `failed(g)` when a route was ever published
+///   `reject(g)`, `socketFailed(g)`): `failed(g)` when a route was ever published
 ///   (the listener fault), `rejected(g)` when not (the host keeps WebKit's
 ///   normal path). The outcome is fixed under the lock.
 /// - `binding`, `verifying`, or `serving` to `closing(g)` (`beginClose`), and
@@ -1895,11 +1928,12 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         }
     }
 
-    /// The ownership check passed: the listener serves. `false` when it is
-    /// no longer verifying (it failed, closed, or stopped first).
-    func confirm() -> Bool {
+    /// The ownership check of bind `g` passed: the listener serves. `false`
+    /// when bind `g` is no longer verifying (it failed, closed, or stopped
+    /// first, or a newer bind took its place).
+    func confirm(_ g: Int) -> Bool {
         lock.withLock {
-            guard case .verifying(let g, _) = current else {
+            guard case .verifying(g, _) = current else {
                 return false
             }
             current = .serving(generation: g)
@@ -1907,11 +1941,12 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         }
     }
 
-    /// The ownership check failed or ran out of time.
-    func reject() -> Failure {
+    /// The ownership check of bind `g` failed or ran out of time. A stale
+    /// generation changes nothing.
+    func reject(_ g: Int) -> Failure {
         lock.withLock {
             switch current {
-            case .binding(let g, _), .verifying(let g, _):
+            case .binding(g, _), .verifying(g, _):
                 return fail(g)
             default:
                 return .none
@@ -1994,13 +2029,14 @@ final class DirectListenerLifecycle: @unchecked Sendable {
         }
     }
 
-    /// Publishes a route: runs `write` under the lock, only while serving,
+    /// Publishes a route: runs `write` under the lock, only while bind `g` is
+    /// serving,
     /// and records the publication only if `write` reports that it wrote.
     /// A failure recorded first stops the write; one recorded after it is a
     /// failure after a route.
-    func publish(_ write: () -> Bool) -> Bool {
+    func publish(_ g: Int, _ write: () -> Bool) -> Bool {
         lock.withLock {
-            guard case .serving = current else {
+            guard case .serving(g) = current else {
                 return false
             }
             let wrote = write()
@@ -2046,4 +2082,11 @@ final class DirectRelayClaim: @unchecked Sendable {
             return true
         }
     }
+}
+
+/// What a bind produced: the bound port, and the bind's generation, which
+/// confirms or rejects exactly that bind.
+struct DirectBinding: Equatable, Sendable {
+    let port: UInt16
+    let generation: Int
 }

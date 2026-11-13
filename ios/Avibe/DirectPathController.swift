@@ -219,6 +219,8 @@ final class DirectPathController {
 
     private var listener: DirectConnectListener?
     private var listenerPort: UInt16?
+    /// The bind of `listener` that serves: route publication names it.
+    private var listenerGeneration: Int?
     private var listenerStart: Task<Bool, Never>?
     /// A return's re-bind task is running. Only this controller's own
     /// bookkeeping of that task; whether the listener admits or publishes
@@ -490,7 +492,8 @@ final class DirectPathController {
             self.listener === listener,
             self.listenerPort == listenerPort,
             routeOwner.canAdd(authority.host, store: store),
-            listener.lifecycle.publish({
+            let listenerGeneration,
+            listener.lifecycle.publish(listenerGeneration, {
                 routeOwner.add(
                     authority.host,
                     store: store,
@@ -897,7 +900,7 @@ final class DirectPathController {
         self.listener = listener
         let rebindSeconds = timing.rebindSeconds
         let task = Task { [weak self] () -> Bool in
-            guard let port = try? await listener.bind(port: nil) else {
+            guard let binding = try? await listener.bind(port: nil) else {
                 // The bind failed (its lifecycle already says so): the
                 // listener goes at once, so no later open reuses it.
                 await MainActor.run {
@@ -908,7 +911,7 @@ final class DirectPathController {
                 return false
             }
             let owned = await DirectConnectListener.ownershipCheck(
-                port: port,
+                port: binding.port,
                 nonce: listener.ownershipNonce,
                 within: rebindSeconds
             )
@@ -916,14 +919,15 @@ final class DirectPathController {
                 guard let self, self.listener === listener else {
                     return false
                 }
-                // Confirmed only if still verifying: a failure recorded
-                // first wins.
-                guard owned, listener.lifecycle.confirm() else {
-                    _ = listener.lifecycle.reject()
+                // Confirmed only if this bind is still verifying: a failure
+                // recorded first wins.
+                guard owned, listener.lifecycle.confirm(binding.generation) else {
+                    _ = listener.lifecycle.reject(binding.generation)
                     self.retireAndStop()
                     return false
                 }
-                self.listenerPort = port
+                self.listenerPort = binding.port
+                self.listenerGeneration = binding.generation
                 if self.isInBackground {
                     // The App went to the background while binding: park
                     // the port as the background does, for the return to
@@ -979,6 +983,7 @@ final class DirectPathController {
         listener?.lifecycle.stop()
         self.listener = nil
         listenerPort = nil
+        listenerGeneration = nil
         listenerStart = nil
         rebindInFlight = false
         return listener
@@ -1095,15 +1100,20 @@ final class DirectPathController {
         rebindInFlight = true
         let rebindSeconds = timing.rebindSeconds
         let nonce = listener.ownershipNonce
+        // The bind's generation is recorded as soon as the bind returns, so
+        // the completion confirms or rejects exactly that bind, even when
+        // the deadline ends the ownership check.
+        let bound = DirectBindingBox()
         Task { [weak self] in
             let ready: Bool
             do {
                 ready = try await directDeadline(rebindSeconds) {
                     // The background's close may not have run yet.
                     await listener.closeListeningSocket()
-                    let port = try await listener.bind(port: listenerPort)
+                    let binding = try await listener.bind(port: listenerPort)
+                    bound.set(binding.generation)
                     return await DirectConnectListener.ownershipCheck(
-                        port: port,
+                        port: binding.port,
                         nonce: nonce,
                         within: rebindSeconds
                     )
@@ -1111,8 +1121,14 @@ final class DirectPathController {
             } catch {
                 ready = false
             }
+            let generation = bound.value
             await MainActor.run {
-                self?.rebindDidComplete(listener, port: listenerPort, ready: ready)
+                self?.rebindDidComplete(
+                    listener,
+                    port: listenerPort,
+                    generation: generation,
+                    ready: ready
+                )
             }
         }
     }
@@ -1120,6 +1136,7 @@ final class DirectPathController {
     private func rebindDidComplete(
         _ listener: DirectConnectListener,
         port listenerPort: UInt16,
+        generation: Int?,
         ready: Bool
     ) {
         // Settled already (a failure callback), or another listener now.
@@ -1136,8 +1153,10 @@ final class DirectPathController {
             }
             return
         }
-        // Serving only if still verifying: a failure recorded first wins.
-        if ready, listener.lifecycle.confirm() {
+        // Serving only if this bind is still verifying: a failure recorded
+        // first wins.
+        if ready, let generation, listener.lifecycle.confirm(generation) {
+            listenerGeneration = generation
             finishResume()
             return
         }
@@ -1150,7 +1169,9 @@ final class DirectPathController {
         default:
             break
         }
-        _ = listener.lifecycle.reject()
+        if let generation {
+            _ = listener.lifecycle.reject(generation)
+        }
         if listener.lifecycle.hasPublished {
             // Routes point at a port the App may not hold: the fault.
             Task {
@@ -1235,5 +1256,19 @@ final class UserDefaultsDirectFaultMarker: DirectFaultMarkerStoring {
         }
         defaults.removeObject(forKey: Self.key)
         return true
+    }
+}
+
+/// The generation of a bind made inside a deadline, read after it.
+private final class DirectBindingBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: Int?
+
+    func set(_ generation: Int) {
+        lock.withLock { self.generation = generation }
+    }
+
+    var value: Int? {
+        lock.withLock { generation }
     }
 }

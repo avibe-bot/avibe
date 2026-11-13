@@ -1083,9 +1083,9 @@ final class DirectConnectListenerTests: XCTestCase {
         func serve() {
             let g = lifecycle.beginBind()!
             XCTAssertTrue(lifecycle.ready(g))
-            XCTAssertTrue(lifecycle.confirm())
+            XCTAssertTrue(lifecycle.confirm(g))
             if published {
-                XCTAssertTrue(lifecycle.publish { true })
+                XCTAssertTrue(lifecycle.publish(g) { true })
             }
         }
         switch phase {
@@ -1111,12 +1111,12 @@ final class DirectConnectListenerTests: XCTestCase {
             _ = lifecycle.beginBind()
         case "failed":
             serve()
-            XCTAssertTrue(lifecycle.publish { true })
+            XCTAssertTrue(lifecycle.publish(1) { true })
             XCTAssertEqual(lifecycle.socketFailed(1), .fault)
         case "rejected":
-            XCTAssertEqual(lifecycle.reject(), .none)
-            _ = lifecycle.beginBind()
-            XCTAssertEqual(lifecycle.reject(), .fallback)
+            XCTAssertEqual(lifecycle.reject(1), .none)
+            let g = lifecycle.beginBind()!
+            XCTAssertEqual(lifecycle.reject(g), .fallback)
         case "stopped":
             lifecycle.stop()
         default:
@@ -1152,8 +1152,11 @@ final class DirectConnectListenerTests: XCTestCase {
             }
             XCTAssertEqual(lifecycle.admit(generation), row.admit, row.phase)
             XCTAssertEqual(lifecycle.admit(generation + 1), .refused, "\(row.phase), a stale generation")
+            var staleWrote = false
+            XCTAssertFalse(lifecycle.publish(generation + 1) { staleWrote = true; return true })
+            XCTAssertFalse(staleWrote, "\(row.phase): a stale generation never writes")
             var wrote = false
-            XCTAssertEqual(lifecycle.publish { wrote = true; return true }, row.publish, row.phase)
+            XCTAssertEqual(lifecycle.publish(generation) { wrote = true; return true }, row.publish, row.phase)
             XCTAssertEqual(wrote, row.publish, "\(row.phase): the write ran only when allowed")
         }
     }
@@ -1169,11 +1172,11 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(bindFails.phase, .rejected(generation: g))
 
         let rejected = makeLifecycle(in: "verifying")
-        XCTAssertEqual(rejected.reject(), .fallback)
+        XCTAssertEqual(rejected.reject(1), .fallback)
 
         let failsServing = makeLifecycle(in: "serving")
         XCTAssertEqual(failsServing.socketFailed(1), .fallback)
-        XCTAssertFalse(failsServing.publish { true })
+        XCTAssertFalse(failsServing.publish(1) { true })
 
         // After a route: the same calls are the fault.
         let routedRebind = makeLifecycle(in: "rebinding", published: true)
@@ -1182,14 +1185,14 @@ final class DirectConnectListenerTests: XCTestCase {
 
         let routedReject = makeLifecycle(in: "rebinding", published: true)
         XCTAssertTrue(routedReject.ready(2))
-        XCTAssertEqual(routedReject.reject(), .fault)
+        XCTAssertEqual(routedReject.reject(2), .fault)
 
         let routedFailure = makeLifecycle(in: "serving", published: true)
         XCTAssertEqual(routedFailure.socketFailed(1), .fault)
 
         // A publication that did not write is no route.
         let notWritten = makeLifecycle(in: "serving")
-        XCTAssertFalse(notWritten.publish { false })
+        XCTAssertFalse(notWritten.publish(1) { false })
         XCTAssertFalse(notWritten.hasPublished)
         XCTAssertEqual(notWritten.socketFailed(1), .fallback)
     }
@@ -1200,19 +1203,24 @@ final class DirectConnectListenerTests: XCTestCase {
     func testIllegalTransitionsLeaveThePhaseUnchanged() {
         let confirmAfterFailure = makeLifecycle(in: "verifying")
         XCTAssertEqual(confirmAfterFailure.socketFailed(1), .fallback)
-        XCTAssertFalse(confirmAfterFailure.confirm())
+        XCTAssertFalse(confirmAfterFailure.confirm(1))
         XCTAssertEqual(confirmAfterFailure.phase, .rejected(generation: 1))
 
         let staleFailure = makeLifecycle(in: "rebinding", published: true)
         XCTAssertTrue(staleFailure.ready(2))
-        XCTAssertTrue(staleFailure.confirm())
+        // A stale bind's completion: neither confirms nor rejects the newer
+        // bind.
+        XCTAssertFalse(staleFailure.confirm(1))
+        XCTAssertEqual(staleFailure.reject(1), .none)
+        XCTAssertEqual(staleFailure.phase, .verifying(generation: 2, rebind: true))
+        XCTAssertTrue(staleFailure.confirm(2))
         XCTAssertEqual(staleFailure.socketFailed(1), .none)
         XCTAssertEqual(staleFailure.phase, .serving(generation: 2))
 
         let twice = makeLifecycle(in: "serving", published: true)
         XCTAssertEqual(twice.socketFailed(1), .fault)
         XCTAssertEqual(twice.socketFailed(1), .none)
-        XCTAssertEqual(twice.reject(), .none)
+        XCTAssertEqual(twice.reject(1), .none)
         XCTAssertFalse(twice.beginClose())
 
         let serving = makeLifecycle(in: "serving")
@@ -1221,12 +1229,12 @@ final class DirectConnectListenerTests: XCTestCase {
 
         let idle = makeLifecycle(in: "idle")
         XCTAssertFalse(idle.beginClose())
-        XCTAssertFalse(idle.confirm())
+        XCTAssertFalse(idle.confirm(1))
 
         let stopped = makeLifecycle(in: "stopped")
         XCTAssertNil(stopped.beginBind())
         XCTAssertFalse(stopped.beginClose())
-        XCTAssertEqual(stopped.reject(), .none)
+        XCTAssertEqual(stopped.reject(1), .none)
         XCTAssertEqual(stopped.phase, .stopped)
     }
 
@@ -1254,12 +1262,16 @@ final class DirectConnectListenerTests: XCTestCase {
             await listener.stop()
         }
         let lifecycle = await listener.lifecycle
-        let port = try await listener.bind(port: nil)
-        XCTAssertTrue(lifecycle.confirm())
+        let first = try await listener.bind(port: nil)
+        XCTAssertEqual(first.generation, 1)
+        XCTAssertTrue(lifecycle.confirm(first.generation))
         await listener.closeListeningSocket()
         XCTAssertEqual(lifecycle.phase, .closed)
-        _ = try await listener.bind(port: port)
+        let second = try await listener.bind(port: first.port)
+        XCTAssertEqual(second, DirectBinding(port: first.port, generation: 2))
         XCTAssertEqual(lifecycle.phase, .verifying(generation: 2, rebind: true))
+        // The first bind's completion, arriving late, confirms nothing.
+        XCTAssertFalse(lifecycle.confirm(first.generation))
 
         // What Network's queue does for each socket's failure.
         XCTAssertEqual(lifecycle.socketFailed(1), .none)
@@ -1283,8 +1295,8 @@ final class DirectConnectListenerTests: XCTestCase {
                 // What a re-bind's failed ownership check records.
                 XCTAssertTrue(lifecycle.beginClose())
                 lifecycle.closeCompleted()
-                _ = lifecycle.beginBind()
-                XCTAssertEqual(lifecycle.reject(), .fallback)
+                let g = lifecycle.beginBind()!
+                XCTAssertEqual(lifecycle.reject(g), .fallback)
             case "closing":
                 XCTAssertTrue(lifecycle.beginClose())
             default:
@@ -1303,6 +1315,42 @@ final class DirectConnectListenerTests: XCTestCase {
         }
     }
 
+    /// Work admitted while serving, when the listener then leaves serving:
+    /// its cleanup owner is this actor, which hears of every such transition
+    /// after the admission's turn. Uncommitted work ends; a committed relay
+    /// stays. Shown for a socket failure and for a deliberate close.
+    func testUncommittedWorkEndsWhenTheListenerLeavesServingAndCommittedRelaysStay() async throws {
+        for transition in ["socket failed", "close"] {
+            let fixture = try await makeListener()
+            let committedClient = LoopbackClient(port: fixture.port)
+            let committed = try await establish(committedClient, fixture)
+            fixture.direct.setMode(.hang)
+            let racing = LoopbackClient(port: fixture.port)
+            try await racing.send(canonicalHead)
+            try await eventually { fixture.direct.attempts == 2 }
+
+            let lifecycle = await fixture.listener.lifecycle
+            if transition == "socket failed" {
+                // What Network's queue records, then what reaches the actor.
+                XCTAssertEqual(lifecycle.socketFailed(1), .fallback)
+                await fixture.listener.socketDidFail(routed: false)
+            } else {
+                await fixture.listener.closeListeningSocket()
+            }
+
+            let rest = try await racing.receiveUntilClosed()
+            XCTAssertEqual(rest, Data(), transition)
+            XCTAssertEqual(fixture.publicOrigin.attempts, 0, transition)
+            XCTAssertFalse(committed.isCancelled, transition)
+            try await committedClient.send("ping")
+            try await eventually {
+                String(decoding: committed.written, as: UTF8.self).hasSuffix("ping")
+            }
+            committedClient.close()
+            await fixture.listener.stop()
+        }
+    }
+
     func testABindOnAPortSomeoneElseHoldsFails() async throws {
         let control = try ControlListener(family: AF_INET, address: "127.0.0.1")
         defer { control.close() }
@@ -1316,8 +1364,8 @@ final class DirectConnectListenerTests: XCTestCase {
         }
 
         do {
-            let port = try await listener.bind(port: control.socket.port)
-            XCTFail("Bound \(port), which another socket holds.")
+            let binding = try await listener.bind(port: control.socket.port)
+            XCTFail("Bound \(binding.port), which another socket holds.")
         } catch {}
     }
 
@@ -1376,7 +1424,8 @@ final class DirectConnectListenerTests: XCTestCase {
         let fixture = try await makeListener()
         await fixture.listener.closeListeningSocket()
 
-        let port = try await fixture.listener.bind(port: fixture.port.rawValue)
+        let binding = try await fixture.listener.bind(port: fixture.port.rawValue)
+        let port = binding.port
 
         XCTAssertEqual(port, fixture.port.rawValue)
         let nonce = await fixture.listener.ownershipNonce
@@ -1393,7 +1442,7 @@ final class DirectConnectListenerTests: XCTestCase {
         )
         XCTAssertTrue(owned)
         let lifecycle = await fixture.listener.lifecycle
-        XCTAssertTrue(lifecycle.confirm())
+        XCTAssertTrue(lifecycle.confirm(binding.generation))
         let client = LoopbackClient(port: fixture.port)
         _ = try await establish(client, fixture)
         client.close()
@@ -1419,7 +1468,7 @@ final class DirectConnectListenerTests: XCTestCase {
 
         let outcome: String
         do {
-            let port = try await fixture.listener.bind(port: fixture.port.rawValue)
+            let port = try await fixture.listener.bind(port: fixture.port.rawValue).port
             XCTAssertEqual(port, fixture.port.rawValue)
             let nonce = await fixture.listener.ownershipNonce
             let owned = await DirectConnectListener.ownershipCheck(
@@ -1644,10 +1693,11 @@ final class DirectConnectListenerTests: XCTestCase {
         for allowed in allowedHosts ?? [host] {
             await listener.allowHost(allowed)
         }
-        let bound = try await listener.bind(port: nil)
+        let binding = try await listener.bind(port: nil)
+        let bound = binding.port
         // What the path controller does once the ownership check passed.
         let lifecycle = await listener.lifecycle
-        XCTAssertTrue(lifecycle.confirm())
+        XCTAssertTrue(lifecycle.confirm(binding.generation))
         addTeardownBlock {
             await listener.stop()
         }
