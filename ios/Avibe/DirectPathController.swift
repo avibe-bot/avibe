@@ -495,18 +495,6 @@ final class DirectPathController {
         listenerState == .faulted
     }
 
-    /// Whether the fault leaves `runtime`'s content behind a route to a port
-    /// the App may not hold: its host is routed on the current store.
-    func faultCovers(_ runtime: MobileRuntimeContext) -> Bool {
-        guard
-            isFaulted,
-            let authority = DirectAuthority(instanceURL: runtime.instance.url)
-        else {
-            return false
-        }
-        return routeOwner.routes(authority.host, store: websiteDataStore.identifier)
-    }
-
     // MARK: Runtime and account
 
     /// Prepares the route for `runtime`'s host before its first load: binds

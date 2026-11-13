@@ -414,10 +414,10 @@ final class DirectPathControllerTests: XCTestCase {
         try await harness.select("instance-2")
         XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
         let second = try XCTUnwrap(harness.lastOpened)
-        XCTAssertFalse(harness.controller.faultCovers(second))
+        XCTAssertEqual(harness.controller.loadGate(for: second), .open)
         XCTAssertEqual(harness.requestStatus("instance-2").values.first??.preferred, .tunnel)
         try await harness.select("instance-1")
-        XCTAssertTrue(harness.controller.faultCovers(try XCTUnwrap(harness.lastOpened)))
+        XCTAssertEqual(harness.controller.loadGate(for: try XCTUnwrap(harness.lastOpened)), .fault)
     }
 
     @MainActor
@@ -961,7 +961,6 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.faults, 1)
         XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
         let first = try XCTUnwrap(harness.lastOpened)
-        XCTAssertFalse(harness.controller.faultCovers(first))
         XCTAssertEqual(harness.controller.loadGate(for: first), .open)
         XCTAssertEqual(harness.requestStatus("instance-1").values.first??.preferred, .tunnel)
         XCTAssertEqual(harness.transport.selections.count, 0)
