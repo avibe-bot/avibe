@@ -667,8 +667,10 @@ actor DirectConnectListener {
 
     /// Closes the committed relays on `backend` (`nil`: both) whose plan was
     /// made under a path generation before `generation`, and returns, per
-    /// host, how many it closed. A relay committed under a later plan,
-    /// after the event that asked for this close, is kept. Relays not yet
+    /// host, how many it closed: relays an event already claimed in its own
+    /// turn (`lifecycle.claimForEvent`) are closed, not counted again. A
+    /// relay committed under a later plan, after the event that asked for
+    /// this close, is kept. Relays not yet
     /// committed are left to their plan's fence. A relay this listener did
     /// not accept is never touched.
     func closeRelays(
@@ -832,15 +834,17 @@ actor DirectConnectListener {
             await Self.serve(
                 connection,
                 id: id,
+                claim: claim,
                 listener: self,
                 allowedHosts: allowedHosts,
                 ownershipNonce: nonce,
                 limits: limits,
                 planner: planner
             )
-            // Linearized with `closeRelays`, before anything else: from here
-            // a close does not count this relay, however long the actor
-            // takes to hear `relayDidEnd`.
+            // Linearized with an event's claim (`lifecycle.claimForEvent`,
+            // `closeRelays`), before anything else: from here a close does
+            // not count this relay, however long the actor takes to hear
+            // `relayDidEnd`.
             claim.end()
             connection.cancel()
             await self?.relayDidEnd(id)
@@ -951,6 +955,7 @@ actor DirectConnectListener {
     private static func serve(
         _ connection: NWConnection,
         id: UUID,
+        claim: DirectRelayClaim,
         listener: DirectConnectListener?,
         allowedHosts: Set<String>,
         ownershipNonce: String,
@@ -1107,7 +1112,8 @@ actor DirectConnectListener {
                         id,
                         host: host,
                         backend: backend,
-                        generation: generation
+                        generation: generation,
+                        claim: claim
                     ) ? .granted : .refused
                 }
                 switch grant {
@@ -2000,7 +2006,9 @@ final class DirectListenerLifecycle: @unchecked Sendable {
 
     private enum Ownership {
         case candidate(bind: Int)
-        case granted(Grant)
+        /// With the relay's claim, so that an event can take it in its own
+        /// turn (`claimForEvent`).
+        case granted(Grant, DirectRelayClaim)
     }
 
     /// One foreground episode of getting the listener to serve: from the
@@ -2313,12 +2321,13 @@ final class DirectListenerLifecycle: @unchecked Sendable {
     /// The commit point: grants candidate `id`, once, while the bind that
     /// admitted it still serves. `false` leaves nothing behind. Whoever
     /// calls this has made its last validation in the same turn, with no
-    /// suspension between the two.
+    /// suspension between the two. `claim` is the relay's own.
     func grant(
         _ id: UUID,
         host: String,
         backend: DirectRelayBackend,
-        generation: Int
+        generation: Int,
+        claim: DirectRelayClaim
     ) -> Bool {
         locked {
             guard
@@ -2328,9 +2337,37 @@ final class DirectListenerLifecycle: @unchecked Sendable {
                 return false
             }
             ledger[id] = .granted(
-                Grant(host: host, backend: backend, generation: generation)
+                Grant(host: host, backend: backend, generation: generation),
+                claim
             )
             return true
+        }
+    }
+
+    /// An event closes the granted relays on `backend` (`nil`: both) that
+    /// were granted under a path generation before `generation`: their
+    /// claims are taken here, in the event's own turn, and the count per
+    /// host is returned. Whatever the event does next, the transport
+    /// closing its streams included, cannot then make one of them look as
+    /// if it had ended on its own. One that did end on its own first is not
+    /// counted. The relays stay listed until the listener drains them
+    /// (`DirectConnectListener.closeRelays`, which counts none of these
+    /// again).
+    func claimForEvent(
+        backend: DirectRelayBackend?,
+        before generation: Int
+    ) -> [String: Int] {
+        locked {
+            var claimed: [String: Int] = [:]
+            for case .granted(let grant, let claim) in ledger.values
+            where (backend == nil || grant.backend == backend)
+                && grant.generation < generation
+            {
+                if claim.closeByEvent() {
+                    claimed[grant.host, default: 0] += 1
+                }
+            }
+            return claimed
         }
     }
 
@@ -2343,7 +2380,7 @@ final class DirectListenerLifecycle: @unchecked Sendable {
     var grants: [UUID: Grant] {
         locked {
             ledger.compactMapValues { (ownership: Ownership) -> Grant? in
-                if case .granted(let grant) = ownership {
+                if case .granted(let grant, _) = ownership {
                     return grant
                 }
                 return nil
