@@ -30,7 +30,7 @@ export type ValueState =
   | { kind: 'protected'; recipe: Recipe; switched?: boolean; optionsOpen?: boolean }
   | { kind: 'typed'; value: string };
 
-function Header({ mode }: { mode: 'create' | 'provide' | 'edit' }) {
+export function Header({ mode }: { mode: 'create' | 'provide' | 'edit' }) {
   const { t } = useTranslation();
   const Icon = mode === 'edit' ? Pencil : KeyRound;
   const title = mode === 'edit' ? t('vaults.edit.title') : mode === 'provide' ? t('vaults.request.title') : t('vaults.dialog.title');
@@ -46,7 +46,7 @@ function Header({ mode }: { mode: 'create' | 'provide' | 'edit' }) {
   );
 }
 
-function TierCards({ value }: { value: Tier }) {
+export function TierCards({ value }: { value: Tier }) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-1.5">
@@ -74,7 +74,7 @@ function TierCards({ value }: { value: Tier }) {
   );
 }
 
-function Description({ value = '' }: { value?: string }) {
+export function Description({ value = '' }: { value?: string }) {
   const { t } = useTranslation();
   return (
     <label className="flex flex-col gap-1.5">
@@ -84,7 +84,7 @@ function Description({ value = '' }: { value?: string }) {
   );
 }
 
-function Tags({ values = [] }: { values?: string[] }) {
+export function Tags({ values = [] }: { values?: string[] }) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-1.5">
@@ -95,7 +95,7 @@ function Tags({ values = [] }: { values?: string[] }) {
   );
 }
 
-function Advanced({ dot = false }: { dot?: boolean }) {
+export function Advanced({ dot = false }: { dot?: boolean }) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col overflow-hidden rounded-[10px] bg-surface-2">
@@ -108,7 +108,7 @@ function Advanced({ dot = false }: { dot?: boolean }) {
   );
 }
 
-function AddFieldsLine() {
+export function AddFieldsLine() {
   const { t } = useTranslation();
   return (
     <>
@@ -350,7 +350,7 @@ export function EditFieldDialog({ variant, tier }: { variant: Variant; tier: Tie
   );
 }
 
-function Footer({ primary }: { primary: ReactNode }) {
+export function Footer({ primary }: { primary: ReactNode }) {
   const { t } = useTranslation();
   return (
     <div className="mt-1 flex justify-end gap-2">
