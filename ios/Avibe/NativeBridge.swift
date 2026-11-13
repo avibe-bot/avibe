@@ -22,7 +22,6 @@ struct NativeShellMetadata: Equatable {
         "badge": 1,
         "haptics": 1,
         "keyboardResizesViewport": 1,
-        "notifications": 1,
         "push": 1,
         "viewport": 1,
         "voice": 1,
