@@ -1188,6 +1188,12 @@ def _message_to_anthropic(
             elif isinstance(block, HostedToolBlock):
                 # Its server_tool_use and web_search_tool_result, verbatim (transform allowed it for this Source).
                 content.extend(copy.deepcopy(list(block.native.payload)))
+        if not any(part.get("type") in {"tool_use", "server_tool_use"} for part in content):
+            # Anthropic refuses every later request while history holds a reply of whitespace-only text ("text
+            # content blocks must contain non-whitespace text"), and an empty reply stays committed
+            # (``empty_response``), so that text is left out as empty text is. Beside a tool call it is accepted and
+            # kept, so committed tool turns keep their bytes and their prompt cache.
+            content = [part for part in content if part.get("type") != "text" or part["text"].strip()]
         return {"role": "assistant", "content": content}
     if isinstance(message, ToolResultMessage):
         result = _anthropic_user_content(message.content, supports_images, loaded_images)

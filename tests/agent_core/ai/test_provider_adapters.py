@@ -794,6 +794,34 @@ async def test_anthropic_replays_redacted_thinking_payload_verbatim() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_leaves_out_a_whitespace_only_reply() -> None:
+    """Anthropic refuses every request whose history holds a reply of whitespace-only text (400 "text content blocks
+    must contain non-whitespace text"). An empty reply stays committed (``empty_response``), so one served as ``"\\n"``
+    must not wedge every later Turn of its Session. Whitespace beside a tool call is accepted and keeps its bytes, so
+    committed tool turns keep their prompt cache."""
+
+    origin = Origin("anthropic", "anthropic", "model-x")
+    tool_turn = (TextBlock(text="\n"), ToolCallBlock("call_1", "read", {"path": "a"}))
+    history = (
+        UserMessage((TextBlock(text="report"),)),
+        AssistantMessage(content=tool_turn, origin=origin, stop_reason="tool_use"),
+        ToolResultMessage("call_1", "read", (TextBlock(text="ok"),)),
+        AssistantMessage(content=(TextBlock(text="\n"),), origin=origin, stop_reason="stop"),
+        UserMessage((TextBlock(text="next"),)),
+        AssistantMessage(content=(ThinkingBlock("", "sig"), TextBlock(text=" \n ")), origin=origin, stop_reason="stop"),
+        UserMessage((TextBlock(text="again"),)),
+    )
+
+    wire = await build_wire_request(_request("anthropic", messages=history), gateway=False)
+
+    replies = [message["content"] for message in wire.body["messages"] if message["role"] == "assistant"]
+    assert replies == [
+        [{"type": "text", "text": "\n"}, {"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "a"}}],
+        [{"type": "thinking", "thinking": "", "signature": "sig"}],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_anthropic_ignores_unknown_content_block_types_like_pi() -> None:
     body = (
         'data: {"type":"content_block_start","index":0,"content_block":{"type":"future_block"}}\n\n'
