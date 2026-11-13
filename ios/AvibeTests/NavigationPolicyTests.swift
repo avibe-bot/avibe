@@ -805,6 +805,7 @@ final class NavigationPolicyTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testPendingPushTapExpiresAfterOneHundredTwentySeconds()
         async throws
     {
