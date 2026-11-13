@@ -6268,9 +6268,6 @@
       "defaultNotRemovable": "The default field can't be removed. Set another field as default first.",
       "extraNotRenamable": "Extra fields can't be renamed",
       "discardNew": "Discard new field",
-      "save": "Save",
-      "saveNamed": "Save {{field}}",
-      "saveNew": "Save new field",
       "saved": "Field saved",
       "draftsDropped": "Drafts for fields removed elsewhere were dropped: {{fields}}.",
       "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
@@ -6286,7 +6283,9 @@
       "referenceName": "NAME",
       "referenceDefault": "<name/> alone resolves to the default field, <field/>.",
       "singleFile": "File upload supports one value. Switch to Text before adding fields.",
-      "editHelp": "Save each row after editing · blank values stay unchanged"
+      "editHelp": "Changes apply together when you click Save · blank keeps the saved value",
+      "removeOnSave": "Removed when you save: {{fields}}",
+      "undoRemove": "Undo"
     },
     "entry": {
       "addressTitle": "Protected Vault is unavailable at this address",

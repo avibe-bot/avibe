@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context/ApiContext';
+import { useApi, type VaultFieldsBatchPayload, type VaultSecret } from '@/context/ApiContext';
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
@@ -46,13 +46,31 @@ function reconcileDrafts(previous: VaultSecret, next: VaultSecret, drafts: Reado
   return { drafts: reconciled, removed };
 }
 
-/** Each field mutation returns the next metadata version for the following browser envelope. */
+/** What the edit dialog's Save calls: commit every field change at once, or nothing. */
+export type VaultFieldsCommit = {
+  /** Whether anything is waiting to be saved. */
+  dirty: () => boolean;
+  /** Writes all changes in one atomic request; resolves true when there was nothing to do or
+   *  the server accepted them, false when they were not written (the error is shown here). */
+  commit: () => Promise<boolean>;
+};
+
+/**
+ * The fields of an existing static secret (ui/design: vault/generate-secret). Every change —
+ * a new value, the default field's new name, an added field, a removed field — is a draft until
+ * the dialog's Save, which commits them all in one atomic request (POST …/fields); Cancel drops
+ * them. There is no Save per row.
+ */
 export function VaultSecretFieldsEditor({
-  secret, disabled, onBusyChange,
+  secret, disabled, onBusyChange, commitRef, onChange,
 }: {
   secret: VaultSecret;
   disabled: boolean;
   onBusyChange: (busy: boolean) => void;
+  /** Filled with this editor's commit, for the dialog's Save. */
+  commitRef: { current: VaultFieldsCommit | null };
+  /** Reports whether there are changes and whether they can be saved as they stand. */
+  onChange?: (state: { dirty: boolean; valid: boolean }) => void;
 }) {
   const { t } = useTranslation();
   const api = useApi();
@@ -69,6 +87,8 @@ export function VaultSecretFieldsEditor({
   const [newField, setNewField] = useState<string | null>(null);
   const [newValue, setNewValue] = useState('');
   const [newNameTouched, setNewNameTouched] = useState(false);
+  // Saved extra fields the user removed in this dialog; they go with the Save.
+  const [removed, setRemoved] = useState<string[]>([]);
   const [focusedName, setFocusedName] = useState<'default' | 'new' | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -236,58 +256,73 @@ export function VaultSecretFieldsEditor({
     return accepted;
   };
 
-  const saveValue = (field: string, value: string, adding = false) => {
-    // Keep this one local copy only until the write settles. Protected sealing clears the
-    // persistent input immediately through `clear`, while this copy permits exactly one
-    // re-seal if the server reports that its record mapping changed.
-    let capturedValue = value;
-    const clear = (targetField = field) => {
-      if (adding) {
-        setNewValue('');
-        setNewNameTouched(false);
-        return;
-      }
-      const next = new Map(draftsRef.current);
-      next.set(targetField, '');
-      updateDrafts(next);
-    };
-    const sealAndWrite = async (secret: VaultSecret, targetField: string, wasDefault: boolean) => {
-      const latestDefault = vaultDefaultField(secret);
-      if (!wasDefault && latestDefault === targetField) throw conflict();
-      const exists = vaultFieldNames(secret).includes(targetField);
-      if (adding ? exists : !exists) throw conflict();
-      const record = vaultRecordName(secret.name, targetField, latestDefault);
-      let cryptoFields: Omit<VaultFieldValuePayload, 'record' | 'expected_updated_at'>;
-      if (isProtected) {
-        const valueRef = { current: capturedValue };
-        const sealed = await vault.sealValue(record, 'static', { valueRef, clear });
-        cryptoFields = { sealed: sealed.envelope };
-      } else {
-        cryptoFields = {
-          blind_box: await sealBlindBox(capturedValue, await api.getVaultPubkey(), standardCreateBlindBoxContext(record)),
-        };
-      }
-      try {
-        return await api.updateVaultSecretField(secret.name, targetField, {
-          record,
-          ...cryptoFields,
-          expected_updated_at: secret.updated_at,
-        }, { handleError: false });
-      } catch (error) {
-        if (hasErrorCode(error, 'record_mismatch')) return { ok: false, code: 'record_mismatch' };
-        if (hasErrorCode(error, 'secret_conflict')) return { ok: false, code: 'secret_conflict' };
-        throw error;
-      }
+  /** Seal one value for `record`: in the sandbox for Protected (it clears the page's copy through
+   *  `clear`), as a blind box to avault for Standard. */
+  const sealFor = async (record: string, value: string, clear: () => void) => {
+    if (isProtected) {
+      const sealed = await vault.sealValue(record, 'static', { valueRef: { current: value }, clear });
+      return { sealed: sealed.envelope };
+    }
+    return { blind_box: await sealBlindBox(value, await api.getVaultPubkey(), standardCreateBlindBoxContext(record)) };
+  };
+
+  // One commit for the whole dialog: rename the default field, write every new value (under the
+  // final labels), add the new field, remove the removed ones — all or nothing. The values are
+  // captured once and kept only until the request settles, which allows exactly one re-seal if the
+  // server reports that a record's name changed meanwhile.
+  const commitAll = async (): Promise<boolean> => {
+    if (fieldsCorrupt) return false;
+    const captured = new Map<string, string>();
+    for (const [field, value] of draftsRef.current) if (value) captured.set(field, value);
+    const adding = newField !== null && newValue ? { field: newField, value: newValue } : null;
+    // The default field as the user saw it: its draft follows the default, any other draft must
+    // stay an extra field (if another write made it the default meanwhile, that is a conflict).
+    const capturedDefault = vaultDefaultField(currentRef.current);
+    const renameTo = defaultLabel !== capturedDefault ? defaultLabel : null;
+    const removing = [...removed];
+    if (!captured.size && !adding && !renameTo && !removing.length) return true;
+    const clearAll = () => {
+      updateDrafts(new Map());
+      setNewValue('');
     };
     let refetchedForRetry = false;
-    void mutate(async () => {
+    const write = async (truth: VaultSecret) => {
+      const oldDefault = vaultDefaultField(truth);
+      const finalDefault = renameTo ?? oldDefault;
+      const names = vaultFieldNames(truth);
+      const values: NonNullable<VaultFieldsBatchPayload['values']> = [];
+      const entries: Array<readonly [string, string]> = [];
+      for (const [field, value] of captured) {
+        if (field === capturedDefault) {
+          entries.push([finalDefault, value]);
+        } else {
+          if (field === oldDefault || !names.includes(field)) throw conflict();
+          entries.push([field, value]);
+        }
+      }
+      if (adding) {
+        if (names.includes(adding.field)) throw conflict();
+        entries.push([adding.field, adding.value]);
+      }
+      for (const [field, value] of entries) {
+        const record = vaultRecordName(truth.name, field, finalDefault);
+        values.push({ field, record, ...(await sealFor(record, value, clearAll)) });
+      }
       try {
-        // Read the latest truth rather than this render's: a value saved right after its
-        // field's rename must be sealed under the renamed record.
-        const latest = currentRef.current;
-        const wasDefault = field === vaultDefaultField(latest);
-        let savedField = field;
-        let result = await sealAndWrite(latest, field, wasDefault);
+        return await api.updateVaultSecretFields(truth.name, {
+          expected_updated_at: truth.updated_at,
+          ...(renameTo ? { default_field: renameTo } : {}),
+          values,
+          remove: removing,
+        }, { handleError: false });
+      } catch (writeError) {
+        if (hasErrorCode(writeError, 'record_mismatch')) return { ok: false, code: 'record_mismatch' };
+        throw writeError;
+      }
+    };
+    try {
+      return await mutate(async () => {
+        let result = await write(currentRef.current);
         if (hasErrorCode(result, 'record_mismatch')) {
           refetchedForRetry = true;
           const refreshed = await refetch();
@@ -295,39 +330,28 @@ export function VaultSecretFieldsEditor({
             setError(t('errors.secret_not_found'));
             return { ok: false, code: 'secret_not_found' };
           }
-          savedField = wasDefault ? vaultDefaultField(refreshed.entry) : field;
-          result = await sealAndWrite(refreshed.entry, savedField, wasDefault);
+          result = await write(refreshed.entry);
           if (hasErrorCode(result, 'record_mismatch')) throw conflict();
         }
         if (result.ok && result.secret) {
-          clear(savedField);
-          if (adding) setNewField(null);
+          clearAll();
+          setNewField(null);
+          setNewNameTouched(false);
+          setRemoved([]);
         }
         return result;
-      } finally {
-        capturedValue = '';
-      }
-    }, false, () => refetchedForRetry);
+      }, Boolean(renameTo), () => refetchedForRetry);
+    } finally {
+      captured.clear();
+    }
   };
 
-  // One Save per row: the default row renames (metadata only) and then writes a typed value
-  // under the renamed record; any other row writes its value.
-  const saveRow = async (field: string) => {
-    const value = draftsRef.current.get(field) ?? '';
-    if (field === defaultField && defaultLabel !== defaultField) {
-      const renamed = await mutate(
-        () => api.updateVaultSecret(current.name, { default_field: defaultLabel }, { handleError: false }),
-        true,
-      );
-      // The rename carried the typed value over to the new label (reconcileDrafts).
-      if (renamed && value) saveValue(vaultDefaultField(currentRef.current), value);
-      return;
-    }
-    if (value) saveValue(field, value);
-  };
-  const removeSavedField = async (field: string) => {
+  const removeSavedField = (field: string) => {
     if (fieldsCorrupt) return;
-    await mutate(() => api.deleteVaultSecretField(current.name, field, { expected_updated_at: current.updated_at }));
+    setRemoved((current) => (current.includes(field) ? current : [...current, field]));
+    const next = new Map(draftsRef.current);
+    next.delete(field);
+    updateDrafts(next);
   };
   const discardNewField = () => {
     setNewField(null);
@@ -339,10 +363,24 @@ export function VaultSecretFieldsEditor({
   const newIssue = newField === null ? null : vaultFieldNameIssue(newField, fields);
   const focusedIssue = focusedName === 'default' ? labelIssue : focusedName === 'new' ? newIssue : null;
   const showNameRule = focusedName !== null && focusedIssue !== 'nameInvalid' && focusedIssue !== 'nameTaken';
+  const renaming = defaultLabel !== defaultField;
+  const hasValues = [...drafts.values()].some(Boolean);
+  const dirty = hasValues || renaming || removed.length > 0 || (newField !== null && (Boolean(newValue) || Boolean(newField)));
+  const valid = !fieldsCorrupt
+    && (!renaming || labelIssue === null)
+    && (newField === null || (newIssue === null && Boolean(newValue)))
+    && (!(hasValues || (newField !== null && newValue)) || canWriteValue);
+  // The latest commit for the dialog's Save, refreshed after every render.
+  useLayoutEffect(() => {
+    commitRef.current = { dirty: () => dirty, commit: commitAll };
+  });
+  useEffect(() => {
+    onChange?.({ dirty, valid });
+  }, [onChange, dirty, valid]);
 
   return (
     <div className="flex flex-col gap-2" onKeyDown={(event) => {
-      // These inputs save through their field buttons, not the enclosing metadata form.
+      // Enter in a field input doesn't submit the dialog; its Save button does.
       if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.preventDefault();
     }}>
       <VaultFieldsHeader count={fields.length + (newField === null ? 0 : 1)} note={t('vaults.fields.editHelp')} />
@@ -356,10 +394,10 @@ export function VaultSecretFieldsEditor({
         onAdd={() => setNewField('')}
         addDisabled={fieldMutationLocked || newField !== null || fields.length >= MAX_VAULT_FIELDS}
       >
-        {fields.map((field) => {
+        {fields.filter((field) => !removed.includes(field)).map((field) => {
           const isDefault = field === defaultField;
           const draft = drafts.get(field) ?? '';
-          const renaming = isDefault && defaultLabel !== defaultField;
+          const renamingRow = isDefault && renaming;
           return (
             <VaultFieldRow
               key={field}
@@ -386,20 +424,13 @@ export function VaultSecretFieldsEditor({
                   updateDrafts(nextDrafts);
                 },
               }}
-              action={draft || renaming ? (
-                <Button type="button" size="xs"
-                  aria-label={t('vaults.fields.saveNamed', { field })}
-                  disabled={fieldMutationLocked || (renaming && labelIssue !== null) || (Boolean(draft) && !canWriteValue)}
-                  onClick={() => void saveRow(field)}>
-                  {t('vaults.fields.save')}
-                </Button>
-              ) : null}
               remove={isDefault ? undefined : {
                 label: t('vaults.fields.remove', { field }),
                 confirm: <VaultFieldRemoveConfirm field={field} revokesGrants />,
+                // Staged: the field goes with the dialog's Save, not now.
                 onRemove: () => removeSavedField(field),
               }}
-              issue={isDefault && renaming ? labelIssue : null}
+              issue={renamingRow ? labelIssue : null}
               disabled={fieldMutationLocked}
             />
           );
@@ -426,19 +457,20 @@ export function VaultSecretFieldsEditor({
               placeholder: t('vaults.dialog.valuePlaceholder'),
               onChange: setNewValue,
             }}
-            action={(
-              <Button type="button" size="xs" aria-label={t('vaults.fields.saveNew')}
-                disabled={fieldMutationLocked || !canWriteValue || !newValue || newIssue !== null}
-                onClick={() => saveValue(newField, newValue, true)}>
-                {t('vaults.fields.save')}
-              </Button>
-            )}
             remove={{ label: t('vaults.fields.discardNew'), onRemove: discardNewField }}
             issue={newIssue === 'nameRequired' && !newNameTouched && !newValue ? null : newIssue}
             disabled={fieldMutationLocked}
           />
         )}
       </VaultFieldList>
+      {removed.length > 0 ? (
+        <p role="status" className="flex flex-wrap items-center gap-x-2 text-xs text-muted">
+          {t('vaults.fields.removeOnSave', { fields: removed.join(', ') })}
+          <Button type="button" variant="ghost" size="xs" className="h-6 px-1.5" disabled={fieldMutationLocked} onClick={() => setRemoved([])}>
+            {t('vaults.fields.undoRemove')}
+          </Button>
+        </p>
+      ) : null}
       {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
       <VaultFieldReferences secretName={current.name} fields={fields} defaultField={defaultField} />
       {isProtected && <VaultProtectedUnlock warnDraftDiscard vault={vault} secretName={current.name}

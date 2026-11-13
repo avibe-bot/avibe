@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
   listSkills: vi.fn(async () => ({ skills: [] })),
   createVaultSecret: vi.fn(),
   updateVaultSecret: vi.fn(async () => ({ ok: true })),
+  updateVaultSecretFields: vi.fn(),
   createVaultSigningPolicyChallenge: vi.fn(),
   completeVaultSigningPolicyDowngrade: vi.fn(),
   getVaultPubkey: vi.fn(async () => ({ public_key: 'public', fingerprint: 'fingerprint' })),
@@ -654,5 +655,51 @@ describe('turning ask-before-signing off with a Passkey', () => {
     expect(askSwitch().getAttribute('aria-checked')).toBe('true');
     expect(screen.getByText(en.vaults.askOff.offHintEdit)).toBeTruthy();
     expect(api.completeVaultSigningPolicyDowngrade).not.toHaveBeenCalled();
+  });
+});
+
+describe('the edit dialog saves its fields with its one Save', () => {
+  const login: VaultSecret = {
+    name: 'LOGIN', kind: 'static', protection: 'standard', fields: ['password', 'username'], default_field: 'password',
+    tags: [], source: 'user', policy: {}, last_used_at: null, use_count: 0, created_at: 'c', updated_at: 'version-1',
+  } as VaultSecret;
+  beforeEach(() => {
+    api.updateVaultSecret.mockClear();
+    api.updateVaultSecretFields.mockReset();
+    api.listVaultSecrets.mockResolvedValue({ secrets: [login] } as never);
+  });
+
+  it('commits the fields first, then the metadata, and closes', async () => {
+    api.updateVaultSecretFields.mockResolvedValue({ ok: true, secret: { ...login, updated_at: 'version-2' } });
+    const onSaved = vi.fn();
+    render(form(<VaultSecretForm editSecret={login} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={onSaved} />));
+    expect(screen.queryByRole('button', { name: 'Save username' })).toBeNull();
+    change('Value for username', 'new-user');
+    save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('LOGIN'));
+    expect(api.updateVaultSecretFields).toHaveBeenCalledOnce();
+    expect(api.updateVaultSecretFields.mock.invocationCallOrder[0]).toBeLessThan(api.updateVaultSecret.mock.invocationCallOrder[0]);
+  });
+
+  it('keeps the dialog open and sends no metadata when the fields are not written', async () => {
+    api.updateVaultSecretFields.mockResolvedValue({ ok: false, code: 'field_not_found' });
+    const onSaved = vi.fn();
+    render(form(<VaultSecretForm editSecret={login} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={onSaved} />));
+    change('Value for username', 'new-user');
+    save();
+    await waitFor(() => expect(api.updateVaultSecretFields).toHaveBeenCalledOnce());
+    await screen.findByText(en.errors.field_not_found);
+    expect(api.updateVaultSecret).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it('cannot be saved while a field change is invalid, and Cancel writes nothing', async () => {
+    const onCancel = vi.fn();
+    render(form(<VaultSecretForm editSecret={login} onCancel={onCancel} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    change('Default field name', 'username');
+    await waitFor(() => expect((screen.getByRole('button', { name: en.vaults.dialog.save }) as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.cancel }));
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
   });
 });
