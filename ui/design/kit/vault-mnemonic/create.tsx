@@ -32,7 +32,7 @@ export function SourceCards({ value }: { value: Source }) {
   );
 }
 
-export function Footer({ back, primary, disabled = false, primaryIcon }: { back?: string; primary: string; disabled?: boolean; primaryIcon?: React.ReactNode }) {
+function Footer({ back, primary, disabled = false, primaryIcon }: { back?: string; primary: string; disabled?: boolean; primaryIcon?: React.ReactNode }) {
   const { t } = useTranslation();
   return (
     <div className="mt-1 flex items-center justify-end gap-2">
