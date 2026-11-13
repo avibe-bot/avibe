@@ -1210,7 +1210,7 @@ async fn a_failed_unread_read_keeps_the_last_total_until_the_next_frame() {
 
 fn post_session(sink: &FakeSink, session: &str) -> Arc<NotificationReceipt> {
     let receipt = sink.registry.lock().unwrap().reserve(Some(session.into())).unwrap();
-    receipt.confirm_workbench_session();
+    receipt.confirm_workbench_session(true);
     sink.deliver(
         NotificationIntent::RunSucceeded,
         None,
@@ -1268,6 +1268,36 @@ async fn stale_generation_failed_reads_and_old_server_maps_never_withdraw() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn failed_notifications_require_unread_result_evidence_before_withdrawal() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    transport.details.lock().unwrap().insert(
+        "run".into(),
+        RunDetail {
+            session_platform: Some("avibe".into()),
+            ..RunDetail::default()
+        },
+    );
+    *transport.unread.lock().unwrap() = Some(0);
+    *transport.unread_by_session.lock().unwrap() = Some(HashMap::new());
+    transport.stream(
+        [frame(
+            "runs.updated",
+            json!({"run_id":"run", "session_id":"a", "run_type":"scheduled", "status":"failed"}),
+        )],
+        false,
+    );
+    let task = spawn(transport, sink.clone());
+    settle().await;
+
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::RunFailed]);
+    let receipt = sink.receipts.lock().unwrap()[0].clone();
+    sink.withdraw(vec![receipt.clone()], HashMap::new(), 0);
+    assert!(sink.withdrawn.lock().unwrap().is_empty());
+    assert!(!receipt.retired());
+    task.abort();
+}
 #[tokio::test(start_paused = true)]
 async fn remote_read_sse_withdraws_even_when_focused_or_notifications_disabled() {
     let transport = Arc::new(FakeTransport::default());

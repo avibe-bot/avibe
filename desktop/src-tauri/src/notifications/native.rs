@@ -260,7 +260,7 @@ mod lifecycle_tests {
 
     fn posted(registry: &mut NotificationRegistry, session: &str) -> Arc<NotificationReceipt> {
         let receipt = registry.reserve(Some(session.into())).unwrap();
-        receipt.confirm_workbench_session();
+        receipt.confirm_workbench_session(true);
         receipt.posted();
         receipt
     }

@@ -17,6 +17,7 @@ pub struct NotificationReceipt {
     session_id: Option<String>,
     retired: AtomicBool,
     readable: AtomicBool,
+    read_reconciliation_eligible: AtomicBool,
     posted_at: OnceLock<Instant>,
 }
 
@@ -33,8 +34,10 @@ impl NotificationReceipt {
         self.session_id.as_deref()
     }
 
-    pub fn confirm_workbench_session(&self) {
+    pub fn confirm_workbench_session(&self, read_reconciliation_eligible: bool) {
         self.readable.store(true, Ordering::SeqCst);
+        self.read_reconciliation_eligible
+            .store(read_reconciliation_eligible, Ordering::SeqCst);
     }
 
     pub fn readable(&self) -> bool {
@@ -42,7 +45,9 @@ impl NotificationReceipt {
     }
 
     pub fn retired(&self) -> bool {
-        self.readable() && self.retired.load(Ordering::SeqCst)
+        self.readable()
+            && self.read_reconciliation_eligible.load(Ordering::SeqCst)
+            && self.retired.load(Ordering::SeqCst)
     }
 
     pub fn posted(&self) {
@@ -86,6 +91,7 @@ impl NotificationRegistry {
             session_id: session_id.filter(|id| !id.is_empty()),
             retired: AtomicBool::new(false),
             readable: AtomicBool::new(false),
+            read_reconciliation_eligible: AtomicBool::new(false),
             posted_at: OnceLock::new(),
         });
         if receipt.session_id.is_some() {
@@ -148,7 +154,7 @@ mod tests {
 
     fn posted(registry: &mut NotificationRegistry, session: &str) -> Arc<NotificationReceipt> {
         let receipt = registry.reserve(Some(session.into())).unwrap();
-        receipt.confirm_workbench_session();
+        receipt.confirm_workbench_session(true);
         receipt.posted();
         receipt
     }
@@ -193,11 +199,11 @@ mod tests {
         let snapshot = registry.snapshot();
         assert!(registry.reconcile(snapshot, &HashMap::new()).is_empty());
         assert!(!pending.retired()); // source platform still unknown
-        pending.confirm_workbench_session();
+        pending.confirm_workbench_session(true);
         assert!(pending.retired()); // late detail/queued delivery cannot resurrect it
         assert!(!im.retired()); // the Avibe-only map says nothing about IM channels
         let newer = registry.reserve(Some("a".into())).unwrap();
-        newer.confirm_workbench_session();
+        newer.confirm_workbench_session(true);
         assert!(!newer.retired());
     }
 
