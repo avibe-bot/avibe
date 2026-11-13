@@ -100,8 +100,8 @@ type FieldDraft = {
   valueTouched?: boolean;
   /** The generator's settings for this row, once it has been used. */
   recipe?: GenerateRecipe;
-  /** The value the generator last put here: while `value` equals it, the row is marked generated. */
-  generated?: string;
+  /** The generator filled this row and it hasn't been typed over. A flag, never a copy of the value. */
+  generated?: boolean;
 };
 
 let nextFieldDraftId = 0;
@@ -292,16 +292,16 @@ export const VaultSecretForm: React.FC<{
   const [alwaysAsk, setAlwaysAsk] = useState(false);
   const [showValue, setShowValue] = useState(false);
   // The generator (ui/design: vault/generate-secret). An Agent's request may preset it; the preset
-  // only sets the options, never a value. `generatedValue` is what it last put in the field: while
-  // the field still holds exactly that, the field is marked generated. Both tiers alike: the value
-  // is in this form like a typed one and is sealed only at Save.
+  // only sets the options, never a value. `valueFromGenerator` marks the field as generated until it
+  // is typed over; it holds no copy of the value, so clearing the field (as sealing does) clears
+  // everything. Both tiers alike: the value is in this form like a typed one, sealed only at Save.
   const specRecipe = useMemo(
     () => recipeFromSpec((requestSpec as { generate?: unknown } | null | undefined)?.generate),
     [requestSpec],
   );
   const specRecipeField = (requestSpec as { generate?: { field?: unknown } } | null | undefined)?.generate?.field;
   const [recipe, setRecipe] = useState<GenerateRecipe>(specRecipe ?? DEFAULT_PASSWORD_RECIPE);
-  const [generatedValue, setGeneratedValue] = useState<string | null>(null);
+  const [valueFromGenerator, setValueFromGenerator] = useState(false);
   // Which generator popup is open: the single value ('value') or a field row (its id).
   const [generatorOpen, setGeneratorOpen] = useState<'value' | number | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -1089,7 +1089,7 @@ export const VaultSecretForm: React.FC<{
     }
   };
 
-  const valueGenerated = Boolean(value) && value === generatedValue;
+  const valueGenerated = valueFromGenerator && Boolean(value);
   const valueField = (
     <div className="flex flex-col gap-2">
       {/* Protected static values are typed and handed to the sandbox as text (byte-safe UTF-8).
@@ -1116,7 +1116,7 @@ export const VaultSecretForm: React.FC<{
               recipe={recipe}
               onRecipeChange={setRecipe}
               onValue={(next) => {
-                setGeneratedValue(next);
+                setValueFromGenerator(true);
                 setStaticValue(next);
               }}
               open={generatorOpen === 'value'}
@@ -1129,7 +1129,10 @@ export const VaultSecretForm: React.FC<{
               {showValue && generatorOpen !== 'value' ? (
                 <Textarea
                   value={value}
-                  onChange={(event) => setStaticValue(event.target.value)}
+                  onChange={(event) => {
+                    setValueFromGenerator(false);
+                    setStaticValue(event.target.value);
+                  }}
                   placeholder={t('vaults.dialog.valuePlaceholder')}
                   autoFocus={isProvision}
                   required
@@ -1142,7 +1145,10 @@ export const VaultSecretForm: React.FC<{
                   // In clear while the generator is open, so each change shows as it happens.
                   type={generatorOpen === 'value' ? 'text' : 'password'}
                   value={value}
-                  onChange={(event) => setStaticValue(event.target.value)}
+                  onChange={(event) => {
+                    setValueFromGenerator(false);
+                    setStaticValue(event.target.value);
+                  }}
                   placeholder={t('vaults.dialog.valuePlaceholder')}
                   autoFocus={isProvision}
                   required
@@ -1215,7 +1221,7 @@ export const VaultSecretForm: React.FC<{
   // The single value moves into the default row, keeping its generated mark and settings.
   const carriedValue = (field: string): FieldDraft => ({
     ...fieldDraft(field, value),
-    ...(valueGenerated ? { generated: value, recipe } : {}),
+    ...(valueGenerated ? { generated: true, recipe } : {}),
   });
   const leaveSingleValue = () => {
     setStaticValue('');
@@ -1284,18 +1290,19 @@ export const VaultSecretForm: React.FC<{
                 value: row.value,
                 label: t('vaults.fields.value', { field: label }),
                 placeholder: row.name ? t('vaults.fields.value', { field: row.name }) : t('vaults.dialog.valuePlaceholder'),
-                onChange: (next) => patchFieldRow(row.id, { value: next }),
+                onChange: (next) => patchFieldRow(row.id, { value: next, generated: false }),
                 onBlur: () => patchFieldRow(row.id, { valueTouched: true }),
                 autoFocus: focusField?.id === row.id && focusField.part === 'value',
                 forceReveal: generatorOpen === row.id,
-                generated: Boolean(row.value) && row.value === row.generated,
+                generated: Boolean(row.value && row.generated),
               }}
-              note={row.value && row.value === row.generated && generatorOpen !== row.id ? <VaultGeneratedBadge /> : undefined}
+              note={row.value && row.generated && generatorOpen !== row.id ? <VaultGeneratedBadge /> : undefined}
               wrapValue={(input) => (
                 <VaultGenerateControl
                   recipe={row.recipe ?? rowPreset(row, index)}
                   onRecipeChange={(next) => patchFieldRow(row.id, { recipe: next })}
-                  onValue={(next) => patchFieldRow(row.id, { recipe: row.recipe ?? rowPreset(row, index), value: next, generated: next, valueTouched: true })}
+                  // Only the value: the settings were already set by onRecipeChange in the same tick.
+                  onValue={(next) => patchFieldRow(row.id, { value: next, generated: true, valueTouched: true })}
                   open={generatorOpen === row.id}
                   onOpenChange={(open) => setGeneratorOpen(open ? row.id : null)}
                   triggerOutside

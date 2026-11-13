@@ -179,3 +179,42 @@ it.each(['en', 'zh'] as const)('names the control in %s without English leaking 
   if (language === 'zh') expect(screen.queryByText(/characters|Regenerate/)).toBeNull();
   await i18n.changeLanguage('en');
 });
+
+it('keeps a field row’s new settings when the generator fills it (Hex stays Hex on Regenerate)', () => {
+  render(form(<VaultSecretForm fixedName="APP_ADMIN" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.add }));
+  const rowButtons = screen.getAllByRole('button', { name: en.vaults.generate.password });
+  fireEvent.click(rowButtons[rowButtons.length - 1]);
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.generate.typeHex }));
+  const row = () => screen.getByLabelText('Value for 2') as HTMLInputElement;
+  expect(row().value).toMatch(/^[0-9a-f]{64}$/);
+  expect((screen.getByRole('radio', { name: en.vaults.generate.typeHex }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.generate.regenerate }));
+  expect(row().value).toMatch(/^[0-9a-f]{64}$/);
+});
+
+it('lets the length be typed digit by digit in the same box', () => {
+  render(form(<VaultSecretForm fixedName="DB_PASSWORD" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  openGenerator();
+  const box = screen.getByRole('textbox', { name: en.vaults.generate.length }) as HTMLInputElement;
+  box.focus();
+  for (const text of ['', '1', '12', '128']) fireEvent.change(box, { target: { value: text } });
+  expect(screen.getByRole('textbox', { name: en.vaults.generate.length })).toBe(box);
+  expect(box.value).toBe('128');
+  expect(valueInput().value).toHaveLength(128);
+});
+
+it('keeps no copy of a protected generated value once sealing clears the field, even when saving fails', async () => {
+  vault.sealValue.mockImplementation(async (_name: string, _kind: string, value: { clear: () => void }) => {
+    value.clear();
+    throw Object.assign(new Error('boom'), { code: 'sandbox_reset' });
+  });
+  render(form(<VaultSecretForm fixedName="DB_PASSWORD" defaultProtection="protected" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  openGenerator();
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+  await waitFor(() => expect(submit().disabled).toBe(false));
+  await act(async () => { fireEvent.click(submit()); });
+  await waitFor(() => expect(vault.sealValue).toHaveBeenCalled());
+  expect(valueInput().value).toBe('');
+  expect(screen.queryByText(en.vaults.generate.generated)).toBeNull();
+});

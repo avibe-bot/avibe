@@ -48,13 +48,15 @@ function Row({ label, hint, children }: { label: React.ReactNode; hint?: React.R
 }
 
 /** The length, exact by keyboard: a number box that applies whole numbers within the limits and
- *  snaps back to the current size when left out of range. */
+ *  shows the current size again when left out of range. While the user is typing it keeps their
+ *  text (the same element throughout, so focus stays); otherwise it shows the size, so the slider
+ *  moves it. */
 function SizeBox({ recipe, onChange }: { recipe: GenerateRecipe; onChange: (next: GenerateRecipe) => void }) {
   const { t } = useTranslation();
   const size = recipeSize(recipe);
   const { min, max } = sizeLimits(recipe.type);
-  // Keyed by the size (see the caller), so a slider move starts it afresh with the new number.
-  const [text, setText] = React.useState(String(size));
+  const [draft, setDraft] = React.useState<string | null>(null);
+  const text = draft ?? String(size);
   const parsed = Number(text);
   const inRange = /^\d+$/.test(text) && parsed >= min && parsed <= max;
   return (
@@ -65,11 +67,11 @@ function SizeBox({ recipe, onChange }: { recipe: GenerateRecipe; onChange: (next
       aria-invalid={!inRange || undefined}
       onChange={(event) => {
         const next = event.target.value.replace(/[^\d]/g, '').slice(0, 3);
-        setText(next);
+        setDraft(next);
         const n = Number(next);
         if (/^\d+$/.test(next) && n >= min && n <= max && n !== size) onChange(withSize(recipe, n));
       }}
-      onBlur={() => setText(String(size))}
+      onBlur={() => setDraft(null)}
       className={cn('h-8 w-16 px-2 text-center font-mono text-xs', !inRange && 'border-destructive/50')}
     />
   );
@@ -121,7 +123,7 @@ export function VaultGeneratePanel({ recipe, onChange, onRegenerate, suggested =
       <div className="flex flex-col border-t border-border pt-2">
         <div className="flex items-center gap-2">
           <span className="flex-1 text-[13px] text-foreground">{t('vaults.generate.length')}</span>
-          <SizeBox key={`${recipe.type}:${size}`} recipe={recipe} onChange={onChange} />
+          <SizeBox recipe={recipe} onChange={onChange} />
           <span className="min-w-[4.5rem] text-[12px] text-muted">
             {recipe.type === 'password' ? t('vaults.generate.unitChars') : t('vaults.generate.unitBytes', { chars: outputLength(recipe) })}
           </span>
