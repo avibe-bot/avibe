@@ -130,9 +130,9 @@ jobs:
               -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
               -parallel-testing-enabled NO \
               CODE_SIGNING_ALLOWED=NO \
-              -only-testing:AvibeTests/DirectPathAppTests/testAccountCoversTheRuntimeAndReturnsToItWhileAPushRequestRuns \\
-              -only-testing:AvibeTests/MobileOnboardingTests/testTheAccountPageReadsTheSessionWhileAPushRequestRuns \\
-              -only-testing:AvibeTests/MobileOnboardingTests/testInstancesListTheCurrentThenTheRecentlyOpenedThenAvibeBotsOrder \\
+              -only-testing:AvibeTests/DirectPathAppTests/testAccountCoversTheRuntimeAndReturnsToItWhileAPushRequestRuns \
+              -only-testing:AvibeTests/MobileOnboardingTests/testTheAccountPageReadsTheSessionWhileAPushRequestRuns \
+              -only-testing:AvibeTests/MobileOnboardingTests/testInstancesListTheCurrentThenTheRecentlyOpenedThenAvibeBotsOrder \
               -only-testing:AvibeTests/MobileOnboardingTests/testAnEdgeSwipePressesTheShownBackAndNothingWithoutOne \
               test 2>&1 | grep -E ": error:|Test Case .*(passed|failed)|\*\* TEST" | sed "s/^/[$variant] /"
           }
