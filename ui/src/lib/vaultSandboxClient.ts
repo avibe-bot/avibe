@@ -47,6 +47,12 @@ import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
 import { buildVaultConfirmSurface, type VaultConfirmSurface } from './vaultConfirmSurface';
+import {
+  parsePolicyDowngradeResult,
+  POLICY_DOWNGRADE_OP,
+  type PolicyDowngradeContext,
+  type PolicyDowngradeResult,
+} from './vaultSigningPolicy';
 
 const CHANNEL = 'avibe.vault.crypto';
 const VERSION = 2;
@@ -61,7 +67,10 @@ const INTERACTIVE_TIMEOUT_MS = 5 * 60_000;
 // top-level sandbox window and does not trust parent hit-test claims.
 const SURFACE_REFRESH_INTERVAL_MS = 10_000;
 
-type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | 'handshake';
+// Ops a newer pinned build may add. Each is checked against the build's capabilities when used,
+// never added to REQUIRED_OPS: an older pin that lacks one must keep unlock/sign/reveal working.
+type OptionalSandboxOp = typeof POLICY_DOWNGRADE_OP;
+type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | OptionalSandboxOp | 'handshake';
 type ParentOnlySandboxOp = 'set-appearance';
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -849,6 +858,35 @@ export class VaultSandboxClient {
       interactive: true,
       authorizationWindow,
     });
+  }
+
+  /** Whether the pinned build offers an optional operation (from its `ready` capabilities). */
+  async supports(op: OptionalSandboxOp): Promise<boolean> {
+    const ready = await this.readyPromise;
+    return Array.isArray(ready.capabilities?.operations) && ready.capabilities.operations.includes(op);
+  }
+
+  /**
+   * Turn ask-before-signing off (contract v1.1 §B): the sandbox shows the server's exact `context`
+   * and returns a fresh WebAuthn assertion over it. Only when the pinned build lists the operation;
+   * otherwise `policy_downgrade_unavailable`, with no other RPC tried instead. The answer must be
+   * exactly `{challengeId, assertion}` for this context's challenge.
+   */
+  async authorizeSigningPolicyDowngrade(
+    payload: { context: PolicyDowngradeContext },
+    authorizationWindow?: string,
+  ): Promise<PolicyDowngradeResult> {
+    if (!(await this.supports(POLICY_DOWNGRADE_OP))) {
+      throw new VaultSandboxError('policy_downgrade_unavailable', 'This sandbox build cannot authorize turning confirmation off');
+    }
+    const result = await this.request<unknown>(POLICY_DOWNGRADE_OP, { context: payload.context }, {
+      timeoutMs: INTERACTIVE_TIMEOUT_MS,
+      interactive: true,
+      authorizationWindow,
+    });
+    const parsed = parsePolicyDowngradeResult(result, payload.context);
+    if (!parsed) throw new VaultSandboxError('policy_result_invalid', 'Sandbox returned an unexpected policy authorization');
+    return parsed;
   }
 
   /**
