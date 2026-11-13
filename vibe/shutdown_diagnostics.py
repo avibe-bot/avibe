@@ -9,10 +9,11 @@ One private file per shutdown lives beside the application logs. The normal
 phase writer owns it, outside logging's handlers/locks and their shutdown
 lifecycle. The signal handler and ordinary phase producers only enqueue small
 records: even a blocked diagnostic destination must not delay service cleanup.
-Exit-boundary markers use a separate synchronous append-and-flush path so they
-remain visible after the queue writer or logging listener has stopped. Fast exits
-can lose the last queued records; these are observations, not leases or
-completion acknowledgements. No source text, locals, arguments or environment
+Exit-boundary markers synchronously attempt a direct append-and-flush through a
+short-lived daemon I/O helper with a bounded wait, so they remain visible after
+the queue writer or logging listener has stopped without making a blocked
+filesystem an owner of process lifetime. Fast exits can lose the last queued
+records; these are observations, not leases or completion acknowledgements. No source text, locals, arguments or environment
 are included in a snapshot.
 """
 from __future__ import annotations
@@ -32,6 +33,7 @@ from pathlib import Path
 # One second before runtime.stop_service's unchanged five-second timeout.
 STACK_DELAY_SECONDS = 4.0
 _PRIVATE_OPEN = os.open
+_SYNC_PHASE_WRITE_TIMEOUT_SECONDS = 0.1
 _FRAMES_PER_THREAD = 30
 
 
@@ -71,6 +73,19 @@ def _wrap_threading_exit_hook(callback: Callable[[], object], name: str) -> Call
     return wrapped
 
 
+def _callback_targets(callback: object, target: object) -> bool:
+    if getattr(callback, "func", None) is target:
+        return True
+    closure = getattr(callback, "__closure__", None) or ()
+    for cell in closure:
+        try:
+            if cell.cell_contents is target:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def install_executor_exit_diagnostics() -> None:
     """Wrap CPython's pre-thread-shutdown executor joins, when available."""
 
@@ -95,8 +110,7 @@ def install_executor_exit_diagnostics() -> None:
         for index, callback in enumerate(callbacks):
             if getattr(callback, "_avibe_shutdown_diagnostic", False):
                 continue
-            closure = getattr(callback, "__closure__", None) or ()
-            if not any(cell.cell_contents is target for cell in closure):
+            if not _callback_targets(callback, target):
                 continue
             wrapped = _wrap_threading_exit_hook(callback, label)
             wrapped._avibe_shutdown_diagnostic = True  # type: ignore[attr-defined]
@@ -134,17 +148,27 @@ class ShutdownDiagnostics:
             self._records.put((time.time(), time.monotonic(), name))
 
     def phase_sync(self, name: str) -> None:
-        """Append one phase directly and flush it without using logging."""
+        """Synchronously attempt one bounded append-and-flush without owning exit."""
         if self._started_at is None or self.path is None:
             return
         line = self._header(time.time(), time.monotonic(), name)
+
+        def write() -> None:
+            try:
+                fd = _PRIVATE_OPEN(self.path, os.O_WRONLY | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8", errors="backslashreplace", buffering=1) as sink:
+                    sink.write(line)
+                    sink.flush()
+            except Exception:
+                # Exit diagnostics must never own process lifetime.
+                return
+
         try:
-            fd = _PRIVATE_OPEN(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(fd, "a", encoding="utf-8", errors="backslashreplace", buffering=1) as sink:
-                sink.write(line)
-                sink.flush()
+            writer = threading.Thread(target=write, name="shutdown-diagnostics-phase", daemon=True)
+            writer.start()
+            writer.join(_SYNC_PHASE_WRITE_TIMEOUT_SECONDS)
         except Exception:
-            # Exit diagnostics must never own process lifetime.
+            # Thread creation/finalization can be unavailable during interpreter exit.
             return
 
     def _run(self) -> None:

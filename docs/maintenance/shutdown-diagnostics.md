@@ -14,9 +14,10 @@ reports its destination in the application log. The diagnostic writer creates
 one private, exclusively created `logs/shutdown-<pid>-<time_ns>.log` under the
 configured Avibe home. It does not reuse an existing file or a logging handler.
 Ordinary phase producers enqueue small records to the daemon writer; exit-boundary
-markers append and flush directly to the private sink so they remain visible
-after the queue writer or logging listener has stopped. Failure or a blocked
-destination cannot hold up service shutdown.
+markers synchronously attempt a direct append-and-flush through a short-lived
+daemon I/O helper with a bounded wait, so they remain visible after the queue
+writer or logging listener has stopped without making a blocked diagnostic sink
+an owner of service shutdown.
 
 The file records UTC timestamps, PID and milliseconds since the first signal. The
 normal cleanup phases are:
@@ -37,12 +38,14 @@ executor joins when the interpreter exposes those hooks:
 - `thread_executor_join_start` / `thread_executor_join_return`
 - `process_executor_join_start` / `process_executor_join_return`
 
-These markers are written and flushed directly to the private sink rather than
-through the logging listener or the diagnostic queue. Because ordinary phase
-records are queued while exit markers are synchronous, compare their
-`elapsed_ms` values rather than assuming file order. A missing return marker
-therefore identifies the hook/join in progress when the supervisor escalates;
-it is still observation, not a new shutdown lease or timeout.
+These markers synchronously attempt a direct append and flush, but the I/O
+attempt itself is bounded and runs on a daemon helper. If the sink is not ready,
+blocked, or fails, the marker may be missing; it cannot hold the wrapped cleanup
+hook or executor join open. Because ordinary phase records are queued while exit
+markers are synchronous, compare their `elapsed_ms` values rather than assuming
+file order. A missing return marker therefore identifies the hook/join in
+progress when the supervisor escalates; it is still observation, not a new
+shutdown lease or timeout.
 
 After four seconds, if the process is still alive, the same daemon writes one
 `thread_snapshot`: all currently observed Python thread IDs/names and up to
