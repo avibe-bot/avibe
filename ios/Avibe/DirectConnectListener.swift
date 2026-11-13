@@ -362,7 +362,7 @@ actor DirectConnectListener {
     private let limits: DirectConnectLimits
     private let planner: DirectConnectPlanner
     /// Called with whether a route had been published to this listener
-    /// before its socket failed (`DirectSocketHealth`).
+    /// before its socket failed, as `lifecycle` decided.
     private let onListenerFailure: @Sendable (_ routed: Bool) -> Void
     private let queue = DispatchQueue(label: "bot.avibe.ios.direct-connect")
     /// Made once per listener. Only this listener's accept loop answers an
@@ -371,7 +371,7 @@ actor DirectConnectListener {
     /// Whether the current socket is serving, readable at once from any
     /// thread: its failure is recorded where Network reports it, before the
     /// failure callback reaches anyone.
-    let health = DirectSocketHealth()
+    let lifecycle = DirectListenerLifecycle()
     private var listener: NWListener?
     private var allowedHosts: Set<String> = []
     private var relays: [UUID: Relay] = [:]
@@ -381,9 +381,6 @@ actor DirectConnectListener {
     /// The one connection beyond the limit, kept for the ownership check.
     /// Recorded from admission until its task has closed its connection.
     private var spare: (id: UUID, task: Task<Void, Never>)?
-    /// The bind whose socket admits connections; `nil` once it began to
-    /// close.
-    private var acceptingGeneration: Int?
     /// How long the spare connection waits for a request head. Far shorter
     /// than an ownership check's window, which retries: a slow or
     /// incomplete request cannot hold the spare through a check.
@@ -392,8 +389,6 @@ actor DirectConnectListener {
     private var retiredGeneration = Int.min
     private var retiredScope = DirectPlanScope(selection: .min, accountEpoch: .min)
     private var pendingBind: DirectOnceAnswer<UInt16>?
-    /// Advances with every bind.
-    private var bindGeneration = 0
 
     init(
         limits: DirectConnectLimits = .standard,
@@ -426,6 +421,13 @@ actor DirectConnectListener {
         guard !isStopped, listener == nil else {
             throw CancellationError()
         }
+        // Each bind has its own generation: a failure reported by an
+        // earlier socket, or a connection it accepted, is recognised as
+        // stale by `lifecycle`.
+        guard let generation = lifecycle.beginBind() else {
+            throw CancellationError()
+        }
+        let lifecycle = lifecycle
         let endpointPort: NWEndpoint.Port
         if let requested {
             guard let exact = NWEndpoint.Port(rawValue: requested) else {
@@ -445,18 +447,17 @@ actor DirectConnectListener {
         // passing it to `NWListener` as well fails with EINVAL ("Local
         // endpoint has port set, cannot override").
         let listener: NWListener
-        if requested == nil {
-            listener = try NWListener(using: parameters, on: .any)
-        } else {
-            listener = try NWListener(using: parameters)
+        do {
+            if requested == nil {
+                listener = try NWListener(using: parameters, on: .any)
+            } else {
+                listener = try NWListener(using: parameters)
+            }
+        } catch {
+            _ = lifecycle.bindFailed(generation)
+            throw error
         }
         self.listener = listener
-        // Each bind has its own generation, so a failure reported by an
-        // earlier socket of this actor is recognised as stale, and so is a
-        // connection that socket accepted after it began closing.
-        bindGeneration += 1
-        let generation = bindGeneration
-        acceptingGeneration = generation
         listener.newConnectionHandler = { [weak self, queue] connection in
             guard let self else {
                 connection.cancel()
@@ -472,7 +473,6 @@ actor DirectConnectListener {
                 await self.accept(connection, bindGeneration: generation)
             }
         }
-        let health = health
         // Resolved by the socket's state, by cancellation of this task, or
         // by `closeListeningSocket()` and `stop()`, which replace the state
         // handler: a pending bind always returns.
@@ -484,14 +484,18 @@ actor DirectConnectListener {
                 // From here on, a state change is the socket failing.
                 listener?.stateUpdateHandler = { [weak self] state in
                     if case .failed = state {
-                        let routed = health.failed(generation: generation)
+                        // Decided here, on Network's queue, before anyone
+                        // hears of it.
+                        let failure = lifecycle.socketFailed(generation)
+                        guard failure != .none else {
+                            return
+                        }
                         Task {
-                            await self?.socketDidFail(bindGeneration: generation, routed: routed)
+                            await self?.socketDidFail(routed: failure == .fault)
                         }
                     }
                 }
-                if let port = listener?.port?.rawValue {
-                    health.serving(generation: generation)
+                if let port = listener?.port?.rawValue, lifecycle.ready(generation) {
                     answer.resolve(with: .success(port))
                 } else {
                     answer.resolve(with: .failure(CancellationError()))
@@ -523,9 +527,7 @@ actor DirectConnectListener {
             if self.listener === listener {
                 self.listener = nil
             }
-            if acceptingGeneration == generation {
-                acceptingGeneration = nil
-            }
+            _ = lifecycle.bindFailed(generation)
             listener.cancel()
             throw error
         }
@@ -547,10 +549,9 @@ actor DirectConnectListener {
     /// `cancel()` failed with EADDRINUSE on the simulator. A bind still
     /// pending ends with `CancellationError`.
     func closeListeningSocket() async {
-        // Before any suspension: no connection is admitted from here on.
-        acceptingGeneration = nil
+        // Before any suspension: nothing is admitted or published from here.
+        lifecycle.beginClose()
         endPendingBind()
-        health.closed()
         if let listener {
             self.listener = nil
             closing = Task {
@@ -562,6 +563,7 @@ actor DirectConnectListener {
         // so a same-port bind never meets it.
         await drainSpare()
         await closing?.value
+        lifecycle.closeCompleted()
     }
 
     private static func cancelAndWait(_ listener: NWListener) async {
@@ -589,9 +591,8 @@ actor DirectConnectListener {
             return
         }
         isStopped = true
-        acceptingGeneration = nil
+        lifecycle.stop()
         endPendingBind()
-        health.closed()
         listener?.stateUpdateHandler = nil
         listener?.cancel()
         listener = nil
@@ -663,32 +664,29 @@ actor DirectConnectListener {
         pendingBind = nil
     }
 
-    /// The socket of bind `bindGeneration` failed. Reported only while that
-    /// socket is the current one: a failure of an earlier socket of this
-    /// listener, closed for the background and replaced, is stale.
-    func socketDidFail(bindGeneration generation: Int, routed: Bool) {
-        guard !isStopped, listener != nil, generation == bindGeneration else {
+    /// The current socket failed; `lifecycle` already decided, on Network's
+    /// queue, that it was current and whether a route had been published.
+    func socketDidFail(routed: Bool) {
+        guard !isStopped else {
             return
         }
         onListenerFailure(routed)
     }
 
     private func accept(_ connection: NWConnection, bindGeneration generation: Int) {
-        // Admission ends when the socket that accepted the connection begins
-        // to close, fails, or is rejected (its ownership check failed): an
-        // accept queued before that, delivered after it, is not admitted, as
-        // a relay or as the spare. A failure is recorded in `health` where
-        // Network reports it, and a rejection by the controller before it
-        // schedules the stop, so neither waits for this actor.
-        guard
-            !isStopped,
-            generation == acceptingGeneration,
-            health.isServing
-        else {
+        // The one admission decision, followed in this same actor turn by
+        // the record of the relay or spare. A failure, rejection, close, or
+        // stop that `lifecycle` recorded first refuses the connection, with
+        // no plan, relay, or spare; while ownership is not yet confirmed only
+        // the ownership check is answered.
+        let admission = isStopped
+            ? DirectListenerLifecycle.Admission.refused
+            : lifecycle.admit(generation)
+        guard admission != .refused else {
             connection.cancel()
             return
         }
-        guard relays.count < limits.maxConnections else {
+        guard admission == .relay, relays.count < limits.maxConnections else {
             // One spare connection beyond the limit is for the listener's
             // own ownership check, so relays the App keeps cannot starve a
             // re-bind's check. It reads a head, answers only a check with
@@ -1799,63 +1797,220 @@ final class DirectRaceHandle: @unchecked Sendable {
     }
 }
 
-/// A listener's socket state, and the one place where "a route was
-/// published to this listener" and "its socket failed" are ordered.
+/// The listener's one lifecycle authority: its phase, its bind generation,
+/// and whether a route was ever published to it. Every admission, route
+/// publication, bind, ownership result, socket failure, close, and stop is
+/// one call here, decided under one lock, and made before any `await` by
+/// whoever makes it (Network's queue, the listener actor, the main-actor
+/// controller). Nothing else decides those things. The controller's view of
+/// the listener is derived from `phase`.
 ///
-/// Network reports a failure on its own queue; `failed(generation:)`
-/// records it there, under this lock, before the failure callback goes
-/// anywhere. The path controller calls `claimPublication()` immediately
-/// before it writes a route, with no suspension between the two. The lock
-/// decides which came first, and nothing can change that afterwards:
-/// - a failure recorded first makes the claim fail, and no route is written:
-///   the failure is one before any route;
-/// - a claim made first means the failure, whenever it comes, is one after a
-///   route (`failed` returns `true`), which is the listener fault.
-final class DirectSocketHealth: @unchecked Sendable {
-    private let lock = NSLock()
-    private var serving: Int?
-    private var published = false
-
-    /// The socket of bind `generation` is ready.
-    func serving(generation: Int) {
-        lock.withLock { serving = generation }
+/// Legal transitions; any other call leaves the phase unchanged:
+/// - `idle` or `closed` to `binding(g+1)` (`beginBind`); `closed` marks it a
+///   re-bind.
+/// - `binding(g)` to `verifying(g)` when the socket is ready (`ready`).
+/// - `verifying(g)` to `serving(g)` once its ownership is confirmed
+///   (`confirm`).
+/// - `binding(g)`, `verifying(g)`, or `serving(g)` to a failure (`bindFailed`,
+///   `reject`, `socketFailed`): `failed(g)` when a route was ever published
+///   (the listener fault), `rejected(g)` when not (the host keeps WebKit's
+///   normal path). The outcome is fixed under the lock.
+/// - `binding`, `verifying`, or `serving` to `closing(g)` (`beginClose`), and
+///   `closing` to `closed` (`closeCompleted`): reusable.
+/// - Anything to `stopped` (`stop`): terminal.
+final class DirectListenerLifecycle: @unchecked Sendable {
+    enum Phase: Equatable, Sendable {
+        case idle
+        case binding(generation: Int, rebind: Bool)
+        /// Ready, ownership not yet confirmed: only the ownership check is
+        /// answered.
+        case verifying(generation: Int, rebind: Bool)
+        case serving(generation: Int)
+        case closing(generation: Int)
+        case closed
+        /// Failed after a route was published: the listener fault.
+        case failed(generation: Int)
+        /// Failed or rejected before any route.
+        case rejected(generation: Int)
+        case stopped
     }
 
-    /// The socket of bind `generation` failed. Returns whether a route had
-    /// been published to this listener before. A failure of an earlier
-    /// socket changes nothing.
-    @discardableResult
-    func failed(generation: Int) -> Bool {
+    /// What a failure transition decided.
+    enum Failure: Equatable, Sendable {
+        /// Not applicable: a stale generation, or already out of service.
+        case none
+        /// No route was ever published: WebKit's normal path.
+        case fallback
+        /// A route was published: the listener fault.
+        case fault
+    }
+
+    /// What `admit` decided for one accepted connection.
+    enum Admission: Equatable, Sendable {
+        case relay
+        case ownershipOnly
+        case refused
+    }
+
+    private let lock = NSLock()
+    private var current = Phase.idle
+    private var generation = 0
+    private var published = false
+
+    var phase: Phase {
+        lock.withLock { current }
+    }
+
+    /// Whether a route was ever published to this listener. Never resets.
+    var hasPublished: Bool {
+        lock.withLock { published }
+    }
+
+    /// The generation of a new bind, or `nil` when no bind may start.
+    func beginBind() -> Int? {
         lock.withLock {
-            if serving == generation {
-                serving = nil
+            let rebind: Bool
+            switch current {
+            case .idle:
+                rebind = false
+            case .closed:
+                rebind = true
+            default:
+                return nil
             }
-            return published
+            generation += 1
+            current = .binding(generation: generation, rebind: rebind)
+            return generation
         }
     }
 
-    /// The listening socket was closed on purpose.
-    func closed() {
-        lock.withLock { serving = nil }
-    }
-
-    /// A route is about to be published to this listener. `false` when its
-    /// socket is not serving: no route may be written.
-    func claimPublication() -> Bool {
+    /// The socket of bind `g` is ready; ownership is not confirmed yet.
+    func ready(_ g: Int) -> Bool {
         lock.withLock {
-            guard serving != nil else {
+            guard case .binding(g, let rebind) = current else {
                 return false
             }
-            published = true
+            current = .verifying(generation: g, rebind: rebind)
             return true
         }
     }
 
-    var isServing: Bool {
-        lock.withLock { serving != nil }
+    /// The ownership check passed: the listener serves. `false` when it is
+    /// no longer verifying (it failed, closed, or stopped first).
+    func confirm() -> Bool {
+        lock.withLock {
+            guard case .verifying(let g, _) = current else {
+                return false
+            }
+            current = .serving(generation: g)
+            return true
+        }
+    }
+
+    /// The ownership check failed or ran out of time.
+    func reject() -> Failure {
+        lock.withLock {
+            switch current {
+            case .binding(let g, _), .verifying(let g, _):
+                return fail(g)
+            default:
+                return .none
+            }
+        }
+    }
+
+    /// The bind of generation `g` failed before its socket was ready.
+    func bindFailed(_ g: Int) -> Failure {
+        lock.withLock {
+            guard case .binding(g, _) = current else {
+                return .none
+            }
+            return fail(g)
+        }
+    }
+
+    /// The socket of bind `g` failed after it was ready. Called on Network's
+    /// queue, before the failure callback goes anywhere.
+    func socketFailed(_ g: Int) -> Failure {
+        lock.withLock {
+            switch current {
+            case .verifying(g, _), .serving(g):
+                return fail(g)
+            default:
+                return .none
+            }
+        }
+    }
+
+    /// With the lock held.
+    private func fail(_ g: Int) -> Failure {
+        if published {
+            current = .failed(generation: g)
+            return .fault
+        }
+        current = .rejected(generation: g)
+        return .fallback
+    }
+
+    /// A deliberate close begins: nothing is admitted or published from here.
+    @discardableResult
+    func beginClose() -> Bool {
+        lock.withLock {
+            switch current {
+            case .binding(let g, _), .verifying(let g, _), .serving(let g):
+                current = .closing(generation: g)
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    /// The socket is gone; the listener may bind again.
+    func closeCompleted() {
+        lock.withLock {
+            if case .closing = current {
+                current = .closed
+            }
+        }
+    }
+
+    func stop() {
+        lock.withLock { current = .stopped }
+    }
+
+    /// The only admission decision, made once per connection by the
+    /// listener actor, with the relay or spare recorded in the same turn.
+    func admit(_ g: Int) -> Admission {
+        lock.withLock {
+            switch current {
+            case .serving(g):
+                return .relay
+            case .verifying(g, _):
+                return .ownershipOnly
+            default:
+                return .refused
+            }
+        }
+    }
+
+    /// Publishes a route: runs `write` under the lock, only while serving,
+    /// and records the publication only if `write` reports that it wrote.
+    /// A failure recorded first stops the write; one recorded after it is a
+    /// failure after a route.
+    func publish(_ write: () -> Bool) -> Bool {
+        lock.withLock {
+            guard case .serving = current else {
+                return false
+            }
+            let wrote = write()
+            if wrote {
+                published = true
+            }
+            return wrote
+        }
     }
 }
-
 
 /// Decides, once, whether a relay ended on its own or was closed by an
 /// event. Whichever call comes first wins; the other learns it lost.

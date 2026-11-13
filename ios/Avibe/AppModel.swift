@@ -392,17 +392,19 @@ final class AppModel: ObservableObject {
         directFaultMarker.mark()
     }
 
-    /// Before the shell reloads `runtime` (Retry): with a transport, waits,
-    /// within the listener bound, while the listener is bound again after
-    /// the background, as the runtime's first load does. Without one,
-    /// returns at once.
-    func prepareReload(of runtime: MobileRuntimeContext) async {
+    /// Before the shell reloads `runtime` (Retry). With a transport, waits,
+    /// within the listener bound, while the listener is being bound or bound
+    /// again after the background, as the runtime's first load does. Returns
+    /// whether to reload: not when the listener fault covers the runtime,
+    /// whose reopen message stays. Without a transport, `true` at once.
+    func prepareReload(of runtime: MobileRuntimeContext) async -> Bool {
         guard let directPathController else {
-            return
+            return true
         }
         await directPathController.prepareRoute(for: runtime) { [weak self] in
             self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
         }
+        return !directFaultCovers(runtime)
     }
 
     /// Sends the current `direct` state to the runtime's documents.

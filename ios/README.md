@@ -332,15 +332,30 @@ With a transport:
   path again closes nothing. Only relays an event itself closes are counted:
   the background counts its closure before it tells the transport to stop
   (which closes its streams), and a relay whose stream had already failed is
-  not counted by a later event. A route is published only if, right before
-  it and with no suspension after, the listener's socket still reports
-  serving; Network's failure is recorded there before its callback arrives.
+  not counted by a later event.
   The background also closes the listening socket;
   the return re-binds the same port, publishes the closure, and only then
   answers a held `direct.status()`, and only for the runtime and store it was
   asked under: a runtime stop or an account change settles held answers as
   `failed`. Nothing is bound and no route is written in the background; a
   bind that completes there is parked for the return.
+- **One lifecycle authority per listener** (`DirectListenerLifecycle`):
+  `idle`, `binding`, `verifying`, `serving`, `closing`, `closed`, `failed`,
+  `rejected`, `stopped`, with one bind generation and a monotonic
+  "a route was published" fact. Every admission, route publication, bind,
+  ownership result, socket failure, close, and stop is one call under its
+  lock, made before any `await`; the controller's view of the listener is
+  derived from it. Only `serving` admits relays and publishes routes (the
+  route write itself runs under the lock and counts only if it wrote);
+  `verifying`, between a bind and its confirmed ownership check, answers
+  only the ownership check. A failure, a rejected ownership check, or a
+  failed bind is a fallback when no route was ever published and the
+  listener fault when one was, decided once under the lock. Closing,
+  re-binding, and the fault keep committed relays; only `stop` and the
+  event closes end them. `closed` can bind again; `stopped` is terminal. The
+  shell's Retry is one logical retry at a time: it waits, within the
+  listener bound, while the listener is being bound or bound again, and
+  does not rebuild under the reopen message.
 - **The listener fault** (accepted for the internal trial, 2026-11-12). A
   failure before any route exists only leaves that host on WebKit's normal
   path. Once a route exists, the listener's socket failing, or a failed

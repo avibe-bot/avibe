@@ -195,6 +195,9 @@ final class DirectPathAppTests: XCTestCase {
             object: nil
         )
         try await eventually { app.directListenerFault }
+        // Retry does not rebuild under the reopen message.
+        let reload = await app.prepareReload(of: first)
+        XCTAssertFalse(reload)
         // Another return does not report it again.
         NotificationCenter.default.post(
             name: UIApplication.didEnterBackgroundNotification,
@@ -221,6 +224,42 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertFalse(app.directFaultCovers(second))
         XCTAssertTrue(app.directListenerFault)
         XCTAssertEqual(marker.marks, 1)
+    }
+
+    /// Retry right after the return, while the listener is bound again:
+    /// the reload waits for it, so it never rebuilds against the closed
+    /// port, and by then the held status answer is settled.
+    @MainActor
+    func testRetryDuringTheReturnWaitsForTheReBindBeforeItReloads() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        NotificationCenter.default.post(
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        var held: DirectPathStatus??
+        app.directStatusProvider?(instance) { held = .some($0) }
+        XCTAssertNil(held, "The status answer is held during the re-bind.")
+
+        let reload = await app.prepareReload(of: runtime)
+
+        XCTAssertTrue(reload)
+        XCTAssertNotNil(held, "The re-bind had completed before the reload.")
+        XCTAssertFalse(app.directListenerFault)
+    }
+
+    /// Without a transport Retry reloads at once, as before.
+    @MainActor
+    func testRetryWithoutATransportReloadsAtOnce() async throws {
+        let app = try await makeApp(directTransport: nil)
+        let runtime = try await select("instance-1", in: app)
+        let reload = await app.prepareReload(of: runtime)
+        XCTAssertTrue(reload)
     }
 
     /// A child window is presented above the view the reopen message

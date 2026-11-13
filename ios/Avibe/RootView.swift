@@ -37,6 +37,7 @@ private struct BrowserScreen: View {
     let runtime: MobileRuntimeContext
 
     @State private var reloadID = UUID()
+    @State private var retryPending = false
     @State private var isLoading = true
     @State private var failed = false
     @State private var showsAccountFallback = false
@@ -140,13 +141,22 @@ private struct BrowserScreen: View {
                             Text("browser.error.body")
                         } actions: {
                             Button("browser.error.retry") {
+                                // One logical retry at a time. The shell's
+                                // own reload waits, within the listener
+                                // bound, for a listener being bound again,
+                                // and does not rebuild under the reopen
+                                // message.
+                                guard !retryPending else {
+                                    return
+                                }
+                                retryPending = true
                                 showsAccountFallback = false
-                                // The shell's own reload waits, within the
-                                // listener bound, for a listener being
-                                // bound again after the background.
                                 Task {
-                                    await appModel.prepareReload(of: runtime)
-                                    reloadID = UUID()
+                                    let reload = await appModel.prepareReload(of: runtime)
+                                    retryPending = false
+                                    if reload {
+                                        reloadID = UUID()
+                                    }
                                 }
                             }
                             .buttonStyle(.borderedProminent)
