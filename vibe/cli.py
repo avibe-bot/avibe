@@ -17761,14 +17761,49 @@ def get_latest_version() -> dict:
     return get_latest_version_info(__version__, prereleases=prerelease_updates_enabled())
 
 
+def _report_desktop_update_check(*, json_output: bool) -> int:
+    """Report the desktop app's last check, the same snapshot ``/api/version`` relays."""
+    from vibe.desktop_update_status import desktop_update_snapshot
+
+    info = desktop_update_snapshot(__version__)
+    if json_output:
+        if info["error"]:
+            _print_task_error(
+                TaskCliError(
+                    f"Failed to check for updates: {info['error']}",
+                    code="update_check_failed",
+                    hint="Check for updates in the Avibe desktop app on this computer.",
+                    details={**info, "desktop_managed": True},
+                )
+            )
+            return 1
+        _print_cli_payload("update_check", **info, desktop_managed=True)
+        return 0
+    print(f"Current version: {info['desktop_version'] or __version__}")
+    print("Updates are delivered with the Avibe desktop app.")
+    checked = f" (checked {info['checked_at']})" if info["checked_at"] else ""
+    if info["error"]:
+        print(f"\033[33m{info['error']}{checked} Check for updates in the desktop app.\033[0m")
+        return 1
+    if info["has_update"]:
+        print(f"\033[32mNew version available: {info['latest']}{checked}\033[0m")
+        print("\nInstall it from the Avibe desktop app.")
+    elif info["phase"] == "current":
+        print(f"\033[32mYou are using the latest version.{checked}\033[0m")
+    elif info["phase"] == "disabled":
+        print("This build of the desktop app cannot update itself. Install a newer release manually.")
+    else:
+        print("The desktop app has not reported an update check yet.")
+    return 0
+
+
 def cmd_check_update(args=None):
     """Check for available updates."""
     from vibe.upgrade import is_desktop_managed_runtime
 
+    if is_desktop_managed_runtime():
+        return _report_desktop_update_check(json_output=getattr(args, "json", False))
     if getattr(args, "json", False):
-        if is_desktop_managed_runtime():
-            _print_cli_payload("update_check", current=__version__, desktop_managed=True)
-            return 0
         info = get_latest_version()
         if info["error"]:
             _print_task_error(
@@ -17782,9 +17817,6 @@ def cmd_check_update(args=None):
         _print_cli_payload("update_check", **info, desktop_managed=False)
         return 0
     print(f"Current version: {__version__}")
-    if is_desktop_managed_runtime():
-        print("Updates are delivered with the Avibe desktop app.")
-        return 0
     print("Checking for updates...")
 
     info = get_latest_version()

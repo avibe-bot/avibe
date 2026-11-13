@@ -4,12 +4,14 @@ Only the desktop app decides whether its computer can install a release: it
 owns the update channel, skipped versions, signature checks, and updater
 artifacts. After each completed check it writes ``update-status.json`` beside
 ``computer-use.json`` (``desktop/runtime-host/src/update_status.rs``). A
-desktop-managed Runtime copies ``latest`` and ``has_update`` from that file and
-never decides availability itself.
+desktop-managed Runtime relays that record (the check's result, the app's own
+version, its channel, and when it checked) to the Web UI and the CLI, so every
+surface shows the same conclusion, and never decides availability itself.
 
 A file this module cannot use reads as no conclusion, so a desktop app that
-predates the file keeps the neutral guidance. Unknown fields are ignored so a
-newer app never breaks an older Runtime.
+predates the file keeps the neutral guidance. A field this module cannot use
+reads as unknown without discarding the rest of the record, and unknown fields
+are ignored, so a newer app never breaks an older Runtime.
 """
 
 from __future__ import annotations
@@ -29,6 +31,16 @@ UPDATE_STATUS_FILE = "update-status.json"
 
 
 class DesktopUpdateStatus(TypedDict):
+    # The completed check's result: "current", "available", "disabled" (this
+    # build cannot update itself) or "error" (the check failed); None when the
+    # record does not say.
+    phase: str | None
+    # The desktop app's own SemVer version, not the Runtime's PEP 440 one.
+    desktop_version: str | None
+    # Whether the app's channel also offers pre-releases; None when unknown.
+    prereleases: bool | None
+    # When the app finished that check, RFC 3339.
+    checked_at: str | None
     latest: str | None
     has_update: bool
     remote_install_allowed: bool
@@ -43,6 +55,10 @@ class RemoteDesktopUpdateStatus(TypedDict):
     error_code: str | None
     updated_at: str
 
+
+CHECK_PHASES = frozenset({"current", "available", "disabled", "error"})
+CHANNEL_PRERELEASES = {"stable": False, "test": True}
+CHECK_FAILED_MESSAGE = "The desktop app's last update check failed."
 
 REMOTE_UPDATE_PHASES = frozenset(
     {
@@ -83,12 +99,40 @@ def parse_desktop_update_status(payload: object) -> DesktopUpdateStatus | None:
     remote_install_allowed = payload.get("remote_install_allowed", False)
     if not isinstance(remote_install_allowed, bool):
         remote_install_allowed = False
+    phase = payload.get("phase")
+    if not isinstance(phase, str) or phase not in CHECK_PHASES:
+        phase = None
+    # `has_update` is the shell's conclusion; a phase that disagrees with it is
+    # not one this Runtime can show.
+    if has_update:
+        phase = "available"
+    elif phase == "available":
+        phase = None
+    desktop_version = payload.get("current")
+    if not isinstance(desktop_version, str) or not desktop_version.strip() or len(desktop_version) > 96:
+        desktop_version = None
+    channel = payload.get("channel")
+    prereleases = CHANNEL_PRERELEASES.get(channel) if isinstance(channel, str) else None
     return {
+        "phase": phase,
+        "desktop_version": desktop_version.strip() if desktop_version else None,
+        "prereleases": prereleases,
+        "checked_at": _parse_timestamp(payload.get("checked_at")),
         "latest": latest,
         "has_update": has_update,
         "remote_install_allowed": remote_install_allowed,
         "remote_request": _parse_remote_request(payload.get("remote_request")),
     }
+
+
+def _parse_timestamp(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value if parsed.tzinfo is not None else None
 
 
 def _parse_remote_request(payload: object) -> RemoteDesktopUpdateStatus | None:
@@ -127,15 +171,8 @@ def _parse_remote_request(payload: object) -> RemoteDesktopUpdateStatus | None:
                 and len(error_code) <= 128
             )
         )
-        or not isinstance(updated_at, str)
-        or len(updated_at) > 64
+        or _parse_timestamp(updated_at) is None
     ):
-        return None
-    try:
-        parsed_updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed_updated_at.tzinfo is None:
         return None
     return {
         "request_id": request_id,
@@ -162,3 +199,28 @@ def read_desktop_update_status(path: Path | None = None) -> DesktopUpdateStatus 
     if status is None:
         logger.debug("Ignoring invalid desktop update status %s", target)
     return status
+
+
+def desktop_update_snapshot(runtime_version: str, path: Path | None = None) -> dict[str, Any]:
+    """What ``/api/version`` and ``vibe check-update`` report for a desktop-managed Runtime.
+
+    ``current`` stays the Runtime's own version, which remote update receipts
+    are verified against; ``desktop_version`` is the app the user updates.
+    ``error`` is set only when the app's last check failed, never for a missing
+    record, which has no conclusion to relay.
+    """
+
+    status = read_desktop_update_status(path)
+    phase = status["phase"] if status else None
+    return {
+        "current": runtime_version,
+        "latest": status["latest"] if status else None,
+        "has_update": status["has_update"] if status else False,
+        "error": CHECK_FAILED_MESSAGE if phase == "error" else None,
+        "phase": phase,
+        "desktop_version": status["desktop_version"] if status else None,
+        "prereleases": status["prereleases"] if status else None,
+        "checked_at": status["checked_at"] if status else None,
+        "remote_install_allowed": status["remote_install_allowed"] if status else False,
+        "remote_request": status["remote_request"] if status else None,
+    }

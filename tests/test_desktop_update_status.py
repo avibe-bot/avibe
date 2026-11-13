@@ -34,10 +34,70 @@ def test_old_status_defaults_remote_fields_without_losing_update() -> None:
             "has_update": True,
         }
     ) == {
+        "phase": "available",
+        "desktop_version": None,
+        "prereleases": None,
+        "checked_at": None,
         "latest": "3.2.4-rc.1",
         "has_update": True,
         "remote_install_allowed": False,
         "remote_request": None,
+    }
+
+
+CHECK_RECORD = {
+    "schema_version": 1,
+    "phase": "error",
+    "current": "3.2.5",
+    "latest": None,
+    "channel": "test",
+    "has_update": False,
+    "checked_at": "2026-11-13T06:34:00Z",
+}
+
+
+def test_the_check_result_version_channel_and_time_are_relayed() -> None:
+    parsed = parse_desktop_update_status(CHECK_RECORD)
+
+    assert parsed is not None
+    assert {key: parsed[key] for key in ("phase", "desktop_version", "prereleases", "checked_at")} == {
+        "phase": "error",
+        "desktop_version": "3.2.5",
+        "prereleases": True,
+        "checked_at": "2026-11-13T06:34:00Z",
+    }
+
+
+@pytest.mark.parametrize(
+    ("changes", "unknown"),
+    [
+        pytest.param({"phase": "checking"}, "phase", id="in-flight-phase"),
+        pytest.param({"phase": "available"}, "phase", id="available-without-has-update"),
+        pytest.param({"phase": 3}, "phase", id="non-string-phase"),
+        pytest.param({"current": ""}, "desktop_version", id="blank-version"),
+        pytest.param({"current": ["3.2.5"]}, "desktop_version", id="non-string-version"),
+        pytest.param({"channel": "beta"}, "prereleases", id="unknown-channel"),
+        pytest.param({"channel": None}, "prereleases", id="null-channel"),
+        pytest.param({"checked_at": "yesterday"}, "checked_at", id="unparsable-time"),
+        pytest.param({"checked_at": "2026-11-13T06:34:00"}, "checked_at", id="time-without-zone"),
+    ],
+)
+def test_an_unusable_check_field_reads_as_unknown_and_keeps_the_rest(changes: dict, unknown: str) -> None:
+    parsed = parse_desktop_update_status({**CHECK_RECORD, **changes})
+
+    assert parsed is not None
+    assert parsed[unknown] is None
+    assert {key: value for key, value in parsed.items() if key != unknown and value is not None} == {
+        key: value
+        for key, value in {
+            "phase": "error",
+            "desktop_version": "3.2.5",
+            "prereleases": True,
+            "checked_at": "2026-11-13T06:34:00Z",
+            "has_update": False,
+            "remote_install_allowed": False,
+        }.items()
+        if key != unknown
     }
 
 
@@ -57,6 +117,10 @@ def test_remote_status_is_relayed_and_bad_remote_fields_degrade_independently() 
         },
     }
     assert parse_desktop_update_status(payload) == {
+        "phase": "available",
+        "desktop_version": None,
+        "prereleases": None,
+        "checked_at": None,
         "latest": "3.2.4-rc.1",
         "has_update": True,
         "remote_install_allowed": True,
@@ -66,6 +130,10 @@ def test_remote_status_is_relayed_and_bad_remote_fields_degrade_independently() 
     payload["remote_install_allowed"] = "yes"
     payload["remote_request"] = {**payload["remote_request"], "progress": True}
     assert parse_desktop_update_status(payload) == {
+        "phase": "available",
+        "desktop_version": None,
+        "prereleases": None,
+        "checked_at": None,
         "latest": "3.2.4-rc.1",
         "has_update": True,
         "remote_install_allowed": False,
