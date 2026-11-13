@@ -57,6 +57,128 @@ def test_selection_keeps_every_full_release_and_only_the_newest_prereleases():
     ]
 
 
+V326_UPDATER_ASSETS = tuple(
+    name
+    for target, suffix in (
+        ("aarch64-apple-darwin", ".app.tar.gz"),
+        ("x86_64-apple-darwin", ".app.tar.gz"),
+        ("x86_64-pc-windows-msvc", ".exe"),
+    )
+    for name in (
+        f"desktop-update-{target}.json",
+        f"desktop-update-{target}.json.sig",
+        f"Avibe_3.2.6_{target}{suffix}",
+    )
+)
+
+
+@pytest.mark.parametrize("missing", V326_UPDATER_ASSETS)
+def test_326_index_waits_for_each_target_manifest_signature_and_payload(missing):
+    assets = ("avibe_os-3.2.6-py3-none-any.whl", *(name for name in V326_UPDATER_ASSETS if name != missing))
+    (release,) = releases(github_release("v3.2.6", published_at="2026-11-14T00:00:00Z", assets=assets))
+    objects = {release.key(asset): asset.size for asset in release.assets}
+
+    result = mirror.plan(REPOSITORY, [release], objects, None)
+
+    assert json.loads(result.index)["releases"] == []
+    # Hiding discovery never removes or skips even the already-mirrored core
+    # objects; unindexed bytes still go through the normal verification path.
+    assert {key for key, _ in result.uploads} == set(objects)
+    assert result.deletions == ()
+    assert result.changed == ()
+
+
+def test_326_index_reappears_with_the_unchanged_complete_signed_set():
+    from scripts import desktop_release, desktop_updater
+
+    canonical = set().union(*(desktop_updater.names("3.2.6", target) for target in desktop_release.TARGETS))
+    assert set(V326_UPDATER_ASSETS) == canonical
+    assets = ("avibe_os-3.2.6-py3-none-any.whl", *V326_UPDATER_ASSETS)
+    (release,) = releases(github_release("v3.2.6", published_at="2026-11-14T00:00:00Z", assets=assets))
+    result = mirror.plan(REPOSITORY, [release], {}, None)
+
+    (indexed,) = json.loads(result.index)["releases"]
+    assert indexed["tag"] == "v3.2.6"
+    assert indexed["commit"] == release.commit
+    assert indexed["prerelease"] is False
+    assert {asset["name"] for asset in indexed["assets"]} == set(assets)
+    assert {asset.name for _, asset in result.uploads} == set(assets)
+    assert result.deletions == ()
+
+
+@pytest.mark.parametrize(
+    "repository, tag, prerelease",
+    [
+        (REPOSITORY, "v3.2.5", False),
+        (REPOSITORY, "v3.2.7", False),
+        (REPOSITORY, "gh-v3.2.6rc16", True),
+        ("avibe-bot/askill", "v3.2.6", False),
+    ],
+)
+def test_326_index_gate_leaves_other_versions_and_repositories_unchanged(repository, tag, prerelease):
+    parsed = releases(
+        github_release(tag, published_at="2026-11-14T00:00:00Z", prerelease=prerelease, repository=repository),
+        repository=repository,
+    )
+
+    (indexed,) = json.loads(mirror.render_index(repository, parsed))["releases"]
+    assert indexed["tag"] == tag
+    assert indexed["prerelease"] is prerelease
+    assert [asset["name"] for asset in indexed["assets"]] == ["a.tgz"]
+
+
+def test_326_pending_index_preserves_existing_entries_objects_and_installer_aliases():
+    stable = github_release(
+        "v3.2.5", published_at="2026-11-10T00:00:00Z",
+        assets=(
+            "Avibe_3.2.5_aarch64-apple-darwin.dmg",
+            "Avibe_3.2.5_x86_64-apple-darwin.dmg",
+            "Avibe_3.2.5_x86_64-pc-windows-msvc.exe",
+        ),
+    )
+    rc = github_release("gh-v3.2.6rc16", published_at="2026-11-13T00:00:00Z", prerelease=True)
+    baseline = mirror.plan(REPOSITORY, releases(stable, rc), {}, None)
+    objects = {key: asset.size for key, asset in baseline.uploads}
+    objects.update({key: asset.size for key, _, asset in baseline.aliases})
+    latest = {key: asset.sha256 for key, _, asset in baseline.aliases}
+    pending = github_release(
+        "v3.2.6", published_at="2026-11-14T00:00:00Z", assets=("avibe_os-3.2.6-py3-none-any.whl",),
+    )
+
+    result = mirror.plan(REPOSITORY, releases(stable, rc, pending), objects, baseline.index, latest)
+
+    assert result.index == baseline.index
+    assert [key for key, _ in result.uploads] == ["releases/v3.2.6/avibe_os-3.2.6-py3-none-any.whl"]
+    assert (result.aliases, result.deletions, result.changed) == ((), (), ())
+
+
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_326_reconcile_mirrors_core_before_advertising_complete_desktop(monkeypatch, complete, dry_run):
+    assets = ("avibe_os-3.2.6-py3-none-any.whl", *(V326_UPDATER_ASSETS if complete else ()))
+    item = github_release("v3.2.6", published_at="2026-11-14T00:00:00Z", assets=assets)
+    written_indexes = []
+
+    class IndexBucket(RecordingBucket):
+        def put(self, key, path, **metadata):
+            super().put(key, path, **metadata)
+            if key == mirror.INDEX_KEY:
+                written_indexes.append(json.loads(path.read_bytes()))
+
+    bucket = IndexBucket({}, None)
+    monkeypatch.setattr(mirror, "github_releases", lambda repository: [item])
+    monkeypatch.setattr(mirror, "tag_commits", lambda repository: {"v3.2.6": "0" * 40})
+    monkeypatch.setattr(mirror, "download", lambda asset, destination: destination.write_bytes(b""))
+
+    assert mirror.reconcile(REPOSITORY, bucket, keep_prereleases=20, dry_run=dry_run) == 0
+    if dry_run:
+        assert bucket.writes == []
+        assert written_indexes == []
+    else:
+        assert bucket.writes == [*(f"releases/v3.2.6/{name}" for name in sorted(assets)), mirror.INDEX_KEY]
+        assert [release["tag"] for release in written_indexes[0]["releases"]] == (["v3.2.6"] if complete else [])
+
+
 def test_the_index_marks_only_releases_whose_notes_ask_for_silence():
     parsed = releases(
         github_release(
