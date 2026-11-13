@@ -29,7 +29,6 @@ struct NotificationReconcile: Equatable {
         guard
             params.count == 2,
             let ids = params["unreadSessions"] as? [Any],
-            ids.count <= maximumSessions,
             let number = params["asOf"] as? NSNumber,
             CFGetTypeID(number) != CFBooleanGetTypeID()
         else {
