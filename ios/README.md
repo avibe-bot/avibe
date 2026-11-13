@@ -359,7 +359,28 @@ With a transport:
   step, so none is granted later, whether or not the actor's cleanup has
   run; granted relays are kept by closes and by the fault, and end only by
   themselves, by an event's close, or by `stop`. `closed` can bind again. A
-  listener a route was ever published to is never stopped or replaced.
+  listener a route was ever published to is never stopped or replaced;
+  retiring an unpublished one is one locked decision against a failure, and
+  a failure recorded first wins and is kept. A bind settles its own
+  generation however it ends: its answer is the one arbiter, and the phase
+  change that goes with an answer is made under the answer's lock, so a
+  bind that returns is `verifying` for the generation it hands to its
+  caller, and one that throws has failed unless a deliberate close or a
+  stop took it first. A real bind failure is recorded where Network reports
+  it. A relay this listener cancels (an event's close, a retirement, the
+  listener leaving `serving`) loses its authority at once but keeps its
+  record, and its slot against the limit of 64, until its task has ended.
+- **The foreground watchdog.** One stay in the foreground has one deadline,
+  5 seconds on the continuous clock from the start of the first bind or
+  from a return with the listener closed (a conservative proposal, not a
+  measurement). Attempts, bind generations, and close-to-bind handoffs
+  inside the stay do not move it; leaving the foreground ends it, and the
+  next stay has its own. The lifecycle applies the deadline at the start of
+  every decision it makes, so a listener still neither serving nor failed
+  at the deadline is failed for whoever asks next, a late confirmation
+  included; the controller's single wake-up only delivers that. It is a
+  backstop for a process that is running: it does nothing while the App is
+  suspended.
 - **The load gate** decides, synchronously and from the route table and
   the phase alone, whether the shell may create or reload a runtime's
   WebView: open with no route on the current store or a serving listener;
@@ -390,7 +411,9 @@ With a transport:
   one marker in the App's preferences; the next launch with a transport
   consumes it in `AppModel.init` and runs that whole launch without a path
   controller, on the public origin. The launch after that uses the
-  transport again. The cost: a single transient failure of the first bind
+  transport again. The marker is written before the fault is shown, by
+  every path that delivers it; that a `mark()` call returned says nothing
+  about the disk. The cost: a single transient failure of the first bind
   loses direct for that launch and the next one.
 - `DirectRouteOwner` is the only writer of `proxyConfigurations` on an
   account data store, which the runtime WebViews and the hidden account

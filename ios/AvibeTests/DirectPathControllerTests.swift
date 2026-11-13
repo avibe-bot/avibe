@@ -89,8 +89,11 @@ final class DirectPathControllerTests: XCTestCase {
             harness.controller.routeOwner.isExcluded(one, store: harness.websiteDataStore.identifier)
         )
         XCTAssertEqual(harness.transport.selections.count, 0)
-        // With no route written, no listener is left behind.
+        // With no route written, no listener is left behind. Retired first:
+        // whatever its bind reports afterwards is not a failure.
         try await eventually { try newListeners(since: listening).isEmpty }
+        XCTAssertFalse(harness.controller.isFaulted)
+        XCTAssertEqual(harness.faults, 0)
 
         // The host loaded without a route on this store, so it never gets
         // one there: WebKit would keep its existing connections.
@@ -748,6 +751,192 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.faults, 0)
     }
 
+    // MARK: The foreground watchdog
+
+    /// The watchdog's harness: the standard five seconds, on a clock the
+    /// test moves, with wake-ups the test fires.
+    @MainActor
+    private func makeWatchedHarness() throws -> Harness {
+        try Harness(
+            timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10),
+            clock: StandInClock(),
+            wakes: ManualWakes(),
+            test: self
+        )
+    }
+
+    /// A stay in the foreground has one deadline, five seconds after the
+    /// return. Before it the routed runtime is held. At it the listener has
+    /// failed, for the load gate and the status at once, whatever the
+    /// re-bind then reports and whether or not the wake-up has run; the
+    /// fault is delivered once.
+    @MainActor
+    func testTheWatchdogFailsAListenerStillRecoveringAtItsDeadline() async throws {
+        let harness = try makeWatchedHarness()
+        let clock = try XCTUnwrap(harness.clock)
+        let wakes = try XCTUnwrap(harness.wakes)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let selections = harness.transport.selections.count
+        // The first bind had its own episode; serving ended it.
+        XCTAssertEqual(wakes.scheduled.count, 1)
+        XCTAssertEqual(wakes.pending.count, 0)
+
+        harness.enterBackground()
+        harness.enterForeground()
+        // One wake-up, for five seconds from the return.
+        XCTAssertEqual(wakes.pending.count, 1)
+        XCTAssertEqual(wakes.pending.first?.deadline, clock.now.advanced(by: .seconds(5)))
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+
+        // All of this in the turn of the return: the re-bind has not run.
+        clock.advance(by: .milliseconds(4999))
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+        XCTAssertEqual(harness.faults, 0)
+        clock.advance(by: .milliseconds(1))
+        // At the deadline, with the wake-up not yet run: failed already.
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .fault)
+        XCTAssertTrue(harness.controller.isFaulted)
+        // An observation outside a view update delivers it, once.
+        XCTAssertEqual(harness.requestStatus("instance-1").values, [nil])
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertEqual(wakes.pending.count, 0)
+
+        // The late wake-up, the re-bind's own completion, and another
+        // status read deliver nothing more, and nothing serves again.
+        wakes.scheduled.last?.fire()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(harness.requestStatus("instance-1").values, [nil])
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .fault)
+        XCTAssertEqual(harness.transport.selections.count, selections)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+    }
+
+    /// The wake-up itself delivers the fault when nothing else observed it.
+    /// A wake-up of a stay that ended (the App left and returned) does
+    /// nothing, and one that fires before its deadline only schedules
+    /// itself again.
+    @MainActor
+    func testTheWatchdogWakeDeliversOnceAndAStaleOrEarlyWakeDoesNot() async throws {
+        let harness = try makeWatchedHarness()
+        let clock = try XCTUnwrap(harness.clock)
+        let wakes = try XCTUnwrap(harness.wakes)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+
+        harness.enterBackground()
+        harness.enterForeground()
+        let first = try XCTUnwrap(wakes.pending.first)
+        clock.advance(by: .seconds(3))
+        // The App leaves: nothing is watched, and that wake-up is cancelled.
+        harness.enterBackground()
+        XCTAssertTrue(first.isCancelled)
+        XCTAssertEqual(wakes.pending.count, 0)
+        clock.advance(by: .seconds(3600))
+        // A new stay: its own wake-up, five seconds from now.
+        harness.enterForeground()
+        let second = try XCTUnwrap(wakes.pending.first)
+        XCTAssertFalse(second === first)
+        XCTAssertEqual(second.deadline, clock.now.advanced(by: .seconds(5)))
+
+        // The first stay's wake-up, delivered late: nothing.
+        first.fire()
+        XCTAssertEqual(harness.faults, 0)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+
+        // The second, woken early: nothing but another wake-up for the same
+        // deadline.
+        clock.advance(by: .seconds(4))
+        second.fire()
+        XCTAssertEqual(harness.faults, 0)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+        let third = try XCTUnwrap(wakes.pending.first)
+        XCTAssertFalse(third === second)
+        XCTAssertEqual(third.deadline, second.deadline)
+        XCTAssertEqual(wakes.pending.count, 1)
+
+        // At the deadline the wake-up delivers the fault, once.
+        clock.advance(by: .seconds(1))
+        third.fire()
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertTrue(harness.controller.isFaulted)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .fault)
+        third.fire()
+        second.fire()
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertEqual(wakes.pending.count, 0)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(harness.faults, 1)
+    }
+
+    /// A listener that serves in time ends its stay's episode: the clock
+    /// can run on, and a wake-up that still fires does nothing.
+    @MainActor
+    func testAListenerThatServesInTimeIsNeverFailedByTheWatchdog() async throws {
+        let harness = try makeWatchedHarness()
+        let clock = try XCTUnwrap(harness.clock)
+        let wakes = try XCTUnwrap(harness.wakes)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+
+        harness.enterBackground()
+        harness.enterForeground()
+        let wake = try XCTUnwrap(wakes.pending.first)
+        try await eventually { harness.controller.loadGate(for: runtime) != .held }
+        guard !harness.controller.isFaulted else {
+            // The simulator could not bind the port again: not this test's
+            // subject.
+            return
+        }
+        XCTAssertTrue(wake.isCancelled)
+        clock.advance(by: .seconds(3600))
+        wake.fire()
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .open)
+        XCTAssertEqual(harness.controller.listenerState, .ready)
+        XCTAssertEqual(harness.faults, 0)
+        XCTAssertEqual(wakes.pending.count, 0)
+    }
+
+    // MARK: Retirement against a failure
+
+    /// A first bind that failed, and then the retirement its abandoned
+    /// preparation asks for: the failure wins. The listener is kept, the
+    /// fault is delivered once, and no other listener is made in this
+    /// process. (The other order, a retirement first, is no failure:
+    /// `testAListenerThatIsNotReadyInTimeExcludesTheHostForThatStore`.)
+    @MainActor
+    func testARetirementAfterAFailureKeepsTheFailedListener() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(
+            timing: DirectPathTiming(
+                listenerWaitSeconds: 30,
+                rebindSeconds: 0,
+                foregroundSeconds: 600
+            ),
+            test: self
+        )
+        try await harness.signIn()
+        _ = try harness.coordinator.selectInstance(id: "instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+
+        // Nobody wants this open any more: the preparation ends by retiring
+        // the listener, which by then has failed.
+        await harness.controller.prepareRoute(for: runtime) { false }
+
+        XCTAssertTrue(harness.controller.isFaulted)
+        XCTAssertEqual(harness.faults, 1)
+        try await eventually { try newListeners(since: listening).isEmpty }
+        try await harness.select("instance-2")
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(try newListeners(since: listening), [])
+        XCTAssertEqual(harness.faults, 1)
+        XCTAssertTrue(harness.controller.isFaulted)
+    }
+
     // MARK: A failure before any route
 
     /// The first bind is not confirmed (its ownership check gets no time at
@@ -898,6 +1087,10 @@ private final class Harness {
     private let stores = InMemoryAccountStores()
     private let notifications = NotificationCenter()
     private let timing: DirectPathTiming
+    /// A clock the test moves, and the watchdog's wake-ups kept for the
+    /// test to fire; `nil` for the real clock and a sleeping task.
+    let clock: StandInClock?
+    let wakes: ManualWakes?
     /// `preferred` for instance-1 each time the controller announced a change.
     private(set) var preferences: [DirectPathStatus.Preference] = []
     /// Every announcement, whatever changed.
@@ -919,6 +1112,8 @@ private final class Harness {
         timing: timing,
         notificationCenter: notifications,
         isInBackground: false,
+        now: clockNow(),
+        scheduleWake: wakeScheduler(),
         onStatusChanged: { [unowned self] in
             self.announcements += 1
             let status = self.status("instance-1")
@@ -954,8 +1149,32 @@ private final class Harness {
 
     private let defaults: UserDefaults
 
+    private func clockNow() -> @Sendable () -> ContinuousClock.Instant {
+        guard let clock else {
+            return { ContinuousClock.now }
+        }
+        return { clock.now }
+    }
+
+    private func wakeScheduler() -> DirectWakeScheduler? {
+        guard let wakes else {
+            return nil
+        }
+        return { deadline, fire in
+            wakes.schedule(deadline, fire)
+        }
+    }
+
     init(
-        timing: DirectPathTiming = DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10),
+        // The watchdog's bound is far away on the real clock: these tests
+        // are about what a loaded simulator does within its other bounds.
+        timing: DirectPathTiming = DirectPathTiming(
+            listenerWaitSeconds: 30,
+            rebindSeconds: 10,
+            foregroundSeconds: 600
+        ),
+        clock: StandInClock? = nil,
+        wakes: ManualWakes? = nil,
         test: XCTestCase
     ) throws {
         let suiteName = "DirectPathControllerTests.\(UUID().uuidString)"
@@ -965,6 +1184,8 @@ private final class Harness {
         }
         self.defaults = defaults
         self.timing = timing
+        self.clock = clock
+        self.wakes = wakes
         websiteDataStore = AccountWebsiteDataStore(
             defaults: defaults,
             operations: stores.operations
@@ -1066,6 +1287,47 @@ private final class Harness {
                 instance("instance-unqualified", "https://avibe-direct-test"),
             ]
         )
+    }
+}
+
+/// The watchdog's wake-ups in a test: kept, never fired by time. The test
+/// fires one when it wants to, late, early, or after it was cancelled.
+@MainActor
+final class ManualWakes {
+    @MainActor
+    final class Wake {
+        let deadline: ContinuousClock.Instant
+        private let action: @MainActor () -> Void
+        fileprivate(set) var isCancelled = false
+        private(set) var hasFired = false
+
+        init(deadline: ContinuousClock.Instant, action: @escaping @MainActor () -> Void) {
+            self.deadline = deadline
+            self.action = action
+        }
+
+        /// Delivers the wake-up now, whether or not it was cancelled: a
+        /// timer that fires late does exactly that.
+        func fire() {
+            hasFired = true
+            action()
+        }
+    }
+
+    private(set) var scheduled: [Wake] = []
+
+    /// The wake-ups asked for that were neither cancelled nor delivered.
+    var pending: [Wake] {
+        scheduled.filter { !$0.isCancelled && !$0.hasFired }
+    }
+
+    func schedule(
+        _ deadline: ContinuousClock.Instant,
+        _ fire: @escaping @MainActor () -> Void
+    ) -> DirectWakeCancel {
+        let wake = Wake(deadline: deadline, action: fire)
+        scheduled.append(wake)
+        return { wake.isCancelled = true }
     }
 }
 

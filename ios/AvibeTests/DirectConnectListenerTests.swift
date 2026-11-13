@@ -1077,9 +1077,12 @@ final class DirectConnectListenerTests: XCTestCase {
     /// A lifecycle brought to `phase` through legal calls only.
     private func makeLifecycle(
         in phase: String,
-        published: Bool = false
+        published: Bool = false,
+        clock: StandInClock? = nil
     ) -> DirectListenerLifecycle {
-        let lifecycle = DirectListenerLifecycle()
+        let lifecycle = clock.map { clock in
+            DirectListenerLifecycle(now: { clock.now })
+        } ?? DirectListenerLifecycle()
         func serve() {
             let g = lifecycle.beginBind()!
             XCTAssertTrue(lifecycle.ready(g))
@@ -1285,6 +1288,307 @@ final class DirectConnectListenerTests: XCTestCase {
         lifecycle.stop()
         XCTAssertNil(lifecycle.beginBind())
         XCTAssertTrue(lifecycle.hasPublished)
+    }
+
+    // MARK: Retirement and an unconfirmed bind
+
+    /// Retirement is one decision against a failure, in both orders: a
+    /// failure recorded first wins and stays; a retirement that comes first
+    /// stops the listener, and nothing reported afterwards is a failure. A
+    /// listener a route was published to is never retired.
+    func testRetirementAndAFailureAreDecidedOnceInEitherOrder() {
+        for phase in ["binding", "verifying", "serving"] {
+            let failureFirst = makeLifecycle(in: phase)
+            switch failureFirst.phase {
+            case .binding(let g, _):
+                XCTAssertTrue(failureFirst.bindFailed(g), phase)
+            default:
+                XCTAssertTrue(failureFirst.socketFailed(1), phase)
+            }
+            XCTAssertEqual(failureFirst.retire(), .failed, phase)
+            XCTAssertEqual(failureFirst.phase, .failed(generation: 1), phase)
+
+            let retirementFirst = makeLifecycle(in: phase)
+            XCTAssertEqual(retirementFirst.retire(), .retired, phase)
+            XCTAssertEqual(retirementFirst.phase, .stopped, phase)
+            XCTAssertFalse(retirementFirst.bindFailed(1), phase)
+            XCTAssertFalse(retirementFirst.reject(1), phase)
+            XCTAssertFalse(retirementFirst.socketFailed(1), phase)
+            XCTAssertFalse(retirementFirst.failUnconfirmed(), phase)
+            XCTAssertEqual(retirementFirst.phase, .stopped, phase)
+        }
+        for phase in ["serving", "closing", "closed", "rebinding"] {
+            let published = makeLifecycle(in: phase, published: true)
+            let before = published.phase
+            XCTAssertEqual(published.retire(), .published, phase)
+            XCTAssertEqual(published.phase, before, phase)
+        }
+        let idle = makeLifecycle(in: "idle")
+        XCTAssertEqual(idle.retire(), .retired)
+        XCTAssertNil(idle.beginBind())
+    }
+
+    /// An attempt that ends without confirming its bind fails that bind
+    /// whatever it had reached, also when the bind never returned a
+    /// generation to the attempt. A listener closed on purpose, serving, or
+    /// already settled is left alone.
+    func testAnAttemptThatEndsUnconfirmedFailsItsBindWhateverItReached() {
+        for phase in ["binding", "verifying", "rebinding"] {
+            let lifecycle = makeLifecycle(in: phase, published: phase == "rebinding")
+            XCTAssertTrue(lifecycle.failUnconfirmed(), phase)
+            if case .failed = lifecycle.phase {
+            } else {
+                XCTFail("\(phase): \(lifecycle.phase)")
+            }
+            XCTAssertFalse(lifecycle.failUnconfirmed(), phase)
+        }
+        // The ready socket of a re-bind whose answer never reached its
+        // attempt: verifying, with no generation known to anyone.
+        let orphan = makeLifecycle(in: "rebinding", published: true)
+        XCTAssertTrue(orphan.ready(2))
+        XCTAssertTrue(orphan.failUnconfirmed())
+        XCTAssertEqual(orphan.phase, .failed(generation: 2))
+
+        for phase in ["idle", "serving", "closing", "closed", "failed", "stopped"] {
+            let lifecycle = makeLifecycle(in: phase)
+            let before = lifecycle.phase
+            XCTAssertFalse(lifecycle.failUnconfirmed(), phase)
+            XCTAssertEqual(lifecycle.phase, before, phase)
+        }
+    }
+
+    /// The bind's answer is the one arbiter of how the bind ended, and the
+    /// phase change that goes with an answer is made by whoever wins it,
+    /// under its lock. Ready first: the answer is the port, the phase is
+    /// verifying, and the cancellation that lost records nothing. The
+    /// cancellation first: the bind failed, and the ready that lost never
+    /// moves the phase.
+    func testTheBindAnswerAndThePhaseAreOneDecisionInEitherOrder() async throws {
+        let readyFirst = makeLifecycle(in: "binding")
+        let answer = DirectOnceAnswer<UInt16>()
+        XCTAssertTrue(
+            answer.resolveFirst {
+                readyFirst.ready(1) ? .success(7) : .failure(CancellationError())
+            }
+        )
+        var loserRan = false
+        XCTAssertFalse(
+            answer.resolveFirst {
+                loserRan = true
+                readyFirst.bindFailed(1)
+                return .failure(CancellationError())
+            }
+        )
+        XCTAssertFalse(loserRan)
+        XCTAssertEqual(readyFirst.phase, .verifying(generation: 1, rebind: false))
+        let port = try await withCheckedThrowingContinuation { continuation in
+            answer.wait(with: continuation)
+        }
+        XCTAssertEqual(port, 7)
+
+        let cancelFirst = makeLifecycle(in: "binding")
+        let cancelled = DirectOnceAnswer<UInt16>()
+        XCTAssertTrue(
+            cancelled.resolveFirst {
+                cancelFirst.bindFailed(1)
+                return .failure(CancellationError())
+            }
+        )
+        var readyRan = false
+        XCTAssertFalse(
+            cancelled.resolveFirst {
+                readyRan = true
+                return cancelFirst.ready(1) ? .success(7) : .failure(CancellationError())
+            }
+        )
+        XCTAssertFalse(readyRan)
+        XCTAssertEqual(cancelFirst.phase, .failed(generation: 1))
+        do {
+            _ = try await withCheckedThrowingContinuation { continuation in
+                cancelled.wait(with: continuation)
+            }
+            XCTFail("A cancelled bind answered.")
+        } catch {}
+
+        // A real failure recorded where it is reported, then the
+        // background's close: the failure stays. The close first: no
+        // failure.
+        let failureThenClose = makeLifecycle(in: "rebinding", published: true)
+        XCTAssertTrue(failureThenClose.bindFailed(2))
+        XCTAssertFalse(failureThenClose.beginClose())
+        XCTAssertEqual(failureThenClose.phase, .failed(generation: 2))
+        let closeThenFailure = makeLifecycle(in: "rebinding", published: true)
+        XCTAssertTrue(closeThenFailure.beginClose())
+        XCTAssertFalse(closeThenFailure.bindFailed(2))
+        XCTAssertEqual(closeThenFailure.phase, .closing(generation: 2))
+    }
+
+    /// A bind cancelled at any moment settles its own generation: when it
+    /// throws, the phase is failed, never still binding or verifying; when
+    /// it returns, the phase is verifying for exactly the generation it
+    /// returned, which its caller then owns.
+    func testABindCancelledAtAnyMomentSettlesItsOwnGeneration() async throws {
+        for round in 0..<40 {
+            let listener = DirectConnectListener(
+                limits: .patient,
+                planner: { _ in nil },
+                onListenerFailure: {}
+            )
+            let lifecycle = await listener.lifecycle
+            let binding = Task {
+                try await listener.bind(port: nil)
+            }
+            for _ in 0..<(round % 8) * 5 {
+                await Task.yield()
+            }
+            if round % 3 == 2 {
+                try await Task.sleep(for: .milliseconds(round % 5))
+            }
+            binding.cancel()
+            switch await binding.result {
+            case .success(let bound):
+                XCTAssertEqual(
+                    lifecycle.phase,
+                    .verifying(generation: bound.generation, rebind: false),
+                    "round \(round)"
+                )
+            case .failure:
+                XCTAssertEqual(lifecycle.phase, .failed(generation: 1), "round \(round)")
+            }
+            await listener.stop()
+        }
+    }
+
+    // MARK: The foreground episode
+
+    /// One fixed bound for a stay in the foreground: before it the listener
+    /// is left alone, and exactly at it the listener has failed, whatever it
+    /// was doing short of serving. A listener that serves, has failed, or
+    /// is stopped has no episode.
+    func testTheForegroundEpisodeFailsTheListenerAtItsDeadlineAndNotBefore() {
+        for phase in ["idle", "binding", "verifying", "closing", "closed", "rebinding"] {
+            let clock = StandInClock()
+            let lifecycle = makeLifecycle(in: phase, clock: clock)
+            let before = lifecycle.phase
+            let episode = lifecycle.beginEpisode(seconds: 5)
+            XCTAssertEqual(episode?.deadline, clock.now.advanced(by: .seconds(5)), phase)
+            clock.advance(by: .milliseconds(4999))
+            XCTAssertEqual(lifecycle.phase, before, phase)
+            XCTAssertEqual(lifecycle.currentEpisode, episode, phase)
+            clock.advance(by: .milliseconds(1))
+            if case .failed = lifecycle.phase {
+            } else {
+                XCTFail("\(phase) at the deadline: \(lifecycle.phase)")
+            }
+            XCTAssertNil(lifecycle.currentEpisode, phase)
+            // Terminal: no bind, no admission, no publication.
+            XCTAssertNil(lifecycle.beginBind(), phase)
+            XCTAssertEqual(lifecycle.admit(1, relay: UUID()), .refused, phase)
+            XCTAssertFalse(lifecycle.publish(1) { true }, phase)
+        }
+        for phase in ["serving", "failed", "stopped"] {
+            let clock = StandInClock()
+            let lifecycle = makeLifecycle(in: phase, clock: clock)
+            let before = lifecycle.phase
+            XCTAssertNil(lifecycle.beginEpisode(seconds: 5), phase)
+            clock.advance(by: .seconds(100))
+            XCTAssertEqual(lifecycle.phase, before, phase)
+        }
+    }
+
+    /// The same decision guards the confirmation: one that comes at or
+    /// after the deadline does not make the listener serve. One in time
+    /// does, and that ends the episode for good.
+    func testALateConfirmationCannotClearAnOverdueEpisode() {
+        let clock = StandInClock()
+        let late = makeLifecycle(in: "verifying", clock: clock)
+        XCTAssertNotNil(late.beginEpisode(seconds: 5))
+        clock.advance(by: .seconds(5))
+        XCTAssertFalse(late.confirm(1))
+        XCTAssertEqual(late.phase, .failed(generation: 1))
+
+        let inTime = makeLifecycle(in: "verifying", clock: clock)
+        XCTAssertNotNil(inTime.beginEpisode(seconds: 5))
+        clock.advance(by: .milliseconds(4999))
+        XCTAssertTrue(inTime.confirm(1))
+        XCTAssertNil(inTime.currentEpisode)
+        clock.advance(by: .seconds(100))
+        XCTAssertEqual(inTime.phase, .serving(generation: 1))
+        XCTAssertEqual(inTime.admit(1, relay: UUID()), .relay)
+    }
+
+    /// Attempts, bind generations, and close-to-bind handoffs inside one
+    /// stay do not move its deadline; asking for the episode again returns
+    /// the same one.
+    func testAttemptsInsideOneStayDoNotMoveItsDeadline() {
+        let clock = StandInClock()
+        let lifecycle = makeLifecycle(in: "closed", published: true, clock: clock)
+        let episode = lifecycle.beginEpisode(seconds: 5)
+        clock.advance(by: .seconds(2))
+        // An attempt binds, is closed on purpose, and another one binds.
+        let second = lifecycle.beginBind()!
+        XCTAssertTrue(lifecycle.ready(second))
+        XCTAssertTrue(lifecycle.beginClose())
+        lifecycle.closeCompleted()
+        XCTAssertEqual(lifecycle.beginEpisode(seconds: 5), episode)
+        let third = lifecycle.beginBind()!
+        XCTAssertEqual(lifecycle.beginEpisode(seconds: 5), episode)
+        XCTAssertEqual(lifecycle.phase, .binding(generation: third, rebind: true))
+        clock.advance(by: .milliseconds(2999))
+        XCTAssertEqual(lifecycle.phase, .binding(generation: third, rebind: true))
+        clock.advance(by: .milliseconds(1))
+        XCTAssertEqual(lifecycle.phase, .failed(generation: third))
+        XCTAssertTrue(lifecycle.hasPublished)
+    }
+
+    /// Leaving the foreground ends the episode: nothing fails while the App
+    /// is away, however long, and the next stay has its own deadline. An
+    /// episode already overdue when the App leaves has failed the listener.
+    func testLeavingTheForegroundEndsTheEpisodeAndTheNextStayHasItsOwn() {
+        let clock = StandInClock()
+        let lifecycle = makeLifecycle(in: "closed", published: true, clock: clock)
+        let first = lifecycle.beginEpisode(seconds: 5)
+        clock.advance(by: .seconds(3))
+        lifecycle.endEpisode()
+        XCTAssertNil(lifecycle.currentEpisode)
+        clock.advance(by: .seconds(3600))
+        XCTAssertEqual(lifecycle.phase, .closed)
+
+        let second = lifecycle.beginEpisode(seconds: 5)
+        XCTAssertNotEqual(second?.id, first?.id)
+        XCTAssertEqual(second?.deadline, clock.now.advanced(by: .seconds(5)))
+        clock.advance(by: .milliseconds(4999))
+        XCTAssertEqual(lifecycle.phase, .closed)
+        clock.advance(by: .milliseconds(1))
+        XCTAssertEqual(lifecycle.phase, .failed(generation: 1))
+
+        let overdue = makeLifecycle(in: "closed", published: true, clock: clock)
+        XCTAssertNotNil(overdue.beginEpisode(seconds: 5))
+        clock.advance(by: .seconds(5))
+        overdue.endEpisode()
+        XCTAssertEqual(overdue.phase, .failed(generation: 1))
+    }
+
+    /// The deadline fails the listener as any failure does: relays granted
+    /// before are kept in the ledger, and nothing new is admitted or
+    /// granted.
+    func testAnOverdueEpisodeKeepsWhatWasGranted() {
+        let clock = StandInClock()
+        let lifecycle = makeLifecycle(in: "serving", published: true, clock: clock)
+        let granted = UUID()
+        let candidate = UUID()
+        XCTAssertEqual(lifecycle.admit(1, relay: granted), .relay)
+        XCTAssertEqual(lifecycle.admit(1, relay: candidate), .relay)
+        XCTAssertTrue(lifecycle.grant(granted, host: host, backend: .direct, generation: 0))
+        XCTAssertTrue(lifecycle.beginClose())
+        lifecycle.closeCompleted()
+        XCTAssertNotNil(lifecycle.beginEpisode(seconds: 5))
+        clock.advance(by: .seconds(5))
+
+        XCTAssertEqual(lifecycle.relayIDs, [granted])
+        XCTAssertEqual(lifecycle.phase, .failed(generation: 1))
+        XCTAssertFalse(lifecycle.grant(candidate, host: host, backend: .direct, generation: 0))
+        XCTAssertEqual(lifecycle.admit(1, relay: UUID()), .refused)
     }
 
     // MARK: The relay ledger
@@ -1689,6 +1993,84 @@ final class DirectConnectListenerTests: XCTestCase {
             let binding = try await listener.bind(port: control.socket.port)
             XCTFail("Bound \(binding.port), which another socket holds.")
         } catch {}
+        // Recorded as the failure of exactly this bind.
+        let lifecycle = await listener.lifecycle
+        XCTAssertEqual(lifecycle.phase, .failed(generation: 1))
+    }
+
+    // MARK: A cancelled relay keeps its slot until it has drained
+
+    /// A candidate retired with its selection is cancelled at once, but its
+    /// task has not finished: its record still counts against the limit,
+    /// so no other CONNECT takes its slot until what held it is gone.
+    func testARetiredCandidateKeepsItsSlotUntilItsTaskHasEnded() async throws {
+        let fixture = try await makeListener(limits: limits(maxConnections: 1), direct: .hold)
+        let lifecycle = await fixture.listener.lifecycle
+        let retired = LoopbackClient(port: fixture.port)
+        try await retired.send(canonicalHead)
+        try await eventually { fixture.direct.attempts == 1 }
+
+        // A newer selection: the candidate's authority ends now. Its direct
+        // open does not return until the test releases it.
+        let newer = DirectPlanScope(selection: 1, accountEpoch: 0)
+        fixture.plans.set(scope: newer)
+        await fixture.listener.retireUncommitted(before: 0, outside: newer)
+        XCTAssertEqual(lifecycle.relayIDs, [])
+
+        // The slot is still held: another CONNECT is not admitted as a relay
+        // and is never planned.
+        let refused = LoopbackClient(port: fixture.port)
+        try? await refused.send(canonicalHead)
+        let nothing = try await refused.receiveUntilClosed()
+        XCTAssertEqual(nothing, Data())
+        XCTAssertEqual(fixture.plans.planCount, 1)
+        XCTAssertEqual(lifecycle.relayIDs, [])
+        // A second retirement finds nothing left to do.
+        await fixture.listener.retireUncommitted(before: 0, outside: newer)
+
+        // The held open returns: the task ends, and only now is the slot
+        // free.
+        fixture.direct.setMode(.open)
+        fixture.direct.releaseHeld()
+        let (served, stream) = try await serveWhenASlotIsFree(fixture)
+        XCTAssertEqual(lifecycle.grants.count, 1)
+        served.close()
+        stream.cancel()
+        retired.close()
+        refused.close()
+    }
+
+    /// The same for a granted relay an event closes: it is counted once and
+    /// its authority ends at once, but its record keeps its slot until its
+    /// task has ended.
+    func testARelayClosedByAnEventKeepsItsSlotUntilItsTaskHasEnded() async throws {
+        let fixture = try await makeListener(limits: limits(maxConnections: 1))
+        let lifecycle = await fixture.listener.lifecycle
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establish(client, fixture)
+        // The stream's own end waits for the test: the relay cannot finish.
+        stream.holdCancellation()
+
+        let closed = await fixture.listener.closeRelays(backend: nil)
+        XCTAssertEqual(closed, [host: 1])
+        XCTAssertEqual(lifecycle.relayIDs, [])
+        // Not counted twice, and not closed twice.
+        let again = await fixture.listener.closeRelays(backend: nil)
+        XCTAssertEqual(again, [:])
+
+        let refused = LoopbackClient(port: fixture.port)
+        try? await refused.send(canonicalHead)
+        let nothing = try await refused.receiveUntilClosed()
+        XCTAssertEqual(nothing, Data())
+        XCTAssertEqual(fixture.plans.planCount, 1)
+
+        stream.releaseCancellation()
+        let (served, second) = try await serveWhenASlotIsFree(fixture)
+        XCTAssertEqual(lifecycle.grants.count, 1)
+        served.close()
+        second.cancel()
+        client.close()
+        refused.close()
     }
 
     func testTheOwnershipCheckIsAnsweredOnlyByThisListenerWithItsNonce() async throws {
@@ -2228,6 +2610,22 @@ final class StandInPlans: @unchecked Sendable {
 
 struct DirectTestTimeout: Error {}
 
+/// A monotonic clock a test moves by hand.
+final class StandInClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant = ContinuousClock.now
+
+    var now: ContinuousClock.Instant {
+        lock.withLock { instant }
+    }
+
+    func advance(by duration: Duration) {
+        lock.withLock {
+            instant = instant.advanced(by: duration)
+        }
+    }
+}
+
 /// Waits for `condition`. A wait that runs out fails at the line that
 /// asked for it, then throws.
 func eventually(
@@ -2300,6 +2698,27 @@ final class StandInDirectStream: DirectByteStream, @unchecked Sendable {
     private var heldWrites: [(data: Data, continuation: CheckedContinuation<Void, Error>)] = []
     private var writeClosed = false
     private var cancelled = false
+    private var cancellationHeld = false
+
+    /// From now on `cancel()` marks the stream cancelled but leaves a read
+    /// in progress waiting, until `releaseCancellation()`: a stream whose
+    /// end takes time.
+    func holdCancellation() {
+        lock.withLock {
+            cancellationHeld = true
+        }
+    }
+
+    func releaseCancellation() {
+        lock.lock()
+        cancellationHeld = false
+        let read = cancelled ? pendingRead : nil
+        if read != nil {
+            pendingRead = nil
+        }
+        lock.unlock()
+        read?.continuation.resume(throwing: Closed())
+    }
 
     /// Everything the listener wrote that the stand-in has accepted.
     var written: Data {
@@ -2412,8 +2831,10 @@ final class StandInDirectStream: DirectByteStream, @unchecked Sendable {
     func cancel() {
         lock.lock()
         cancelled = true
-        let read = pendingRead
-        pendingRead = nil
+        let read = cancellationHeld ? nil : pendingRead
+        if !cancellationHeld {
+            pendingRead = nil
+        }
         let held = heldWrites
         heldWrites = []
         lock.unlock()
@@ -2429,6 +2850,9 @@ final class StandInDirectStream: DirectByteStream, @unchecked Sendable {
             return nil
         }
         if cancelled {
+            if cancellationHeld {
+                return nil
+            }
             pendingRead = nil
             return { read.continuation.resume(throwing: Closed()) }
         }
@@ -2718,6 +3142,9 @@ final class StandInStreamSource: @unchecked Sendable {
         case fail
         /// Never answers until its task is cancelled.
         case hang
+        /// Does not answer, cancelled or not, until `releaseHeld()`; then it
+        /// fails. An open whose end takes time.
+        case hold
     }
 
     struct Unavailable: Error {}
@@ -2726,6 +3153,19 @@ final class StandInStreamSource: @unchecked Sendable {
     private var mode: Mode
     private var streams: [StandInDirectStream] = []
     private var calls = 0
+    private var held: [CheckedContinuation<Void, Never>] = []
+
+    /// Lets every open held by `.hold` return (as a failure).
+    func releaseHeld() {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            let waiting = held
+            held = []
+            return waiting
+        }
+        for continuation in waiting {
+            continuation.resume()
+        }
+    }
 
     init(mode: Mode = .open) {
         self.mode = mode
@@ -2762,6 +3202,13 @@ final class StandInStreamSource: @unchecked Sendable {
             throw Unavailable()
         case .hang:
             try await Task.sleep(for: .seconds(3600))
+            throw Unavailable()
+        case .hold:
+            await withCheckedContinuation { continuation in
+                lock.withLock {
+                    held.append(continuation)
+                }
+            }
             throw Unavailable()
         }
     }

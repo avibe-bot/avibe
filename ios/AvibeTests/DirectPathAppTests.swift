@@ -175,6 +175,10 @@ final class DirectPathAppTests: XCTestCase {
         let socket = try XCTUnwrap(try newListeners(since: listening).first)
         let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
         XCTAssertFalse(app.directFaultCovers(first))
+        var shownWhileMarking: [Bool] = []
+        marker.whileMarking = {
+            shownWhileMarking.append(app.directListenerFault)
+        }
 
         // The App's port is taken while it is in the background: the return
         // cannot re-bind it, which is the listener fault.
@@ -195,10 +199,13 @@ final class DirectPathAppTests: XCTestCase {
             object: nil
         )
         try await eventually { app.directListenerFault }
+        // The marker was written before the fault was shown.
+        XCTAssertEqual(shownWhileMarking, [false])
         // Retry does not rebuild under the reopen message, and the runtime
         // that was open keeps its WebView under it.
         XCTAssertEqual(app.directLoadGate(for: first), .fault)
         XCTAssertFalse(app.mayReload(first))
+        XCTAssertFalse(app.authorizeReload(of: first))
         XCTAssertFalse(app.presentsDirectFaultOnly(first))
         // Another return does not report it again.
         NotificationCenter.default.post(
@@ -337,6 +344,10 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.route, .loading)
         _ = try await app.mobileSessionCoordinator.logout()
         trackStore(of: app)
+        // The sign-out itself ends the held open: the spinner does not wait
+        // for the return.
+        XCTAssertNil(app.route.runtime)
+        XCTAssertNotEqual(app.route, .loading)
         enterForeground()
         try await settle()
         XCTAssertNil(app.route.runtime)
@@ -393,6 +404,7 @@ final class DirectPathAppTests: XCTestCase {
         let app = try await makeApp(directTransport: nil)
         let runtime = try await select("instance-1", in: app)
         XCTAssertTrue(app.mayReload(runtime))
+        XCTAssertTrue(app.authorizeReload(of: runtime))
         XCTAssertEqual(app.directLoadGate(for: runtime), .open)
         XCTAssertNil(app.directLoadGateProvider(for: runtime))
         XCTAssertFalse(app.presentsDirectFaultOnly(runtime))
@@ -1682,6 +1694,8 @@ private final class FaultMarkerSpy: DirectFaultMarkerStoring {
     private(set) var isMarked: Bool
     private(set) var marks = 0
     private(set) var takes = 0
+    /// Called inside `mark()`, before it returns.
+    var whileMarking: () -> Void = {}
 
     init(marked: Bool) {
         isMarked = marked
@@ -1689,6 +1703,7 @@ private final class FaultMarkerSpy: DirectFaultMarkerStoring {
 
     func mark() {
         marks += 1
+        whileMarking()
         isMarked = true
     }
 

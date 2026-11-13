@@ -165,9 +165,36 @@ struct DirectPathTiming: Sendable {
     /// How long the return to the foreground may take to re-bind and check
     /// the listener's port.
     let rebindSeconds: TimeInterval
+    /// The foreground watchdog: how long, in one stay in the foreground,
+    /// the listener may be neither serving nor failed (binding, checking,
+    /// closing, closed and about to be bound again) before that is the
+    /// listener fault. One fixed bound for the whole stay, whatever
+    /// attempts happen inside it. Longer than a first bind or a re-bind
+    /// with its check is allowed to take, so it only ends what those bounds
+    /// did not. A conservative proposal for the internal trial.
+    let foregroundSeconds: TimeInterval
+
+    init(
+        listenerWaitSeconds: TimeInterval,
+        rebindSeconds: TimeInterval,
+        foregroundSeconds: TimeInterval = 5
+    ) {
+        self.listenerWaitSeconds = listenerWaitSeconds
+        self.rebindSeconds = rebindSeconds
+        self.foregroundSeconds = foregroundSeconds
+    }
 
     static let standard = DirectPathTiming(listenerWaitSeconds: 1, rebindSeconds: 2)
 }
+
+/// Asks for one call of `fire`, on the main actor, at or after `deadline`,
+/// and returns what cancels it. A wake-up only: whoever is woken reads the
+/// state again.
+typealias DirectWakeScheduler = @MainActor (
+    _ deadline: ContinuousClock.Instant,
+    _ fire: @escaping @MainActor () -> Void
+) -> DirectWakeCancel
+typealias DirectWakeCancel = @MainActor () -> Void
 
 /// The listener's state, as the controller sees it.
 enum DirectListenerState: Equatable, Sendable {
@@ -250,17 +277,30 @@ final class DirectPathController {
     /// bookkeeping of that task; whether the listener admits or publishes
     /// is decided by its lifecycle alone.
     private var rebinds = DirectRebindAttempts()
-    /// The listener fault was delivered (`enterFault` ran). The fault itself
-    /// is the lifecycle's `failed` phase, which fences everything at once;
-    /// this only makes its one delivery happen once.
-    private var faulted = false
+    /// Where the delivery of the listener fault stands. The fault itself is
+    /// the lifecycle's `failed` phase, which fences everything at once; this
+    /// only makes its one delivery (the marker, the reopen message) happen
+    /// once. It is `delivered` only after `onFault` has returned, so an
+    /// observation of the failure before that still delivers.
+    private enum FaultDelivery {
+        case none
+        case delivering
+        case delivered
+    }
+
+    private var faultDelivery = FaultDelivery.none
+    /// The one wake-up scheduled for the foreground watchdog, and the
+    /// episode it is for.
+    private var watchdog: (episode: UUID, cancel: DirectWakeCancel)?
+    private let now: @Sendable () -> ContinuousClock.Instant
+    /// `nil`: a task that sleeps until the deadline.
+    private let scheduleWake: DirectWakeScheduler?
 
     /// The listener, as the controller sees it: derived from the listener's
     /// lifecycle, the one authority (`DirectListenerLifecycle`).
     var listenerState: DirectListenerState {
-        if faulted {
-            return .faulted
-        }
+        // A failed listener is kept, so its phase says so for as long as the
+        // process lives.
         guard let listener else {
             return .none
         }
@@ -320,6 +360,8 @@ final class DirectPathController {
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
         isInBackground: Bool? = nil,
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+        scheduleWake: DirectWakeScheduler? = nil,
         onStatusChanged: @escaping () -> Void,
         onFault: @escaping () -> Void = {},
         onAvailabilityChanged: @escaping () -> Void = {}
@@ -337,6 +379,8 @@ final class DirectPathController {
         self.onStatusChanged = onStatusChanged
         self.onFault = onFault
         self.onAvailabilityChanged = onAvailabilityChanged
+        self.now = now
+        self.scheduleWake = scheduleWake
 
         websiteDataStore.onWillRotate = { [weak self] in
             self?.accountWillChange()
@@ -361,6 +405,23 @@ final class DirectPathController {
                 }
             },
         ]
+    }
+
+    /// The production wake-up: a task that sleeps until the deadline on the
+    /// continuous clock, which keeps counting while the device sleeps.
+    private static func sleepingWake(
+        until deadline: ContinuousClock.Instant,
+        _ fire: @escaping @MainActor () -> Void
+    ) -> DirectWakeCancel {
+        let task = Task { @MainActor in
+            do {
+                try await Task.sleep(until: deadline, clock: ContinuousClock())
+            } catch {
+                return
+            }
+            fire()
+        }
+        return { task.cancel() }
     }
 
     deinit {
@@ -393,6 +454,7 @@ final class DirectPathController {
         for origin: WebOrigin,
         reply: @escaping @MainActor (DirectPathStatus?) -> Void
     ) {
+        settleRecordedFault()
         if isResuming {
             heldReplies.append(
                 HeldReply(
@@ -535,9 +597,21 @@ final class DirectPathController {
         }
     }
 
+    /// Delivers the listener fault if the lifecycle has recorded a failure
+    /// that has not been delivered yet (the watchdog's deadline passed, or
+    /// a failure's own callback is still on its way). For callers that are
+    /// about to act on the gate or the status outside a view update; the
+    /// gate and the status themselves never wait for it.
+    func settleRecordedFault() {
+        if let listener {
+            deliverFault(of: listener, "a recorded failure was observed")
+        }
+    }
+
     /// Whether the shell may create or reload `runtime`'s WebView now.
     /// Synchronous, and read from the route table and the lifecycle each
-    /// time: a failure the lifecycle has recorded closes the gate before
+    /// time, with no side effect: a failure the lifecycle has recorded,
+    /// including the watchdog's deadline passing, closes the gate before
     /// its delivery reaches this actor.
     func loadGate(for runtime: MobileRuntimeContext) -> DirectLoadGate {
         guard
@@ -927,6 +1001,7 @@ final class DirectPathController {
         let listenerBox = DirectListenerBox()
         let listener = DirectConnectListener(
             limits: limits,
+            now: now,
             planner: { [weak self] authority in
                 await self?.plan(for: authority)
             },
@@ -941,6 +1016,8 @@ final class DirectPathController {
         )
         listenerBox.listener = listener
         self.listener = listener
+        // The first bind starts in the foreground: its episode begins here.
+        armWatchdog()
         let rebindSeconds = timing.rebindSeconds
         let task = Task { [weak self] () -> Bool in
             guard let binding = try? await listener.bind(port: nil) else {
@@ -980,6 +1057,7 @@ final class DirectPathController {
                 // first bind still under way before it can be confirmed.
                 self.listenerPort = binding.port
                 self.listenerGeneration = binding.generation
+                self.disarmWatchdog()
                 return true
             }
         }
@@ -1012,25 +1090,32 @@ final class DirectPathController {
         }
     }
 
-    /// Takes the listener out of service now: no route preparation or plan
-    /// sees it ready from here on. Returns it for its socket to be stopped.
-    /// A fault is never undone in its process, and a listener a route was
-    /// ever published to is never stopped or replaced: the route cannot be
-    /// taken back, so only that listener, on that port, can serve it.
+    /// Takes the listener out of service now, if it may be: no route
+    /// preparation or plan sees it ready from here on. Returns it for its
+    /// socket to be stopped. One decision under the listener's own lock
+    /// (`retire`): a failure recorded first wins, and then the listener is
+    /// kept and the fault delivered; a listener a route was ever published
+    /// to is never stopped or replaced, because the route cannot be taken
+    /// back and only that listener, on that port, can serve it.
     private func retireListener() -> DirectConnectListener? {
-        guard listenerState != .faulted, listener?.lifecycle.hasPublished != true else {
+        guard let listener else {
             return nil
         }
-        let listener = listener
-        // Out of service now: a connection already queued for it is refused,
-        // and no route is published to it, before its stop runs.
-        listener?.lifecycle.stop()
-        self.listener = nil
-        listenerPort = nil
-        listenerGeneration = nil
-        listenerStart = nil
-        rebinds.abandon()
-        return listener
+        switch listener.lifecycle.retire() {
+        case .retired:
+            disarmWatchdog()
+            self.listener = nil
+            listenerPort = nil
+            listenerGeneration = nil
+            listenerStart = nil
+            rebinds.abandon()
+            return listener
+        case .failed:
+            enterFault("the listener failed before it could be retired")
+            return nil
+        case .published:
+            return nil
+        }
     }
 
     /// The listening socket of `failed` failed, as its lifecycle recorded
@@ -1063,11 +1148,12 @@ final class DirectPathController {
     /// them, and it is not a closure. The listener is kept, never stopped:
     /// it holds those relays.
     private func enterFault(_ reason: String) {
-        guard !faulted else {
+        guard faultDelivery == .none else {
             return
         }
+        faultDelivery = .delivering
         Self.logger.error("Direct path: listener fault: \(reason, privacy: .public)")
-        faulted = true
+        disarmWatchdog()
         // Whatever return was under way is settled by this.
         rebinds.abandon()
         if let listener {
@@ -1080,9 +1166,73 @@ final class DirectPathController {
         // its streams, and the fault closes no relay.
         advanceGeneration()
         preferred = .tunnel
+        // The marker and the reopen message. Delivered only once this has
+        // returned.
         onFault()
+        faultDelivery = .delivered
         if isResuming, !isInBackground {
             finishResume()
+        }
+    }
+
+    // MARK: The foreground watchdog
+
+    /// Begins the foreground episode for the listener, or keeps the one
+    /// running, and makes sure exactly one wake-up is scheduled for its
+    /// deadline. The lifecycle owns the episode and its deadline; an attempt
+    /// that starts inside it does not move either.
+    private func armWatchdog() {
+        guard
+            let listener,
+            let episode = listener.lifecycle.beginEpisode(seconds: timing.foregroundSeconds)
+        else {
+            disarmWatchdog()
+            return
+        }
+        scheduleWatchdogWake(for: episode, of: listener)
+    }
+
+    private func scheduleWatchdogWake(
+        for episode: DirectListenerLifecycle.Episode,
+        of listener: DirectConnectListener
+    ) {
+        guard watchdog?.episode != episode.id else {
+            return
+        }
+        watchdog?.cancel()
+        let id = episode.id
+        let fire: @MainActor () -> Void = { [weak self, weak listener] in
+            self?.watchdogDidWake(listener, episode: id)
+        }
+        let cancel = scheduleWake?(episode.deadline, fire)
+            ?? Self.sleepingWake(until: episode.deadline, fire)
+        watchdog = (id, cancel)
+    }
+
+    private func disarmWatchdog() {
+        watchdog?.cancel()
+        watchdog = nil
+    }
+
+    /// The watchdog's wake-up. It proves nothing by itself: a wake-up for
+    /// another listener or an episode that is over does nothing, and for
+    /// the current one the lifecycle is read again. Its deadline decided
+    /// there, under its lock, whether the listener has failed; this only
+    /// delivers that. Woken before the deadline, it is scheduled again.
+    private func watchdogDidWake(_ woken: DirectConnectListener?, episode: UUID) {
+        guard
+            let listener,
+            woken === listener,
+            watchdog?.episode == episode
+        else {
+            return
+        }
+        watchdog = nil
+        if deliverFault(of: listener, "the listener did not serve in the foreground in time") {
+            return
+        }
+        if let running = listener.lifecycle.currentEpisode, running.id == episode {
+            scheduleWatchdogWake(for: running, of: listener)
         }
     }
 
@@ -1093,6 +1243,12 @@ final class DirectPathController {
             return
         }
         isInBackground = true
+        // Nothing is watched while the App is away. An episode already
+        // overdue fails the listener here, before the close below; the
+        // background itself is never a failure.
+        listener?.lifecycle.endEpisode()
+        disarmWatchdog()
+        settleRecordedFault()
         // The relays are closed and counted before the transport is told to
         // stop, which closes its streams: a relay whose stream ended first
         // would no longer be there to count.
@@ -1134,6 +1290,9 @@ final class DirectPathController {
             return
         }
         isInBackground = false
+        // A new stay in the foreground: a new episode, with its own
+        // deadline, for a listener that does not serve yet.
+        armWatchdog()
         if rebinds.inFlight {
             // A return before the previous return's re-bind finished: that
             // re-bind settles this resume too. Held answers stay held and
@@ -1228,6 +1387,7 @@ final class DirectPathController {
         // Serving only if this bind is still verifying.
         if ready, let generation, listener.lifecycle.confirm(generation) {
             listenerGeneration = generation
+            disarmWatchdog()
             finishResume()
             return
         }
@@ -1241,17 +1401,24 @@ final class DirectPathController {
         default:
             break
         }
-        // Not owned, or out of time: the failure of exactly this bind, if
-        // it is still the current one.
-        if let generation {
-            listener.lifecycle.reject(generation)
-        }
+        // Not owned, or out of time. This attempt was the only owner of the
+        // current bind, whether or not that bind ever returned a generation
+        // to it: whatever the bind had reached, it fails here, under the
+        // lifecycle's lock. Nothing is left binding or verifying with no
+        // attempt behind it.
+        listener.lifecycle.failUnconfirmed()
         if deliverFault(of: listener, "the port could not be re-bound and checked") {
             return
         }
-        // Not reachable: a bind that did not end serving, closed, or failed.
-        // Settled all the same, so no answer stays held.
-        finishResume()
+        switch listener.lifecycle.phase {
+        case .closing, .closed:
+            // A background closed it in between: the return binds again.
+            startRebind(listener, port: listenerPort)
+        default:
+            // Serving (nothing to do but settle) or stopped (no listener).
+            // Neither is held: the gate is open, or shows the fault.
+            finishResume()
+        }
     }
 
     /// Publishes the closures the background caused, answers the held

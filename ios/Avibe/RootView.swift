@@ -156,7 +156,7 @@ private struct BrowserScreen: View {
                                 Button("browser.error.retry") {
                                     // Decided again at the tap, for the
                                     // reload itself.
-                                    guard appModel.mayReload(runtime) else {
+                                    guard appModel.authorizeReload(of: runtime) else {
                                         return
                                     }
                                     showsAccountFallback = false

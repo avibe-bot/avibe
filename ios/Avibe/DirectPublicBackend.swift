@@ -467,20 +467,37 @@ final class DirectOnceAnswer<Value>: @unchecked Sendable {
     }
 
     func resolve(with result: Result<Value, Error>) {
-        let waiting: CheckedContinuation<Value, Error>? = lock.withLock {
-            guard !done else {
-                return nil
+        resolveFirst { result }
+    }
+
+    /// Resolves with what `decide` returns, if nothing has resolved this
+    /// answer yet, and says whether it did. `decide` runs under this
+    /// answer's lock, and only for the resolver that wins: a state change it
+    /// makes and the answer it gives are one decision, so no other resolver
+    /// can win the answer after that change, or make its own change after
+    /// losing. `decide` must not wait or resolve this answer.
+    @discardableResult
+    func resolveFirst(_ decide: () -> Result<Value, Error>) -> Bool {
+        var waiting: CheckedContinuation<Value, Error>?
+        var answer: Result<Value, Error>?
+        let won: Bool = lock.withLock {
+            guard !done, early == nil else {
+                return false
             }
+            let result = decide()
             if let continuation {
                 done = true
                 self.continuation = nil
-                return continuation
-            }
-            if early == nil {
+                waiting = continuation
+                answer = result
+            } else {
                 early = result
             }
-            return nil
+            return true
         }
-        waiting?.resume(with: result)
+        if let waiting, let answer {
+            waiting.resume(with: answer)
+        }
+        return won
     }
 }

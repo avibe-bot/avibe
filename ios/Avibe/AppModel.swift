@@ -78,6 +78,9 @@ final class AppModel: ObservableObject {
     /// (A runtime the fault reaches later keeps its WebView under the
     /// message; the same gate value cannot tell the two apart.)
     private var directFaultOnlyIdentity: Int?
+    /// A call of the fault marker's `mark()` has returned in this process.
+    /// That is all it says: not that the marker is on disk.
+    private var directFaultIsMarked = false
     private let pushKeychain: PushKeychainStoring
     private let pushGenerationStore: PushGenerationStoring
     private let pushInstallationMarker: PushInstallationMarkerStoring
@@ -395,6 +398,9 @@ final class AppModel: ObservableObject {
         guard let directPathController else {
             return
         }
+        // About to act on the gate: a failure already recorded is delivered
+        // first, so the marker never lags behind what is shown.
+        directPathController.settleRecordedFault()
         switch directPathController.loadGate(for: runtime) {
         case .open:
             deferredOpen = nil
@@ -446,17 +452,27 @@ final class AppModel: ObservableObject {
             return nil
         }
         return { [weak self] in
-            self?.directLoadGate(for: runtime) ?? .open
+            // Asked where a load is about to be made, never in a view
+            // update: a failure already recorded is delivered first.
+            self?.directPathController?.settleRecordedFault()
+            return self?.directLoadGate(for: runtime) ?? .open
         }
     }
 
-    /// Whether the shell's own reload of `runtime` (Retry) is allowed now.
-    /// Synchronous: only when the host is on WebKit's normal path or its
-    /// route points at a serving listener. Never while the listener is
-    /// closed or being bound again, and never under the fault. Always
-    /// `true` without a transport.
+    /// Whether the shell's own reload of `runtime` (Retry) may be offered
+    /// now. Synchronous and without side effects, for the view: only when
+    /// the host is on WebKit's normal path or its route points at a serving
+    /// listener. Never while the listener is closed or being bound again,
+    /// and never under the fault. Always `true` without a transport.
     func mayReload(_ runtime: MobileRuntimeContext) -> Bool {
         directLoadGate(for: runtime) == .open
+    }
+
+    /// The Retry tap itself: decides again, now, whether the reload may be
+    /// made, and delivers a failure already recorded first.
+    func authorizeReload(of runtime: MobileRuntimeContext) -> Bool {
+        directPathController?.settleRecordedFault()
+        return mayReload(runtime)
     }
 
     /// Whether the listener fault covers `runtime`: its host is routed to a
@@ -473,6 +489,12 @@ final class AppModel: ObservableObject {
     }
 
     private func directListenerDidFault() {
+        // The marker first, and whatever else happens: it is what makes the
+        // next launch work. Repeated only until one call has returned.
+        if !directFaultIsMarked {
+            directFaultMarker.mark()
+            directFaultIsMarked = true
+        }
         guard !directListenerFault else {
             return
         }
@@ -482,7 +504,6 @@ final class AppModel: ObservableObject {
         if let runtime = route.runtime, directFaultCovers(runtime) {
             runtimeController?.discardPopupsForListenerFault()
         }
-        directFaultMarker.mark()
         // A held open ends as the reopen message, and a held automatic
         // load is dropped.
         directAvailabilityDidChange()
@@ -642,6 +663,9 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] {
         clearPendingPushOpened()
+        // A held open is ended here, with nothing left to settle it: its
+        // loading route must not stay.
+        let endsHeldOpen = deferredOpen != nil
         stopRuntime()
         switch route {
         case .browser:
@@ -649,7 +673,11 @@ final class AppModel: ObservableObject {
         case .accountOverBrowser:
             // The account page stays where it is; only the runtime goes.
             route = .onboarding(.account)
-        case .loading, .onboarding:
+        case .loading:
+            if endsHeldOpen {
+                route = .onboarding(.instances)
+            }
+        case .onboarding:
             break
         }
         let barriers = pendingRuntimeReleaseBarriers
