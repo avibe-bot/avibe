@@ -796,10 +796,9 @@ final class DirectPathAppTests: XCTestCase {
         let hold = PushHold(path: "/api/push/hold-account")
         let app = try await makeApp(directTransport: nil, pushHolds: [hold])
         let runtime = try await select("instance-1", in: app)
-        app.registerRuntimeController(
-            try makeRuntimeController(app, runtime),
-            for: runtime
-        )
+        // The App holds its runtime's controller weakly; the view would.
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
         XCTAssertEqual(app.route, .browser(runtime))
 
         let management = try await holdPushManagement(hold, in: app)
@@ -812,6 +811,7 @@ final class DirectPathAppTests: XCTestCase {
         try await management.value
         XCTAssertEqual(app.route, .browser(runtime))
         XCTAssertFalse(app.mobileSessionCoordinator.isAccountSurfaceActive)
+        withExtendedLifetime(controller) {}
     }
 
     // MARK: A runtime abandoned when its WebView registers
