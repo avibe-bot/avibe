@@ -379,7 +379,11 @@ actor DirectConnectListener {
     /// The close of the previous listening socket, until it has finished.
     private var closing: Task<Void, Never>?
     /// The one connection beyond the limit, kept for the ownership check.
+    /// Recorded from admission until its task has closed its connection.
     private var spare: (id: UUID, task: Task<Void, Never>)?
+    /// The bind whose socket admits connections; `nil` once it began to
+    /// close.
+    private var acceptingGeneration: Int?
     /// How long the spare connection waits for a request head. Far shorter
     /// than an ownership check's window, which retries: a slow or
     /// incomplete request cannot hold the spare through a check.
@@ -413,8 +417,12 @@ actor DirectConnectListener {
     /// share its address (`allowLocalEndpointReuse` is off), so a port held by
     /// anyone else fails the bind.
     func bind(port requested: UInt16?) async throws -> UInt16 {
-        // A listening socket still closing holds the port.
+        // A listening socket still closing, or a spare it accepted, holds
+        // the port.
         await closing?.value
+        if listener == nil {
+            await drainSpare()
+        }
         guard !isStopped, listener == nil else {
             throw CancellationError()
         }
@@ -443,6 +451,12 @@ actor DirectConnectListener {
             listener = try NWListener(using: parameters)
         }
         self.listener = listener
+        // Each bind has its own generation, so a failure reported by an
+        // earlier socket of this actor is recognised as stale, and so is a
+        // connection that socket accepted after it began closing.
+        bindGeneration += 1
+        let generation = bindGeneration
+        acceptingGeneration = generation
         listener.newConnectionHandler = { [weak self, queue] connection in
             guard let self else {
                 connection.cancel()
@@ -455,13 +469,9 @@ actor DirectConnectListener {
             // was not established; macOS showed neither.
             connection.start(queue: queue)
             Task {
-                await self.accept(connection)
+                await self.accept(connection, bindGeneration: generation)
             }
         }
-        // Each bind has its own generation, so a failure reported by an
-        // earlier socket of this actor is recognised as stale.
-        bindGeneration += 1
-        let generation = bindGeneration
         let health = health
         // Resolved by the socket's state, by cancellation of this task, or
         // by `closeListeningSocket()` and `stop()`, which replace the state
@@ -513,6 +523,9 @@ actor DirectConnectListener {
             if self.listener === listener {
                 self.listener = nil
             }
+            if acceptingGeneration == generation {
+                acceptingGeneration = nil
+            }
             listener.cancel()
             throw error
         }
@@ -534,17 +547,20 @@ actor DirectConnectListener {
     /// `cancel()` failed with EADDRINUSE on the simulator. A bind still
     /// pending ends with `CancellationError`.
     func closeListeningSocket() async {
+        // Before any suspension: no connection is admitted from here on.
+        acceptingGeneration = nil
         endPendingBind()
         health.closed()
-        // The spare belongs to the socket that accepted it; the next socket's
-        // ownership check must not find it taken.
-        endSpare()
         if let listener {
             self.listener = nil
             closing = Task {
                 await Self.cancelAndWait(listener)
             }
         }
+        // The spare belongs to the socket that accepted it. It is cancelled
+        // and waited for, through its own completion, before this returns,
+        // so a same-port bind never meets it.
+        await drainSpare()
         await closing?.value
     }
 
@@ -573,6 +589,7 @@ actor DirectConnectListener {
             return
         }
         isStopped = true
+        acceptingGeneration = nil
         endPendingBind()
         health.closed()
         listener?.stateUpdateHandler = nil
@@ -656,8 +673,11 @@ actor DirectConnectListener {
         onListenerFailure(routed)
     }
 
-    private func accept(_ connection: NWConnection) {
-        guard !isStopped else {
+    private func accept(_ connection: NWConnection, bindGeneration generation: Int) {
+        // Admission ends when the socket that accepted the connection begins
+        // to close: an accept queued before the close, delivered after it,
+        // is not admitted, as a relay or as the spare.
+        guard !isStopped, generation == acceptingGeneration else {
             connection.cancel()
             return
         }
@@ -706,23 +726,36 @@ actor DirectConnectListener {
         })
     }
 
-    /// A relay's task ended, on its own or because a close cancelled it.
-    /// A relay whose stream failed before any event closed it is not counted
-    /// by a later event: that event did not close it, and the page already
-    /// saw that connection fail.
-    /// Clears the spare only if it is still this one: a spare cancelled by
-    /// a socket close may end after a newer one took its place.
+    /// Clears the spare only if it is still this one. A cancelled spare stays
+    /// recorded until here, so a newer one cannot take its place first; the
+    /// id fence is a second guard, not the cleanup.
     private func spareDidEnd(_ id: UUID) {
         if spare?.id == id {
             spare = nil
         }
     }
 
+    /// Cancels the spare without forgetting it: it stays recorded, and
+    /// counted against the bound, until its own completion clears it.
     private func endSpare() {
         spare?.task.cancel()
-        spare = nil
     }
 
+    /// Cancels the spare and waits until its connection is closed and it
+    /// has cleared itself. Waiting on its task lets this actor run the
+    /// spare's own `spareDidEnd`, so this cannot deadlock.
+    private func drainSpare() async {
+        guard let spare else {
+            return
+        }
+        spare.task.cancel()
+        await spare.task.value
+    }
+
+    /// A relay's task ended, on its own or because a close cancelled it.
+    /// A relay whose stream failed before any event closed it is not counted
+    /// by a later event: that event did not close it, and the page already
+    /// saw that connection fail.
     private func relayDidEnd(_ id: UUID) {
         relays.removeValue(forKey: id)
     }
@@ -1366,7 +1399,13 @@ actor DirectConnectListener {
             if await checkOwnershipOnce(port: port, nonce: nonce, within: remainingSeconds) {
                 return true
             }
-            try? await Task.sleep(for: .milliseconds(50))
+            // Never past the window: the pause is the lesser of 50 ms and
+            // what remains.
+            let left = ContinuousClock.now.duration(to: deadline)
+            guard left > .zero else {
+                break
+            }
+            try? await Task.sleep(for: min(.milliseconds(50), left))
         }
         return false
     }
