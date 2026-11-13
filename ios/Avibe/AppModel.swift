@@ -616,7 +616,6 @@ final class AppModel: ObservableObject {
         // retires notifications; the total is preference-filtered and has no
         // snapshot time.
         if count == 0,
-           reconciledRuntimeIdentity != runtimeIdentity,
            let account = sessionCoordinator.currentAccount
         {
             // Nothing notified on this instance is unread. The zero was
