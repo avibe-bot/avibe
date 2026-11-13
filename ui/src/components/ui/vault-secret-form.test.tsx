@@ -630,6 +630,24 @@ describe('turning ask-before-signing off with a Passkey', () => {
     expect(screen.getByText(en.vaults.askOff.offHintEdit)).toBeTruthy();
   });
 
+  it.each(['setup_window_closed', 'setup_window_timeout', 'passkey_cancelled'])('goes back to the setup offer without a failure when setup ends with %s', async (code) => {
+    sandbox.canTurnOff = true;
+    api.createVaultSigningPolicyChallenge.mockReset();
+    api.createVaultSigningPolicyChallenge.mockResolvedValue({ ok: false, code: 'vault_policy_setup_required' });
+    vault.setupVaultDurably.mockReset();
+    vault.setupVaultDurably.mockRejectedValue(Object.assign(new Error('x'), { code }));
+    render(form(<VaultSecretForm editSecret={on} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={vi.fn()} />));
+    await screen.findByText(en.vaults.askOff.offHintEdit);
+    await act(async () => { fireEvent.click(askSwitch()); });
+    fireEvent.click(await screen.findByRole('checkbox', { name: en.vaults.protectedUnlock.passkeyAck }));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: en.vaults.askOff.setupAction })); });
+    expect(vault.setupVaultDurably).toHaveBeenCalledOnce();
+    expect(await screen.findByText(en.vaults.askOff.setupRequired)).toBeTruthy();
+    expect(screen.queryByText(en.vaults.askOff.setupFailed)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(askSwitch().getAttribute('aria-checked')).toBe('true');
+  });
+
   it('sets up a Passkey from here when none was ever set up, then turns it off on the next toggle', async () => {
     sandbox.canTurnOff = true;
     api.createVaultSigningPolicyChallenge.mockReset();

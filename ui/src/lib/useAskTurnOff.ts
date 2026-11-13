@@ -16,6 +16,14 @@ export type AskTurnOffState =
   | { phase: 'ready'; failure?: PolicyTurnOffFailure; setup?: AskSetupOutcome }
   | { phase: 'working'; settingUp?: boolean };
 
+// The setup window closed or ran out of time, or the Passkey prompt was dismissed: back to the
+// setup offer, said nothing about (not a failure).
+const SETUP_ENDED_BY_USER = new Set(['setup_window_closed', 'setup_window_timeout']);
+const setupEndedByUser = (error: unknown) => {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return (typeof code === 'string' && SETUP_ENDED_BY_USER.has(code)) || policyFailureFromSandbox(error) === 'cancelled';
+};
+
 /** Whether the line under the switch (AskTurnOffNote) has anything to say for this state. */
 export const askTurnOffNoteShown = (state: AskTurnOffState) =>
   state.phase === 'working'
@@ -99,7 +107,7 @@ export function useAskTurnOff(target: { name: string; account?: number }, enable
     const started = key;
     setAttempt({ key: started, id, phase: 'working', settingUp: true });
     void setupVaultDurably(api)
-      .catch((error: unknown) => ({ ok: false as const, code: policyFailureFromSandbox(error) === 'cancelled' ? 'cancelled' : 'setup_failed' }))
+      .catch((error: unknown) => ({ ok: false as const, code: setupEndedByUser(error) ? 'cancelled' : 'setup_failed' }))
       .then((result) => {
         if (!ref.live || ref.id !== id || ref.key !== started) return;
         if (result.ok) setAttempt({ key: started, id, phase: 'done', setup: 'done' });

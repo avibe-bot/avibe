@@ -232,7 +232,7 @@ type SetupApi = Pick<ApiContextType, 'createVaultAuthzWebAuthnOptions' | 'getVau
 
 /** The sandbox setup ceremony: a new Passkey and Vault root, held in this tab until something
  *  persists it (the first protected key, or {@link setupVaultDurably}). */
-async function runPasskeySetup(api: SetupApi): Promise<void> {
+async function runPasskeySetup(api: SetupApi, options: { onlyFirstFactor?: boolean } = {}): Promise<void> {
   const sandbox = await getVaultSandboxClient();
   const [authzOptions, rootMetadata] = await Promise.all([
     api.createVaultAuthzWebAuthnOptions(),
@@ -240,6 +240,11 @@ async function runPasskeySetup(api: SetupApi): Promise<void> {
   ]);
   if (!authzOptions?.ok) throw new Error(authzOptions?.code || 'passkey-registration-options-failed');
   if (!rootMetadata?.ok) throw new Error(rootMetadata?.code || 'sandbox-root-metadata-failed');
+  // The server already has a Passkey (set up in another tab meanwhile, or a commit whose reply was
+  // lost): never create a second credential behind it.
+  if (options.onlyFirstFactor && authzOptions.requires_existing_factor) {
+    throw Object.assign(new Error('vault-already-initialized'), { code: 'vault_already_initialized' });
+  }
   const result = await sandbox.setup({
     vaultUserHandle: 'avibe-vault',
     displayName: 'Avibe Vault',
@@ -266,7 +271,14 @@ export async function setupVaultDurably(
   // tab made but could not commit yet is committed again as it is: no second ceremony.
   const pendingFresh = sessionVault.freshSetup && sessionVault.wrapMeta && sessionVault.authzFactorRegistration;
   if (sessionVault.wrapMeta && !pendingFresh) return { ok: false, code: 'vault_already_initialized' };
-  if (!pendingFresh) await runPasskeySetup(api);
+  if (!pendingFresh) {
+    try {
+      await runPasskeySetup(api, { onlyFirstFactor: true });
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'vault_already_initialized') return { ok: false, code: 'vault_already_initialized' };
+      throw error;
+    }
+  }
   const wrapMeta = sessionVault.wrapMeta;
   const registration = sessionVault.authzFactorRegistration;
   if (!wrapMeta || !registration) {
