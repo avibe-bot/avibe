@@ -48,3 +48,7 @@ export function genBits(g: Gen): number {
   const alphabet = 52 + (g.digits ? 10 : 0) + (g.symbols ? SYMBOLS.length : 0) - (g.noLookalike ? (g.digits ? 5 : 3) : 0);
   return Math.floor(g.length * Math.log2(alphabet));
 }
+
+// Version 3: a 40-character password, for the frame where the slider is being dragged to 40.
+export const SAMPLE_40 = '3pLyrRG^L8?=gnMDixe6q=~WZcYz6d+@v+v35BO8';
+export const PASSWORD_40: Gen = { ...PASSWORD_24, length: 40 } as Gen;
