@@ -176,7 +176,7 @@ export function WindowReview({ mode }: { mode: 'create' | 'import' }) {
       <MirrorRow label="ETH" value={a.eth} />
       <MirrorRow label="BTC · Taproot" value={a.btc_taproot} />
       <MirrorRow label="Solana" value={a.solana} />
-      <span className="flex items-center gap-1.5 text-[12px] text-muted"><Lock className="size-3.5" />{d('保存时用通行密钥确认；随后在安全窗口里重新打开加密结果核对，再把加密结果交给 Avibe。', 'Saving is confirmed with your passkey; the secure window then reopens the encrypted result to check it before handing the encrypted result to Avibe.')}</span>
+      <span className="flex items-start gap-1.5 text-[12px] leading-snug text-muted"><Lock className="mt-0.5 size-3.5 shrink-0" />{d('保存时用通行密钥确认；随后在安全窗口里重新打开加密结果核对，再把加密结果交给 Avibe。', 'Saving is confirmed with your passkey; the secure window then reopens the encrypted result to check it before handing the encrypted result to Avibe.')}</span>
     </SandboxCard>
   );
 }
