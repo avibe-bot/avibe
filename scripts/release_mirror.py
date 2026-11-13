@@ -240,6 +240,29 @@ def latest_installers(releases: Sequence[Release]) -> dict[str, tuple[str, Asset
     return {}
 
 
+def index_visible(release: Release) -> bool:
+    # Desktop 3.2.5 selects the latest release before checking updater assets.
+    # Hide only this transition release until every desktop target is ready;
+    # remove this compatibility gate after the 3.2.6 rollout. Object mirroring
+    # still includes the release, so core downloads need not wait for desktop.
+    if release.repository != "avibe-bot/avibe" or release.tag != "v3.2.6":
+        return True
+    required = {
+        name
+        for target, suffix in (
+            ("aarch64-apple-darwin", ".app.tar.gz"),
+            ("x86_64-apple-darwin", ".app.tar.gz"),
+            ("x86_64-pc-windows-msvc", ".exe"),
+        )
+        for name in (
+            f"desktop-update-{target}.json",
+            f"desktop-update-{target}.json.sig",
+            f"Avibe_3.2.6_{target}{suffix}",
+        )
+    }
+    return required <= {asset.name for asset in release.assets}
+
+
 def render_index(repository: str, releases: Sequence[Release]) -> bytes:
     document = {
         "schema_version": INDEX_SCHEMA_VERSION,
@@ -258,6 +281,7 @@ def render_index(repository: str, releases: Sequence[Release]) -> bytes:
                 **({"update_notification": "none"} if release.silent else {}),
             }
             for release in releases
+            if index_visible(release)
         ],
     }
     return (json.dumps(document, separators=(",", ":")) + "\n").encode()
