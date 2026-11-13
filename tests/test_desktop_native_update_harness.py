@@ -29,6 +29,14 @@ HARNESS = ROOT / "desktop/src-tauri/tests/native_update"
 @pytest.fixture
 def harness(monkeypatch):
     monkeypatch.syspath_prepend(str(HARNESS))
+    # Exercise the Windows legacy default on every host. Source files must
+    # explicitly request UTF-8, as the actual assembly builder already does.
+    read_text = Path.read_text
+
+    def legacy_read_text(path, encoding=None, errors=None):
+        return read_text(path, encoding=encoding or "cp1252", errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", legacy_read_text)
     modules = {}
     for name in ("build", "runtime", "guard"):
         spec = importlib.util.spec_from_file_location(f"native_update_{name}", HARNESS / f"{name}.py")
@@ -68,8 +76,8 @@ def test_real_fixture_adaptation_keeps_installer_and_owner_sources(harness, tmp_
     ".plugin(tauri_plugin_global_shortcut::Builder::new()",
 ])
 def test_fixture_requires_real_auxiliary_state_before_client_attach(harness, missing):
-    library = (ROOT / "desktop/src-tauri/src/lib.rs").read_text()
-    fixture = (ROOT / "desktop/src-tauri/examples/support/fixture_native_update.rs").read_text()
+    library = (ROOT / "desktop/src-tauri/src/lib.rs").read_text(encoding="utf-8")
+    fixture = (ROOT / "desktop/src-tauri/examples/support/fixture_native_update.rs").read_text(encoding="utf-8")
     validate = harness["build"].validate_presentation_lifecycle
     validate(library, fixture)
     with pytest.raises(RuntimeError, match="lifecycle missing"):
@@ -147,7 +155,7 @@ def admission(harness, monkeypatch, tmp_path):
     source = "1" * 40
     event.write_text(json.dumps({"action": "labeled", "label": {"name": "native-update-acceptance"},
         "pull_request": {"base": {"ref": "master"},
-                         "head": {"sha": source, "repo": {"full_name": guard.REPOSITORY}}}}))
+                         "head": {"sha": source, "repo": {"full_name": guard.REPOSITORY}}}}), encoding="utf-8")
     for key, value in {
         "GITHUB_REPOSITORY": guard.REPOSITORY, "ACCEPTANCE_SOURCE_SHA": source,
         "GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "pull_request",
@@ -215,7 +223,7 @@ def test_admission_still_fails_closed(admission, monkeypatch, failure):
 
 
 def test_workflow_token_is_read_only_and_guard_step_scoped():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/desktop-native-update-acceptance.yml").read_text())
+    workflow = yaml.safe_load((ROOT / ".github/workflows/desktop-native-update-acceptance.yml").read_text(encoding="utf-8"))
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
     assert "GH_TOKEN" not in workflow.get("env", {})
     guards = 0
@@ -233,7 +241,7 @@ def test_workflow_token_is_read_only_and_guard_step_scoped():
 @pytest.mark.parametrize("method,field", [("start", "data"), ("success", "executable")])
 def test_observer_compares_real_file_identity_across_native_path_spellings(tmp_path, method, field):
     # Execute the actual observer assertion, without starting its processes.
-    tree = ast.parse((HARNESS / "run.py").read_text())
+    tree = ast.parse((HARNESS / "run.py").read_text(encoding="utf-8"))
     function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == method)
     assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert)
                      and isinstance(node.test, ast.Call) and isinstance(node.test.func, ast.Attribute)
