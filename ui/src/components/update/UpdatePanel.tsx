@@ -66,11 +66,9 @@ function useStatusCopy(status: UpdatePanelStatus | null, subject: UpdateSubject)
     case 'disabled':
       return { tone: 'neutral', title: t('update.status.disabled'), detail: t('update.status.disabledDetail') };
     case 'check-failed':
-      return {
-        tone: 'danger',
-        title: t('update.status.checkFailed'),
-        detail: t('update.status.checkFailedDetail'),
-      };
+      return status.reason === 'unreachable'
+        ? { tone: 'danger', title: t('update.failure.unreachable.title'), detail: t('update.failure.unreachable.detail') }
+        : { tone: 'danger', title: t('update.status.checkFailed'), detail: t('update.status.checkFailedDetail') };
     case 'requesting':
       return { tone: 'info', spin: true, title: t('update.status.requesting') };
     case 'awaiting-host':

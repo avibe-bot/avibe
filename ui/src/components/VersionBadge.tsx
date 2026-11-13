@@ -161,9 +161,15 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   // A check or setting change asked of a desktop-managed host: its receipt arrives in the version snapshot.
   const [controlRequestId, setControlRequestId] = React.useState<string | null>(null);
-  const failControl = (action: 'check' | 'prereleases' | 'auto_update', enabled: boolean | undefined, code: string) => {
+  const failControl = (
+    action: 'check' | 'prereleases' | 'auto_update',
+    enabled: boolean | undefined,
+    code: string,
+    restore?: Pick<VersionInfo, 'prereleases' | 'auto_update' | 'phase'>,
+  ) => {
     setVersionInfo((previous) => previous && {
       ...previous,
+      ...restore,
       control_request: {
         request_id: `local-${Date.now()}`, action, enabled: enabled ?? null, phase: 'failed',
         error_code: code, updated_at: new Date().toISOString(),
@@ -173,10 +179,24 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const sendControl = async (action: 'check' | 'prereleases' | 'auto_update', enabled?: boolean) => {
     setRemoteRequestError(null);
     setUpgradeResult(null);
+    // The host acknowledges within seconds; show the request at once, and put a setting back if it fails.
+    const restore = versionInfo
+      ? { prereleases: versionInfo.prereleases, auto_update: versionInfo.auto_update, phase: versionInfo.phase }
+      : undefined;
+    const pending = (id: string) => setVersionInfo((previous) => previous && {
+      ...previous,
+      ...(action === 'prereleases' ? { prereleases: enabled ?? null } : {}),
+      ...(action === 'auto_update' ? { auto_update: enabled ?? null } : {}),
+      control_request: {
+        request_id: id, action, enabled: enabled ?? null, phase: 'checking',
+        error_code: null, updated_at: new Date().toISOString(),
+      },
+    });
+    pending('pending');
     try {
       const result = await api.requestUpdateControl(action, enabled);
       if (!result.ok) {
-        failControl(action, enabled, result.error);
+        failControl(action, enabled, result.error, restore);
         return;
       }
       if (result.snapshot) {
@@ -184,23 +204,14 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         return;
       }
       if (result.request_id) {
-        const id = result.request_id;
-        setVersionInfo((previous) => previous && {
-          ...previous,
-          ...(action === 'prereleases' ? { prereleases: enabled ?? null } : {}),
-          ...(action === 'auto_update' ? { auto_update: enabled ?? null } : {}),
-          control_request: {
-            request_id: id, action, enabled: enabled ?? null, phase: 'checking',
-            error_code: null, updated_at: new Date().toISOString(),
-          },
-        });
-        setControlRequestId(id);
+        pending(result.request_id);
+        setControlRequestId(result.request_id);
       }
     } catch (e) {
       // A check or a setting that never reached the host fails as itself: retrying it must
       // never become an install request.
       console.error('Failed to send the update request:', e);
-      failControl(action, enabled, 'request_failed');
+      failControl(action, enabled, 'request_failed', restore);
     }
   };
   React.useEffect(() => {

@@ -21,7 +21,8 @@ export type UpdatePanelStatus =
   /** A desktop-managed host whose desktop app has published no result: the only time the neutral line is true. */
   | { kind: 'unknown' }
   | { kind: 'disabled' }
-  | { kind: 'check-failed' }
+  /** `unreachable`: the host's desktop app did not answer the request at all. */
+  | { kind: 'check-failed'; reason?: 'unreachable' }
   | { kind: 'requesting' }
   /** An older desktop app that still asks someone at the host before installing. */
   | { kind: 'awaiting-host' }
@@ -183,7 +184,9 @@ export function modelFromDesktopRelay(
   const controlStatus: UpdatePanelStatus | null = control?.phase === 'checking' || info.phase === 'checking'
     ? { kind: 'checking' }
     : controlSettled && (control.phase === 'failed' || control.phase === 'expired')
-      ? control.action === 'check' ? { kind: 'check-failed' } : { kind: 'update-failed', reason: 'setting' }
+      ? control.action === 'check'
+        ? control.error_code === 'desktop_shell_unavailable' ? { kind: 'check-failed', reason: 'unreachable' } : { kind: 'check-failed' }
+        : { kind: 'update-failed', reason: control.error_code === 'desktop_shell_unavailable' ? 'unreachable' : 'setting' }
       : null;
   // The newer of an install request and a check or setting request speaks first.
   const controlFirst = Boolean(controlStatus && control

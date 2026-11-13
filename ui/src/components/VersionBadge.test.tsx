@@ -827,6 +827,21 @@ describe('one panel on a desktop-managed host', () => {
     expect((screen.getByRole('button', { name: i18n.t('update.action.retry') }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it('puts a setting back and says the desktop app did not answer when the host cannot take it', async () => {
+    api.getVersion.mockResolvedValue(hostWith());
+    let answer!: (result: UpdateControlResult) => void;
+    api.requestUpdateControl.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    await openBrowserPopup('v3.2.6');
+    const auto = screen.getByRole('switch', { name: i18n.t('update.setting.autoUpdate') });
+    fireEvent.click(auto);
+    // Shown at once while the host has ten seconds to acknowledge.
+    expect(auto.getAttribute('aria-checked')).toBe('true');
+    await act(async () => answer({ ok: false, error: 'desktop_shell_unavailable' }));
+    expect(screen.getByText(i18n.t('update.failure.unreachable.title'))).toBeTruthy();
+    expect(screen.getByRole('switch', { name: i18n.t('update.setting.autoUpdate') }).getAttribute('aria-checked')).toBe('false');
+    expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
+  });
+
   it('names a desktop app too old to take these, and still offers its install', async () => {
     api.getVersion.mockResolvedValue(hostWith({ phase: 'available', latest: '3.2.7', has_update: true, host_actions: undefined, auto_update: null }));
     await openBrowserPopup('v3.2.6');
