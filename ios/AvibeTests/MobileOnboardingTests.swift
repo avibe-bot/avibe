@@ -767,6 +767,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "haptics.notify",
                 "haptics.selection",
                 "navigation.historyChanged",
+                "notifications.reconcile",
                 "push.status",
                 "push.subscribe",
                 "push.unsubscribe",

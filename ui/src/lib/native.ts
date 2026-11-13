@@ -5,6 +5,7 @@ export type NativeCapability =
   | 'badge'
   | 'haptics'
   | 'keyboardResizesViewport'
+  | 'notifications'
   | 'push'
   | 'viewport'
   | 'voice';
@@ -159,6 +160,48 @@ export function setNativeBadge(count: number): boolean {
   if (!hasNativeCapability('badge')) return false;
   const value = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
   void callNative<null>('badge', 'badge.set', { count: value }).catch(() => {});
+  return true;
+}
+
+/** The most unread Sessions one `notifications.reconcile` may name (docs/plans/ios-app.md section 4). */
+export const NATIVE_RECONCILE_MAX_SESSIONS = 1000;
+const NATIVE_RECONCILE_MAX_ID_LENGTH = 200;
+
+/**
+ * Tells the native App which Sessions are unread in a whole unread map the
+ * server returned, so it retires the delivered notifications of every other
+ * Session. `asOf` is the device time just before the request that returned
+ * `unreadBySession` was sent: the map describes the server at that moment or
+ * later, so a notification delivered by then and absent from it was read.
+ * Fire-and-forget: false where the shell lacks the capability, or when the map
+ * cannot be described within the contract's bounds; then nothing is retired.
+ */
+export function reconcileNativeNotifications(
+  unreadBySession: unknown,
+  asOf: number,
+): boolean {
+  if (!hasNativeCapability('notifications')) return false;
+  if (
+    !unreadBySession
+    || typeof unreadBySession !== 'object'
+    || Array.isArray(unreadBySession)
+    || !Number.isFinite(asOf)
+  ) {
+    return false;
+  }
+  const unreadSessions: string[] = [];
+  for (const [sessionId, count] of Object.entries(unreadBySession)) {
+    if (typeof count !== 'number' || !Number.isFinite(count)) return false;
+    if (count <= 0) continue;
+    // A Session the call could not name would read as read: send nothing.
+    if (!sessionId || sessionId.length > NATIVE_RECONCILE_MAX_ID_LENGTH) return false;
+    unreadSessions.push(sessionId);
+  }
+  if (unreadSessions.length > NATIVE_RECONCILE_MAX_SESSIONS) return false;
+  void callNative<null>('notifications', 'notifications.reconcile', {
+    unreadSessions,
+    asOf,
+  }).catch(() => {});
   return true;
 }
 
