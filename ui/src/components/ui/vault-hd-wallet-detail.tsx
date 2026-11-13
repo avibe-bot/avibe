@@ -3,7 +3,7 @@ import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext
 // its three addresses (owner decision 2026-11-12: 3 = A), a name, its own ask-before-signing, and
 // the Session that last signed. The addresses are the ones avault derived at import, shown as the
 // server lists them: the UI never computes or rewrites an address it shows here.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Bot, Clock3, Layers, Lock, Pencil, Plus, Sparkles, WalletCards } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -203,6 +203,34 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
       setAdding(false);
     }
   };
+  // A wallet saved before the three Bitcoin types: derive its SegWit and Legacy keys from the sealed
+  // seed once, when its accounts are opened by someone who may (never while listing; no words).
+  // Until then, and for everyone else, Bitcoin shows Taproot only.
+  const [prepare, setPrepare] = useState<'idle' | 'avault-old' | 'failed'>('idle');
+  const prepared = useRef<string | null>(null);
+  useEffect(() => {
+    if (!open) {
+      // Each opening may try once.
+      prepared.current = null;
+      return;
+    }
+    if (!canManage || secret.bitcoin_profile === 'bitcoin-address-types-v1') return;
+    if (prepared.current === secret.name) return;
+    prepared.current = secret.name;
+    let cancelled = false;
+    void api.prepareVaultBitcoinAddressTypes(secret.name, { handleError: false }).then((result) => {
+      if (cancelled) return;
+      if (result.ok && result.secret) {
+        onChanged(result.secret);
+        return;
+      }
+      // Old avault: the existing upgrade notice. A disagreement with what the wallet already holds:
+      // say so and offer nothing new. A refusal or a wallet that changed meanwhile: keep what is shown.
+      if (result.code === 'avault_upgrade_required') setPrepare('avault-old');
+      else if (result.code === 'hd_bitcoin_types_integrity_failed') setPrepare('failed');
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [api, canManage, onChanged, open, secret.bitcoin_profile, secret.name]);
   const usage = accounts.length > 1 ? 1 : 0;
   const command = `vibe vault sign ${secret.name} --chain solana --account ${usage}`;
   return (
@@ -232,6 +260,11 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
               <CopyButton value={command} label={null} variant="ghost" />
             </div>
           </div>
+          {prepare === 'avault-old' ? (
+            <span role="note" className="text-[11.5px] text-muted">{t('vaults.hd.wallet.bitcoinTypesAvaultOld')}</span>
+          ) : prepare === 'failed' ? (
+            <span role="alert" className="text-[11.5px] text-destructive-ink">{t('vaults.hd.wallet.bitcoinTypesFailed')}</span>
+          ) : null}
           <div className="flex flex-col gap-2.5">
             {accounts.map((account) => (
               <AccountCard key={account.account} wallet={secret.name} account={account} fresh={fresh === account.account} canManage={canManage} onChanged={onChanged} />

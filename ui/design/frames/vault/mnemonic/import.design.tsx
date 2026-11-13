@@ -9,8 +9,8 @@ import { frames } from '../../../frame';
 import { consolePage } from '../../workbench/fixtures';
 import { alone, avaultFixtures, importFixtures, type ImportFixture } from './fixtures';
 
-const fixtures = avaultFixtures('0.1.11');
-const old = avaultFixtures('0.1.10');
+const fixtures = avaultFixtures('0.1.12');
+const old = avaultFixtures('0.1.11');
 const T = '添加密钥';
 const noop = () => {};
 const importTab = ['role=radio[name="{t:vaults.dialog.kindKeypair}"]', 'role=radio[name="{t:vaults.hd.chainMnemonic}"]', 'role=radio[name="{t:vaults.dialog.signingImport}"]'];
@@ -20,7 +20,7 @@ const add = () => <VaultSecretDialog open onOpenChange={noop} onCreated={noop} /
 const panel = (state: ImportFixture, { avaultOld = false } = {}) => () => (
   <div className="flex min-w-0 flex-col gap-4">
     <HdImportFields text={state.text} onTextChange={noop} check={state.check} passphrase={state.passphrase} onPassphraseChange={noop} preview={state.preview} />
-    {avaultOld ? <HdAvaultOld version="0.1.11" installed="0.1.10" onOpenDependencies={noop} /> : null}
+    {avaultOld ? <HdAvaultOld version="0.1.12" installed="0.1.11" onOpenDependencies={noop} /> : null}
   </div>
 );
 const { valid, passphrase, unknownWord: unknown, checksum } = importFixtures;

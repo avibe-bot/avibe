@@ -36,7 +36,7 @@ import {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import type { ApprovalOutcome } from '../ui/vault-approval-card';
-import { SigningAddressList } from '../ui/signing-address-list';
+import { KeyAddressList } from '../ui/btc-address-row';
 import { VaultApprovalDialog } from '../ui/vault-approval-dialog';
 import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
 import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
@@ -169,7 +169,7 @@ const SecretRow: React.FC<{
               <ChevronRight className="size-3.5" />
             </Button>
           </div>
-        ) : isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
+        ) : isKeypair && s.signing_addresses ? <KeyAddressList addresses={s.signing_addresses} types={s.bitcoin_address_types} className="mt-1" /> : null}
         {!isKeypair && vaultHasNamedFieldShape(s) ? (
           <div className="flex flex-wrap gap-1">
             {fields.map((field) => <Badge key={field} variant="outline" className="font-mono">

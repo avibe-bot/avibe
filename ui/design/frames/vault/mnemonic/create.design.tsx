@@ -12,7 +12,7 @@ import { frames } from '../../../frame';
 import { consolePage } from '../../workbench/fixtures';
 import { alone, avaultFixtures, checkFixtures, type CheckFixture } from './fixtures';
 
-const fixtures = avaultFixtures('0.1.11');
+const fixtures = avaultFixtures('0.1.12');
 const T = '添加密钥';
 const noop = () => {};
 const setup = ['role=radio[name="{t:vaults.dialog.kindKeypair}"]', 'role=radio[name="{t:vaults.hd.chainMnemonic}"]'];

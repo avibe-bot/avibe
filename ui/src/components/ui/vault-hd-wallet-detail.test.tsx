@@ -13,6 +13,7 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 const api = vi.hoisted(() => ({
   enableVaultHdAccount: vi.fn(),
   updateVaultHdAccount: vi.fn(),
+  prepareVaultBitcoinAddressTypes: vi.fn(async () => ({ ok: false, code: 'forbidden' })),
   getSession: vi.fn(async () => ({ title: '网格交易' })),
 }));
 vi.mock('@/context/ApiContext', async (original) => ({ ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api }));
