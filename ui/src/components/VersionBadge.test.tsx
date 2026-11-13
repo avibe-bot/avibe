@@ -428,6 +428,32 @@ describe('desktop version ownership', () => {
     expect(screen.queryByText('raw deferred helper transcript')).toBeNull();
   });
 
+  it('lets a later check replace a finished install that did not restart', async () => {
+    api.getVersion.mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true });
+    api.doUpgrade.mockResolvedValueOnce({ ok: true, message: 'Upgrade successful', output: null, restarting: false });
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+    fireEvent.click(await screen.findByTitle('v9.9.9'));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('update.action.update') }));
+    expect(await screen.findByText(i18n.t('update.status.updatedTo', { version: '10.0.0' }))).toBeTruthy();
+
+    api.getVersion.mockResolvedValue({ current: '10.0.0', latest: '10.1.0', has_update: true });
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    expect(await screen.findByText(i18n.t('update.status.available'))).toBeTruthy();
+    expect(screen.queryByText(i18n.t('update.status.updatedTo', { version: '10.1.0' }))).toBeNull();
+    expect(screen.getByRole('button', { name: i18n.t('update.action.update') })).toBeTruthy();
+  });
+
+  it('offers a retry when the first version read fails', async () => {
+    api.getVersion.mockRejectedValueOnce(new Error('offline'));
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByTitle('v...'));
+    expect(await screen.findByText(i18n.t('update.status.checkFailed'))).toBeTruthy();
+    api.getVersion.mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true });
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.retry') }));
+    expect(await screen.findByText(i18n.t('update.status.available'))).toBeTruthy();
+  });
+
   it('keeps a clean successful banner when only raw output is returned', async () => {
     // The successful install rereads the version; this Runtime is standalone throughout.
     api.getVersion.mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true });

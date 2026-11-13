@@ -162,7 +162,14 @@ export function modelFromDesktopRelay(
     && remoteRequestSettled(info.remote_request, info.current)
     && latest === normalizeVersion(info.remote_request.target);
   const hasUpdate = info.has_update && Boolean(latest) && !completedTarget;
-  const status: UpdatePanelStatus = remoteStatus(info, view)
+  // A settled request stops describing the host once a later check has spoken,
+  // or once the host offers a different release than the one it installed.
+  const request = info.remote_request;
+  const superseded = Boolean(request && remoteRequestSettled(request, info.current) && (
+    (info.checked_at && Date.parse(info.checked_at) > Date.parse(request.updated_at))
+    || (request.phase === 'completed' && hasUpdate && latest !== normalizeVersion(request.target))
+  ));
+  const status: UpdatePanelStatus = (superseded && !view.requesting && !view.error ? null : remoteStatus(info, view))
     ?? (hasUpdate && latest ? { kind: 'available', version: latest }
       : info.phase === 'error' ? { kind: 'check-failed' }
         : info.phase === 'disabled' ? { kind: 'disabled' }
@@ -189,7 +196,7 @@ export function modelFromRuntime(info: VersionInfo, {
   checking: boolean;
   installing: boolean;
   restarting: boolean;
-  result: { ok: boolean } | null;
+  result: { ok: boolean; target: string | null } | null;
   prereleases: boolean | null;
   checkedAt: string | null;
 }): UpdatePanelModel {
@@ -198,7 +205,7 @@ export function modelFromRuntime(info: VersionInfo, {
   const status: UpdatePanelStatus = restarting ? { kind: 'updated', version: latest, restarting: true }
     : installing ? { kind: 'installing' }
       : result && !result.ok ? { kind: 'update-failed', reason: 'install', retry: true }
-        : result?.ok ? { kind: 'updated', version: latest }
+        : result?.ok ? { kind: 'updated', version: result.target ? normalizeVersion(result.target) : null }
           : checking ? { kind: 'checking' }
             : info.has_update && latest ? { kind: 'available', version: latest }
               : info.error ? { kind: 'check-failed' }
@@ -206,7 +213,7 @@ export function modelFromRuntime(info: VersionInfo, {
   return {
     subject: 'runtime',
     current: info.current,
-    latest: info.has_update || stable || status.kind === 'updated' ? latest : null,
+    latest: status.kind !== 'updated' && (info.has_update || stable) ? latest : null,
     latestIsStable: stable,
     prereleases: prereleases === null ? null : { enabled: prereleases },
     checkedAt,

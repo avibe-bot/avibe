@@ -70,6 +70,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [upgrading, setUpgrading] = React.useState(false);
   const [restarting, setRestarting] = React.useState(false);
   const [upgradeResult, setUpgradeResult] = React.useState<UpgradeResult | null>(null);
+  // The version an install was asked for, so its result never names a later offer.
+  const [upgradeTarget, setUpgradeTarget] = React.useState<string | null>(null);
+  const [versionLoadFailed, setVersionLoadFailed] = React.useState(false);
   const [remoteRequesting, setRemoteRequesting] = React.useState(false);
   const [remoteRequestError, setRemoteRequestError] = React.useState<string | null>(null);
   const [remoteUpdateTimedOut, setRemoteUpdateTimedOut] = React.useState(false);
@@ -199,6 +202,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     try {
       const info = await api.getVersion(rereadVersion || nativeStateAvailable ? { cache: false } : undefined);
       setVersionInfo(info);
+      setVersionLoadFailed(false);
       setCheckedAt(new Date().toISOString());
       const receipt = info.remote_request;
       if (receipt && receipt.request_id === versionInfo?.remote_request?.request_id
@@ -209,6 +213,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       }
     } catch (e) {
       console.error('Failed to check version:', e);
+      setVersionLoadFailed(true);
     } finally {
       setChecking(false);
     }
@@ -304,6 +309,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       if (upgrading) return;
       setUpgrading(true);
       setUpgradeResult(null);
+      setUpgradeTarget(versionInfo?.latest ?? null);
       try {
         const result = await api.doUpgrade(options);
         setUpgradeResult(result);
@@ -491,7 +497,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   // updater, a desktop-managed host as its Runtime relays it, or a standalone Runtime.
   const nativeModel = desktopActions && desktopUpdateState;
   const panelModel: UpdatePanelModel = !versionInfo && !nativeModel
-    ? { subject: isDesktopManaged ? 'host-desktop' : 'runtime', current: null, latest: null, prereleases: null, checkedAt: null, status: { kind: 'checking' } }
+    ? {
+      subject: isDesktopManaged ? 'host-desktop' : 'runtime', current: null, latest: null, prereleases: null, checkedAt: null,
+      // A first read that failed is a failed check the user can retry, not a check still running.
+      status: { kind: versionLoadFailed && !checking ? 'check-failed' : 'checking' },
+    }
     : nativeModel
       ? modelFromDesktopState(desktopUpdateState, {
         current: currentVersion,
@@ -510,7 +520,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           checking,
           installing: upgrading,
           restarting,
-          result: upgradeResult,
+          result: upgradeResult && { ok: upgradeResult.ok, target: upgradeTarget },
           prereleases: versionInfo && capabilities.can_manage_instance && !isSourceBuild ? prereleases : null,
           checkedAt,
         });
@@ -519,6 +529,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     panelModel.latest = null;
   }
   const refresh = () => {
+    // A new check supersedes the last install's result.
+    setUpgradeResult(null);
     setRemoteRequestError(null);
     setNativeInstallFailed(false);
     void checkVersion(true);
