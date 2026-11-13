@@ -164,12 +164,22 @@ mod macos {
     }
 }
 
+// Windows limits Tag and Group to 16 characters. Full Session identity stays
+// in the receipt and launch metadata; groups are NEVER removed.
+#[cfg(any(windows, test))]
+fn windows_labels(receipt: &NotificationReceipt) -> (String, String) {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(receipt.session_id().unwrap_or_default().as_bytes());
+    let group: String = digest[..8].iter().map(|byte| format!("{byte:02x}")).collect();
+    (receipt.key()[..16].into(), group)
+}
+
 #[cfg(windows)]
 mod windows {
     use ::windows::core::{Result, HSTRING};
     use ::windows::Data::Xml::Dom::XmlDocument;
     use ::windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
-    use sha2::{Digest, Sha256};
 
     use super::*;
 
@@ -187,13 +197,8 @@ mod windows {
     }
 
     fn labels(receipt: &NotificationReceipt) -> (HSTRING, HSTRING) {
-        // Windows limits Tag and Group to 16 characters. Full Session identity
-        // stays in the receipt and launch metadata; groups are NEVER removed.
-        let group = format!(
-            "{:x}",
-            Sha256::digest(receipt.session_id().unwrap_or_default().as_bytes())
-        );
-        (HSTRING::from(&receipt.key()[..16]), HSTRING::from(&group[..16]))
+        let (tag, group) = windows_labels(receipt);
+        (HSTRING::from(tag), HSTRING::from(group))
     }
 
     pub(super) fn show(app: &AppHandle, receipt: &NotificationReceipt, copy: &NotificationCopy) -> Result<()> {
@@ -233,22 +238,6 @@ mod windows {
         }
         Ok(forgotten)
     }
-
-    #[test]
-    fn labels_are_short_exact_delivery_keys_not_session_wide_deletion_keys() {
-        let mut registry = NotificationRegistry::default();
-        let first = registry.reserve(Some("ses_a".into())).unwrap();
-        let next = registry.reserve(Some("ses_a".into())).unwrap();
-        let other = registry.reserve(Some("ses_b".into())).unwrap();
-        let (first_tag, first_group) = labels(&first);
-        let (next_tag, next_group) = labels(&next);
-        let (_, other_group) = labels(&other);
-        assert_eq!(first_tag.len(), 16);
-        assert_eq!(first_group.len(), 16);
-        assert_ne!(first_tag, next_tag);
-        assert_eq!(first_group, next_group);
-        assert_ne!(first_group, other_group);
-    }
 }
 
 #[cfg(test)]
@@ -258,10 +247,28 @@ mod lifecycle_tests {
 
     use super::*;
 
+    #[test]
+    fn windows_labels_are_short_exact_delivery_keys_not_session_wide_deletion_keys() {
+        let mut registry = NotificationRegistry::default();
+        let first = registry.reserve(Some("ses_a".into())).unwrap();
+        let next = registry.reserve(Some("ses_a".into())).unwrap();
+        let other = registry.reserve(Some("ses_b".into())).unwrap();
+        let (first_tag, first_group) = windows_labels(&first);
+        let (next_tag, next_group) = windows_labels(&next);
+        let (_, other_group) = windows_labels(&other);
+        assert_eq!(first_tag.len(), 16);
+        assert_eq!(first_group.len(), 16);
+        assert!(first_group.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first_tag, next_tag);
+        assert_eq!(first_group, next_group);
+        assert_ne!(first_group, other_group);
+    }
+
     fn posted(registry: &mut NotificationRegistry, session: &str) -> Arc<NotificationReceipt> {
         let receipt = registry.reserve(Some(session.into())).unwrap();
         receipt.confirm_workbench_session(true);
         receipt.posted();
+        registry.reconcile(vec![receipt.clone()], &HashMap::from([(session.into(), 1)]));
         receipt
     }
 

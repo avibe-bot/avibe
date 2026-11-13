@@ -1217,6 +1217,7 @@ fn post_session(sink: &FakeSink, session: &str) -> Arc<NotificationReceipt> {
         sink.presentation_generation(),
         receipt.clone(),
     );
+    sink.withdraw(vec![receipt.clone()], HashMap::from([(session.into(), 1)]), 0);
     receipt
 }
 
@@ -1269,35 +1270,50 @@ async fn stale_generation_failed_reads_and_old_server_maps_never_withdraw() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn failed_notifications_require_unread_result_evidence_before_withdrawal() {
-    let transport = Arc::new(FakeTransport::default());
-    let sink = Arc::new(FakeSink::default());
-    transport.details.lock().unwrap().insert(
-        "run".into(),
-        RunDetail {
-            session_platform: Some("avibe".into()),
-            ..RunDetail::default()
-        },
-    );
-    *transport.unread.lock().unwrap() = Some(0);
-    *transport.unread_by_session.lock().unwrap() = Some(HashMap::new());
-    transport.stream(
-        [frame(
-            "runs.updated",
-            json!({"run_id":"run", "session_id":"a", "run_type":"scheduled", "status":"failed"}),
-        )],
-        false,
-    );
-    let task = spawn(transport, sink.clone());
-    settle().await;
+async fn resultless_terminal_notifications_require_read_evidence_before_withdrawal() {
+    for (status, intent) in [
+        ("succeeded", NotificationIntent::RunSucceeded),
+        ("failed", NotificationIntent::RunFailed),
+        ("canceled", NotificationIntent::RunCanceled),
+    ] {
+        let transport = Arc::new(FakeTransport::default());
+        let sink = Arc::new(FakeSink::default());
+        transport.details.lock().unwrap().insert(
+            "run".into(),
+            RunDetail {
+                session_platform: Some("avibe".into()),
+                ..RunDetail::default()
+            },
+        );
+        *transport.unread.lock().unwrap() = Some(0);
+        *transport.unread_by_session.lock().unwrap() = Some(HashMap::new());
+        transport.stream(
+            [frame(
+                "runs.updated",
+                json!({"run_id":"run", "session_id":"a", "run_type":"scheduled", "status":status}),
+            )],
+            false,
+        );
+        let task = spawn(transport, sink.clone());
+        settle().await;
 
-    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::RunFailed]);
-    let receipt = sink.receipts.lock().unwrap()[0].clone();
-    sink.withdraw(vec![receipt.clone()], HashMap::new(), 0);
-    assert!(sink.withdrawn.lock().unwrap().is_empty());
-    assert!(!receipt.retired());
-    task.abort();
+        assert_eq!(*sink.delivered.lock().unwrap(), [intent]);
+        let receipt = sink.receipts.lock().unwrap()[0].clone();
+        sink.withdraw(vec![receipt.clone()], HashMap::new(), 0);
+        assert!(sink.withdrawn.lock().unwrap().is_empty(), "{status}");
+        assert!(!receipt.retired(), "{status}");
+        sink.withdraw(vec![receipt.clone()], HashMap::from([("a".into(), 1)]), 0);
+        sink.withdraw(vec![receipt.clone()], HashMap::new(), 0);
+        assert_eq!(receipt.retired(), status == "succeeded", "{status}");
+        assert_eq!(
+            sink.withdrawn.lock().unwrap().len(),
+            usize::from(status == "succeeded"),
+            "{status}"
+        );
+        task.abort();
+    }
 }
+
 #[tokio::test(start_paused = true)]
 async fn remote_read_sse_withdraws_even_when_focused_or_notifications_disabled() {
     let transport = Arc::new(FakeTransport::default());

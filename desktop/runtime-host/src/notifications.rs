@@ -819,12 +819,12 @@ async fn notify_run(
     if detail.as_ref().is_some_and(|detail| {
         detail.session_is_workbench == Some(true) || detail.session_platform.as_deref() == Some("avibe")
     }) {
-        // The unread map counts terminal result messages, not terminal errors;
-        // a failed notification therefore needs real result-read evidence
-        // before absence can authorize withdrawal.
+        // Failures are `error` messages, and cancellation may settle without
+        // any message. Success is eligible only after the registry also sees
+        // an unread -> read transition; success alone is not result evidence.
         preferences
             .receipt
-            .confirm_workbench_session(!matches!(intent, NotificationIntent::RunFailed));
+            .confirm_workbench_session(matches!(intent, NotificationIntent::RunSucceeded));
     }
     let category = detail
         .as_ref()

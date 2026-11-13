@@ -18,6 +18,7 @@ pub struct NotificationReceipt {
     retired: AtomicBool,
     readable: AtomicBool,
     read_reconciliation_eligible: AtomicBool,
+    observed_unread: AtomicBool,
     posted_at: OnceLock<Instant>,
 }
 
@@ -92,6 +93,7 @@ impl NotificationRegistry {
             retired: AtomicBool::new(false),
             readable: AtomicBool::new(false),
             read_reconciliation_eligible: AtomicBool::new(false),
+            observed_unread: AtomicBool::new(false),
             posted_at: OnceLock::new(),
         });
         if receipt.session_id.is_some() {
@@ -126,11 +128,15 @@ impl NotificationRegistry {
     /// e.g. Linux's plugin may not have assigned its D-Bus id on the first pass.
     pub fn reconcile(&mut self, snapshot: NotificationSnapshot, unread: &HashMap<String, u64>) -> NotificationSnapshot {
         for receipt in snapshot {
-            if receipt
-                .session_id()
-                .is_some_and(|id| unread.get(id).copied().unwrap_or(0) == 0)
-            {
-                receipt.retired.store(true, Ordering::SeqCst);
+            if let Some(session) = receipt.session_id() {
+                if unread.get(session).copied().unwrap_or(0) > 0 {
+                    receipt.observed_unread.store(true, Ordering::SeqCst);
+                } else if receipt.observed_unread.load(Ordering::SeqCst) {
+                    // Even successful Runs can settle without a result. Initial
+                    // absence is not a read; require an observed unread -> read
+                    // transition after this delivery was reserved.
+                    receipt.retired.store(true, Ordering::SeqCst);
+                }
             }
         }
         self.receipts
@@ -156,6 +162,7 @@ mod tests {
         let receipt = registry.reserve(Some(session.into())).unwrap();
         receipt.confirm_workbench_session(true);
         receipt.posted();
+        registry.reconcile(vec![receipt.clone()], &HashMap::from([(session.into(), 1)]));
         receipt
     }
 
@@ -196,6 +203,7 @@ mod tests {
         let mut registry = NotificationRegistry::default();
         let pending = registry.reserve(Some("a".into())).unwrap();
         let im = registry.reserve(Some("im".into())).unwrap();
+        registry.reconcile(vec![pending.clone()], &HashMap::from([("a".into(), 1)]));
         let snapshot = registry.snapshot();
         assert!(registry.reconcile(snapshot, &HashMap::new()).is_empty());
         assert!(!pending.retired()); // source platform still unknown
