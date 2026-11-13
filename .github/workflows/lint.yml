@@ -682,6 +682,12 @@ jobs:
             engine_platform: windows-arm64
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
+      # Match web-fetch-runtime: cache downloads and retry HTTP, not tests.
+      UV_CACHE_DIR: ${{ github.workspace }}/.ci-lifecycle-uv-cache
+      UV_HTTP_CONNECT_TIMEOUT: "30"
+      UV_HTTP_TIMEOUT: "60"
+      UV_HTTP_RETRIES: "3"
+      UV_CONCURRENT_DOWNLOADS: "4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Fetch pinned released caller source (not a candidate rehearsal)
@@ -697,6 +703,11 @@ jobs:
         with:
           python-version: "3.12"
           architecture: ${{ matrix.python_arch }}
+      - name: Cache locked dependency downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.UV_CACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-lifecycle-uv-0.13.7-py3.12-${{ matrix.python_arch }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
       - name: Require requested interpreter and install locked test dependencies
         shell: bash
         env:
