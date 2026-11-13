@@ -4499,6 +4499,149 @@ def update_secret_field(
     return _meta_payload(_require_row(conn, secret_name))
 
 
+def validate_secret_field_changes(
+    meta: dict[str, Any],
+    *,
+    default_field: str | None,
+    values: list[dict[str, Any]],
+    remove: list[str],
+) -> str:
+    """Check the complete final layout before custody or storage work starts."""
+    if meta.get("kind") == "keypair":
+        raise FieldsNotSupportedError(f"{meta['name']} does not support fields")
+    if meta.get("fields_state") == "corrupt":
+        raise FieldsCorruptError(f"{meta['name']} has corrupt fields")
+    old_default = str(meta.get("default_field") or "value")
+    final_default = old_default if default_field is None else _validate_field_name(default_field, field="default_field")
+    existing = set(meta["fields"])
+    if final_default != old_default and final_default in existing:
+        raise FieldExistsError(f"field {final_default!r} already exists on {meta['name']}")
+    if not isinstance(values, list) or not isinstance(remove, list):
+        raise InvalidRequestError("values and remove must be arrays")
+    if len(values) > MAX_SECRET_FIELDS or len(remove) > MAX_SECRET_FIELDS:
+        raise TooManyFieldsError(f"a vault secret can have at most {MAX_SECRET_FIELDS} fields")
+    changed: set[str] = set()
+    for item in values:
+        if not isinstance(item, dict):
+            raise InvalidRequestError("each value change must be an object")
+        field = _validate_field_name(item.get("field"))
+        if field in changed:
+            raise InvalidRequestError("a field may appear only once in values")
+        changed.add(field)
+        record = record_name_for_field(str(meta["name"]), field, default_field=final_default)
+        if item.get("record") != record:
+            raise RecordMismatchError(f"record does not match field {field!r} on {meta['name']}")
+    removed: set[str] = set()
+    for field in remove:
+        field = _validate_field_name(field)
+        if field in removed or field in changed:
+            raise InvalidRequestError("field changes and removals must be unique and disjoint")
+        if field in {old_default, final_default}:
+            raise InvalidRequestError("the default field cannot be removed")
+        if field not in existing:
+            raise FieldNotFoundError(f"field {field!r} not found on {meta['name']}")
+        removed.add(field)
+    final_fields = ((existing - {old_default}) | {final_default} | changed) - removed
+    if len(final_fields) > MAX_SECRET_FIELDS:
+        raise TooManyFieldsError(f"a vault secret can have at most {MAX_SECRET_FIELDS} fields")
+    return final_default
+
+
+def update_secret_fields(
+    conn: Connection,
+    secret_name: str,
+    *,
+    expected_updated_at: str,
+    default_field: str | None = None,
+    values: list[dict[str, Any]] | None = None,
+    remove: list[str] | None = None,
+    expected_default_field: str | None = None,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    release_scopes: list[dict[str, str]] | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    """Commit an entire dialog's opaque field edits with one compare-and-swap.
+
+    Values use final field labels. A rename alone remains display metadata and
+    preserves envelope versions and grants, matching update_secret_metadata.
+    """
+    if not isinstance(expected_updated_at, str) or not expected_updated_at:
+        raise InvalidRequestError("expected_updated_at is required")
+    context = resolve_resource_access_context(user_context)
+    try:
+        row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
+    except SecretNotFoundError as exc:
+        raise SecretConflictError(f"secret {secret_name!r} was removed while fields were being updated") from exc
+    if row["updated_at"] != expected_updated_at:
+        raise SecretConflictError(f"secret {secret_name!r} changed while fields were being updated")
+    old_default = _default_field_name(row)
+    if expected_default_field is not None and old_default != expected_default_field:
+        raise RecordMismatchError(f"default field changed on {secret_name}")
+    values = [] if values is None else values
+    remove = [] if remove is None else remove
+    final_default = validate_secret_field_changes(_meta_payload(row), default_field=default_field, values=values, remove=remove)
+    extras = _extra_field_rows(row, strict=True)
+    extra_by_name = {item["name"]: item for item in extras}
+    now = _next_updated_at(row["updated_at"])
+    updates: dict[str, Any] = {}
+    events: list[dict[str, str]] = []
+    for item in values:
+        if set(item) != {"field", "record", "sealed"} or not isinstance(item["sealed"], Sealed):
+            raise InvalidRequestError("value changes require field, record and a sealed envelope")
+        field = item["field"]
+        envelope = item["sealed"]
+        opaque = {"ciphertext": envelope.ciphertext, "nonce": envelope.nonce, "wrap_meta": envelope.wrap_meta}
+        if field == final_default:
+            updates.update(opaque)
+            op = "replace"
+        elif field in extra_by_name:
+            extra_by_name[field].update(opaque, updated_at=now)
+            op = "replace"
+        else:
+            extras.append({"name": field, **opaque, "created_at": now, "updated_at": now})
+            op = "add"
+        events.append({"field": field, "op": op})
+    extras = [item for item in extras if item["name"] not in remove]
+    events.extend({"field": field, "op": "remove"} for field in remove)
+    if events:
+        updates.update(fields=_stored_fields_json(extras), updated_at=now)
+    if final_default != old_default:
+        public_meta = _public_meta(row.get("public_meta"))
+        if final_default == "value":
+            public_meta.pop("default_field", None)
+        else:
+            public_meta["default_field"] = final_default
+        updates["public_meta"] = json.dumps(public_meta) if public_meta else None
+    if not updates:
+        return _meta_payload(row)
+
+    # Start the SQLite outer writer before SAVEPOINT: legacy transaction mode
+    # otherwise commits an outermost released savepoint independently of callers.
+    # All validation and external sealing are already done; this lock is short.
+    conn.execute(vault_secrets.update().where(vault_secrets.c.id == row["id"]).values(updated_at=vault_secrets.c.updated_at))
+    scopes: list[dict[str, str]] = []
+    with conn.begin_nested():
+        result = conn.execute(vault_secrets.update().where(
+            vault_secrets.c.id == row["id"], vault_secrets.c.updated_at == row["updated_at"],
+            vault_secrets.c.public_meta == row.get("public_meta"),
+        ).values(**updates))
+        if result.rowcount != 1:
+            current = conn.execute(select(vault_secrets).where(vault_secrets.c.id == row["id"])).mappings().first()
+            if current is not None and _default_field_name(dict(current)) != old_default:
+                raise RecordMismatchError(f"default field changed on {secret_name}")
+            raise SecretConflictError(f"secret {secret_name!r} changed while fields were being updated")
+        if final_default != old_default:
+            audit(conn, "metadata-updated", secret_name=secret_name, delivery={"fields": ["default_field"]})
+        for event in events:
+            audit(conn, "updated", secret_name=secret_name, delivery=event)
+        if events:
+            _expire_envelope_change(conn, secret_name, cache=cache, release_scopes=scopes)
+        meta = _meta_payload(_require_row(conn, secret_name))
+    if release_scopes is not None:
+        release_scopes.extend(scopes)
+    return meta
+
+
 def remove_secret_field(
     conn: Connection,
     secret_name: str,

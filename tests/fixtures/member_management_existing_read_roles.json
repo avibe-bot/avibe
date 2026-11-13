@@ -143,6 +143,7 @@
   "POST /api/vault/secrets": "editor",
   "POST /api/vault/secrets/example/accounts": "editor",
   "POST /api/vault/secrets/example/bitcoin-address-types": "editor",
+  "POST /api/vault/secrets/example/fields": "editor",
   "POST /api/vault/secrets/example/reveal-context": "editor",
   "POST /api/vault/secrets/example/signing-policy": "editor",
   "POST /api/vault/secrets/example/signing-policy/challenge": "editor",
