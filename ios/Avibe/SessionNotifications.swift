@@ -39,7 +39,6 @@ final class SessionNotificationCleaner {
                     return deliveredAt <= readAt
                         && entry.threadIdentifier.hasPrefix(SessionNotificationThread.prefix)
                         && entry.userInfo["instance_origin"] as? String == instanceOrigin
-                        && entry.userInfo["account_id"] as? String == accountID
                 }
                 .map(\.identifier)
             center.removeDeliveredNotifications(withIdentifiers: delivered)
