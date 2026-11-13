@@ -61,7 +61,9 @@ export function LivePanel({ tier, gen, slider = 'idle', suggested = false }: { t
   return (
     <div className="flex flex-col p-3">
       <div className="flex items-center gap-2 pb-2">
-        {tier === 'standard' ? (
+        {/* Owner 2026-11-14 02:37: Protected generates exactly as Standard; a typed protected value is
+            in this page before it is sealed too, so generating here adds nothing. */}
+        {tier === 'standard' || tier === 'protected' ? (
           <>
             <span className="flex-1 text-[11.5px] text-muted">{d(`约 ${genBits(gen)} 位随机性 · 改任何设置都会立刻换一个`, `About ${genBits(gen)} bits · any change makes a new one at once`)}</span>
             <Button type="button" variant="ghost" size="icon" className="size-8" aria-label={d('换一个', 'Regenerate')}><RefreshCw className="size-4" /></Button>
@@ -173,7 +175,7 @@ export function LiveValueField({ tier, state, suggested = false, preset = PASSWO
         </span>
       ) : (
         <Input type={open ? 'text' : 'password'} readOnly value={state.kind === 'empty' ? '' : valueOf(gen)}
-          placeholder={tier === 'protected' ? d('输入值', 'Type the value') : t('vaults.dialog.valuePlaceholder')}
+          placeholder={t('vaults.dialog.valuePlaceholder')}
           aria-label={t('vaults.dialog.value')}
           className={cn('pr-12 font-mono text-xs md:group-focus-within/gen:pr-32', state.kind !== 'empty' && 'border-mint/40 bg-mint-soft/40', state.kind === 'empty' && 'max-md:pr-32', open && 'md:group-focus-within/gen:pr-12')} />
       )}
@@ -194,7 +196,7 @@ export function LiveValueField({ tier, state, suggested = false, preset = PASSWO
         <LivePopover open={open} anchor={field} inline={inline}>
           <LivePanel tier={tier} gen={gen} slider={state.kind === 'open' ? state.slider : undefined} suggested={suggested} />
         </LivePopover>
-        {tier === 'standard' ? <Button type="button" variant="ghost" size="icon" aria-label={t('vaults.dialog.showValue')}><Eye className="size-4" /></Button> : null}
+        <Button type="button" variant="ghost" size="icon" aria-label={t('vaults.dialog.showValue')}><Eye className="size-4" /></Button>
       </div>
       {/* While the popup is open it sits right under the field, over this line; the field's
           tint and clear text already say it is generated. */}
