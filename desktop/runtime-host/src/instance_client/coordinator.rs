@@ -23,6 +23,11 @@ use crate::LoopbackOrigin;
 #[async_trait]
 pub trait ClientView: Send + Sync {
     fn changed(&self, state: &ClientState);
+    /// Only the native shell implements local updater intents. They never use
+    /// the selected Runtime's session, cookies or account persistence.
+    fn desktop_update(&self, _action: ClientAction, _epoch: Epoch) -> Result<(), ClientError> {
+        Err(ClientError::new("invalid_action"))
+    }
     /// Immediately invalidate all pending window/cookie/download callbacks.
     fn invalidate(&self, generation: u64);
     /// Local lifecycle invalidation may interrupt a physical store replacement.
@@ -273,6 +278,17 @@ impl Coordinator {
         let Ok(_operation) = self.operation.try_lock() else {
             return self.reply(request.request_id, Err(ClientError::new("busy")));
         };
+        if request.action.is_desktop_update() {
+            let epoch = Epoch::new(self.generation.clone(), request.expected_generation);
+            let result = epoch
+                .check()
+                .and_then(|_| self.view.desktop_update(request.action, epoch.clone()))
+                .and_then(|_| epoch.check())
+                .map(|_| None);
+            // The updater publishes its own live projection. An account-state
+            // clone/persist here could overwrite progress or mutate credentials.
+            return self.reply(request.request_id, result);
+        }
         if let Some(error) = self.credential_io.lock().await.cleanup_error.clone() {
             return self.reply(request.request_id, Err(error));
         }

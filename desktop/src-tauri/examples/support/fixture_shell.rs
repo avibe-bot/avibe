@@ -30,7 +30,7 @@ pub fn prepare(app: &AppHandle, root: &Path) {
     let data = app.path().app_local_data_dir().unwrap();
     assert!(data.starts_with(root));
     std::fs::create_dir_all(&data).unwrap();
-    if std::env::var("AVIBE_FIXTURE_AUTO_UPDATE").as_deref() == Ok("1") {
+    if std::env::var("AVIBE_FIXTURE_LEGACY_INSTALL").as_deref() == Ok("1") {
         std::fs::write(data.join("remote-install.json"), r#"{"enabled":true}"#).unwrap();
     }
 }

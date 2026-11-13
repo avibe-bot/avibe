@@ -38,9 +38,12 @@ none of these parity changes ships in 3.2.6.
    the four update actions and every install remains exact-target and generation
    fenced.
 
-All four target 3.2.7, not the 3.2.6 desktop build. #3682 and #3681 remain held
-until the complete train is ready; split review commits are allowed, but no
-partial panel release or version-number compatibility branch is allowed.
+All four target 3.2.7, not the 3.2.6 desktop build. #3682 is the single integrated
+train PR after the UI owner's explicit frozen-head handoff from #3681. The
+integrated train has one writer, full exact-head Codex plus independent UI/native
+review, and one hosted acceptance SHA. Product gives the merge go and the release
+lead merges; no partial panel release or version-number compatibility branch is
+allowed.
 
 ## Additive surface contract
 
@@ -65,6 +68,22 @@ partial panel release or version-number compatibility branch is allowed.
   checker/config preference. Install remains `/api/desktop/update/request` or
   `/api/upgrade` as appropriate, always with the exact target where the host
   supports it.
+- The bundled account bridge accepts exactly `update_check`,
+  `update_set_prereleases {enabled}`, `update_set_auto_update {enabled}` and
+  `update_install {target_version}` inside its existing v1 request envelope.
+  Only the trusted bundled document can invoke it. Request version/identity,
+  coordinator busy ownership and expected generation are checked before native
+  execution; the updater retains generation fencing through installation.
+  These actions do not use the selected Runtime's cookies or persist account
+  state. Replies read the updater's live `state.desktop.update` projection.
+  Footer/menu/deep-link presentation is a queued native intent: window
+  contention, lifecycle rebinding and failed navigation retain it for view
+  signals and one bounded-rate retry worker. Only its exact admitted navigation
+  settles it; a newer explicit account/selection/escape owner supersedes it.
+  Source authority does not require an idle window, but staging and unpublished
+  candidates cannot enqueue. A pending candidate needs its exact public commit
+  receipt; enqueue retains the source-validated owner instead of adopting a
+  newer action's authority.
 - Policy-only `auto_update` controls preserve the native phase, manifest, latest
   offer and original `checked_at` on success, expiry and save failure. Their
   control receipt is not a discovery/checking state on any surface.
@@ -148,7 +167,7 @@ confirmed that "signed-in owner" means the person who manages this instance, not
 new owner-only role distinction. Removing the host prompt never grants access to
 editor/viewer or bypasses origin/CSRF protection.
 
-## Implementation evidence (check/channel and explicit-click steps)
+## Implementation status
 
 - The committed check/channel slice passed its focused Python, updater/platform,
   Rust, Clippy, exact-head CI/review and controlled credential-free Incus HTTP
@@ -169,8 +188,19 @@ editor/viewer or bypasses origin/CSRF protection.
   still gates, not claimed results. No signed application replacement has been
   exercised in this step; controlled disposable native acceptance remains a
   separate gate.
-- The trusted updates view remains owned by the UI lane and is required before
-  the held panels can enter the frozen merge window.
+- The trusted-view native protocol, presentation and dispatch are implemented:
+  remote-selected footers and the native menu present the bundled updates view;
+  the four actions reuse the same local updater, without another native
+  confirmation dialog. The integrated UI panel/adapter consumes this bridge.
+  Coordinator/protocol tests cover local and remote-selected dispatch, no
+  credential/network side effects, malformed actions, busy rejection, stale
+  generations and delayed-completion fencing. Native-chain fixtures now use the
+  trusted panel and explicit-click policy instead of the retired host-prompt
+  flow; they still require a controlled disposable-host run with the integrated
+  UI/native heads. Source tests and fixture collection are not that acceptance.
+- The direct-loopback idle read is explicitly declared as GET in the canonical
+  Member allow-list; other unclassified methods remain Owner-default. The global
+  authorization sweep and focused HTTP role/origin regression cover the boundary.
 
 ## Validation and acceptance gates
 
@@ -191,10 +221,36 @@ editor/viewer or bypasses origin/CSRF protection.
   Runtime; preserve generation/instance fencing from #3653/#3661.
 - Runtime end-to-end runs only in a task-owned local Incus worktree environment,
   not the shared master environment or any customer/owner host.
-- Native fixture exercise should use disposable GitHub-hosted `macos-26` and
-  `windows-latest` desktop-shell jobs with isolated state. A real signed bundle
-  replacement is a separately named release acceptance gate on controlled
-  disposable machines; never install/restart the owner's app to claim it.
+- **Merge gate — scoped hosted native handoff:** disposable GitHub-hosted
+  `macos-26` and `windows-latest`, both on the integrated PR head, with fixture-only
+  signing and isolated native paths. Actual rendered panel DOM actions must
+  reach the real checker/verifier/installer; macOS swaps and restarts a sealed
+  fixture `.app`, Windows exercises Rust → PowerShell → fixture installer →
+  target native relaunch. A durable external observer proves the new version.
+  This is not a claim of production NSIS, Certum, notarization or standard-user
+  elevation coverage. Native GUI/WebView control and path isolation must pass
+  preflight on each runner; no owner-machine fallback is allowed.
+- The hosted fixture workflow is label- or dispatch-triggered only, never on
+  push. A same-repository/master-base PR label is the premerge manual trigger;
+  `workflow_dispatch` becomes usable after default-branch registration. Checkout
+  the event PR head explicitly and record workflow/merge context separately.
+  Reapply the label after a final push. Use read-only permissions, no persisted
+  Git credentials, production secrets, release environments or publishing. Do
+  not activate while RC/stable Stage 2 is running; recheck that guard before
+  expensive native jobs. Do not weaken existing CI scope or aggregators.
+- Real automatic acceptance uses the unchanged `auto_update_loop`, a fresh
+  isolated controller-owned idle producer and normal scheduling durations, not
+  a direct tick, remote idle ticket, canned idle time or timer patch. Budget up
+  to 240 minutes including builds; test policy invalidation at the final edge.
+  All updater network access remains fixture-local; installable payloads and
+  fixture signing keys are generated fresh for the run.
+- **Stable release gate — published signed RC → RC:** before this train ships
+  in a stable release, run one actual Desktop RC-to-RC update through the new
+  panel on hosted macOS and Windows using real published, signed RC artifacts
+  from public downloads, with no signing secrets. This separately proves the
+  production-to-production path. It is not a merge gate and cannot be replaced
+  by the fixture handoff. Production packaging/signing/notarization remain in
+  RC Stage 2. Never restart or install the owner's app for either acceptance.
 - Current-head review and CI, actual regression evidence, Product exact-head
   authorization-policy go and lead merge remain required. No merge authorizes
   deployment or enabling new behavior on the owner's machine.

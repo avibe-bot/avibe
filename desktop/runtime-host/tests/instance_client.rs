@@ -2,7 +2,10 @@
 //! Existing local bootstrap tests cannot exercise the account/remote boundary.
 use async_trait::async_trait;
 use avibe_runtime_host::instance_client::{
-    protocol::{account_view, instance_origin, ClientError, ClientRequest, ClientState, Instance},
+    protocol::{
+        account_view, instance_origin, presentation_view, ClientAction, ClientError, ClientRequest, ClientState,
+        Instance,
+    },
     storage::ConnectionStore,
     transport::{NativeSession, Request, Response, Transport},
 };
@@ -60,6 +63,26 @@ fn catalog_requires_exact_tuple_and_bundle_requires_exact_owned_entry() {
         ),
         Some("instances")
     );
+    for origin in ["tauri://localhost/", "http://tauri.localhost/"] {
+        let owned = origin.parse().unwrap();
+        let updates = format!("{origin}account/index.html?view=updates");
+        assert_eq!(account_view(&updates.parse().unwrap(), &owned), Some("updates"));
+        assert_eq!(
+            account_view(&format!("{updates}&target=https://evil.test").parse().unwrap(), &owned),
+            None
+        );
+    }
+    assert_eq!(
+        presentation_view(&"avibe://desktop/updates".parse().unwrap()),
+        Some("updates")
+    );
+    for url in [
+        "avibe://desktop/updates?install=true",
+        "avibe://desktop/updates#install",
+        "avibe://evil/updates",
+    ] {
+        assert_eq!(presentation_view(&url.parse().unwrap()), None);
+    }
     for url in [
         "tauri://localhost/account/index.html?view=delete",
         "tauri://localhost/account/index.html?view=account&view=instances",
@@ -68,6 +91,25 @@ fn catalog_requires_exact_tuple_and_bundle_requires_exact_owned_entry() {
         "https://studio.avibe.bot/account/index.html",
     ] {
         assert_eq!(account_view(&url.parse().unwrap(), &owned), None);
+    }
+}
+
+// The bridge wire shape must not turn a setting save or an absent clicked
+// target into an install. Generic account fixtures did not cover these actions.
+#[test]
+fn update_action_payloads_require_exact_typed_fields() {
+    for action in [
+        serde_json::json!({"type":"update_check","target_version":"3.2.7"}),
+        serde_json::json!({"type":"update_set_prereleases"}),
+        serde_json::json!({"type":"update_set_auto_update","enabled":"true"}),
+        serde_json::json!({"type":"update_install"}),
+        serde_json::json!({"type":"update_install","target_version":327}),
+        serde_json::json!({"type":"update_install","target_version":"3.2.7","url":"https://evil.test"}),
+    ] {
+        assert!(
+            serde_json::from_value::<ClientAction>(action.clone()).is_err(),
+            "{action}"
+        );
     }
 }
 

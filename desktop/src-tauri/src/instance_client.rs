@@ -20,6 +20,42 @@ const EVENT: &str = "avibe:desktop-client-state";
 pub(crate) struct Client {
     pub coordinator: Arc<Coordinator>,
     view: Arc<NativeView>,
+    presentations: Mutex<PresentationQueue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PresentationIntent {
+    id: u64,
+    view: &'static str,
+    owner: u64,
+}
+#[derive(Default)]
+struct PresentationQueue {
+    sequence: u64,
+    pending: Option<PresentationIntent>,
+    scheduled: bool,
+    retrying: bool,
+}
+impl PresentationQueue {
+    fn enqueue(&mut self, view: &'static str, owner: u64) {
+        self.sequence += 1;
+        self.pending = Some(PresentationIntent {
+            id: self.sequence,
+            view,
+            owner,
+        });
+    }
+    fn current(&mut self, owner: u64) -> Option<PresentationIntent> {
+        if self.pending.is_some_and(|intent| intent.owner != owner) {
+            self.pending = None;
+        }
+        self.pending
+    }
+    fn complete(&mut self, id: u64) {
+        if self.pending.is_some_and(|intent| intent.id == id) {
+            self.pending = None;
+        }
+    }
 }
 #[derive(Clone)]
 struct PreviousView {
@@ -237,6 +273,7 @@ pub fn attach(
     app.manage(Client {
         coordinator: coordinator.clone(),
         view,
+        presentations: Mutex::new(PresentationQueue::default()),
     });
     coordinator
 }
@@ -353,8 +390,12 @@ pub(crate) fn navigation_loaded(app: &AppHandle, generation: u64, url: &Url) {
     }
 }
 fn trusted_page(client: &Client, window: &WebviewWindow) -> bool {
+    let owned = {
+        let presentation = client.view.presentation.lock().expect("presentation");
+        presentation.account && !presentation.staging && presentation.pending_commit.is_none()
+    };
     window.label() == MAIN_WINDOW
-        && client.view.presentation.lock().expect("presentation").account
+        && owned
         && window
             .url()
             .is_ok_and(|url| account_view(&url, &client.view.bundle).is_some())
@@ -403,7 +444,36 @@ pub fn caller_can_present(app: &AppHandle, label: &str, current: &Url) -> bool {
         .and_then(|origin| origin.clone())
         .is_some_and(|origin| origin.matches_url_origin(current))
 }
-/// Native presentation requests share one caller check in every shell assembly.
+/// Source authority is independent of physical-window admission. A committed
+/// document can request presentation while the window serializer is occupied,
+/// but a hidden, not-yet-published candidate cannot acquire that authority.
+fn presentation_source_allowed(
+    view: &Presentation,
+    bundle: &Url,
+    local: Option<&LoopbackOrigin>,
+    committed_receipt: Option<u64>,
+    label: &str,
+    current: &Url,
+) -> bool {
+    if label != MAIN_WINDOW
+        || view.staging
+        || (view.pending_commit.is_some() && view.pending_commit != committed_receipt)
+    {
+        return false;
+    }
+    if view.account {
+        return account_view(current, bundle).is_some();
+    }
+    match (&view.remote, &view.state.connection.committed) {
+        (Some(origin), ClientTarget::Remote { canonical_origin, .. }) => {
+            origin.origin().ascii_serialization() == *canonical_origin && current.origin() == origin.origin()
+        }
+        (None, ClientTarget::Local { .. }) => local.is_some_and(|origin| origin.matches_url_origin(current)),
+        _ => false,
+    }
+}
+
+/// Native presentation requests share one source check in every shell assembly.
 /// Returning true means the URL was consumed, never that an action was approved.
 pub fn presentation_request(
     app: &AppHandle,
@@ -422,56 +492,168 @@ pub fn presentation_request(
     // Wry's macOS URL getter has no value during the initial navigation.
     // Presentation can only originate from an already loaded document; do not
     // ask for its current URL when admitting bootstrap/ordinary navigation.
-    let allowed = current().is_some_and(|url| caller_can_present(app, label, &url));
-    if let Some(view) = view {
-        if allowed {
-            present(app, view);
-        }
-        return true;
+    let Some(client) = app.try_state::<Client>() else {
+        return false;
+    };
+    // Capture before reading the document. A newer explicit action must not be
+    // recaptured as authority after this source was inspected.
+    let owner = client.coordinator.presentation_owner();
+    let allowed = current().is_some_and(|url| {
+        let view = client.view.presentation.lock().expect("presentation");
+        let local = client.view.local_origin.lock().expect("local origin");
+        presentation_source_allowed(
+            &view,
+            &client.view.bundle,
+            local.as_ref(),
+            client.coordinator.committed_view_generation(),
+            label,
+            &url,
+        )
+    });
+    if allowed {
+        present_owned(app, view.unwrap_or("updates"), owner);
     }
-    if updates {
-        if allowed {
-            crate::updater::trusted_decision(app.clone());
-        }
-        return true;
-    }
-    false
+    true
 }
-pub fn present(app: &AppHandle, view: &'static str) {
+/// Accept a presentation intent, not an updater action. Busy/rebinding windows
+/// retain it until a view/lifecycle signal can admit navigation. A newer explicit
+/// account action supersedes it; a local lifecycle generation change does not.
+pub fn present(app: &AppHandle, view: &'static str) -> bool {
+    let Some(client) = app.try_state::<Client>() else {
+        return false;
+    };
+    present_owned(app, view, client.coordinator.presentation_owner())
+}
+
+fn present_owned(app: &AppHandle, view: &'static str, owner: u64) -> bool {
+    let Some(client) = app.try_state::<Client>() else {
+        return false;
+    };
+    let Ok(mut url) = client.view.bundle.join("/account/index.html") else {
+        return false;
+    };
+    url.set_query(Some(&format!("view={view}")));
+    if account_view(&url, &client.view.bundle).is_none() {
+        return false;
+    }
+    {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if client.coordinator.presentation_owner() != owner {
+            return false;
+        }
+        queue.enqueue(view, owner);
+    }
+    schedule_presentation(app);
+    ensure_presentation_retry(app);
+    true
+}
+
+/// Native navigation failure need not emit a page/view event. One bounded-rate
+/// worker per client keeps accepted intents live without relying on that signal.
+fn ensure_presentation_retry(app: &AppHandle) {
     let Some(client) = app.try_state::<Client>() else {
         return;
     };
-    let native = client.view.clone();
-    let generation = client.coordinator.state().generation;
+    {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if queue.retrying || queue.pending.is_none() {
+            return;
+        }
+        queue.retrying = true;
+    }
     let app = app.clone();
-    let _ = app.clone().run_on_main_thread(move || {
-        if !epoch_matches(&app, generation) {
-            return;
-        }
-        let Ok(_windows) = native.windows.try_lock() else {
-            return;
-        };
-        let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
-            return;
-        };
-        let Ok(mut url) = native.bundle.join("/account/index.html") else {
-            return;
-        };
-        url.set_query(Some(&format!("view={view}")));
-        {
-            let mut state = native.presentation.lock().expect("presentation");
-            if state.staging || state.pending_commit.is_some() {
+    tauri::async_runtime::spawn(async move {
+        let mut delay = std::time::Duration::from_millis(100);
+        loop {
+            tokio::time::sleep(delay).await;
+            let Some(client) = app.try_state::<Client>() else {
                 return;
+            };
+            {
+                let mut queue = client.presentations.lock().expect("presentation intent");
+                if queue.current(client.coordinator.presentation_owner()).is_none() {
+                    queue.retrying = false;
+                    return;
+                }
             }
-            if !state.account {
-                state.route = window.url().ok();
-            }
-            state.account = true;
-        }
-        if window.navigate(url).is_err() {
-            native.presentation.lock().expect("presentation").account = false;
+            schedule_presentation(&app);
+            delay = (delay * 2).min(std::time::Duration::from_secs(2));
         }
     });
+}
+
+fn schedule_presentation(app: &AppHandle) {
+    let Some(client) = app.try_state::<Client>() else {
+        return;
+    };
+    {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if queue.scheduled || queue.pending.is_none() {
+            return;
+        }
+        queue.scheduled = true;
+    }
+    let handle = app.clone();
+    if app.run_on_main_thread(move || apply_presentation(&handle)).is_err() {
+        // Keep the accepted intent; a later page/view signal can retry it.
+        client.presentations.lock().expect("presentation intent").scheduled = false;
+    }
+}
+
+fn apply_presentation(app: &AppHandle) {
+    let Some(client) = app.try_state::<Client>() else {
+        return;
+    };
+    let intent = {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        queue.scheduled = false;
+        queue.current(client.coordinator.presentation_owner())
+    };
+    let Some(intent) = intent else { return };
+    let native = &client.view;
+    let Ok(windows) = native.windows.try_lock() else { return };
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    let Ok(mut url) = native.bundle.join("/account/index.html") else {
+        return;
+    };
+    url.set_query(Some(&format!("view={}", intent.view)));
+    let route = window.url().ok();
+    if client.coordinator.presentation_epoch(intent.owner).is_err() {
+        client
+            .presentations
+            .lock()
+            .expect("presentation intent")
+            .complete(intent.id);
+        return;
+    }
+    let previous = {
+        let mut state = native.presentation.lock().expect("presentation");
+        if state.staging || state.pending_commit.is_some() {
+            return;
+        }
+        let previous = (state.account, state.route.clone());
+        if !state.account {
+            state.route = route;
+        }
+        state.account = true;
+        previous
+    };
+    if window.navigate(url).is_err() {
+        let mut state = native.presentation.lock().expect("presentation");
+        state.account = previous.0;
+        state.route = previous.1;
+        return;
+    }
+    client
+        .presentations
+        .lock()
+        .expect("presentation intent")
+        .complete(intent.id);
+    drop(windows);
+    // A newer presentation may have arrived during native admission.
+    schedule_presentation(app);
 }
 /// Called before legacy navigation. None keeps the legacy shell policy.
 pub fn navigation(app: &AppHandle, label: &str, destination: &Url) -> Option<bool> {
@@ -813,6 +995,21 @@ impl NativeView {
 }
 #[async_trait]
 impl ClientView for NativeView {
+    fn desktop_update(&self, action: ClientAction, epoch: Epoch) -> Result<(), ClientError> {
+        let client = self
+            .app
+            .try_state::<Client>()
+            .ok_or_else(|| ClientError::new("desktop_client_unavailable"))?;
+        let window = self
+            .app
+            .get_webview_window(MAIN_WINDOW)
+            .ok_or_else(|| ClientError::new("untrusted_desktop_caller"))?;
+        if !trusted_page(&client, &window) {
+            return Err(ClientError::new("untrusted_desktop_caller"));
+        }
+        epoch.check()?;
+        crate::updater::client_action(&self.app, action, epoch.value).map_err(ClientError::new)
+    }
     fn local_rebound(&self, epoch: Epoch) {
         let Some(client) = self.app.try_state::<Client>() else {
             return;
@@ -896,6 +1093,7 @@ impl ClientView for NativeView {
         // Finished may arrive while this owner still holds the window lock.
         // The owner's terminal publication is the deferred delivery handoff.
         crate::apply_pending_deep_link(&self.app);
+        schedule_presentation(&self.app);
     }
     fn committed(&self, epoch: Epoch) {
         let Some(client) = self.app.try_state::<Client>() else {
@@ -1055,6 +1253,102 @@ impl ClientView for NativeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A footer/menu intent used to disappear when its deferred callback met a
+    // busy window or a lifecycle rebind. Only actual admission may settle it.
+    #[test]
+    fn presentation_intents_survive_retries_until_the_exact_navigation_is_admitted() {
+        let mut queue = PresentationQueue::default();
+        queue.enqueue("updates", 4);
+        let first = queue.current(4).unwrap();
+        // Lock contention, pending presentation and failed navigation leave the
+        // same intent available. Lifecycle generation is deliberately not owner.
+        for _ in 0..3 {
+            assert_eq!(queue.current(4), Some(first));
+        }
+        queue.enqueue("account", 4);
+        let newer = queue.current(4).unwrap();
+        queue.complete(first.id);
+        assert_eq!(queue.current(4), Some(newer));
+        queue.complete(newer.id);
+        assert!(queue.current(4).is_none());
+    }
+
+    #[test]
+    fn a_new_explicit_action_supersedes_an_old_presentation_without_reviving_it() {
+        let mut queue = PresentationQueue::default();
+        queue.enqueue("updates", 4);
+        let old = queue.current(4).unwrap();
+        assert!(queue.current(5).is_none());
+        queue.enqueue("updates", 5);
+        let current = queue.current(5).unwrap();
+        queue.complete(old.id);
+        assert_eq!(queue.current(5), Some(current));
+    }
+
+    // Queue-only tests cannot detect rejecting a valid source before enqueue.
+    // Exercise the authority matrix without admission's window serializer:
+    // committed origins survive contention; uncommitted candidates stay denied.
+    #[test]
+    fn presentation_sources_require_owned_documents_not_an_idle_window() {
+        let local = LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap();
+        let mut view = Presentation {
+            state: ClientState::new("fixture".into(), "0.1.0".into(), serde_json::json!({})),
+            previous: None,
+            account: false,
+            disposable: false,
+            staging: false,
+            pending_commit: None,
+            local_owner: None,
+            remote: None,
+            route: None,
+        };
+        for raw_bundle in ["tauri://localhost", "http://tauri.localhost"] {
+            let bundle = Url::parse(raw_bundle).unwrap();
+            let allows = |view: &Presentation, receipt, label, url: &str| {
+                presentation_source_allowed(view, &bundle, Some(&local), receipt, label, &Url::parse(url).unwrap())
+            };
+            assert!(allows(&view, None, MAIN_WINDOW, "http://127.0.0.1:1984/chat"));
+            assert!(!allows(&view, None, "other", "http://127.0.0.1:1984/chat"));
+            assert!(!allows(&view, None, MAIN_WINDOW, "http://127.0.0.1:1985/chat"));
+            view.account = true;
+            assert!(allows(
+                &view,
+                None,
+                MAIN_WINDOW,
+                bundle.join("/account/index.html?view=updates").unwrap().as_str()
+            ));
+            assert!(!allows(
+                &view,
+                None,
+                MAIN_WINDOW,
+                bundle.join("/index.html").unwrap().as_str()
+            ));
+            view.account = false;
+        }
+        let bundle = Url::parse("tauri://localhost").unwrap();
+        let remote = Url::parse("https://fixture.avibe.bot/chat").unwrap();
+        view.remote = Some(remote.clone());
+        view.state.connection.committed = ClientTarget::Remote {
+            name: "fixture".into(),
+            instance_id: "fixture".into(),
+            canonical_origin: "https://fixture.avibe.bot".into(),
+        };
+        let allows = |view: &Presentation, receipt| {
+            presentation_source_allowed(view, &bundle, Some(&local), receipt, MAIN_WINDOW, &remote)
+        };
+        assert!(allows(&view, None));
+        view.pending_commit = Some(7);
+        assert!(!allows(&view, None));
+        assert!(!allows(&view, Some(6)));
+        assert!(allows(&view, Some(7)));
+        view.staging = true;
+        assert!(!allows(&view, Some(7)));
+        view.staging = false;
+        view.remote = Some(Url::parse("https://other.avibe.bot").unwrap());
+        assert!(!allows(&view, Some(7)));
+    }
+
     #[test]
     fn only_supported_static_bundle_enables_the_client() {
         assert!(compatible_asset(

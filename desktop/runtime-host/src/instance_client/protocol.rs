@@ -235,9 +235,24 @@ pub enum ClientAction {
     RetryLocalRemoteAccess,
     SelectInstance { instance_id: String },
     DecideConsent { approve: bool },
+    UpdateCheck {},
+    UpdateSetPrereleases { enabled: bool },
+    UpdateSetAutoUpdate { enabled: bool },
+    UpdateInstall { target_version: String },
     Cancel,
     ReturnLocal,
     SignOut,
+}
+impl ClientAction {
+    pub fn is_desktop_update(&self) -> bool {
+        matches!(
+            self,
+            Self::UpdateCheck {}
+                | Self::UpdateSetPrereleases { .. }
+                | Self::UpdateSetAutoUpdate { .. }
+                | Self::UpdateInstall { .. }
+        )
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -360,6 +375,7 @@ pub fn account_view(url: &Url, owned_bundle_origin: &Url) -> Option<&'static str
         "instances" => Some("instances"),
         "setup-complete" => Some("setup-complete"),
         "sign-out" => Some("sign-out"),
+        "updates" => Some("updates"),
         _ => None,
     }
 }
@@ -380,6 +396,7 @@ pub fn presentation_view(url: &Url) -> Option<&'static str> {
         "/instances" => Some("instances"),
         "/setup-complete" => Some("setup-complete"),
         "/sign-out" => Some("sign-out"),
+        "/updates" => Some("updates"),
         _ => None,
     }
 }

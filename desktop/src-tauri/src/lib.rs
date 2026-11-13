@@ -710,6 +710,10 @@ fn open_desktop_updates(app: &AppHandle) -> bool {
         return false;
     };
     if !pet::is_workbench(&window) {
+        if instance_client::present(app, "updates") {
+            focus_or_restore_main_window(app);
+            return true;
+        }
         return false;
     }
     focus_or_restore_main_window(app);

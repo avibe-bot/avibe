@@ -20,8 +20,13 @@ pass.
 
 The local mutation header is `X-Vibe-CSRF-Token`, obtained from `csrf_token`
 and the `vibe_csrf_token` cookie with the exact local Origin. Bundled entry is
-`account/index.html?view=account|instances|setup-complete|sign-out`; `view` is
-presentation only. Mutations are native-generation fenced.
+`account/index.html?view=account|instances|setup-complete|sign-out|updates`; `view`
+is presentation only. Mutations are native-generation fenced. The four
+`update_*` actions use only the local shell updater, even when a remote Runtime
+is selected; they neither use its session nor persist an account transaction.
+`update_install` requires the exact displayed `target_version`. The updater
+publishes progress through `state.desktop.update`; an update reply cannot
+replace that live projection with a saved account-state clone.
 
 Runtime projection excludes catalog, enrollment transaction, second-factor
 inputs and consent details. It includes account identity, connection, local

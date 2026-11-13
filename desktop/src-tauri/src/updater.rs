@@ -123,7 +123,7 @@ enum Phase {
 enum CheckPresentation {
     Native,
     Workbench,
-    TrustedDecision(u64),
+    TrustedPanel(u64),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1068,58 +1068,47 @@ async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<(Manife
 }
 
 fn should_show_current_dialog(interactive: bool, presentation: CheckPresentation, workbench_ready: bool) -> bool {
-    interactive && (presentation != CheckPresentation::Workbench || !workbench_ready)
+    interactive
+        && !matches!(presentation, CheckPresentation::TrustedPanel(_))
+        && (presentation != CheckPresentation::Workbench || !workbench_ready)
 }
 
 pub fn check(app: AppHandle, interactive: bool) {
-    check_with_presentation(app, interactive, CheckPresentation::Native);
+    let _ = check_with_presentation(app, interactive, CheckPresentation::Native);
 }
 
-pub(crate) fn trusted_decision(app: AppHandle) {
-    if let Some(generation) = crate::instance_client::epoch(&app) {
-        let pending = {
-            let updater = app.state::<Updater>();
-            let state = updater.state.lock().expect("updater state");
-            state
-                .remote_request
-                .as_ref()
-                .filter(|request| request.phase == RemoteRequestPhase::AwaitingHost)
-                .and_then(|request| {
-                    state.manifest.clone().map(|manifest| {
-                        (
-                            manifest,
-                            RemoteInstallContext {
-                                request_id: request.request_id.clone(),
-                                target: request.target.clone(),
-                            },
-                        )
-                    })
-                })
-        };
-        if let Some((manifest, remote)) = pending {
-            if let Err(error) = reread_remote_request(&app, &remote) {
-                record_remote_gate_failure(&app, &remote, error);
-                return;
-            }
-            confirm_install(
-                app,
-                manifest,
-                CheckPresentation::TrustedDecision(generation),
-                Some(remote),
-            );
-        } else {
-            check_with_presentation(app, true, CheckPresentation::TrustedDecision(generation));
+/// Called only through the bundled account bridge after its caller/envelope
+/// checks. All four actions use the same local updater as Workbench IPC.
+pub(crate) fn client_action(
+    app: &AppHandle,
+    action: avibe_runtime_host::instance_client::protocol::ClientAction,
+    generation: u64,
+) -> Result<(), String> {
+    use avibe_runtime_host::instance_client::protocol::ClientAction;
+    install_generation_current(app, Some(generation))?;
+    match action {
+        ClientAction::UpdateCheck {} => {
+            check_with_presentation(app.clone(), true, CheckPresentation::TrustedPanel(generation))
         }
+        ClientAction::UpdateSetPrereleases { enabled } => {
+            set_channel(app, Channel::of(enabled))?;
+            check_with_presentation(app.clone(), true, CheckPresentation::TrustedPanel(generation))
+        }
+        ClientAction::UpdateSetAutoUpdate { enabled } => set_auto_update(app, enabled).map(|_| ()),
+        ClientAction::UpdateInstall { target_version } => {
+            explicit_install(app.clone(), &target_version, Some(generation))
+        }
+        _ => Err("invalid_action".into()),
     }
 }
 fn decision_current(app: &AppHandle, presentation: CheckPresentation) -> bool {
     match presentation {
-        CheckPresentation::TrustedDecision(generation) => crate::instance_client::epoch_matches(app, generation),
+        CheckPresentation::TrustedPanel(generation) => crate::instance_client::epoch_matches(app, generation),
         _ => true,
     }
 }
 fn handoff_to_workbench(presentation: CheckPresentation, ready: bool) -> bool {
-    ready && !matches!(presentation, CheckPresentation::TrustedDecision(_))
+    matches!(presentation, CheckPresentation::TrustedPanel(_)) || ready
 }
 fn confirm_install(
     app: AppHandle,
@@ -1147,20 +1136,6 @@ fn confirm_install(
         } else {
             MessageDialogButtons::YesNoCancelCustom(c.install.clone(), c.skip.clone(), c.cancel.clone())
         });
-    let dialog = if matches!(presentation, CheckPresentation::TrustedDecision(_)) {
-        // Keep the account client's confirmation owned by its
-        // current window. Replacing/closing that window dismisses
-        // the sheet; the generation check still fences its result.
-        let Some(window) = app.get_webview_window(super::MAIN_WINDOW) else {
-            if remote.is_none() {
-                settle_update(&app, None, Settlement::Completed);
-            }
-            return;
-        };
-        dialog.parent(&window)
-    } else {
-        dialog
-    };
     dialog.show_with_result(move |result| {
         if !decision_current(&confirmation, presentation) {
             if remote.is_none() {
@@ -1173,7 +1148,7 @@ fn confirm_install(
             // install owner atomically claims and revalidates this exact ticket.
             if choice(&result, &c) == Choice::Install {
                 let generation = match presentation {
-                    CheckPresentation::TrustedDecision(generation) => Some(generation),
+                    CheckPresentation::TrustedPanel(generation) => Some(generation),
                     _ => None,
                 };
                 install_in_generation(confirmation, manifest, Some(remote), generation, false);
@@ -1192,7 +1167,7 @@ fn confirm_install(
         }
     });
 }
-fn check_with_presentation(app: AppHandle, interactive: bool, presentation: CheckPresentation) {
+fn check_with_presentation(app: AppHandle, interactive: bool, presentation: CheckPresentation) -> Result<(), String> {
     // Install progress and outcomes stay in memory: a failed install keeps
     // the last `Available`, and the new app's startup check publishes
     // `Current` after a successful hand-over.
@@ -1212,20 +1187,20 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
     }
     let updater = app.state::<Updater>();
     if updater.busy.swap(true, Ordering::SeqCst) {
-        if interactive {
+        if interactive && !matches!(presentation, CheckPresentation::TrustedPanel(_)) {
             let state = updater.state.lock().expect("updater state");
             show(&app, label(state.phase, &catalog()), state.latest.as_deref());
         }
-        return;
+        return Err("update_in_progress".into());
     }
     if KEY.trim().is_empty() || TARGET == "unsupported" {
         set_state(&app, Phase::Disabled, None);
         publish_check(&app);
         settle_update(&app, None, Settlement::Completed);
-        if interactive {
+        if interactive && !matches!(presentation, CheckPresentation::TrustedPanel(_)) {
             show(&app, &catalog().disabled_detail, None);
         }
-        return;
+        return Ok(());
     }
     let channel = updater.state.lock().expect("updater state").channel;
     updater.state.lock().expect("updater state").availability_interactive = interactive;
@@ -1275,12 +1250,16 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                 set_state(&app, Phase::Error, None);
                 publish_check(&app);
                 settle_update(&app, None, Settlement::Failed("check_failed"));
-                if interactive && decision_current(&app, presentation) {
+                if interactive
+                    && decision_current(&app, presentation)
+                    && !matches!(presentation, CheckPresentation::TrustedPanel(_))
+                {
                     show(&app, &catalog().check_failed, None);
                 }
             }
         }
     });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1292,8 +1271,7 @@ pub fn desktop_update_state(window: WebviewWindow, app: AppHandle) -> Result<Des
 #[tauri::command]
 pub fn desktop_update_check(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
     ensure_workbench(&window)?;
-    check_with_presentation(app, true, CheckPresentation::Workbench);
-    Ok(())
+    check_with_presentation(app, true, CheckPresentation::Workbench)
 }
 
 /// The Workbench's pre-release switch: the same channel as the menu item.
@@ -1301,7 +1279,7 @@ pub fn desktop_update_check(window: WebviewWindow, app: AppHandle) -> Result<(),
 pub fn desktop_update_prereleases_set(window: WebviewWindow, app: AppHandle, enabled: bool) -> Result<bool, String> {
     ensure_workbench(&window)?;
     set_channel(&app, Channel::of(enabled))?;
-    check_with_presentation(app, true, CheckPresentation::Workbench);
+    check_with_presentation(app, true, CheckPresentation::Workbench)?;
     Ok(enabled)
 }
 
@@ -1364,13 +1342,18 @@ fn claim_explicit_install(
 pub fn desktop_update_install(window: WebviewWindow, app: AppHandle, target_version: String) -> Result<(), String> {
     ensure_workbench(&window)?;
     let generation = crate::instance_client::epoch(&app);
+    explicit_install(app, &target_version, generation)
+}
+
+fn explicit_install(app: AppHandle, target_version: &str, generation: Option<u64>) -> Result<(), String> {
+    install_generation_current(&app, generation)?;
     let (manifest, remote) = {
         let updater = app.state::<Updater>();
         let state = updater
             .state
             .lock()
             .map_err(|_| "Desktop updater state is unavailable.".to_owned())?;
-        claim_explicit_install(&state, &updater.busy, &target_version)?
+        claim_explicit_install(&state, &updater.busy, target_version)?
     };
     install_in_generation(app, manifest, remote, generation, false);
     Ok(())
@@ -1583,7 +1566,7 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
 
 fn install(app: AppHandle, manifest: Manifest, presentation: CheckPresentation) {
     let generation = match presentation {
-        CheckPresentation::TrustedDecision(generation) => Some(generation),
+        CheckPresentation::TrustedPanel(generation) => Some(generation),
         _ => None,
     };
     install_in_generation(app, manifest, None, generation, false);
@@ -2020,9 +2003,15 @@ mod tests {
         assert!(should_show_current_dialog(true, CheckPresentation::Workbench, false));
         assert!(should_show_current_dialog(true, CheckPresentation::Native, true));
         assert!(!should_show_current_dialog(false, CheckPresentation::Native, false));
-        // A Phase 1 footer CTA must reach the native decision even when the
-        // current local Workbench is ready to display the legacy popover.
-        assert!(!handoff_to_workbench(CheckPresentation::TrustedDecision(7), true));
+        // The bundled updates view owns feedback even without a local
+        // Workbench. It must never fall back to a second native dialog.
+        assert!(!should_show_current_dialog(
+            true,
+            CheckPresentation::TrustedPanel(7),
+            false
+        ));
+        assert!(handoff_to_workbench(CheckPresentation::TrustedPanel(7), true));
+        assert!(handoff_to_workbench(CheckPresentation::TrustedPanel(7), false));
         assert!(handoff_to_workbench(CheckPresentation::Native, true));
         assert!(handoff_to_workbench(CheckPresentation::Workbench, true));
         assert!(!handoff_to_workbench(CheckPresentation::Workbench, false));
