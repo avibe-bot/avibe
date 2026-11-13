@@ -31,7 +31,7 @@ import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
 import { useAccountName } from '@/lib/vaultHdAccounts';
 import { isHdWalletBlocked } from '@/lib/vaultHdQuarantine';
-import { AccountIndex } from './vault-hd-wallet-detail';
+import { AccountIndex } from './vault-hd-account-index';
 import { Button } from './button';
 import { ConfirmDialog } from './confirm-dialog';
 import { SegmentedRadio } from './segmented';
