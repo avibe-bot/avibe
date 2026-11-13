@@ -70,9 +70,16 @@ impl NotificationRegistry {
     pub fn reserve(&mut self, session_id: Option<String>) -> Option<Arc<NotificationReceipt>> {
         // Never reuse a Linux plugin id, even if the connection is replaced.
         static NEXT_ID: AtomicI32 = AtomicI32::new(1);
-        let id = NEXT_ID
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
-            .ok()?;
+        let id = {
+            let mut current = NEXT_ID.load(Ordering::SeqCst);
+            loop {
+                let next = current.checked_add(1)?;
+                match NEXT_ID.compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+                    Ok(_) => break current,
+                    Err(observed) => current = observed,
+                }
+            }
+        };
         let receipt = Arc::new(NotificationReceipt {
             id,
             key: uuid::Uuid::new_v4().simple().to_string(),

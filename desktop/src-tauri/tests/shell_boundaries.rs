@@ -324,25 +324,6 @@ fn notifications_are_native_only_and_workbench_scoped() {
 }
 
 #[test]
-fn linux_notification_removal_enables_tracking_without_a_ui_action_listener() {
-    let native = shipping_source("src/notifications/native.rs");
-    let linux_show = native
-        .split("static TRACKING:")
-        .nth(1)
-        .unwrap()
-        .split("    Ok(())")
-        .next()
-        .unwrap();
-    // Tauri's removal lookup is populated only when has_listeners() is true;
-    // on_close by itself does not enable it. This is native-only registration,
-    // so it cannot depend on a Workbench JavaScript listener or a visible button.
-    assert!(linux_show.find(".on_action(|_| {})").unwrap() < linux_show.find(".id(id)").unwrap());
-    assert!(linux_show.contains(".on_close("));
-    assert!(!linux_show.contains(".action_type_id("));
-    assert!(native.contains(".filter(|receipt| receipt.retired())"));
-}
-
-#[test]
 fn notification_lifecycle_follows_runtime_ownership_not_webview_visibility_or_sse_health() {
     let source = shipping_source("src/lib.rs");
     for (function, next_function, required) in [

@@ -291,15 +291,20 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn present_history_removes_only_retired_exact_keys() {
+    fn notification_removal_reconciles_exact_retired_history_keys() {
         let mut registry = NotificationRegistry::default();
-        let read = posted(&mut registry, "a");
+        let read = posted(&mut registry, "read");
+        let unread = posted(&mut registry, "unread");
         let snapshot = registry.snapshot();
-        registry.reconcile(snapshot, &HashMap::new());
-        let newer = posted(&mut registry, "a");
-        let (remove, forget) = reconcile_posts(registry.posted_snapshot(), |_| true);
-        assert_eq!(remove.iter().map(|r| r.id()).collect::<Vec<_>>(), [read.id()]);
-        assert!(!newer.retired());
+        registry.reconcile(snapshot, &HashMap::from([(String::from("unread"), 1)]));
+
+        let (remove, forget) = reconcile_posts(registry.posted_snapshot(), |receipt| receipt.id() == read.id());
+
+        assert_eq!(
+            remove.iter().map(|receipt| receipt.id()).collect::<Vec<_>>(),
+            [read.id()]
+        );
         assert!(forget.is_empty());
+        assert!(!unread.retired());
     }
 }
