@@ -183,7 +183,9 @@ export function modelFromDesktopRelay(
     && !(info.checked_at && Date.parse(info.checked_at) > Date.parse(control.updated_at));
   // Turning automatic updates on or off checks nothing; a check, or a channel change, does.
   const controlChecks = control?.phase === 'checking' && control.action !== 'auto_update';
-  const controlStatus: UpdatePanelStatus | null = controlChecks || info.phase === 'checking'
+  // The relay reports any live request as `checking`; an automatic-updates change is not a check.
+  const hostChecks = info.phase === 'checking' && !(control?.phase === 'checking' && control.action === 'auto_update');
+  const controlStatus: UpdatePanelStatus | null = controlChecks || hostChecks
     ? { kind: 'checking' }
     : controlSettled && (control.phase === 'failed' || control.phase === 'expired')
       ? control.error_code === 'update_in_progress' ? { kind: 'update-failed', reason: 'busy' }
@@ -200,7 +202,7 @@ export function modelFromDesktopRelay(
     ?? (hasUpdate && latest ? { kind: 'available', version: latest }
       : info.phase === 'error' ? { kind: 'check-failed' }
         : info.phase === 'disabled' ? { kind: 'disabled' }
-          : info.phase === 'current' || info.phase === 'available' ? { kind: 'current' }
+          : info.phase === 'current' || info.phase === 'available' || info.phase === 'checking' ? { kind: 'current' }
             // A Runtime that predates the relayed phase still says "nothing to install" with a known latest.
             : !info.phase && latest ? { kind: 'current' }
               : { kind: 'unknown' });
