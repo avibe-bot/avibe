@@ -1,6 +1,6 @@
 # Remote direct paths: the App's iroh transport (A2)
 
-Status: **Core written and linkable but inactive; not registered or qualified.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The pull request that adds this document holds the core and its tests against stand-ins for the iroh binding; the `ios-shell` result for its head is in that pull request, not here. A1 links the published iOS-only `Iroh.xcframework` and compiles the unmodified `IrohLib.swift` wrapper in the separate `IrohLib` module, but nothing in the App creates the transport and `AvibeApp` registers none.
+Status: **Core written and inactive; not linked, not registered, not qualified.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The pull request that adds this document holds the core and its tests against stand-ins for the iroh binding; the `ios-shell` result for its head is in that pull request, not here. No App build links an iroh binary (`packaging/iroh-apple/release.json` is `pending`), nothing in the App creates the transport, and `AvibeApp` registers none.
 
 This is not the whole of A2. The binding adapter, the join to the proxy seam, the registration, and everything that runs real iroh are still to be implemented and qualified (section 8). A build that registers a transport is a separate gate with its own approval and evidence; nothing here grants it.
 

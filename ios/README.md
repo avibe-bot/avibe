@@ -942,7 +942,7 @@ Xcode project compiles that wrapper in its own `IrohLib` Swift module over the
 `Iroh` C module; it links the module into the App and tests, never the
 notification service. The linked App is still dormant: no endpoint,
 transport registration, listener, route write or direct capability is created.
-Xcode rejects missing or stale staging and scans the final App binary for the
+Xcode rejects missing or stale staging and scans the final App product for the
 private Apple datapath symbols.
 
 The generated `ios/Avibe/Resources/MobileApp` directory is ignored build

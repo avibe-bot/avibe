@@ -315,6 +315,15 @@
 			path = "../tests/fixtures/push";
 			sourceTree = "<group>";
 		};
+		700000000000000000000008 /* IrohLib */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000130 /* IrohLib.swift */,
+				200000000000000000000131 /* Iroh.xcframework */,
+			);
+			path = IrohLib;
+			sourceTree = "<group>";
+		};
 		700000000000000000000005 /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -529,8 +538,17 @@
 			inputFileListPaths = (
 			);
 			inputPaths = (
-				"$(SRCROOT)/Avibe/IrohLib/verified.json",
+				"$(SRCROOT)/../packaging/iroh-apple/release.json",
 				"$(SRCROOT)/scripts/prepare_iroh_app.py",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib.xcframework.zip",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib-support.zip",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib.swift",
+				"$(SRCROOT)/Avibe/IrohLib/manifest.json",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios.txt",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios-sim.txt",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-x86_64-apple-ios.txt",
+				"$(SRCROOT)/Avibe/IrohLib/verified.json",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework",
 			);
 			name = "Verify IrohLib inputs";
 			outputFileListPaths = (
@@ -551,9 +569,19 @@
 			inputFileListPaths = (
 			);
 			inputPaths = (
-				"$(SRCROOT)/Avibe/IrohLib/verified.json",
+				"$(SRCROOT)/../packaging/iroh-apple/release.json",
+				"$(SRCROOT)/../packaging/iroh-apple/check-private-apple-datapath.sh",
 				"$(SRCROOT)/scripts/prepare_iroh_app.py",
-				"$(SRCROOT)/packaging/iroh-apple/check-private-apple-datapath.sh",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib.xcframework.zip",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib-support.zip",
+				"$(SRCROOT)/Avibe/IrohLib/IrohLib.swift",
+				"$(SRCROOT)/Avibe/IrohLib/manifest.json",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios.txt",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-aarch64-apple-ios-sim.txt",
+				"$(SRCROOT)/Avibe/IrohLib/feature-graph-x86_64-apple-ios.txt",
+				"$(SRCROOT)/Avibe/IrohLib/verified.json",
+				"$(SRCROOT)/Avibe/IrohLib/Iroh.xcframework",
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)",
 			);
 			name = "Verify linked Iroh artifact";
 			outputFileListPaths = (
@@ -562,7 +590,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "python3 \"$SRCROOT/scripts/prepare_iroh_app.py\" verify-product --staging \"$SRCROOT/Avibe/IrohLib\" --product \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\"\n";
+			shellScript = "python3 \"$SRCROOT/scripts/prepare_iroh_app.py\" verify-product --staging \"$SRCROOT/Avibe/IrohLib\" --product \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\n";
 			showEnvVarsInLog = 0;
 		};
 

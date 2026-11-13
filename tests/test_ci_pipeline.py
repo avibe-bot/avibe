@@ -594,7 +594,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     assert '-derivedDataPath "$RUNNER_TEMP/AvibeDerivedData"' in simulator_build
     linked_check = next(step for step in steps if step.get("name") == "Verify linked iroh binary in the simulator product")
     assert linked_check["run"].splitlines()[-1].endswith(
-        '"$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe"'
+        '"$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app"'
     )
 
     test_step, = [

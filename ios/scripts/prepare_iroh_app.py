@@ -100,11 +100,11 @@ def archive_members(data: bytes, *, label: str) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
     total = 0
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        require(archive.testzip() is None, f"corrupt {label}")
+        infos = []
         for info in archive.infolist():
-            name = info.filename
             if info.is_dir():
                 continue
+            name = info.filename
             path = PurePosixPath(name)
             require(
                 not path.is_absolute()
@@ -118,7 +118,13 @@ def archive_members(data: bytes, *, label: str) -> dict[str, bytes]:
             require(info.file_size <= MAX_MEMBER_BYTES, f"oversized {label} member: {name}")
             total += info.file_size
             require(total <= MAX_TOTAL_BYTES, f"{label} expands beyond the consumer bound")
-            members[name] = archive.read(info)
+            members[name] = b""
+            infos.append(info)
+        for info in infos:
+            with archive.open(info) as source:
+                content = source.read(info.file_size + 1)
+            require(len(content) == info.file_size, f"{label} member size changed while reading: {info.filename}")
+            members[info.filename] = content
     return members
 
 
@@ -139,6 +145,26 @@ def validate_binary(data: bytes) -> dict[str, bytes]:
     require(all(name.startswith("Iroh.xcframework/") for name in members), "xcframework contains an unexpected top-level member")
     require(not any("macos" in name.lower() for name in members), "published xcframework contains a macOS slice")
     return members
+
+
+def verify_extracted_framework(staging: Path, expected: dict[str, bytes]) -> None:
+    root = staging / "Iroh.xcframework"
+    require(root.is_dir() and not root.is_symlink(), "staged xcframework directory is missing")
+    expected_files = {
+        name.removeprefix("Iroh.xcframework/"): content
+        for name, content in expected.items()
+    }
+    actual_files: dict[str, bytes] = {}
+    for path in root.rglob("*"):
+        require(not path.is_symlink(), f"symlink in staged xcframework: {path}")
+        if path.is_file():
+            relative = path.relative_to(root).as_posix()
+            require(relative in expected_files, f"unexpected staged xcframework file: {relative}")
+            require(path.stat().st_size == len(expected_files[relative]), f"staged xcframework file size differs: {relative}")
+            actual_files[relative] = path.read_bytes()
+    require(set(actual_files) == set(expected_files), "staged xcframework files differ from the published archive")
+    for name, content in expected_files.items():
+        require(actual_files[name] == content, f"staged xcframework file differs from the published archive: {name}")
 
 
 def validate_graphs(pin: dict, downloaded: dict[str, bytes]) -> None:
@@ -165,19 +191,28 @@ def verify_local(staging: Path, pin: dict | None = None) -> dict:
     support = staging / SUPPORT_NAME
     manifest = staging / MANIFEST_NAME
     require(binary.is_file() and binding.is_file() and support.is_file() and manifest.is_file(), "iroh staging is incomplete")
-    binary_data = binary.read_bytes()
+
     binary_item = asset(pin, BINARY_NAME)
+    binary_data = binary.read_bytes()
     require(len(binary_data) == binary_item["size"] and sha256(binary_data) == binary_item["sha256"], "staged binary does not match the published pin")
-    validate_binary(binary_data)
+    binary_members = validate_binary(binary_data)
+    verify_extracted_framework(staging, binary_members)
+
     binding_item = asset(pin, BINDING_NAME)
     binding_data = binding.read_bytes()
     require(len(binding_data) == binding_item["size"] and sha256(binding_data) == binding_item["sha256"], "staged binding does not match the published pin")
+
     support_item = asset(pin, SUPPORT_NAME)
     support_data = support.read_bytes()
     require(len(support_data) == support_item["size"] and sha256(support_data) == support_item["sha256"], "staged support archive does not match the published pin")
     support_members = archive_members(support_data, label="support archive")
     require(support_members.get(BINDING_NAME) == binding_data, "staged wrapper differs from the support archive")
-    downloaded = {MANIFEST_NAME: manifest.read_bytes()}
+
+    manifest_item = asset(pin, MANIFEST_NAME)
+    manifest_data = manifest.read_bytes()
+    require(len(manifest_data) == manifest_item["size"] and sha256(manifest_data) == manifest_item["sha256"], "staged manifest does not match the published pin")
+    downloaded = {MANIFEST_NAME: manifest_data}
+    graph_hashes = {}
     for name in GRAPH_NAMES:
         path = staging / name
         require(path.is_file(), f"iroh staging is missing {name}")
@@ -185,10 +220,16 @@ def verify_local(staging: Path, pin: dict | None = None) -> dict:
         content = path.read_bytes()
         require(len(content) == item["size"] and sha256(content) == item["sha256"], f"staged {name} differs from the published pin")
         downloaded[name] = content
+        graph_hashes[name] = sha256(content)
     validate_graphs(pin, downloaded)
+
     verified = load_json(staging / "verified.json") if (staging / "verified.json").is_file() else {}
     require(verified.get("release_tag") == pin["release_tag"], "iroh staging was made from another release")
     require(verified.get("binary_sha256") == pin["sha256"], "iroh staging provenance is stale")
+    require(verified.get("binding_sha256") == sha256(binding_data), "iroh staging wrapper provenance is stale")
+    require(verified.get("support_sha256") == sha256(support_data), "iroh staging support provenance is stale")
+    require(verified.get("manifest_sha256") == sha256(manifest_data), "iroh staging manifest provenance is stale")
+    require(verified.get("graph_sha256") == graph_hashes, "iroh staging feature-graph provenance is stale")
     return {"release_tag": pin["release_tag"], "binary_sha256": pin["sha256"], "binding_sha256": sha256(binding_data), "support_sha256": sha256(support_data)}
 
 
@@ -229,7 +270,7 @@ def stage(staging: Path, pin_path: Path = PIN_PATH) -> None:
 
 def verify_product(staging: Path, product: Path) -> None:
     verify_local(staging)
-    require(product.is_file(), f"linked App product does not exist: {product}")
+    require(product.exists(), f"linked App product does not exist: {product}")
     subprocess.run(["bash", str(CHECKER), str(product)], check=True)
 
 

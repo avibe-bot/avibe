@@ -92,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           bash packaging/iroh-apple/check-private-apple-datapath.sh \
-            "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe"
+            "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app"
 
       - name: Select an available iPhone simulator
         run: |

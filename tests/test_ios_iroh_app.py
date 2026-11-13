@@ -67,9 +67,14 @@ def pin_for(staging: Path, *, published: bool = True) -> dict:
 
 def make_staging(tmp_path: Path) -> Path:
     staging = tmp_path / "IrohLib"
-    staging.mkdir()
+    staging.mkdir(parents=True)
     binding = b"// generated wrapper\n"
-    (staging / "IrohLib.xcframework.zip").write_bytes(archive(BINARY_MEMBERS))
+    binary = archive(BINARY_MEMBERS)
+    (staging / "IrohLib.xcframework.zip").write_bytes(binary)
+    for name, content in BINARY_MEMBERS.items():
+        path = staging / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
     (staging / "IrohLib.swift").write_bytes(binding)
     (staging / "IrohLib-support.zip").write_bytes(archive({"IrohLib.swift": binding}))
     (staging / "manifest.json").write_text(json.dumps({
@@ -82,8 +87,16 @@ def make_staging(tmp_path: Path) -> Path:
     for name in app.GRAPH_NAMES:
         (staging / name).write_text('iroh feature "metrics"\niroh feature "tls-ring"\n')
     (staging / "verified.json").write_text(json.dumps({
+        "schema_version": 1,
         "release_tag": "iroh-apple-v1.2.0-1",
         "binary_sha256": hashlib.sha256((staging / "IrohLib.xcframework.zip").read_bytes()).hexdigest(),
+        "binding_sha256": hashlib.sha256(binding).hexdigest(),
+        "support_sha256": hashlib.sha256((staging / "IrohLib-support.zip").read_bytes()).hexdigest(),
+        "manifest_sha256": hashlib.sha256((staging / "manifest.json").read_bytes()).hexdigest(),
+        "graph_sha256": {
+            name: hashlib.sha256((staging / name).read_bytes()).hexdigest()
+            for name in app.GRAPH_NAMES
+        },
     }))
     return staging
 
@@ -134,11 +147,72 @@ def test_feature_graph_rejects_forbidden_discovery(tmp_path):
         raise AssertionError("forbidden feature graph was accepted")
 
 
+def test_verify_local_rejects_extracted_framework_changes(tmp_path):
+    staging = make_staging(tmp_path)
+    pin = pin_for(staging)
+    (staging / "Iroh.xcframework/ios-arm64/libiroh_ffi.a").write_bytes(b"tampered")
+    try:
+        app.verify_local(staging, pin)
+    except ValueError as error:
+        assert "staged xcframework file" in str(error)
+    else:
+        raise AssertionError("tampered extracted framework was accepted")
+
+    staging = make_staging(tmp_path / "missing")
+    (staging / "Iroh.xcframework/ios-arm64/Headers/module.modulemap").unlink()
+    try:
+        app.verify_local(staging, pin_for(staging))
+    except ValueError as error:
+        assert "staged xcframework files differ" in str(error)
+    else:
+        raise AssertionError("incomplete extracted framework was accepted")
+
+    staging = make_staging(tmp_path / "extra")
+    (staging / "Iroh.xcframework/extra.txt").write_bytes(b"unexpected")
+    try:
+        app.verify_local(staging, pin_for(staging))
+    except ValueError as error:
+        assert "unexpected staged xcframework file" in str(error)
+    else:
+        raise AssertionError("extra extracted framework file was accepted")
+
+
+def test_verify_local_authenticates_manifest_and_provenance(tmp_path):
+    staging = make_staging(tmp_path)
+    pin = pin_for(staging)
+    (staging / "manifest.json").write_text(json.dumps({"features": ["metrics"]}))
+    try:
+        app.verify_local(staging, pin)
+    except ValueError as error:
+        assert "staged manifest" in str(error)
+    else:
+        raise AssertionError("modified manifest was accepted")
+
+
+def test_archive_expansion_bound_is_checked_before_decompression(monkeypatch):
+    monkeypatch.setattr(app, "MAX_MEMBER_BYTES", 8)
+    monkeypatch.setattr(zipfile.ZipFile, "testzip", lambda _archive: (_ for _ in ()).throw(AssertionError("testzip ran")))
+    try:
+        app.archive_members(archive({"large": b"0123456789"}), label="fixture")
+    except ValueError as error:
+        assert "oversized fixture member" in str(error)
+    else:
+        raise AssertionError("oversized archive member was accepted")
+
+
 def test_xcode_module_boundary_keeps_iroh_out_of_the_notification_extension():
     project = (Path(__file__).parents[1] / "ios/Avibe.xcodeproj/project.pbxproj").read_text()
     assert "name = IrohLib;" in project
     assert "PRODUCT_MODULE_NAME = IrohLib;" in project
-    assert "200000000000000000000131 /* Iroh.xcframework */" in project
+    group = project.split("700000000000000000000008 /* IrohLib */ = {", 1)[1].split(
+        "700000000000000000000003 /* Resources */ = {", 1
+    )[0]
+    assert "path = IrohLib;" in group
+    assert "200000000000000000000130 /* IrohLib.swift */" in group
+    assert "200000000000000000000131 /* Iroh.xcframework */" in group
+    assert "$(SRCROOT)/../packaging/iroh-apple/release.json" in project
+    assert "$(SRCROOT)/../packaging/iroh-apple/check-private-apple-datapath.sh" in project
+    assert "$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)" in project
     notification = project.split("500000000000000000000003 /* NotificationService */ = {", 1)[1].split(
         "500000000000000000000004 /* IrohLib */ = {", 1
     )[0]
