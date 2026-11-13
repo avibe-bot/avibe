@@ -17,7 +17,7 @@ import { WordGrid } from './parts';
 const account = WALLET_ACCOUNTS[1];
 
 /** The sandbox window's frame (vault-sandbox src/operationUi.ts), in product tokens. */
-function SandboxCard({ title, subtitle, children, actions }: { title: string; subtitle: string; children: ReactNode; actions: [string, string] }) {
+export function SandboxCard({ title, subtitle, children, actions }: { title: string; subtitle: string; children: ReactNode; actions: [string, string] }) {
   return (
     <div className="flex min-h-full items-center justify-center bg-background p-6">
       <div className="flex w-full max-w-[400px] flex-col overflow-hidden rounded-2xl border border-edge bg-card shadow-elevation-2">
@@ -40,7 +40,7 @@ function SandboxCard({ title, subtitle, children, actions }: { title: string; su
   );
 }
 
-function MirrorRow({ label, value, added = false }: { label: string; value: string; added?: boolean }) {
+export function MirrorRow({ label, value, added = false }: { label: string; value: string; added?: boolean }) {
   const d = useDraft();
   return (
     <div className={cn('flex min-w-0 flex-col gap-1', added && '-mx-2 rounded-lg bg-mint/[0.08] px-2 py-1.5 ring-1 ring-mint/30')}>
