@@ -12,15 +12,15 @@ const { setupVaultDurably, vaultFreshSetup } = await import('./useProtectedVault
 const wrapMeta = JSON.stringify({ v: 1, rp_id: 'sandbox.avibe.bot', copies: [{ kind: 'passkey', kdf: 'webauthn-prf-hkdf-sha256', credential_id: 'AQID' }] });
 const registration = { challenge_id: 'wch_1', credential: { id: 'AQID', rawId: 'AQID', type: 'public-key', response: { clientDataJSON: 'e30=', attestationObject: 'AA==' } } };
 
-describe('setupVaultDurably when the server refuses', () => {
-  it('reports the code and keeps nothing durable (the tab stays a fresh, unsaved setup)', async () => {
+describe('setupVaultDurably when the commit gets no answer', () => {
+  it('keeps the uncommitted setup (it may have landed), nothing durable here yet', async () => {
     sandbox.setup.mockResolvedValue({ wrapMeta, rpId: 'sandbox.avibe.bot', credentialId: 'AQID', authzRegistration: registration, state: 'unlocked' });
     const result = await setupVaultDurably({
       createVaultAuthzWebAuthnOptions: vi.fn(async () => ({ ok: true }) as never),
       getVaultSandboxRootMetadata: vi.fn(async () => ({ ok: true, root_metadata: {} }) as never),
-      completeVaultSetup: vi.fn(async () => ({ ok: false, code: 'vault_policy_factor_unavailable' })),
+      completeVaultSetup: vi.fn(async () => { throw new Error('offline'); }),
     });
-    expect(result).toEqual({ ok: false, code: 'vault_policy_factor_unavailable' });
+    expect(result).toEqual({ ok: false, code: 'network_error' });
     expect(vaultFreshSetup()).toBe(true);
   });
 
@@ -52,3 +52,23 @@ describe('setupVaultDurably cancelled', () => {
   });
 });
 
+
+describe('setupVaultDurably when the server refuses the registration', () => {
+  it('drops the uncommitted setup (e.g. its 2-minute registration expired), so the next try is a fresh ceremony', async () => {
+    vi.resetModules();
+    const fresh = await import('./useProtectedVault');
+    sandbox.setup.mockReset();
+    sandbox.setup.mockResolvedValue({ wrapMeta, rpId: 'sandbox.avibe.bot', credentialId: 'AQID', authzRegistration: registration, state: 'unlocked' });
+    const api = {
+      createVaultAuthzWebAuthnOptions: vi.fn(async () => ({ ok: true }) as never),
+      getVaultSandboxRootMetadata: vi.fn(async () => ({ ok: true, root_metadata: {} }) as never),
+      completeVaultSetup: vi.fn(async () => ({ ok: false, code: 'invalid_protected_authz' })),
+    };
+    await expect(fresh.setupVaultDurably(api)).resolves.toEqual({ ok: false, code: 'invalid_protected_authz' });
+    expect(fresh.vaultFreshSetup()).toBe(false);
+    expect(fresh.vaultUnlocked()).toBe(false);
+    api.completeVaultSetup.mockResolvedValue({ ok: true, exists: true, wrap_meta: wrapMeta } as never);
+    await expect(fresh.setupVaultDurably(api)).resolves.toEqual({ ok: true });
+    expect(sandbox.setup).toHaveBeenCalledTimes(2);
+  });
+});

@@ -277,15 +277,17 @@ export async function setupVaultDurably(
   const committed = await api.completeVaultSetup({ wrap_meta: wrapMeta, authz_factor_registration: registration })
     .catch(() => ({ ok: false as const, code: 'network_error' }));
   if (!committed.ok) {
-    if (committed.code === 'vault_already_initialized') {
-      // Another tab committed its own root first: drop this tab's uncommitted one, both here and in
-      // the sandbox (its iframe still holds the fresh root unlocked), so the next ceremony starts
-      // from a fresh handshake and discovery finds the durable root instead of offering a second.
+    // No answer (network) or no reason given: it may still have landed, so a retry posts this same
+    // setup again (no second ceremony). Any reason the server gives is final for this setup: another
+    // tab committed first, or this registration is refused (expired after 2 minutes, invalid). Then
+    // drop the uncommitted root, here and in the sandbox (its iframe still holds it unlocked), so the
+    // next attempt starts a fresh ceremony and discovery finds whatever root is durable.
+    const final = typeof committed.code === 'string' && committed.code !== 'network_error';
+    if (final) {
       resetVaultSandboxClient();
       clearUnlockState();
       notifyVaultLockChange();
     }
-    // Otherwise nothing durable: this tab's fresh root stays as before (lost on lock, retried as is).
     return { ok: false, code: committed.code || 'setup_failed' };
   }
   sessionVault.freshSetup = false;
