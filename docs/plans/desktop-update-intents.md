@@ -252,6 +252,11 @@ editor/viewer or bypasses origin/CSRF protection.
   suppressed Model Hub reconciliation with nested-`asyncio.run` errors. Hermetic
   assembly/lifecycle tests guard these repairs, but cannot replace another real
   hosted run. Neither platform's handoff is accepted from that failed run.
+  The next Windows run built and verified its installer and reached native
+  startup, but exposed an observer mismatch between Rust's verbatim Windows
+  paths and Python's unprefixed paths. Data-root and target-executable assertions
+  now compare filesystem identity, still rejecting absent/different files. The
+  hermetic harness tests run on each hosted OS before native compilation.
 - The hosted fixture workflow is label- or dispatch-triggered only, never on
   push. A same-repository/master-base PR label is the premerge manual trigger;
   `workflow_dispatch` becomes usable after default-branch registration. Checkout

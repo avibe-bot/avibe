@@ -5,6 +5,7 @@ The hosted workflow remains the authority for actual startup and replacement.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import importlib.util
@@ -14,6 +15,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+from types import SimpleNamespace
 from urllib.error import HTTPError
 import zipfile
 
@@ -226,3 +228,40 @@ def test_workflow_token_is_read_only_and_guard_step_scoped():
             else:
                 assert "GH_TOKEN" not in step.get("env", {})
     assert guards == 3
+
+
+@pytest.mark.parametrize("method,field", [("start", "data"), ("success", "executable")])
+def test_observer_compares_real_file_identity_across_native_path_spellings(tmp_path, method, field):
+    # Execute the actual observer assertion, without starting its processes.
+    tree = ast.parse((HARNESS / "run.py").read_text())
+    function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == method)
+    assertion = next(node for node in ast.walk(function) if isinstance(node, ast.Assert)
+                     and isinstance(node.test, ast.Call) and isinstance(node.test.func, ast.Attribute)
+                     and node.test.func.attr == "samefile")
+    code = compile(ast.Module(body=[assertion], type_ignores=[]), "observer-path-assertion", "exec")
+    root = tmp_path / "case"
+    (root / "native-state").mkdir(parents=True)
+    binary = root / "installation/avibe-desktop.exe"
+    binary.parent.mkdir()
+    binary.write_bytes(b"fixture")
+    if os.name == "nt":
+        alias = Path("\\\\?\\" + str(root.resolve()))
+    else:
+        alias = tmp_path / "alias"
+        alias.symlink_to(root, target_is_directory=True)
+    relative = "native-state" if field == "data" else "installation/avibe-desktop.exe"
+    namespace = {"Path": Path, "self": SimpleNamespace(root=root, binary=binary),
+                 "initial": {field: str(alias / relative)}, "target": {field: str(alias / relative)}}
+    exec(code, namespace)
+    other = tmp_path / "different" / relative
+    other.parent.mkdir(parents=True)
+    if field == "data":
+        other.mkdir()
+    else:
+        other.write_bytes(b"fixture")  # Same bytes/name are not the same installed file.
+    namespace["initial"][field] = namespace["target"][field] = str(other)
+    with pytest.raises(AssertionError):
+        exec(code, namespace)
+    namespace["initial"][field] = namespace["target"][field] = str(tmp_path / "missing")
+    with pytest.raises(FileNotFoundError):
+        exec(code, namespace)

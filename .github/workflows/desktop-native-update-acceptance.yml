@@ -102,6 +102,9 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
           uv sync --frozen --no-install-project
+      - name: Verify hermetic harness boundaries on the native OS
+        shell: bash
+        run: uv run --no-sync pytest -q tests/test_desktop_native_update_harness.py
       - name: Create immutable fixture assembly and signed test payload
         shell: bash
         run: |

@@ -91,7 +91,10 @@ class Case:
         initial = self.wait(lambda: next((event for event in self.events() if event["event"] == "native_ready"), None), 30, "native GUI startup failed")
         assert initial["version"] == self.build["base_version"]
         assert initial["source_sha"] == self.build["source_sha"]
-        assert Path(initial["data"]).resolve() == (self.root / "native-state").resolve()
+        # Rust canonicalize emits Windows verbatim paths (\\\\?\\...), while
+        # Python retains the input's prefix style. Compare filesystem identity,
+        # not those different spellings, and fail if either path is absent.
+        assert Path(initial["data"]).samefile(self.root / "native-state")
         self.wait(lambda: any(event["event"] == "loaded" and "account/index.html?view=updates" in event.get("url", "") for event in self.events()),
                   15, "native trusted panel did not load")
         snapshot = self.wait(self.panel.snapshot, 10, "actual rendered panel missing")
@@ -144,7 +147,7 @@ class Case:
                                         and event["version"] == self.build["next_version"] and event["pid"] != old_pid), None),
                            timeout, "no target-version native relaunch")
         assert target["source_sha"] == self.build["source_sha"]
-        assert Path(target["executable"]).resolve() == self.binary.resolve()
+        assert Path(target["executable"]).samefile(self.binary)
         self.native_pid = target["pid"]
         self.processes.add(self.native_pid)
         self.wait(lambda: self.native.poll() is not None, 20, "original native process did not exit")
