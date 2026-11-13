@@ -747,6 +747,8 @@ it.each([
   render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
   expect(screen.getByText(address)).toBeTruthy();
   expect(screen.getByText(en.vaults.approval.path.replace('{{path}}', path))).toBeTruthy();
+  const typeLabel = { p2tr: en.vaults.addresses.typeTaproot, p2wpkh: en.vaults.addresses.typeSegwit, p2pkh: en.vaults.addresses.typeLegacy }[type];
+  expect(screen.getByText(en.vaults.addresses.btcWithType.replace('{{type}}', typeLabel))).toBeTruthy();
   if (type !== 'p2tr') expect(screen.queryByText(taproot)).toBeNull();
 });
 

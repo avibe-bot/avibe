@@ -207,21 +207,17 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
   // seed once, when its accounts are opened by someone who may (never while listing; no words).
   // Until then, and for everyone else, Bitcoin shows Taproot only.
   const [prepare, setPrepare] = useState<'idle' | 'avault-old' | 'failed'>('idle');
-  const prepared = useRef<string | null>(null);
+  // The latest handler, read when the answer arrives: the page passes a new callback on every render
+  // (its grant clock ticks each second), and that must not drop an answer still on its way.
+  const onChangedRef = useRef(onChanged);
+  useEffect(() => { onChangedRef.current = onChanged; }, [onChanged]);
   useEffect(() => {
-    if (!open) {
-      // Each opening may try once.
-      prepared.current = null;
-      return;
-    }
-    if (!canManage || secret.bitcoin_profile === 'bitcoin-address-types-v1') return;
-    if (prepared.current === secret.name) return;
-    prepared.current = secret.name;
+    if (!open || !canManage || secret.bitcoin_profile === 'bitcoin-address-types-v1') return;
     let cancelled = false;
     void api.prepareVaultBitcoinAddressTypes(secret.name, { handleError: false }).then((result) => {
       if (cancelled) return;
       if (result.ok && result.secret) {
-        onChanged(result.secret);
+        onChangedRef.current(result.secret);
         return;
       }
       // Old avault: the existing upgrade notice. A disagreement with what the wallet already holds:
@@ -229,8 +225,9 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
       if (result.code === 'avault_upgrade_required') setPrepare('avault-old');
       else if (result.code === 'hd_bitcoin_types_integrity_failed') setPrepare('failed');
     }).catch(() => undefined);
+    // Cancelled only when the dialog closes, shows another wallet, or the wallet is prepared.
     return () => { cancelled = true; };
-  }, [api, canManage, onChanged, open, secret.bitcoin_profile, secret.name]);
+  }, [api, canManage, open, secret.bitcoin_profile, secret.name]);
   const usage = accounts.length > 1 ? 1 : 0;
   const command = `vibe vault sign ${secret.name} --chain solana --account ${usage}`;
   return (

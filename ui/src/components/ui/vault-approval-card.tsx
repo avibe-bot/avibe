@@ -116,6 +116,8 @@ type HdApprovalAccount = VaultHdAccount & {
 
 /** The one Bitcoin address an HD request signs as: the selected type's, never Taproot's by default
  *  when another type was asked for. */
+const BTC_TYPE_LABEL = { p2tr: 'vaults.addresses.typeTaproot', p2wpkh: 'vaults.addresses.typeSegwit', p2pkh: 'vaults.addresses.typeLegacy' } as const;
+
 const hdBitcoinSigningAddress = (account: HdApprovalAccount): SigningAddresses => {
   const type = account.bitcoin_address_type ?? 'p2tr';
   const address = account.bitcoin_address ?? (type === 'p2tr' ? account.btc_taproot : undefined);
@@ -712,7 +714,9 @@ export const VaultApprovalCard: React.FC<{
               <span className="flex min-w-0 items-center gap-2">
                 <AccountIndex index={hdDerivation.account} />
                 {hdAccount ? <span className="truncate text-[13px] font-semibold text-foreground">{accountName(hdAccount)}</span> : null}
-                <Badge variant="outline">{t(hdDerivation.chain === 'evm' ? 'vaults.addresses.eth' : hdDerivation.chain === 'bitcoin' ? 'vaults.addresses.btcTaproot' : 'vaults.addresses.solana')}</Badge>
+                <Badge variant="outline">{hdDerivation.chain === 'evm' ? t('vaults.addresses.eth') : hdDerivation.chain === 'solana' ? t('vaults.addresses.solana')
+                  // The type this request signs as; older requests without one are Taproot.
+                  : t('vaults.addresses.btcWithType', { type: t(BTC_TYPE_LABEL[hdAccount?.bitcoin_address_type ?? delivery.derivation?.address_type ?? 'p2tr']) })}</Badge>
               </span>
               {hdAccount?.paths?.[hdDerivation.chain] ? (
                 <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', {
