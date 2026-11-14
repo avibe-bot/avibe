@@ -238,6 +238,36 @@ async def test_controller_refuses_final_path_that_changes_meaning(tmp_path, fake
 native = pytest.mark.skipif(os.name != "nt", reason="Windows native path API")
 
 
+def _native_final_path(path):
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFinalPathNameByHandleW.argtypes = [
+        wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+    ]
+    kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        str(path), 0x80, 7, None, 3, 0x02000000, None,
+    )
+    if handle in (None, 0, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = kernel32.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
+        if not 0 < length < len(buffer):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 @native
 def test_windows_native_path_canonical_regular_exe_and_missing(tmp_path):
     executable = tmp_path / "MixedCase.exe"
@@ -273,6 +303,9 @@ async def test_windows_native_path_follows_junction_to_final_local_file(tmp_path
         subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(junction), actual],
                        check=True, capture_output=True, timeout=10)
         requested = str(junction / "Target.exe")
+        raw_final = _native_final_path(requested)
+        assert raw_final.startswith("\\\\?\\")
+        assert raw_final[4:].endswith(f"\\Apps{suffix}\\Target.exe")
         assert os.path.exists(actual + "\\Target.exe")
         state_path, state = _state(tmp_path)
         upstream = FakeUpstream()
