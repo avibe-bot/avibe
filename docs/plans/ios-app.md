@@ -294,8 +294,33 @@ These are the only operations the **sheet** may invoke. Its handler rejects
 email/password/second-factor method set. Refresh/sign-out errors use the
 existing `{code, message, retry_after_seconds?}` rejection shape. No new
 runtime bridge method, capability, event or server endpoint is introduced in
-A; `instancePresentation`, `app.showInstances` and the instance name in
-`app.info` belong to separate variant B work.
+A; variant B adds only the native-owned presentation contract below.
+
+### Variant B: named instance entry (`instancePresentation: 1`)
+
+The runtime bridge advertises `capabilities.instancePresentation = 1`.
+`app.info()` adds `instance: {name}` alongside its existing fields. The name
+comes from the native selected account catalog, never from web-supplied
+parameters; it carries no instance ID, URL or credentials. A missing, empty or
+whitespace-only name falls back to `Avibe`. The Runtime reads this metadata
+when its document loads; no rename event or polling is introduced. A rename
+while the document remains open is displayed after its next load.
+
+`app.showInstances()` is a compiled runtime bridge method with **no
+parameters**, resolving to `null`. It uses the existing runtime-preserving
+native sheet at `avibe-app://bundle/mobile.html#sheet-instances`. The bundled
+page recognizes this entry and omits the Account row; `app.showAccount()`
+continues to open A's `#sheet`, including Account. Both modes use the same
+native owner for dismissal, large-detent/document scrolling and sheet
+`auth.*` restrictions. If either sheet is already presented, another
+`app.showInstances()` is a quiet no-op resolving `null`: it does not replace
+or navigate the existing document or change its mode. Nonempty parameters
+reject with `invalid_argument` before presentation.
+
+Native support and the bundled `#sheet-instances` page mode must both be
+present before B ships. Runtime 3.2.7 consumes this capability; older Runtime
+pages retain their existing title/avatar and A entry. The native-only change
+introduces no runtime transport, account mutation or feature-enablement step.
 
 **Scroll and navigation ownership:** the sheet's bundled page scrolls its
 **document** (not an inner `overflow-y-auto`/fixed-height root). The native host
