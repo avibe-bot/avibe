@@ -1547,7 +1547,7 @@ final class MobileOnboardingTests: XCTestCase {
                 await self.fulfillment(of: [allowRefresh], timeout: 30)
                 switch row.result {
                 case .sameAccount:
-                    return .signedIn(snapshot(self.snapshot(accountID: "account-1")))
+                    return .signedIn(self.snapshot(accountID: "account-1"))
                 case .networkFailure:
                     throw MobileAccountError.network
                 }
@@ -1654,7 +1654,7 @@ final class MobileOnboardingTests: XCTestCase {
         refreshTransport.fetchSessionHandler = {
             refreshStarted.fulfill()
             await self.fulfillment(of: [allowRefresh], timeout: 30)
-            return .signedIn(snapshot(self.snapshot(accountID: "account-1")))
+            return .signedIn(self.snapshot(accountID: "account-1"))
         }
         let coordinator = makeCoordinator(
             defaults: defaults,
@@ -1690,7 +1690,7 @@ final class MobileOnboardingTests: XCTestCase {
         transport.fetchSessionHandler = {
             refreshStarted.fulfill()
             await self.fulfillment(of: [allowRefresh], timeout: 30)
-            return .signedIn(snapshot(self.snapshot(accountID: "account-1")))
+            return .signedIn(self.snapshot(accountID: "account-1"))
         }
 
         let refresh = Task { try await coordinator.refresh() }
