@@ -544,12 +544,114 @@ final class MobileOnboardingTests: XCTestCase {
                 "session.selectInstance",
                 "session.logout",
                 "app.openExternal",
+                "app.dismiss",
                 "app.returnToInstance",
             ]
         )
         XCTAssertThrowsError(
             try MobileBridgeRequest.parse(["method": "auth.fetch"])
         )
+    }
+
+    func testNativeSheetUsesOneLargeDetentAndTheDocumentScrollView()
+        async throws
+    {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(
+            accountID: "account-1",
+            instances: (1...8).map { index in
+                MobileInstance(
+                    id: "fixture-\(index)",
+                    name: "Fixture instance \(index)",
+                    host: "fixture-\(index).avibe.bot",
+                    url: URL(string: "https://fixture-\(index).avibe.bot")!,
+                    relationship: "owner",
+                    ownerEmail: nil,
+                    available: true
+                )
+            }
+        )
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport]
+        )
+        let controller = MobileOnboardingViewController(
+            coordinator: coordinator,
+            startScreen: .sheet,
+            dismissSurface: { true }
+        )
+        let root = UIViewController()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        root.present(controller, animated: false)
+        defer {
+            root.dismiss(animated: false)
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Fixture instance 8\")"
+        }
+        let sheet = try XCTUnwrap(controller.sheetPresentationController)
+        XCTAssertEqual(sheet.detents.count, 1)
+        XCTAssertEqual(sheet.detents.first?.identifier, .large)
+        XCTAssertFalse(sheet.prefersScrollingExpandsWhenScrolledToEdge)
+        XCTAssertTrue(controller.contentScrollView(for: .all) === webView.scrollView)
+    }
+
+    func testAppDismissIsStrictAndReturnsNullFromTheSheet() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var dismissCalls = 0
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport]
+            ),
+            startScreen: .sheet,
+            dismissSurface: {
+                dismissCalls += 1
+                return true
+            }
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 390, height: 844)
+        )
+        defer { window.isHidden = true }
+
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Personal Avibe\")"
+        }
+        let result = try await webView.callAsyncJavaScript(
+            "return await window.avibeMobile.call('app.dismiss');",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertTrue(result is NSNull)
+        XCTAssertEqual(dismissCalls, 1)
+
+        let invalid = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('app.dismiss', {unexpected: true});
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(invalid, MobileAccountError.invalidRequest.code)
+        XCTAssertEqual(dismissCalls, 1)
     }
 
     func testBundledPageSignsInWithThePasswordThroughTheBridge() async throws {
@@ -1275,7 +1377,116 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(pushLogoutCalls, 1)
     }
 
-    func testHiddenTransportStopsBeforeRuntimeAndRestartsOnlyForAccountSurface() async throws {
+    func testRefreshNetworkFailureKeepsSelectedRuntimeAndSnapshot() async throws {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let refreshTransport = FakeMobileAuthTransport()
+        refreshTransport.fetchSessionError = MobileAccountError.network
+        var runtime: MobileRuntimeContext?
+        var transitions = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport, refreshTransport],
+            onOpen: { runtime = $0 },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return []
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let selected = try XCTUnwrap(runtime)
+        coordinator.activateAccountSurface()
+
+        do {
+            _ = try await coordinator.refresh()
+            XCTFail("A refresh transport failure should be reported")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error.code, MobileAccountError.network.code)
+        }
+        XCTAssertTrue(coordinator.isCurrentRuntime(selected))
+        XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
+        XCTAssertEqual(transitions, 0)
+    }
+
+    func testRefreshSameAccountKeepsSelectedRuntimeAndAppliesCatalogChanges()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let refreshedInstance = MobileInstance(
+            id: instance.id,
+            name: "Renamed Avibe",
+            host: instance.host,
+            url: instance.url,
+            relationship: instance.relationship,
+            ownerEmail: instance.ownerEmail,
+            available: true
+        )
+        let refreshTransport = FakeMobileAuthTransport()
+        refreshTransport.session = snapshot(
+            accountID: "account-1",
+            instances: [refreshedInstance]
+        )
+        var runtime: MobileRuntimeContext?
+        var transitions = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport, refreshTransport],
+            onOpen: { runtime = $0 },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return []
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let selected = try XCTUnwrap(runtime)
+        coordinator.activateAccountSurface()
+
+        guard case .signedIn = try await coordinator.refresh() else {
+            return XCTFail("Expected a signed-in refresh")
+        }
+        XCTAssertTrue(coordinator.isCurrentRuntime(selected))
+        XCTAssertEqual(coordinator.currentInstances.first?.name, "Renamed Avibe")
+        XCTAssertEqual(transitions, 0)
+    }
+
+    func testRefreshAccountChangeStillReleasesSelectedRuntime() async throws {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let refreshTransport = FakeMobileAuthTransport()
+        refreshTransport.session = snapshot(accountID: "account-2")
+        var runtime: MobileRuntimeContext?
+        var transitions = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport, refreshTransport, FakeMobileAuthTransport()],
+            onOpen: { runtime = $0 },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return []
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let selected = try XCTUnwrap(runtime)
+        coordinator.activateAccountSurface()
+
+        XCTAssertEqual(try await coordinator.refresh(), .signedOut)
+        XCTAssertFalse(coordinator.isCurrentRuntime(selected))
+        XCTAssertEqual(transitions, 1)
+    }
+
+    func testHiddenTransportStopsBeforeRuntimeAndRestartsOnlyForAccountSurface()
+        async throws
+    {
         let defaults = makeDefaults()
         var events: [String] = []
         let firstTransport = FakeMobileAuthTransport()
@@ -1316,7 +1527,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(events.last, "transport.created")
     }
 
-    func testAccountOverARuntimeStartsTheTransportOnlyAfterReleasingIt() async throws {
+    func testAccountOverARuntimeKeepsRefreshAndReleasesForLogout() async throws {
         for operation in ["refresh", "logout"] {
             let defaults = makeDefaults()
             var events: [String] = []
@@ -1355,10 +1566,13 @@ final class MobileOnboardingTests: XCTestCase {
             XCTAssertEqual(events, [], operation)
 
             if operation == "refresh" {
+                // A sheet refresh reuses the selected runtime and activates
+                // only the hidden account transport.
+                coordinator.activateAccountSurface()
                 _ = try await coordinator.refresh()
                 XCTAssertEqual(
                     events,
-                    ["runtime.released", "transport.created"],
+                    ["transport.created"],
                     operation
                 )
             } else {
@@ -2629,6 +2843,7 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
         throw MobileAccountError.invalidCredentials
     }
     private(set) var passwordAttempts: [(email: String, password: String)] = []
+    var fetchSessionError: Error?
     var logoutError: Error?
     var logoutHandler: () async throws -> Void = {}
     var pushManagementHandler: (
@@ -2673,6 +2888,9 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     }
 
     func fetchSession() async throws -> MobileSessionDiscovery? {
+        if let fetchSessionError {
+            throw fetchSessionError
+        }
         if let secondFactor {
             return .secondFactorRequired(secondFactor)
         }

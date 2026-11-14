@@ -3,6 +3,9 @@ import SwiftUI
 enum MobileOnboardingStartScreen: String, Equatable {
     case account
     case instances
+    /// The instances sheet over a live runtime. The sheet's Close button and
+    /// native dismissal return to that runtime without reloading it.
+    case sheet
     /// Account over a live runtime: Back calls `app.returnToInstance`.
     case runtimeAccount = "runtime-account"
 }
@@ -18,7 +21,8 @@ struct MobileOnboardingContainer: UIViewControllerRepresentable {
         MobileOnboardingViewController(
             coordinator: coordinator,
             startScreen: startScreen,
-            returnToRuntime: returnToRuntime
+            returnToRuntime: returnToRuntime,
+            dismissSurface: returnToRuntime
         )
     }
 

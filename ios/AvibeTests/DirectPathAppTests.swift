@@ -568,21 +568,32 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertEqual(starts, 1)
 
-        // A reload held in the background, and the runtime is replaced
-        // before the return: it is never made.
-        let primary = try XCTUnwrap(
-            controller.view.subviews.compactMap { $0 as? WKWebView }.first
-        )
-        enterBackground()
-        controller.webViewWebContentProcessDidTerminate(primary)
-        app.showInstancePicker()
+        // A replacement selection ends the held runtime before the return.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         enterForeground()
         try await eventually { app.directLoadGate(for: runtime) != .held }
         try await settle()
         XCTAssertEqual(starts, 1)
     }
 
-    /// The gate the runtime's WebView is given is the App's own: held while
+    @MainActor
+    func testFailureInstancePickerCoversTheSelectedRuntimeWithoutStoppingIt()
+        async throws
+    {
+        let app = try await makeApp(directTransport: nil)
+        let runtime = try await select("instance-1", in: app)
+        let identity = app.runtimeIdentity
+
+        // The native failure action uses the same sheet as the avatar and
+        // leaves the selected route available for Close/current-instance.
+        app.showInstancePicker()
+        XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+        XCTAssertEqual(app.runtimeIdentity, identity)
+        XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        XCTAssertTrue(app.returnToRuntime())
+        XCTAssertEqual(app.route, .browser(runtime))
+    }
+
     /// the App is in the background with a route, open again once the
     /// listener serves.
     @MainActor
@@ -985,9 +996,13 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(app.directRendezvousWebView(for: selection))
         XCTAssertNil(app.directRendezvousWebView(for: second))
 
-        // The instance picker ends the selection.
+        // The instance picker now opens the instances sheet over the
+        // selected runtime; it does not end the selection by itself.
         app.showInstancePicker()
-        XCTAssertNil(app.directRendezvousWebView(for: second))
+        guard case .accountOverBrowser(let covered) = app.route else {
+            return XCTFail("The instance picker did not open the sheet")
+        }
+        XCTAssertEqual(covered.instance.id, "instance-2")
     }
 
     /// Without a transport there is no target, so no WebView is handed
