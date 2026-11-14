@@ -64,3 +64,26 @@ it('AUTH-SETUP-177 only enumerated presentation URLs leave the Workbench', () =>
   nativeWindow.__AVIBE_DESKTOP_CLIENT_VERSION__ = 2;
   expect(presentDesktopClient('account')).toBe(false);
 });
+
+// A4: a query alone cannot authorize automatic logout; only a correlated
+// get_state result may reach the account component, and a newer epoch retires it.
+it('exposes only a current direct sign-out receipt and clears it on escape', async () => {
+  vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+  vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', state());
+  const invoke = vi.fn(async (_command, { request }: { request: DesktopClientRequest }) => ({
+    version: 1, request_id: request.request_id, ok: true, state: state(),
+    ...(request.action.type === 'get_state' ? { result: { type: 'sign_out_intent', intent_id: 'one-use', generation: 2 } } : {}),
+  }));
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+  function Probe() {
+    const client = useAccountClient();
+    const receipt = (client as typeof client & { signOutIntent?: { intent_id: string } | null }).signOutIntent;
+    return <><p>{receipt?.intent_id ?? 'none'}</p><button onClick={() => void client.send({ type: 'cancel' })}>Escape</button></>;
+  }
+  render(<Probe />);
+  await screen.findByText('one-use');
+  await act(async () => { screen.getByText('Escape').click(); });
+  expect(screen.getByText('none')).toBeTruthy();
+  await act(async () => { window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: state(3, 3) })); });
+  expect(screen.getByText('none')).toBeTruthy();
+});

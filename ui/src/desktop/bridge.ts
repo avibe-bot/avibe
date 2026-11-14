@@ -24,7 +24,7 @@ export type DesktopClientState = {
     instance_id: string | null; error_code: string | null;
   };
   catalog: { status: 'idle' | 'loading' | 'ready' | 'error'; instances: Instance[] };
-  local: { name: string; remote_access: 'off' | 'starting' | 'on' | 'unavailable' };
+  local: { name: string; instance_id?: string | null; remote_access_url?: string | null; remote_access: 'off' | 'starting' | 'on' | 'unavailable' };
   desktop: { version: string; update: DesktopUpdateState };
   consent: null | { instance_id: string; instance_name: string; host: string; scope: string };
   remote_auxiliary: 'local' | 'disabled_incomplete';
@@ -37,6 +37,7 @@ export type DesktopClientProjection = Pick<DesktopClientState,
 export type DesktopClientAction =
   | { type: 'get_state' }
   | { type: 'request_otp'; email: string }
+  | { type: 'sign_in_password'; email: string; password: string }
   | { type: 'verify_otp'; code: string }
   | { type: 'verify_second_factor'; method: 'totp' | 'recovery'; code: string }
   | { type: 'verify_passkey' }
@@ -49,7 +50,7 @@ export type DesktopClientAction =
   | { type: 'decide_consent'; approve: boolean }
   | { type: 'cancel' }
   | { type: 'return_local' }
-  | { type: 'sign_out' }
+  | { type: 'sign_out'; intent_id?: string }
   // This computer's desktop updater, from the trusted update view (ui/design: update/panel/trusted-view).
   | { type: 'update_check' }
   | { type: 'update_set_prereleases'; enabled: boolean }
@@ -58,7 +59,9 @@ export type DesktopClientAction =
 export type DesktopClientRequest = {
   version: 1; request_id: string; expected_generation: number; action: DesktopClientAction;
 };
+export type SignOutIntent = { intent_id: string; generation: number };
 export type DesktopClientDirectResult =
+  | ({ type: 'sign_out_intent' } & SignOutIntent)
   | { type: 'totp_enrollment'; uri: string; qrSvg: string; secret: string }
   | { type: 'totp_enrolled'; method: {
     id: string; kind: 'totp'; name: string; createdAt: string; lastUsedAt: string | null;
@@ -96,12 +99,26 @@ export function isNewerClientState(next: DesktopClientProjection, previous: Desk
   return !previous || next.generation > previous.generation
     || (next.generation === previous.generation && next.revision >= previous.revision);
 }
-/** The caller owns the navigation guard. This URL only presents a trusted page. A native request
+/** The caller owns the navigation guard. Sign-out admits the A4 native intent; other views present trusted UI. A native request
  *  carries its `presentationToken` back unchanged, so native can match the approval to that request. */
-export function presentDesktopClient(view: DesktopClientView | 'updates', presentationToken?: string): boolean {
+export function presentDesktopClient(view: DesktopClientView | 'updates', presentationToken?: string, locale?: 'en' | 'zh'): boolean {
   if (!hasDesktopClient() || (view !== 'updates' && !isDesktopClientView(view))) return false;
-  window.location.assign(presentationToken !== undefined
-    ? `avibe://desktop/${view}?native_request=${encodeURIComponent(presentationToken)}`
+  const query = [
+    ...(presentationToken !== undefined ? [`native_request=${encodeURIComponent(presentationToken)}`] : []),
+    ...(locale ? [`locale=${locale}`] : []),
+  ].join('&');
+  window.location.assign(query ? `avibe://desktop/${view}?${query}`
     : view === 'updates' ? 'avibe://updates' : `avibe://desktop/${view}`);
   return true;
+}
+
+/** Older shells have no local identity proof; never substitute enrollment/catalog. */
+export function withLocalIdentity<T extends DesktopClientProjection>(state: T): T {
+  return { ...state, local: { ...state.local,
+    instance_id: typeof state.local.instance_id === 'string' ? state.local.instance_id : null,
+    remote_access_url: typeof state.local.remote_access_url === 'string' ? state.local.remote_access_url : null,
+  } };
+}
+export function desktopLocale(language: string | undefined): 'en' | 'zh' {
+  return language?.toLowerCase().split(/[-_]/)[0] === 'zh' ? 'zh' : 'en';
 }
