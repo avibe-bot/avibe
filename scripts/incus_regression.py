@@ -1465,6 +1465,21 @@ def legacy_image_ownership_command() -> str:
     ).strip()
 
 
+def unattended_apt_boot_config() -> list[str]:
+    """Mask automatic apt jobs before cloud-init's package stage, not on updates."""
+    units = (
+        "unattended-upgrades.service",
+        "apt-daily.service",
+        "apt-daily-upgrade.service",
+        "apt-daily.timer",
+        "apt-daily-upgrade.timer",
+    )
+    return [
+        "bootcmd:",
+        "  - " + json.dumps(["systemctl", "mask", "--now", *units]),
+    ]
+
+
 def cloud_init_user_data() -> str:
     service = regression_service_unit()
     helper = textwrap.dedent(
@@ -1479,6 +1494,7 @@ def cloud_init_user_data() -> str:
     ).rstrip()
     lines = [
         "#cloud-config",
+        *unattended_apt_boot_config(),
         "package_update: true",
         "packages:",
         "  - bash",
@@ -2779,6 +2795,8 @@ def build_base_image(args: argparse.Namespace) -> int:
             args.storage_pool,
             "--network",
             args.network,
+            "--config",
+            "cloud-init.user-data=" + "\n".join(["#cloud-config", *unattended_apt_boot_config()]),
             project=project,
         )
     )
