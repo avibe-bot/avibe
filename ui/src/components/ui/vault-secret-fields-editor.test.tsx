@@ -71,6 +71,7 @@ const batch = (n = 0) => api.updateVaultSecretFields.mock.calls[n];
 beforeEach(() => {
   vi.stubGlobal('crypto', webcrypto);
   vi.stubGlobal('isSecureContext', true);
+  sealBlindBox.mockReset().mockResolvedValue(box);
   api.updateVaultSecret.mockReset();
   api.updateVaultSecretFields.mockReset();
   api.listVaultSecrets.mockReset();
@@ -89,6 +90,164 @@ afterEach(async () => { cleanup(); eventHandlers = null; vi.clearAllMocks(); vi.
 
 
 const box2 = (name: string) => ({ purpose: 'seal', name });
+
+// Seeded transition walks use a record-identity oracle, independent of the editor's helpers.
+// Observable contract: every settled plan has correct validity and every accepted value keeps
+// its BARE/EXTRA identity. Directed cases do not cover arbitrary interleavings of drafts,
+// Undo, external shape changes (even without a version change), Cancel and subsequent Saves.
+it.each([12, 23, 47, 101, 211, 431, 863, 1723])('keeps final-layout invariants through seeded transitions (%s)', async (seed) => {
+  type Store = { label: string; values: Map<string, string>; version: number };
+  const extraId = (name: string) => `extra:${name}`;
+  const fieldName = (id: string, store: Store) => id === 'bare' ? store.label : id.slice(6);
+  const copyStore = (store: Store): Store => ({ ...store, values: new Map(store.values) });
+  const initialCount = [1, 31, 32][seed % 3];
+  let store: Store = { label: 'password', values: new Map([['bare', 'original']]), version: 1 };
+  for (let i = 1; i < initialCount; i++) store.values.set(extraId(`f${i}`), 'original');
+  let truth = copyStore(store);
+  let drafts = new Map<string, string>();
+  let label = truth.label;
+  let labelEdited = false;
+  let addition: { name: string; value: string } | null = null;
+  let removals = new Set<string>();
+  const payload = (value: Store): VaultSecret => ({ ...secret, default_field: value.label,
+    fields: [...value.values.keys()].map((id) => fieldName(id, value)), updated_at: `v${value.version}` });
+  const boxes = new Map<string, { value: string; record: string }>();
+  sealBlindBox.mockImplementation(async (value?: unknown, _key?: unknown, context?: unknown) => {
+    const ct = `box-${boxes.size}`;
+    boxes.set(ct, { value: String(value), record: (context as { name: string }).name });
+    return { ...box, ct };
+  });
+  // Independent backend effect ledger: validate/apply atomically, without reconciling UI drafts.
+  api.updateVaultSecretFields.mockImplementation(async (_name, plan) => {
+    const next = copyStore(store);
+    const finalLabel = plan.default_field ?? store.label;
+    if (plan.expected_updated_at !== `v${store.version}`) return { ok: false, code: 'secret_conflict' };
+    if (finalLabel !== store.label && store.values.has(extraId(finalLabel))) throw Error('oracle_default_collision');
+    const changed = new Set<string>();
+    for (const value of plan.values ?? []) {
+      if (changed.has(value.field) || plan.remove.includes(value.field)) throw Error('oracle_duplicate_change');
+      changed.add(value.field);
+      const id = value.field === finalLabel ? 'bare' : extraId(value.field);
+      const expectedRecord = id === 'bare' ? 'LOGIN' : `LOGIN.${value.field}`;
+      const sealed = boxes.get(value.blind_box.ct);
+      if (!sealed || value.record !== expectedRecord || sealed.record !== expectedRecord) throw Error('oracle_record_mismatch');
+      next.values.set(id, sealed.value);
+    }
+    for (const field of plan.remove ?? []) {
+      if (field === finalLabel || field === store.label || !next.values.delete(extraId(field))) throw Error('oracle_invalid_removal');
+    }
+    if (next.values.size > 32) throw Error('oracle_capacity');
+    next.label = finalLabel;
+    if ((plan.values?.length ?? 0) + (plan.remove?.length ?? 0)) next.version++;
+    store = next;
+    return { ok: true, secret: payload(store) };
+  });
+  api.listVaultSecrets.mockImplementation(async () => ({ ok: true, secrets: [payload(store)] }));
+  let view = renderEditor(payload(store));
+  let randomState = seed;
+  const pick = (n: number) => { randomState = (Math.imul(randomState, 1664525) + 1013904223) >>> 0; return Math.floor(randomState / 0x100000000 * n); };
+  const names = ['password', 'username', 'credential', 'note', 'f1', 'f2', '', 'Bad-name'];
+  const actions = ['edit-value', 'clear-value', 'rename-default', 'open-new', 'fill-new', 'remove-extra',
+    'undo', 'discard-new', 'external-role-change', 'external-add-or-rename', 'save', 'cancel'];
+  const trace: string[] = [];
+  const state = () => {
+    const extraNames = [...truth.values.keys()].filter((id) => id !== 'bare').map((id) => id.slice(6));
+    const validName = (name: string) => /^[a-z][a-z0-9_]{0,63}$/.test(name);
+    const meaningful = [...drafts].some(([id, value]) => value !== '' && !removals.has(id));
+    const dirty = meaningful || label !== truth.label || removals.size > 0 || Boolean(addition && (addition.name || addition.value));
+    const count = truth.values.size - removals.size + (addition ? 1 : 0);
+    const valid = !dirty || (count <= 32 && validName(label) && !extraNames.includes(label)
+      && (!addition || (validName(addition.name) && Boolean(addition.value) && addition.name !== label && !extraNames.includes(addition.name))));
+    return { dirty, valid };
+  };
+  const reconcile = () => {
+    truth = copyStore(store);
+    for (const id of drafts.keys()) if (!truth.values.has(id)) drafts.delete(id);
+    removals = new Set([...removals].filter((id) => id !== 'bare' && truth.values.has(id)));
+    if (!labelEdited) label = truth.label;
+  };
+  const remove = (id: string) => {
+    fireEvent.click(screen.getByRole('button', { name: `Remove ${fieldName(id, truth)}` }));
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+    removals.add(id);
+  };
+  for (let step = 0; step < 40; step++) {
+    const action = pick(12);
+    trace.push(actions[action]);
+    const evidence = `seed=${seed}; prefix=${trace.join(',')}`;
+    const before = api.updateVaultSecretFields.mock.calls.length;
+    const beforeSeal = sealBlindBox.mock.calls.length;
+    const visible = [...truth.values.keys()].filter((id) => !removals.has(id));
+    if (action <= 1) {
+      const id = visible[pick(visible.length)];
+      const value = action === 0 ? `edit-${seed}-${step}` : '';
+      change(`Value for ${fieldName(id, truth)}`, value); drafts.set(id, value);
+    } else if (action === 2) {
+      const nextLabel = names[pick(names.length)];
+      // A same-value DOM change is not an edit event; edit intent begins on an actual change.
+      if (nextLabel !== label) labelEdited = true;
+      label = nextLabel; change('Default field name', label);
+    } else if (action === 3 && !addition && visible.length < 32) {
+      const button = screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement;
+      expect(button.disabled, evidence).toBe(false); fireEvent.click(button); addition = { name: '', value: '' };
+    } else if (action === 4 && addition) {
+      addition.name = names[pick(names.length)]; addition.value = `new-${seed}-${step}`;
+      change('New field name', addition.name); change('New field value', addition.value);
+    } else if (action === 5 && visible.length > 1) {
+      remove(visible.filter((id) => id !== 'bare')[pick(visible.length - 1)]);
+    } else if (action === 6 && removals.size) {
+      fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.undoRemove })); removals.clear();
+    } else if (action === 7 && addition) {
+      fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.discardNew })); addition = null;
+    } else if (action === 8 || action === 9) {
+      const extras = [...store.values.keys()].filter((id) => id !== 'bare');
+      if (action === 8 && extras.length) {
+        // Reachable coalesced truth: delete an extra, then rename the bare record to its label.
+        const id = extras[pick(extras.length)]; store.values.delete(id); store.label = id.slice(6); store.version++;
+      } else {
+        const name = `external${step}`;
+        if (pick(2) && store.values.size < 32) { store.values.set(extraId(name), 'external'); store.version++; }
+        else store.label = name; // Label-only rename deliberately leaves the CAS timestamp unchanged.
+      }
+      reconcile();
+      await act(async () => { eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' }); });
+    } else if (action === 10) {
+      const expected = state();
+      const accepted = copyStore(truth);
+      if (expected.dirty && expected.valid) {
+        for (const id of removals) accepted.values.delete(id);
+        for (const [id, value] of drafts) if (value && !removals.has(id)) accepted.values.set(id, value);
+        if (addition) accepted.values.set(extraId(addition.name), addition.value);
+        accepted.label = label;
+      }
+      const result = await save();
+      expect(result, evidence).toBe(expected.valid);
+      if (expected.dirty && expected.valid) {
+        expect(store.label === accepted.label && store.values.size === accepted.values.size
+          && [...accepted.values].every(([id, value]) => store.values.get(id) === value), evidence).toBe(true);
+        expect(store.values.size <= 32 && store.values.has('bare'), evidence).toBe(true);
+        if (label !== truth.label) labelEdited = false;
+        truth = copyStore(store); drafts.clear(); removals.clear(); addition = null; label = truth.label;
+      } else {
+        expect(api.updateVaultSecretFields.mock.calls.length, evidence).toBe(before);
+        expect(sealBlindBox.mock.calls.length, evidence).toBe(beforeSeal);
+      }
+    } else if (action === 11) {
+      view.unmount(); truth = copyStore(store); drafts = new Map(); removals = new Set(); addition = null; label = truth.label; labelEdited = false;
+      view = renderEditor(payload(store));
+    }
+    expect(lastState(), evidence).toEqual(state());
+    for (const id of truth.values.keys()) {
+      if (removals.has(id)) continue;
+      const actual = (screen.getByLabelText(`Value for ${fieldName(id, truth)}`) as HTMLInputElement).value;
+      expect(actual === (drafts.get(id) ?? ''), evidence).toBe(true);
+    }
+    if (action !== 10) {
+      expect(api.updateVaultSecretFields.mock.calls.length, evidence).toBe(before);
+      expect(sealBlindBox.mock.calls.length, evidence).toBe(beforeSeal);
+    }
+  }
+});
 
 it('saves nothing and reports clean when nothing changed', async () => {
   renderEditor();
