@@ -260,6 +260,21 @@ it.each([12, 23, 47, 101, 211, 431, 863, 1723])('keeps final-layout invariants t
 // Give shared CI workers a bounded budget without reducing seeds, steps or invariants.
 }, 15_000);
 
+// The name rule shows while a field name has focus and is hidden in place on blur. Unmounting it
+// moved the dialog's Save up mid-click (focus leaves the name on the press), so the click was lost.
+it('keeps the field-name rule in place, hidden and unannounced, when the name loses focus', () => {
+  renderEditor();
+  const name = screen.getByLabelText('Default field name');
+  fireEvent.focus(name);
+  const rule = screen.getByText(en.vaults.fields.nameRule);
+  expect(rule.classList.contains('invisible')).toBe(false);
+  expect(rule.getAttribute('aria-hidden')).toBeNull();
+  fireEvent.blur(name);
+  expect(screen.getByText(en.vaults.fields.nameRule)).toBe(rule);
+  expect(rule.classList.contains('invisible')).toBe(true);
+  expect(rule.getAttribute('aria-hidden')).toBe('true');
+});
+
 it('saves nothing and reports clean when nothing changed', async () => {
   renderEditor();
   expect(lastState()).toEqual({ dirty: false, valid: true });

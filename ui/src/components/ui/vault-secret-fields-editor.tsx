@@ -13,6 +13,7 @@ import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Button } from './button';
 import {
   VaultFieldList,
+  VaultFieldNameRule,
   VaultFieldReferences,
   VaultFieldRemoveConfirm,
   VaultFieldRow,
@@ -495,7 +496,7 @@ export function VaultSecretFieldsEditor({
           </Button>
         </p>
       ) : null}
-      {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
+      <VaultFieldNameRule shown={showNameRule} />
       <VaultFieldReferences secretName={current.name} fields={fields} defaultField={defaultField} />
       {isProtected && <VaultProtectedUnlock warnDraftDiscard vault={vault} secretName={current.name}
         onContinueInBrowser={() => openVaultsInBrowser({ kind: 'edit', secretName: current.name })} />}
