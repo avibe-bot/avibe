@@ -1972,6 +1972,23 @@ final class NavigationPolicyTests: XCTestCase {
             hostingController.presentedViewController == nil
                 && hostingController.childForStatusBarStyle === runtimeController
         }
+
+        // Consume B through the actual SwiftUI root, not just AppModel's mode.
+        appModel.showInstances()
+        var namedSheet: MobileOnboardingViewController?
+        try await waitUntil {
+            namedSheet = self.mobileOnboardingController(in: hostingController)
+            let page = namedSheet?.viewIfLoaded?.subviews.compactMap { $0 as? WKWebView }.first
+            return page?.url?.fragment == "sheet-instances"
+        }
+        appModel.showInstances()
+        appModel.showAccount()
+        XCTAssertTrue(self.mobileOnboardingController(in: hostingController) === namedSheet)
+        XCTAssertTrue(appModel.returnToRuntime())
+        try await waitUntil {
+            hostingController.presentedViewController == nil
+                && hostingController.childForStatusBarStyle === runtimeController
+        }
     }
 
     @MainActor
@@ -1985,6 +2002,8 @@ final class NavigationPolicyTests: XCTestCase {
         var historyChangeRequests = 0
         weak var primaryWebView: WKWebView?
         let accountShown = expectation(description: "runtime bridge opens account surface")
+        let instancesShown = expectation(description: "runtime bridge opens named instances surface")
+        var nativeName: String? = "Studio"
         let webView = WKWebView(
             frame: .zero,
             configuration: NativeBridgeConfiguration.make(
@@ -2010,7 +2029,11 @@ final class NavigationPolicyTests: XCTestCase {
                 },
                 showAccount: {
                     accountShown.fulfill()
-                }
+                },
+                showInstances: {
+                    instancesShown.fulfill()
+                },
+                instanceName: { nativeName }
             )
         )
         primaryWebView = webView
@@ -2048,6 +2071,13 @@ final class NavigationPolicyTests: XCTestCase {
               invalidHistory = error.code;
             }
             await window.avibeNative.call("app.showAccount");
+            let invalidInstances = null;
+            try {
+              await window.avibeNative.call("app.showInstances", {url: "https://example.com"});
+            } catch (error) {
+              invalidInstances = error.code;
+            }
+            const instancesResult = await window.avibeNative.call("app.showInstances");
             let unsupported = null;
             try {
               await window.avibeNative.call("app.instances");
@@ -2060,6 +2090,10 @@ final class NavigationPolicyTests: XCTestCase {
               platform: info.platform,
               shellVersion: info.shellVersion,
               accountPresentationCapability: info.capabilities.accountPresentation,
+              instancePresentationCapability: info.capabilities.instancePresentation,
+              instanceInfo: info.instance,
+              instancesResult,
+              invalidInstances,
               appCapability: info.capabilities.app,
               keyboardResizesViewport: info.capabilities.keyboardResizesViewport,
               viewportCapability: info.capabilities.viewport,
@@ -2083,6 +2117,10 @@ final class NavigationPolicyTests: XCTestCase {
             instancePayload["accountPresentationCapability"] as? Int,
             2
         )
+        XCTAssertEqual(instancePayload["instancePresentationCapability"] as? Int, 1)
+        XCTAssertEqual(instancePayload["instanceInfo"] as? [String: String], ["name": "Studio"])
+        XCTAssertTrue(instancePayload["instancesResult"] is NSNull)
+        XCTAssertEqual(instancePayload["invalidInstances"] as? String, "invalid_argument")
         XCTAssertEqual(instancePayload["appCapability"] as? Int, 1)
         XCTAssertEqual(instancePayload["keyboardResizesViewport"] as? Int, 1)
         XCTAssertEqual(instancePayload["viewportCapability"] as? Int, 1)
@@ -2093,7 +2131,19 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["invalidHistory"] as? String, "invalid_argument")
         XCTAssertEqual(instancePayload["unsupported"] as? String, "unsupported")
         assertForbiddenReply(instancePayload["subframeTransport"])
-        await fulfillment(of: [accountShown], timeout: 2)
+        await fulfillment(of: [accountShown, instancesShown], timeout: 2)
+
+        // The Runtime reads app.info on document load; no rename event or
+        // caller-supplied identity is involved. Empty/missing names are safe.
+        for (name, expected) in [("Renamed Studio" as String?, "Renamed Studio"), (nil, "Avibe"), (" \n", "Avibe")] {
+            nativeName = name
+            try await probe.loadHTML("<!doctype html><title>Reloaded</title>", baseURL: instance.url, in: webView)
+            let info = try await webView.callAsyncJavaScript(
+                "return JSON.stringify((await window.avibeNative.call('app.info')).instance);",
+                arguments: [:], in: nil, contentWorld: .page
+            )
+            XCTAssertEqual(try jsonObject(from: info) as? [String: String], ["name": expected])
+        }
 
         try await probe.loadHTML(
             "<!doctype html><title>External</title>",
@@ -2321,20 +2371,29 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     func testAccountBridgeTransitionDoesNotRecreateReleasedRuntimeWebView() async throws {
-        let accountShown = expectation(description: "account bridge requested")
+        for method in ["app.showAccount", "app.showInstances"] {
+            try await exerciseReleasedRuntimeSurfaceCallback(method)
+        }
+    }
+
+    @MainActor
+    private func exerciseReleasedRuntimeSurfaceCallback(_ method: String) async throws {
+        let accountShown = expectation(description: "runtime surface bridge requested")
         var accountRequestCount = 0
         var loadingStarted = 0
         var loadingFinished = 0
         var loadingFailed = 0
         var controller: WebViewController!
+        let showSurface: () -> Void = {
+            accountRequestCount += 1
+            accountShown.fulfill()
+            _ = controller.invalidateForAccountTransition()
+        }
         controller = WebViewController(
             instanceOrigin: instance,
             websiteDataStore: .nonPersistent(),
-            showAccount: {
-                accountRequestCount += 1
-                accountShown.fulfill()
-                _ = controller.invalidateForAccountTransition()
-            },
+            showAccount: showSurface,
+            showInstances: showSurface,
             didStartLoading: {
                 loadingStarted += 1
             },
@@ -2357,7 +2416,7 @@ final class NavigationPolicyTests: XCTestCase {
         try await probe.loadHTML(
             """
             <!doctype html>
-            <button id="account" onclick="window.avibeNative.call('app.showAccount')">
+            <button id="account" onclick="window.avibeNative.call('\(method)')">
               Account
             </button>
             """,
@@ -2376,7 +2435,7 @@ final class NavigationPolicyTests: XCTestCase {
         let lateBridgeResult = try await webView.callAsyncJavaScript(
             """
             const result = {};
-            await window.avibeNative.call("app.showAccount");
+            await window.avibeNative.call("\(method)");
             try {
               await window.avibeNative.call(
                 "app.setAccountActionAvailable",

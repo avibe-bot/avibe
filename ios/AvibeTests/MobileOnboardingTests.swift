@@ -553,9 +553,18 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
-    func testNativeSheetUsesOneLargeDetentAndTheDocumentScrollView()
-        async throws
-    {
+    func testNativeSheetUsesOneLargeDetentAndTheDocumentScrollView() async throws {
+        let modes: [(MobileOnboardingStartScreen, String)] = [
+            (.sheet, "#sheet"), (.sheetInstances, "#sheet-instances"),
+        ]
+        for (mode, hash) in modes {
+            try await exerciseNativeSheet(mode, expectedHash: hash)
+        }
+    }
+
+    private func exerciseNativeSheet(
+        _ startScreen: MobileOnboardingStartScreen, expectedHash: String
+    ) async throws {
         let transport = FakeMobileAuthTransport()
         transport.session = snapshot(
             accountID: "account-1",
@@ -577,7 +586,7 @@ final class MobileOnboardingTests: XCTestCase {
         )
         let controller = MobileOnboardingViewController(
             coordinator: coordinator,
-            startScreen: .sheet,
+            startScreen: startScreen,
             dismissSurface: { true }
         )
         let root = UIViewController()
@@ -597,6 +606,8 @@ final class MobileOnboardingTests: XCTestCase {
         _ = try await waitForJavaScriptValue(in: webView) {
             "document.body.textContent.includes(\"Fixture instance 8\")"
         }
+        let hash = try await webView.evaluateJavaScript("window.location.hash") as? String
+        XCTAssertEqual(hash, expectedHash)
         let sheet = try XCTUnwrap(controller.sheetPresentationController)
         XCTAssertEqual(sheet.detents.count, 1)
         XCTAssertEqual(sheet.detents.first?.identifier, .large)
@@ -606,6 +617,12 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     func testAppDismissIsStrictAndReturnsNullFromTheSheet() async throws {
+        for mode in [MobileOnboardingStartScreen.sheet, .sheetInstances] {
+            try await exerciseSheetDismissal(mode)
+        }
+    }
+
+    private func exerciseSheetDismissal(_ startScreen: MobileOnboardingStartScreen) async throws {
         let transport = FakeMobileAuthTransport()
         transport.session = snapshot(accountID: "account-1")
         var dismissCalls = 0
@@ -614,7 +631,7 @@ final class MobileOnboardingTests: XCTestCase {
                 defaults: makeDefaults(),
                 transports: [transport]
             ),
-            startScreen: .sheet,
+            startScreen: startScreen,
             dismissSurface: {
                 dismissCalls += 1
                 return true
@@ -656,6 +673,12 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     func testSheetRejectsAuthMethodsWithoutMutatingTheRuntime() async throws {
+        for mode in [MobileOnboardingStartScreen.sheet, .sheetInstances] {
+            try await exerciseSheetAuthRestriction(mode)
+        }
+    }
+
+    private func exerciseSheetAuthRestriction(_ startScreen: MobileOnboardingStartScreen) async throws {
         let transport = FakeMobileAuthTransport()
         transport.session = snapshot(accountID: "account-1")
         var requestCount = 0
@@ -669,7 +692,7 @@ final class MobileOnboardingTests: XCTestCase {
         )
         let controller = MobileOnboardingViewController(
             coordinator: coordinator,
-            startScreen: .sheet
+            startScreen: startScreen
         )
         let (window, webView) = try present(
             controller,
@@ -907,6 +930,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.openExternal",
                 "app.setAccountActionAvailable",
                 "app.showAccount",
+                "app.showInstances",
                 "badge.set",
                 "direct.status",
                 "haptics.impact",

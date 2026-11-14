@@ -18,6 +18,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let websiteDataStore: WKWebsiteDataStore
     let pushCoordinator: NativePushCoordinator?
     let showAccount: () -> Void
+    let showInstances: () -> Void
+    let instanceName: () -> String?
     let directStatus: DirectStatusProvider?
     let directLoadGate: DirectLoadGateProvider?
     let pushOpenedAck: (String, WebOrigin) -> Bool
@@ -36,6 +38,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
         websiteDataStore: WKWebsiteDataStore,
         pushCoordinator: NativePushCoordinator? = nil,
         showAccount: @escaping () -> Void,
+        showInstances: @escaping () -> Void = {},
+        instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
@@ -53,6 +57,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.websiteDataStore = websiteDataStore
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
+        self.showInstances = showInstances
+        self.instanceName = instanceName
         self.directStatus = directStatus
         self.directLoadGate = directLoadGate
         self.pushOpenedAck = pushOpenedAck
@@ -78,6 +84,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
             websiteDataStore: websiteDataStore,
             pushCoordinator: pushCoordinator,
             showAccount: showAccount,
+            showInstances: showInstances,
+            instanceName: instanceName,
             directStatus: directStatus,
             directLoadGate: directLoadGate,
             pushOpenedAck: pushOpenedAck,
