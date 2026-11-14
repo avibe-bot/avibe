@@ -25,13 +25,16 @@ import {
 /** Why the window ended without a result; in every case nothing reached Avibe. */
 export type ProtectedHdLaunchFailure = 'blocked' | 'cancelled' | 'closed' | 'timeout' | 'reset' | 'unavailable' | 'failed';
 
+/** Avibe's answer to a refused save: its code (shown in the UI's language when known) and its text. */
+export type ProtectedHdRefusal = { code: string | null; text: string };
+
 export type ProtectedHdPhase =
   | { kind: 'idle' }
   | { kind: 'waiting' }
   | { kind: 'failed'; reason: ProtectedHdLaunchFailure }
   | { kind: 'saving' }
-  | { kind: 'checking'; refusal: string | null }
-  | { kind: 'unconfirmed'; refusal: string | null }
+  | { kind: 'checking'; refusal: ProtectedHdRefusal | null }
+  | { kind: 'unconfirmed'; refusal: ProtectedHdRefusal | null }
   | { kind: 'mismatch' }
   | { kind: 'done'; name: string; account0: ProtectedHdAccount0 };
 
@@ -71,8 +74,11 @@ function launchFailure(error: unknown): ProtectedHdLaunchFailure {
   return 'failed';
 }
 
-const refusalText = (result: { code?: string; message?: string } | null | undefined): string | null =>
-  result?.message?.trim() || result?.code?.trim() || null;
+const refusalOf = (result: { code?: string; message?: string } | null | undefined): ProtectedHdRefusal | null => {
+  const code = result?.code?.trim() || null;
+  const text = result?.message?.trim() || code;
+  return text ? { code, text } : null;
+};
 
 export function useProtectedHdCreate() {
   const api = useApi();
@@ -106,7 +112,7 @@ export function useProtectedHdCreate() {
   }, []);
 
   /** Ask the daemon for the wallet by its exact name and compare it with this operation. */
-  const check = useCallback(async (refusal: string | null) => {
+  const check = useCallback(async (refusal: ProtectedHdRefusal | null) => {
     const op = operation.current;
     if (!op) return;
     setPhase({ kind: 'checking', refusal });
@@ -181,7 +187,7 @@ export function useProtectedHdCreate() {
         await check(null);
         return;
       }
-      await check(created ? refusalText(created) : null);
+      await check(created ? refusalOf(created) : null);
     })();
   }, [api, check, confirmWith]);
 

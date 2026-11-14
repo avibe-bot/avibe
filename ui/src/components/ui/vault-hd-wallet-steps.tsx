@@ -245,7 +245,7 @@ export function HdDoneStep({ name, account, withPassphrase = false, protectedTie
           <Check className="size-6" strokeWidth={2.5} />
         </span>
         <span className="text-[16px] font-semibold text-foreground">{t('vaults.hd.done.title', { name })}</span>
-        <span className="max-w-sm text-[12.5px] leading-snug text-muted">{t('vaults.hd.done.body')}</span>
+        <span className="max-w-sm text-[12.5px] leading-snug text-muted">{t(protectedTier ? 'vaults.hd.protected.done.body' : 'vaults.hd.done.body')}</span>
       </div>
       <div className="flex flex-col gap-2 rounded-[10px] border border-edge bg-surface-2 p-3">
         <span className="flex items-center gap-2 text-[12.5px] font-semibold text-foreground">

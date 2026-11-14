@@ -21,6 +21,14 @@ export function ProtectedHdTierNote() {
   );
 }
 
+const KNOWN_REFUSALS = {
+  secret_exists: 'vaults.hd.protected.refusals.secret_exists',
+  secret_name_case_conflict: 'vaults.hd.protected.refusals.secret_name_case_conflict',
+  vault_already_initialized: 'vaults.hd.protected.refusals.vault_already_initialized',
+} as const;
+const knownRefusal = (code: string | null) =>
+  code && Object.hasOwn(KNOWN_REFUSALS, code) ? KNOWN_REFUSALS[code as keyof typeof KNOWN_REFUSALS] : null;
+
 export function ProtectedHdLaunchNotice({ phase, name }: { phase: ProtectedHdPhase; name: string }) {
   const { t } = useTranslation();
   switch (phase.kind) {
@@ -39,7 +47,14 @@ export function ProtectedHdLaunchNotice({ phase, name }: { phase: ProtectedHdPha
       return (
         <HdNotice tone={phase.kind === 'checking' ? 'neutral' : 'warning'} icon={phase.kind === 'checking' ? ShieldCheck : TriangleAlert}>
           <span>{t(phase.kind === 'checking' ? 'vaults.hd.protected.notice.checking' : 'vaults.hd.protected.notice.unconfirmed', { name })}</span>
-          {phase.refusal ? <span className="text-muted">{t('vaults.hd.protected.notice.refusal', { message: phase.refusal })}</span> : null}
+          {phase.refusal ? (
+            <span className="text-muted">
+              {t('vaults.hd.protected.notice.refusal', {
+                // A known refusal reads in the UI's language; anything else is Avibe's own words.
+                message: knownRefusal(phase.refusal.code) ? t(knownRefusal(phase.refusal.code)!) : phase.refusal.text,
+              })}
+            </span>
+          ) : null}
         </HdNotice>
       );
     case 'mismatch':

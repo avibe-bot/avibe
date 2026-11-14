@@ -130,6 +130,7 @@ it('creates: opens the window from the click, saves the opaque result, and offer
   expect(screen.getByText(p.done.recovery)).toBeTruthy();
   // The standard done screen: the same check line (protected wording), and how an Agent uses it.
   expect(screen.getByText(p.verified)).toBeTruthy();
+  expect(screen.getByText(p.done.body)).toBeTruthy();
   expect(screen.getByText(en.vaults.hd.done.howTitle)).toBeTruthy();
   expect(screen.getByText(wallet.expected_account0.eth)).toBeTruthy();
   expect(vault.afterCreated).toHaveBeenCalledOnce();
@@ -192,12 +193,13 @@ it('a lost save reply is checked, never retried: unconfirmed until the exact wal
 
 it('a refusal is shown, but the wallet stays unconfirmed and blocked: never "not saved", never a new one', async () => {
   await openProtected();
-  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'secret_exists', message: 'A secret with this name already exists' });
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'secret_exists', message: 'raw server text' });
   // Another wallet holds the name: its snapshot does not match, so nothing is offered.
   api.getVaultHdReconciliation.mockResolvedValue({ ok: true, reconciliation: snapshot({ secret_id: 'vlt_other', envelope_sha256: wallet.reordered_envelope_sha256 }) });
   await launch();
   expect(await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }))).toBeTruthy();
-  expect(screen.getByText(fill(p.notice.refusal, { message: 'A secret with this name already exists' }))).toBeTruthy();
+  // A known refusal reads in the UI's language (en here), not as the server's raw text.
+  expect(screen.getByText(fill(p.notice.refusal, { message: p.refusals.secret_exists }))).toBeTruthy();
   expect(screen.queryByText(/nothing was saved/i)).toBeNull();
   expect(screen.queryByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeNull();
   expect(vault.sealHdWallet).toHaveBeenCalledOnce();
@@ -290,4 +292,12 @@ it('an id named in an unreadable save answer is held: a same-name copy under ano
   // The record it named, complete and matching: confirmed.
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: p.checkAgain })); });
   expect(await screen.findByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeTruthy();
+});
+
+it('an unknown refusal is shown in Avibe’s own words', async () => {
+  await openProtected();
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'something_new', message: 'Something new went wrong' });
+  api.getVaultHdReconciliation.mockResolvedValue({ ok: false, code: 'secret_not_found' });
+  await launch();
+  expect(await screen.findByText(fill(p.notice.refusal, { message: 'Something new went wrong' }))).toBeTruthy();
 });

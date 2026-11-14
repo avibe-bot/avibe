@@ -50,7 +50,7 @@ const designFrames = frames([
   { name: 'reset', title: '保护档 · 期间被锁定或重置（提交前，未保存）', width: 800, height: 1560, status: 'shipped', fixtures, click: create, render: add({ kind: 'failed', reason: 'reset' }) },
   { name: 'saving', title: '保护档 · 窗口完成，正在保存', width: 800, height: 1560, status: 'shipped', fixtures, click: create, render: add({ kind: 'saving' }) },
   { name: 'checking', title: '保护档 · 没有确定回复，向 Avibe 核对（不重来、不再生成）', width: 800, height: 1600, status: 'shipped', fixtures, click: create, render: add({ kind: 'checking', refusal: null }) },
-  { name: 'unconfirmed', title: '保护档 · 仍无法确认（显示 Avibe 的拒绝原因，不说“未保存”）', width: 800, height: 1640, status: 'shipped', fixtures, click: create, render: add({ kind: 'unconfirmed', refusal: 'A secret with this name already exists' }) },
+  { name: 'unconfirmed', title: '保护档 · 仍无法确认（显示 Avibe 的拒绝原因，不说“未保存”）', width: 800, height: 1640, status: 'shipped', fixtures, click: create, render: add({ kind: 'unconfirmed', refusal: { code: 'secret_exists', text: 'A secret with this name already exists' } }) },
   { name: 'mismatch', title: '保护档 · 保存的和窗口生成的对不上，不要转账', width: 800, height: 1600, status: 'shipped', fixtures, click: create, render: add({ kind: 'mismatch' }) },
   { name: 'done', title: '回到页面 · 已创建（保护档）· 恢复说明', width: 800, height: 900, status: 'shipped', fixtures, render: done },
   { name: 'accounts', title: '保护档钱包 · 账户卡：BTC 只有 Taproot，每次签名都批准', width: 860, height: 900, status: 'shipped', fixtures: walletFixtures, render: accounts },
