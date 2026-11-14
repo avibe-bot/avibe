@@ -616,6 +616,12 @@ final class MobileSessionCoordinator {
         transport = transportFactory(controlPlane.baseURL, websiteDataStore.dataStore)
     }
 
+    private func releaseTransportPreservingSurfaceLease() {
+        transportOperationToken = nil
+        recordReleaseBarrier(transport?.invalidate())
+        transport = nil
+    }
+
     func bootstrap() async throws -> MobileSessionState {
         if let snapshot {
             guard keepsSelection else {
@@ -1289,7 +1295,7 @@ final class MobileSessionCoordinator {
     private func replaceWithFreshSignedOutStore() async {
         authoritativeSignedOutTransitionInProgress = true
         defer { authoritativeSignedOutTransitionInProgress = false }
-        deactivateAccountSurface()
+        releaseTransportPreservingSurfaceLease()
         snapshot = nil
         secondFactorEmail = nil
         clearStoredSelection()

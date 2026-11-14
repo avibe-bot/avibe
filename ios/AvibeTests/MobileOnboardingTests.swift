@@ -1679,6 +1679,12 @@ final class MobileOnboardingTests: XCTestCase {
         let defaults = makeDefaults()
         let transport = FakeMobileAuthTransport()
         transport.session = snapshot(accountID: "account-1")
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport]
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
         let refreshStarted = expectation(description: "refresh started")
         let allowRefresh = expectation(description: "refresh may finish")
         transport.fetchSessionHandler = {
@@ -1686,12 +1692,6 @@ final class MobileOnboardingTests: XCTestCase {
             await self.fulfillment(of: [allowRefresh], timeout: 30)
             return .signedIn(snapshot(self.snapshot(accountID: "account-1")))
         }
-        let coordinator = makeCoordinator(
-            defaults: defaults,
-            transports: [transport]
-        )
-        coordinator.activateAccountSurface()
-        _ = try await coordinator.bootstrap()
 
         let refresh = Task { try await coordinator.refresh() }
         await fulfillment(of: [refreshStarted], timeout: 30)
