@@ -30,7 +30,10 @@ beforeEach(() => {
   mock.remote = false; mock.phase = 'available'; mock.signedIn = true;
   mock.getVersion.mockResolvedValue({ current: '3.2.6rc12', latest: '3.2.7', has_update: true, managed_by: 'desktop' });
   mock.invoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
-    ? { phase: mock.phase, latest: '3.2.7', channel: 'test', prereleases: true, skippedVersion: null, interactive: false }
+    ? {
+      phase: mock.phase, latest: '3.2.7', channel: 'test', prereleases: true, autoUpdate: false,
+      hostActions: ['check', 'prereleases', 'auto_update', 'install'], skippedVersion: null, interactive: false,
+    }
     : undefined);
   vi.stubGlobal('__AVIBE_DESKTOP_SHELL__', true);
   vi.stubGlobal('__AVIBE_DESKTOP_VERSION__', '3.2.6rc12');
@@ -38,52 +41,61 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 function mount() { return render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>); }
+const installed = () => mock.invoke.mock.calls.filter(([command]) => command === 'desktop_update_install');
 
-// The former test only asserted the new compact menu. Mount the actual rc12
-// VersionBadge through the production footer so substituting that menu fails.
-it('AUTH-SETUP-178 opens the original version dialog and retains its local updater actions', async () => {
+// Mount the actual VersionBadge through the production footer, so substituting a second, simpler
+// update menu fails. The footer's update is the shared panel (ui/design: update/panel).
+it('AUTH-SETUP-178 opens the shared update panel and acts on this computer over the desktop IPC', async () => {
   mount();
   const trigger = await screen.findByTitle('v3.2.6rc12');
   fireEvent.click(trigger);
-  const dialog = await screen.findByRole('dialog', { name: 'Version & Update' });
-  expect(within(dialog).getByText('Current Version')).toBeTruthy();
-  expect(within(dialog).getByText('Latest Version')).toBeTruthy();
+  const dialog = await screen.findByRole('dialog', { name: en.dashboard.versionAndUpdate });
+  // The panel is its own chunk; it arrives just after the dialog opens.
+  await waitFor(() => expect(dialog.querySelector('[data-update-panel]')).toBeTruthy());
+  expect(within(dialog).getByText(en.update.row.current)).toBeTruthy();
+  expect(within(dialog).getByText(en.update.row.offered)).toBeTruthy();
   expect(within(dialog).getByRole('link', { name: /3.2.7/ })).toBeTruthy();
-  expect(within(dialog).getByText('Get pre-release updates')).toBeTruthy();
-  expect(within(dialog).getByRole('button', { name: 'Skip this version' })).toBeTruthy();
-  expect(mock.invoke).not.toHaveBeenCalledWith('desktop_update_install');
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Upgrade Now' }));
-  await waitFor(() => expect(mock.invoke).toHaveBeenCalledWith('desktop_update_install'));
+  expect(within(dialog).getByRole('switch', { name: en.update.setting.prereleases })).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole('switch', { name: en.update.setting.autoUpdate }));
+  await waitFor(() => expect(mock.invoke).toHaveBeenCalledWith('desktop_update_auto_update_set', { enabled: true }));
+  expect(within(dialog).getByRole('button', { name: en.dashboard.skipUpdate })).toBeTruthy();
+  expect(installed()).toEqual([]);
+  fireEvent.click(within(dialog).getByRole('button', { name: en.update.action.update }));
+  // Exactly the version the panel shows.
+  await waitFor(() => expect(installed()).toEqual([['desktop_update_install', { targetVersion: '3.2.7' }]]));
   expect(mock.present).not.toHaveBeenCalled();
   expect(document.querySelector('[data-update-menu]')).toBeNull();
 });
 
-it('AUTH-SETUP-178 routes the native menu to the same original dialog and preserves Skip', async () => {
+it('AUTH-SETUP-178 routes the native menu to the same panel and preserves Skip', async () => {
   mount();
   await waitFor(() => expect(mock.invoke).toHaveBeenCalledWith('desktop_update_state'));
   const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
-  fireEvent(window, event);
-  expect(event.defaultPrevented).toBe(true);
-  const dialog = await screen.findByRole('dialog', { name: 'Version & Update' });
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Skip this version' }));
+  await waitFor(() => {
+    fireEvent(window, event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+  const dialog = await screen.findByRole('dialog', { name: en.dashboard.versionAndUpdate });
+  fireEvent.click(await within(dialog).findByRole('button', { name: en.dashboard.skipUpdate }));
   await waitFor(() => expect(mock.invoke).toHaveBeenCalledWith('desktop_update_skip'));
   expect(mock.present).not.toHaveBeenCalled();
 });
 
-it('AUTH-SETUP-178 current version never opens the compact menu; account menu has no updater action', async () => {
+it('AUTH-SETUP-178 current version offers no install; the account menu has no updater action', async () => {
   mock.phase = 'current';
   mount();
   fireEvent.click(await screen.findByTitle('v3.2.6rc12'));
-  const dialog = await screen.findByRole('dialog', { name: 'Version & Update' });
-  expect(within(dialog).queryByRole('button', { name: 'Upgrade Now' })).toBeNull();
+  const dialog = await screen.findByRole('dialog', { name: en.dashboard.versionAndUpdate });
+  expect(await within(dialog).findByText(en.update.status.current)).toBeTruthy();
+  expect(within(dialog).queryByRole('button', { name: en.update.action.update })).toBeNull();
   expect(document.querySelector('[data-update-menu]')).toBeNull();
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: en.common.close }));
   fireEvent.click(document.querySelector('[data-account-trigger]')!);
   const menu = document.querySelector('[data-instance-menu]')!;
   expect(menu.textContent).not.toMatch(/update|upgrade/i);
 });
 
-it('AUTH-SETUP-178 remote Runtime presents the trusted native decision without local or remote update IPC', async () => {
+it('AUTH-SETUP-178 remote Runtime presents the trusted update view without local or remote update IPC', async () => {
   mock.remote = true;
   mount();
   fireEvent.click(screen.getByRole('button', { name: 'Local Desktop version 3.2.6rc12' }));

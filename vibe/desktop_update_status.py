@@ -16,11 +16,12 @@ are ignored, so a newer app never breaks an older Runtime.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
 from typing import Any, TypedDict
+from uuid import UUID
 
 from core.computer_use import desktop_computer_use_dir
 
@@ -43,8 +44,11 @@ class DesktopUpdateStatus(TypedDict):
     checked_at: str | None
     latest: str | None
     has_update: bool
+    auto_update: bool | None
     remote_install_allowed: bool
     remote_request: "RemoteDesktopUpdateStatus | None"
+    host_actions: list[str]
+    control_request: dict[str, Any] | None
 
 
 class RemoteDesktopUpdateStatus(TypedDict):
@@ -96,6 +100,9 @@ def parse_desktop_update_status(payload: object) -> DesktopUpdateStatus | None:
     latest = (latest or "").strip() or None
     if has_update and latest is None:
         return None
+    auto_update = payload.get("auto_update")
+    if auto_update is not None and type(auto_update) is not bool:
+        auto_update = None
     remote_install_allowed = payload.get("remote_install_allowed", False)
     if not isinstance(remote_install_allowed, bool):
         remote_install_allowed = False
@@ -120,8 +127,11 @@ def parse_desktop_update_status(payload: object) -> DesktopUpdateStatus | None:
         "checked_at": _parse_timestamp(payload.get("checked_at")),
         "latest": latest,
         "has_update": has_update,
+        "auto_update": auto_update,
         "remote_install_allowed": remote_install_allowed,
         "remote_request": _parse_remote_request(payload.get("remote_request")),
+        "host_actions": _parse_host_actions(payload.get("host_actions")),
+        "control_request": _parse_control_receipt(payload.get("control_request")),
     }
 
 
@@ -133,6 +143,42 @@ def _parse_timestamp(value: object) -> str | None:
     except ValueError:
         return None
     return value if parsed.tzinfo is not None else None
+
+
+def _parse_host_actions(payload: object) -> list[str]:
+    if not isinstance(payload, list):
+        return []
+    return [action for action in ("check", "prereleases", "auto_update", "install") if action in payload]
+
+
+def _parse_control_receipt(payload: object) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    request_id, action, phase = (payload.get(key) for key in ("request_id", "action", "phase"))
+    try:
+        if not isinstance(request_id, str) or str(UUID(request_id)) != request_id:
+            return None
+    except ValueError:
+        return None
+    if action not in ("check", "prereleases", "auto_update") or phase not in ("checking", "completed", "failed", "expired"):
+        return None
+    enabled = payload.get("enabled")
+    if (type(enabled) is not bool if action in ("prereleases", "auto_update") else enabled is not None):
+        return None
+    dates = {key: _parse_timestamp(payload.get(key)) for key in ("created_at", "expires_at", "updated_at")}
+    if any(value is None for value in dates.values()):
+        return None
+    created = datetime.fromisoformat(dates["created_at"].replace("Z", "+00:00"))
+    expires = datetime.fromisoformat(dates["expires_at"].replace("Z", "+00:00"))
+    if not timedelta(0) < expires - created <= timedelta(minutes=2):
+        return None
+    error = payload.get("error_code")
+    if error is not None and (not isinstance(error, str) or not error.strip() or len(error) > 128):
+        return None
+    return {
+        "request_id": request_id, "action": action, "enabled": enabled, "phase": phase,
+        "error_code": error, **dates,
+    }
 
 
 def _parse_remote_request(payload: object) -> RemoteDesktopUpdateStatus | None:
@@ -212,6 +258,16 @@ def desktop_update_snapshot(runtime_version: str, path: Path | None = None) -> d
 
     status = read_desktop_update_status(path)
     phase = status["phase"] if status else None
+    control = status.get("control_request") if status else None
+    if control is not None and control["phase"] == "checking":
+        now = datetime.now(timezone.utc)
+        created = datetime.fromisoformat(control["created_at"].replace("Z", "+00:00"))
+        expires = datetime.fromisoformat(control["expires_at"].replace("Z", "+00:00"))
+        if created <= now < expires:
+            if control["action"] != "auto_update":
+                phase = "checking"
+        else:
+            control = {**control, "phase": "expired", "error_code": "expired"}
     return {
         "current": runtime_version,
         "latest": status["latest"] if status else None,
@@ -221,6 +277,9 @@ def desktop_update_snapshot(runtime_version: str, path: Path | None = None) -> d
         "desktop_version": status["desktop_version"] if status else None,
         "prereleases": status["prereleases"] if status else None,
         "checked_at": status["checked_at"] if status else None,
+        "auto_update": status["auto_update"] if status else None,
         "remote_install_allowed": status["remote_install_allowed"] if status else False,
         "remote_request": status["remote_request"] if status else None,
+        "host_actions": status["host_actions"] if status else [],
+        "control_request": control,
     }

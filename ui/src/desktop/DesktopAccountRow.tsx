@@ -4,7 +4,9 @@ import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
 import { DesktopAccountRowView } from './DesktopAccountRowView';
 import { useDesktopClientProjection, usePresentDesktopClient } from './useDesktopClient';
 
-/** Nonsecret footer: every account/updater action presents native-owned UI. */
+/** Nonsecret footer. Account actions present native-owned UI. This computer's update is the shared
+ *  update panel (ui/design: update/panel): on a page this computer serves, VersionBadge acts over the
+ *  desktop app's IPC; on another computer's page, the version opens the trusted update view. */
 export function DesktopAccountRow() {
   const state = useDesktopClientProjection();
   const present = usePresentDesktopClient();
