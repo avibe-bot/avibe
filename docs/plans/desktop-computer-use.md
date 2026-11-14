@@ -115,8 +115,11 @@ The Controller accepts a literal absolute drive-letter `.exe` path, without
 NUL, alternate data streams, UNC or device namespaces. It opens the file once
 with ordinary read/write/delete sharing, follows normal Windows resolution,
 checks a regular disk file on a local fixed drive, and obtains the final DOS
-path from that handle. Only the OS-added verbatim prefix is removed; spelling
-and case are preserved. That same canonical string is forwarded and used as
+path from that handle. The OS-added verbatim prefix is removed only when no
+final component ends in an ASCII dot or space: otherwise ordinary Win32
+normalization could select a different executable, so admission refuses the
+path. This is a final-string representability check, not an input or ancestry
+policy. Spelling and case are preserved. That same canonical string is forwarded and used as
 the sole launch lock key. Dot components, short names and reparse paths are
 resolved by Windows rather than a separate ancestry policy. The handle closes
 before dispatch. There are no file-ID alias locks, directory walks, case-policy
@@ -128,7 +131,7 @@ inheritance disabled, executable-parent cwd, no inherited handles,
 target-only breakaway and elevated-launch refusal. The Controller does not
 synthesize a replacement PID or alter source launch metadata. Native admission
 coverage runs in the existing Windows Computer Use CI step: seven foundation
-cases plus two path cases, exactly nine executed with no skips. SDK/source
+cases plus four path cases, exactly eleven executed with no skips. SDK/source
 creation semantics and Windows end-to-end acceptance remain separate gates.
 
 Foreground input and window activation are ordinary Computer Use operations.

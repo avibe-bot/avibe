@@ -155,9 +155,11 @@ Phase 0a PR 2 implements this v1 subset:
   `{contract, platform, shellVersion, capabilities}`;
 - `app.openExternal({url})` returns `{opened}` and accepts `http`/`https` URLs
   with a host plus `mailto`/`tel` URLs with a non-empty target;
-- `accountPresentation: 1` admits `app.showAccount()`, which returns `null`,
-  tears down the current runtime surface, and presents the app-bundled account
-  and instance-switching flow. Capability 2 additionally admits
+- `accountPresentation: 1` admits `app.showAccount()`, which returns `null`
+  and presents the app-bundled account/instance surface. On iOS variant A,
+  this is one instances sheet over the selected runtime: its document stays
+  alive and dismissal returns without reloading it (the bundled-only contract
+  below). Capability 2 additionally admits
   `app.setAccountActionAvailable({available})` from the selected-instance
   primary main frame so current Web UI can suppress the old-Web native
   fallback bar;
@@ -259,6 +261,63 @@ Rules:
 - **Fixed surface**: the method set is compiled into the shell. Web content can
   call it but cannot extend it, which is what keeps the app within App Review
   2.5.2 (section 13).
+
+### Bundled iOS instance sheet: `window.avibeMobile` v1
+
+The bundled account page has a **separate**, compiled bridge,
+`window.avibeMobile = {contract: 1, call(method, params)}`. It is not an
+instance capability and is never installed in the runtime WebView. The same
+main-frame, exact `avibe-app://bundle` origin and owning-WebView checks apply
+on every call. No credentials or caller-selected runtime URL cross it.
+
+Variant A keeps the runtime's `app.showAccount()` entry point unchanged. It
+opens the bundled document at `avibe-app://bundle/mobile.html#sheet` in one
+native modal over the selected runtime, including its native load-failure
+screen. The sheet starts on the instances list, **not Account**. With no
+selected runtime, the bundled page remains full-screen at `#instances` (first
+choice) or `#account` (the existing account entry); sign-in and second-factor
+screens are full-screen only. The older `#runtime-account` start remains
+compatible while the old bundled page and Swift half coexist between PRs.
+
+| Bundled call | Result / behavior in the sheet |
+| --- | --- |
+| `session.bootstrap()` | Existing session JSON. Returns the current native snapshot immediately, without a fetch or loading-page transition; selected id and device/account-local recency order come from `MobileAccount`. It stays readable during a selection-preserving background request. |
+| `session.refresh()` | Existing session JSON. One explicit refresh when the sheet opens or the user retries; no polling. A failed request keeps the cached list and runtime intact. A verified response for the same account keeps that runtime alive while updating the catalog. Authoritative sign-out, second-factor/account change, or loss/change of authorization for its selected origin uses the existing account-transition invalidation and full-screen flow. |
+| `session.selectInstance({id})` | Existing `{instance}` result. Only an authorized, available id from the native snapshot may open; failures reject on that row and keep the covered runtime. A different successful selection starts the new runtime and dismisses the sheet. The current row calls `app.dismiss()` instead of selecting/reloading itself. |
+| `app.dismiss()` | New, **no parameters**, resolves to `null`. Dismisses only the sheet over a still-selected runtime; no navigation, reload, recency write, runtime stop or account mutation. Rejects `runtime_unavailable` if there is no such presentation, and `invalid_request` for nonempty parameters. Native pull-down, accessibility escape, Close, and the current row share this dismissal owner. |
+| `app.returnToInstance()` | Existing compatibility spelling for returning from `#runtime-account`; same dismissal behavior. New sheet code uses `app.dismiss()`. |
+| `session.logout()` | Existing current-device sign-out. The normal account transition releases the runtime and modal and shows the full-screen signed-out flow. |
+| `app.openExternal({url})` | Existing fixed URL allowlist and `{opened}` result, for installation guidance, account security and license sources. No new URL authority. |
+
+These are the only operations the **sheet** may invoke. Its handler rejects
+`auth.*` calls as `forbidden`; full-screen onboarding retains the existing
+email/password/second-factor method set. Refresh/sign-out errors use the
+existing `{code, message, retry_after_seconds?}` rejection shape. No new
+runtime bridge method, capability, event or server endpoint is introduced in
+A; `instancePresentation`, `app.showInstances` and the instance name in
+`app.info` belong to separate variant B work.
+
+**Scroll and navigation ownership:** the sheet's bundled page scrolls its
+**document** (not an inner `overflow-y-auto`/fixed-height root). The native host
+registers `WKWebView.scrollView` as its content scroll view and uses a large
+sheet detent only. Dragging a scrolled list down first scrolls toward the top;
+only at the document top does the downward gesture dismiss. There is no
+pull-to-refresh in the sheet; it is reserved for full-screen first use. Web
+content draws the title and Close button, labelled `关闭，回到 {name}` / `Close
+and return to {name}`; native marks the presentation modal and handles the
+VoiceOver two-finger scrub through the same dismissal owner. Account,
+licenses and Add are in-page pushes inside this one sheet: a visible
+`[data-mobile-back]` button owns Back, and the existing native left-edge swipe
+presses that same button. Back on Account returns to the instances list,
+never to a second sheet or a runtime reload. A fallback full-screen
+presentation with Close and edge-swipe dismissal is kept behind one native
+presentation switch until real-device acceptance; it changes no bridge call
+or page design.
+
+Final real-bundle simulator evidence uses the on-demand 24-state capture
+workflow in [the capture runbook](../regression/ios-mobile-captures.md), on the
+exact merged native + bundled-page head. The static gesture fixture remains
+separate and is not final product visual evidence.
 
 ### `direct`: which path new connections prefer
 

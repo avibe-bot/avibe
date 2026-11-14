@@ -127,6 +127,20 @@ jobs:
       - name: Boot the pinned simulator
         run: xcrun simctl bootstatus "$SIMULATOR_ID" -b
 
+      - name: Build the sheet gesture XCUITest fixture
+        id: sheet-fixture-build
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme AvibeSheetFixture \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing
+
       - name: Run XCTest on iPhone Simulator
         run: |
           set -euo pipefail
@@ -146,5 +160,30 @@ jobs:
         with:
           name: ios-shell-xcresult
           path: ${{ runner.temp }}/AvibeTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Run sheet gesture XCUITest fixture
+        if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme AvibeSheetFixture \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
+            -skip-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests \
+            CODE_SIGNING_ALLOWED=NO \
+            test-without-building
+
+      - name: Upload sheet gesture XCUITest result bundle
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-sheet-fixture-xcresult
+          path: ${{ runner.temp }}/AvibeSheetFixtureTests.xcresult
           if-no-files-found: ignore
           retention-days: 7

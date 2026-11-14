@@ -162,6 +162,16 @@ export const returnToMobileInstance = (): Promise<null> =>
   call('app.returnToInstance');
 
 /**
+ * Closes the instance sheet native opened over the selected instance (`#sheet`), which is shown
+ * again unchanged. Rejects with `runtime_unavailable` when no such sheet is presented.
+ */
+export const dismissMobileSheet = (): Promise<null> =>
+  call('app.dismiss');
+
+/** The page native opens as a sheet over the selected instance. */
+export const SHEET_HASH = '#sheet';
+
+/**
  * avibe.bot's Account security page: where an account turns on two-step
  * verification and sets or changes its password.
  */
