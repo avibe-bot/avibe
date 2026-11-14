@@ -6614,6 +6614,29 @@
         "recovery": "If this computer is lost, only these words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing.",
         "set": "Set"
       }
+    },
+    "generate": {
+      "password": "Random password",
+      "key": "Random key",
+      "regenerate": "Regenerate",
+      "bits": "About {{bits}} bits of randomness · any change makes a new one",
+      "suggested": "Preset from the Agent’s suggestion",
+      "type": "Type",
+      "typePassword": "Password",
+      "typeHex": "Hex",
+      "typeBase64": "Base64",
+      "length": "Length",
+      "unitChars": "characters",
+      "unitBytes": "bytes · {{chars}} chars",
+      "chars": "{{count}} characters",
+      "bytes": "{{count}} bytes, {{chars}} characters",
+      "digits": "Digits",
+      "symbols": "Symbols",
+      "noLookalikes": "No look-alikes",
+      "noLookalikesHint": "Leaves out 0 O 1 l I",
+      "base64Note": "Standard Base64 (with + / =), the same as openssl rand -base64 prints.",
+      "generated": "Generated · not saved",
+      "generatedHint": "Kept only when you save; type to use your own instead."
     }
   },
   "permissions": {

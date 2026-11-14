@@ -6614,6 +6614,29 @@
         "recovery": "这台电脑丢失时，只有这些词加上你设置的 Passphrase（一字不差）能找回资金。只靠数据库备份无法恢复签名。",
         "set": "已设置"
       }
+    },
+    "generate": {
+      "password": "随机密码",
+      "key": "随机密钥",
+      "regenerate": "换一个",
+      "bits": "约 {{bits}} 位随机性 · 改任何设置都会立刻换一个",
+      "suggested": "按 Agent 的建议预设",
+      "type": "类型",
+      "typePassword": "密码",
+      "typeHex": "Hex",
+      "typeBase64": "Base64",
+      "length": "长度",
+      "unitChars": "个字符",
+      "unitBytes": "字节 · {{chars}} 个字符",
+      "chars": "{{count}} 个字符",
+      "bytes": "{{count}} 字节，{{chars}} 个字符",
+      "digits": "数字",
+      "symbols": "符号",
+      "noLookalikes": "排除易混字符",
+      "noLookalikesHint": "不用 0 O 1 l I",
+      "base64Note": "标准 Base64（含 + / =），和 openssl rand -base64 输出的一样。",
+      "generated": "已生成 · 未保存",
+      "generatedHint": "保存时才存下；直接输入就换成你自己的值。"
     }
   },
   "permissions": {
