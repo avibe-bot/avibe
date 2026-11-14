@@ -196,17 +196,16 @@ kernel, SDK, saved flows, and safety rules above are the same.
   finds or reuses an app that is already open; use a `name` handle for that.
   If the launch returns an error instead of an app (the new process exited at
   once, as a stub that hands off does), do not retry: ask the owner to open
-  the app, as below.
-  Do not combine `path` with `name` or `bundleId`. On macOS `path` is refused:
-  keep using `bundleId` or `name` there.
-- Store apps, stubs that hand off to another process (such as the files in
-  `WindowsApps`), apps with several plausible or no reliable `.exe`, links,
-  and files that open in their default app cannot be launched. Tell the owner:
-  "Please open it first, then I can operate it." Then resolve it with a
-  `name` handle, wait for its window with `app.waitFor`, observe, and continue
-  there. Never start it through a
-  shell command (such as `Start-Process`) and then attach, try another launch
-  route, or elevate, and do not retry the launch. If Avibe refuses a launch
+  the app, as below. Do not combine `path` with `name` or `bundleId`. On macOS
+  `path` is refused: keep using `bundleId` or `name` there.
+- Store apps, stubs that hand off to another process (such as the app
+  aliases in `%LOCALAPPDATA%\Microsoft\WindowsApps`), apps with several
+  plausible or no reliable `.exe`, links, and files that open in their default
+  app cannot be launched. Tell the owner: "Please open it first, then I can
+  operate it." Then resolve it with a `name` handle, wait for its window with
+  `app.waitFor`, observe, and continue there. Never start it through a shell
+  command (such as `Start-Process`) and then attach, try another launch route,
+  or elevate, and do not retry the launch. If Avibe refuses a launch
   ("Avibe cannot launch this app in the Windows Preview"), do the same.
 - To open a menu, `await win.activate()` and observe that this exact window is
   focused before the click: foreground delivery restores the previous window,
