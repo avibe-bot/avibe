@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import subprocess
 import shutil
 import tarfile
 import zipfile
@@ -278,6 +280,106 @@ def test_wheel_and_rebuilt_sdist_pin_graph_without_changing_source_or_editable(t
     assert {Requirement(item) for item in editable_metadata.get_all("Requires-Dist")} == {
         Requirement(item) for item in source_dependencies
     }
+
+
+@pytest.mark.parametrize("mode", ["development", "stable", "preview", "local-tag"])
+def test_distributions_keep_portable_version_frozen_description_and_original_readme(tmp_path, monkeypatch, mode):
+    """Protect PyPI's actual artifact description, including an offline rebuild.
+
+    Relative images/file links broke on PyPI even though README worked on GitHub.
+    Dependency packaging coverage above never inspects the description payload.
+    """
+    pytest.importorskip("hatchling")
+    pytest.importorskip("hatch_vcs")
+    pytest.importorskip("tomlkit")
+    from hatchling.builders.sdist import SdistBuilder
+    from hatchling.builders.wheel import WheelBuilder
+
+    version = "9.9.9rc1" if mode == "preview" else "9.9.9"
+    ref = {"development": "master", "stable": "v9.9.9", "preview": "gh-v9.9.9rc1", "local-tag": "v9.9.9"}[mode]
+    monkeypatch.setenv("SETUPTOOLS_SCM_PRETEND_VERSION", version)
+    monkeypatch.delenv("AVIBE_BUILD_TAG", raising=False)
+    root = _build_source(tmp_path)
+    if mode == "local-tag":
+        for args in (["init"], ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "fixture"], ["tag", ref]):
+            subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    elif mode != "development":
+        monkeypatch.setenv("AVIBE_BUILD_TAG", ref)
+    # Exercise the real README plus Markdown/HTML forms it might acquire. The
+    # inputs remain relative: the fixture must not supply the hook's output.
+    with (root / "README.md").open("a", encoding="utf-8") as stream:
+        stream.write('''
+![Markdown image](assets/test.png)
+[![Linked image](assets/badge.png)](LICENSE)
+[File with title](./docs/CLI.md "CLI")
+[Angle destination](<docs/CLI.md>)
+<a href='SECURITY.md'>Security</a><img src=assets/unquoted.png>
+[Reference link][manual]
+![Reference image][picture]
+[manual]: docs/CLI.md "CLI"
+[picture]: assets/reference.png
+[Anchor](#mac) [Email](mailto:test@example.com)
+`[not a link](leave-relative.md)`
+```
+<img src="leave-relative.png">
+```
+''')
+    original_readme = (root / "README.md").read_bytes()
+    original_project = (root / "pyproject.toml").read_bytes()
+    wheel = next(WheelBuilder(str(root)).build(directory=str(tmp_path / "wheel"), versions=["standard"]))
+    metadata, _ = _wheel_metadata(wheel)
+    description = metadata.get_payload()
+    assert metadata["Description-Content-Type"] == "text/markdown"
+    raw_base = f"https://raw.githubusercontent.com/avibe-bot/avibe/{ref}/"
+    file_base = f"https://github.com/avibe-bot/avibe/blob/{ref}/"
+    for image in ("assets/logo.png", "assets/test.png", "assets/badge.png", "assets/unquoted.png", "assets/reference.png"):
+        assert raw_base + image in description
+    for file in ("README.md", "README_ZH.md", "LICENSE", "SECURITY.md", "docs/CLI.md"):
+        assert file_base + file in description
+    assert '[Anchor](#mac) [Email](mailto:test@example.com)' in description
+    assert '`[not a link](leave-relative.md)`' in description
+    assert '```\n<img src="leave-relative.png">\n```' in description
+    # Inspect every prose destination, not just the currently known screenshots.
+    prose = description.replace('`[not a link](leave-relative.md)`', '').replace('```\n<img src="leave-relative.png">\n```', '')
+    destinations = re.findall(r'''\]\(<?([^\s)>]+)|(?:src|href)\s*=\s*['"]?([^\s'">]+)|^\[[^\]]+\]:\s*<?([^\s>]+)''', prose, re.MULTILINE)
+    assert destinations
+    for groups in destinations:
+        url = next(value for value in groups if value)
+        assert url.startswith(("https://", "http://", "#", "mailto:", "//")), url
+
+    sdist = next(SdistBuilder(str(root)).build(directory=str(tmp_path / "sdist"), versions=["standard"]))
+    with tarfile.open(sdist) as archive:
+        prefix = archive.getnames()[0].split("/")[0]
+        assert archive.extractfile(f"{prefix}/README.md").read() == original_readme
+        sdist_metadata = BytesParser().parsebytes(archive.extractfile(f"{prefix}/PKG-INFO").read())
+        assert sdist_metadata.get_payload() == description
+        archive.extractall(tmp_path / "unpacked", filter="data")
+    unpacked = tmp_path / "unpacked" / prefix
+    monkeypatch.delenv("AVIBE_BUILD_TAG", raising=False)
+    rebuilt = next(WheelBuilder(str(unpacked)).build(directory=str(tmp_path / "rebuilt"), versions=["standard"]))
+    assert _wheel_metadata(rebuilt)[0].get_payload() == description
+    # PEP 517 metadata preparation may bypass the build hook entirely.
+    from hatchling.build import prepare_metadata_for_build_wheel
+    monkeypatch.chdir(unpacked)
+    prepared_dir = tmp_path / "prepared"
+    prepared_dir.mkdir()
+    prepared = prepare_metadata_for_build_wheel(str(prepared_dir))
+    prepared_metadata = BytesParser().parsebytes((prepared_dir / prepared / "METADATA").read_bytes())
+    assert prepared_metadata.get_payload() == description
+    assert (root / "README.md").read_bytes() == original_readme
+    assert (root / "pyproject.toml").read_bytes() == original_project
+
+
+def test_description_rejects_release_tag_for_a_different_version(tmp_path, monkeypatch):
+    pytest.importorskip("hatchling")
+    pytest.importorskip("hatch_vcs")
+    from hatchling.builders.wheel import WheelBuilder
+
+    monkeypatch.setenv("SETUPTOOLS_SCM_PRETEND_VERSION", "9.9.9")
+    monkeypatch.setenv("AVIBE_BUILD_TAG", "v1.2.3")
+    root = _build_source(tmp_path)
+    with pytest.raises(ValueError, match="does not match package version"):
+        next(WheelBuilder(str(root)).build(directory=str(tmp_path / "wheel"), versions=["standard"]))
 
 
 @pytest.mark.parametrize("damage", ["artifact", "source-range", "source-new-runtime"])

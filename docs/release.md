@@ -195,6 +195,7 @@ Every new release ships `dependency-constraints.txt` as a GitHub asset and the
 same content as `vibe/dependency_constraints.txt` inside its wheel and sdist.
 Regenerate it after updating `uv.lock` with
 `python scripts/release_dependency_constraints.py`; `--check` verifies freshness.
+
 Release builds retain exact transitive pins in distribution metadata, including
 platform/Python markers, so older installers such as 3.2.5 also obey the release
 graph. Source/editable development keeps its declared ranges.
@@ -213,6 +214,18 @@ Avibe's release mirror can provide the core wheel; it does not mirror the full
 Python dependency graph. Where PyPI is unreachable, configure a trusted HTTPS
 proxy or explicitly select an index whose artifacts you trust. See the change
 contract in [release dependency locks](plans/release-dependency-locks.md).
+
+## Python distribution descriptions
+
+The existing Hatch hook generates the PyPI description from `README.md`, making
+relative images and file links absolute without changing the repository README.
+Both release build workflows pass their resolved tag as `AVIBE_BUILD_TAG` alongside
+the package-version override. The hook checks that tag against the package version
+and uses it for version-frozen image and file URLs, including `gh-v*` previews.
+An exact matching local Git tag also works; other development builds use `master`.
+The sdist keeps the original `README.md` and archives the resolved description in
+its static project metadata, so rebuilding a wheel without Git or release
+environment preserves the same description. No extra build dependency is needed.
 
 ## Activate a release on a machine
 

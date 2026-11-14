@@ -380,6 +380,7 @@ jobs:
           PACKAGE_VERSION="$(python scripts/release_package_version.py "$RELEASE_TAG")"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+          echo "AVIBE_BUILD_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
 
       - name: Verify Show Runtime release assets
         run: |
