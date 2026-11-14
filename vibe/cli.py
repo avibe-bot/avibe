@@ -9845,7 +9845,7 @@ def _vault_secret_row(secret: dict) -> dict:
             "signer_kind": secret.get("signer_kind") if secret.get("signer_kind") == "hd-seed" else None,
             "accounts": [
                 {key: account[key] for key in ("account", "name", "eth", "btc_taproot", "btc_legacy", "btc_segwit", "solana",
-                                               "paths", "bitcoin_paths", "bitcoin_address_types") if key in account}
+                                               "always_ask", "paths", "bitcoin_paths", "bitcoin_address_types") if key in account}
                 for account in secret.get("accounts", [])
             ] if secret.get("signer_kind") == "hd-seed" else None,
             "signing_curve": secret.get("signing_curve"),
@@ -9853,11 +9853,13 @@ def _vault_secret_row(secret: dict) -> dict:
             "bitcoin_address_types": secret.get("bitcoin_address_types"),
             "bitcoin_profile": secret.get("bitcoin_profile"),
             "solana_signing_note": (
-                None
+                "HD Solana: use --chain solana --account N --message-hex <exact serialized message bytes>. If signing needs approval, build transactions with a durable nonce for delayed submission."
+                if secret.get("signer_kind") == "hd-seed"
+                else None
                 if secret.get("signing_curve") != "ed25519"
-                else "Sign with --scheme ed25519 --message-hex <exact non-empty serialized message, lowercase hex> and --signing-context-json '{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"<the same hex>\"}'; --digest is refused. Needs browser approval and a compatible Vault sandbox."
+                else "Sign with --scheme ed25519 --message-hex <exact non-empty serialized message, lowercase hex> and --signing-context-json '{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"<the same hex>\"}'; --digest is refused. Needs browser approval and a compatible Vault sandbox. For delayed submission, build with a durable nonce before requesting approval."
                 if secret.get("protection") == "protected"
-                else "Sign with --scheme ed25519 --message-hex <exact serialized message bytes>; --digest is refused."
+                else "Sign with --scheme ed25519 --message-hex <exact serialized message bytes>; --digest is refused. If signing needs approval, build transactions with a durable nonce for delayed submission."
             ),
             "bitcoin_signing_warning": (
                 None
@@ -20109,11 +20111,13 @@ def build_parser():
 
     vault_sign_parser = vault_subparsers.add_parser(
         "sign",
-        help="Sign a digest or a Solana message with a keypair secret (standard signs inline; protected needs approval)",
+        help="Sign a digest or a Solana message (protected and ask-first standard keys need approval)",
         description=(
-            "Sign with a keypair or HD wallet (--chain required). Solana uses exact --message-hex; "
-            "secp256k1 uses --digest. Protected/ask-first keys need browser approval; "
-            "read with 'vibe vault await ID'. Protected Solana also needs --signing-context-json "
+            "Sign with a keypair or HD wallet (--chain required). Solana uses exact --message-hex, "
+            "not a hash; secp256k1 uses --digest. Protected/ask-first signing needs approval. "
+            "For Solana approvals, use a durable nonce (use-avibe-vault Skill recipe); "
+            "the caller creates and funds the nonce account. Protected Solana also needs "
+            "--signing-context-json "
             '{"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex.'
         ),
         epilog=(
