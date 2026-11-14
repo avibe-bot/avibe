@@ -226,10 +226,16 @@ export type VaultRequestSession = {
   is_workbench: boolean;
 };
 
+export type VaultGenerateRecipe =
+  | { type: 'password'; length?: number; digits?: boolean; symbols?: boolean; no_lookalikes?: boolean; field?: string }
+  | { type: 'hex' | 'base64'; bytes?: number; field?: string };
+
 export type VaultRequestSpec = {
   kind?: 'static';
   default_field?: string;
   fields?: string[];
+  /** Advisory browser preset only; never generates, saves, or authorizes a value. */
+  generate?: VaultGenerateRecipe;
   protection?: 'standard' | 'protected';
   description?: string;
   /** May already include `skill:<name>` tags; `links.skills` is a bare-name convenience mirror. */

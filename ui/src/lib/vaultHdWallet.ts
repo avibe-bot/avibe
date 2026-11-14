@@ -203,11 +203,24 @@ export type HdQuestion = { position: number; options: string[]; answer: string }
 export function makeQuiz(words: string[], random: () => number = Math.random): HdQuestion[] {
   const positions = new Set<number>();
   while (positions.size < 3) positions.add(1 + Math.floor(random() * words.length));
-  return [...positions].sort((a, b) => a - b).map((position) => {
+  const sorted = [...positions].sort((a, b) => a - b);
+  const answers = new Set(sorted.map((position) => words[position - 1]));
+  // A wrong option is never any row's answer and never repeats across rows (the sandbox's rule), so
+  // no row can be passed by recognising a word from another. Draw from the phrase first; a phrase
+  // with repeated words runs short, so top up from the BIP39 list.
+  const used = new Set(answers);
+  const take = (pool: string[]) => {
+    const fresh = pool.filter((w) => !used.has(w));
+    if (fresh.length === 0) return null;
+    const word = fresh[Math.floor(random() * fresh.length)];
+    used.add(word);
+    return word;
+  };
+  const phrase = [...new Set(words)];
+  return sorted.map((position) => {
     const answer = words[position - 1];
-    const others = [...new Set(words.filter((w) => w !== answer))];
     const decoys: string[] = [];
-    while (decoys.length < 2 && others.length > 0) decoys.push(others.splice(Math.floor(random() * others.length), 1)[0]);
+    while (decoys.length < 2) decoys.push(take(phrase) ?? take(wordlist)!);
     const options = [answer, ...decoys];
     for (let i = options.length - 1; i > 0; i -= 1) {
       const j = Math.floor(random() * (i + 1));

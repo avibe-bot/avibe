@@ -565,8 +565,15 @@ budgets separate from the app's deadlines, and use numeric loopback origins for
 cross-origin redirect checks. The hanging-readiness case uses a 3-second
 readiness deadline, which a cold WebContent or GPU process launch on a loaded
 simulator can exceed before the request is sent; it retries such an attempt
-within the fixture budget instead of counting it. When `ios-shell` XCTest fails, CI uploads
-`AvibeTests.xcresult` as `ios-shell-xcresult`.
+within the fixture budget instead of counting it. `ios-shell` uploads any available
+`AvibeTests.xcresult` as `ios-shell-xcresult` after success or failure, including
+compile failures. Signed-in App fixtures require a settled bootstrap and the
+expected account and instance IDs: the picker route alone also occurs after a
+bootstrap error. Fixture request attachments contain elapsed time, method, path,
+and response status, not headers, query strings, or bodies. The password-error
+mapping table establishes its own transport session once before checking each
+row's grant request; production deadlines and separate cold-start tests are
+unchanged.
 
 ### Two-step verification
 
@@ -869,7 +876,7 @@ bridge and do not run these Web UI branches.
 
 | Environment | Coverage |
 | --- | --- |
-| CI: Xcode 26.6, iOS 26.4.1 simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
+| CI: Xcode 26.6, pinned iOS 26.5 / iPhone 17 Pro simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
 | Local: Xcode 27.2, iOS 26.4.1 simulator | Focused Debug XCTest for notification-driven viewport geometry and bundled onboarding, plus real-WebKit Home quick-task, conversation composer, background/foreground, and bundled OTP explicit-dismissal checks. Each path returned to its safe-area baseline. Interactive pull-down dismissal remains an owner device retest. |
 | Local: Xcode 27.2, iOS 27.2 simulator | Focused Home quick-task check with the software keyboard; explicit dismissal returned the tab bar to its safe-area baseline. |
 

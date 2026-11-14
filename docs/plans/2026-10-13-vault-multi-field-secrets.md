@@ -174,6 +174,26 @@ The secret metadata payload (`_meta_payload`, REST, and `vibe vault list/find
   or `{"record", "sealed"}`. For the default field it replaces the default envelope.
   Otherwise it adds the field (appended) or replaces its value. It returns the
   masked metadata.
+- `POST /api/vault/secrets/{name}/fields` atomically saves a dialog's field
+  changes. Body: `{"expected_updated_at":"<version>","default_field":"password",
+  "values":[{"field":"password","record":"NAME","blind_box":{...}}],
+  "remove":["obsolete"]}`. `expected_updated_at` is required; the other keys
+  are optional (`values` and `remove` default to empty arrays). Protected values
+  use `sealed` instead of `blind_box`. Each value entry has exactly `field`,
+  `record`, and its tier's opaque envelope; plaintext is rejected recursively.
+  Value fields and record names refer to the final default label after the
+  optional rename; removals name existing extras. Edits/removals must be unique
+  and disjoint; the default cannot be removed, and a renamed default must use an
+  unused label, as with PATCH. Final layout is limited to 32 fields, so removing
+  one and adding one at capacity works. Response: `{"ok":true,"secret":<masked
+  metadata>}`. All envelopes are prepared outside the write transaction; one
+  compare-and-swap commits the entire batch and its usual per-field audit events.
+  An error stores nothing, including when a storage caller catches it. A stale
+  envelope version returns 409 `secret_conflict`; a default binding change during
+  sealing returns 409 `record_mismatch`, for one browser re-read/re-seal retry.
+  Envelope changes bump the version and expire grants once; rename-only keeps
+  existing metadata-only version/grant semantics. The per-field endpoints stay
+  available for other callers.
 - `DELETE /api/vault/secrets/{name}/fields/{field}` removes an extra field. The
   browser sends `{"expected_updated_at": "<displayed version>"}` so deleting a
   field changed in another tab returns 409 `secret_conflict`. The default field
@@ -211,6 +231,20 @@ vibe vault request GITHUB_LOGIN --reason "Log in to GitHub" \
   --spec-json '{"protection":"protected","fields":["username","password","totp"],"default_field":"password"}'
 ```
 
+A request can also carry an advisory `generate` recipe. It never generates,
+saves, or authorizes anything: the browser may use it to preset the user's
+explicit generator action on either tier. Recipes are strict objects:
+
+- Password: `{"type":"password","length":24,"digits":true,"symbols":true,"no_lookalikes":false}`.
+  `length` is 12–128 characters; the other options are booleans. Omitted options
+  use these defaults.
+- Hex or standard padded Base64: `{"type":"hex","bytes":32}` or
+  `{"type":"base64","bytes":32}`. `bytes` is 16–64 and defaults to 32;
+  password options are not accepted for these types.
+- Any recipe may name an optional `field` (a valid field label); omission targets
+  the default field. Unknown keys, types, or invalid limits reject the whole
+  request spec before any request/audit row is written. Recipes carry no value.
+
 The browser form starts with those rows. The user may remove rows, and every
 submitted field needs a value. Field-aware provision replies (asynchronous
 callbacks, synchronous `--wait`, and already-existing results) list current field
@@ -231,8 +265,10 @@ also receives this hint when the original request had no field spec.
 - A protected create seals every field in the same sandbox session and sends
   one create request. Vault establishment fields are sent once.
 - Edit: replace any field's value, add or remove extra fields, and rename the
-  default field. A row shows Save once it changes; on the default row Save
-  renames first and then writes a typed value under the renamed record. Name, kind, and protection stay read-only. After mount the
+  default field. Name, kind, and protection stay read-only. The dialog stages
+  all field edits and commits them with one Save through the atomic fields
+  endpoint; cancelling does not write any field. A default rename and replacement
+  use the final label and canonical record name in the same save. After mount the
   editor owns current server metadata and drafts: own-write responses or
   sequenced authoritative refetches update truth, while changed parent props
   and Vault events trigger refetches rather than directly replacing it. Only

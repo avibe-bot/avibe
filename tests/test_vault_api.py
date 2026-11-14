@@ -753,6 +753,27 @@ def test_get_provision_request_by_name_returns_pending_spec():
     assert result["ambiguous"] is False
 
 
+@pytest.mark.parametrize("protection", ["standard", "protected"])
+def test_generate_recipe_reaches_request_card_without_creating_secret(protection):
+    # The REST/card consumer must receive the preset, not a generated record.
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(
+            conn, "APP_SECRET", spec={
+                "protection": protection,
+                "fields": ["username", "password"], "default_field": "password",
+                "generate": {"type": "password", "length": 32, "field": "password", "symbols": False},
+            },
+        )
+    result = api.get_vault_provision_request(req["id"])
+    assert result["request"]["card"]["spec"]["generate"] == {
+        "type": "password", "length": 32, "field": "password", "digits": True,
+        "symbols": False, "no_lookalikes": False,
+    }
+    with api._vault_engine().connect() as conn:
+        assert vault_service.list_secrets(conn) == []
+        assert vault_service.list_grants(conn) == []
+
+
 def test_provision_request_card_carries_session_id():
     # The chat surface scopes request cards by card.session_id; provision must set it from the
     # requester like access/sign do, or its card is invisible in the originating chat.

@@ -59,6 +59,89 @@ enum WebKitReadiness {
         )
         throw WebKitReadinessError.documentNotLoaded
     }
+    /// A picker route is also the App's bootstrap error fallback. Require
+    /// the account and instance snapshot before exercising a signed-in flow.
+    /// This observes one bootstrap; it never retries or extends its deadlines.
+    @MainActor
+    static func waitForSignedInFixture(
+        _ app: AppModel,
+        accountID: String,
+        instanceIDs: Set<String>,
+        requests: FixtureRequestLog
+    ) async throws {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let deadline = started.advanced(by: standardTransportOperation)
+        while case .loading = app.route {
+            guard clock.now < deadline else {
+                throw FixtureReadinessError(description: fixtureEvidence(
+                    app, stage: "bootstrap did not settle", started: started,
+                    requests: requests
+                ))
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let evidence = fixtureEvidence(
+            app, stage: "bootstrap settled", started: started, requests: requests
+        )
+        print("[iOS fixture] \(evidence)")
+        guard case .onboarding(.instances) = app.route,
+              app.mobileSessionCoordinator.currentAccount?.id == accountID,
+              Set(app.mobileSessionCoordinator.currentInstances.map(\.id)) == instanceIDs
+        else {
+            throw FixtureReadinessError(description:
+                "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())"
+            )
+        }
+    }
+
+    @MainActor
+    private static func fixtureEvidence(
+        _ app: AppModel,
+        stage: String,
+        started: ContinuousClock.Instant,
+        requests: FixtureRequestLog
+    ) -> String {
+        let account = app.mobileSessionCoordinator.currentAccount?.id ?? "nil"
+        let instances = app.mobileSessionCoordinator.currentInstances.map(\.id).sorted()
+        return "stage=\(stage), elapsed=\(started.duration(to: .now)), "
+            + "route=\(app.route), account=\(account), instances=\(instances); "
+            + requests.summary()
+    }
+}
+
+/// Only fixture metadata, never request bodies, headers, query strings or
+/// provider error text (the password test deliberately puts secrets in those).
+final class FixtureRequestLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private let started = ContinuousClock.now
+    private var entries: [String] = []
+
+    var count: Int { lock.withLock { entries.count } }
+
+    func record(_ request: LocalHTTPRequest, status: Int) {
+        lock.withLock {
+            entries.append("\(started.duration(to: .now)) \(request.method) \(request.path) -> \(status)")
+        }
+    }
+
+    func summary(since index: Int = 0) -> String {
+        lock.withLock {
+            "requests=[" + entries.dropFirst(index).joined(separator: "; ") + "]"
+        }
+    }
+
+    @MainActor
+    func attach(to test: XCTestCase, name: String) {
+        let attachment = XCTAttachment(string: summary())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        test.add(attachment)
+    }
+}
+
+struct FixtureReadinessError: Error, CustomStringConvertible {
+    let description: String
 }
 
 enum WebKitReadinessError: Error {
