@@ -25,9 +25,7 @@ command -v opencode || true
 command -v codex || true
 ```
 
-Windows 用户默认推荐 WSL：
-
-- https://github.com/avibe-bot/avibe/blob/master/docs/WINDOWS_WSL_ZH.md
+在 Mac 或 Windows 电脑上，推荐的方式是桌面 App：由用户自己从 https://avibe.bot 下载并安装。先把这一点告诉用户；只有用户明确想用命令行安装时，才继续按这份流程操作。Windows 上的命令行安装指原生 PowerShell，这份流程里的 `bash` 检查在那里不适用。
 
 ## 第 2 步：安装 Avibe
 
@@ -42,7 +40,7 @@ curl -fsSL https://avibe.bot/install.sh | bash
 Windows PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1 | iex
+irm https://avibe.bot/install.ps1 | iex
 ```
 
 验证：
@@ -176,7 +174,7 @@ bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --unin
 Windows PowerShell：
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://avibe.bot/install.ps1))) -Uninstall
 ```
 
 只有用户明确要求时，才连同数据一起删除。数据删除后无法恢复，所以先和用户确认。清除只删除真实目录：如果 home 是通过链接到达的，只删除链接本身，并告诉用户它指向哪里，由用户自行删除。清除时会先列出要删除的全部内容，并在终端上确认；没有终端时（比如 agent 的 shell），不加 `--yes`（PowerShell 为 `-Yes`）就不会执行：
@@ -186,5 +184,5 @@ bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --unin
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall -Purge
+& ([scriptblock]::Create((irm https://avibe.bot/install.ps1))) -Uninstall -Purge
 ```

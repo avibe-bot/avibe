@@ -710,6 +710,10 @@ fn open_desktop_updates(app: &AppHandle) -> bool {
         return false;
     };
     if !pet::is_workbench(&window) {
+        if instance_client::present_guarded(app, "updates") {
+            focus_or_restore_main_window(app);
+            return true;
+        }
         return false;
     }
     focus_or_restore_main_window(app);
@@ -722,14 +726,6 @@ fn request_desktop_updates(app: &AppHandle) {
 
 fn take_desktop_update_request(app: &AppHandle) -> bool {
     app.state::<PendingDesktopUpdateOpen>().take()
-}
-
-fn request_and_open_desktop_updates(app: &AppHandle) {
-    request_desktop_updates(app);
-    focus_or_restore_main_window(app);
-    if open_desktop_updates(app) {
-        let _ = take_desktop_update_request(app);
-    }
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -2627,9 +2623,8 @@ pub fn run() {
             pet::pet_set_voice_mode,
             notifications::desktop_notifications_state,
             notifications::desktop_notifications_set_enabled,
-            updater::desktop_remote_install_allowed,
-            updater::desktop_remote_install_set,
             updater::desktop_update_prereleases_set,
+            updater::desktop_update_auto_update_set,
             updater::desktop_update_remote_decline,
             pet::pet_ready,
             pet::pet_context_menu,

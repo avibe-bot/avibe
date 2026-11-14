@@ -2,6 +2,7 @@ import i18n, { type BackendModule } from 'i18next';
 import { initReactI18next } from 'react-i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
 
+import { forDevicePlatform } from './device';
 import { APP_LANGUAGES, I18N_OPTIONS, type AppLanguage } from './options';
 
 // The Web UI's copy, one language at a time (docs/plans/web-ui-first-load.md):
@@ -30,7 +31,7 @@ const lazyBundles: BackendModule = {
       return;
     }
     BUNDLES[language]().then(
-      (bundle) => callback(null, bundle.default),
+      (bundle) => callback(null, forDevicePlatform(bundle.default)),
       (error: unknown) => callback(error instanceof Error ? error : String(error), false),
     );
   },

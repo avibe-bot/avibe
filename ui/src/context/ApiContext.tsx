@@ -1,4 +1,8 @@
 import type { PolicyDowngradeContext } from '../lib/vaultPolicyWire';
+import type { UpdateControlRequest, UpdateSnapshot } from '../components/update/types';
+export type {
+  DesktopRemoteUpdatePhase, DesktopRemoteUpdateRequest, UpdateControlRequest, UpdateHostAction,
+} from '../components/update/types';
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
@@ -889,6 +893,8 @@ export type ApiContextType = {
     options?: { confirmInterrupt?: boolean },
   ) => Promise<DesktopRemoteUpdateResult>;
   doUpgrade: (options?: { confirmInterrupt: boolean }) => Promise<UpgradeResult>;
+  /** Ask this host's updater to check now, or to change one of its settings. */
+  requestUpdateControl: (action: UpdateControlRequest['action'], enabled?: boolean) => Promise<UpdateControlResult>;
   browseDirectory: (path: string, showHidden?: boolean) => Promise<{ ok: boolean; path?: string; parent?: string | null; dirs?: { name: string; path: string }[]; error?: string }>;
   browseFavorites: () => Promise<{ ok: boolean; system?: string; favorites?: { key: string; path: string }[]; error?: string }>;
   browseMkdir: (path: string) => Promise<{ path: string }>;
@@ -2178,42 +2184,14 @@ export type LogSource = {
   logs?: LogEntry[];
 };
 
-export type VersionInfo = {
-  current: string;
-  latest: string | null;
-  has_update: boolean;
-  error: string | null;
-  managed_by?: 'desktop';
-  remote_install_allowed?: boolean;
-  remote_request?: DesktopRemoteUpdateRequest | null;
-  build?: {
-    kind: 'package' | 'source';
-    revision?: string;
-    dirty?: boolean;
-  };
-};
+/** The update snapshot `/api/version` reports, shared with the update panel (components/update/types.ts). */
+export type VersionInfo = UpdateSnapshot;
 
-export type DesktopRemoteUpdatePhase =
-  | 'requested'
-  | 'acknowledged'
-  | 'checking'
-  | 'awaiting_host'
-  | 'downloading'
-  | 'installing'
-  | 'restarting'
-  | 'completed'
-  | 'failed'
-  | 'declined'
-  | 'expired';
+/** `request_id` when a desktop app takes the request; `snapshot` when a standalone Runtime answers at once. */
+export type UpdateControlResult =
+  | { ok: true; request_id?: string; snapshot?: VersionInfo }
+  | { ok: false; error: string };
 
-export type DesktopRemoteUpdateRequest = {
-  request_id: string;
-  target: string;
-  phase: DesktopRemoteUpdatePhase;
-  progress: number | null;
-  error_code: string | null;
-  updated_at: string;
-};
 
 export type DesktopRemoteUpdateErrorCode =
   | 'not_desktop_managed'
@@ -4375,6 +4353,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         throw new ApiError('Upgrade request failed', res.status, payloadJson?.error ?? null);
       }
       return payloadJson as UpgradeResult;
+    },
+    requestUpdateControl: async (action, enabled) => {
+      const path = action === 'check' ? '/api/update/check'
+        : action === 'prereleases' ? '/api/update/prereleases' : '/api/update/auto-update';
+      const { res, payloadJson } = await requestJson(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(action === 'check' ? {} : { enabled }),
+      }, path, { handleError: false });
+      if (!res.ok && typeof payloadJson?.error !== 'string') {
+        throw new ApiError('Update request failed', res.status, null);
+      }
+      return payloadJson as UpdateControlResult;
     },
     browseDirectory: (path, showHidden) => postJson('/api/browse', { path, show_hidden: showHidden || false }),
     browseFavorites: () => getJson('/api/browse/favorites'),

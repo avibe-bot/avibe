@@ -133,6 +133,16 @@ _RETAINED_OWNER_ROUTES = {
 }
 
 
+@pytest.mark.parametrize("role", ["owner", "member", "editor", "viewer"])
+def test_desktop_idle_probe_never_queries_a_remote_selected_runtime(management_http, monkeypatch, role):
+    probe = AsyncMock(return_value={"idle_seconds": 7200})
+    monkeypatch.setattr(internal_client, "desktop_update_idle", probe)
+    response = management_http(role)("GET", "/api/desktop/update/idle")
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "direct_loopback_required"
+    probe.assert_not_awaited()
+
+
 def test_complete_registered_api_management_inventory():
     endpoints = {
         (method, route.path)
@@ -148,10 +158,15 @@ def test_complete_registered_api_management_inventory():
     # + 2 HD account metadata mutations (Editor, like other Vault metadata;
     # the service also requires resource-management authority).
     # + 2 Desktop local enrollment methods (Owner and direct-loopback-only).
+    # + 3 host-owned update check/channel/auto-update methods (Member).
+    # + 1 fresh controller idle probe (Member and direct-loopback-only).
     # + 1 HD Bitcoin public preparation mutation (Editor plus resource management).
     # + 3 shared Vault setup and exact-target policy authorization methods.
     # + 1 atomic Vault field save (Editor namespace plus resource management).
-    assert len(endpoints) == 332
+    assert len(endpoints) == 336
+    idle_policy = http_authorization_policy("GET", "/api/desktop/update/idle")
+    assert idle_policy.minimum_role == "member"
+    assert idle_policy.direct_loopback_only
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
@@ -193,6 +208,9 @@ def test_complete_registered_api_management_inventory():
     assert http_authorization_policy("GET", "/api/desktop/computer-use/status").minimum_role == "member"
     assert ("POST", "/api/desktop/update/request") in endpoints
     assert http_authorization_policy("POST", "/api/desktop/update/request").minimum_role == "member"
+    for action in ("check", "prereleases", "auto-update"):
+        assert ("POST", f"/api/update/{action}") in endpoints
+        assert http_authorization_policy("POST", f"/api/update/{action}").minimum_role == "member"
     # Additive read-only backend projection inherits native backend-management
     # authorization; it does not grant lower-tier credential-management access.
     assert ("GET", "/api/backend/{name}/connection") in endpoints

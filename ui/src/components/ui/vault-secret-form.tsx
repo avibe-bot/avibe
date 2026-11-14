@@ -56,6 +56,7 @@ import { ProtectedHdDesignState } from '@/lib/protectedHdDesign';
 import { useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
+import { DEFAULT_PASSWORD_RECIPE, recipeFromSpec, type GenerateRecipe } from '@/lib/vaultGenerate';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
@@ -86,6 +87,7 @@ import { AskTurnOffNote } from './vault-ask-turn-off-note';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 import { VaultSolanaKeyFields } from './vault-solana-key-fields';
+import { VaultGenerateControl, VaultGeneratedBadge } from './vault-generate';
 
 type VaultKind = 'static' | 'keypair';
 /** The chain family a signing key is for. It decides the curve, and how the key is created. */
@@ -93,7 +95,17 @@ type KeyChain = 'evm-bitcoin' | 'solana' | 'mnemonic';
 type FetchAuthMode = 'bearer' | 'header' | 'query';
 type StaticSecretSource = 'text' | 'file';
 /** A create-form field row. Touched flags hold back blank-field errors until the user has been there. */
-type FieldDraft = { id: number; name: string; value: string; nameTouched?: boolean; valueTouched?: boolean };
+type FieldDraft = {
+  id: number;
+  name: string;
+  value: string;
+  nameTouched?: boolean;
+  valueTouched?: boolean;
+  /** The generator's settings for this row, once it has been used. */
+  recipe?: GenerateRecipe;
+  /** The generator filled this row and it hasn't been typed over. A flag, never a copy of the value. */
+  generated?: boolean;
+};
 
 let nextFieldDraftId = 0;
 const fieldDraft = (name: string, value = ''): FieldDraft => ({ id: nextFieldDraftId++, name, value });
@@ -283,6 +295,19 @@ export const VaultSecretForm: React.FC<{
   // per-use browser approval instead. Only meaningful for a standard keypair (see onSubmit).
   const [alwaysAsk, setAlwaysAsk] = useState(false);
   const [showValue, setShowValue] = useState(false);
+  // The generator (ui/design: vault/generate-secret). An Agent's request may preset it; the preset
+  // only sets the options, never a value. `valueFromGenerator` marks the field as generated until it
+  // is typed over; it holds no copy of the value, so clearing the field (as sealing does) clears
+  // everything. Both tiers alike: the value is in this form like a typed one, sealed only at Save.
+  const specRecipe = useMemo(
+    () => recipeFromSpec((requestSpec as { generate?: unknown } | null | undefined)?.generate),
+    [requestSpec],
+  );
+  const specRecipeField = (requestSpec as { generate?: { field?: unknown } } | null | undefined)?.generate?.field;
+  const [recipe, setRecipe] = useState<GenerateRecipe>(specRecipe ?? DEFAULT_PASSWORD_RECIPE);
+  const [valueFromGenerator, setValueFromGenerator] = useState(false);
+  // Which generator popup is open: the single value ('value') or a field row (its id).
+  const [generatorOpen, setGeneratorOpen] = useState<'value' | number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [checkingAvault, setCheckingAvault] = useState(true);
   const [avaultDep, setAvaultDep] = useState<DependencyItem | null>(null);
@@ -1102,6 +1127,7 @@ export const VaultSecretForm: React.FC<{
     }
   };
 
+  const valueGenerated = valueFromGenerator && Boolean(value);
   const valueField = (
     <div className="flex flex-col gap-2">
       {/* Protected static values are typed and handed to the sandbox as text (byte-safe UTF-8).
@@ -1122,40 +1148,75 @@ export const VaultSecretForm: React.FC<{
         </div>
       )}
       {staticSource === 'text' ? (
-        <div className="flex items-start gap-2">
-          {showValue ? (
-            <Textarea
-              value={value}
-              onChange={(event) => setStaticValue(event.target.value)}
-              placeholder={t('vaults.dialog.valuePlaceholder')}
-              autoFocus={isProvision}
-              required
-              spellCheck={false}
-              autoComplete="off"
-              className="min-h-[76px] min-w-0 flex-1 resize-y font-mono text-xs leading-relaxed"
-            />
-          ) : (
-            <Input
-              type="password"
-              value={value}
-              onChange={(event) => setStaticValue(event.target.value)}
-              placeholder={t('vaults.dialog.valuePlaceholder')}
-              autoFocus={isProvision}
-              required
-              spellCheck={false}
-              autoComplete="off"
-              className="min-w-0 flex-1 font-mono text-xs"
-            />
-          )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={() => setShowValue((current) => !current)}
-            aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
-          >
-            {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-          </Button>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-start gap-2">
+            <VaultGenerateControl
+              recipe={recipe}
+              onRecipeChange={setRecipe}
+              onValue={(next) => {
+                setValueFromGenerator(true);
+                setStaticValue(next);
+              }}
+              open={generatorOpen === 'value'}
+              onOpenChange={(open) => setGeneratorOpen(open ? 'value' : null)}
+              labelled
+              showLabel={!value}
+              suggested={Boolean(specRecipe) && !specRecipeField}
+              disabled={submitting}
+            >
+              {showValue && generatorOpen !== 'value' ? (
+                <Textarea
+                  value={value}
+                  onChange={(event) => {
+                    setValueFromGenerator(false);
+                    setStaticValue(event.target.value);
+                  }}
+                  placeholder={t('vaults.dialog.valuePlaceholder')}
+                  autoFocus={isProvision}
+                  required
+                  spellCheck={false}
+                  autoComplete="off"
+                  className={cn('min-h-[76px] min-w-0 flex-1 resize-y pr-12 font-mono text-xs leading-relaxed', valueGenerated && 'border-mint/40 bg-mint-soft/40')}
+                />
+              ) : (
+                <Input
+                  // In clear while the generator is open, so each change shows as it happens.
+                  type={generatorOpen === 'value' ? 'text' : 'password'}
+                  value={value}
+                  onChange={(event) => {
+                    setValueFromGenerator(false);
+                    setStaticValue(event.target.value);
+                  }}
+                  placeholder={t('vaults.dialog.valuePlaceholder')}
+                  autoFocus={isProvision}
+                  required
+                  spellCheck={false}
+                  autoComplete="off"
+                  aria-label={t('vaults.dialog.value')}
+                  className={cn(
+                    'min-w-0 flex-1 pr-12 font-mono text-xs md:group-focus-within/gen:pr-36',
+                    !value && 'max-md:pr-36',
+                    valueGenerated && 'border-mint/40 bg-mint-soft/40',
+                  )}
+                />
+              )}
+            </VaultGenerateControl>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => setShowValue((current) => !current)}
+              aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
+            >
+              {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+            </Button>
+          </div>
+          {valueGenerated && generatorOpen !== 'value' ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <VaultGeneratedBadge />
+              <span className="text-[11px] text-muted">{t('vaults.generate.generatedHint')}</span>
+            </div>
+          ) : null}
         </div>
       ) : (
         <div className="rounded-[10px] border border-dashed border-border-strong bg-surface p-3">
@@ -1195,6 +1256,11 @@ export const VaultSecretForm: React.FC<{
   // Leaving the single value turns it into rows. Its value moves to the default row (`value`
   // for Add field, `password` for a template), and a selected file is dropped because file
   // uploads hold one value only.
+  // The single value moves into the default row, keeping its generated mark and settings.
+  const carriedValue = (field: string): FieldDraft => ({
+    ...fieldDraft(field, value),
+    ...(valueGenerated ? { generated: true, recipe } : {}),
+  });
   const leaveSingleValue = () => {
     setStaticValue('');
     setStaticSource('text');
@@ -1202,12 +1268,12 @@ export const VaultSecretForm: React.FC<{
   };
   const addFieldRow = () => {
     const added = fieldDraft('');
-    setFieldRows((rows) => [...(rows ?? [fieldDraft('value', value)]), added]);
+    setFieldRows((rows) => [...(rows ?? [carriedValue('value')]), added]);
     setFocusField({ id: added.id, part: 'name' });
     leaveSingleValue();
   };
   const applyFieldTemplate = (fields: string[], defaultField: string) => {
-    const rows = fields.map((field) => fieldDraft(field, field === defaultField ? value : ''));
+    const rows = fields.map((field) => (field === defaultField ? carriedValue(field) : fieldDraft(field)));
     setFieldRows(rows);
     setDefaultFieldIndex(fields.indexOf(defaultField));
     setFocusField({ id: (rows.find((row) => !row.value) ?? rows[0]).id, part: 'value' });
@@ -1220,6 +1286,10 @@ export const VaultSecretForm: React.FC<{
     setDefaultFieldIndex((current) => (index < current ? current - 1 : current));
   };
 
+  // A row starts from the Agent's suggestion when it names this row, or names no field and this is
+  // the default row; otherwise from the default password.
+  const rowPreset = (row: FieldDraft, index: number): GenerateRecipe =>
+    specRecipe && (specRecipeField ? row.name === specRecipeField : index === defaultFieldIndex) ? specRecipe : DEFAULT_PASSWORD_RECIPE;
   const fieldNames = fieldRows?.map((row) => row.name) ?? [];
   const fieldNameIssues = fieldNames.map((fieldName, index) =>
     vaultFieldNameIssue(fieldName, fieldNames.filter((_, i) => i !== index)));
@@ -1258,10 +1328,28 @@ export const VaultSecretForm: React.FC<{
                 value: row.value,
                 label: t('vaults.fields.value', { field: label }),
                 placeholder: row.name ? t('vaults.fields.value', { field: row.name }) : t('vaults.dialog.valuePlaceholder'),
-                onChange: (next) => patchFieldRow(row.id, { value: next }),
+                onChange: (next) => patchFieldRow(row.id, { value: next, generated: false }),
                 onBlur: () => patchFieldRow(row.id, { valueTouched: true }),
                 autoFocus: focusField?.id === row.id && focusField.part === 'value',
+                forceReveal: generatorOpen === row.id,
+                generated: Boolean(row.value && row.generated),
               }}
+              note={row.value && row.generated && generatorOpen !== row.id ? <VaultGeneratedBadge /> : undefined}
+              wrapValue={(input) => (
+                <VaultGenerateControl
+                  recipe={row.recipe ?? rowPreset(row, index)}
+                  onRecipeChange={(next) => patchFieldRow(row.id, { recipe: next })}
+                  // Only the value: the settings were already set by onRecipeChange in the same tick.
+                  onValue={(next) => patchFieldRow(row.id, { value: next, generated: true, valueTouched: true })}
+                  open={generatorOpen === row.id}
+                  onOpenChange={(open) => setGeneratorOpen(open ? row.id : null)}
+                  triggerOutside
+                  suggested={!row.recipe && Boolean(specRecipe) && rowPreset(row, index) === specRecipe}
+                  disabled={submitting}
+                >
+                  {input}
+                </VaultGenerateControl>
+              )}
               onSetDefault={() => setDefaultFieldIndex(index)}
               remove={{
                 label: t('vaults.fields.remove', { field: label }),

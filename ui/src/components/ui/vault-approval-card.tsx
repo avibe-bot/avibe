@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, Info, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 
@@ -645,6 +645,11 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
+  // A pending Solana signature may wait longer than its transaction stays valid (a minute or two,
+  // unless it uses a durable nonce). The card does not parse the message, so the hint is shown for
+  // every pending `ed25519` request (ui/design: vault/solana/approval); once this card or the daemon
+  // settles the request it is gone.
+  const showBlockhashHint = isSign && signsMessage && request.status === 'pending' && !resolved;
   // A wallet whose address check failed in this browser is not signed with from here either.
   const walletBlocked = isSign && Boolean(hdDerivation) && Boolean(card?.secret_name) && isHdWalletBlocked(card?.secret_name ?? '');
   const approveDisabled = busy || preparing || entryBlocked || walletBlocked || !canApprove || (isDelete && !canManageDelete) || (!isSign && !isDelete && !option);
@@ -817,6 +822,12 @@ export const VaultApprovalCard: React.FC<{
               ) : null}
             </div>
           </DetailRow>
+        ) : null}
+        {showBlockhashHint ? (
+          <span role="note" className="flex items-start gap-2 text-[12px] leading-snug text-muted">
+            <Info className="mt-px size-3.5 shrink-0" />
+            {t('vaults.approval.solanaBlockhashHint')}
+          </span>
         ) : null}
       </div>
 

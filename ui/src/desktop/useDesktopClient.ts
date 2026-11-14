@@ -25,12 +25,13 @@ export function useDesktopClientProjection(): DesktopClientProjection | null {
 
 export function usePresentDesktopClient() {
   const authorize = useUnsavedChangesActionGuard();
-  return useCallback((view: DesktopClientView | 'updates') => {
+  return useCallback((view: DesktopClientView | 'updates', presentationToken?: string) => {
     if (!hasDesktopClient()) return false;
     const permission = authorize();
     if (!permission) return false;
+    // The token is captured here, so an approval given later still answers this request.
     permission.runNavigation(() => {
-      presentDesktopClient(view);
+      presentDesktopClient(view, presentationToken);
     });
     return true;
   }, [authorize]);
@@ -41,11 +42,13 @@ function CompatibleDesktopClientPresentation() {
   useEffect(() => {
     if (!hasDesktopClient()) return;
     const handle = (event: Event) => {
-      const view: unknown = (event as CustomEvent).detail?.view;
+      const detail: unknown = (event as CustomEvent).detail;
+      const view: unknown = (detail as { view?: unknown } | null)?.view;
       if (!isDesktopClientView(view)) return;
+      const token: unknown = (detail as { presentationToken?: unknown } | null)?.presentationToken;
       // Consumed even when the user refuses, so native must not fall back past the guard.
       event.preventDefault();
-      present(view);
+      present(view, typeof token === 'string' ? token : undefined);
     };
     window.addEventListener(DESKTOP_PRESENT_EVENT, handle);
     return () => window.removeEventListener(DESKTOP_PRESENT_EVENT, handle);

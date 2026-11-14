@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from core.inbox_events import publish_runtime_activity
 from core.message_output import MessageOutput
 from core.runtime_activation import RuntimeActivationIdentity, RuntimeActivationRegistry
 
@@ -404,6 +405,7 @@ class SessionActivityRegistry:
         return set(_activity_run_id_sequence(activity))
 
     def _persist_activity(self, activity: SessionActivity, *, phase: str) -> None:
+        publish_runtime_activity()
         upsert = getattr(self._store, "upsert_activity", None)
         if callable(upsert):
             try:
@@ -482,6 +484,7 @@ class SessionActivityRegistry:
                 continue
 
     def _delete_activity(self, activity: SessionActivity) -> None:
+        publish_runtime_activity()
         delete = getattr(self._store, "delete_activity", None)
         if callable(delete):
             try:
@@ -2302,19 +2305,21 @@ class SessionActivityRegistry:
             if not snapshots:
                 self._terminal_snapshots.pop(key, None)
 
-    def has_backend_work(self, backend: str) -> bool:
-        """Whether a backend has live Activities or undelivered completions."""
+    def has_backend_work(self, backend: str | None) -> bool:
+        """Live Activities/undelivered completions, including unroutable backends.
 
-        identity = str(backend)
+        ``None`` asks about all retained owners, not only registered backends.
+        """
+        identity = str(backend) if backend is not None else None
         with self._lock:
             return (
-                any(key[0] == identity for key in self._active)
+                any(identity is None or key[0] == identity for key in self._active)
                 or any(
-                    key[0] == identity and bool(queue)
+                    (identity is None or key[0] == identity) and bool(queue)
                     for key, queue in self._completed_outputs.items()
                 )
-                or any(key[0] == identity for key in self._claimed_completed_outputs)
-                or any(key[0] == identity for key in self._terminal_snapshots)
+                or any(identity is None or key[0] == identity for key in self._claimed_completed_outputs)
+                or any(identity is None or key[0] == identity for key in self._terminal_snapshots)
             )
 
     def end_backend(

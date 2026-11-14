@@ -2157,25 +2157,222 @@ private final class RuntimePage {
     }
 }
 
-/// Loads a document and waits for it. The cancellation of a navigation
-/// that was in flight when this one started is not this load's failure.
+/// Script terminal callbacks independently of WebContent timing. Navigation
+/// tokens still come from WebKit: bare WKNavigation() instances lack the native
+/// storage their deallocator requires. Token creation uses only local HTML.
+final class PageLoaderTests: XCTestCase {
+    @MainActor
+    func testUnrelatedCallbacksCannotSettleTheRequestedDocument() async throws {
+        enum Callback: CaseIterable {
+            case staleFinish, staleFailure, staleProvisionalFailure
+            case nilFinish, nilFailure, nilProvisionalFailure
+            case wrongViewFinish, wrongViewFailure, wrongViewProvisionalFailure
+            case wrongViewTermination
+        }
+        let view = makeWebView()
+        let otherView = makeWebView()
+        let loader = PageLoader()
+        let staleNavigation = try view.makeNavigation()
+        let expected = NSError(domain: "PageLoaderTests", code: 123)
+        let unrelated = NSError(domain: "PageLoaderTests", code: 456)
+
+        for callback in Callback.allCases {
+            let navigation = try view.makeNavigation()
+            view.nextNavigation = navigation
+            view.onLoad = {
+                switch callback {
+                case .staleFinish:
+                    loader.webView(view, didFinish: staleNavigation)
+                case .staleFailure:
+                    loader.webView(view, didFail: staleNavigation, withError: unrelated)
+                case .staleProvisionalFailure:
+                    loader.webView(view, didFailProvisionalNavigation: staleNavigation, withError: unrelated)
+                case .nilFinish:
+                    loader.webView(view, didFinish: nil)
+                case .nilFailure:
+                    loader.webView(view, didFail: nil, withError: unrelated)
+                case .nilProvisionalFailure:
+                    loader.webView(view, didFailProvisionalNavigation: nil, withError: unrelated)
+                case .wrongViewFinish:
+                    loader.webView(otherView, didFinish: navigation)
+                case .wrongViewFailure:
+                    loader.webView(otherView, didFail: navigation, withError: unrelated)
+                case .wrongViewProvisionalFailure:
+                    loader.webView(otherView, didFailProvisionalNavigation: navigation, withError: unrelated)
+                case .wrongViewTermination:
+                    loader.webViewWebContentProcessDidTerminate(otherView)
+                }
+                // A terminal fallback makes an incorrectly accepted callback
+                // fail an assertion rather than leave this test hanging.
+                loader.webView(view, didFail: navigation, withError: expected)
+            }
+            do {
+                try await loader.loadHTML("fixture", baseURL: baseURL, in: view)
+                XCTFail("Unrelated callback completed the load: \(callback)")
+            } catch {
+                XCTAssertEqual(error as NSError, expected, "\(callback)")
+            }
+        }
+    }
+
+    @MainActor
+    func testMatchingFailuresIncludingCancellationAreNotIgnored() async throws {
+        let view = makeWebView()
+        let loader = PageLoader()
+        for provisional in [false, true] {
+            for code in [NSURLErrorCancelled, NSURLErrorCannotFindHost] {
+                let navigation = try view.makeNavigation()
+                let expected = NSError(domain: NSURLErrorDomain, code: code)
+                view.nextNavigation = navigation
+                view.onLoad = {
+                    if provisional {
+                        loader.webView(view, didFailProvisionalNavigation: navigation, withError: expected)
+                    } else {
+                        loader.webView(view, didFail: navigation, withError: expected)
+                    }
+                    loader.webView(view, didFinish: navigation)
+                }
+                do {
+                    try await loader.loadHTML("fixture", baseURL: baseURL, in: view)
+                    XCTFail("Matching failure was ignored: \(code), provisional=\(provisional)")
+                } catch {
+                    XCTAssertEqual(error as NSError, expected)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testProcessTerminationFailsOnceAndLoaderCanBeReused() async throws {
+        let view = makeWebView()
+        let loader = PageLoader()
+        let terminatedNavigation = try view.makeNavigation()
+        view.nextNavigation = terminatedNavigation
+        view.onLoad = {
+            loader.webViewWebContentProcessDidTerminate(view)
+            loader.webViewWebContentProcessDidTerminate(view)
+            loader.webView(view, didFinish: terminatedNavigation)
+        }
+        do {
+            try await loader.loadHTML("fixture", baseURL: baseURL, in: view)
+            XCTFail("Process termination must fail, not accept a fallback document")
+        } catch {
+            XCTAssertEqual(error as? PageLoader.LoadError, .webContentProcessTerminated)
+        }
+
+        let nextNavigation = try view.makeNavigation()
+        view.nextNavigation = nextNavigation
+        view.onLoad = {
+            loader.webView(
+                view, didFail: terminatedNavigation,
+                withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+            )
+            loader.webView(view, didFinish: nextNavigation)
+            // Success must also clear the owner before a later termination.
+            loader.webViewWebContentProcessDidTerminate(view)
+        }
+        try await loader.loadHTML("next fixture", baseURL: baseURL, in: view)
+    }
+
+    @MainActor
+    func testMissingNavigationFailsAndClearsThePendingLoad() async throws {
+        let view = makeWebView()
+        let loader = PageLoader()
+        view.nextNavigation = nil
+        // A broken loader must fail an assertion, not suspend this test forever.
+        view.onLoad = { loader.webView(view, didFinish: nil) }
+        do {
+            try await loader.loadHTML("fixture", baseURL: baseURL, in: view)
+            XCTFail("A load without a navigation token cannot be observed")
+        } catch {
+            XCTAssertEqual(error as? PageLoader.LoadError, .navigationNotCreated)
+        }
+        let navigation = try view.makeNavigation()
+        view.nextNavigation = navigation
+        view.onLoad = { loader.webView(view, didFinish: navigation) }
+        try await loader.loadHTML("next fixture", baseURL: baseURL, in: view)
+    }
+
+    private var baseURL: URL { URL(string: "https://fixture.example")! }
+
+    @MainActor
+    private func makeWebView() -> ScriptedPageLoaderWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        return ScriptedPageLoaderWebView(frame: .zero, configuration: configuration)
+    }
+}
+
+@MainActor
+private final class ScriptedPageLoaderWebView: WKWebView {
+    var nextNavigation: WKNavigation?
+    var onLoad: (() -> Void)?
+
+    func makeNavigation() throws -> WKNavigation {
+        // Bypass the scripted override to obtain a fully initialized token.
+        // No navigationDelegate is installed, so WebKit cannot deliver these
+        // real load callbacks to PageLoader; only onLoad does that.
+        let navigation = try XCTUnwrap(super.loadHTMLString("<!doctype html>", baseURL: nil))
+        stopLoading()
+        return navigation
+    }
+
+    override func loadHTMLString(_ string: String, baseURL: URL?) -> WKNavigation? {
+        let callback = onLoad
+        onLoad = nil
+        // Match WebKit's asynchronous delegate delivery: the loader must have
+        // received the navigation token before these callbacks run.
+        Task { @MainActor in callback?() }
+        return nextNavigation
+    }
+}
+
+/// Observes only the synthetic document requested by this loader. A runtime
+/// controller can already have a URL navigation in flight when this delegate
+/// is installed; its callbacks must not complete the synthetic document wait.
 @MainActor
 private final class PageLoader: NSObject, WKNavigationDelegate {
+    enum LoadError: Error, Equatable, LocalizedError {
+        case alreadyLoading
+        case navigationNotCreated
+        case webContentProcessTerminated
+
+        var errorDescription: String? {
+            switch self {
+            case .alreadyLoading:
+                return "PageLoader already has a pending fixture document load"
+            case .navigationNotCreated:
+                return "PageLoader could not create a navigation for the fixture document"
+            case .webContentProcessTerminated:
+                return "PageLoader WebContent process terminated before the fixture document finished loading"
+            }
+        }
+    }
+
     private var continuation: CheckedContinuation<Void, Error>?
+    private var navigation: WKNavigation?
+    private weak var loadingWebView: WKWebView?
 
     func loadHTML(
         _ html: String,
         baseURL: URL,
         in webView: WKWebView
     ) async throws {
+        guard continuation == nil else {
+            throw LoadError.alreadyLoading
+        }
         try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
-            webView.loadHTMLString(html, baseURL: baseURL)
+            loadingWebView = webView
+            navigation = webView.loadHTMLString(html, baseURL: baseURL)
+            if navigation == nil {
+                finish(with: .failure(LoadError.navigationNotCreated))
+            }
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        finish(with: .success(()))
+        finish(in: webView, navigation: navigation, with: .success(()))
     }
 
     func webView(
@@ -2183,7 +2380,7 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
         didFail navigation: WKNavigation?,
         withError error: Error
     ) {
-        finish(with: .failure(error))
+        finish(in: webView, navigation: navigation, with: .failure(error))
     }
 
     func webView(
@@ -2191,18 +2388,35 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation?,
         withError error: Error
     ) {
-        finish(with: .failure(error))
+        finish(in: webView, navigation: navigation, with: .failure(error))
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard webView === loadingWebView else { return }
+        // The HTML document is gone. Do not let WebKit's fallback URL reload
+        // masquerade as the requested fixture or wait for its DNS failure.
+        finish(with: .failure(LoadError.webContentProcessTerminated))
+    }
+
+    private func finish(
+        in webView: WKWebView,
+        navigation: WKNavigation?,
+        with result: Result<Void, Error>
+    ) {
+        guard webView === loadingWebView,
+              let navigation, navigation === self.navigation
+        else { return }
+        // Cancellation of this navigation is a real failure. Only callbacks
+        // for a different navigation are ignored, regardless of error code.
+        finish(with: result)
     }
 
     private func finish(with result: Result<Void, Error>) {
-        if case .failure(let error as NSError) = result,
-           error.domain == NSURLErrorDomain,
-           error.code == NSURLErrorCancelled
-        {
-            return
-        }
-        continuation?.resume(with: result)
+        let pending = continuation
         continuation = nil
+        navigation = nil
+        loadingWebView = nil
+        pending?.resume(with: result)
     }
 }
 

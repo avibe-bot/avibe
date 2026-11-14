@@ -828,3 +828,88 @@ it.each([['p2pkh'], ['p2wpkh'], ['p2tr'], [undefined]] as const)('approving a se
   if (type) expect(body.address_type).toBe(type);
   else expect(body).not.toHaveProperty('address_type');
 });
+
+// Contract: a pending Solana (`ed25519`) sign approval carries one neutral hint that a Solana
+// transaction is usually valid for only a minute or two unless it uses a durable nonce. The card parses
+// nothing, so every pending `ed25519` input gets the same hint, a durable-nonce message included; no
+// other request, and no request this card or the daemon has settled, shows it.
+describe('Solana transaction-lifetime hint', () => {
+  const hint = { en: en.vaults.approval.solanaBlockhashHint, zh: zh.vaults.approval.solanaBlockhashHint };
+  // A legacy message whose first instruction is System AdvanceNonceAccount: its "recent blockhash"
+  // is the nonce value. The card treats it exactly like any other message.
+  const durableNonceMessage =
+    '01000204'
+    + 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a'
+    + '3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c'
+    + '06a7d517192c568ee08a845f73d29788cf035c3145b21ab344d8062ea9400000'
+    + '0000000000000000000000000000000000000000000000000000000000000000'
+    + '2a'.repeat(32)
+    + '0103030102000404000000';
+  const hdAccount = {
+    account: 2, name: null, eth: '0xE', btc_taproot: 'bc1pB', solana: 'SoLsnapshotAddress111',
+    paths: { evm: '', bitcoin: '', solana: "m/44'/501'/2'/0'" }, always_ask: true, last_signer: null,
+  };
+  const hdSolana = {
+    ...solanaSignRequest, id: 'vrq_hd_sol', secret_name: 'AGENT_WALLET',
+    delivery: { message_hex: solanaMessage, scheme: 'ed25519', derivation: { chain: 'solana', account: 2 }, signing_context: { kind: 'solana-message' } },
+    card: { request_type: 'sign', secret_name: 'AGENT_WALLET', kind: 'keypair', protection: 'standard', derivation: { chain: 'solana', account: 2 }, account: hdAccount },
+  } as unknown as VaultRequest;
+  const protectedSolana = {
+    ...solanaSignRequest,
+    card: { ...solanaSignRequest.card, protection: 'protected', secret_unlock_material: { name: 'SOLANA_KEY', kind: 'keypair', envelope } },
+  } as unknown as VaultRequest;
+  const renderCard = (request: VaultRequest, onResolved = vi.fn()) =>
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={onResolved} onCancel={vi.fn()} /></I18nextProvider>);
+
+  beforeEach(() => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+  });
+
+  it('ships the approved wording in both languages', () => {
+    expect(hint.en).toBe('Solana transactions are usually valid for only a minute or two. If you approve later, this one may have expired and will need to be requested again. Transactions that use a durable nonce are not affected.');
+    expect(hint.zh).toBe('Solana 交易通常只在一两分钟内有效。批准晚了，这笔交易可能已经过期，需要重新发起；使用持久 nonce 的交易不受此限。');
+  });
+
+  it.each([
+    ['a standard key, recent-blockhash message', solanaSignRequest],
+    ['a standard key, durable-nonce message', { ...solanaSignRequest, delivery: { message_hex: durableNonceMessage, scheme: 'ed25519' } }],
+    ['a standard key, empty raw message', { ...solanaSignRequest, delivery: { message_hex: '', scheme: 'ed25519' } }],
+    ['a seed-phrase wallet Solana account', hdSolana],
+    ['a protected key', protectedSolana],
+  ] as Array<[string, VaultRequest]>)('shows the hint in en and zh on a pending request from %s', async (_label, request) => {
+    for (const language of ['en', 'zh'] as const) {
+      await i18n.changeLanguage(language);
+      renderCard(request);
+      expect(screen.getByText(hint[language]).getAttribute('role')).toBe('note');
+      cleanup();
+    }
+  });
+
+  it.each(['approved', 'completed', 'fulfilled', 'denied', 'expired', 'failed'])('hides the hint on a Solana request whose status is %s', (status) => {
+    renderCard({ ...solanaSignRequest, status });
+    expect(screen.queryByText(hint.en)).toBeNull();
+  });
+
+  it.each([
+    ['a secp256k1 digest sign request', standardSignRequest],
+    ['a seed-phrase wallet EVM sign request', { ...hdSolana, delivery: { digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable', derivation: { chain: 'evm', account: 2 } } }],
+    ['an access request', protectedAccess],
+    ['a delete request', deleteRequest],
+  ] as Array<[string, VaultRequest]>)('hides the hint on %s', (_label, request) => {
+    renderCard(request);
+    expect(screen.queryByText(hint.en)).toBeNull();
+  });
+
+  it.each([
+    ['signing', 'sign', 'approved'],
+    ['denying', 'deny', 'denied'],
+  ] as const)('hides the hint once this card settles the request by %s it', async (_label, button, kind) => {
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    const onResolved = vi.fn();
+    renderCard(solanaSignRequest, onResolved);
+    expect(screen.getByText(hint.en)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.approval[button] }));
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind, requestType: 'sign' }));
+    expect(screen.queryByText(hint.en)).toBeNull();
+  });
+});

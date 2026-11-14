@@ -1,9 +1,61 @@
 {
-  "schema_version": 1,
+  "archives": {
+    "darwin-arm64": {
+      "bin_path": "avibe-direct-transport",
+      "binary_sha256": "283113bc1f3c32023dee0fbe3c975060e1ef38c235dbff19bc26be60aee69fbf",
+      "format": "tar.gz",
+      "name": "avibe-direct-transport-aarch64-apple-darwin.tar.gz",
+      "sha256": "a500ff85927caf923490f682b3890160b711908a3d7a8bb07d578ccba16e54d6",
+      "size": 4542299,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/direct-transport-v0.1.0-1/avibe-direct-transport-aarch64-apple-darwin.tar.gz"
+    },
+    "darwin-x64": {
+      "bin_path": "avibe-direct-transport",
+      "binary_sha256": "4a4c3ad952c2c7a8300ffac6092517725693602373ea50a6ac37c82191ab94e7",
+      "format": "tar.gz",
+      "name": "avibe-direct-transport-x86_64-apple-darwin.tar.gz",
+      "sha256": "28f90031e7fe362b04887f47c03d5fd3806f2715a59f48ecb185092a0b1f4bcf",
+      "size": 4927455,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/direct-transport-v0.1.0-1/avibe-direct-transport-x86_64-apple-darwin.tar.gz"
+    },
+    "linux-arm64": {
+      "bin_path": "avibe-direct-transport",
+      "binary_sha256": "cc83650c0fa9018696a13b8642ce4e4b46de73a0bd0893baebf3b1a6fdd60d04",
+      "format": "tar.gz",
+      "name": "avibe-direct-transport-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "3427e30e1427a88c9b7d48f716cad00d705b716a09c48a8a118d966fce4322f9",
+      "size": 5475401,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/direct-transport-v0.1.0-1/avibe-direct-transport-aarch64-unknown-linux-musl.tar.gz"
+    },
+    "linux-x64": {
+      "bin_path": "avibe-direct-transport",
+      "binary_sha256": "fa9f26163f0f257dd24cd546ce72ce608a7c4b949f56d4a7a7078801f8a14bc4",
+      "format": "tar.gz",
+      "name": "avibe-direct-transport-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "7dfb65ecb7ff86333ae99f6920c45ff82b17f564a29e61e05788cf7f06f33381",
+      "size": 5934449,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/direct-transport-v0.1.0-1/avibe-direct-transport-x86_64-unknown-linux-musl.tar.gz"
+    },
+    "win32-x64": {
+      "bin_path": "avibe-direct-transport.exe",
+      "binary_sha256": "57d1f3929dba76842d43231bf7b31560b1e5055613513df2bfa753e63c7348e3",
+      "format": "tar.gz",
+      "name": "avibe-direct-transport-x86_64-pc-windows-msvc.tar.gz",
+      "sha256": "681e8136e08540dc489f7cee900e5ca9944767dae7dbeb7b209b8bfcb3fe23b1",
+      "size": 4829944,
+      "url": "https://github.com/avibe-bot/avibe/releases/download/direct-transport-v0.1.0-1/avibe-direct-transport-x86_64-pc-windows-msvc.tar.gz"
+    }
+  },
   "direct_transport_version": "0.1.0",
-  "release_state": "pending",
+  "provenance": {
+    "qualification_attempt": 1,
+    "qualification_run_id": "43492203265",
+    "release_record_sha256": "16e3c94fee56c6d1076ac33c561fb37be8a26cfbc9b78ad7960c2db2aa1a4652",
+    "source_sha": "da6fe3f0b54e0107a814d90fef748fe888892cce"
+  },
+  "release_state": "published",
+  "release_tag": "direct-transport-v0.1.0-1",
+  "schema_version": 1,
   "source": "avibe-bot/avibe",
-  "source_url": null,
-  "release_tag": null,
-  "archives": {}
+  "source_url": "https://github.com/avibe-bot/avibe/releases/tag/direct-transport-v0.1.0-1"
 }

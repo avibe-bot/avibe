@@ -86,9 +86,10 @@ workspace to edit), and `updated_at`. An Agent row is its `name`, `backend`,
 `vibe vault find`, is the secret's `name`, `kind`, `protection`, `fields` (a
 multi-field secret adds `default_field`, the field `NAME` alone selects),
 `tags`, `description`, `policy`, a keypair's `signing_curve` and
-`signing_addresses`, and
-`per_use_sign: true` when `vibe vault sign` can use the key; it never holds a
-value. `vibe task show`, `vibe watch show`, `vibe runs show`,
+`signing_addresses`, and the current signing state: `always_ask: true` means each
+signature needs user approval, while a keypair's `agent_signable: true` only
+means an Agent can call `vibe vault sign`. They are independent states; the row
+never holds a value. `vibe task show`, `vibe watch show`, `vibe runs show`,
 `vibe session get`, `vibe agent show`, and `vibe show status` print the full
 record; add `--brief` to print exactly the row the matching list command
 prints. A removed Task or Watch shows `lifecycle_state: "removed"` and
@@ -604,6 +605,43 @@ request/upstream state rather than re-arming that continuation.
 For Show `api/*.ts` handlers, the `use-show-pages` Skill documents the Node-only
 server adapter, which avoids starting a CLI process for each request. Existing
 pages are not rewritten automatically.
+
+### `vibe vault sign`: Solana approval lifetime
+
+For Solana transactions needing approval—standard `always_ask`, the selected HD
+account's `always_ask`, or protected—build with a **durable nonce** before requesting
+signatures. A recent blockhash may expire while the owner decides. Standard keys
+without ask-first can still sign inline.
+
+The Agent uses caller-owned tooling and authorized funds to create/initialize and
+fund a nonce account; Avibe never holds SOL, provisions accounts, or broadcasts.
+Use the stored nonce as `recent_blockhash` and exact System `AdvanceNonceAccount`
+as instruction **0**, before transfers or compute-budget instructions. All required
+signers sign the same message. Bootstrap itself needs approval/submission: arrange
+prompt approval or an existing owner-provisioned account, never disable approval.
+See the [tested recipe and offline builder](../skills/use-avibe-vault/references/solana-durable-nonce.md).
+
+```bash
+vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"
+# Protected: add matching --signing-context-json
+# '{"kind":"solana-transaction-v1","messageHex":"<the exact MESSAGE_HEX>"}'
+# Standard HD: use --chain solana --account N instead of --scheme.
+```
+
+`MESSAGE_HEX` is the complete serialized message, not a hash or signed transaction.
+Pending Solana request objects include `solana_lifetime_hint`:
+“If this message uses a recent blockhash, it may expire while awaiting approval.
+Use a durable nonce for delayed submission.” It is conditional advice for every
+pending Ed25519 sign request, including durable-nonce and raw messages, not parsing
+or a claim of expiry/validity. It is absent on resolved requests and other schemes.
+
+Wait for the existing callback; retrieve its result and submit the same saved
+bytes. With `--no-callback`, read `vibe vault await REQUEST_ID`. Never rerun a pending
+`sign` or refresh a blockhash under old approval. Serialize operations per nonce
+account, recheck nonce/authority before submission, and reconcile signature status
+and nonce state after uncertain broadcast before preparing another payment. Even
+failed execution can consume nonce and fees. Changed bytes need fresh approval;
+durable nonces do not extend Avibe request expiry or guarantee execution.
 
 ### `vibe vault key authorize`
 
