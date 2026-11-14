@@ -6,404 +6,242 @@
 
 ### Make your computer a home for your AI partner.
 
-**Vibey, Avibe's built-in AI partner, works out of the box — and Claude Code, Codex, and OpenCode can move in too.**<br/>
-Avibe is the local-first Agent OS: a Workbench, durable tasks, Model Hub, Show Pages, and Vaults, all running on your own machine and reachable from your browser, phone, or chat app.
+Avibe is the local-first Agent OS: it runs on your own Mac or PC. Vibey, its built-in AI partner, lives there. It remembers what you are working on, does the work on your machine, and comes to find you when it is done or needs a decision.<br/>
+Reach it from the desktop app, your iPhone, or the chat app you already have open.
 
-[![GitHub Stars](https://img.shields.io/github/stars/avibe-bot/avibe?color=ffcb47&labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe/stargazers)
+**[Download for Mac](#mac)** · **[Download for Windows](#windows)** · **[iPhone](#iphone)** · **[Linux and servers](#linux-and-servers)**
+
 [![Release](https://img.shields.io/github/v/release/avibe-bot/avibe?labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe/releases/latest)
-[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?labelColor=black&style=flat-square)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?labelColor=black&style=flat-square)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/avibe-bot/avibe?color=ffcb47&labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe)
 
-[Docs](https://docs.avibe.bot) · [English](README.md) · [中文](README_ZH.md)
-
-**Agents** ![Vibey](https://img.shields.io/badge/Vibey-built--in-14B8A6?style=flat-square) ![Claude Code](https://img.shields.io/badge/Claude%20Code-D4A27F?style=flat-square&logo=anthropic&logoColor=white) ![Codex](https://img.shields.io/badge/Codex-412991?style=flat-square) ![OpenCode](https://img.shields.io/badge/OpenCode-00B4D8?style=flat-square)
-
-**Reach it from** ![Browser](https://img.shields.io/badge/Browser-111827?style=flat-square&logo=googlechrome&logoColor=white) ![Slack](https://img.shields.io/badge/Slack-4A154B?style=flat-square&logo=slack&logoColor=white) ![Discord](https://img.shields.io/badge/Discord-5865F2?style=flat-square&logo=discord&logoColor=white) ![Telegram](https://img.shields.io/badge/Telegram-26A5E4?style=flat-square&logo=telegram&logoColor=white) ![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white) ![Lark](https://img.shields.io/badge/Lark%20%2F%20Feishu-3370FF?style=flat-square&logo=bytedance&logoColor=white)
+[Website](https://avibe.bot) · [Docs](https://docs.avibe.bot) · [English](README.md) · [中文](README_ZH.md)
 
 </div>
 
 <br/>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/v5/workbench-vibey-dark-en.png">
-  <img src="assets/screenshots/v5/workbench-vibey-en.png" alt="Vibey in the Avibe Workbench: it picks up yesterday's launch plan, runs the tests, edits the welcome page, asks Codex for a review, and sets a Watch and a scheduled launch brief" width="100%">
-</picture>
+<img src="assets/screenshots/v6/workbench-main-bot-en.png" alt="Vibey's conversation in the Avibe Workbench. Asked what needs attention today, Vibey lists a newsletter draft that is ready and a venue comparison its Researcher Bot finished, then sets a Friday reminder and asks Researcher to add travel times." width="100%">
 
-<p align="center"><sub>Product UI with illustrative project data</sub></p>
+<p align="center"><sub>The Avibe Workbench, with sample data</sub></p>
 
-## Get started
+Avibe is free and open source. It runs on the Claude or ChatGPT subscription you already pay for, or on an API key.
+
+## What you can ask it
+
+Say it the way you would say it to a person.
+
+- **"Compare three venues for our October offsite and show me a page I can share."** Vibey searches the web and answers with a live page, not a wall of text. Open it on your phone, point at the part you want changed, and it reworks the page.
+- **"Every Monday at 9, tell me what changed in this folder last week."** It sets the schedule itself and reports in the same conversation each week.
+- **"Sort these invoices into folders by month, and tell me what you moved."** It works with the real files on your computer and tells you what it did.
+- **"Keep an eye on this page and tell me when it changes."** It waits in the background and comes back when there is something to say. You do not have to keep a window open.
+- **"Upload this with my site login."** The password stays in your Vault. Vibey asks for it by name, and Avibe hands it straight to the upload without showing it to Vibey.
+- **"Have Claude Code build this, have Codex review it, and tell me when it is ready."** If you write software, Vibey hands the parts to the coding agents you already use and brings back the result.
+
+Avibe runs on your computer, so the work continues for as long as that computer is on.
+
+## Get Avibe
+
+### Mac
+
+1. **Download** Avibe from [avibe.bot](https://avibe.bot/#download). Direct links: [Apple silicon](https://dl.avibe.bot/latest/Avibe_aarch64-apple-darwin.dmg) · [Intel](https://dl.avibe.bot/latest/Avibe_x86_64-apple-darwin.dmg).
+2. **Open** the download, drag Avibe to Applications, and start it.
+3. **Connect a model.** Sign in with your Claude or ChatGPT subscription, or paste an API key, pick a model for Vibey, and say hello.
+
+The app is signed and notarized by Apple, needs nothing else installed, and checks for its own updates.
+
+### Windows
+
+1. **Download** Avibe from [avibe.bot](https://avibe.bot/#download). Direct link: [Windows x64](https://dl.avibe.bot/latest/Avibe_x86_64-pc-windows-msvc.exe).
+2. **Run** the installer, then start Avibe.
+3. **Connect a model.** Sign in with your Claude or ChatGPT subscription, or paste an API key, pick a model for Vibey, and say hello.
+
+The installer is signed, and Windows may ask you to confirm the first time you run it. The app needs nothing else installed and checks for its own updates.
+
+On both, step 3 is one sign-in:
+
+<p align="center"><img src="assets/screenshots/v6/setup-providers-en.png" alt="The setup dialog for adding a model: sign in with Claude, ChatGPT, Gemini, Kimi, or xAI, or switch to the API Key tab" width="640"></p>
+
+### iPhone
+
+The iPhone app is your Avibe in your pocket: the same conversations, and a notification when something needs you. It connects to the Avibe on your computer. It does not run on its own.
+
+1. **On your computer,** sign in when setup finishes, or later from the bottom of the sidebar. All it takes is an email address. Signing in adds the computer to your account and turns on remote access.
+2. **On your iPhone,** install [TestFlight](https://apps.apple.com/us/app/testflight/id899247664), then open the [Avibe beta invitation](https://testflight.apple.com/join/HXqwMqeX). The app is listed as **Avibe OS** and needs iOS 17 or later.
+3. **Sign in** with the same email and pick your computer.
+
+The iPhone app is a public beta.
+
+### Linux and servers
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
+curl -fsSL https://avibe.bot/install.sh | bash
+vibe
 ```
 
-**Sign in with a subscription you already have, or add an API key, and Vibey is ready. No CLI to install.** The browser opens a three-step wizard that wires up your models, finds any agents you already use (one click installs the ones you pick), and drops you into the Workbench.
-
-> Open source — read the [install script](https://github.com/avibe-bot/avibe/blob/master/install.sh) first if you like. The short URL is a 307 redirect to that file.
+`vibe` starts Avibe and opens setup in your browser. On a machine with no screen, run `vibe remote` to pair it with your avibe.bot account and open it from another device. The script is open source: read [install.sh](https://github.com/avibe-bot/avibe/blob/master/install.sh) first if you like. More in the [install guide](https://docs.avibe.bot/get-started/install).
 
 <details>
-<summary><b>On Windows?</b></summary>
+<summary>Prefer the command line on Windows or macOS?</summary>
 
-We recommend WSL on Windows for the best compatibility — see [Run Avibe with WSL from scratch](docs/WINDOWS_WSL.md). It covers where to install WSL, which terminal to use, where to run the install command, and how to open the Web UI.
+The same `vibe` command-line install works on macOS with the command above. On Windows, run this in PowerShell:
+
+```powershell
+irm https://avibe.bot/install.ps1 | iex
+```
+
+The Desktop App is the recommended way to run Avibe on both.
 </details>
 
----
+## Your Bots
 
-## Meet Vibey — the AI partner that lives on your computer
+<img src="assets/mascot/cloud-tuanzi.png" alt="Vibey, Avibe's built-in AI partner" width="130" align="right"/>
 
-<img src="assets/mascot/cloud-tuanzi.png" alt="Vibey — the gaseous consciousness inside Avibe" width="150" align="right"/>
+**Vibey** is your main Bot. It is built in, it is the first one you talk to, and it can see everything on your Avibe.
 
-Vibey is Avibe's own agent: built in, always on, nothing extra to install. Give it a model from Model Hub, and it is ready in the Workbench and in every chat app you connect.
+A Bot is a standing member of your Avibe, not a chat you start over each time. It has a name, a role, a memory of its own, and one conversation that never ends. Add a Researcher or a Bookkeeper when an area deserves one; you can have up to five besides Vibey.
 
-Reads the room. Picks up where you left off. Asks the right question when it's unsure. Goes quiet when you're heads-down. Ships at 2am because that's when the vibe hits — then leaves a note about what it touched. Holds opinions. Says thanks when you fix its bugs.
+You talk things through with a Bot and decide together. The Bot hands the work to **Agents**, which do the job in their own sessions, several at once if needed. It follows each job to the end and comes back with the result.
 
-> Avibe is the home. Vibey is the AI partner who lives there.
-
-<br clear="all"/>
-
-### 🧠 It remembers why
-
-Long work forces every agent to condense its earlier conversation, again and again. Each time, Vibey rebuilds its memory around what matters: the long-term goal, your requirements in your own words, and the next step — and, far more often than the other agents we measured, why you want them.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark/vibey-memory-en-dark.svg">
-  <img src="assets/benchmark/vibey-memory-en-light.svg" alt="Vibey memory benchmark. Same GPT model after 8 or more compactions: Vibey answers task, rules, and next step 97% correctly, Claude Code 93%, Codex 53%. Intent depth: Vibey 81% vs Claude Code 20% and Codex 14% on GPT, 62% vs Pi 25% on Grok 4.6, 36% vs Claude Code 14% on Claude Sonnet 5.5." width="100%">
-</picture>
-
-- **97% after 8+ compactions.** On the same GPT model, Vibey still answers what the task is, what the rules are, and what comes next 97% of the time. Claude Code: 93%. Codex: 53%.
-- **Highest in 8 of 9 head-to-head results** across three models and three measures. The exception is the long-term goal on Claude Sonnet 5.5, Claude Code's native model (99% vs 96%); on the same model, Vibey keeps more of your requirements (89% vs 78%).
-- **Knows why, not only what.** Memory that captures your deeper intent: Vibey 81% vs Claude Code 20% and Codex 14% (GPT), 62% vs Pi 25% (Grok), 36% vs Claude Code 14% (Sonnet).
-
-<sub>Avibe's internal benchmark on 6 real long sessions and 55 compaction points; every agent gets the same transcript, compaction point, and model. AI-judged, not yet human-reviewed; full method and limits in the docs.</sub>
-
-→ [How Vibey remembers](https://docs.avibe.bot/agents/vibey-memory) · [Memory benchmark](https://docs.avibe.bot/agents/vibey-memory-benchmark)
-
-### ⏰ It keeps its own timeline
-
-Vibey schedules Tasks, waits on Watches, and runs work in the background, then comes back to the same conversation when there is something worth your attention. Say *"Watch this PR and come back when there's actionable review feedback"* and get on with your day; even a long command it starts turns into a Watch that reports back on its own. → [Harness](https://docs.avibe.bot/concepts/harness)
-
-### 📱 You can reach it anywhere
-
-The browser Workbench, your phone, Slack, Discord, Telegram, WeChat, or Lark / Feishu — the same Vibey on the same machine. When text is not enough, it answers with a Show Page: a live dashboard, diagram, or report you can point at and comment on. → [Show Pages](https://docs.avibe.bot/concepts/show-pages)
-
-In the Avibe desktop app (in testing), Vibey also keeps a small window on your desktop: hold it and speak, and it answers right there, showing what it's working on, including the runs, Watches, and Tasks it has started.
-
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/v5/vibey-mini-dark-en.png">
-    <img src="assets/screenshots/v5/vibey-mini-en.png" alt="Vibey's desktop mini window: Vibey says Codex is reviewing the welcome flow, it will watch the preview checks, and the Monday launch brief is set for 09:00" width="428">
-  </picture>
-</div>
-
-Under all three, it does the hands-on work. Vibey reads, writes, and edits files, runs commands (`bash` on macOS and Linux, PowerShell on native Windows) with independent tool calls running at the same time, and hands parts of a job to Claude Code, Codex, or OpenCode. → [Vibey docs](https://docs.avibe.bot/agents/vibey)
-
----
-
-## The OS Vibey lives in
-
-Most AI tools still live in a single window:
-
-- 🖥️ **Close the window, lose the work.** It only runs while you watch it.
-- 📵 **Away from your desk, out of reach.** You can't see what it's doing, let alone steer it.
-- 💸 **Several plans, stuck on one.** One hits its cap mid-task while another sits idle.
-- 🔒 **Their cloud, your data.** Every tool wants its own app, its own subscription, and your files on someone else's box.
-
-Avibe answers each one with a part of the OS, and every agent you bring gets the same parts. Your code, keys, and agent processes stay on your machine; `avibe.bot` signs you in and opens a secure tunnel, and never touches your workspace.
-
-### 💬 Workbench — not a chat box, a desktop
-
-Files, editor, and terminal open as windows beside your chat, all in one browser tab, with the apps and Show Pages your agent builds opening right next to them. It stops feeling like a web page and starts feeling like an operating system.
-
-<img src="assets/screenshots/v5/apps-library-en.png" alt="The multi-window Workbench: Files, Terminal, Editor, and a Show Page open beside the chat, with the Apps Dock" />
-
-### 🔀 Model Hub — every plan you pay for, on the same team
-
-Your Claude, ChatGPT, Gemini, Kimi, and xAI subscriptions and your API keys — official vendors, relays, aggregators, self-hosted endpoints — all land behind one local gateway.
-
-- **Set up once, use it in every agent.** One sign-in or key feeds Vibey, Claude Code, Codex, and OpenCode. (A subscription you leave to its own CLI serves only that CLI.)
-- **Mix and match models.** GPT inside Claude Code, Claude inside Codex: the gateway translates between protocols.
-- **Plan runs dry? The next one picks it up.** If a source hits a quota, rate limit, or network failure before it starts answering, the next source in your route takes the request. Once your first choice recovers, the next turn goes back to it.
-- **Move in with one click.** Already signed in to a supported CLI? Bring that login over with your explicit OK. Credentials and routes stay on your machine.
-
-<img src="assets/screenshots/v5/model-hub-routes-en.png" alt="Model Hub sources and routes: a gateway source supplies Vibey, while native OpenAI and Anthropic sign-ins supply Codex and Claude Code" />
-
-**Know what your plans are worth.** Usage by model and source, priced at official API rates, plus live 5-hour and weekly quotas for Claude and ChatGPT subscriptions.
-
-<img src="assets/screenshots/v5/model-hub-usage-en.png" alt="Model Hub usage over 24 hours: total tokens, requests, cached input share, value at API prices, and an hourly trend" />
-
-**Tools for Vibey.** Web search and web fetch work out of the box: search can fall back to the built-in, keyless Exa (free), and fetch tries your own machine first. In **Models > Tools**, add Tavily, Exa, or DeepSeek as search services, set their order, or switch a tool off; X search and image generation run on sources that offer them.
-
-<img src="assets/screenshots/v5/model-hub-tools-en.png" alt="Model Hub Tools: web search and web fetch, each with its switch and service order" />
-
-### ⏰ Harness — it works while you sleep
-
-Four durable primitives — **run, schedule, watch, and inspect** — let an agent start work on its own, wait for the right moment, keep going in the background, and come back when there's something worth your attention. Scheduled shell commands stay silent when they pass; a failure leaves a notice, or, if you opt in, goes straight to an Agent. No flags to learn. Just say it:
-
-- *"Run the deployment check every weekday morning and post the summary here."*
-- *"Start a separate investigation session for this incident, but report the conclusion to this channel."*
-- *"If CI fails, summarize the logs; if it passes, tell me whether the PR is mergeable."*
-
-<img src="assets/screenshots/v5/harness-tasks-en.png" alt="Harness Tasks: a Vibey-owned Monday launch brief and a daily preview check, with schedule, Agent, session, and delivery details" />
-
-### 🎨 Show Pages — answers you can point at
-
-Ask for a dashboard, flowchart, diff, report, or small app, and get a live page instead of a wall of text. Click an element, box a region, or mark up a screenshot, say what you want, and the agent reworks the page or answers right where you pointed. Keep a page private, share it with specific people, or publish it at a link you'll remember; pin your favorites to the Dock and they open like apps.
-
-<img src="assets/screenshots/v5/show-page-en.png" alt="A Show Page launch dashboard open beside the chat, with a user annotation and Vibey's annotation reply in the conversation" />
-
-### 📱 Phone and chat apps — leave your desk, keep your partner
-
-<img src="assets/screenshots/v5/workbench-vibey-mobile-en.png" alt="Vibey's launch session in the Workbench on a phone" width="270" align="right" />
-
-Your machine does the work; you don't have to babysit it. Open the Workbench when you want windows, or send a message in Slack, Discord, Telegram, WeChat, or Lark / Feishu when that's faster — same Agents, same machine.
-
-- 🔔 **It taps you on the shoulder.** Install the Workbench on your phone or desktop and get a push the moment a job needs you.
-- 🎙️ **Talk, don't type.** Pair with `avibe.bot` and realtime voice input writes as you speak, then tidies the transcript in place. On desktop, press ⌥Z (Alt+Z on Windows and Linux).
-- 🌍 **Your own `you-app.avibe.bot`.** Pair once with `vibe remote` and your Workbench opens in any browser, anywhere — no VPN, no port forwarding.
-- 🔒 **Your door, your guest list.** Only the people your access policy allows can sign in — by default, just you. Auth, routing, and host checks all fail closed.
+On long work, Vibey keeps hold of what you asked for and why. In our own benchmark on a GPT model, after its memory had been condensed eight or more times it still answered what the task was, what the rules were, and what came next 97% of the time. The benchmark is internal and AI-judged. [How Vibey remembers](https://docs.avibe.bot/agents/vibey-memory) · [The benchmark and its limits](https://docs.avibe.bot/agents/vibey-memory-benchmark)
 
 <br clear="all"/>
 
-### 🔐 Vaults — secrets by name, never by value
+## With you wherever you are
 
-Add an API key or token once, or let an Agent request a missing one for you to fill in from the browser. Agents use it by name, and Avibe hands it to the command, authenticated request, or signing operation that needs it. Vault responses never include the secret value; commands receiving it must still avoid printing it. Passkey-protected custody stays pre-launch until the sandbox integrity gate is enforced.
+<img src="assets/screenshots/v6/workbench-mobile-en.png" alt="The same conversation with Vibey on a phone" width="250" align="right" />
 
-<img src="assets/screenshots/v5/vaults-en.png" alt="Vaults list showing secret names, tags, and usage, never their values" />
+- **iPhone.** The [iPhone app](#iphone) opens the same conversations and notifies you when a job finishes or needs a decision.
+- **Any browser.** Once you sign in, your Avibe gets its own address at avibe.bot. Only the people you allow can sign in; by default, that is you.
+- **Chat apps.** Connect Slack, Discord, Telegram, WeChat, or Lark / Feishu, and message your Bots where you already talk to people.
+- **On your desktop.** In the Desktop App, Vibey keeps a small window on screen. Type to it, or hold it and speak.
 
-**Plus** — thread = session, picks up where you left off · interactive buttons and forms when the agent needs a decision · rich attachments with in-app preview and inline audio · keyboard shortcuts · one-click backend updates.
+Wherever you reach it from, it is the same Avibe on the same computer.
 
----
+<br clear="all"/>
 
-## Bring your agent team
+## What is inside
 
-Claude Code, Codex, and OpenCode run as their official CLIs — the same ones you'd install yourself, unchanged — side by side with Vibey, behind one Agent registry. Give each Agent its own model and reasoning effort, and hand each project or channel to the right specialist. Write a Skill once, and every agent loads it the same way.
+### Workbench
 
-Vibey can hand them work: ask it to have Claude Code build a change, Codex review it, and OpenCode test it, and it reports the result back to you. **Runs** draws the whole chain as a graph: who started each background Session, where it reports back, and the history behind every node.
+Your conversations, files, a terminal, and an editor, as windows side by side in one place. The pages and small apps your Bots build open right next to them.
 
-<img src="assets/screenshots/v5/agents-graph-en.png" alt="Run graph: a Vibey Session hands work to Claude Code, Codex, and OpenCode background Sessions" />
+### Model Hub: the plans you already pay for
 
-The setup wizard finds the agents you already have and installs the ones you pick; to install one yourself, see [Agents](#agents).
+Sign in with a Claude or ChatGPT subscription, or add API keys, and every Bot and Agent can use them. Line up more than one, and when a plan hits its limit the next takes over. Model Hub also shows how much of each plan you have used.
 
-> 💚 **Built with Avibe.** This project was developed end-to-end using Avibe itself — steering Claude Code, Codex, and OpenCode from the browser and from my phone, picking up seamlessly whether I was at my desk or not. The deeper in I got, the faster it went. — [@alex_metacraft](https://x.com/alex_metacraft)
+### Vault: secrets by name, not by value
 
----
+Save a password, API key, or signing key once. Agents ask for it by name. Avibe does not show them the value: it hands it straight to the command or request that needs it. A signing key never leaves the Vault; only the signature comes back. You can make any secret ask you before each use.
 
-## Why Avibe is different
+<img src="assets/screenshots/v6/vaults-en.png" alt="The Vaults list: names, tags, and usage, never the values" />
 
-| | |
-|---|---|
-| **Local-first, actually yours** | Your AI partner, its execution, your keys, and your code stay on your machine. `avibe.bot` issues identity and a secure tunnel; it never proxies your workspace. |
-| **A partner built in, your agents welcome** | Vibey works out of the box. The *official* Claude Code, Codex, and OpenCode run beside it — switch per task, per project, or per channel, with no vendor silo. |
-| **Every subscription, one team** | Model Hub pools your plans and keys behind one gateway, lets agents mix models, fails over on its own, and shows what each one is really worth. |
-| **Browser and chat, both first-class** | Workbench, phone, Slack, Discord, Telegram, WeChat, and Lark / Feishu — same agents, same machine. |
-| **The agent you chose runs** | Vibey or an official CLI: whichever you chose is the one that runs, with no relay layer in between. |
+### Show Pages
 
----
+Ask for a comparison, a dashboard, a report, or a small tool and get a live page. Point at any part of it and say what to change. Keep it private, share it with people you choose, or publish it at a link.
 
-## How it works
+### Scheduled and background work
 
-```
-  You, anywhere              Your machine                            Your models
-┌──────────────┐      ┌──────────────────────────────────────┐      ┌──────────────┐
-│ Browser      │      │ Avibe                                │      │ Subscriptions│
-│ Phone (PWA)  │ ───▶ │   Vibey       ─┐                     │      │ API keys     │
-│ Slack        │      │   Claude Code ─┤                     │      │ Relays       │
-│ Discord …    │ ◀─── │   Codex       ─┼─▶ Model Hub ────────┼────▶ │ Self-hosted  │
-│              │      │   OpenCode    ─┘                     │      │              │
-│              │      │   Workbench · Harness · Show Pages   │      │              │
-└──────────────┘      └──────────────────────────────────────┘      └──────────────┘
-```
+Bots set their own reminders and schedules, wait for things to happen, and keep working in the background. Everything they have set up is listed in one place.
 
-1. **You ask** — in the browser or a chat app: *"Add dark mode to the settings page."*
-2. **Avibe routes** the message to the right Agent, in the right project.
-3. **The agent** reads your local codebase, writes code, and streams its work back; Vibey can hand parts of the job to the other agents. Vibey always gets its models through Model Hub. A CLI agent in gateway mode does too, with Model Hub picking the source for each call; in direct mode, it uses its own login.
-4. **You review** in the same surface, iterate in the thread, and pick it up later from anywhere.
+<img src="assets/screenshots/v6/harness-tasks-en.png" alt="The Tasks list: a one-time reminder to decide on the offsite venue on Friday at 9:00, and a weekly brief every Monday at 9:00" />
 
-Avibe connects out via Slack Socket Mode, Discord Gateway, Telegram long-polling, WeChat polling, or Lark WebSocket — no public inbound ports for chat control. Agent prompts go only to the model sources you configure.
+### Skills and MCP
 
----
+Teach your Agents a way of working once, as a Skill, and all of them follow it. Connect an MCP server once, and all of them can use its tools.
 
-## Avibe vs OpenClaw
+### Computer Use (macOS)
 
-| | Avibe | OpenClaw |
-|---|---|---|
-| **Setup** | One command + web wizard. Done in minutes. | Gateway + channels + JSON config. Expect an afternoon. |
-| **Security** | Local-first. Outbound Socket Mode / WebSocket / long polling only. No public inbound ports, minimal attack surface. | Gateway exposes ports. More moving parts, more surface. |
-| **Agents** | Vibey built in, plus the official Claude Code, Codex, and OpenCode CLIs; bring your own subscriptions and keys; switch per task. | Its own assistant loop. |
+On a Mac, with Computer Use turned on in the Desktop App, Agents can see and operate the apps on your desktop. It is off until you turn it on, and it is available on macOS only.
 
-OpenClaw is an always-on personal assistant. Avibe is an **Agent OS**: it ships its own AI partner, Vibey, runs the official agents you already trust unchanged, and keeps all of them on your machine, reachable from wherever your work already happens.
+## Yours, on your machine
 
----
+- Your files, your keys, and the Agents themselves stay on your computer.
+- What an Agent needs for a job goes to the AI provider you chose.
+- avibe.bot signs you in and opens a secure tunnel to your computer. Your workspace does not pass through it.
+- Two things do pass through avibe.bot: voice input, which is transcribed there, and iPhone notifications, which are encrypted on your computer before they leave it.
+
+The docs list [every path that carries your content](https://docs.avibe.bot/concepts/local-first#what-leaves-your-machine).
 
 ## FAQ
 
 <details>
-<summary><b>Do I need Claude Code, Codex, or OpenCode installed?</b></summary>
+<summary><b>Does it cost anything?</b></summary>
 
-No. Vibey is built in: add a subscription sign-in or an API key to Model Hub, give Vibey a model, and it is ready. Claude Code, Codex, and OpenCode are optional teammates you can add at any time.
+Avibe is open source (MIT) and free. You bring your own subscription or API key and pay that provider directly. There is no markup and no second subscription.
 </details>
 
 <details>
-<summary><b>Can I use my existing Claude or ChatGPT subscription?</b></summary>
+<summary><b>Can I use my Claude or ChatGPT subscription?</b></summary>
 
-Yes. Add supported subscriptions to Model Hub as gateway sources, and Vibey and your other agents can use them, with quota tracking, usage analytics, and automatic takeover. Claude Code and Codex can also keep their own logins. Each vendor's terms still apply; Avibe warns you before a sign-in that may carry account restrictions. See [Model Hub](https://docs.avibe.bot/concepts/model-hub).
+Yes. Sign in during setup or later in Model Hub. Each vendor's terms still apply, and Avibe tells you before a sign-in that may carry account restrictions. See [Model Hub](https://docs.avibe.bot/concepts/model-hub).
+</details>
+
+<details>
+<summary><b>Do I need an avibe.bot account?</b></summary>
+
+No. Avibe works on your computer without one. Sign in when you want to reach it from your phone or another computer.
+</details>
+
+<details>
+<summary><b>Does my computer have to stay on?</b></summary>
+
+Yes. Avibe and your Agents run on your computer, so scheduled and background work continues while it is on. Closing the Avibe window does not stop it.
+</details>
+
+<details>
+<summary><b>Is remote access safe?</b></summary>
+
+Your computer dials out to open the tunnel; no port is opened to the internet. Apart from Show Pages you choose to publish, nothing is reachable without signing in, and only the people you allow can sign in. If something is misconfigured, access is refused, not opened. See [Remote access](https://docs.avibe.bot/concepts/remote-ui).
 </details>
 
 <details>
 <summary><b>Does it run local models?</b></summary>
 
-Local-first here means your **code, data, and execution** stay on your machine — not necessarily the model weights. Model Hub can point at any compatible self-hosted endpoint if you want inference local too.
+Local-first here means your files and the work stay on your machine, not necessarily the model. If you want the model local too, point Model Hub at any compatible endpoint you host.
 </details>
 
 <details>
-<summary><b>Where do my code and data go?</b></summary>
+<summary><b>Do I need Claude Code, Codex, or OpenCode?</b></summary>
 
-Your code, keys, and agent processes stay on your machine. Agent prompts go to the model sources you configure. `avibe.bot` handles sign-in and the Remote Web UI tunnel without proxying your workspace; Voice input is the exception that goes through `avibe.bot` for transcription. The [boundary inventory](https://docs.avibe.bot/concepts/local-first#what-leaves-your-machine) lists every network path that carries your content.
+No. Vibey is built in. The coding agents are optional, and setup can install the ones you choose.
 </details>
 
-<details>
-<summary><b>Do I have to pay for Avibe?</b></summary>
+## For developers
 
-Avibe is open source (MIT) and free to run. You bring your own subscriptions or API keys and pay your provider directly — no markup, no second subscription.
-</details>
+**Bring your coding agents.** The official Claude Code, Codex, and OpenCode CLIs run unchanged next to Vibey, each with its own model and reasoning effort. Vibey can hand them work, and **Runs** draws who started which session and where it reports back. Setup detects the ones you have and installs the ones you pick.
 
-<details>
-<summary><b>Which agents and platforms are supported?</b></summary>
+**Instruction files.** Vibey loads `~/.avibe/AGENTS.md`, then each `AGENTS.md` (or `CLAUDE.md`) from the filesystem root down to the working directory, at the start of every turn. See [Vibey](https://docs.avibe.bot/agents/vibey).
 
-**Agents:** Vibey, Avibe's built-in AI partner, plus the official Claude Code, Codex, and OpenCode CLIs. **Surfaces:** a built-in browser Workbench (installable on desktop and mobile) plus Slack, Discord, Telegram, WeChat, and Lark / Feishu.
-</details>
-
-<details>
-<summary><b>Is remote access secure?</b></summary>
-
-`vibe remote` runs a Cloudflare tunnel from your machine; browser traffic reaches it only after sign-in (except Show Pages you choose to publish), and only for the people your access policy allows (by default, just you). Auth, routing, and host checks are **fail-closed**, and there are no public inbound ports for chat control.
-</details>
-
-<details>
-<summary><b>How is Avibe different from OpenClaw or Hermes?</b></summary>
-
-OpenClaw is a gateway-style personal assistant, and Hermes is a self-improving agent with its own learning loop; each is one assistant with its own runtime. Avibe is an operating system for agents: the Workbench, Harness, Model Hub, Show Pages, Vaults, and chat surfaces are shared by every agent it runs. It ships its own AI partner, Vibey, and runs the official Claude Code, Codex, and OpenCode unchanged beside it. Vibey's memory benchmark compares it with Claude Code, Codex, and Pi; OpenClaw and Hermes were not part of it. See the [comparison table](#avibe-vs-openclaw) above for OpenClaw specifics.
-</details>
-
----
-
-## Commands
+**Commands.**
 
 ```bash
 vibe            # Start Avibe and open the Workbench
-vibe status     # Check service and configuration status
+vibe status     # Check the service and its configuration
 vibe stop       # Stop the local service
-vibe upgrade    # Upgrade to the latest release
-vibe doctor     # Diagnose common setup issues; "vibe doctor repair" applies safe fixes
-vibe remote     # Reach your Workbench from any device via avibe.bot
-vibe agent      # Run and manage Avibe Agents
-vibe task       # Schedule time-based work (cron / one-off)
+vibe upgrade    # Upgrade a command-line install
+vibe doctor     # Diagnose setup problems; "vibe doctor repair" applies safe fixes
+vibe remote     # Pair with avibe.bot and manage remote access
+vibe agent      # Run and manage Agents
+vibe task       # Schedule work
 vibe watch      # Wait on a condition, then act
-vibe runs       # Inspect agent run history
-vibe show       # Create, inspect, and publish Show Pages
-vibe vault      # Manage secrets, requests, authenticated fetches, and signing
+vibe runs       # Inspect run history
+vibe show       # Create and publish Show Pages
+vibe vault      # Manage secrets, authenticated requests, and signing
+vibe mcp        # Call the tools of connected MCP servers
 ```
 
-| In chat | What it does |
-|---|---|
-| Mention the bot | Start a task or ask a question |
-| Reply in thread | Continue the same agent session |
-| `/stop` | Interrupt the current run |
-
-Full references: [Commands](docs/COMMANDS.md) · [CLI](docs/CLI.md)
-
----
-
-## Agents
-
-**Vibey reads your instruction files.** Like Claude Code and Codex, Vibey loads your standing instructions at the start of every Turn:
-1. `~/.avibe/AGENTS.md`, for every project;
-2. then, in each directory from the filesystem root down to the working directory, its `AGENTS.md` (or `CLAUDE.md`).
-
-`AGENTS.override.md` takes the place of a directory's `AGENTS.md`. When two files conflict, the more specific one wins. Files in directories below the working directory are not loaded up front: Vibey is told to read a subtree's file before it works with files there. An edit takes effect on the next Turn. The instructions are capped at 64 KiB in all; past that, Vibey is told which file was cut or left out.
-
-The setup wizard detects Claude Code, Codex, and OpenCode on your machine and installs any you choose that are missing. To install one yourself:
-
-<details>
-<summary><b>Claude Code</b></summary>
-
-```bash
-bash -o pipefail -c 'curl -fsSL https://claude.ai/install.sh | bash'
-```
-</details>
-
-<details>
-<summary><b>Codex</b></summary>
-
-```bash
-npm install -g @openai/codex
-```
-</details>
-
-<details>
-<summary><b>OpenCode</b></summary>
-
-```bash
-bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash'
-```
-
-OpenCode may pause tool calls for approval unless `~/.config/opencode/opencode.json` allows them; the setup wizard can set this for you:
-
-```json
-{ "permission": "allow" }
-```
-</details>
-
----
-
-## Security
-
-- **Local-first** — Avibe runs on your machine; your code and agent processes stay there.
-- **No public inbound ports** — Socket Mode / WebSocket / long-polling only for chat control.
-- **Your keys, your data** — stored under `~/.avibe/`; agent prompts go only to the model sources you configure. Existing installs keep `~/.vibe_remote/` as a compatibility path.
-- **Fail-closed remote access** — `avibe.bot` brokers identity and the tunnel, never your workspace.
-
----
-
-## Uninstall
-
-Run the installer with `--uninstall`. It stops Avibe, then removes every `vibe` command and install file it put on this machine. A `vibe` it did not install is left alone. Your settings, sessions, and other data in `~/.avibe` are kept:
+**Uninstall.** In the Desktop App, choose **Uninstall Avibe…** in the app's menu, then delete the app (macOS) or run the Windows uninstaller. For a command-line install, run the installer with `--uninstall`:
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 ```
 
-To delete your data too, add `--purge`. It lists everything it will delete and asks before deleting. **Deleted data cannot be recovered.** Where no terminal can answer, it also needs `--yes`.
+Both keep your data in `~/.avibe`. The [install guide](https://docs.avibe.bot/get-started/install#uninstall) covers deleting it too.
 
-```bash
-bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
-```
+**Read more.** [Quickstart](https://docs.avibe.bot/quickstart) · [What is Avibe](https://docs.avibe.bot/concepts/agent-os) · [Bots](https://docs.avibe.bot/concepts/bots) · [Model Hub](https://docs.avibe.bot/concepts/model-hub) · [Vaults](https://docs.avibe.bot/concepts/vaults) · [Show Pages](https://docs.avibe.bot/concepts/show-pages) · [Skills](https://docs.avibe.bot/concepts/skills) · [Harness](https://docs.avibe.bot/concepts/harness) · [CLI reference](docs/CLI.md) · [Chat commands](docs/COMMANDS.md) · [MCP Hub](docs/MCP_HUB.md) · [Install with an AI agent](docs/INSTALL_FOR_AI.md) · [Security policy](SECURITY.md)
 
----
-
-## Roadmap
-
-What's coming next:
-
-- **A native desktop app** — macOS and Windows builds with signed self-updates are in testing now.
-- **Deeper interaction-first workflows** — more direct manipulation, structured decisions, and in-place collaboration between chat, apps, and Show Pages.
-- **Protected Vault custody** — finish the immutable sandbox integrity gate before enabling passkey-protected secrets for real users.
-- **SaaS mode** — one-click hosted onboarding with a cloud relay, while execution still stays on your own machine.
-
-Shipped recently: Vibey's long-task memory · Vibey, Avibe's built-in AI partner · Model Hub with automatic takeover, quota tracking, and usage analytics · realtime voice input · Show Page sharing · Skills unified across every backend · the three-step setup wizard · the Agent Harness and run graph · multi-window Apps · Standard Vaults.
-
----
-
-## Docs
-
-- **[Official Docs](https://docs.avibe.bot)** — quickstart, concepts, platform & agent guides, troubleshooting
-- **[What is Avibe](https://docs.avibe.bot/concepts/agent-os)** — the Agent OS model
-- **[Vibey](https://docs.avibe.bot/agents/vibey)** — Avibe's built-in AI partner
-- **[How Vibey remembers](https://docs.avibe.bot/agents/vibey-memory)** · **[Vibey memory benchmark](https://docs.avibe.bot/agents/vibey-memory-benchmark)** — long-task memory, its design, and how it was measured
-- **[Model Hub](https://docs.avibe.bot/concepts/model-hub)** — sources, routes, takeover, usage, and quota
-- **[CLI Reference](docs/CLI.md)** · **[Commands](docs/COMMANDS.md)** · **[Show Pages](docs/SHOW_PAGES.md)**
-- **[Install via AI agent](docs/INSTALL_FOR_AI.md)** — hand this to Claude Code, Codex, or OpenCode for guided setup
-- **[Slack](docs/SLACK_SETUP.md)** · **[Discord](docs/DISCORD_SETUP.md)** · **[Telegram](docs/TELEGRAM_SETUP.md)** setup guides
+> **Built with Avibe.** This project is developed end to end with Avibe itself, from the desk and from a phone. — [@alex_metacraft](https://x.com/alex_metacraft)
 
 ---
 
@@ -411,6 +249,6 @@ Shipped recently: Vibey's long-task memory · Vibey, Avibe's built-in AI partner
 
 **Your computer. Your AI partner. Within reach, wherever you are.**
 
-[Install now](#get-started) · [Docs](https://docs.avibe.bot) · [Report a bug](https://github.com/avibe-bot/avibe/issues) · [Follow @alex_metacraft](https://x.com/alex_metacraft)
+[Download](https://avibe.bot/#download) · [Docs](https://docs.avibe.bot) · [Report a bug](https://github.com/avibe-bot/avibe/issues)
 
 </div>

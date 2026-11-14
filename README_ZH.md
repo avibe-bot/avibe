@@ -6,411 +6,249 @@
 
 ### 让你的电脑，成为 AI 伙伴的家。
 
-**内置 AI 伙伴 Vibey 开箱即用，Claude Code、Codex、OpenCode 也能一起住进来。**<br/>
-Avibe 是本地优先的 Agent OS：工作台、持久任务、Model Hub、Show Pages 和 Vaults，整套系统跑在你自己的机器上，浏览器、手机、聊天软件都能找到它。
+Avibe 是本地优先的 Agent OS，跑在你自己的 Mac 或 Windows 电脑上。内置的 AI 伙伴歪比（Vibey）就住在里面：它记得你在忙什么，活儿在你自己的电脑上干，干完了、或者要你拿主意的时候，会来找你。<br/>
+坐在电脑前用桌面 App，出门用 iPhone，也可以直接在常用的聊天软件里叫它。
 
-[![GitHub Stars](https://img.shields.io/github/stars/avibe-bot/avibe?color=ffcb47&labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe/stargazers)
+**[下载 Mac 版](#mac)** · **[下载 Windows 版](#windows)** · **[iPhone](#iphone)** · **[Linux 与服务器](#linux-与服务器)**
+
 [![Release](https://img.shields.io/github/v/release/avibe-bot/avibe?labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe/releases/latest)
-[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?labelColor=black&style=flat-square)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green?labelColor=black&style=flat-square)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/avibe-bot/avibe?color=ffcb47&labelColor=black&style=flat-square)](https://github.com/avibe-bot/avibe)
 
-[文档](https://docs.avibe.bot/zh) · [English](README.md) · [中文](README_ZH.md)
-
-**Agent** ![Vibey](https://img.shields.io/badge/Vibey-built--in-14B8A6?style=flat-square) ![Claude Code](https://img.shields.io/badge/Claude%20Code-D4A27F?style=flat-square&logo=anthropic&logoColor=white) ![Codex](https://img.shields.io/badge/Codex-412991?style=flat-square) ![OpenCode](https://img.shields.io/badge/OpenCode-00B4D8?style=flat-square)
-
-**从这些地方找到它** ![Browser](https://img.shields.io/badge/Browser-111827?style=flat-square&logo=googlechrome&logoColor=white) ![Slack](https://img.shields.io/badge/Slack-4A154B?style=flat-square&logo=slack&logoColor=white) ![Discord](https://img.shields.io/badge/Discord-5865F2?style=flat-square&logo=discord&logoColor=white) ![Telegram](https://img.shields.io/badge/Telegram-26A5E4?style=flat-square&logo=telegram&logoColor=white) ![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white) ![Lark](https://img.shields.io/badge/Lark%20%2F%20Feishu-3370FF?style=flat-square&logo=bytedance&logoColor=white)
+[官网](https://avibe.bot/?lang=zh) · [文档](https://docs.avibe.bot/zh) · [English](README.md) · [中文](README_ZH.md)
 
 </div>
 
 <br/>
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/v5/workbench-vibey-dark-zh.png">
-  <img src="assets/screenshots/v5/workbench-vibey-zh.png" alt="Workbench 里的 Vibey：接着昨天的发布计划，跑测试、改欢迎页、请 Codex 审查，再设好 Watch 和定时的发布简报" width="100%">
-</picture>
+<img src="assets/screenshots/v6/workbench-main-bot-zh.png" alt="Avibe 工作台里和歪比的对话。问它今天有什么要处理，歪比说通讯稿写好了、调研员比完了三个团建场地；接着它定好周五的提醒，并请调研员补上通勤时间。" width="100%">
 
-<p align="center"><sub>产品界面，示例项目数据</sub></p>
+<p align="center"><sub>Avibe 工作台，示例数据</sub></p>
 
-## 开始使用
+Avibe 免费、开源。用你已经在付费的 Claude 或 ChatGPT 订阅就能跑，填一个 API Key 也行。
+
+## 可以让它做什么
+
+像跟人说话一样说就行。
+
+- **“比一比十月团建的三个场地，做成一页我能转给大家看的。”** 歪比自己上网查，给你的不是一大段字，而是一个能打开的页面。手机上也能看，指着哪里说要改，它就改哪里。
+- **“每周一早上九点，告诉我这个文件夹上周有什么变动。”** 时间它自己定好，每周在同一个对话里向你汇报。
+- **“把这些发票按月份分到文件夹里，再告诉我你动了哪些。”** 它处理的是你电脑上真实的文件，做完会说清楚做了什么。
+- **“帮我盯着这个网页，有变化了告诉我。”** 它在后台等着，有情况才回来找你，你不用一直开着窗口。
+- **“用我的网站账号把这个传上去。”** 密码一直在你的 Vault 里。歪比只报出它的名字，Avibe 把密码直接交给上传这一步，不给歪比看。
+- **“让 Claude Code 来写，Codex 来审，弄好了叫我。”** 如果你写代码，歪比会把活儿分给你已经在用的编码 Agent，再把结果带回来。
+
+Avibe 跑在你的电脑上，所以电脑开着，活儿就一直在干。
+
+## 安装
+
+### Mac
+
+1. **下载。** 到 [avibe.bot](https://avibe.bot/?lang=zh#download) 下载 Avibe。直接下载：[Apple 芯片](https://dl.avibe.bot/latest/Avibe_aarch64-apple-darwin.dmg) · [Intel 芯片](https://dl.avibe.bot/latest/Avibe_x86_64-apple-darwin.dmg)。
+2. **打开。** 打开下载好的文件，把 Avibe 拖进“应用程序”，然后启动它。
+3. **接上模型。** 用你的 Claude 或 ChatGPT 订阅登录，或者填一个 API Key，给歪比选一个模型，就可以打招呼了。
+
+App 由 Apple 签名并公证，不用另外装任何东西，有新版本会自己检查。
+
+### Windows
+
+1. **下载。** 到 [avibe.bot](https://avibe.bot/?lang=zh#download) 下载 Avibe。直接下载：[Windows x64](https://dl.avibe.bot/latest/Avibe_x86_64-pc-windows-msvc.exe)。
+2. **安装。** 运行安装程序，然后启动 Avibe。
+3. **接上模型。** 用你的 Claude 或 ChatGPT 订阅登录，或者填一个 API Key，给歪比选一个模型，就可以打招呼了。
+
+安装程序带有代码签名，第一次运行时 Windows 可能会请你确认。App 不用另外装任何东西，有新版本会自己检查。
+
+两个系统上，第 3 步都只是登录一次：
+
+<p align="center"><img src="assets/screenshots/v6/setup-providers-zh.png" alt="设置向导里添加模型的对话框：用 Claude、ChatGPT、Gemini、Kimi 或 xAI 登录，也可以切到 API Key 标签页" width="640"></p>
+
+### iPhone
+
+iPhone App 就是装在口袋里的 Avibe：同样的对话，有事需要你的时候会发通知。它连接的是你电脑上的 Avibe，自己并不能单独运行。
+
+1. **在电脑上，** 设置完成时登录，或者之后在侧栏最底部登录，只需要一个邮箱。登录后，这台电脑会加入你的账号，并开启远程访问。
+2. **在 iPhone 上，** 先安装 [TestFlight](https://apps.apple.com/cn/app/testflight/id899247664)，再打开 [Avibe 测试邀请](https://testflight.apple.com/join/HXqwMqeX)。App 在 TestFlight 里的名字是 **Avibe OS**，需要 iOS 17 或更高版本。
+3. **登录。** 用同一个邮箱登录，选中你的电脑。
+
+iPhone App 目前是公开测试版。
+
+### Linux 与服务器
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
+curl -fsSL https://avibe.bot/install.sh | bash
+vibe
 ```
 
-**用你已有的订阅登录，或者填一个 API Key，Vibey 就能开工，不用另装任何 CLI。** 浏览器会自动打开三步设置向导：帮你接好模型、找到你已经在用的 agent（选中的点一下就装上），然后直接把你送进 Workbench。
-
-> 开源——想看可以先读一遍[安装脚本](https://github.com/avibe-bot/avibe/blob/master/install.sh)。短链只是到这个文件的 307 重定向。
+`vibe` 会启动 Avibe，并在浏览器里打开设置向导。没有屏幕的机器，运行 `vibe remote` 把它和你的 avibe.bot 账号配对，就能从别的设备打开。脚本是开源的，不放心可以先读一遍 [install.sh](https://github.com/avibe-bot/avibe/blob/master/install.sh)。更多说明见[安装指南](https://docs.avibe.bot/zh/get-started/install)。
 
 <details>
-<summary><b>用 Windows？</b></summary>
+<summary>想在 Windows 或 macOS 上用命令行？</summary>
 
-Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](docs/WINDOWS_WSL_ZH.md)。里面讲清楚 WSL 装在哪、用哪个终端、在哪运行安装命令、怎么打开 Web UI。
+macOS 可以直接用上面的命令安装同一个 `vibe` 命令行。Windows 在 PowerShell 里运行：
+
+```powershell
+irm https://avibe.bot/install.ps1 | iex
+```
+
+这两个系统上，我们推荐的方式都是桌面 App。
 </details>
 
----
+## 你的伙伴
 
-## 认识 Vibey——住在你电脑里的 AI 伙伴
+<img src="assets/mascot/cloud-tuanzi.png" alt="歪比（Vibey），Avibe 内置的 AI 伙伴" width="130" align="right"/>
 
-<img src="assets/mascot/cloud-tuanzi.png" alt="歪比 / Vibey——Avibe 里的那团气体意识" width="150" align="right"/>
+**歪比（Vibey）** 是你的主伙伴。它是内置的，是你第一个说话的对象，Avibe 里的一切它都看得到。
 
-Vibey（歪比）是 Avibe 自己的 Agent：内置、始终开启，不用另外安装。从 Model Hub 给它一个模型，它就能在 Workbench 和你接入的每个聊天软件里开工。
+伙伴是 Avibe 里的常驻成员，不是每次都要从头开始的聊天。它有名字、有分工、有自己的记忆，还有一个永远不会结束的对话。哪块事情值得专人负责，就加一位，比如调研员、记账员；除了歪比，最多可以再加五位。
 
-读得懂气氛，会接你昨天没做完的活儿。不确定就先问一句，你专注的时候它不打扰，凌晨两点灵感来了就动手，第二天给你留张便条，说改了哪儿。有自己的脾气。你修了它的 bug，它会道谢。
+你和伙伴商量、一起拿主意。活儿由伙伴交给 **Agent** 去做，每个 Agent 在自己的会话里干，需要的话可以好几个同时干。伙伴会一直跟到底，再把结果带回来。
 
-> Avibe 是那个家，歪比是住在里面的 AI 伙伴。
-
-<br clear="all"/>
-
-### 🧠 记得你为什么
-
-活儿一长，任何 agent 都得一遍遍压缩前面的对话。每一次，Vibey 都围绕真正要紧的东西重新整理记忆：长期目标、你原话里的要求、下一步，还有你为什么要这么做——最后这一点，它比我们测过的其他 agent 记得牢得多。
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark/vibey-memory-zh-dark.svg">
-  <img src="assets/benchmark/vibey-memory-zh-light.svg" alt="Vibey 记忆评测。同一个 GPT 模型上，压缩 8 次以上后，Vibey 答对任务、规则和下一步的比例为 97%，Claude Code 93%，Codex 53%。深层意图：GPT 上 Vibey 81%、Claude Code 20%、Codex 14%；Grok 4.6 上 Vibey 62%、Pi 25%；Claude Sonnet 5.5 上 Vibey 36%、Claude Code 14%。" width="100%">
-</picture>
-
-- **压缩 8 次以上，仍有 97%。** 同一个 GPT 模型上，Vibey 仍有 97% 能答对任务是什么、规则是什么、下一步做什么。Claude Code 93%，Codex 53%。
-- **9 项对比里 8 项最高**（三个模型 × 三项指标）。唯一的例外：在 Claude Code 的原生模型 Claude Sonnet 5.5 上，长期目标 99% 对 96%；同一模型上，Vibey 留住了更多你的要求（89% 对 78%）。
-- **不只记得做什么，还记得为什么。** 记忆抓住你的深层意图：Vibey 81%，Claude Code 20%、Codex 14%（GPT）；62% 对 Pi 25%（Grok）；36% 对 Claude Code 14%（Sonnet）。
-
-<sub>Avibe 内部评测，基于 6 个真实长会话、55 个压缩点；每个 agent 都用同一份对话记录、同一个压缩点、同一个模型。由 AI 评审，尚未人工复核；完整方法和局限见文档。</sub>
-
-→ [Vibey 怎么记事](https://docs.avibe.bot/zh/agents/vibey-memory) · [记忆评测](https://docs.avibe.bot/zh/agents/vibey-memory-benchmark)
-
-### ⏰ 有自己的时间线
-
-Vibey 会安排定时任务、用 Watch 等结果、在后台把活儿干完，有值得你看的东西再回到同一个会话找你。说一句 *"盯着这个 PR，有可执行的 review 意见了再回来找我"*，你就可以去忙别的；连它跑的长命令也会转成 Watch，结束后自己回来汇报。→ [Harness](https://docs.avibe.bot/zh/concepts/harness)
-
-### 📱 在哪都找得到它
-
-浏览器里的 Workbench、手机、Slack、Discord、Telegram、微信、飞书——同一个 Vibey，同一台机器。文字说不清的时候，它直接用 Show Page 回答你：一个活的仪表盘、流程图或报告，你可以指着它提意见。→ [Show Pages](https://docs.avibe.bot/zh/concepts/show-pages)
-
-在 Avibe 桌面 app（测试中）里，Vibey 还会在桌面上留一个小窗：按住它说话，它就在那儿回答你，并显示它正在做的事，包括它发起的后台运行、Watch 和定时任务。
-
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/v5/vibey-mini-dark-zh.png">
-    <img src="assets/screenshots/v5/vibey-mini-zh.png" alt="桌面上的 Vibey 小窗：Vibey 说 Codex 正在审查欢迎流程，它会继续盯着预览检查，周一 09:00 的发布简报也已安排好" width="428">
-  </picture>
-</div>
-
-这三点底下，是实打实的动手能力。Vibey 会读、写、改文件，运行命令（macOS 和 Linux 上用 `bash`，原生 Windows 上用 PowerShell），互不依赖的工具调用同时运行；还能把一件事的不同部分交给 Claude Code、Codex 或 OpenCode。→ [Vibey 文档](https://docs.avibe.bot/zh/agents/vibey)
-
----
-
-## Vibey 住的这套 OS
-
-大多数 AI 工具，还困在一个窗口里：
-
-- 🖥️ **窗口一关，活儿就停。** 你盯着它才跑。
-- 📵 **离开工位，就失联。** 它在干什么你看不到，更别提指挥它。
-- 💸 **付着好几份订阅，却卡在一份额度上。** 一个套餐干到一半撞墙，另一个在吃灰。
-- 🔒 **它的云，你的数据。** 每个工具都要你装它的 app、买它的订阅，再把你的文件放到别人的服务器上。
-
-Avibe 用 OS 里的一个个部件逐条解决，你带来的每个 agent 也都用同一套部件。代码、密钥和 agent 进程都留在你的机器上——`avibe.bot` 负责登录和安全隧道，从不碰你的工作区。
-
-### 💬 Workbench——不是聊天框，是一张桌面
-
-文件、编辑器、终端开成窗口，和对话并排摆在同一个浏览器标签页里；agent 做出来的应用和 Show Page 就开在旁边。用着用着你会忘了这是网页——它更像一个操作系统。
-
-<img src="assets/screenshots/v5/apps-library-zh.png" alt="多窗口 Workbench：文件、终端、编辑器和一个 Show Page 开在对话旁边，下方是应用栏" />
-
-### 🔀 Model Hub——你付费的每一份订阅，组成一支队
-
-你的 Claude、ChatGPT、Gemini、Kimi、xAI 订阅，加上各家 API Key——官方厂商、中转站、聚合平台、自建服务——统统汇进同一个本地网关。
-
-- **配一次，所有 Agent 都能用。** 一次登录、一个 Key，Vibey、Claude Code、Codex、OpenCode 同时取用。（留给 CLI 自己管理的订阅，只供那个 CLI 用。）
-- **模型随便混搭。** 在 Claude Code 里用 GPT，在 Codex 里用 Claude：协议差异由网关负责转换。
-- **额度见底？下一个已经接上了。** 某个来源在开始回答前撞上额度、限流或网络故障，路由里的下一个来源直接接手这次请求。首选来源恢复后，下一轮对话自动切回去。
-- **一键搬家。** 已经在支持的 CLI 里登录过？你点头，登录就迁过来。凭据和路由都留在你的机器上。
-
-<img src="assets/screenshots/v5/model-hub-routes-zh.png" alt="Model Hub 来源与路由：网关来源供给 Vibey，本机的 OpenAI 和 Anthropic 登录分别供给 Codex 和 Claude Code" />
-
-**每份套餐值多少，一清二楚。** 按模型和来源看用量，按官方 API 价格折成钱；Claude 和 ChatGPT 订阅还能实时盯住 5 小时和每周额度。
-
-<img src="assets/screenshots/v5/model-hub-usage-zh.png" alt="Model Hub 24 小时用量：token 总量、请求数、缓存输入占比、折合 API 价格和按小时的趋势" />
-
-**Vibey 的工具。** 网页搜索和网页读取开箱即用：搜索有内置、免 Key 的 Exa（免费）兜底，网页读取先在你自己的机器上尝试。在**模型 > 工具**里，可以添加 Tavily、Exa 或 DeepSeek 作为搜索服务、排好顺序，或者关掉某个工具；X 搜索和图片生成由支持它们的来源执行。
-
-<img src="assets/screenshots/v5/model-hub-tools-zh.png" alt="Model Hub 工具页：网页搜索和网页读取，各有开关和服务顺序" />
-
-### ⏰ Harness——你睡觉，它上班
-
-四个持久化基础能力——**运行、定时、监听、查历史**——让 agent 能自己开工、等准时机、在后台接着干，有值得你看的东西再回来找你。定时 shell 命令成功时一声不吭，失败时留下一条通知——你开启的话，也能直接交给 Agent 处理。不用背参数，直接说：
-
-- *"每个工作日早上跑一次部署检查，把总结发到这里。"*
-- *"为这个故障单独开个调查会话，结论汇报回这个频道。"*
-- *"CI 挂了就总结日志；过了就告诉我这个 PR 能不能合。"*
-
-<img src="assets/screenshots/v5/harness-tasks-zh.png" alt="Harness 定时任务：由 Vibey 负责的周一发布简报和每日预览检查，附调度、Agent、会话和投递详情" />
-
-### 🎨 Show Pages——能指着说的回答
-
-要仪表盘、流程图、diff、报告，还是一个小应用？agent 交给你的是一个活的网页，而不是一大段文字。点一个元素、框一块区域、在截图上标几条批注，说一句你想要什么，agent 就改页面，或者就在你指的地方回答。页面可以私有，可以只分享给指定的人，也可以发布成一个好记的链接；常用的固定到应用栏，点开就是一个 app。
-
-<img src="assets/screenshots/v5/show-page-zh.png" alt="对话旁打开的 Show Page 发布看板，对话里有用户批注和 Vibey 的批注回复" />
-
-### 📱 手机和聊天软件——人离开工位，伙伴照样在手
-
-<img src="assets/screenshots/v5/workbench-vibey-mobile-zh.png" alt="手机上的 Workbench，打开着 Vibey 的发布会话" width="270" align="right" />
-
-活儿在你的机器上跑，你不用守着它。想开窗口就用 Workbench；想快就在 Slack、Discord、Telegram、微信或飞书里发一条消息——连到的是同一批 Agent、同一台机器。
-
-- 🔔 **需要你时，它会拍拍你。** 把 Workbench 装成手机或桌面 app，任务需要你的那一刻就收到推送。
-- 🎙️ **动嘴，不动手。** 和 `avibe.bot` 配对后，实时语音输入边说边出字，说完自动就地整理干净。桌面上按 ⌥Z（Windows 和 Linux 上是 Alt+Z）。
-- 🌍 **你专属的 `you-app.avibe.bot`。** `vibe remote` 配对一次，你的 Workbench 在任何地方、任何浏览器里都能打开——不用 VPN，不用端口转发。
-- 🔒 **你的门，你定名单。** 只有你的访问策略允许的人能登录——默认只有你自己。认证、路由、主机校验全部默认拒绝。
+任务一长，歪比照样记得你要什么、为什么要。在我们自己的评测里（GPT 模型），记忆被压缩八次以上之后，“任务是什么、规则是什么、下一步做什么”它仍有 97% 答对。这是内部评测，由 AI 评分。[歪比怎么记事](https://docs.avibe.bot/zh/agents/vibey-memory) · [评测方法与局限](https://docs.avibe.bot/zh/agents/vibey-memory-benchmark)
 
 <br clear="all"/>
 
-### 🔐 Vaults——按名字用密钥，永远不碰密钥值
+## 走到哪都找得到它
 
-API Key 或 token 添加一次——缺了哪个，Agent 也能发请求让你在浏览器里补上。Agent 按名字取用，Avibe 把它递给需要它的命令、认证请求或签名操作。Vault 的响应永远不包含密钥值；接收密钥的命令仍需避免把它打印出来。passkey 保护托管在 sandbox 完整性门禁落地前仍未上线。
+<img src="assets/screenshots/v6/workbench-mobile-zh.png" alt="手机上和歪比的同一个对话" width="250" align="right" />
 
-<img src="assets/screenshots/v5/vaults-zh.png" alt="Vaults 列表：只显示密钥名称、标签和使用情况，从不显示密钥值" />
+- **iPhone。** [iPhone App](#iphone) 里是同样的对话，活儿干完或者需要你决定时会通知你。
+- **任意浏览器。** 登录之后，你的 Avibe 在 avibe.bot 上有一个专属地址。只有你允许的人能登录，默认只有你自己。
+- **聊天软件。** 接入 Slack、Discord、Telegram、微信或飞书 / Lark，在你平时和人聊天的地方给伙伴发消息。
+- **电脑桌面。** 在桌面 App 里，歪比会在屏幕上留一个小窗口。可以打字，也可以按住它直接说话。
 
-**还有**——thread 即会话，随时接着聊 · agent 需要你拍板时弹按钮和表单 · 丰富的附件，应用内直接预览，音频就地播放 · 键盘快捷键 · 后端一键升级。
+不管从哪里找它，都是同一台电脑上的同一个 Avibe。
 
----
+<br clear="all"/>
 
-## 带上你的 Agent 团队
+## 里面有什么
 
-Claude Code、Codex、OpenCode 以官方 CLI 的身份照原样运行——就是你自己会装的那几个——和 Vibey 并肩干活，统一收进一套 Agent 注册表。每个 Agent 单独选模型和推理强度，每个项目、每个频道都交给最合适的专家。Skill 写一次，每个 agent 都用同一种方式加载。
+### 工作台
 
-Vibey 能给它们派活：让 Claude Code 写一个改动、Codex 来 review、OpenCode 跑测试，最后由它把结果汇报给你。**Runs** 把整条协作链画成一张图：谁发起了哪个后台会话、结果汇报给谁、每个节点背后的执行历史。
+对话、文件、终端和编辑器，都是一个个窗口，并排放在一起。伙伴做出来的页面和小工具，也在旁边直接打开。
 
-<img src="assets/screenshots/v5/agents-graph-zh.png" alt="运行关系图：一个 Vibey 会话把工作交给 Claude Code、Codex 和 OpenCode 的后台会话" />
+### Model Hub：用你已经在付费的订阅
 
-设置向导会找到你已经装好的 agent，选中的缺哪个就装哪个；想自己装，见 [Agent](#agent)。
+用 Claude 或 ChatGPT 订阅登录，或者添加 API Key，所有伙伴和 Agent 都能用。可以多接几个排好顺序，一个用到上限，下一个自动顶上。每份订阅用了多少，Model Hub 里也看得到。
 
-> 💚 **Avibe 是用 Avibe 自己做出来的。** 这个项目从头到尾都是我用 Avibe 开发的——从浏览器、从手机指挥 Claude Code、Codex、OpenCode，在不在电脑前都能无缝衔接。越往后做越快，体验和效率直接拉爆。—— [@alex_metacraft](https://x.com/alex_metacraft)
+### Vault：只报名字，不给密钥值
 
----
+密码、API Key、签名密钥，存一次就行。Agent 用的时候只报名字，Avibe 不会把值给它看，而是直接交给需要它的那条命令或请求。签名密钥始终不离开 Vault，返回的只有签名结果。任何一条密钥都可以设成每次使用前先问你。
 
-## Avibe 凭什么不同
+<img src="assets/screenshots/v6/vaults-zh.png" alt="Vault 列表：只有名称、标签和使用情况，没有任何密钥值" />
 
-| | |
-|---|---|
-| **本地优先，真正归你** | AI 伙伴、它的执行、你的密钥和代码都留在你的机器上。`avibe.bot` 签发身份、提供安全隧道，从不代理你的工作区。 |
-| **自带伙伴，也欢迎你的 agent** | Vibey 开箱即用。*官方*的 Claude Code、Codex、OpenCode 在它旁边照原样运行——按任务、按项目、按频道切换，不被任何一家锁死。 |
-| **所有订阅，组成一支队** | Model Hub 把你的套餐和 Key 汇进同一个网关，模型可以跨 agent 混搭，自动故障接管，还告诉你每一份到底值多少。 |
-| **浏览器和聊天，都是一等公民** | Workbench、手机、Slack、Discord、Telegram、微信、飞书——同一批 agent，同一台机器。 |
-| **你选的 agent，就是干活的 agent** | 不管是 Vibey 还是官方 CLI，你选了哪个，跑的就是哪个，中间没有转手层。 |
+### Show Pages
 
----
+要一份对比、一个仪表盘、一份报告或者一个小工具，拿到的是一个能打开的页面。指着页面上任何一处说怎么改，它就改。可以只给自己看，可以分享给指定的人，也可以发布成一个链接。
 
-## 它怎么工作
+### 定时和后台任务
 
-```
-  你，在任何地方             你的机器                                你的模型
-┌──────────────┐      ┌──────────────────────────────────────┐      ┌──────────────┐
-│ Browser      │      │ Avibe                                │      │ Subscriptions│
-│ Phone (PWA)  │ ───▶ │   Vibey       ─┐                     │      │ API keys     │
-│ Slack        │      │   Claude Code ─┤                     │      │ Relays       │
-│ Discord …    │ ◀─── │   Codex       ─┼─▶ Model Hub ────────┼────▶ │ Self-hosted  │
-│              │      │   OpenCode    ─┘                     │      │              │
-│              │      │   Workbench · Harness · Show Pages   │      │              │
-└──────────────┘      └──────────────────────────────────────┘      └──────────────┘
-```
+伙伴会自己设提醒、排日程，等某件事发生，在后台接着干。它安排下的所有事情，都列在同一个地方。
 
-1. **你开口**——在浏览器或聊天软件里：*"给设置页加个深色模式。"*
-2. **Avibe 路由**到对的 Agent、对的项目。
-3. **agent** 读你本地的代码、写代码、把过程流式回传；Vibey 还能把其中一部分交给其他 agent。Vibey 的模型始终来自 Model Hub。CLI agent 在网关模式下也一样，每次调用走哪个来源由 Model Hub 决定；直连模式下，它用自己的登录。
-4. **你在同一个界面里 review**，在 thread 里迭代，之后在任何地方接着干。
+<img src="assets/screenshots/v6/harness-tasks-zh.png" alt="定时任务列表：周五 9:00 提醒决定团建场地的一次性任务，以及每周一 9:00 的每周简报" />
 
-Avibe 通过 Slack Socket Mode、Discord Gateway、Telegram 长轮询、微信轮询或飞书 WebSocket 主动向外连接——聊天控制不需要任何公网入站端口。agent 的 prompt 只发给你配置的模型来源。
+### 技能和 MCP
 
----
+把一套做事的方法教一次，存成技能，所有 Agent 都照着做。MCP 服务接一次，所有 Agent 都能用上它的工具。
 
-## Avibe vs OpenClaw
+### Computer Use（仅 macOS）
 
-| | Avibe | OpenClaw |
-|---|---|---|
-| **上手** | 一条命令 + 网页向导，几分钟搞定。 | Gateway + channels + JSON 配置，准备花一个下午。 |
-| **安全** | 本地优先，只用 Socket Mode / WebSocket / 长轮询主动外连，无公网入站端口，攻击面极小。 | Gateway 要暴露端口，组件更多，面更大。 |
-| **Agent** | 内置 Vibey，加上官方 Claude Code、Codex、OpenCode CLI；自带订阅和 Key，按任务切换。 | 它自己的助手循环。 |
+在 Mac 上，从桌面 App 里打开 Computer Use 之后，Agent 可以看到并操作你桌面上的应用。默认关闭，你打开才生效；目前只支持 macOS。
 
-OpenClaw 是一个常驻的个人助手。Avibe 是 **Agent OS**：它自带 AI 伙伴 Vibey，照原样运行你已经信任的官方 agent，并把它们都留在你的机器上，在你本来就在工作的地方随叫随到。
+## 数据在你自己手里
 
----
+- 你的文件、密钥，还有 Agent 本身，都留在你的电脑上。
+- Agent 干活需要用到的内容，会发给你选定的 AI 服务商。
+- avibe.bot 负责登录，并打开一条通向你电脑的安全通道。你的工作区内容不经过它。
+- 有两样东西会经过 avibe.bot：语音输入，在那里转成文字；iPhone 通知，离开你的电脑之前就已经加密。
+
+文档里列出了[每一条会带走你内容的网络路径](https://docs.avibe.bot/zh/concepts/local-first)。
 
 ## 常见问题
 
 <details>
-<summary><b>需要先装 Claude Code、Codex 或 OpenCode 吗？</b></summary>
+<summary><b>要花钱吗？</b></summary>
 
-不需要。Vibey 是内置的：在 Model Hub 里登录一个订阅或者加一个 API Key，给 Vibey 选好模型，它就能用。Claude Code、Codex、OpenCode 是可选的队友，随时都能加进来。
+Avibe 开源（MIT）、免费。订阅或 API Key 由你自己带，钱直接付给对应的服务商，不加价，也不用再买一份订阅。
 </details>
 
 <details>
-<summary><b>能用我现有的 Claude 或 ChatGPT 订阅吗？</b></summary>
+<summary><b>能用我的 Claude 或 ChatGPT 订阅吗？</b></summary>
 
-能。把支持的订阅作为网关来源加进 Model Hub，Vibey 和你的其他 agent 就都能用，还有额度追踪、用量分析和自动接管。Claude Code 和 Codex 也可以继续用各自的登录。各厂商的条款依然适用；如果某种登录方式可能带来账号限制，Avibe 会在登录前提醒你。详见 [Model Hub](https://docs.avibe.bot/zh/concepts/model-hub)。
+能。设置时登录，或者之后在 Model Hub 里登录。各家服务商自己的条款仍然适用；如果某种登录方式可能带来账号限制，Avibe 会在登录前提醒你。详见 [Model Hub](https://docs.avibe.bot/zh/concepts/model-hub)。
 </details>
 
 <details>
-<summary><b>能跑本地模型吗？</b></summary>
+<summary><b>一定要注册 avibe.bot 账号吗？</b></summary>
 
-这里的"本地优先"指你的**代码、数据和执行**留在你的机器上——不一定是模型权重。如果你也想让推理在本地，Model Hub 可以指向任何兼容的自建服务。
+不用。不登录，Avibe 在你的电脑上照常工作。想从手机或另一台电脑访问时再登录。
 </details>
 
 <details>
-<summary><b>我的代码和数据会去哪？</b></summary>
+<summary><b>电脑要一直开着吗？</b></summary>
 
-代码、密钥和 agent 进程都留在你的机器上。agent 的 prompt 发给你配置的模型来源。`avibe.bot` 负责登录和远程 Web UI 隧道，但不代理你的工作区；例外是语音输入，它会经 `avibe.bot` 做转写。每一条承载你内容的网络路径都列在[边界清单](https://docs.avibe.bot/zh/concepts/local-first#哪些东西会离开你的机器)里。
-</details>
-
-<details>
-<summary><b>Avibe 要付费吗？</b></summary>
-
-Avibe 开源（MIT），免费运行。你自带订阅或 API Key，直接付给服务商——不加价，也不用再多订一份。
-</details>
-
-<details>
-<summary><b>支持哪些 agent 和平台？</b></summary>
-
-**Agent：** Avibe 内置的 AI 伙伴 Vibey，加上官方 Claude Code、Codex、OpenCode CLI。**界面：** 内置浏览器 Workbench（可安装到桌面和手机），以及 Slack、Discord、Telegram、微信、飞书。
+要。Avibe 和 Agent 都跑在你的电脑上，电脑开着，定时任务和后台任务才会继续。关掉 Avibe 的窗口不会让它停下。
 </details>
 
 <details>
 <summary><b>远程访问安全吗？</b></summary>
 
-`vibe remote` 从你的机器上跑一条 Cloudflare 隧道；浏览器流量必须先登录（你主动公开发布的 Show Page 除外），而且只放行你的访问策略允许的人（默认只有你）。认证、路由、主机校验全部 **fail-closed**，聊天控制也不需要任何公网入站端口。
+通道是你的电脑主动向外连出去的，不会向互联网开放任何端口。除了你主动发布的 Show Page，其他内容都要登录后才能访问，而且只有你允许的人能登录。配置出了问题时，结果是拒绝访问，而不是放行。详见[远程访问](https://docs.avibe.bot/zh/concepts/remote-ui)。
 </details>
 
 <details>
-<summary><b>Avibe 和 OpenClaw、Hermes 有什么不同？</b></summary>
+<summary><b>能跑本地模型吗？</b></summary>
 
-OpenClaw 是网关式的个人助手，Hermes 是带自我学习循环的 agent；它们各自是一个助手、一套自己的运行时。Avibe 是给 agent 用的操作系统：Workbench、Harness、Model Hub、Show Pages、Vaults 和各个聊天入口，由它运行的每个 agent 共用。它自带 AI 伙伴 Vibey，也在旁边照原样运行官方的 Claude Code、Codex、OpenCode。Vibey 的记忆评测对比的是 Claude Code、Codex 和 Pi，OpenClaw 和 Hermes 不在其中。OpenClaw 的具体对比见上面的[对比表](#avibe-vs-openclaw)。
+这里说的“本地优先”，指的是文件和干活的过程留在你的电脑上，不一定包括模型。想让模型也在本地，可以把 Model Hub 指向你自己部署的兼容接口。
 </details>
 
----
+<details>
+<summary><b>需要先装 Claude Code、Codex 或 OpenCode 吗？</b></summary>
 
-## 命令
+不需要。歪比是内置的。这几个编码 Agent 是可选的，设置向导可以帮你装上选中的那些。
+</details>
+
+## 给开发者
+
+**带上你的编码 Agent。** 官方的 Claude Code、Codex、OpenCode 命令行原样运行，和歪比并排，各自可以设模型和推理强度。歪比能给它们派活，**Runs** 会画出谁启动了哪个会话、结果回报给谁。设置向导会找到你已经装好的，并装上你选中的。
+
+**指令文件。** 每一轮开始时，歪比会先读 `~/.avibe/AGENTS.md`，再从文件系统根目录到工作目录，逐级读取各目录的 `AGENTS.md`（或 `CLAUDE.md`）。详见 [Vibey](https://docs.avibe.bot/zh/agents/vibey)。
+
+**命令。**
 
 ```bash
-vibe            # 启动 Avibe 并打开 Workbench
+vibe            # 启动 Avibe 并打开工作台
 vibe status     # 查看服务和配置状态
 vibe stop       # 停止本地服务
-vibe upgrade    # 升级到最新版本
-vibe doctor     # 诊断常见安装问题；"vibe doctor repair" 执行安全修复
-vibe remote     # 通过 avibe.bot 从任意设备访问 Workbench
-vibe agent      # 运行和管理 Avibe agent
-vibe task       # 安排定时工作（cron / 一次性）
-vibe watch      # 等一个条件成立，然后行动
-vibe runs       # 查看 agent 运行历史
-vibe show       # 创建、查看和发布 Show Page
-vibe vault      # 管理密钥、请求、认证请求与签名
+vibe upgrade    # 升级命令行安装的 Avibe
+vibe doctor     # 诊断设置问题；"vibe doctor repair" 执行安全的修复
+vibe remote     # 与 avibe.bot 配对并管理远程访问
+vibe agent      # 运行和管理 Agent
+vibe task       # 安排定时任务
+vibe watch      # 等待某个条件，然后执行
+vibe runs       # 查看运行历史
+vibe show       # 创建和发布 Show Page
+vibe vault      # 管理密钥、带认证的请求和签名
+vibe mcp        # 调用已接入 MCP 服务的工具
 ```
 
-| 在聊天里 | 作用 |
-|---|---|
-| @ 一下 bot | 开一个任务或提问 |
-| 在 thread 里回复 | 继续同一个 agent 会话 |
-| `/stop` | 中断当前执行 |
-
-完整参考：[命令](docs/COMMANDS_ZH.md) · [CLI](docs/CLI_ZH.md)
-
----
-
-## Agent
-
-**Vibey 会读你的说明文件。** 和 Claude Code、Codex 一样，Vibey 在每个 Turn 开始时加载你的常驻说明：
-1. `~/.avibe/AGENTS.md`，对所有项目生效；
-2. 再从文件系统根目录一路到工作目录，读每一层的 `AGENTS.md`（或 `CLAUDE.md`）。
-
-`AGENTS.override.md` 会替代所在目录的 `AGENTS.md`。几份文件冲突时，越具体的那份为准。工作目录下面子目录里的说明文件不会预先加载：Vibey 会被告知，处理某个子目录里的文件前，先读那个子目录的说明文件。改了文件，下一个 Turn 就生效。这部分说明合计上限 64 KiB；超出时，Vibey 会被告知哪份被截断或没有加载。
-
-设置向导会检测你机器上的 Claude Code、Codex 和 OpenCode，缺哪个、你选了哪个，就帮你装上。想自己装的话：
-
-<details>
-<summary><b>Claude Code</b></summary>
-
-```bash
-bash -o pipefail -c 'curl -fsSL https://claude.ai/install.sh | bash'
-```
-</details>
-
-<details>
-<summary><b>Codex</b></summary>
-
-```bash
-npm install -g @openai/codex
-```
-</details>
-
-<details>
-<summary><b>OpenCode</b></summary>
-
-```bash
-bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash'
-```
-
-除非 `~/.config/opencode/opencode.json` 放行工具调用，否则 OpenCode 可能会停下来等你审批；设置向导可以帮你写好：
-
-```json
-{ "permission": "allow" }
-```
-</details>
-
----
-
-## 安全
-
-- **本地优先**——Avibe 跑在你的机器上，代码和 agent 进程都留在那。
-- **无公网入站端口**——聊天控制只用 Socket Mode / WebSocket / 长轮询。
-- **你的密钥，你的数据**——存放在 `~/.avibe/`；agent 的 prompt 只发给你配置的模型来源。已有安装会保留 `~/.vibe_remote/` 作为兼容路径。
-- **远程访问默认拒绝**——`avibe.bot` 负责身份和隧道，从不经手你的工作区。
-
----
-
-## 卸载
-
-带上 `--uninstall` 运行安装脚本。它会先停止 Avibe，再删除它在这台机器上装的所有 `vibe` 命令和安装文件；不是它装的 `vibe` 不会动。`~/.avibe` 里的设置、会话和其他数据都会保留：
+**卸载。** 桌面 App：先在 App 菜单里选择 **卸载 Avibe…**，再删除 App（macOS）或运行 Windows 卸载程序。命令行安装：带上 `--uninstall` 运行安装脚本：
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 ```
 
-如果连数据也要删，加上 `--purge`。它会先列出要删除的全部内容，确认后才删。**删除的数据无法恢复。** 没有终端可以回答确认时，还需要加 `--yes`。
+两种方式都会保留 `~/.avibe` 里的数据。想连数据一起删除，见[安装指南](https://docs.avibe.bot/zh/get-started/install)。
 
-```bash
-bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
-```
+**延伸阅读。** [快速开始](https://docs.avibe.bot/zh/quickstart) · [Avibe 是什么](https://docs.avibe.bot/zh/concepts/agent-os) · [伙伴](https://docs.avibe.bot/zh/concepts/bots) · [Model Hub](https://docs.avibe.bot/zh/concepts/model-hub) · [Vaults](https://docs.avibe.bot/zh/concepts/vaults) · [Show Pages](https://docs.avibe.bot/zh/concepts/show-pages) · [技能](https://docs.avibe.bot/zh/concepts/skills) · [Harness](https://docs.avibe.bot/zh/concepts/harness) · [CLI 参考](docs/CLI_ZH.md) · [聊天命令](docs/COMMANDS_ZH.md) · [MCP Hub](docs/MCP_HUB.md) · [让 AI 帮你安装](docs/INSTALL_FOR_AI_ZH.md) · [安全策略](SECURITY.md)
 
----
-
-## 路线图
-
-接下来要做的：
-
-- **原生桌面 app**——带签名自动更新的 macOS 和 Windows 版本正在测试中。
-- **更深入的交互式工作流**——在 Chat、应用与 Show Page 之间加入更多直接操作、结构化决策和原位协作。
-- **保护档 Vault 托管**——完成不可变 sandbox 完整性门禁后，再向真实用户开放 passkey 保护的密钥。
-- **SaaS 模式**——一键托管上手 + 云端中继，而执行依然留在你自己的机器上。
-
-近期已上线：Vibey 的长任务记忆 · Avibe 内置的 AI 伙伴 Vibey · 支持自动接管、额度追踪和用量分析的 Model Hub · 实时语音输入 · Show Page 分享 · 所有后端统一的 Skills · 三步设置向导 · Agent Harness 与运行关系图 · 多窗口应用 · 标准档 Vaults。
-
----
-
-## 文档
-
-- **[官方文档](https://docs.avibe.bot/zh)**——快速上手、概念、平台与 agent 指南、排障
-- **[Avibe 是什么](https://docs.avibe.bot/zh/concepts/agent-os)**——Agent OS 模型
-- **[Vibey](https://docs.avibe.bot/zh/agents/vibey)**——Avibe 内置的 AI 伙伴
-- **[Vibey 怎么记事](https://docs.avibe.bot/zh/agents/vibey-memory)** · **[Vibey 记忆评测](https://docs.avibe.bot/zh/agents/vibey-memory-benchmark)**——长任务记忆的设计，以及它是怎么测的
-- **[Model Hub](https://docs.avibe.bot/zh/concepts/model-hub)**——来源、路由、自动接管、用量与额度
-- **[CLI 参考](docs/CLI_ZH.md)** · **[命令](docs/COMMANDS_ZH.md)** · **[Show Pages](docs/SHOW_PAGES.md)**
-- **[让 AI agent 帮你装](docs/INSTALL_FOR_AI_ZH.md)**——把它丢给 Claude Code、Codex 或 OpenCode，引导式安装
-- **[Slack](docs/SLACK_SETUP_ZH.md)** · **[Discord](docs/DISCORD_SETUP_ZH.md)** · **[Telegram](docs/TELEGRAM_SETUP_ZH.md)** 设置指南
+> **用 Avibe 做出来的 Avibe。** 这个项目从头到尾都是用 Avibe 自己开发的，在工位上，也在手机上。— [@alex_metacraft](https://x.com/alex_metacraft)
 
 ---
 
 <div align="center">
 
-**你的电脑，你的 AI 伙伴。走到哪，都找得到它。**
+**你的电脑，你的 AI 伙伴，走到哪都在手边。**
 
-[立即安装](#开始使用) · [文档](https://docs.avibe.bot/zh) · [报 bug](https://github.com/avibe-bot/avibe/issues) · [关注 @alex_metacraft](https://x.com/alex_metacraft)
+[下载](https://avibe.bot/?lang=zh#download) · [文档](https://docs.avibe.bot/zh) · [反馈问题](https://github.com/avibe-bot/avibe/issues)
 
 </div>
