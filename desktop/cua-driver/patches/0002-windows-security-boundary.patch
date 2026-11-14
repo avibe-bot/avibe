@@ -1370,7 +1370,7 @@ index 0000000..738f5cd
 +    }
 +}
 diff --git a/libs/cua-driver/rust/crates/platform-windows/Cargo.toml b/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
-index 1d2a2ae..6cdc1a8 100644
+index 1d2a2ae..4a69383 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
 +++ b/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
 @@ -33,6 +33,8 @@ windows = { version = "0.58", features = [
@@ -1382,6 +1382,20 @@ index 1d2a2ae..6cdc1a8 100644
      # CreatePipe: the result pipe of the standard-user shell launch helper.
      "Win32_System_Pipes",
      "Win32_System_SystemInformation",
+@@ -93,6 +95,13 @@ windows = { version = "0.58", features = [
+ ] }
+ base64 = { workspace = true }
+
++[target.'cfg(target_os = "windows")'.dev-dependencies]
++windows = { version = "0.58", features = [
++    "Win32_System_IO",
++    "Win32_System_Ioctl",
++    "Win32_System_SystemServices",
++] }
++
+ [dev-dependencies]
+ uuid = { workspace = true }
+ tempfile = "3"
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs b/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs
 index 6de2266..0d3741c 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs
@@ -2861,7 +2875,7 @@ index e4989de..b37b52b 100644
  //! tools could not close or automate the app, and it would behave differently
  //! from the same app started from Explorer. An elevated Driver instead
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
-index c3101d1..e25cd37 100644
+index c3101d1..daa42ec 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 @@ -673,7 +673,7 @@ impl Tool for ListAppsTool {
@@ -3339,9 +3353,7 @@ index c3101d1..e25cd37 100644
 -                    ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS,
 -                    SHELLEXECUTEINFOW,
 -                };
-+        let created_app = std::sync::Arc::new(created_app);
-+        let pid = created_app.pid;
-
+-
 -                fn to_wide(s: &str) -> Vec<u16> {
 -                    s.encode_utf16().chain(std::iter::once(0)).collect()
 -                }
@@ -3480,7 +3492,9 @@ index c3101d1..e25cd37 100644
 -            // unblocks if/when the modal is dismissed) and return an error so
 -            // the daemon stays responsive instead of wedging on the request.
 -            let result = tokio::time::timeout(std::time::Duration::from_secs(15), launch).await;
--
++        let created_app = std::sync::Arc::new(created_app);
++        let pid = created_app.pid;
+
 -            match result {
 -                Ok(Ok(Ok(p))) => p,
 -                Ok(Ok(Err(e))) if name_lookup_missed => {
@@ -3826,7 +3840,7 @@ index c3101d1..e25cd37 100644
          if !windows_json.is_empty() {
              summary.push_str("\n\nWindows:");
              for w in &windows_json {
-@@ -3044,28 +2351,269 @@ impl Tool for LaunchAppTool {
+@@ -3044,28 +2351,335 @@ impl Tool for LaunchAppTool {
                  "\n→ Call get_window_state(pid: {pid}, window_id) to inspect."
              ));
          }
@@ -3874,6 +3888,78 @@ index c3101d1..e25cd37 100644
 +#[cfg(test)]
 +mod literal_launch_callsite_tests {
 +    use super::*;
++
++    // Write the mount-point payload directly: mklink normalizes trailing dots
++    // and spaces even when its target uses the verbatim prefix.
++    fn create_exact_junction(junction: &std::path::Path, target: &std::path::Path) {
++        use std::os::windows::{
++            ffi::OsStrExt,
++            io::{AsRawHandle, FromRawHandle, OwnedHandle},
++        };
++        use windows::core::PCWSTR;
++        use windows::Win32::Foundation::{GENERIC_WRITE, HANDLE};
++        use windows::Win32::Storage::FileSystem::{
++            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
++            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
++        };
++        use windows::Win32::System::{
++            Ioctl::FSCTL_SET_REPARSE_POINT, SystemServices::IO_REPARSE_TAG_MOUNT_POINT,
++            IO::DeviceIoControl,
++        };
++
++        let target = target.to_str().unwrap().strip_prefix(r"\\?\").unwrap();
++        let substitute: Vec<u16> = format!(r"\??\{target}").encode_utf16().collect();
++        let print: Vec<u16> = target.encode_utf16().collect();
++        let sub_len = u16::try_from(substitute.len() * 2).unwrap();
++        let print_len = u16::try_from(print.len() * 2).unwrap();
++        let data_len = 8usize + usize::from(sub_len) + 2 + usize::from(print_len) + 2;
++        let mut buffer = Vec::new();
++        buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
++        for value in [
++            u16::try_from(data_len).unwrap(),
++            0,
++            0,
++            sub_len,
++            sub_len + 2,
++            print_len,
++        ] {
++            buffer.extend_from_slice(&value.to_le_bytes());
++        }
++        for value in substitute.into_iter().chain([0]).chain(print).chain([0]) {
++            buffer.extend_from_slice(&value.to_le_bytes());
++        }
++        assert_eq!(buffer.len(), data_len + 8);
++        assert!(buffer.len() <= 16 * 1024);
++        std::fs::create_dir(junction).unwrap();
++        let path: Vec<u16> = junction.as_os_str().encode_wide().chain([0]).collect();
++        let handle = unsafe {
++            CreateFileW(
++                PCWSTR(path.as_ptr()),
++                GENERIC_WRITE.0,
++                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                None,
++                OPEN_EXISTING,
++                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
++                None,
++            )
++        }
++        .expect("open test-owned junction directory");
++        let handle = unsafe { OwnedHandle::from_raw_handle(handle.0) };
++        let mut returned = 0;
++        unsafe {
++            DeviceIoControl(
++                HANDLE(handle.as_raw_handle()),
++                FSCTL_SET_REPARSE_POINT,
++                Some(buffer.as_ptr().cast()),
++                buffer.len() as u32,
++                None,
++                0,
++                Some(&mut returned),
++                None,
++            )
++        }
++        .expect("set exact test junction target without shell normalization");
++    }
 +
 +    #[tokio::test]
 +    async fn unsupported_routes_refuse_at_actual_launch_tool_before_native_effects() {
@@ -3994,13 +4080,7 @@ index c3101d1..e25cd37 100644
 +            let special_executable = special.join("launch-probe.exe");
 +            std::fs::copy(&executable, &special_executable).unwrap();
 +            let junction = directory.path().join(format!("junction-{index}"));
-+            let output = std::process::Command::new(&system_cmd)
-+                .args(["/d", "/c", "mklink", "/J"])
-+                .arg(&junction)
-+                .arg(&special)
-+                .output()
-+                .unwrap();
-+            assert!(output.status.success(), "junction setup: {output:?}");
++            create_exact_junction(&junction, &special);
 +            let public_path = junction.join("launch-probe.exe");
 +            let resolved = std::fs::canonicalize(&public_path).unwrap();
 +            assert_eq!(
@@ -4108,7 +4188,7 @@ index c3101d1..e25cd37 100644
  fn posted_pixel_click_result(pid: u32, click_word: &str) -> ToolResult {
      ToolResult::text(format!("✅ Posted {click_word} to pid {pid}.")).with_structured(json!({
          "path": "post_message",
-@@ -5514,9 +5062,10 @@ impl Tool for HotkeyTool {
+@@ -5514,9 +5128,10 @@ impl Tool for HotkeyTool {
                  accelerators via `TranslateAccelerator` (LibreOffice, FAR, classic Notepad, etc.) \
                  never see the combo as a real accelerator on the PostMessage-only path. \
                  Trade-off: brief foreground swap (mitigated by restoring the previous foreground \
@@ -4122,7 +4202,7 @@ index c3101d1..e25cd37 100644
                  - **Legacy Win32 targets without modifiers** (plain `enter`, `tab`, `f5`, etc.) \
                  route through `PostMessage(WM_KEYDOWN/UP)` — no focus steal, no need to update \
                  modifier state.\n\n\
-@@ -7896,6 +7445,7 @@ impl Tool for GetDesktopStateTool {
+@@ -7896,6 +7511,7 @@ impl Tool for GetDesktopStateTool {
              is_error: None,
              structured_content: Some(structured),
              action_record: None,
@@ -4130,7 +4210,7 @@ index c3101d1..e25cd37 100644
          }
      }
  }
-@@ -8875,6 +8425,7 @@ impl Tool for ZoomTool {
+@@ -8875,6 +8491,7 @@ impl Tool for ZoomTool {
                          "mime_type": "image/jpeg"
                      })),
                      action_record: None,
@@ -4138,7 +4218,7 @@ index c3101d1..e25cd37 100644
                  }
              }
              Ok(Err(e)) => ToolResult::error(format!("Zoom failed: {e}")),
-@@ -9641,21 +9192,40 @@ impl Tool for KillAppTool {
+@@ -9641,21 +9258,40 @@ impl Tool for KillAppTool {
              }
          };
 
@@ -4186,7 +4266,7 @@ index c3101d1..e25cd37 100644
                  .map_err(|e| {
                  format!(
                      "OpenProcess(pid={pid_v}, PROCESS_TERMINATE|PROCESS_SYNCHRONIZE) failed: {e}. \
-@@ -9664,6 +9234,13 @@ impl Tool for KillAppTool {
+@@ -9664,6 +9300,13 @@ impl Tool for KillAppTool {
                  )
              })?;
 
@@ -4200,7 +4280,7 @@ index c3101d1..e25cd37 100644
              let term_result = unsafe { TerminateProcess(h, 1) };
 
              // WaitForSingleObject so the caller can assume the process is
-@@ -9673,7 +9250,7 @@ impl Tool for KillAppTool {
+@@ -9673,7 +9316,7 @@ impl Tool for KillAppTool {
              // success (the kill request landed; the process may take a
              // little longer to disappear from list_apps).
              let wait_status = unsafe { WaitForSingleObject(h, 2000) };
