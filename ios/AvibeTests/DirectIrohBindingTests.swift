@@ -148,7 +148,7 @@ final class DirectIrohBindingTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         let nativeCallsStarted = await waitForStarted(recorder)
         XCTAssertTrue(nativeCallsStarted)
-        XCTAssertFalse(recorder.allSettled)
+        XCTAssertTrue(recorder.bothInFlight)
 
         let cancelledAt = Date()
         stream.cancel()
@@ -197,6 +197,12 @@ final class DirectIrohBindingTests: XCTestCase {
         var bothStarted: Bool {
             lock.withLock {
                 sendWriteStarted && receiveReadStarted
+            }
+        }
+
+        var bothInFlight: Bool {
+            lock.withLock {
+                sendWriteStarted && receiveReadStarted && !sendWrite && !receiveRead
             }
         }
 
