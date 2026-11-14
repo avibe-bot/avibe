@@ -19995,7 +19995,7 @@ def build_parser():
     vault_generate_parser.add_argument("name", help="New secret name, or existing static Standard secret for a new field")
     vault_generate_parser.add_argument("--field", help="New field label; new secrets default to value")
     vault_generate_parser.add_argument("--type", choices=["password", "hex", "base64"], default="password", help="Format (default password)")
-    vault_generate_parser.add_argument("--length", type=int, help="Password characters, 12..128 (default 24); password only")
+    vault_generate_parser.add_argument("--length", type=int, help="Password characters, 12..100 (default 24); password only")
     vault_generate_parser.add_argument("--bytes", type=int, help="Random bytes, 16..64 (default 32); hex/base64 only")
     vault_generate_parser.add_argument("--no-digits", action="store_true", default=None, help="Exclude digits; password only")
     vault_generate_parser.add_argument("--no-symbols", action="store_true", default=None, help="Exclude symbols; password only")
