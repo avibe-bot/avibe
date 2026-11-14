@@ -12,6 +12,7 @@ import type {
 
 const mobile = vi.hoisted(() => ({
   bootstrap: vi.fn<() => Promise<MobileSessionState>>(),
+  dismiss: vi.fn<() => Promise<null>>(),
   logout: vi.fn<() => Promise<MobileSessionState>>(),
   openExternal: vi.fn(),
   refresh: vi.fn<() => Promise<MobileSessionState>>(),
@@ -29,6 +30,8 @@ const mobile = vi.hoisted(() => ({
 vi.mock('./bridge', () => ({
   ACCOUNT_SECURITY_URL: 'https://avibe.bot/app/account/security',
   bootstrapMobileSession: mobile.bootstrap,
+  dismissMobileSheet: mobile.dismiss,
+  SHEET_HASH: '#sheet',
   logoutMobileSession: mobile.logout,
   openMobileExternal: mobile.openExternal,
   refreshMobileSession: mobile.refresh,
@@ -121,6 +124,8 @@ const resetMobileMocks = () => {
   appLicenses.load.mockReset();
   appLicenses.load.mockResolvedValue(null);
   mobile.bootstrap.mockReset();
+  mobile.dismiss.mockReset();
+  mobile.dismiss.mockResolvedValue(null);
   mobile.logout.mockReset();
   mobile.openExternal.mockReset();
   mobile.refresh.mockReset();
@@ -211,6 +216,12 @@ const expectedErrorKey = (
   operation: FailureOperation,
   code: typeof bridgeErrorCodes[number],
 ): string => {
+  if (operation === 'select') {
+    // An instance that did not open says so on its own row, by name.
+    if (code === 'instance_offline') return 'mobileApp.sheet.openFailedOffline:Personal Avibe';
+    if (code === 'unauthorized_instance') return 'mobileApp.sheet.openFailedGone:Personal Avibe';
+    return 'mobileApp.sheet.openFailed:Personal Avibe';
+  }
   if (operation === 'password') {
     if (code === 'invalid_credentials') return 'mobileApp.password.invalid';
     if (code === 'email_not_confirmed') return 'mobileApp.password.unconfirmed';
@@ -879,11 +890,15 @@ describe('mobile onboarding', () => {
 
     render(<MobileOnboarding />);
 
-    expect(await screen.findByText('mobileApp.instances.sharedBy:owner@example.com')).toBeTruthy();
+    expect(await screen.findByText('mobileApp.sheet.offlineLine')).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: /Shared Research Avibe/ }));
+    const offlineRow = screen.getByRole('button', { name: /Shared Research Avibe/ });
+    expect(offlineRow.getAttribute('aria-expanded')).toBe('false');
+    await user.click(offlineRow);
     expect(mobile.selectInstance).not.toHaveBeenCalled();
-    expect(screen.getByText('mobileApp.instances.offlineTitle:Shared Research Avibe')).toBeTruthy();
+    // Explained in place, on its own row.
+    expect(offlineRow.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('mobileApp.sheet.offlineBody:Shared Research Avibe')).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: /Personal Avibe/ }));
     await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
@@ -1978,5 +1993,304 @@ describe('mobile password sign-in', () => {
       fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
       expect(await screen.findByRole('heading', { name: 'mobileApp.account.title' })).toBeTruthy();
     });
+  });
+});
+
+// The instance sheet native opens over the selected instance (ui/design: mobile-app/switcher/*).
+describe('mobile instance sheet', () => {
+  const lab = {
+    id: 'lab',
+    name: 'Lab',
+    host: 'lab-app.avibe.bot',
+    url: 'https://lab-app.avibe.bot',
+    relationship: 'owner' as const,
+    owner_email: null,
+    available: true,
+  };
+  /** Native's snapshot: the selected instance and the rest by recent use on this device. */
+  const inSheet = (): Extract<MobileSessionState, { status: 'signedIn' }> => {
+    const base = signedIn();
+    return { ...base, selected_instance_id: 'owned', instances: [base.instances[0], lab, base.instances[1]] };
+  };
+  const openSheet = async (state = inSheet()) => {
+    window.history.replaceState({}, '', '/#sheet');
+    mobile.bootstrap.mockResolvedValueOnce(state);
+    mobile.refresh.mockResolvedValue(state);
+    render(<MobileOnboarding />);
+    // The sheet's header is drawn from the first frame; the list once the snapshot is read.
+    await screen.findByText('mobileApp.sheet.youreIn');
+  };
+  const rowNames = () => Array.from(document.querySelectorAll('main button'))
+    .map((button) => button.textContent ?? '')
+    .filter((text) => /Personal Avibe|Lab|Shared Research Avibe/.test(text));
+
+  it('opens on the list over the current instance, never on Account or the first-use page', async () => {
+    await openSheet();
+    expect(screen.queryByRole('heading', { name: 'mobileApp.account.title', level: 1 })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'mobileApp.instances.title' })).toBeNull();
+    expect(screen.getByText('mobileApp.sheet.youreIn')).toBeTruthy();
+    // The current instance first, then the others in native's recent order.
+    const names = ['Personal Avibe', 'Lab', 'Shared Research Avibe'];
+    expect(rowNames().map((text) => names.find((name) => text.startsWith(name)))).toEqual([
+      'Personal Avibe', 'Lab', 'Shared Research Avibe',
+    ]);
+    // One background refresh, while the list is already usable.
+    await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
+  });
+
+  it('scrolls its document, so native can hand a pull at the top to the sheet', async () => {
+    await openSheet();
+    const main = screen.getByRole('main');
+    expect(main.classList.contains('h-dvh')).toBe(false);
+    expect(main.classList.contains('overflow-y-auto')).toBe(false);
+  });
+
+  it('returns to the current instance with Close or its row, without selecting it again', async () => {
+    await openSheet();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.sheet.close:Personal Avibe' }));
+    await waitFor(() => expect(mobile.dismiss).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.sheet.returnTo:Personal Avibe' }));
+    await waitFor(() => expect(mobile.dismiss).toHaveBeenCalledTimes(2));
+    expect(mobile.selectInstance).not.toHaveBeenCalled();
+  });
+
+  it('opens another instance, and reports a failure on its row with a retry', async () => {
+    await openSheet();
+    const opening = deferred<{ instance: typeof lab }>();
+    mobile.selectInstance.mockReturnValueOnce(opening.promise);
+    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('lab'));
+    expect(await screen.findByText('mobileApp.sheet.opening')).toBeTruthy();
+
+    opening.reject({ code: 'network', message: 'The instance did not answer.' });
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('mobileApp.sheet.openFailed:Lab');
+    // The list stays; the current instance is still one tap away.
+    expect(screen.getByRole('button', { name: 'mobileApp.sheet.returnTo:Personal Avibe' })).toBeTruthy();
+
+    mobile.selectInstance.mockResolvedValueOnce({ instance: lab });
+    fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+    await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledTimes(2));
+    expect(mobile.dismiss).not.toHaveBeenCalled();
+  });
+
+  it('explains an offline instance in place instead of opening it', async () => {
+    await openSheet();
+    const offline = screen.getByRole('button', { name: /Shared Research Avibe/ });
+    fireEvent.click(offline);
+    expect(offline.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('mobileApp.sheet.offlineBody:Shared Research Avibe')).toBeTruthy();
+    expect(mobile.selectInstance).not.toHaveBeenCalled();
+  });
+
+  it('keeps the list usable when its refresh fails, with a banner that retries', async () => {
+    window.history.replaceState({}, '', '/#sheet');
+    mobile.bootstrap.mockResolvedValueOnce(inSheet());
+    mobile.refresh.mockRejectedValueOnce({ code: 'network', message: 'offline' });
+    render(<MobileOnboarding />);
+    expect(await screen.findByText('mobileApp.sheet.stale')).toBeTruthy();
+    // No blanket "can't reach avibe.bot": the cached list is still there.
+    expect(screen.queryByText('mobileApp.errors.network')).toBeNull();
+    expect(screen.getByRole('button', { name: /^Lab/ })).toBeTruthy();
+
+    mobile.refresh.mockResolvedValueOnce(inSheet());
+    fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+    await waitFor(() => expect(screen.queryByText('mobileApp.sheet.stale')).toBeNull());
+    expect(mobile.refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('pushes Account and Add inside the sheet, each with a Back the edge swipe presses', async () => {
+    await openSheet();
+    fireEvent.click(screen.getByRole('button', { name: /alexander\.with\.a\.very\.long/ }));
+    await screen.findByRole('heading', { name: 'mobileApp.account.title' });
+    // The list already names the current instance; Account does not repeat it.
+    expect(screen.queryByText('mobileApp.account.current')).toBeNull();
+    const back = screen.getByRole('button', { name: 'common.back' });
+    expect(back.hasAttribute('data-mobile-back')).toBe(true);
+    fireEvent.click(back);
+    await screen.findByRole('heading', { name: 'mobileApp.sheet.title' });
+    expect(mobile.returnToInstance).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /mobileApp\.sheet\.add/ }));
+    await screen.findByRole('heading', { name: 'mobileApp.empty.title' });
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    await screen.findByRole('heading', { name: 'mobileApp.sheet.title' });
+  });
+
+  it('waits for the background refresh before it opens an instance or signs out', async () => {
+    const refreshing = deferred<MobileSessionState>();
+    window.history.replaceState({}, '', '/#sheet');
+    mobile.bootstrap.mockResolvedValueOnce(inSheet());
+    mobile.refresh.mockReturnValueOnce(refreshing.promise);
+    render(<MobileOnboarding />);
+    await screen.findByText('mobileApp.sheet.updating');
+
+    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    expect(await screen.findByText('mobileApp.sheet.opening')).toBeTruthy();
+    // Native runs one account operation at a time: the open waits rather than failing as busy.
+    expect(mobile.selectInstance).not.toHaveBeenCalled();
+    refreshing.resolve(inSheet());
+    await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('lab'));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('signs out and refreshes again only once the background refresh has settled', async () => {
+    const refreshing = deferred<MobileSessionState>();
+    window.history.replaceState({}, '', '/#sheet');
+    mobile.bootstrap.mockResolvedValueOnce(inSheet());
+    mobile.refresh.mockReturnValueOnce(refreshing.promise);
+    render(<MobileOnboarding />);
+    await screen.findByText('mobileApp.sheet.updating');
+
+    fireEvent.click(screen.getByRole('button', { name: /mobileApp\.sheet\.add/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.empty.refresh' }));
+    await Promise.resolve();
+    expect(mobile.refresh).toHaveBeenCalledTimes(1);
+    refreshing.resolve(inSheet());
+    await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(2));
+    cleanup();
+
+    resetMobileMocks();
+    const again = deferred<MobileSessionState>();
+    window.history.replaceState({}, '', '/#sheet');
+    mobile.bootstrap.mockResolvedValueOnce(inSheet());
+    mobile.refresh.mockReturnValueOnce(again.promise);
+    render(<MobileOnboarding />);
+    await screen.findByText('mobileApp.sheet.updating');
+    fireEvent.click(screen.getByRole('button', { name: /alexander\.with\.a\.very\.long/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.signOut' }));
+    await Promise.resolve();
+    expect(mobile.logout).not.toHaveBeenCalled();
+    again.resolve(inSheet());
+    await waitFor(() => expect(mobile.logout).toHaveBeenCalledTimes(1));
+  });
+
+  it('joins a second refresh to the one in flight', async () => {
+    const refreshing = deferred<MobileSessionState>();
+    window.history.replaceState({}, '', '/#sheet');
+    mobile.bootstrap.mockResolvedValueOnce(inSheet());
+    mobile.refresh.mockReturnValueOnce(refreshing.promise);
+    render(<MobileOnboarding />);
+    await screen.findByText('mobileApp.sheet.updating');
+    fireEvent.click(screen.getByRole('button', { name: /Shared Research Avibe/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.sheet.refreshList' }));
+    await Promise.resolve();
+    expect(mobile.refresh).toHaveBeenCalledTimes(1);
+
+    refreshing.resolve(inSheet());
+    await waitFor(() => expect(screen.queryByText('mobileApp.sheet.updating')).toBeNull());
+    expect(screen.queryByText('mobileApp.sheet.stale')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('lab'));
+  });
+
+  it('returns a refresh from Add an instance to the sheet list', async () => {
+    await openSheet();
+    await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: /mobileApp\.sheet\.add/ }));
+    await screen.findByRole('heading', { name: 'mobileApp.empty.title' });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.empty.refresh' }));
+    await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('heading', { name: 'mobileApp.sheet.title' })).toBeTruthy();
+    // Still the sheet: Close returns to the instance.
+    expect(screen.getByRole('button', { name: 'mobileApp.sheet.close:Personal Avibe' })).toBeTruthy();
+  });
+
+  it('pulls to refresh only on the full-screen list', async () => {
+    mobile.bootstrap.mockResolvedValueOnce(signedIn());
+    render(<MobileOnboarding />);
+    await screen.findByRole('heading', { name: 'mobileApp.instances.title' });
+    // Once the first read has settled and the list is live.
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: 'mobileApp.instances.refresh' }) as HTMLButtonElement).disabled,
+    ).toBe(false));
+    const main = screen.getByRole('main');
+    fireEvent.touchStart(main, { touches: [{ clientY: 10 }] });
+    fireEvent.touchMove(main, { touches: [{ clientY: 100 }] });
+    expect(screen.getByText('mobileApp.sheet.releaseToRefresh')).toBeTruthy();
+    fireEvent.touchEnd(main);
+    await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
+    // A short pull, or one that starts below the top, refreshes nothing.
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: 'mobileApp.instances.refresh' }) as HTMLButtonElement).disabled,
+    ).toBe(false));
+    fireEvent.touchStart(main, { touches: [{ clientY: 10 }] });
+    fireEvent.touchMove(main, { touches: [{ clientY: 40 }] });
+    fireEvent.touchEnd(main);
+    Object.defineProperty(main, 'scrollTop', { configurable: true, value: 200 });
+    fireEvent.touchStart(main, { touches: [{ clientY: 10 }] });
+    fireEvent.touchMove(main, { touches: [{ clientY: 100 }] });
+    fireEvent.touchEnd(main);
+    expect(mobile.refresh).toHaveBeenCalledTimes(1);
+    // Scrolling back up to the top counts only the travel past the top as a pull.
+    fireEvent.touchStart(main, { touches: [{ clientY: 10 }] });
+    fireEvent.touchMove(main, { touches: [{ clientY: 60 }] });
+    Object.defineProperty(main, 'scrollTop', { configurable: true, value: 0 });
+    fireEvent.touchMove(main, { touches: [{ clientY: 111 }] });
+    fireEvent.touchEnd(main);
+    expect(mobile.refresh).toHaveBeenCalledTimes(1);
+    cleanup();
+
+    resetMobileMocks();
+    await openSheet();
+    await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
+    const sheetMain = screen.getByRole('main');
+    fireEvent.touchStart(sheetMain, { touches: [{ clientY: 10 }] });
+    fireEvent.touchMove(sheetMain, { touches: [{ clientY: 100 }] });
+    fireEvent.touchEnd(sheetMain);
+    expect(mobile.refresh).toHaveBeenCalledTimes(1);
+  });
+});
+
+// A second factor owed at launch, after which native has restored the saved selection (E4).
+describe('mobile launch second factor', () => {
+  const passAtLaunch = async (
+    owedEmail: string | null,
+    after: Extract<MobileSessionState, { status: 'signedIn' }>,
+  ) => {
+    mobile.bootstrap.mockResolvedValueOnce(owed({ email: owedEmail, methods: ['totp'] }));
+    mobile.verifySecondFactor.mockResolvedValueOnce(after);
+    render(<MobileOnboarding />);
+    fireEvent.change(await screen.findByLabelText('mobileApp.twoFactor.totpLabel'), {
+      target: { value: '287082' },
+    });
+    await waitFor(() => expect(mobile.verifySecondFactor).toHaveBeenCalledWith('totp', '287082'));
+  };
+  const email = signedIn().account.email;
+
+  it('continues into the restored instance', async () => {
+    await passAtLaunch(email, { ...signedIn(), selected_instance_id: 'owned' });
+    await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
+    expect(mobile.selectInstance).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the list when nothing was restored', async () => {
+    await passAtLaunch(email, signedIn());
+    expect(await screen.findByRole('heading', { name: 'mobileApp.instances.title' })).toBeTruthy();
+    expect(mobile.selectInstance).not.toHaveBeenCalled();
+  });
+
+  it('shows the list when another account passed', async () => {
+    await passAtLaunch('alex@example.com', { ...signedIn(), selected_instance_id: 'owned' });
+    expect(await screen.findByRole('heading', { name: 'mobileApp.instances.switchTitle' })).toBeTruthy();
+    expect(mobile.selectInstance).not.toHaveBeenCalled();
+  });
+
+  it('shows the list after a second factor owed by a sign-in on this page', async () => {
+    // Owed at launch, but the person signs in again on this page instead.
+    mobile.bootstrap.mockResolvedValueOnce(owed({ email, methods: ['totp'] }));
+    mobile.verifyOtp.mockResolvedValueOnce(owed({ email, methods: ['totp'] }));
+    mobile.verifySecondFactor.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' });
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.differentAccount' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.change(screen.getByLabelText('mobileApp.email.label'), { target: { value: email } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+    fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), { target: { value: '123456' } });
+    fireEvent.change(await screen.findByLabelText('mobileApp.twoFactor.totpLabel'), {
+      target: { value: '287082' },
+    });
+    expect(await screen.findByRole('heading', { name: 'mobileApp.instances.switchTitle' })).toBeTruthy();
+    expect(mobile.selectInstance).not.toHaveBeenCalled();
   });
 });

@@ -11,16 +11,17 @@ import {
   Laptop,
   Mail,
   MonitorDown,
-  Plus,
   RotateCw,
   ShieldCheck,
   Sparkles,
   UserRound,
 } from 'lucide-react';
 import {
+  createContext,
   type FormEvent,
   type ReactNode,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -42,6 +43,7 @@ import { cn } from '@/lib/utils';
 import {
   ACCOUNT_SECURITY_URL,
   bootstrapMobileSession,
+  dismissMobileSheet,
   logoutMobileSession,
   normalizeMobileBridgeError,
   openMobileExternal,
@@ -57,7 +59,21 @@ import {
   verifyMobileOtp,
   verifyMobilePasskey,
   verifyMobileSecondFactor,
+  SHEET_HASH,
 } from './bridge';
+import {
+  AccountRow,
+  AddInstanceRow,
+  CurrentInstance,
+  InstanceGroup,
+  InstanceListRow,
+  NoOtherInstances,
+  OtherInstancesHeader,
+  type RowStatus,
+  SheetHeader,
+  StaleBanner,
+} from './InstanceList';
+import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
 import { LicensesContent, LicensesEntry } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
@@ -74,7 +90,8 @@ type Screen =
   | 'empty'
   | 'cli'
   | 'account'
-  | 'licenses';
+  | 'licenses'
+  | 'sheet';
 
 type BusyAction =
   | 'boot'
@@ -247,22 +264,50 @@ const pageErrorKey = (
   return 'mobileApp.errors.network';
 };
 
+/** In the instance sheet (`#sheet`) the page scrolls its document, which native hands to the sheet. */
+const DocumentScroll = createContext(false);
+
 function CloudScreen({
   children,
+  onPull,
 }: {
   children: ReactNode;
+  /** Pull to refresh at the top (full-screen pages only). */
+  onPull?: () => void;
 }) {
+  const { t } = useTranslation();
+  const documentScroll = useContext(DocumentScroll);
+  const scroller = useRef<HTMLElement>(null);
+  // The sheet's document scroller is native's: no ref, so no pull to refresh there.
+  const pulled = usePullToRefresh(scroller, onPull ?? noop, Boolean(onPull));
+  if (documentScroll) {
+    return (
+      <main className="min-h-dvh w-full bg-bg text-foreground">
+        <div className="mx-auto flex w-full max-w-xl flex-col px-4 pt-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+          {children}
+        </div>
+      </main>
+    );
+  }
   return (
     <main
+      ref={scroller}
       className="h-dvh w-full overflow-y-auto bg-bg text-foreground"
       style={{ background: 'var(--gradient-wizard-platforms)' }}
     >
+      {pulled > 0 ? (
+        <p role="status" className="pt-[max(0.75rem,env(safe-area-inset-top))] text-center text-sm text-muted">
+          {t(pulled >= PULL_THRESHOLD_PX ? 'mobileApp.sheet.releaseToRefresh' : 'mobileApp.sheet.pullToRefresh')}
+        </p>
+      ) : null}
       <div className="mx-auto flex min-h-full w-full max-w-xl shrink-0 flex-col px-6 pt-[max(1.5rem,env(safe-area-inset-top))] pb-[max(1.5rem,env(safe-area-inset-bottom))]">
         {children}
       </div>
     </main>
   );
 }
+
+const noop = () => {};
 
 function Brand({
   back,
@@ -1360,14 +1405,62 @@ function InstanceSkeleton() {
   );
 }
 
+/** Where a row stands: the one opening, the others waiting, or the one that failed to open. */
+type RowFailure = { id: string; reason: TranslationKey };
+const rowStatus = (
+  instance: MobileInstance,
+  openingId: string | null,
+  failure: RowFailure | null,
+): RowStatus => {
+  if (openingId) return instance.id === openingId ? { kind: 'opening' } : { kind: 'waiting' };
+  if (failure?.id === instance.id) return { kind: 'failed', reason: failure.reason };
+  return { kind: 'idle' };
+};
+
+/** Why an instance did not open, on its row. Each says what happened, not a guessed cause. */
+const openFailureKey = (error: MobileBridgeError): TranslationKey => {
+  if (error.code === 'instance_offline') return 'mobileApp.sheet.openFailedOffline';
+  if (error.code === 'unauthorized_instance') return 'mobileApp.sheet.openFailedGone';
+  return 'mobileApp.sheet.openFailed';
+};
+
+type RowsProps = {
+  instances: MobileInstance[];
+  locked: boolean;
+  openingId: string | null;
+  failure: RowFailure | null;
+  expandedId: string | null;
+  onOpen: (instance: MobileInstance) => void;
+  onRefresh: () => void;
+};
+
+function InstanceRows({ instances, locked, openingId, failure, expandedId, onOpen, onRefresh }: RowsProps) {
+  return (
+    <InstanceGroup>
+      {instances.map((instance) => (
+        <InstanceListRow
+          key={instance.id}
+          instance={instance}
+          status={rowStatus(instance, openingId, failure)}
+          expanded={expandedId === instance.id}
+          disabled={locked}
+          onOpen={() => onOpen(instance)}
+          onRetry={() => onOpen(instance)}
+          onRefresh={onRefresh}
+        />
+      ))}
+    </InstanceGroup>
+  );
+}
+
+/** The full-screen list: first use, or no instance open. The same rows as the sheet, and pull to refresh. */
 function Instances({
   session,
   busy,
   locked,
   errorKey,
-  offlineSelection,
+  rows,
   onRefresh,
-  onSelect,
   onAccount,
   onAdd,
   onBack,
@@ -1376,9 +1469,8 @@ function Instances({
   busy: BusyAction | null;
   locked: boolean;
   errorKey: MobileErrorKey | null;
-  offlineSelection: MobileInstance | null;
+  rows: Omit<RowsProps, 'instances' | 'locked' | 'onRefresh'>;
   onRefresh: () => void;
-  onSelect: (instance: MobileInstance) => void;
   onAccount: () => void;
   onAdd: () => void;
   /** Present while the page covers an instance: Back returns to it. */
@@ -1387,7 +1479,7 @@ function Instances({
   const { t } = useTranslation();
   const refreshing = busy === 'refresh';
   return (
-    <CloudScreen>
+    <CloudScreen onPull={locked ? undefined : onRefresh}>
       <Brand
         back={Boolean(onBack)}
         account
@@ -1400,7 +1492,9 @@ function Instances({
           title={session.selected_instance_id
             ? t('mobileApp.instances.switchTitle')
             : t('mobileApp.instances.title')}
-          subtitle={t('mobileApp.instances.subtitle')}
+          subtitle={session.selected_instance_id
+            ? t('mobileApp.instances.subtitle')
+            : t('mobileApp.sheet.firstRunSubtitle')}
         />
         <Button
           type="button"
@@ -1422,41 +1516,58 @@ function Instances({
       {errorKey ? (
         <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onRefresh} />
       ) : (
-        <div className="flex flex-col gap-4" aria-busy={refreshing || busy === 'select'}>
-          {session.instances.map((instance) => (
-            <InstanceRow
-              key={instance.id}
-              instance={instance}
-              current={instance.id === session.selected_instance_id}
-              disabled={locked}
-              onClick={() => onSelect(instance)}
-            />
-          ))}
+        <div aria-busy={refreshing || busy === 'select'}>
+          <InstanceRows {...rows} instances={session.instances} locked={locked} onRefresh={onRefresh} />
         </div>
       )}
-      {offlineSelection ? (
-        <div role="status" className={cn(raised, 'mt-4')}>
-          <p className="break-words text-sm font-semibold">
-            {t('mobileApp.instances.offlineTitle', { name: offlineSelection.name })}
-          </p>
-          <p className="mt-2 text-xs leading-6 text-muted">
-            {t('mobileApp.instances.offlineBody')}
-          </p>
-        </div>
-      ) : null}
-      <div className="mt-auto pt-8 pb-3">
-        <Button
-          type="button"
-          variant="outline"
-          size="lg"
-          disabled={locked}
-          className="w-full gap-2 rounded-full"
-          onClick={onAdd}
-        >
-          <Plus className="size-4" />
-          {t('mobileApp.instances.add')}
-        </Button>
-      </div>
+      <AddInstanceRow disabled={locked} onClick={onAdd} />
+    </CloudScreen>
+  );
+}
+
+/**
+ * The sheet native opens over the selected instance (`#sheet`, ui/design: mobile-app/switcher/*):
+ * where you are, the other instances by recent use, Add an instance, and the account. Close, the
+ * current instance and native's pull-down all return to the instance, unchanged.
+ */
+function InstanceSheet({
+  session,
+  locked,
+  refreshing,
+  stale,
+  rows,
+  onClose,
+  onRefresh,
+  onAdd,
+  onAccount,
+}: {
+  session: Extract<MobileSessionState, { status: 'signedIn' }>;
+  locked: boolean;
+  refreshing: boolean;
+  stale: boolean;
+  rows: Omit<RowsProps, 'instances' | 'locked' | 'onRefresh'>;
+  onClose: () => void;
+  onRefresh: () => void;
+  onAdd: () => void;
+  onAccount: () => void;
+}) {
+  const current = session.instances.find((instance) => instance.id === session.selected_instance_id) ?? null;
+  const others = session.instances.filter((instance) => instance.id !== current?.id);
+  return (
+    <CloudScreen>
+      <SheetHeader currentName={current?.name ?? null} onClose={onClose} />
+      {stale ? <StaleBanner disabled={refreshing || locked} onRetry={onRefresh} /> : null}
+      {current ? <CurrentInstance instance={current} onClick={onClose} /> : null}
+      <section className={current ? 'mt-6' : undefined}>
+        <OtherInstancesHeader refreshing={refreshing} />
+        {others.length === 0 ? (
+          <NoOtherInstances />
+        ) : (
+          <InstanceRows {...rows} instances={others} locked={locked} onRefresh={onRefresh} />
+        )}
+      </section>
+      <AddInstanceRow disabled={locked} onClick={onAdd} />
+      <AccountRow email={session.account.email} disabled={locked} onClick={onAccount} />
     </CloudScreen>
   );
 }
@@ -1471,7 +1582,10 @@ function EmptyInstances({
   onRefresh,
   onShowCli,
   onOpenGuide,
+  onExit,
 }: {
+  /** In the sheet: Back returns to the instance list there. */
+  onExit?: () => void;
   cli: boolean;
   busy: boolean;
   locked: boolean;
@@ -1486,10 +1600,10 @@ function EmptyInstances({
   return (
     <CloudScreen>
       <Brand
-        back={cli}
-        account={!cli}
+        back={cli || Boolean(onExit)}
+        account={!cli && !onExit}
         disabled={locked}
-        onBack={onBack}
+        onBack={cli ? onBack : onExit}
         onAccount={onAccount}
       />
       <div className="pt-7">
@@ -1599,12 +1713,15 @@ function Account({
   onSwitch,
   onLogout,
   onLicenses,
+  inSheet = false,
 }: {
   session: Extract<MobileSessionState, { status: 'signedIn' }>;
   busy: boolean;
   locked: boolean;
   errorKey: MobileErrorKey | null;
   licenses: boolean;
+  /** Pushed inside the instance sheet, whose list already names the current instance. */
+  inSheet?: boolean;
   onBack: () => void;
   onSwitch: () => void;
   onLogout: () => void;
@@ -1634,7 +1751,7 @@ function Account({
           <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onLogout} />
         </div>
       ) : null}
-      <section className="mt-8">
+      {inSheet ? null : <section className="mt-8">
         <h2 className="mb-4 text-sm font-semibold">{t('mobileApp.account.current')}</h2>
         {current ? (
           <InstanceRow
@@ -1659,7 +1776,7 @@ function Account({
           {t(current ? 'mobileApp.account.switch' : 'mobileApp.account.choose')}
           <ChevronRight className="size-4" />
         </Button>
-      </section>
+      </section>}
       {licenses ? <LicensesEntry disabled={locked} onOpen={onLicenses} /> : null}
     </CloudScreen>
   );
@@ -1706,14 +1823,25 @@ function BootRecovery({
   locked,
   onRetry,
   onBack,
+  onClose,
 }: {
   errorKey: MobileErrorKey;
   locked: boolean;
   onRetry: () => void;
   /** Present while the page covers an instance: Back returns to it. */
   onBack?: () => void;
+  /** In the instance sheet: its header, whose Close returns to the instance. */
+  onClose?: () => void;
 }) {
   const { t } = useTranslation();
+  if (onClose) {
+    return (
+      <CloudScreen>
+        <SheetHeader currentName={null} disabled={locked} onClose={onClose} />
+        <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onRetry} />
+      </CloudScreen>
+    );
+  }
   return (
     <CloudScreen>
       {onBack
@@ -1729,6 +1857,16 @@ function BootRecovery({
 }
 
 export function MobileOnboarding() {
+  // Native opens `#sheet` as a sheet over the selected instance, which scrolls its document.
+  const [sheet] = useState(() => window.location.hash === SHEET_HASH);
+  return (
+    <DocumentScroll.Provider value={sheet}>
+      <MobileOnboardingScreens />
+    </DocumentScroll.Provider>
+  );
+}
+
+function MobileOnboardingScreens() {
   const { i18n } = useTranslation();
   const startsOnAccount = useRef(
     window.location.hash === '#account' || window.location.hash === RUNTIME_ACCOUNT_HASH,
@@ -1752,7 +1890,24 @@ export function MobileOnboarding() {
   const [cooldownSource, setCooldownSource] = useState<CooldownSource>(null);
   const [cooldownScope, setCooldownScope] = useState<CooldownScope>(null);
   const [resent, setResent] = useState(false);
-  const [offlineSelection, setOfflineSelection] = useState<MobileInstance | null>(null);
+  // The page native opens as a sheet over the selected instance: a ref for the first read, the
+  // state for rendering. Both end only if no instance is behind the sheet any more.
+  const sheetPresentation = useRef(window.location.hash === SHEET_HASH);
+  const [inSheet, setInSheet] = useState(() => window.location.hash === SHEET_HASH);
+  // A second factor owed at launch (not after a sign-in on this page), with the account's email
+  // when native knows it: passing it continues into the selection native restored, as a launch
+  // without a second factor does.
+  const launchSecondFactor = useRef<{ email: string | null } | null>(null);
+  const sheetOpened = useRef(false);
+  const sheetRefreshToken = useRef(0);
+  // Native runs one account operation at a time: while the sheet's background refresh is in
+  // flight, an open, a refresh or a sign-out waits for it rather than being refused as busy.
+  const sheetRefreshSettled = useRef<Promise<void>>(Promise.resolve());
+  const [sheetRefresh, setSheetRefresh] = useState<'idle' | 'refreshing' | 'failed'>('idle');
+  // The instance rows: the one opening, the one that failed to open, the offline one explained.
+  const [openingId, setOpeningId] = useState<string | null>(null);
+  const [rowFailure, setRowFailure] = useState<RowFailure | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [factorStep, setFactorStep] = useState<SecondFactorStep>('passkey');
   const [factorCode, setFactorCode] = useState('');
   const [factorRetryMinutes, setFactorRetryMinutes] = useState(SECOND_FACTOR_RETRY_MINUTES);
@@ -1775,8 +1930,10 @@ export function MobileOnboarding() {
   const owedSecondFactor = session.status === 'twoFactorRequired' ? session : null;
   const providerCooldownActive = cooldownScope === 'all' && cooldown > 0;
   const accountReturnScreen = useMemo(
-    () => (signedIn?.instances.length ? 'instances' : 'empty') as Screen,
-    [signedIn],
+    () => (inSheet
+      ? 'sheet'
+      : signedIn?.instances.length ? 'instances' : 'empty') as Screen,
+    [inSheet, signedIn],
   );
 
   // Setters only, so the bootstrap callback can use it without a dependency.
@@ -1795,11 +1952,14 @@ export function MobileOnboarding() {
       const next = await bootstrapMobileSession();
       if (!ownsOperation(token)) return;
       showSecondFactorStart(next);
+      launchSecondFactor.current = next.status === 'twoFactorRequired' ? { email: next.email } : null;
       setSession(next);
       setScreen(
-        startsOnAccount.current && next.status === 'signedIn'
-          ? 'account'
-          : screenForSession(next),
+        next.status === 'signedIn' && sheetPresentation.current
+          ? 'sheet'
+          : startsOnAccount.current && next.status === 'signedIn'
+            ? 'account'
+            : screenForSession(next),
       );
       startsOnAccount.current = false;
     } catch (rawError) {
@@ -1868,9 +2028,12 @@ export function MobileOnboarding() {
     }
     showSecondFactorStart(next);
     setSession(next);
-    setScreen(screenAfterSession(next));
+    // A refresh from a page pushed inside the sheet returns to the sheet's list.
+    setScreen(next.status === 'signedIn' && sheetPresentation.current ? 'sheet' : screenAfterSession(next));
     setErrorKey(null);
-    setOfflineSelection(null);
+    setOpeningId(null);
+    setRowFailure(null);
+    setExpandedId(null);
   };
 
   const requestOtp = async (resend: boolean) => {
@@ -1886,6 +2049,7 @@ export function MobileOnboarding() {
     setErrorKey(null);
     setResent(false);
     pendingWeakPassword.current = null;
+    launchSecondFactor.current = null;
     try {
       const result = await requestMobileOtp(normalizedEmail);
       if (!ownsOperation(token)) return;
@@ -1964,6 +2128,7 @@ export function MobileOnboarding() {
     setEmail(normalizedEmail);
     setErrorKey(null);
     pendingWeakPassword.current = null;
+    launchSecondFactor.current = null;
     try {
       const { weak_password: weakPassword, ...next } = await signInMobileWithPassword(
         normalizedEmail,
@@ -1997,6 +2162,7 @@ export function MobileOnboarding() {
     if (token === null) return;
     setErrorKey(null);
     try {
+      await sheetRefreshSettled.current;
       const next = await refreshMobileSession();
       applySession(token, next, true);
     } catch (rawError) {
@@ -2015,6 +2181,17 @@ export function MobileOnboarding() {
     setFactorRetryMinutes(secondFactorRetryMinutes(error));
   };
 
+  /** The selection native restored at launch, once the same account has passed its second factor. */
+  const restoredSelection = (next: MobileSessionState): MobileInstance | null => {
+    const owed = launchSecondFactor.current;
+    if (!owed || next.status !== 'signedIn') return null;
+    if (owed.email !== null && owed.email !== next.account.email) return null;
+    launchSecondFactor.current = null;
+    return next.instances.find(
+      (instance) => instance.id === next.selected_instance_id && instance.available,
+    ) ?? null;
+  };
+
   const verifySecondFactorCode = async (candidate: string = factorCode) => {
     if (factorStep !== 'totp' && factorStep !== 'recovery') return;
     const method = factorStep;
@@ -2024,8 +2201,10 @@ export function MobileOnboarding() {
     const token = beginOperation('verify');
     if (token === null) return;
     setErrorKey(null);
+    let resume: MobileInstance | null = null;
     try {
       const next = await verifyMobileSecondFactor(method, candidate);
+      if (ownsOperation(token)) resume = restoredSelection(next);
       applySession(token, next, true);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
@@ -2035,14 +2214,17 @@ export function MobileOnboarding() {
     } finally {
       finishOperation(token);
     }
+    if (resume) void select(resume);
   };
 
   const verifyPasskey = async () => {
     const token = beginOperation('passkey');
     if (token === null) return;
     setErrorKey(null);
+    let resume: MobileInstance | null = null;
     try {
       const next = await verifyMobilePasskey();
+      if (ownsOperation(token)) resume = restoredSelection(next);
       applySession(token, next, true);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
@@ -2052,34 +2234,94 @@ export function MobileOnboarding() {
     } finally {
       finishOperation(token);
     }
+    if (resume) void select(resume);
   };
 
   const select = async (instance: MobileInstance) => {
     if (isOperationLocked()) return;
-    setOfflineSelection(null);
+    setRowFailure(null);
     if (!instance.available) {
-      setOfflineSelection(instance);
+      // Offline: the row explains how to bring it back, in place.
+      setExpandedId((open) => (open === instance.id ? null : instance.id));
       return;
     }
     const token = beginOperation('select');
     if (token === null) return;
     setErrorKey(null);
+    setOpeningId(instance.id);
     try {
+      await sheetRefreshSettled.current;
+      // Native opens the instance and takes this page away; the row says Opening until then.
       await selectMobileInstance(instance.id);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
-      const error = normalizeMobileBridgeError(rawError);
-      setErrorKey(pageErrorKey(error, 'select'));
+      setOpeningId(null);
+      setRowFailure({ id: instance.id, reason: openFailureKey(normalizeMobileBridgeError(rawError)) });
     } finally {
       finishOperation(token);
     }
   };
+
+  /** Back to the instance under the sheet, unchanged. */
+  const closeSheet = async () => {
+    if (isOperationLocked()) return;
+    try {
+      await dismissMobileSheet();
+    } catch {
+      // No instance is behind the sheet any more: show the full list instead.
+      sheetPresentation.current = false;
+      setInSheet(false);
+      setScreen(signedIn?.instances.length ? 'instances' : 'empty');
+    }
+  };
+
+  /** One refresh when the sheet opens, or on Retry: the list stays usable while it runs or fails. */
+  const runSheetRefresh = useCallback(async () => {
+    const token = sheetRefreshToken.current + 1;
+    sheetRefreshToken.current = token;
+    setSheetRefresh('refreshing');
+    let settle = () => {};
+    sheetRefreshSettled.current = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    try {
+      const next = await refreshMobileSession();
+      if (sheetRefreshToken.current !== token) return;
+      setSheetRefresh('idle');
+      setSession(next);
+      // A sign-out or an account change leaves the sheet; native shows the full-screen flow.
+      if (next.status !== 'signedIn') setScreen(screenForSession(next));
+    } catch {
+      if (sheetRefreshToken.current !== token) return;
+      setSheetRefresh('failed');
+    } finally {
+      settle();
+    }
+  }, []);
+
+  const sheetRefreshInFlight = useRef<Promise<void> | null>(null);
+  /** One refresh at a time: a second request joins the one in flight (native would refuse it as busy). */
+  const refreshSheet = useCallback((): Promise<void> => {
+    sheetRefreshInFlight.current ??= runSheetRefresh().finally(() => {
+      sheetRefreshInFlight.current = null;
+    });
+    return sheetRefreshInFlight.current;
+  }, [runSheetRefresh]);
+
+
+  useEffect(() => {
+    if (screen !== 'sheet' || sheetOpened.current) return undefined;
+    sheetOpened.current = true;
+    const timer = window.setTimeout(() => void refreshSheet(), 0);
+    return () => window.clearTimeout(timer);
+  }, [screen, refreshSheet]);
 
   const logout = async () => {
     const token = beginOperation('logout');
     if (token === null) return;
     setErrorKey(null);
     try {
+      await sheetRefreshSettled.current;
       const next = await logoutMobileSession();
       if (!ownsOperation(token)) return;
       if (next.status !== 'signedOut') {
@@ -2163,7 +2405,11 @@ export function MobileOnboarding() {
     void openMobileExternal(ACCOUNT_SECURITY_URL);
   };
 
-  if (screen === 'boot') return <Boot />;
+  if (screen === 'boot') {
+    return inSheet
+      ? <CloudScreen><SheetHeader currentName={null} disabled onClose={noop} /></CloudScreen>
+      : <Boot />;
+  }
   if (screen === 'bootError') {
     return (
       <BootRecovery
@@ -2171,6 +2417,7 @@ export function MobileOnboarding() {
         locked={locked}
         onRetry={() => void bootstrap()}
         onBack={coversInstance ? () => void leaveAccount() : undefined}
+        onClose={inSheet ? () => void closeSheet() : undefined}
       />
     );
   }
@@ -2309,6 +2556,7 @@ export function MobileOnboarding() {
         locked={locked}
         errorKey={errorKey}
         licenses={licenses !== null}
+        inSheet={inSheet}
         onBack={() => void leaveAccount()}
         onSwitch={() => {
           if (!isOperationLocked()) {
@@ -2362,6 +2610,35 @@ export function MobileOnboarding() {
           }
         }}
         onOpenGuide={openGuide}
+        onExit={inSheet ? () => {
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('sheet');
+          }
+        } : undefined}
+      />
+    );
+  }
+  const rows = { openingId, failure: rowFailure, expandedId, onOpen: (instance: MobileInstance) => void select(instance) };
+  if (screen === 'sheet') {
+    return (
+      <InstanceSheet
+        session={signedIn}
+        locked={locked}
+        refreshing={sheetRefresh === 'refreshing'}
+        stale={sheetRefresh === 'failed'}
+        rows={rows}
+        onClose={() => void closeSheet()}
+        onRefresh={() => void refreshSheet()}
+        onAdd={() => {
+          if (!isOperationLocked()) setScreen('empty');
+        }}
+        onAccount={() => {
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('account');
+          }
+        }}
       />
     );
   }
@@ -2371,9 +2648,8 @@ export function MobileOnboarding() {
       busy={busy}
       locked={locked}
       errorKey={errorKey}
-      offlineSelection={offlineSelection}
+      rows={rows}
       onRefresh={() => void refresh()}
-      onSelect={(instance) => void select(instance)}
       onAccount={() => {
         if (!isOperationLocked()) {
           setErrorKey(null);
