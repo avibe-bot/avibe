@@ -614,6 +614,12 @@ final class MobileSessionCoordinator {
         if signedOutStoreIsFresh {
             return .signedOut
         }
+        if case .resetting = phase, snapshot == nil {
+            // logout() has already invalidated the old account and is
+            // replacing the page. The replacement must not race the reset's
+            // transport operation with a busy error.
+            return .signedOut
+        }
         return try await runExclusive {
             let requestGeneration = self.generation
             let discovery = try await self.requireTransport().fetchSession()
@@ -754,6 +760,10 @@ final class MobileSessionCoordinator {
                     self.beginAccountTransition(clearSelection: true)
                     await self.replaceWithFreshSignedOutStore()
                     return .signedOut
+                }
+                if self.selectedRuntimeOriginIsMissing(in: fresh) {
+                    await self.preparePushLogout()
+                    self.beginAccountTransition(clearSelection: true)
                 }
                 self.signedOutStoreIsFresh = false
                 return self.state(for: fresh)
@@ -980,6 +990,22 @@ final class MobileSessionCoordinator {
         return selection.accountID != fresh.account.id
     }
 
+    private func selectedRuntimeOriginIsMissing(
+        in fresh: MobileSessionSnapshot
+    ) -> Bool {
+        guard
+            let previous = snapshot,
+            previous.account.id == fresh.account.id,
+            let selection = storedSelection(),
+            selection.accountID == fresh.account.id
+        else {
+            return false
+        }
+        return !fresh.instances.contains {
+            $0.id == selection.instanceID && $0.url == selection.url
+        }
+    }
+
     private func state(for discovery: MobileSessionDiscovery) -> MobileSessionState {
         switch discovery {
         case .signedIn(let fresh):
@@ -1132,6 +1158,12 @@ final class MobileSessionCoordinator {
             }
             if phase == .operation(token) {
                 phase = .ready
+            }
+            if releasesSurfaceAfterOperation,
+               selectionKeepingOperation == nil
+            {
+                deactivateAccountSurface()
+                releasesSurfaceAfterOperation = false
             }
         }
         return try await operation()

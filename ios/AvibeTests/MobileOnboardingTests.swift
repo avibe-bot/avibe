@@ -1456,6 +1456,113 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(transitions, 0)
     }
 
+    func testRefreshRemovingSelectedOriginReleasesRuntimeButKeepsAccount()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let removedTransport = FakeMobileAuthTransport()
+        let replacement = MobileInstance(
+            id: "instance-2",
+            name: "Team Avibe",
+            host: "team-app.avibe.bot",
+            url: URL(string: "https://team-app.avibe.bot")!,
+            relationship: "shared",
+            ownerEmail: "owner@example.com",
+            available: true
+        )
+        removedTransport.session = snapshot(
+            accountID: "account-1",
+            instances: [replacement]
+        )
+        var runtime: MobileRuntimeContext?
+        var transitions = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport, removedTransport],
+            onOpen: { runtime = $0 },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return []
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let selected = try XCTUnwrap(runtime)
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.refresh()
+
+        guard case .signedIn(_, let selectedInstanceID) = state else {
+            return XCTFail("Expected a signed-in account after catalog removal")
+        }
+        XCTAssertNil(selectedInstanceID)
+        XCTAssertFalse(coordinator.isCurrentRuntime(selected))
+        XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
+        XCTAssertEqual(transitions, 1)
+    }
+
+    func testRefreshAfterSheetDismissReleasesHiddenTransportWhenOperationEnds()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let refreshTransport = FakeMobileAuthTransport()
+        refreshTransport.session = snapshot(accountID: "account-1")
+        let refreshStarted = expectation(description: "refresh started")
+        let allowRefresh = expectation(description: "refresh may finish")
+        refreshTransport.fetchSessionHandler = {
+            refreshStarted.fulfill()
+            await self.fulfillment(of: [allowRefresh], timeout: 30)
+            return .signedIn(snapshot(self.snapshot(accountID: "account-1")))
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport, refreshTransport]
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        coordinator.activateAccountSurface()
+
+        let refresh = Task { try await coordinator.refresh() }
+        await fulfillment(of: [refreshStarted], timeout: 30)
+        coordinator.leaveAccountSurface()
+        XCTAssertFalse(refreshTransport.invalidated)
+
+        allowRefresh.fulfill()
+        _ = try await refresh.value
+        XCTAssertTrue(refreshTransport.invalidated)
+    }
+
+    func testLogoutAllowsReplacementBootstrapDuringReset() async throws {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let logoutStarted = expectation(description: "logout started")
+        let allowLogout = expectation(description: "logout may finish")
+        transport.logoutHandler = {
+            logoutStarted.fulfill()
+            await self.fulfillment(of: [allowLogout], timeout: 30)
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport]
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+
+        let logout = Task { try await coordinator.logout() }
+        await fulfillment(of: [logoutStarted], timeout: 30)
+        XCTAssertEqual(try await coordinator.bootstrap(), .signedOut)
+
+        allowLogout.fulfill()
+        XCTAssertEqual(try await logout.value, .signedOut)
+    }
+
     func testRefreshAccountChangeStillReleasesSelectedRuntime() async throws {
         let defaults = makeDefaults()
         let firstTransport = FakeMobileAuthTransport()
@@ -2844,6 +2951,7 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     }
     private(set) var passwordAttempts: [(email: String, password: String)] = []
     var fetchSessionError: Error?
+    var fetchSessionHandler: (() async throws -> MobileSessionDiscovery?)?
     var logoutError: Error?
     var logoutHandler: () async throws -> Void = {}
     var pushManagementHandler: (
@@ -2888,6 +2996,9 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     }
 
     func fetchSession() async throws -> MobileSessionDiscovery? {
+        if let fetchSessionHandler {
+            return try await fetchSessionHandler()
+        }
         if let fetchSessionError {
             throw fetchSessionError
         }
