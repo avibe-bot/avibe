@@ -1,0 +1,110 @@
+name: ios-direct-interop
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ios-direct-interop.yml'
+      - 'ios/scripts/direct_interop_host.py'
+      - 'ios/scripts/run_direct_interop.py'
+      - 'tests/test_ios_direct_interop_*.py'
+      - 'docs/testing/ios-direct-interop.md'
+  workflow_dispatch:
+    inputs:
+      run_interop:
+        description: 'Run hosted interop only after merged published pins and App harness are ready'
+        type: boolean
+        default: false
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-direct-interop-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  host-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Source-only host contracts (not native interoperability)
+        run: |
+          python -m pip install pytest pytest-asyncio ruff
+          python -m pytest --noconftest -o addopts='' -o asyncio_default_fixture_loop_scope=function -q tests/test_ios_direct_interop_*.py
+          ruff check ios/scripts/direct_interop_host.py ios/scripts/run_direct_interop.py tests/test_ios_direct_interop_*.py
+
+  interop:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_interop
+    needs: host-contract
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Require current merged dependency inputs
+        run: |
+          git fetch origin master
+          python3 ios/scripts/run_direct_interop.py check-dependencies
+      - name: Check pinned Apple toolchain
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          test "$(xcodebuild -version | head -1)" = 'Xcode 26.6'
+          xcrun --sdk iphonesimulator --show-sdk-version
+      - name: Stage actual published pins in RUNNER_TEMP
+        run: python3 ios/scripts/run_direct_interop.py prepare
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.23.4'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the bundled mobile UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build:mobile
+      - name: Generate and verify App notices and bundle
+        run: |
+          python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp --support-zip ios/Avibe/IrohLib/IrohLib-support.zip
+          ios/scripts/verify_mobile_bundle.sh ios/Avibe/Resources/MobileApp
+      - name: Select and boot the pinned hosted simulator
+        run: |
+          simulator_id="$(python3 ios/scripts/run_direct_interop.py simulator)"
+          echo "SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+          xcrun simctl bootstatus "$simulator_id" -b
+      - name: Run actual App/sidecar interop with independent host verdicts
+        run: python3 ios/scripts/run_direct_interop.py run --simulator "$SIMULATOR_ID"
+      - name: Verify linked iroh product
+        run: |
+          ios/scripts/verify_iroh_app_product.sh \
+            ios/Avibe/IrohLib \
+            "$RUNNER_TEMP/avibe-direct-interop/DerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe" \
+            "$RUNNER_TEMP/avibe-direct-interop/DerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib" \
+            YES
+      - name: Upload independent evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-direct-interop-evidence
+          path: |
+            ${{ runner.temp }}/avibe-direct-interop/dependencies.json
+            ${{ runner.temp }}/avibe-direct-interop/sidecar/verified.json
+            ${{ runner.temp }}/avibe-direct-interop/xcodebuild-pid.json
+            ${{ runner.temp }}/avibe-direct-interop/xcodebuild.log
+            ${{ runner.temp }}/avibe-direct-interop/Interop.xcresult
+            ${{ runner.temp }}/avibe-direct-interop/results
+            ${{ runner.temp }}/avibe-direct-interop/verdict.json
+          if-no-files-found: warn
+          retention-days: 7
