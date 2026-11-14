@@ -165,9 +165,12 @@ test('unsupported reveal/edit stops before preparation, but metadata and cancel 
   const saveButton = dialog.getByRole('button', { name: en.vaults.dialog.save, exact: true });
   await expect(saveButton).toBeEnabled();
   await expect(dialog.getByText(en.vaults.fields.editHelp)).toBeVisible();
-  await saveButton.click();
   const saved = [`POST /api/vault/secrets/${secret.name}/fields`, `PATCH /api/vault/secrets/${secret.name}`];
-  await expect.poll(() => observed.writes).toEqual(saved);
+  const fieldWrite = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/vault/secrets/${secret.name}/fields`);
+  const metadataWrite = page.waitForResponse((response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/vault/secrets/${secret.name}`);
+  await saveButton.click();
+  await Promise.all([fieldWrite, metadataWrite]);
+  expect(observed.writes).toEqual(saved);
   await expect(dialog).toHaveCount(0);
   await expectSingleDocumentJourney(page, observed, url, saved);
 });
