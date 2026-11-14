@@ -763,7 +763,7 @@ final class MobileSessionCoordinator {
                 }
                 if self.selectedRuntimeOriginIsMissing(in: fresh) {
                     await self.preparePushLogout()
-                    self.beginAccountTransition(clearSelection: true)
+                    self.beginRuntimeInvalidation(with: fresh)
                 }
                 self.signedOutStoreIsFresh = false
                 return self.state(for: fresh)
@@ -988,6 +988,18 @@ final class MobileSessionCoordinator {
             return false
         }
         return selection.accountID != fresh.account.id
+    }
+
+    private func beginRuntimeInvalidation(
+        with snapshot: MobileSessionSnapshot
+    ) {
+        generation += 1
+        clearStoredSelection()
+        self.snapshot = snapshot
+        pendingStoreReleaseBarriers.append(
+            contentsOf: onPrepareAccountTransition()
+        )
+        activateAccountSurface()
     }
 
     private func selectedRuntimeOriginIsMissing(
