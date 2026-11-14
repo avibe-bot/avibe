@@ -9812,7 +9812,9 @@ def _vault_secret_row(secret: dict) -> dict:
 
     Only a static secret has fields to reference, and ``NAME`` alone selects the
     default one, so ``default_field`` is named only when there are several. A
-    keypair says ``per_use_sign: true`` when ``vibe vault sign`` can use it.
+    A keypair exposes ``agent_signable: true`` when ``vibe vault sign`` can use it;
+    this is independent of ``always_ask``, which reports whether each signature
+    needs user approval. Both fields are read from the current public projection.
     """
 
     from vibe import api
@@ -9859,7 +9861,9 @@ def _vault_secret_row(secret: dict) -> dict:
                 if secret.get("kind") == "keypair" and (secret.get("signing_addresses") or {}).get("btc_taproot")
                 else None
             ),
-            "per_use_sign": bool(secret.get("per_use_sign")) or None,
+            "always_ask": ((secret.get("policy") or {}).get("always_ask")
+                           if "always_ask" in (secret.get("policy") or {}) else None),
+            "agent_signable": bool(secret.get("per_use_sign")) or None,
         }
     )
 

@@ -16,6 +16,7 @@ Core concepts:
 - HD seed wallet: a standard-tier signing key whose row has `signer_kind: hd-seed` and an `accounts` list. One seed supplies EVM, Bitcoin and Solana addresses at each shared account index. Prepared standard wallets offer Legacy (P2PKH), Native SegWit (P2WPKH) and Taproot (P2TR) under separate purpose-derived keys; an older unprepared wallet keeps its original Taproot address. It is signing-only, never a value to reveal/export/inject. Only the user creates/imports it, enables accounts, names them and changes ask-before-signing in the browser; never ask for words, a passphrase or a seed in chat.
 - Standard: for lower-risk routine automation. Agents can usually use it without interrupting the user unless it is configured to ask first.
 - Protected: for high-risk secrets, such as production databases or wallet/funds keys. Because protected secrets are end-to-end encrypted, use requires browser approval and passkey unlock.
+- In `vibe vault list` / `find`, a keypair row's `agent_signable: true` means the Agent may call `vibe vault sign`; it does **not** mean signing is approval-free. Read `always_ask: true` for the current ask-before-signing policy. These are independent: a standard keypair can be agent-signable while still requiring approval for every signature.
 
 Rules:
 - Vault approval auto-resume and Vault's `--no-callback` are unchanged by the retirement of Agent Run callbacks. Agent Run `--no-reply` does not disable Vault continuations.
