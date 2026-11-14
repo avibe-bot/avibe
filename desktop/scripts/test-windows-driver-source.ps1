@@ -306,6 +306,9 @@ try {
     $provenance | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
 
     $environment = @{
+        GITHUB_ACTIONS = $env:GITHUB_ACTIONS
+        RUNNER_ENVIRONMENT = $env:RUNNER_ENVIRONMENT
+        RUNNER_OS = $env:RUNNER_OS
         AVIBE_TEST_EXPECTED_SID = $user.SID.Value
         AVIBE_LITERAL_TEST_DIR = $temp
         AVIBE_LITERAL_SENTINEL = 'synthetic-not-a-credential'

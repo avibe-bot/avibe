@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import runpy
 import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -73,14 +75,30 @@ def test_native_runner_applies_full_patch_before_supplement(monkeypatch, tmp_pat
     assert events == []
 
 
-def test_production_capture_is_ordinary_profile_and_metadata_only():
-    script = (ROOT / "desktop/scripts/capture-windows-cua-driver.py").read_text()
-    assert "GITHUB_ACTIONS" in script
-    assert 'os.name != "nt"' in script
-    assert '"mcp", "--direct"' in script
-    assert '"dump-docs", "--type", "mcp"' in script
-    assert "desktop_actions" in script
-    assert "snapshot_edited_by_capture" in script
+def test_production_capture_uses_isolated_direct_mcp(monkeypatch, tmp_path):
+    capture = runpy.run_path(str(ROOT / "desktop/scripts/capture-windows-cua-driver.py"))
+    calls = []
+    response = {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "click"}]}}
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        assert kwargs["env"]["CUA_DRIVER_MCP_ENVELOPES"] == "0"
+        assert kwargs["env"]["CUA_DRIVER_PERMISSION_MODE"] == "standard"
+        assert kwargs["env"]["CUA_DRIVER_RS_TELEMETRY_ENABLED"] == "false"
+        assert kwargs["env"]["HOME"] != os.environ.get("HOME")
+        assert b'"method":"tools/list"' in kwargs["input"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(json.dumps({"id": 1, "result": {}}) + "\n" + json.dumps(response) + "\n").encode(),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(capture["subprocess"], "run", fake_run)
+    result, raw, stderr = capture["run_tools_list"](tmp_path / "cua-driver.exe", timeout=5)
+    assert result == response
+    assert raw.endswith(b"\n")
+    assert stderr == b""
+    assert calls[0][0] == [str(tmp_path / "cua-driver.exe"), "mcp", "--direct"]
 
 
 def test_production_capture_is_wired_into_the_existing_windows_job():
