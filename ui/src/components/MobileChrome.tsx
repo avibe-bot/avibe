@@ -242,7 +242,7 @@ const NativeHeaderAccountAction: React.FC = () => {
 };
 
 // In the phone app with `instancePresentation`, the header names the instance it shows; the name
-// opens the shell's instances sheet, and the avatar stays for the account
+// opens the shell's instances sheet, and the avatar opens the sheet on the Account page
 // (ui/design: mobile-app/switcher/b-home). Older shells keep "Avibe" and the avatar.
 const NativeInstanceName: React.FC<{ name: string }> = ({ name }) => {
   const { t } = useTranslation();

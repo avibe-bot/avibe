@@ -14,7 +14,7 @@ import { homeFactsApi, workbenchFixtures } from '../workbench/fixtures';
 import { copyFor } from '../desktop/instances-fixtures';
 import { phoneShell } from '../workbench/fixtures';
 import { Workbench } from '@/components/Workbench';
-import { InstanceSheetPage } from '@/mobile/MobileOnboarding';
+import { AccountSheetPage, InstanceSheetPage } from '@/mobile/MobileOnboarding';
 import type { MobileInstance } from '@/mobile/bridge';
 import {
   FirstRunPage, InstanceSheet, NativeSheet, RuntimeFailed, SheetAccount, SheetLanguage,
@@ -126,6 +126,24 @@ const designFrames = frames([
         onClose={noop}
         onRefresh={noop}
         onAdd={noop}
+      />
+    </NativeSheet>
+  ), { b: true }),
+  // B's avatar opens the same sheet on the Account page (#sheet-account): ✕ returns to the instance,
+  // there is no Back, and the licenses still push inside it. Compare A's `account`, pushed from the list.
+  ...both('b-account', 'B · 头像打开的 sheet 直接是账号页：右上角 ✕ 回到实例，没有返回', () => (
+    <NativeSheet>
+      <AccountSheetPage
+        session={bSession}
+        busy={false}
+        locked={false}
+        errorKey={null}
+        licenses
+        onClose={noop}
+        onBack={noop}
+        onSwitch={noop}
+        onLogout={noop}
+        onLicenses={noop}
       />
     </NativeSheet>
   ), { b: true }),

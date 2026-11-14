@@ -126,7 +126,7 @@ Rules:
 | Home header | unchanged: 「Avibe」 + avatar | 「{instance name} ⌄」 + avatar |
 | Avatar | instances sheet (account is its last row) | Account page directly |
 | Answers "where am I" on Home | no (one tap away) | yes (C1) |
-| Ships with | the next TestFlight build only (bundled page + Swift) | TestFlight **and** a Runtime release: the instance's own header changes. Gated by a new capability (`instancePresentation: 1`, `app.showInstances`, the current instance's name in `app.info`). Older instances keep 「Avibe」 + avatar, and their avatar opens the A sheet, so both kinds work side by side. |
+| Ships with | the next TestFlight build only (bundled page + Swift) | TestFlight **and** a Runtime release: the instance's own header changes. Gated by a new capability (`instancePresentation: 1`, `app.showInstances`, the current instance's name in `app.info`). The name opens the sheet at `#sheet-instances` (the list without the account row); the avatar, and every other in-App account entry (More's 「账号与 Avibe」, the account menu), calls `app.showAccount({start:'account'})`, which opens the same sheet at `#sheet-account` with Account as its root (✕ returns to the instance, no Back). Older instances keep 「Avibe」 + avatar, and their avatar opens the A sheet, so both kinds work side by side. |
 
 Decision (owner, 2026-11-14 13:23): **A now, B with 3.2.7.** A removes every confusion except C1 with no Runtime dependency; B is additive on top of A.
 

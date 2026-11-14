@@ -114,7 +114,7 @@ describe('MobileBrandHeader instance name (ui/design: mobile-app/switcher/b-home
     </MemoryRouter>,
   );
 
-  it('names the instance; the name opens the instances sheet and the avatar keeps the account', async () => {
+  it('names the instance; the name opens the instances sheet and the avatar the sheet on its Account page', async () => {
     const call = shell('Studio');
     installBridge(call, B);
     header();
@@ -124,12 +124,25 @@ describe('MobileBrandHeader instance name (ui/design: mobile-app/switcher/b-home
     fireEvent.click(name);
     await waitFor(() => expect(call).toHaveBeenCalledWith('app.showInstances', {}));
     fireEvent.click(screen.getByRole('button', { name: 'appShell.accountMenuLabel' }));
-    await waitFor(() => expect(call).toHaveBeenCalledWith('app.showAccount', {}));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('app.showAccount', { start: 'account' }));
+    expect(call).not.toHaveBeenCalledWith('app.showAccount', {});
     // The name is read once per document, however often the header mounts.
     cleanup();
     header();
     expect(await screen.findByRole('button', { name: 'appShell.switchInstanceLabel' })).toBeTruthy();
     expect(call.mock.calls.filter(([method]) => method === 'app.info')).toHaveLength(1);
+  });
+
+  it('signs out on the Web when the shell refuses to open its Account page', async () => {
+    const refusing = vi.fn(async (method: string) => {
+      if (method === 'app.showAccount') throw { code: 'invalid_params', message: 'start' };
+      return shell('Studio')(method);
+    });
+    installBridge(refusing, B);
+    header();
+    fireEvent.click(screen.getByRole('button', { name: 'appShell.accountMenuLabel' }));
+    await waitFor(() => expect(auth.signOut).toHaveBeenCalledTimes(1));
+    expect(refusing).toHaveBeenCalledWith('app.showAccount', { start: 'account' });
   });
 
   it('keeps "Avibe" without the capability', async () => {

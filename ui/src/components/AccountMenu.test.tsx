@@ -68,6 +68,28 @@ describe('AccountMenu', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
+  it('opens the account sheet on its Account page where the shell presents instances', async () => {
+    const call = vi.fn(async () => null);
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: '1.0 (1)',
+        capabilities: { accountPresentation: 2, app: 1, instancePresentation: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+    });
+
+    render(<AccountMenu />);
+    fireEvent.click(screen.getByRole('button', { name: 'appShell.accountMenuLabel' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'appShell.openMobileAccount' }));
+
+    await waitFor(() => expect(call).toHaveBeenCalledWith('app.showAccount', { start: 'account' }));
+    expect(call).not.toHaveBeenCalledWith('app.showAccount', {});
+  });
+
   it('keeps the web sign-out action for an older shell', async () => {
     Object.defineProperty(window, 'avibeNative', {
       configurable: true,

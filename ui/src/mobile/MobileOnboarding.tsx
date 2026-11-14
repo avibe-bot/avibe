@@ -61,6 +61,7 @@ import {
   verifyMobilePasskey,
   verifyMobileSecondFactor,
   isSheetHash,
+  SHEET_ACCOUNT_HASH,
   SHEET_INSTANCES_HASH,
 } from './bridge';
 import {
@@ -1726,6 +1727,7 @@ function Account({
   onLogout,
   onLicenses,
   inSheet = false,
+  onClose,
 }: {
   session: Extract<MobileSessionState, { status: 'signedIn' }>;
   busy: boolean;
@@ -1734,6 +1736,11 @@ function Account({
   licenses: boolean;
   /** Pushed inside the instance sheet, whose list already names the current instance. */
   inSheet?: boolean;
+  /**
+   * The sheet's root (`#sheet-account`, ui/design: mobile-app/switcher/b-account): ✕ returns to the
+   * instance, and there is no Back to swipe to.
+   */
+  onClose?: () => void;
   onBack: () => void;
   onSwitch: () => void;
   onLogout: () => void;
@@ -1743,7 +1750,9 @@ function Account({
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id);
   return (
     <CloudScreen>
-      {inSheet ? (
+      {inSheet && onClose ? (
+        <SheetHeader title={t('mobileApp.account.title')} currentName={null} disabled={locked} onClose={onClose} />
+      ) : inSheet ? (
         // A page pushed inside the sheet names where Back goes (ui/design: mobile-app/switcher/account).
         <header className="pb-4">
           <Button
@@ -1813,6 +1822,15 @@ function Account({
       </section>}
       {licenses ? <LicensesEntry disabled={locked} onOpen={onLicenses} /> : null}
     </CloudScreen>
+  );
+}
+
+/** The Account page as the sheet's root, as a view (props only); design frames draw it. */
+export function AccountSheetPage(props: Omit<Parameters<typeof Account>[0], 'inSheet'> & { onClose: () => void }) {
+  return (
+    <DocumentScroll.Provider value>
+      <Account {...props} inSheet />
+    </DocumentScroll.Provider>
   );
 }
 
@@ -1901,7 +1919,7 @@ export function MobileOnboarding() {
 }
 
 function MobileOnboardingScreens() {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const startsOnAccount = useRef(
     window.location.hash === '#account' || window.location.hash === RUNTIME_ACCOUNT_HASH,
   );
@@ -1930,6 +1948,8 @@ function MobileOnboardingScreens() {
   const [inSheet, setInSheet] = useState(() => isSheetHash(window.location.hash));
   // Opened from the instance's name: the list only, without the account row.
   const [instancesOnly] = useState(() => window.location.hash === SHEET_INSTANCES_HASH);
+  // Opened from the avatar where the header names the instance: the Account page is the sheet's root.
+  const [accountRoot] = useState(() => window.location.hash === SHEET_ACCOUNT_HASH);
   // A second factor owed at launch (not after a sign-in on this page), with the account's email
   // when native knows it: passing it continues into the selection native restored, as a launch
   // without a second factor does.
@@ -1992,7 +2012,7 @@ function MobileOnboardingScreens() {
       setSession(next);
       setScreen(
         next.status === 'signedIn' && sheetPresentation.current
-          ? 'sheet'
+          ? accountRoot ? 'account' : 'sheet'
           : startsOnAccount.current && next.status === 'signedIn'
             ? 'account'
             : screenForSession(next),
@@ -2005,7 +2025,7 @@ function MobileOnboardingScreens() {
     } finally {
       finishOperation(token);
     }
-  }, [beginOperation, finishOperation, ownsOperation]);
+  }, [accountRoot, beginOperation, finishOperation, ownsOperation]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -2345,12 +2365,13 @@ function MobileOnboardingScreens() {
   }, [runSheetRefresh]);
 
 
+  // The sheet's root (the list, or Account from `#sheet-account`) refreshes once when it opens.
   useEffect(() => {
-    if (screen !== 'sheet' || sheetOpened.current) return undefined;
+    if (screen !== (accountRoot ? 'account' : 'sheet') || sheetOpened.current) return undefined;
     sheetOpened.current = true;
     const timer = window.setTimeout(() => void refreshSheet(), 0);
     return () => window.clearTimeout(timer);
-  }, [screen, refreshSheet]);
+  }, [accountRoot, screen, refreshSheet]);
 
   const logout = async () => {
     const token = beginOperation('logout');
@@ -2443,7 +2464,7 @@ function MobileOnboardingScreens() {
 
   if (screen === 'boot') {
     return inSheet
-      ? <CloudScreen><SheetHeader currentName={null} disabled onClose={noop} /></CloudScreen>
+      ? <CloudScreen><SheetHeader title={accountRoot ? t('mobileApp.account.title') : undefined} currentName={null} disabled onClose={noop} /></CloudScreen>
       : <Boot />;
   }
   if (screen === 'bootError') {
@@ -2593,6 +2614,7 @@ function MobileOnboardingScreens() {
         errorKey={errorKey}
         licenses={licenses !== null}
         inSheet={inSheet}
+        onClose={inSheet && accountRoot ? () => void closeSheet() : undefined}
         onBack={() => void leaveAccount()}
         onSwitch={() => {
           if (!isOperationLocked()) {

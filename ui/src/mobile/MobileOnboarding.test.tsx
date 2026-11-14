@@ -2209,6 +2209,82 @@ describe('mobile instance sheet', () => {
     expect(screen.getByRole('main').classList.contains('overflow-y-auto')).toBe(false);
   });
 
+  // Opened from the avatar where Home's header names the instance (ui/design: mobile-app/switcher/b-account).
+  describe('opened on the Account page', () => {
+    const openAccountRoot = async () => {
+      window.history.replaceState({}, '', '/#sheet-account');
+      mobile.bootstrap.mockResolvedValueOnce(inSheet());
+      mobile.refresh.mockResolvedValue(inSheet());
+      render(<MobileOnboarding />);
+      await screen.findByText('mobileApp.account.signedInAs');
+    };
+
+    it('is the sheet\'s root: Account with Close, and no Back for the edge swipe to press', async () => {
+      await openAccountRoot();
+      expect(screen.getByRole('heading', { name: 'mobileApp.account.title', level: 1 })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'mobileApp.sheet.title' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'common.back' })).toBeNull();
+      expect(document.querySelector('[data-mobile-back]')).toBeNull();
+      // Not the list, and not the full-screen Account with its current instance.
+      expect(screen.queryByText('mobileApp.sheet.youreIn')).toBeNull();
+      expect(screen.queryByText('mobileApp.account.current')).toBeNull();
+      expect(screen.getByRole('main').classList.contains('overflow-y-auto')).toBe(false);
+
+      fireEvent.click(screen.getByRole('button', { name: 'common.close' }));
+      await waitFor(() => expect(mobile.dismiss).toHaveBeenCalledTimes(1));
+      expect(mobile.returnToInstance).not.toHaveBeenCalled();
+    });
+
+    it('refreshes once as it opens, and leaves for the full-screen flow when the account signed out elsewhere', async () => {
+      await openAccountRoot();
+      await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
+      cleanup();
+
+      resetMobileMocks();
+      window.history.replaceState({}, '', '/#sheet-account');
+      mobile.bootstrap.mockResolvedValueOnce(inSheet());
+      mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
+      render(<MobileOnboarding />);
+      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+      expect(mobile.refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('draws Account\'s title and Close from the first frame', () => {
+      window.history.replaceState({}, '', '/#sheet-account');
+      mobile.bootstrap.mockReturnValueOnce(new Promise(() => {}));
+      render(<MobileOnboarding />);
+      expect(screen.getByRole('heading', { name: 'mobileApp.account.title', level: 1 })).toBeTruthy();
+      expect((screen.getByRole('button', { name: 'common.close' }) as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it('pushes the licenses and comes back to the Account root', async () => {
+      appLicenses.load.mockResolvedValue({
+        schema_version: 1,
+        native: { state: 'published', release_tag: 'iroh-apple-v1.2.0-1' },
+        web: { sha256: 'a'.repeat(64), packages: 1 },
+        components: 0,
+        sources: [],
+        groups: [],
+      });
+      await openAccountRoot();
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.licenses.title' }));
+      expect(await screen.findByRole('heading', { name: 'mobileApp.licenses.title' })).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+      expect(await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'common.close' })).toBeTruthy();
+      expect(document.querySelector('[data-mobile-back]')).toBeNull();      // Coming back is not opening: the sheet refreshed once.
+      expect(mobile.refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('signs out as the avatar\'s sheet does', async () => {
+      await openAccountRoot();
+      mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.signOut' }));
+      await waitFor(() => expect(mobile.logout).toHaveBeenCalledTimes(1));
+      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+    });
+  });
+
   it('pulls to refresh only on the full-screen list', async () => {
     mobile.bootstrap.mockResolvedValueOnce(signedIn());
     render(<MobileOnboarding />);

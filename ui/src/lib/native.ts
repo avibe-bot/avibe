@@ -127,10 +127,20 @@ export async function openNativeExternal(url: string): Promise<boolean> {
   }
 }
 
+/**
+ * Every in-App account entry (the header avatar, More's account, the account menu). Where the
+ * header names the instance (`instancePresentation`), the shell's sheet opens on the Account page
+ * (`#sheet-account`) and the name opens the instances; older shells open their account sheet as
+ * before. False where the shell lacks account presentation or the call fails.
+ */
 export async function nativeShowAccount(): Promise<boolean> {
   try {
     if (!hasNativeCapability('accountPresentation')) return false;
-    await callNative<null>('accountPresentation', 'app.showAccount');
+    await callNative<null>(
+      'accountPresentation',
+      'app.showAccount',
+      hasNativeCapability('instancePresentation') ? { start: 'account' } : {},
+    );
     return true;
   } catch {
     return false;
