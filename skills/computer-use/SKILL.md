@@ -168,8 +168,9 @@ kernel, SDK, saved flows, and safety rules above are the same.
   administrator" lets you continue. Never retry it, ask the owner to elevate
   Avibe, or work around the refusal.
 - Some apps cannot be launched by Avibe in this Preview. When a launch is
-  refused, ask the owner to open the app, wait for its window with
-  `app.waitFor`, then observe and continue there. Never try another launch
+  refused ("Avibe cannot launch this app in the Windows Preview"), ask the
+  owner to open the app, wait for its window with `app.waitFor`, then observe
+  and continue there. Never try another launch
   route, a shell command, or elevation instead, and do not retry the launch.
 - To open a menu, `await win.activate()` and observe that this exact window is
   focused before the click: foreground delivery restores the previous window,
