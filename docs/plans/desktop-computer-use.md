@@ -10,7 +10,66 @@
 - Companion docs: `desktop-tray-lifecycle.md` (native toggle pattern),
   `desktop-auto-update.md` (signing), `desktop-product-gaps.md`
 
-## Amendment (2026-10-29, #3050)
+## Windows x64 Preview interface contract (2026-11-14, 3.2.7)
+
+This amendment defines the cross-process boundary before the Windows shell and
+Runtime consumers are wired. It keeps `schema_version: 1` and adds no fields.
+
+- `socket_path` remains the endpoint field. On macOS/Linux it is an absolute
+  Unix-domain socket path. On Windows it is an absolute named-pipe path of the
+  form `\\\\.\\pipe\\<opaque-name>`; it is not a filesystem path and is not
+  converted to a TCP endpoint. The shell chooses a per-`instance_id` and
+  `generation` name and publishes it only after the daemon is listening.
+- `host_bundle_id` is shell identity metadata for the driver invocation. It is
+  not Windows authentication, a parent-process claim, or a macOS TCC claim.
+  `shell_pid` is diagnostic/liveness and session evidence only.
+- The shell creates `computer-use.lock` beside `computer-use.json` with an
+  owner-only DACL (SYSTEM may be allowed when required by the host) and holds
+  an exclusive OS byte-range lock for
+  its entire lifetime. A Runtime probe must use the same non-blocking lock
+  operation. Lock conflict means a live shell; missing, unreadable, ACL-unsafe,
+  access-denied, or any other probe error means **not live**, never “probably
+  live”. State and lock artifacts must also be owner-private.
+- A ready Runtime admission requires: valid state and approved snapshot;
+  enabled/ready state; the shell lock is held; the exact published named pipe
+  opens; the pipe server has a live PID in the same nonzero interactive session
+  as the Runtime; and the current Runtime is x64, non-elevated, and not in a
+  disconnected/locked session. Unknown security or session evidence fails
+  closed with a stable unavailable reason.
+- The shell must retain the owned driver process HANDLE/PID for the daemon
+  generation and, before publishing `state: ready`, verify
+  `GetNamedPipeServerProcessId` is that exact live driver PID. With v1 fields
+  there is no persisted `driver_pid`, so the Runtime cannot independently
+  reconstruct this exact generation binding; it relies on the shell's atomic
+  ready publication, private state/lock, and exact pipe name. The shell must
+  not publish ready when this check is unknown or fails.
+- The pipe's owner-only DACL (with SYSTEM only if the host proves it is needed)
+  plus the exact private state/lock/generation is the trust boundary. The
+  readiness probe additionally checks the server PID and session. **PROPOSED,
+  pending independent security review and Product approval:** a same-user process
+  can read same-user state and launch the same binary; distinguishing that
+  process after the shell's pre-publication PID check would require an
+  authenticated pipe handshake or a new state field.
+  This is consistent with the existing SECURITY.md same-user local-process
+  boundary, but is not a waived foreign-endpoint guarantee until those gates
+  approve it. Opaque names and `host_bundle_id` are not authentication. A
+  missing, dead, wrong-session, ACL-unsafe, or otherwise unverifiable endpoint
+  is refused rather than accepted.
+- Interactive-session checks are repeated at ready admission. On the action
+  path, the component that owns driver dispatch must recheck lock/disconnect
+  state and reject or stop input; shell supervisory cleanup alone is not a
+  sufficient action-time guarantee when Runtime requests go directly through
+  proxy to driver. The Runtime owns only admission and must never infer an
+  ordinary target from the shell token. Elevated-target refusal is a
+  driver/driver-host action-path rule; this lane does not claim to enforce it
+  from `shell_pid` or `host_bundle_id`.
+- Stable Windows refusal reasons are `unsupported_architecture`,
+  `elevated_runtime`, `session_unavailable`, `session_locked`,
+  `session_mismatch`, `shell_not_running`, `state_unverified`,
+  `lock_unverified`, `pipe_unverified`, and `daemon_unreachable`. Older Runtimes that do not understand the Windows
+  endpoint refuse it safely; macOS lock, Unix-socket, and health behavior is
+  unchanged.
+
 
 Foreground input and window activation are ordinary Computer Use operations.
 The Controller forwards `delivery_mode: "foreground"` and focus-changing

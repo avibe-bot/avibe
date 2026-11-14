@@ -36,6 +36,23 @@ const ERROR_RECOVERY_BACKOFF: [Duration; 2] = [Duration::from_secs(30), Duration
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+fn is_windows_named_pipe(path: &Path) -> bool {
+    let value = path.to_string_lossy();
+    let prefix = r#"\\.\pipe\"#;
+    let Some(name) = value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .and_then(|_| value.get(prefix.len()..))
+    else {
+        return false;
+    };
+    !name.is_empty() && value.len() <= 256 && !name.chars().any(|character| matches!(character, '\\' | '/' | '\0'))
+}
+
+fn is_endpoint_path(path: &Path) -> bool {
+    path.is_absolute() || is_windows_named_pipe(path)
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputerUsePhase {
@@ -96,6 +113,15 @@ impl ComputerUseRecord {
             return Err("tool_snapshot.sha256 must be a SHA-256 hex digest".to_owned());
         }
         if self.state == ComputerUsePhase::Ready {
+            let required_endpoint = |value: &Option<PathBuf>, name: &str| -> Result<(), String> {
+                if value.as_ref().is_some_and(|path| is_endpoint_path(path)) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{name} must be an absolute path or Windows named pipe in ready state"
+                    ))
+                }
+            };
             let required_path = |value: &Option<PathBuf>, name: &str| -> Result<(), String> {
                 if value.as_ref().is_some_and(|path| path.is_absolute()) {
                     Ok(())
@@ -103,7 +129,7 @@ impl ComputerUseRecord {
                     Err(format!("{name} must be an absolute path in ready state"))
                 }
             };
-            required_path(&self.socket_path, "socket_path")?;
+            required_endpoint(&self.socket_path, "socket_path")?;
             required_path(&self.proxy_executable, "proxy_executable")?;
             if self.host_bundle_id.as_deref().is_none_or(str::is_empty) {
                 return Err("host_bundle_id must be non-empty in ready state".to_owned());
@@ -190,8 +216,8 @@ impl ComputerUseStateStore {
 /// The shell holds this file lock for its whole lifetime.
 ///
 /// `std::fs::File` maps this operation to `flock` on Unix and `LockFileEx` on
-/// Windows. Phase 1 uses it on macOS; the cross-platform implementation keeps
-/// the state contract ready for the deferred Windows lane.
+/// Windows. The Runtime host and Python reader use the matching OS lock
+/// semantics; the lock is released by the OS when the shell process exits.
 pub struct ComputerUseShellLock {
     _file: File,
 }
@@ -819,6 +845,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn windows_named_pipe_endpoint_is_accepted_without_relaxing_proxy_paths() {
+        let mut record = record(ComputerUsePhase::Ready, true);
+        record.socket_path = Some(PathBuf::from(r#"\\.\pipe\avibe-cua-shell-1-2"#));
+        record.validate().expect("named pipe endpoint");
+
+        record.proxy_executable = Some(PathBuf::from(r#"cua-driver.exe"#));
+        assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn malformed_windows_named_pipe_endpoint_is_rejected() {
+        let mut record = record(ComputerUsePhase::Ready, true);
+        record.socket_path = Some(PathBuf::from(r#"\\.\pipe\"#));
+        assert!(record.validate().is_err());
+        record.socket_path = Some(PathBuf::from(r#"\\.\pipe\avibe\\foreign"#));
+        assert!(record.validate().is_err());
+    }
     #[test]
     fn tool_snapshot_digest_matches_the_runtime_pin() {
         use crate::hashing::lower_hex;
