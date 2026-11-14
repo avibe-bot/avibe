@@ -56,12 +56,24 @@ non-HTTPS: the real coordinator rejects it with `invalid_instance`, and the
 real page renders its generic row failure. This proves the row-error state,
 not an actual runtime/network connection failure. No remote request is made.
 
-The test waits for native refresh consumption and state-specific localized
-content before attaching screenshots. The static gesture page cannot satisfy
-the real-page assertions. Routine `ios-shell` builds/typechecks the capture
-class but skips its execution; its four existing gesture tests continue to use
-the original static document. The capture workflow selects only the capture
-class.
+Before any web accessibility query, both suites wait for a fixture-native
+`document-ready` value: WebKit must evaluate `document.readyState === "complete"`
+at the expected bundled URL, not its initial `about:blank`. This read-only probe
+does not replace the production navigation delegate or mutate the page. Process
+startup has the same 120-second budget as `AvibeTests.WebKitReadiness`; required
+web-content assertions keep their existing 10-second budget. Capture sheet
+states also wait for the native refresh invocation before querying localized
+content, and for the page's Updating state to clear before capture. Text queries
+re-snapshot within the WebView and match exact labels, not app-wide identifiers.
+A readiness failure remains a test failure, not a screenshot-ready fallback.
+
+The static gesture page cannot satisfy the real-page assertions. Routine
+`ios-shell` builds/typechecks the capture class but skips its full matrix. It
+runs the four existing gestures on the static document plus a cold-launch real
+bundle smoke (default/en/light). That smoke checks actual expected content and
+rejects absent text through the same scoped waiter: native readiness alone
+cannot pass a missing-content assertion. The capture workflow selects only
+the capture class.
 
 ## Safety and acceptance
 
