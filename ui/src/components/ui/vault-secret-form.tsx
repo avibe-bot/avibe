@@ -51,7 +51,7 @@ import {
   checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
 } from '@/lib/vaultHdWallet';
 import { useProtectedVault } from '@/lib/useProtectedVault';
-import { useAskTurnOff } from '@/lib/useAskTurnOff';
+import { askTurnOffNoteShown, useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { DEFAULT_PASSWORD_RECIPE, recipeFromSpec, type GenerateRecipe } from '@/lib/vaultGenerate';
@@ -1617,11 +1617,9 @@ export const VaultSecretForm: React.FC<{
                 label={t('vaults.dialog.alwaysAskSign')}
               />
             </div>
-            {editAskWasOn && askOff.state.phase === 'working' ? (
-              <AskTurnOffNote state={askOff.state} />
-            ) : editAskWasOn && canTurnAskOff ? (
-              askOff.state.phase === 'ready' && askOff.state.failure && askOff.state.failure !== 'cancelled'
-                ? <AskTurnOffNote state={askOff.state} />
+            {editAskWasOn && (askOff.state.phase === 'working' || canTurnAskOff) ? (
+              askTurnOffNoteShown(askOff.state)
+                ? <AskTurnOffNote state={askOff.state} onSetup={askOff.setup} />
                 : <span className="text-[11px] text-muted">{t('vaults.askOff.offHintEdit')}</span>
             ) : editAskWasOn && askOff.state.phase === 'unavailable' ? (
               <span className="text-[11px] text-muted">{t('vaults.dialog.alwaysAskSignLocked')}</span>

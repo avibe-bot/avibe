@@ -1094,6 +1094,8 @@ export type ApiContextType = {
   completeVaultSigningPolicyDowngrade: (name: string, payload: { context: PolicyDowngradeContext; authorization: VaultWebAuthnAuthz }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   /** Derive a seed wallet's Legacy and SegWit public keys from its sealed seed (no words). */
   prepareVaultBitcoinAddressTypes: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  /** Commit a Passkey and Vault root on their own, without a protected key (contract v1.1 §G). */
+  completeVaultSetup: (payload: { wrap_meta: string; authz_factor_registration: VaultWebAuthnRegistrationPayload }) => Promise<{ ok: boolean; exists?: boolean; wrap_meta?: string; code?: string; message?: string }>;
   updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecretField: (name: string, field: string, payload: { expected_updated_at: string }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecretFields: (name: string, payload: VaultFieldsBatchPayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
@@ -4817,6 +4819,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createVaultSigningPolicyChallenge: (name, payload) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/signing-policy/challenge`, payload, { handleError: false }),
     completeVaultSigningPolicyDowngrade: (name, payload) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/signing-policy`, payload, { handleError: false }),
     prepareVaultBitcoinAddressTypes: (name, opts) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/bitcoin-address-types`, {}, opts),
+    completeVaultSetup: (payload) => postJson('/api/vault/setup', payload, { handleError: false }),
     updateVaultSecretField: async (name, field, payload, opts) => {
       const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;
       const { payloadJson } = await requestJson(path, {
