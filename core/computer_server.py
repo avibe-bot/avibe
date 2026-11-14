@@ -181,9 +181,16 @@ class _WindowsPathAPI:
             self.fail()
         value = buffer.value
         # Only the OS result may use the internal DOS verbatim prefix; external
-        # input never may. No UNC, volume GUID or NT-device conversion fallback.
+        # input never may. Dropping it re-enables Win32 normalization, so refuse
+        # final components whose trailing dot/space would change their meaning.
+        # This checks one returned string, not the input spelling or ancestors.
         if value.startswith("\\\\?\\"):
             value = value[4:]
+        if any(part.endswith((".", " ")) for part in value.split("\\")):
+            raise ComputerServerError(
+                "invalid_arguments",
+                "Resolved executable cannot be represented as a conventional Windows path.",
+            )
         return _literal_windows_executable(value)
 
     def canonical_executable(self, path: str) -> str:

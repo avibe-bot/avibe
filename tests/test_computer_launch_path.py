@@ -5,7 +5,7 @@ import asyncio
 import ctypes
 import os
 import shutil
-import subprocess
+import struct
 import sys
 from types import SimpleNamespace
 
@@ -188,9 +188,9 @@ class LaunchUpstream(FakeUpstream):
         return result
 
 
-def server_for(tmp_path):
+def server_for(tmp_path, upstream=None):
     state_path, state = _state(tmp_path)
-    upstream = LaunchUpstream()
+    upstream = upstream if upstream is not None else LaunchUpstream()
     server = cs.ComputerUseServer(state_path=state_path,
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
         status_reader=lambda: ComputerUseStatus("ready", None, state))
@@ -221,7 +221,138 @@ async def test_controller_bad_file_never_dispatches(tmp_path, fake_kernel):
     assert not upstream.calls
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("component", ["Apps.", "Apps ", ".", ".."])
+async def test_controller_refuses_final_path_that_changes_meaning(tmp_path, fake_kernel, component):
+    # The public spelling is valid; only the opened file's OS-final name is unsafe.
+    fake_kernel[0].final = "\\\\?\\C:\\" + component + "\\App.exe"
+    server, upstream = server_for(tmp_path, FakeUpstream())
+    result = await server.call_tool("launch_app", {"session": "s", "path": r"C:\Tools\App.exe"})
+    assert result.get("isError") is True
+    assert result["structuredContent"]["code"] == "invalid_arguments"
+    assert result["structuredContent"]["dispatched"] is False
+    assert not upstream.calls
+    assert fake_kernel[2] == [10]
+
+
 native = pytest.mark.skipif(os.name != "nt", reason="Windows native path API")
+
+
+def _native_final_path(path):
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle_type = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, handle_type,
+    ]
+    kernel32.CreateFileW.restype = handle_type
+    kernel32.GetFinalPathNameByHandleW.argtypes = [
+        handle_type, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+    ]
+    kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [handle_type]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(str(path), 0x80, 7, None, 3, 0x02000000, None)
+    if handle in (None, 0, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = kernel32.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
+        if not 0 < length < len(buffer):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _mount_junction(link, target):
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle_type = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, handle_type,
+    ]
+    kernel32.CreateFileW.restype = handle_type
+    kernel32.DeviceIoControl.argtypes = [
+        handle_type, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.DeviceIoControl.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [handle_type]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    link.mkdir()
+    target_text = str(target)
+    assert target_text.startswith("\\\\?\\")
+    substitute = "\\??\\" + target_text[4:]
+    printed = target_text[4:]
+    substitute_bytes = substitute.encode("utf-16-le")
+    printed_bytes = printed.encode("utf-16-le")
+    path_buffer = substitute_bytes + b"\x00\x00" + printed_bytes + b"\x00\x00"
+    payload = struct.pack(
+        "<IHHHHHH", 0xA0000003, 8 + len(path_buffer), 0,
+        0, len(substitute_bytes), len(substitute_bytes) + 2, len(printed_bytes),
+    ) + path_buffer
+    handle = kernel32.CreateFileW(
+        str(link), 0x180, 7, None, 3, 0x02200000, None,
+    )
+    if handle in (None, 0, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        returned = wintypes.DWORD()
+        buffer = ctypes.create_string_buffer(payload)
+        if not kernel32.DeviceIoControl(
+            handle, 0x000900A4, buffer, len(payload), None, 0,
+            ctypes.byref(returned), None,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        if os.path.lexists(link):
+            link.rmdir()
+        raise
+    kernel32.CloseHandle(handle)
+
+
+def _unmount_junction(link):
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle_type = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, handle_type,
+    ]
+    kernel32.CreateFileW.restype = handle_type
+    kernel32.DeviceIoControl.argtypes = [
+        handle_type, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.DeviceIoControl.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [handle_type]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        str(link), 0x100, 7, None, 3, 0x02200000, None,
+    )
+    if handle in (None, 0, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        returned = wintypes.DWORD()
+        header = struct.pack("<IHH", 0xA0000003, 0, 0)
+        buffer = ctypes.create_string_buffer(header)
+        if not kernel32.DeviceIoControl(
+            handle, 0x000900AC, buffer, len(header), None, 0,
+            ctypes.byref(returned), None,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel32.CloseHandle(handle)
+    link.rmdir()
 
 
 @native
@@ -242,14 +373,51 @@ def test_windows_native_path_canonical_regular_exe_and_missing(tmp_path):
 
 
 @native
-def test_windows_native_path_follows_junction_to_final_local_file(tmp_path):
-    actual = tmp_path / "actual"
-    actual.mkdir()
-    shutil.copyfile(sys.executable, actual / "Target.exe")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["", ".", " "])
+async def test_windows_native_path_follows_junction_to_final_local_file(tmp_path, suffix):
+    ordinary = tmp_path / "Apps"
+    ordinary.mkdir()
+    shutil.copyfile(sys.executable, ordinary / "Target.exe")
+    # Verbatim paths create genuinely distinct directories, not normalized aliases.
+    actual = "\\\\?\\" + str(ordinary) + suffix
+    if suffix:
+        os.mkdir(actual)
+        shutil.copyfile(sys.executable, actual + "\\Target.exe")
+        assert not os.path.samefile(str(ordinary / "Target.exe"), actual + "\\Target.exe")
     junction = tmp_path / "junction"
-    subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(junction), str(actual)],
-                   check=True, capture_output=True, timeout=10)
     try:
-        assert cs._windows_executable_path(str(junction / "Target.exe")) == cs._windows_executable_path(str(actual / "Target.exe"))
+        _mount_junction(junction, actual)
+        requested = str(junction / "Target.exe")
+        raw_final = _native_final_path(requested)
+        assert raw_final.startswith("\\\\?\\")
+        assert raw_final[4:].endswith(f"\\Apps{suffix}\\Target.exe")
+        assert os.path.exists(actual + "\\Target.exe")
+        state_path, state = _state(tmp_path)
+        upstream = FakeUpstream()
+        server = cs.ComputerUseServer(state_path=state_path,
+            upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+            status_reader=lambda: ComputerUseStatus("ready", None, state))
+        # Valid ordinary sibling proves native file/drive admission is working.
+        safe = await server.call_tool("launch_app", {"session": "s", "path": str(ordinary / "Target.exe")})
+        assert not safe.get("isError")
+        upstream.calls.clear()
+        result = await server.call_tool("launch_app", {"session": "s", "path": requested})
+        if suffix:
+            assert result.get("isError") is True
+            assert result["structuredContent"]["code"] == "invalid_arguments"
+            assert result["structuredContent"]["dispatched"] is False
+            with pytest.raises(cs.ComputerServerError, match="cannot be represented"):
+                cs._windows_executable_path(requested)
+            assert not upstream.calls
+        else:
+            assert not result.get("isError")
+            forwarded = [call[1]["arguments"]["path"] for call in upstream.calls
+                         if call[1].get("name") == "launch_app"]
+            assert forwarded == [cs._windows_executable_path(str(ordinary / "Target.exe"))]
     finally:
-        junction.rmdir()
+        if os.path.lexists(junction):
+            _unmount_junction(junction)
+        if suffix:
+            os.unlink(actual + "\\Target.exe")
+            os.rmdir(actual)
