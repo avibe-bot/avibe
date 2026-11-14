@@ -3,6 +3,17 @@
 param([string]$Request)
 $ErrorActionPreference = 'Stop'
 
+function ConvertFrom-AvibeVerbatimPath([string]$Path) {
+    if ([string]::IsNullOrEmpty($Path)) { return $Path }
+    if ($Path.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return '\\' + $Path.Substring(8)
+    }
+    if ($Path.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $Path.Substring(4)
+    }
+    return $Path
+}
+
 function Invoke-AvibeReplacement($requestData) {
     $backup = Join-Path $requestData.staging 'previous'
     $ready = Join-Path $requestData.staging 'ready'
@@ -57,6 +68,9 @@ function Invoke-AvibeReplacement($requestData) {
 # point, not the transaction, owns user dialogs and the temporary directory.
 if ($MyInvocation.InvocationName -eq '.') { return }
 $requestData = Get-Content -LiteralPath $Request -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($name in @('directory', 'executable', 'installer', 'staging')) {
+    $requestData.$name = ConvertFrom-AvibeVerbatimPath $requestData.$name
+}
 try {
     Invoke-AvibeReplacement $requestData
     Remove-Item -LiteralPath $requestData.staging -Recurse -Force

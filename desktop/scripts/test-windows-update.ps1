@@ -19,7 +19,27 @@ function Start-Process {
     if ($returnProcess) { return $process }
 }
 
+# Check literal outputs, including preservation of ordinary paths. No UNC share
+# is accessed: only the production string conversion runs in these cases.
+function Test-PathNormalization {
+    $cases = @(
+        @{ input='\\?\C:\Avibe space 中文\app.exe'; expected='C:\Avibe space 中文\app.exe' },
+        @{ input='\\?\UNC\server\share\Avibe space 中文\app.exe'; expected='\\server\share\Avibe space 中文\app.exe' },
+        @{ input='\\?\unc\server\share\app.exe'; expected='\\server\share\app.exe' },
+        @{ input='C:\Avibe space 中文\app.exe'; expected='C:\Avibe space 中文\app.exe' },
+        @{ input='\\server\share\Avibe space 中文\app.exe'; expected='\\server\share\Avibe space 中文\app.exe' },
+        @{ input=''; expected='' }
+    )
+    foreach ($case in $cases) {
+        $actual = ConvertFrom-AvibeVerbatimPath $case.input
+        if ($actual -cne $case.expected) {
+            throw "Path normalization mismatch for '$($case.input)': '$actual' != '$($case.expected)'"
+        }
+    }
+}
+
 try {
+    Test-PathNormalization
     function Build-App($path, $version, $marker, $class) {
         $source = @"
 using System;
@@ -71,8 +91,8 @@ public class Installer {
     }
 }
 '@ -OutputAssembly $installer -OutputType ConsoleApplication
-    foreach ($mode in @('success', 'deleted', 'partial', 'wrong-version')) {
-        $failure = $mode -ne 'success'
+    foreach ($mode in @('success', 'verbatim-success', 'deleted', 'partial', 'wrong-version')) {
+        $failure = $mode -notin @('success', 'verbatim-success')
         $directory = Join-Path $root ("installation space 中文 " + $mode)
         $staging = Join-Path $root ("stage-" + $mode)
         [IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -85,8 +105,31 @@ public class Installer {
             installer=$installer; version='3.1.2'; pid=2147483647
         }
         $threw = $false
-        try { Invoke-AvibeReplacement $requestData } catch { $threw = $true }
-        if ($threw -ne $failure) { throw "Unexpected transaction outcome: $threw / $failure" }
+        try {
+            if ($mode -eq 'verbatim-success') {
+                # Exercise JSON parsing and the real entry-point normalization,
+                # not a fixture-normalized call straight into the transaction.
+                foreach ($name in @('directory', 'executable', 'installer', 'staging')) {
+                    if ($requestData.$name -notmatch '^[A-Za-z]:\\') {
+                        throw 'The drive-path fixture requires an absolute local path'
+                    }
+                    $requestData.$name = '\\?\' + $requestData.$name
+                }
+                $requestPath = Join-Path $root 'verbatim-request.json'
+                $requestData | ConvertTo-Json | Set-Content -LiteralPath $requestPath -Encoding UTF8
+                & {
+                    # A regression must fail CI, never wait on a modal dialog.
+                    function Add-Type { throw 'Installer entry attempted a failure dialog' }
+                    & "$PSScriptRoot/../src-tauri/src/update_windows.ps1" -Request $requestPath
+                }
+                if (Test-Path -LiteralPath $staging) {
+                    throw 'The successful entry point did not release its staging directory'
+                }
+            } else {
+                Invoke-AvibeReplacement $requestData
+            }
+        } catch { $threw = $true }
+        if ($threw -ne $failure) { throw "Unexpected transaction outcome for ${mode}: $threw / $failure" }
         $expected = if ($failure) { $old } else { $next }
         if ((Get-FileHash (Join-Path $directory 'app.exe')).Hash -ne (Get-FileHash $expected).Hash) {
             throw 'Application bytes did not match the successful or restored version'
@@ -106,7 +149,7 @@ public class Installer {
         }
     }
     $assertionsPassed = $true
-    Write-Output 'Native Windows update success and rollback fixtures passed.'
+    Write-Output 'Native Windows update path normalization, success and rollback fixtures passed.'
 } finally {
     $processCleanupErrors = @()
     foreach ($process in $fixtureProcesses) {
