@@ -448,6 +448,7 @@ def prepare(
     source_archive: Path | None = None,
     output_dir: Path | None = None,
     reuse: bool = False,
+    verify_windows_contract: bool = True,
 ) -> Path:
     if target not in TARGET_ARCH:
         raise ValueError("unsupported Cua Driver target")
@@ -467,7 +468,7 @@ def prepare(
         source_root = extract_driver_source(manifest, resolved_archive, work / "source")
         patches = apply_driver_patches(manifest, source_root, target)
         prepared = build_driver(manifest, source_root, target)
-        if target == WINDOWS_TARGET:
+        if target == WINDOWS_TARGET and verify_windows_contract:
             verify_windows_built_contract(prepared)
         else:
             sign_adhoc(prepared)
@@ -503,6 +504,11 @@ def main() -> None:
         action="store_true",
         help="keep an existing helper whose provenance and checks match the pinned inputs",
     )
+    parser.add_argument(
+        "--defer-windows-contract",
+        action="store_true",
+        help="build Windows without executing the helper; an ordinary-user fixture must verify it before packaging",
+    )
     args = parser.parse_args()
     if args.check_manifest:
         load_manifest()
@@ -515,6 +521,7 @@ def main() -> None:
         source_archive=args.source_archive,
         output_dir=args.output_dir,
         reuse=args.reuse_verified,
+        verify_windows_contract=not args.defer_windows_contract,
     )
     print(output)
 
