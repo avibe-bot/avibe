@@ -318,9 +318,18 @@ or navigate the existing document or change its mode. Nonempty parameters
 reject with `invalid_argument` before presentation.
 
 Native support and the bundled `#sheet-instances` page mode must both be
-present before B ships. Runtime 3.2.7 consumes this capability; older Runtime
-pages retain their existing title/avatar and A entry. The native-only change
-introduces no runtime transport, account mutation or feature-enablement step.
+present before B ships or the App advertises `instancePresentation: 1` in a
+shipped build. The native PR is held until the bundled-page B PR is Merge-ready;
+the lead lands bundled B first and native advertisement second, only after the
+A-only TestFlight build has been dispatched. B is not part of that A build.
+Unknown hashes in older bundled pages fall back to the full-screen-style list:
+there is no crash or auth bypass, but Close/current-row return and document
+scrolling are wrong and Account may remain visible. This is not an acceptable
+B compatibility fallback.
+
+Runtime 3.2.7 consumes this capability; older Runtime pages retain their existing
+title/avatar and A entry. The native-only change introduces no runtime
+transport, account mutation or feature-enablement step.
 
 **Scroll and navigation ownership:** the sheet's bundled page scrolls its
 **document** (not an inner `overflow-y-auto`/fixed-height root). The native host

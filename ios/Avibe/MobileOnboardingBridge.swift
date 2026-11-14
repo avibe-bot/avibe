@@ -508,7 +508,7 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
             coordinator: coordinator,
             returnToRuntime: returnToRuntime,
             dismissSurface: dismissSurface,
-            sheetMethodsOnly: startScreen == .sheet
+            sheetMethodsOnly: startScreen.isSheet
         )
         webView = WKWebView(
             frame: .zero,
@@ -588,7 +588,7 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
 
     private func configureSheetPresentation() {
         guard
-            startScreen == .sheet,
+            startScreen.isSheet,
             let sheet = (presentationController ?? parent?.presentationController)
                 as? UISheetPresentationController
         else {

@@ -328,6 +328,8 @@ final class WebViewFactory {
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let showInstances: () -> Void
+    private let instanceName: () -> String?
     private let directStatus: DirectStatusProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
@@ -349,6 +351,8 @@ final class WebViewFactory {
         historyDidChange: historyDidChange,
         colorSchemeDidChange: colorSchemeDidChange,
         showAccount: showAccount,
+        showInstances: showInstances,
+        instanceName: instanceName,
         directStatus: directStatus,
         pushStatus: { [weak self] vapidPublicKey, origin in
             guard let coordinator = self?.pushCoordinator else {
@@ -395,6 +399,8 @@ final class WebViewFactory {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        showInstances: @escaping () -> Void = {},
+        instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -407,6 +413,8 @@ final class WebViewFactory {
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.showInstances = showInstances
+        self.instanceName = instanceName
         self.directStatus = directStatus
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
@@ -562,6 +570,8 @@ final class WebViewController: UIViewController {
     private(set) var pageColorScheme: PageColorScheme?
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
+    private let showInstances: () -> Void
+    private let instanceName: () -> String?
     private let directStatus: DirectStatusProvider?
     /// Whether this runtime's WebView may be loaded now; `nil` without a
     /// direct transport, which loads as before.
@@ -620,6 +630,13 @@ final class WebViewController: UIViewController {
             showAccount: { [weak self] in
                 self?.showAccountIfActive()
             },
+            showInstances: { [weak self] in
+                self?.showInstancesIfActive()
+            },
+            instanceName: { [weak self] in
+                guard let self, !self.isInvalidatedForAccountTransition else { return nil }
+                return self.instanceName()
+            },
             directStatus: directStatus,
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
@@ -652,6 +669,8 @@ final class WebViewController: UIViewController {
         pushCoordinator: NativePushCoordinator? = nil,
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
+        showInstances: @escaping () -> Void = {},
+        instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
@@ -667,6 +686,8 @@ final class WebViewController: UIViewController {
         self.websiteDataStore = websiteDataStore
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
+        self.showInstances = showInstances
+        self.instanceName = instanceName
         self.directStatus = directStatus
         self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
@@ -888,6 +909,13 @@ final class WebViewController: UIViewController {
             return
         }
         showAccount()
+    }
+
+    private func showInstancesIfActive() {
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
+        showInstances()
     }
 
     /// The primary WebView while this runtime is live: `nil` before the

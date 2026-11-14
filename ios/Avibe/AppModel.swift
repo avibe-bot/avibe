@@ -50,6 +50,9 @@ private struct PendingPushOpened {
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var route: AppRoute = .loading
+    /// Chosen once when the one runtime-preserving sheet opens. Repeated
+    /// presentation requests never replace its document or change its mode.
+    @Published private(set) var accountSheetStartScreen: MobileOnboardingStartScreen = .sheet
     /// Advances each time a runtime opens, so the root builds a new runtime
     /// controller even when the same instance is selected again.
     @Published private(set) var runtimeIdentity = 0
@@ -279,16 +282,39 @@ final class AppModel: ObservableObject {
     /// remains selected and its document is not released, including when the
     /// runtime currently shows its native load-failure screen.
     func showAccount() {
+        showRuntimeSheet(startScreen: .sheet, fallback: .account)
+    }
+
+    func showInstances() {
+        showRuntimeSheet(startScreen: .sheetInstances, fallback: .instances)
+    }
+
+    /// App metadata is read by the Runtime on document load. The catalog,
+    /// rather than the runtime's creation-time snapshot, owns its display name.
+    func selectedInstanceName() -> String? {
+        guard let runtime = route.runtime,
+              sessionCoordinator.isSelectedRuntime(runtime) else { return nil }
+        return sessionCoordinator.currentInstances.first {
+            $0.id == runtime.instance.id
+                && WebOrigin(url: $0.url) == WebOrigin(url: runtime.instance.url)
+        }?.name
+    }
+
+    private func showRuntimeSheet(
+        startScreen: MobileOnboardingStartScreen,
+        fallback: MobileOnboardingStartScreen
+    ) {
         switch route {
         case .accountOverBrowser:
             return
         case .browser(let runtime)
             where sessionCoordinator.isSelectedRuntime(runtime):
             runtimeController?.prepareForAccountCover()
+            accountSheetStartScreen = startScreen
             route = .accountOverBrowser(runtime)
         default:
             stopRuntime()
-            route = .onboarding(.account)
+            route = .onboarding(fallback)
         }
     }
 

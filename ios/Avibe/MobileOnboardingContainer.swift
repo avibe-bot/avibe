@@ -6,8 +6,14 @@ enum MobileOnboardingStartScreen: String, Equatable {
     /// The instances sheet over a live runtime. The sheet's Close button and
     /// native dismissal return to that runtime without reloading it.
     case sheet
+    /// Variant B's named-instance entry; the bundled page omits Account.
+    case sheetInstances = "sheet-instances"
     /// Account over a live runtime: Back calls `app.returnToInstance`.
     case runtimeAccount = "runtime-account"
+
+    var isSheet: Bool {
+        self == .sheet || self == .sheetInstances
+    }
 }
 
 struct MobileOnboardingContainer: UIViewControllerRepresentable {
