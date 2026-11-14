@@ -1,13 +1,17 @@
 # Offline Vault integrity and entry fixtures (AUTH-SETUP-136 / 137)
 
-`release/` is an exact copy of vault-sandbox's reviewed candidate
-`retained/v/fc013b755a005b6b48dc750c429c46e9ee1401532d944c671207f85e371e7b7a/`
-from sandbox source commit `7e2fb00c687532cd2e40ded5f797c9ff8b680213` (#39,
-tree-equal reviewed head `db76ed326b4cf40f741bb54ad071eb9c05cc82c8`).
+`release/` is an exact copy of vault-sandbox's reviewed immutable release
+`retained/v/f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5/`
+from merged sandbox commit `8f1ac62b11ab6a133e7874b0520aeed1d00c44d4` (#43,
+tree-equal reviewed head `df64d4361454b3875c7d0d2c52fa1384f6d1f801`).
 `source.json` lists source-input hashes; the sandbox commit containing this
 snapshot locates its source. It is reproduced twice using the owning repository's
 release tools, not fetched from a deployed host. The packaged authority is
 `vibe/data/vault_sandbox_release.json`; `hosting.json` copies sandbox `vercel.json`.
+The release adds protected-HD secure-window operations, but this pin fixture
+alone does not add the parent HD creation/signing consumers or backend APIs.
+Existing ordinary signing and policy operations remain the selected consumer
+scope until their separate integration changes land.
 
 `legacy/` copies the frozen runtime HTML, JavaScript and CSS plus manifest from
 sandbox `retained/legacy/`, independently reproduced from reviewed commit
