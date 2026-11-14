@@ -1721,10 +1721,12 @@ final class MobileOnboardingTests: XCTestCase {
 
         let logout = Task { try await coordinator.logout() }
         await fulfillment(of: [logoutStarted], timeout: 30)
-        XCTAssertEqual(try await coordinator.bootstrap(), .signedOut)
+        let replacementState = try await coordinator.bootstrap()
+        XCTAssertEqual(replacementState, .signedOut)
 
         allowLogout.fulfill()
-        XCTAssertEqual(try await logout.value, .signedOut)
+        let logoutState = try await logout.value
+        XCTAssertEqual(logoutState, .signedOut)
     }
 
     func testRefreshAccountChangeStillReleasesSelectedRuntime() async throws {
@@ -1750,7 +1752,8 @@ final class MobileOnboardingTests: XCTestCase {
         let selected = try XCTUnwrap(runtime)
         coordinator.activateAccountSurface()
 
-        XCTAssertEqual(try await coordinator.refresh(), .signedOut)
+        let refreshState = try await coordinator.refresh()
+        XCTAssertEqual(refreshState, .signedOut)
         XCTAssertFalse(coordinator.isCurrentRuntime(selected))
         XCTAssertEqual(transitions, 1)
     }
