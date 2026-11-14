@@ -59,6 +59,9 @@
 		100000000000000000000134 /* libIrohLib.a in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000132 /* libIrohLib.a */; };
 		100000000000000000000135 /* Iroh.xcframework in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000131 /* Iroh.xcframework */; };
 		100000000000000000000136 /* DirectIrohBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000136 /* DirectIrohBinding.swift */; };
+		100000000000000000000139 /* DirectIrohBindingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000139 /* DirectIrohBindingTests.swift */; };
+		100000000000000000000137 /* SystemConfiguration.framework in App Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000137 /* SystemConfiguration.framework */; };
+		100000000000000000000138 /* SystemConfiguration.framework in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000137 /* SystemConfiguration.framework */; };
 		1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A1 /* FormAccessoryBar.swift */; };
 		1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A2 /* NativePushCoordinator.swift */; };
 		1000000000000000000000A3 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
@@ -161,6 +164,8 @@
 		200000000000000000000131 /* Iroh.xcframework */ = {isa = PBXFileReference; explicitFileType = wrapper.xcframework; path = Iroh.xcframework; sourceTree = "<group>"; };
 		200000000000000000000132 /* libIrohLib.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libIrohLib.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000136 /* DirectIrohBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohBinding.swift; sourceTree = "<group>"; };
+		200000000000000000000139 /* DirectIrohBindingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohBindingTests.swift; sourceTree = "<group>"; };
+		200000000000000000000137 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		2000000000000000000000A1 /* FormAccessoryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormAccessoryBar.swift; sourceTree = "<group>"; };
 		2000000000000000000000A2 /* NativePushCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinator.swift; sourceTree = "<group>"; };
 		2000000000000000000000A3 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCrypto.swift; sourceTree = "<group>"; };
@@ -185,6 +190,7 @@
 			files = (
 				100000000000000000000132 /* libIrohLib.a in Frameworks */,
 				100000000000000000000133 /* Iroh.xcframework in App Frameworks */,
+				100000000000000000000137 /* SystemConfiguration.framework in App Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -194,6 +200,7 @@
 			files = (
 				100000000000000000000134 /* libIrohLib.a in Test Frameworks */,
 				100000000000000000000135 /* Iroh.xcframework in Test Frameworks */,
+				100000000000000000000138 /* SystemConfiguration.framework in Test Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -295,6 +302,7 @@
 				2000000000000000000000B3 /* PushNotificationTests.swift */,
 				200000000000000000000125 /* DirectIrohByteStreamTests.swift */,
 				200000000000000000000126 /* DirectIrohTestSupport.swift */,
+				200000000000000000000139 /* DirectIrohBindingTests.swift */,
 				200000000000000000000127 /* DirectIrohTransportTests.swift */,
 				200000000000000000000128 /* DirectRendezvousFetcherTests.swift */,
 				200000000000000000000129 /* DirectRendezvousTests.swift */,
@@ -679,6 +687,7 @@
 				1000000000000000000000AA /* PushNotificationTests.swift in Sources */,
 				100000000000000000000125 /* DirectIrohByteStreamTests.swift in Sources */,
 				100000000000000000000126 /* DirectIrohTestSupport.swift in Sources */,
+				100000000000000000000139 /* DirectIrohBindingTests.swift in Sources */,
 				100000000000000000000127 /* DirectIrohTransportTests.swift in Sources */,
 				100000000000000000000128 /* DirectRendezvousFetcherTests.swift in Sources */,
 				100000000000000000000129 /* DirectRendezvousTests.swift in Sources */,
