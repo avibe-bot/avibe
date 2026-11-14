@@ -2804,6 +2804,24 @@ def get_vault_secrets(
     return {"ok": True, "secrets": [vault_public_capabilities(secret) for secret in secrets]}
 
 
+def get_vault_hd_reconciliation(name: str, *, user_context: Any = None) -> dict:
+    """Return a strict public snapshot; never treat a list card as identity."""
+    from storage import vault_service
+
+    try:
+        with _vault_engine().connect() as conn:
+            snapshot = vault_service.get_hd_reconciliation(conn, name, user_context=user_context)
+    except vault_service.InvalidSecretNameError as exc:
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.InvalidHdWalletError as exc:
+        raise VaultApiError(str(exc), code="invalid_hd_wallet", status=409) from exc
+    return {"ok": True, "reconciliation": snapshot}
+
+
 def get_vault_tags(*, query: Optional[str] = None, tag_type: Optional[str] = None) -> dict:
     from storage import vault_service
 
@@ -4231,7 +4249,7 @@ def create_vault_secret(
         raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidSigningKeyError as exc:
         raise VaultApiError(
-            str(exc), code="invalid_keypair", status=409,
+            str(exc), code="invalid_hd_wallet" if protected_hd else "invalid_keypair", status=409,
             message_key=("vault.hd.invalidWallet" if protected_hd else
                          "vault.signing.invalidKey" if hd_keypair is not None else "vault.signing.invalidProtectedSolanaRecord"),
         ) from exc
@@ -4243,7 +4261,13 @@ def create_vault_secret(
         request_id=str(payload.get("provision_request_id") or "") or None,
         request_status="fulfilled" if payload.get("provision_request_id") else None,
     )
-    return {"ok": True, "secret": vault_public_capabilities(meta)}
+    # Storage captured this inside the protected create savepoint. Pop it from
+    # the ephemeral result so general public cards keep their existing shape.
+    reconciliation = meta.pop("reconciliation") if protected_hd else None
+    result = {"ok": True, "secret": vault_public_capabilities(meta)}
+    if protected_hd:
+        result["reconciliation"] = reconciliation
+    return result
 
 
 def prepare_vault_hd_bitcoin_types(name: str, payload: dict, *, user_context: Any = None) -> dict:

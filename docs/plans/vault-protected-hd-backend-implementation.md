@@ -1,8 +1,10 @@
 # Protected HD backend implementation
 
 Status: implementation candidate, not runtime acceptance or feature enablement.
-Contract: [Protected HD wallets, revision 0.6](vault-protected-hd-wallets.md).
-That contract and its committed codec/fingerprint vectors remain unchanged.
+Contract: [Protected HD wallets, revision 0.7](vault-protected-hd-wallets.md).
+Revision 0.7 adds exact-name public reconciliation and the identical transactional
+POST snapshot; the rev0.6 fingerprint algorithm and both committed vector files
+remain unchanged.
 
 ## Scope and invariants
 
@@ -65,6 +67,37 @@ That contract and its committed codec/fingerprint vectors remain unchanged.
 - `skills/use-avibe-vault/SKILL.md`: distinguish standard/protected HD, supported
   contexts and Taproot-only protected commands. No runtime pin changes.
 
+## Exact-name reconciliation
+
+The response-loss test that only snapshots the DB proves no overwrite, not that
+Web can confirm the saved identity. The owning create result therefore includes
+an ephemeral value-free `reconciliation` snapshot built from its validated
+inserted row inside the existing savepoint. The API returns it beside, not inside,
+the unchanged enabled-account `secret` cards. Never reconstruct it by name after
+commit.
+
+One strict storage projection also serves
+`GET /api/vault/secrets/{name}/hd-reconciliation`. Require the exact canonical
+name, the existing create-access check (Editor+) and the saved ID's resource-use
+ACL. Return all 20 immutable six-field rows, exact classification/profile/name/ID,
+the unchanged raw-string-array fingerprint and all five addresses derived from
+saved row0. This includes disabled accounts, so list/view permission is not the
+contract. No new permission, digest, custody, repair or mutation is introduced.
+Ordinary/standard create and existing list projections remain unchanged. Errors
+return no partial snapshot; Web remains blocking/unconfirmed unless every field
+matches its completed operation, including a previously known ID. An unknown ID
+is learned only after a full match. No new seed/create retry/adopt-by-name/delete
+or setup replay follows.
+
+Primary acceptance: normal API/REST returns and actual committed-response loss,
+full disabled table/five saved-derived addresses, raw Unicode/wrap fingerprint,
+wrong-kind/corruption/ACL/exact-name failures, known-ID/name replacement and a
+read-only state snapshot. A forced projection failure is caught within an outer
+storage transaction to prove wallet/setup/resource/audit/provision rollback.
+Consumer comparison tests remain Web-owned; backend tests do not impersonate a
+new client or claim browser acceptance. Contract/document changes need fresh
+producer/consumer/independent-reviewer ACKs with both unchanged fixture hashes.
+
 ## Verification and evidence limits
 
 Primary new coverage is `tests/test_vault_protected_hd.py`: exact projection and
@@ -90,8 +123,9 @@ producer and real composed-runtime evidence.
 - Complete independent security review, exact-head Codex review and required CI.
 - Obtain a separately authorized combined local-Incus allocation before any
   composed exercise. Do not use owner services or remote tenant infrastructure.
-- Coordinate actual wire deltas with the sandbox owner; none are introduced by
-  this implementation. F4 keeps the existing canonical envelope-object hash,
+- Coordinate the additive POST/GET reconciliation union with producer and Web,
+  and re-ACK the exact revised contract before treating it as frozen. F4 keeps
+  the existing canonical envelope-object hash,
   distinct from the unchanged HD string-array fingerprint. F2 is the producer's
   immediate-parent RPC guard, not a backend flag or authority.
 - Publication/pinning, final candidate acceptance and deployment are separate

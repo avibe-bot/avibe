@@ -1,6 +1,6 @@
 # Protected HD wallets — v1 contract
 
-Status: CONTRACT revision 0.6, 2026-11-13. Target: 3.2.7.
+Status: CONTRACT revision 0.7, 2026-11-14. Target: 3.2.7.
 Revision 0.4 added all THREE BTC public-key precommitments using the common
 versioned flat table and existing address-index paths, keeping protected
 signing/display Taproot-only. Revision 0.5 changed DOCUMENT ONLY: exact validated
@@ -8,7 +8,11 @@ stored projection, separate unchanged-standard/protected release unions, and
 account-label versus secret-record-name rules. Revision 0.6 only removes private
 coordination identifiers and replaces a scratch fixture locator with its committed
 repository path. Wire, storage, custody and acceptance requirements are unchanged;
-both public fixture bytes stay unchanged.
+both public fixture bytes stay unchanged. Revision 0.7 adds the value-free exact-name
+reconciliation GET and identical transactional create snapshot below. Its access
+floor reuses protected-HD create authority plus the saved record's resource ACL;
+it is not list/view authority. The rev0.6 fingerprint algorithm and both vector
+files remain byte-for-byte unchanged.
 
 Freeze requires the exact document and BOTH public vectors to be acknowledged by
 the sandbox producer, backend consumer and an independent reviewer. An older
@@ -384,6 +388,108 @@ fingerprint and #0 against its completed operation before presenting ready-to-fu
 mismatch remains blocking, never silently retried without the check. Fault tests
 cover stale response/name reuse and a committed response lost. DELETE as
 compensation is not atomic rollback.
+
+### Exact-name reconciliation (revision 0.7)
+
+The protected-HD POST success is additive:
+
+```ts
+{ ok: true, secret: /* existing enabled-account public cards */,
+  reconciliation: ProtectedHdReconciliation }
+```
+
+`GET /api/vault/secrets/{name}/hd-reconciliation` returns exactly
+`{ok:true, reconciliation:ProtectedHdReconciliation}`. The path name must satisfy
+`^[A-Za-z_][A-Za-z0-9_]*$` and is looked up exactly: no trim, case-fold, search,
+body, expected-value input or alternate selector. The response is fresh JSON with
+`Cache-Control: no-store`. The snapshot has exactly these nine fields:
+
+```ts
+type ProtectedHdReconciliation = {
+  name: string;
+  secret_id: string; // nonempty saved record ID
+  kind: "keypair";
+  protection: "protected";
+  signer_kind: "hd-seed";
+  bitcoin_profile: "bitcoin-address-types-v1";
+  envelope_sha256: string; // lowercase 64-hex; unchanged rev0.6 algorithm, section 5
+  accounts: Array<{
+    account: number; // true integers 0..19, ordered, exactly 20 rows
+    evm: string; // lowercase compressed SEC1, 66 hex
+    bitcoin: string; // lowercase BIP86 INTERNAL compressed SEC1, 66 hex
+    bitcoin_p2pkh: string; // lowercase BIP44 compressed SEC1, 66 hex
+    bitcoin_p2wpkh: string; // lowercase BIP84 compressed SEC1, 66 hex
+    solana: string; // lowercase Ed25519 public key, 64 hex
+  }>;
+  expected_account0: {
+    eth: string; btc_legacy: string; btc_segwit: string;
+    btc_taproot: string; solana: string;
+  };
+};
+```
+
+Return the complete six-field public table, INCLUDING disabled indices, rather
+than inventing a table digest/canonicalizer. Public keys link derived accounts
+not exposed in ordinary enabled-only cards. Therefore GET reuses the SAME
+`require_secret_create_access` check as protected-HD create (currently Editor or
+higher), THEN requires the saved record ID's existing resource-use ACL. This is
+not a new permission, list/view parity, management-only authority, a Passkey
+ceremony or permission to use custody. HTTP admission likewise uses create's
+existing role floor. Preserve the existing resource-use policy, including its
+established role/instance semantics; this endpoint does not change which saved
+records that policy permits. Do not add a public-metadata exception to its
+saved-ID check.
+
+One storage-owned projection validates exact protected/keypair/hd-seed
+classification, the envelope/profile and the whole cached table/settings before
+returning any snapshot. All fields come from ONE authorized row, not separate
+name-based rereads. `expected_account0` is derived from that validated saved
+row0 using the five canonical address rules above, not echoed caller values.
+`envelope_sha256` hashes the ORIGINAL persisted ciphertext/nonce/raw wrap strings
+using section 5, never parsed/reserialized wrap metadata or the F4 envelope-object
+hash. No mutable labels, settings, usage, timestamps or policy revision enter the
+snapshot. The two extra BTC addresses remain consistency-only, not new protected
+receiving/signing choices. No ciphertext, nonce, wrap metadata, seed, words,
+passphrase, private key or root/factor material is returned.
+
+POST builds the SAME projection from the validated inserted/read-back row INSIDE
+the existing create rollback unit, and emits it only after commit. Projection
+failure rolls back wallet/resource/audit/provision and any newly established
+setup even if a storage caller catches the error; independently durable setup
+survives. Do not fetch by name after commit to construct a POST snapshot. Ordinary
+and standard-HD create responses and all existing lists stay unchanged. GET is a
+pure read: no custody/version probe, decrypt/sign/reveal, grant, setup/factor/root
+mutation or promotion, audit/use write, resource creation, repair or event.
+
+Failures use the existing error envelope: invalid exact name -> 400
+`invalid_name`; absent exact record -> 404 `secret_not_found`; create-floor or
+saved-resource refusal -> 403 `resource_access_forbidden` at the API/storage
+boundary (HTTP admission may return its existing `instance_access_forbidden`);
+wrong classification, corrupt envelope/cache or unknown/missing profile -> 409
+`invalid_hd_wallet`. Authentication retains the existing HTTP behavior. Return
+no partial reconciliation on error. Missing old-server endpoint, timeout, 5xx,
+404 or any other failure is UNCONFIRMED, never proof that nothing was saved.
+
+Both normal POST and later GET feed the SAME consumer comparison of the completed
+operation: exact name/classification/profile, every field of all 20 ordered rows,
+locally computed rev0.6 envelope fingerprint and all five expected#0 strings.
+If an ID was observed previously, require that same ID even if another record
+copies the public/encrypted material. If the response was lost before any ID was
+known, learn the ID only after a FULL match; never adopt by name/existence or
+three displayed addresses. Malformed/partial, mismatching, stale-response or
+same-name replacement results stay blocking/unconfirmed. Cosmetic account label
+changes are not identity changes. No automatic create retry, new seed, overwrite,
+compensating delete, setup replay, signing or reveal fallback follows. A match is
+public consistency at the time of that read, not AEAD/seed/PRF attestation or a
+guarantee against later authorized changes; fresh signing checks remain required.
+
+Acceptance must use real API return fields, not injected keys or DB-only proof:
+normal POST/GET snapshot equality; actual commit then lost response -> exact GET;
+a different same-name winner and known-ID replacement; all 20 rows with only#0
+enabled; all five saved-derived addresses; raw-wrap order/Unicode fingerprint;
+missing/partial/malformed/error cases; create-floor and saved-ID ACL refusal; no
+GET side effects; ordinary/standard/list parity. Existing duplicate/no-overwrite
+storage tests do not establish consumer reconciliation.
 
 The public metadata is a consistency boundary, not remote attestation that the
 sandbox generated ciphertext. Only the sandbox can authenticate its AAD and

@@ -20,12 +20,14 @@ import pytest
 from sqlalchemy import select
 
 from storage import resource_access_service, vault_hd, vault_protected_hd, vault_service, vault_setup
-from storage.models import resource_access_policies, state_meta, vault_audit, vault_auth_factors, vault_requests, vault_secrets
+from storage.models import metadata, resource_access_policies, state_meta, vault_audit, vault_auth_factors, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
+from tests.ui_server_test_helpers import csrf_headers
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
 from vibe import api, cli
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/vault_signing/protected-hd-codec-vectors.json").read_text())
+FINGERPRINTS = json.loads((Path(__file__).parent / "fixtures/vault_signing/protected-hd-fingerprint-vectors.json").read_text())
 ORIGIN = "https://sandbox.avibe.bot"
 
 
@@ -95,6 +97,218 @@ def test_create_builds_exact_projection_and_taproot_only_public_choices(case):
     assert "btc_legacy" not in result["accounts"][0] and "btc_segwit" not in result["accounts"][0]
     assert {key: result["accounts"][0][key] for key in ("eth", "btc_taproot", "solana")} == {
         key: value["expected_account0"][key] for key in ("eth", "btc_taproot", "solana")}
+
+
+def expected_reconciliation(value, secret_id):
+    # Independent operation inputs/fixture addresses, not the projection under test.
+    envelope = value["sealed"]
+    fingerprint = hashlib.sha256(json.dumps(
+        [envelope["ciphertext"], envelope["nonce"], envelope["wrap_meta"]],
+        separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")).hexdigest()
+    return {"name": value["name"], "secret_id": secret_id, "kind": "keypair", "protection": "protected",
+            "signer_kind": "hd-seed", "bitcoin_profile": "bitcoin-address-types-v1",
+            "envelope_sha256": fingerprint, "accounts": value["accounts"],
+            "expected_account0": value["expected_account0"]}
+
+
+@pytest.mark.parametrize("case", range(5))
+def test_create_returns_complete_saved_identity_not_only_enabled_cards(case):
+    value = payload(case)
+    result = api.create_vault_secret(value)
+    assert set(result) == {"ok", "secret", "reconciliation"}
+    assert result["reconciliation"] == expected_reconciliation(value, stored()["id"])
+    assert len(result["secret"]["accounts"]) == 1
+    assert len(result["reconciliation"]["accounts"]) == 20
+    assert "reconciliation" not in result["secret"]
+    assert "reconciliation" not in api.get_vault_secrets()["secrets"][0]
+
+
+def test_committed_post_response_loss_reconciles_via_exact_rest_without_db_inputs(monkeypatch):
+    from vibe.ui_server import app
+
+    value = payload()
+    # Publication is after engine.begin commits. Losing the response here must
+    # still leave enough evidence in the normal read API; do not retry create.
+    monkeypatch.setattr(api, "_publish_vaults_updated", Mock(side_effect=ConnectionError("synthetic response loss")))
+    with pytest.raises(ConnectionError, match="response loss"):
+        api.create_vault_secret(value)
+    client = app.test_client()
+    response = client.get(f"/api/vault/secrets/{value['name']}/hd-reconciliation")
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    result = response.get_json()
+    assert set(result) == {"ok", "reconciliation"} and result["ok"] is True
+    saved_id = result["reconciliation"]["secret_id"]
+    assert isinstance(saved_id, str) and saved_id.startswith("vlt_")
+    assert result["reconciliation"] == expected_reconciliation(value, saved_id)
+    assert len(result["reconciliation"]["accounts"]) == 20
+
+
+def test_normal_rest_post_and_exact_get_return_the_same_snapshot():
+    from vibe.ui_server import app
+
+    value = payload()
+    client = app.test_client()
+    created = client.post("/api/vault/secrets", json=value, headers=csrf_headers(client))
+    assert created.status_code == 200
+    result = created.get_json()
+    saved = client.get(f"/api/vault/secrets/{value['name']}/hd-reconciliation")
+    assert saved.status_code == 200
+    assert result["reconciliation"] == saved.get_json()["reconciliation"]
+    assert result["reconciliation"] == expected_reconciliation(value, result["reconciliation"]["secret_id"])
+    assert "reconciliation" not in result["secret"]
+
+
+@pytest.mark.parametrize("vector", FINGERPRINTS["cases"], ids=lambda case: case["id"])
+def test_shared_reconciliation_and_signing_fingerprint_preserves_frozen_rev06_vectors(vector):
+    # Codec-only cases include structurally invalid envelopes/lone surrogates;
+    # matching the hash never authorizes their ingestion as protected wallets.
+    row = dict(zip(("ciphertext", "nonce", "wrap_meta"), vector["input"]))
+    assert vault_service._hd_envelope_sha256(row) == vector["sha256"]
+
+
+def test_post_snapshot_is_captured_before_commit_not_relooked_up_during_publication(monkeypatch):
+    value = payload()
+    observed = {}
+
+    def replace_after_commit(**_):
+        observed["original"] = api.get_vault_hd_reconciliation(value["name"])["reconciliation"]
+        other = payload(1)
+        other["name"] = value["name"]
+        with api._vault_engine().begin() as conn:
+            conn.execute(vault_secrets.delete())
+            observed["replacement"] = storage_create(conn, other)["reconciliation"]
+
+    monkeypatch.setattr(api, "_publish_vaults_updated", replace_after_commit)
+    result = api.create_vault_secret(value)
+    assert result["reconciliation"] == observed["original"]
+    assert result["reconciliation"]["accounts"] == value["accounts"]
+    assert api.get_vault_hd_reconciliation(value["name"])["reconciliation"] == observed["replacement"]
+    assert observed["replacement"]["secret_id"] != result["reconciliation"]["secret_id"]
+
+
+@pytest.mark.parametrize("name,code,status", [
+    ("missing", "secret_not_found", 404), ("lowercase", "secret_not_found", 404),
+    ("leading-space", "invalid_name", 400), ("dotted", "invalid_name", 400),
+])
+def test_reconciliation_is_exact_name_and_errors_never_return_partial_identity(name, code, status):
+    from vibe.ui_server import app
+
+    value = payload()
+    api.create_vault_secret(value)
+    names = {"missing": value["name"] + "_MISSING", "lowercase": value["name"].lower(),
+             "leading-space": " " + value["name"], "dotted": value["name"] + ".value"}
+    response = app.test_client().get(f"/api/vault/secrets/{names[name]}/hd-reconciliation")
+    assert response.status_code == status
+    assert response.get_json()["code"] == code
+    assert "reconciliation" not in response.get_json()
+
+
+@pytest.mark.parametrize("classification", ["standard", "static", "ordinary"])
+def test_reconciliation_refuses_other_record_classifications(classification):
+    value = payload()
+    api.create_vault_secret(value)
+    changes = {"standard": {"protection": "standard"}, "static": {"kind": "static"},
+               "ordinary": {"signer_kind": None}}[classification]
+    with api._vault_engine().begin() as conn:
+        conn.execute(vault_secrets.update().values(**changes))
+    with pytest.raises(api.VaultApiError) as error:
+        api.get_vault_hd_reconciliation(value["name"])
+    assert (error.value.code, error.value.status) == ("invalid_hd_wallet", 409)
+
+
+@pytest.mark.parametrize("role", ["viewer", "editor", "member", "owner"])
+def test_reconciliation_reuses_create_authority_and_actual_saved_id_acl(role):
+    value = payload()
+    creator = resource_access_service.ResourceUserContext(instance_role="editor", subject="creator")
+    created = api.create_vault_secret(value, user_context=creator)["reconciliation"]
+    context = resource_access_service.ResourceUserContext(instance_role=role, subject="creator")
+    if role == "viewer":
+        with pytest.raises(api.VaultApiError) as error:
+            api.get_vault_hd_reconciliation(value["name"], user_context=context)
+        assert (error.value.code, error.value.status) == ("resource_access_forbidden", 403)
+    else:
+        assert api.get_vault_hd_reconciliation(value["name"], user_context=context)["reconciliation"] == created
+
+    # A nonremote Editor has create authority but still needs this saved ID's
+    # private use ACL. Active remote-organization Editors intentionally retain
+    # the existing runtime access rule rather than a new ownership policy.
+    direct_other = resource_access_service.ResourceUserContext(instance_role="editor", subject="other")
+    with pytest.raises(api.VaultApiError) as error:
+        api.get_vault_hd_reconciliation(value["name"], user_context=direct_other)
+    assert (error.value.code, error.value.status) == ("resource_access_forbidden", 403)
+    remote_other = resource_access_service.ResourceUserContext(instance_role="editor", subject="other", is_remote=True,
+        organization_id="org-test", organization_member_id="member-test", organization_role="member",
+        instance_access_source="organization_group")
+    assert api.get_vault_hd_reconciliation(value["name"], user_context=remote_other)["reconciliation"] == created
+
+
+def test_reconciliation_http_uses_create_floor_and_saved_acl_without_auth_exceptions(tmp_path):
+    from tests.ui_server_test_helpers import remote_peer, remote_session_cookie, save_config
+    from vibe import remote_access
+    from vibe.authorization import http_authorization_policy
+    from vibe.ui_server import app
+
+    value = payload()
+    api.create_vault_secret(value, user_context=resource_access_service.ResourceUserContext(
+        instance_role="editor", subject="creator"))
+    config = save_config(tmp_path)
+    path = f"/api/vault/secrets/{value['name']}/hd-reconciliation"
+    assert http_authorization_policy("GET", path).minimum_role == http_authorization_policy(
+        "POST", "/api/vault/secrets").minimum_role == "editor"
+    for role, subject, status, code in [
+        (None, None, 401, None), ("viewer", "creator", 403, "instance_access_forbidden"),
+        ("editor", "other", 403, "resource_access_forbidden"),
+        ("editor", "creator", 200, None), ("member", "other", 200, None), ("owner", "other", 200, None),
+    ]:
+        client = app.test_client()
+        if role:
+            client.set_cookie(remote_access.SESSION_COOKIE_NAME, remote_session_cookie(
+                config, f"{subject}@example.com", subject, role=role, access_source="email"), domain="alex.avibe.bot")
+        response = client.get(path, base_url="https://alex.avibe.bot", environ_base=remote_peer())
+        assert response.status_code == status, (role, subject, response.get_json())
+        if code:
+            assert response.get_json().get("code", response.get_json().get("error")) == code
+        if status != 200:
+            assert "reconciliation" not in response.get_json()
+
+
+def test_reconciliation_is_read_only_and_ignores_cosmetic_settings(monkeypatch):
+    value = payload()
+    initial = api.create_vault_secret(value)["reconciliation"]
+    api.update_vault_hd_account(value["name"], {})
+    api.update_vault_hd_account(value["name"], {"name": "Daily"}, account=1)
+    with api._vault_engine().connect() as conn:
+        before = {table.name: list(conn.execute(select(table)).mappings()) for table in metadata.tables.values()}
+    publish = Mock(side_effect=AssertionError("GET must not publish or mutate"))
+    monkeypatch.setattr(api, "_publish_vaults_updated", publish)
+    assert api.get_vault_hd_reconciliation(value["name"])["reconciliation"] == initial
+    with api._vault_engine().connect() as conn:
+        after = {table.name: list(conn.execute(select(table)).mappings()) for table in metadata.tables.values()}
+    assert after == before
+    publish.assert_not_called()
+
+
+@pytest.mark.parametrize("replacement", ["different-operation", "same-material-new-id"])
+def test_reconciliation_exposes_same_name_replacement_instead_of_adopting_it(replacement):
+    value = payload()
+    initial = api.create_vault_secret(value)["reconciliation"]
+    with api._vault_engine().begin() as conn:
+        conn.execute(vault_secrets.delete())
+    other = payload(1) if replacement == "different-operation" else copy.deepcopy(value)
+    other["name"] = value["name"]
+    # Envelope structure is not ciphertext/seed authentication. A fresh insert
+    # with copied public material must still have a different saved identity.
+    created = api.create_vault_secret(other)["reconciliation"]
+    read = api.get_vault_hd_reconciliation(value["name"])["reconciliation"]
+    assert read == created and read["secret_id"] != initial["secret_id"]
+    if replacement == "different-operation":
+        assert read["accounts"] != initial["accounts"]
+        assert read["envelope_sha256"] != initial["envelope_sha256"]
+    else:
+        assert {k: v for k, v in read.items() if k != "secret_id"} == {
+            k: v for k, v in initial.items() if k != "secret_id"}
 
 
 @pytest.mark.parametrize("field", ["eth", "btc_legacy", "btc_segwit", "btc_taproot", "solana"])
@@ -173,7 +387,9 @@ def test_duplicate_effective_members_and_unknown_root_extensions_keep_raw_finger
         conn.execute(state_meta.update().where(state_meta.c.key == vault_setup.META_KEY).values(value_json=json.dumps({
             "v": 1, "wrap_meta": json.dumps({key: child for key, child in json.loads(value["sealed"]["wrap_meta"]).items()
                 if key not in {"scheme", "record_meta", "wrapped_dek", "dek_nonce"}})})))
-    api.create_vault_secret(value)
+    result = api.create_vault_secret(value)
+    assert result["reconciliation"] == expected_reconciliation(value, stored()["id"])
+    assert api.get_vault_hd_reconciliation(value["name"])["reconciliation"] == result["reconciliation"]
     assert stored()["wrap_meta"] == value["sealed"]["wrap_meta"]
     # Root numbers/extensions are not a new whitelist; duplicate v uses last-wins parsing.
     parsed = vault_protected_hd.parse_wrap(stored()["wrap_meta"])
@@ -189,7 +405,7 @@ def test_authenticated_duplicate_points_do_not_gain_a_new_cross_row_rejection_ru
     assert api.create_vault_secret(value)["ok"]
 
 
-@pytest.mark.parametrize("failure", ["readback", "audit", "fulfil"])
+@pytest.mark.parametrize("failure", ["readback", "audit", "fulfil", "reconciliation"])
 def test_caught_create_failure_rolls_back_record_resource_audit_and_provision(failure, monkeypatch):
     value = payload()
     original_require = vault_service._require_row
@@ -200,6 +416,8 @@ def test_caught_create_failure_rolls_back_record_resource_audit_and_provision(fa
         monkeypatch.setattr(vault_service, "_require_row", bad_readback)
     elif failure == "audit":
         monkeypatch.setattr(vault_service, "audit", Mock(side_effect=RuntimeError("synthetic audit failure")))
+    elif failure == "reconciliation":
+        monkeypatch.setattr(vault_service, "_protected_hd_reconciliation", Mock(side_effect=RuntimeError("synthetic projection failure")))
     else:
         monkeypatch.setattr(vault_service, "fulfill_pending_provision_requests_for_secret", Mock(side_effect=RuntimeError("synthetic fulfil failure")))
     with api._vault_engine().begin() as conn:
@@ -209,7 +427,8 @@ def test_caught_create_failure_rolls_back_record_resource_audit_and_provision(fa
 
 
 @pytest.mark.parametrize("durable", [False, True])
-def test_failed_first_wallet_rolls_back_only_new_setup_not_preexisting_durable_setup(durable, monkeypatch):
+@pytest.mark.parametrize("failure", ["fulfil", "reconciliation"])
+def test_failed_first_wallet_rolls_back_only_new_setup_not_preexisting_durable_setup(durable, failure, monkeypatch):
     credential = WebAuthnTestCredential(rp_id="sandbox.avibe.bot", origin=ORIGIN)
     options = api.create_vault_authz_webauthn_options(origin=ORIGIN)
     setup = {"wrap_meta": credential.wrap_meta(), "authz_factor_registration": credential.registration_payload(
@@ -218,7 +437,8 @@ def test_failed_first_wallet_rolls_back_only_new_setup_not_preexisting_durable_s
         api.complete_vault_setup(setup, origin=ORIGIN)
     before_factors, before_audit = rows(vault_auth_factors), rows(vault_audit)
     value = payload(setup=setup)
-    monkeypatch.setattr(vault_service, "fulfill_pending_provision_requests_for_secret", Mock(side_effect=RuntimeError("synthetic fulfil failure")))
+    owner = "_protected_hd_reconciliation" if failure == "reconciliation" else "fulfill_pending_provision_requests_for_secret"
+    monkeypatch.setattr(vault_service, owner, Mock(side_effect=RuntimeError("synthetic create failure")))
     with api._vault_engine().begin() as conn:
         with pytest.raises(RuntimeError):
             storage_create(conn, value, establishing_vmk=True, authz_factor_registration=setup["authz_factor_registration"], authz_factor_origin=ORIGIN)
@@ -255,6 +475,9 @@ def test_corrupt_item_degrades_listing_and_refuses_account_management(mutation):
         conn.execute(vault_secrets.update().values(public_meta=json.dumps(meta), **changes))
     result, = api.get_vault_secrets()["secrets"]
     assert result["accounts"] == [] and not result["per_use_sign"]
+    with pytest.raises(api.VaultApiError) as error:
+        api.get_vault_hd_reconciliation(value["name"])
+    assert (error.value.code, error.value.status) == ("invalid_hd_wallet", 409)
     before = stored()
     with pytest.raises(api.VaultApiError):
         api.update_vault_hd_account(value["name"], {})
@@ -583,7 +806,7 @@ def test_two_concurrent_completions_deliver_exactly_one_signature():
     assert sum(item["event"] == "signed" for item in rows(vault_audit)) == 1
 
 
-def test_same_name_concurrent_create_and_committed_response_loss_do_not_replace_winner():
+def test_same_name_concurrent_create_and_duplicate_refusal_do_not_replace_winner():
     value = payload()
     engine = api._vault_engine()
     barrier = Barrier(2)

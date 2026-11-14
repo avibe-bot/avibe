@@ -3984,6 +3984,7 @@ def _create_secret(
             vault_protected_hd.initial_meta(name, _row_sealed(inserted), accounts, expected_account0)
         except ValueError as exc:
             raise InvalidHdWalletError(str(exc)) from exc
+        reconciliation = _protected_hd_reconciliation(inserted)
     _register_created_secret_resource_policy(conn, secret_id, context)
     audit(conn, "created", secret_name=name)
     decided_at = _now()
@@ -3999,6 +4000,10 @@ def _create_secret(
     # request-specific create still uses only that request's spec for the secret metadata,
     # but sibling waiters should not keep timing out or resurfacing stale rows.
     fulfill_pending_provision_requests_for_secret(conn, name, decided_at=decided_at)
+    if protected_hd:
+        # Ephemeral create result only; never add this all-account snapshot to
+        # general metadata/list projections or reconstruct it after commit.
+        return {**_meta_payload(inserted), "reconciliation": reconciliation}
     return _meta_payload(_require_row(conn, name))
 
 
@@ -4209,6 +4214,33 @@ def update_secret_classification(
     return _meta_payload(_require_row(conn, secret_name))
 
 
+def _protected_hd_reconciliation(row: dict[str, Any]) -> dict[str, Any]:
+    """One immutable, value-free snapshot for create and exact-name recovery."""
+    try:
+        if (row.get("kind") != "keypair" or row.get("protection") != "protected"
+                or row.get("signer_kind") != vault_hd.SIGNER_KIND
+                or not isinstance(row.get("id"), str) or not row["id"]):
+            raise ValueError("reconciliation requires a saved protected HD wallet")
+        accounts = _hd_stored_accounts(row)
+        table = [{key: item[key] for key in vault_protected_hd.PUBLIC_FIELDS} for item in accounts]
+        return {
+            "name": row["name"], "secret_id": row["id"], "kind": "keypair", "protection": "protected",
+            "signer_kind": vault_hd.SIGNER_KIND, "bitcoin_profile": vault_hd.BITCOIN_PROFILE,
+            "envelope_sha256": _hd_envelope_sha256(row), "accounts": table,
+            "expected_account0": vault_protected_hd.account_addresses(table[0]),
+        }
+    except ValueError as exc:
+        raise InvalidHdWalletError(str(exc)) from exc
+
+
+def get_hd_reconciliation(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
+    """Read all public indices under create authority AND the saved-ID use ACL."""
+    if not isinstance(name, str) or not vault_crypto.is_valid_secret_name(name):
+        raise InvalidSecretNameError(name)
+    context = require_secret_create_access(user_context=user_context)
+    return _protected_hd_reconciliation(require_secret_access(conn, name, user_context=context))
+
+
 def get_secret_meta(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
     return _meta_payload(require_secret_access(conn, name, user_context=user_context))
 
@@ -4239,14 +4271,20 @@ def get_signing_public_key(
     )
 
 
+def _hd_envelope_sha256(row: dict[str, Any]) -> str:
+    # Frozen HD rev0.6: preserve all three original strings, including raw wrap.
+    envelope = json.dumps([row.get("ciphertext"), row.get("nonce"), row.get("wrap_meta")],
+                          separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(envelope.encode("utf-8")).hexdigest()
+
+
 def hd_signing_binding(row: dict[str, Any], derivation: dict[str, Any]) -> dict[str, str]:
     key = _row_signing_public_key(row, derivation=derivation)
     if row.get("signer_kind") != vault_hd.SIGNER_KIND:
         raise InvalidRequestError("HD binding requires an HD seed wallet")
-    envelope = json.dumps([row.get("ciphertext"), row.get("nonce"), row.get("wrap_meta")], separators=(",", ":"))
     return {
         "secret_id": row["id"], "public_key": key["public_key"],
-        "envelope_sha256": hashlib.sha256(envelope.encode()).hexdigest(),
+        "envelope_sha256": _hd_envelope_sha256(row),
     }
 
 
