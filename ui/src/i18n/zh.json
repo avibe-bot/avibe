@@ -7450,7 +7450,7 @@
     "localVersion": "本机 Desktop 版本 {{version}}",
     "updateAvailable": "Desktop 有更新",
     "desktopVersion": "Desktop 版本",
-    "updateScope": "这里显示这台 Mac 的 Avibe Desktop。本机更新独立于当前连接的 Runtime。",
+    "updateScope": "这里显示本机的 Avibe Desktop。本机更新独立于当前连接的 Runtime。",
     "reviewUpdate": "查看并安装更新",
     "checkUpdates": "检查更新",
     "continueLocal": "继续使用本机",
@@ -7491,7 +7491,7 @@
     "changeEmail": "修改邮箱",
     "resendCode": "重新发送",
     "consentTitle": "连接到 {{name}}？",
-    "consentBody": "{{name}} 不是你创建的实例。继续后，它会获得你的账号邮箱，用来让你登录。",
+    "consentBody": "{{name}} 不是你的实例。继续后，它会获得你的账号邮箱，用来让你登录。",
     "consentAlsoReceives": "它还会获得：{{items}}",
     "consentAlsoOther": "另外还有：{{items}}",
     "consentScopes": {

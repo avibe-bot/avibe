@@ -41,7 +41,7 @@ it('AUTH-SETUP-177 consumes the native UTF-8 catalog and sends its opaque instan
 it('AUTH-SETUP-177 consumes native consent before switching and sends explicit approval', async () => {
   const invoke = mount(states.consent, (request) => ({ ...replies.success, request_id: request.request_id, state: states.consent }));
   expect(await screen.findByRole('heading', { name: 'Connect to 工作室 Studio?' })).toBeTruthy();
-  expect(screen.getByText("工作室 Studio wasn't created by you. If you continue, it will receive your account email to sign you in.")).toBeTruthy();
+  expect(screen.getByText("工作室 Studio isn't one of your instances. If you continue, it will receive your account email to sign you in.")).toBeTruthy();
   expect(screen.getByText('It will also receive: your profile name')).toBeTruthy();
   expect(screen.queryByText(/openid/)).toBeNull();
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
@@ -64,8 +64,8 @@ it.each([
   const state = { ...states.consent, consent: { ...states.consent.consent, scope } };
   mount(state, (request) => ({ ...replies.success, request_id: request.request_id, state }));
   const body = lng === 'en'
-    ? "工作室 Studio wasn't created by you. If you continue, it will receive your account email to sign you in."
-    : '工作室 Studio 不是你创建的实例。继续后，它会获得你的账号邮箱，用来让你登录。';
+    ? "工作室 Studio isn't one of your instances. If you continue, it will receive your account email to sign you in."
+    : '工作室 Studio 不是你的实例。继续后，它会获得你的账号邮箱，用来让你登录。';
   expect(await screen.findByText(body)).toBeTruthy();
   for (const text of present) expect(screen.getByText(text)).toBeTruthy();
   for (const text of absent) expect(screen.queryByText(new RegExp(text))).toBeNull();
