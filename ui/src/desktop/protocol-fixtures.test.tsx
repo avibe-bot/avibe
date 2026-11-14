@@ -288,3 +288,72 @@ it('deduplicates an admitted sign-out across same-document remounts while cleanu
   expect(second.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state']);
   await act(async () => finish({ ...replies.success, request_id: pending.request_id }));
 });
+
+// A local IPC failure has no native error envelope. It must still be visible on
+// its selected row, but cannot revive a request retired by Escape or a new owner.
+it.each(['reject', 'malformed'] as const)('correlates selected-row %s with its active native generation', async (failure) => {
+  for (const advance of [false, true]) {
+    const initial = structuredClone(states.signed_in);
+    const target = initial.catalog.instances[0];
+    let finish!: () => void;
+    const invoke = mount(initial, (request) => {
+      if (request.action.type === 'select_instance') return new Promise((resolve, reject) => {
+        finish = () => failure === 'reject' ? reject(new Error('Synthetic IPC failure'))
+          : resolve({ ...replies.success, request_id: 'wrong-request' });
+      });
+      return { ...replies.success, state: initial, request_id: request.request_id };
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
+    await waitFor(() => expect(finish).toBeDefined());
+    if (advance) fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: {
+      ...initial, generation: initial.generation + 7, revision: initial.revision + 1,
+      connection: { ...initial.connection, status: 'switching', pending: { kind: 'remote', instance_id: target.id, name: target.name, canonical_origin: target.url } },
+    } }));
+    await act(async () => finish());
+    const row = screen.getByText(target.name).closest('[data-instance-id]') as HTMLElement;
+    expect(within(row).getByRole('alert').textContent).toContain(en.desktopClient.errors.bridge);
+    expect((within(row).getByRole('button', { name: 'Retry' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(document.querySelector('[data-instance-list]')).toBeTruthy();
+    expect(document.querySelector('[data-instance-mask]')).toBeNull();
+    cleanup();
+  }
+});
+
+it.each(['reject', 'malformed'] as const)('does not revive selected-row %s after Escape or a newer account generation', async (failure) => {
+  for (const retirement of ['escape', 'signed-out'] as const) {
+    const initial = structuredClone(states.signed_in);
+    let finish!: () => void;
+    const invoke = mount(initial, (request) => {
+      if (request.action.type === 'select_instance') return new Promise((resolve, reject) => {
+        finish = () => failure === 'reject' ? reject(new Error('Synthetic retired IPC failure'))
+          : resolve({ ...replies.success, request_id: 'wrong-retired-request' });
+      });
+      return { ...replies.success, state: initial, request_id: request.request_id };
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
+    await waitFor(() => expect(finish).toBeDefined());
+    if (retirement === 'escape') fireEvent.keyDown(window, { key: 'Escape' });
+    else fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: {
+      ...initial, generation: initial.generation + 9, account: { ...initial.account, status: 'signed_out', identity: null },
+    } }));
+    await act(async () => finish());
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(document.querySelector('[data-instance-mask]')).toBeNull();
+    cleanup();
+  }
+});
+
+it('shows a native get_state cleanup error without manufacturing a sign-out receipt', async () => {
+  window.history.replaceState({}, '', '?view=sign-out');
+  try {
+    const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id, ok: false, error: { code: 'cleanup_error' } }));
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state']);
+  } finally {
+    window.history.replaceState({}, '', '/');
+  }
+});

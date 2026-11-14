@@ -25,7 +25,7 @@ export function signIn(state: DesktopClientState) {
   state.enrollment = { status: 'paired_this_account', instance_id: 'local-fixture', error_code: null };
   state.catalog.status = 'ready';
 }
-export async function installBridge(page: Page, state: DesktopClientState, options: { projection?: boolean; factor?: 'challenge' | 'enroll'; selectError?: string; passwordError?: string; signOutIntent?: string; signOutGeneration?: number; signOutError?: string } = {}) {
+export async function installBridge(page: Page, state: DesktopClientState, options: { projection?: boolean; factor?: 'challenge' | 'enroll'; selectError?: string; selectTransportFailure?: 'reject' | 'malformed'; passwordError?: string; signOutIntent?: string; signOutGeneration?: number; signOutError?: string } = {}) {
   const requests: DesktopClientRequest[] = [];
   await page.exposeFunction('__fixtureDesktopRequest', async (request: DesktopClientRequest): Promise<DesktopClientReply> => {
     requests.push(request);
@@ -50,6 +50,15 @@ export async function installBridge(page: Page, state: DesktopClientState, optio
       result = { type: 'totp_enrolled', method: { id: 'totp-fixture', kind: 'totp', name: 'Fixture', createdAt: '2026-11-12', lastUsedAt: null }, recoveryCodes: ['fixture-recovery-one', 'fixture-recovery-two'] };
     }
     if (action.type === 'refresh_instances') state.catalog.status = 'ready';
+    if (action.type === 'select_instance' && options.selectTransportFailure) {
+      const instance = state.catalog.instances.find((item) => item.id === action.instance_id)!;
+      state.generation += 7;
+      state.connection.status = 'switching';
+      state.connection.pending = { kind: 'remote', instance_id: instance.id, name: instance.name, canonical_origin: instance.url };
+      await page.evaluate((snapshot) => window.dispatchEvent(new CustomEvent('avibe:desktop-client-state', { detail: snapshot })), state);
+      if (options.selectTransportFailure === 'reject') throw new Error('Synthetic selected-row IPC failure');
+      return { version: 1, request_id: 'synthetic-mismatched-response', ok: true, state: structuredClone(state) };
+    }
     if (action.type === 'select_instance' && options.selectError) return { version: 1, request_id: request.request_id, ok: false, state: structuredClone(state), error: { code: options.selectError } };
     if (action.type === 'select_instance') {
       const instance = state.catalog.instances.find((item) => item.id === action.instance_id)!;

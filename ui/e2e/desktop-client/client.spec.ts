@@ -305,3 +305,24 @@ test('rc19 stale receipt cannot auto-logout and a failed current intent needs ex
   await expect.poll(() => requests.filter((request) => request.action.type === 'sign_out').length).toBe(2);
   expect(requests.at(-1)?.action).toEqual({ type: 'sign_out' });
 });
+
+// The real bridge promise fails after native has broadcast a new pending generation.
+// The row must recover its Retry control without changing the projected native state.
+for (const failure of ['reject', 'malformed'] as const) test(`rc19 IPC ${failure} stays on the selected row and can retry`, async ({ page }, info) => {
+  const denied = await isolateAccount(page); await language(page, 'en');
+  const state = clientState(); signIn(state);
+  const options: { selectTransportFailure?: 'reject' | 'malformed' } = { selectTransportFailure: failure };
+  const requests = await installBridge(page, state, options);
+  await page.goto(`${ACCOUNT}?view=instances`);
+  const row = page.locator('[data-instance-id="studio"]');
+  await row.getByRole('button').click();
+  await expect(row.getByRole('alert')).toContainText('The Desktop connection is unavailable');
+  await expect(row.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled();
+  await expect(page.locator('[data-instance-mask]')).toHaveCount(0);
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('ipc-row-error.png') });
+  options.selectTransportFailure = undefined;
+  await row.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  expect(requests.filter((request) => request.action.type === 'select_instance').map((request) => request.expected_generation)).toEqual([1, 8]);
+  expect(denied).toEqual([]);
+});

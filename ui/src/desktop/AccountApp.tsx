@@ -146,6 +146,10 @@ export function AccountApp() {
     try {
       const reply = await send(action);
       if (ticket !== epoch.current) return false;
+      if (reply && 'kind' in reply) {
+        if (selectedId) setSelection({ id: selectedId, generation: reply.generation, error: reply.code });
+        return false;
+      }
       if (!reply?.ok) {
         if (selectedId && reply) setSelection({ id: selectedId, generation: reply.state.generation, error: reply.error.code });
         return false;
@@ -209,8 +213,9 @@ export function AccountApp() {
   const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
   const errorMessage = error ? explainError(error) : null;
   const activeSelection = selection?.generation === state?.generation ? selection : null;
+  const failedPending = activeSelection?.error && activeSelection.id === state?.connection.pending?.instance_id;
   const switcher = state && <InstanceSwitcherView state={state} localInstanceId={state.local.instance_id ?? null}
-    busy={busy} pendingId={state.connection.status === 'switching' ? state.connection.pending?.instance_id ?? null : busy && activeSelection ? activeSelection.id : null}
+    busy={busy} pendingId={failedPending ? null : state.connection.status === 'switching' ? state.connection.pending?.instance_id ?? null : busy && activeSelection ? activeSelection.id : null}
     failure={activeSelection?.error ? { instanceId: activeSelection.id, message: explainError(activeSelection.error) } : null}
     offlineId={offlineId} onOfflineChange={setOfflineId} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
     onLocal={() => leave('return_local')} onCancel={() => leave('cancel')} onRefresh={() => void act({ type: 'refresh_instances' })}
