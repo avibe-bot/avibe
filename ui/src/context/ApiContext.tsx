@@ -148,6 +148,9 @@ export type VaultSecret = {
   fields?: string[];
   /** Present only when the stored extra-field section could not be read safely. */
   fields_state?: 'corrupt';
+  /** Fields whose current value an Agent (`vibe vault generate` from a Session) or the CLI generated
+   *  inside avault. The server drops an entry when the user replaces or removes that value. */
+  generated?: VaultGeneratedField[];
   /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
   tags: string[];
   kind: string;
@@ -173,6 +176,19 @@ export type VaultSecret = {
   use_count: number;
   created_at: string;
   updated_at: string;
+};
+
+/** Who generated one field's current value. `session_title` is the title when it was generated;
+ *  the Session may have been renamed or deleted since. */
+export type VaultGeneratedField = {
+  field: string;
+  by: 'agent' | 'cli';
+  session_id: string | null;
+  session_title: string | null;
+  at: string;
+  type: 'password' | 'hex' | 'base64';
+  length?: number;
+  bytes?: number;
 };
 
 /** A Bitcoin script type the server can sign for: Legacy P2PKH, Native SegWit P2WPKH, Taproot. */

@@ -6665,6 +6665,19 @@
       "base64Note": "标准 Base64（含 + / =），和 openssl rand -base64 输出的一样。",
       "generated": "已生成 · 未保存",
       "generatedHint": "保存时才存下；直接输入就换成你自己的值。"
+    },
+    "generatedBy": {
+      "agent": "Agent 生成",
+      "cli": "命令行生成",
+      "agentInSession": "Agent 在会话「{{session}}」里生成",
+      "cliLong": "在命令行里生成",
+      "password": "密码 {{count}} 位",
+      "hex": "Hex {{count}} 字节",
+      "base64": "Base64 {{count}} 字节",
+      "agentNote": "它没见过这个值，和其他标准档密钥一样可以使用它。",
+      "badge": "{{who}} · {{detail}}",
+      "line": "{{who}} · {{when}} · <recipe>{{recipe}}</recipe>",
+      "openSession": "打开会话"
     }
   },
   "permissions": {

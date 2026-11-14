@@ -1,4 +1,4 @@
-import type { VaultSecret } from '@/context/ApiContext';
+import type { VaultGeneratedField, VaultSecret } from '@/context/ApiContext';
 
 export const VAULT_FIELD_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 export const MAX_VAULT_FIELDS = 32;
@@ -36,6 +36,11 @@ export function vaultHasNamedFieldShape(secret: VaultFieldShape): boolean {
     || secret.default_field !== 'value'
     || fields.length !== 1
     || fields[0] !== 'value';
+}
+
+/** Who generated `field`'s current value, from the server's per-field provenance. */
+export function vaultGeneratedField(secret: Pick<VaultSecret, 'generated'>, field: string): VaultGeneratedField | null {
+  return secret.generated?.find((entry) => entry.field === field) ?? null;
 }
 
 export function vaultRecordName(name: string, field: string, defaultField: string): string {
