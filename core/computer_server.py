@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+import ctypes
 from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
@@ -16,6 +17,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
@@ -39,6 +41,7 @@ from core.computer_use import (
 )
 from core.computer_script_handles import (
     ComputerScriptHandleError,
+    PathAppHandleDescriptor,
     bind_handle_to_request,
     handle_validated_by_driver,
     parse_handle_descriptor,
@@ -106,6 +109,107 @@ class ComputerServerError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
+
+
+def _windows_host() -> bool:
+    return os.name == "nt"
+
+
+def _literal_windows_executable(value: Any) -> str:
+    """Accept an absolute DOS executable path; let Windows resolve its spelling."""
+    if not isinstance(value, str):
+        raise ComputerServerError("invalid_arguments", "path must be a literal Windows .exe path.")
+    path = value.replace("/", "\\")
+    if (
+        not re.match(r"^[A-Za-z]:\\", path)
+        or "\x00" in path
+        or ":" in path[2:]
+        or not path.lower().endswith(".exe")
+    ):
+        raise ComputerServerError("invalid_arguments", "path must be an absolute drive-letter .exe path without ADS.")
+    return path
+
+
+def _validate_windows_launch_arguments(arguments: Mapping[str, Any]) -> None:
+    if set(arguments) - {"path", "additional_arguments", "start_minimized", "session"}:
+        raise ComputerServerError("invalid_arguments", "Windows launch accepts only path, additional_arguments and start_minimized.")
+    _literal_windows_executable(arguments.get("path"))
+    if "additional_arguments" in arguments:
+        argv = arguments["additional_arguments"]
+        if not isinstance(argv, list) or any(not isinstance(arg, str) or "\x00" in arg for arg in argv):
+            raise ComputerServerError("invalid_arguments", "additional_arguments must be literal strings without NUL.")
+    if "start_minimized" in arguments and not isinstance(arguments["start_minimized"], bool):
+        raise ComputerServerError("invalid_arguments", "start_minimized must be boolean.")
+
+
+class _WindowsPathAPI:
+    """Only native reads/opens; no mutation, launch, environment or ACL repair."""
+
+    def __init__(self) -> None:
+        from ctypes import wintypes as w
+
+        self.k = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class AttributeTag(ctypes.Structure):
+            _fields_ = [("attributes", w.DWORD), ("tag", w.DWORD)]
+
+        self.AttributeTag = AttributeTag
+        signatures = {
+            "CreateFileW": ([w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE], w.HANDLE),
+            "CloseHandle": ([w.HANDLE], w.BOOL),
+            "GetDriveTypeW": ([w.LPCWSTR], w.UINT),
+            "GetFileType": ([w.HANDLE], w.DWORD),
+            "GetFileInformationByHandleEx": ([w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD], w.BOOL),
+            "GetFinalPathNameByHandleW": ([w.HANDLE, w.LPWSTR, w.DWORD, w.DWORD], w.DWORD),
+        }
+        for name, (args, result) in signatures.items():
+            function = getattr(self.k, name)
+            function.argtypes, function.restype = args, result
+
+    def fail(self) -> None:
+        raise ComputerServerError("invalid_arguments", "Windows executable identity could not be verified.")
+
+    def info(self, handle: Any, kind: int, record: Any) -> Any:
+        if not self.k.GetFileInformationByHandleEx(handle, kind, ctypes.byref(record), ctypes.sizeof(record)):
+            self.fail()
+        return record
+
+    def final_path(self, handle: Any) -> str:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = self.k.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
+        if not 0 < length < len(buffer):
+            self.fail()
+        value = buffer.value
+        # Only the OS result may use the internal DOS verbatim prefix; external
+        # input never may. No UNC, volume GUID or NT-device conversion fallback.
+        if value.startswith("\\\\?\\"):
+            value = value[4:]
+        return _literal_windows_executable(value)
+
+    def canonical_executable(self, path: str) -> str:
+        # Ordinary sharing and path resolution: admission, not a file freeze.
+        handle = self.k.CreateFileW(path, 0x80, 7, None, 3, 0x02000000, None)
+        if handle in (None, 0, ctypes.c_void_p(-1).value):
+            self.fail()
+        try:
+            attributes = self.info(handle, 9, self.AttributeTag()).attributes
+            if attributes & 0x10 or self.k.GetFileType(handle) != 1:
+                self.fail()
+            canonical = self.final_path(handle)
+            if self.k.GetDriveTypeW(canonical[:3]) != 3:  # DRIVE_FIXED only
+                self.fail()
+            return canonical
+        finally:
+            self.k.CloseHandle(handle)
+
+
+def _windows_executable_path(path: Any) -> str:
+    if not _windows_host():
+        raise ComputerServerError("invalid_arguments", "Executable path targets are Windows-only.")
+    try:
+        return _WindowsPathAPI().canonical_executable(_literal_windows_executable(path))
+    except (OSError, AttributeError, TypeError, ValueError, ctypes.ArgumentError) as exc:
+        raise ComputerServerError("invalid_arguments", "Windows executable identity is unavailable.") from exc
 
 
 class UpstreamUnavailable(RuntimeError):
@@ -658,6 +762,7 @@ def _target_lock_keys(
     arguments: Mapping[str, Any],
     *,
     element_token_windows: Mapping[str, tuple[int, int]] | None = None,
+    launch_path: str | None = None,
 ) -> tuple[tuple[str, str], ...]:
     if tool_name in _WINDOW_MUTATION_TOOLS:
         key = _window_key(arguments)
@@ -677,6 +782,10 @@ def _target_lock_keys(
         pid, window_id = key
         return (("window", f"{pid}:{window_id}"),)
     if tool_name == "launch_app":
+        if _windows_host():
+            if launch_path is None:
+                raise ComputerServerError("invalid_arguments", "Windows launch requires a checked executable path.")
+            return (("launch_path", launch_path),)
         identity = arguments.get("bundle_id") or arguments.get("name")
         if not isinstance(identity, str) or not identity.strip():
             raise ComputerServerError(
@@ -752,11 +861,13 @@ class _TargetLockManager:
         arguments: Mapping[str, Any],
         *,
         element_token_windows: Mapping[str, tuple[int, int]] | None = None,
+        launch_path: str | None = None,
     ) -> _TargetLockLease:
         keys = _target_lock_keys(
             tool_name,
             arguments,
             element_token_windows=element_token_windows,
+            launch_path=launch_path,
         )
         if not keys:
             return _TargetLockLease(self, ())
@@ -808,6 +919,11 @@ def _remove_legacy_lease_files(directory: Path) -> None:
 
 
 def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
+    if tool_name == "launch_app":
+        if _windows_host():
+            _validate_windows_launch_arguments(arguments)
+        elif "path" in arguments:
+            raise ComputerServerError("invalid_arguments", "Literal executable launches are Windows-only.")
     if "click_mode" in arguments and tool_name != "click":
         raise ComputerServerError(
             "invalid_arguments",
@@ -1145,6 +1261,10 @@ class ComputerUseServer:
                     result_params=exc.params,
                 )
 
+        if isinstance(parsed_handle, PathAppHandleDescriptor) and not _windows_host():
+            return _error_result("invalid_arguments", "Executable path targets are Windows-only.", dispatched=False)
+        launch_path: str | None = None
+
         lock = self._session_locks.setdefault(session, asyncio.Lock())
         async with lock:
             try:
@@ -1172,6 +1292,10 @@ class ComputerUseServer:
                             reason=status.reason,
                         )
                     state = status.state
+                    if launch_path is None and name == "launch_app" and _windows_host():
+                        launch_path = await asyncio.to_thread(
+                            _windows_executable_path, arguments.get("path")
+                        )
                     upstream = await self._ensure_upstream(state)
                     await asyncio.to_thread(
                         self._revalidate_daemon_key,
@@ -1235,6 +1359,8 @@ class ComputerUseServer:
                                 return refusal
                     self._require_observation(name, arguments, session_state)
                     forwarded = dict(arguments)
+                    if launch_path is not None:
+                        forwarded["path"] = launch_path
                     forwarded["session"] = session
                     if name not in self._upstream_accepts_session:
                         forwarded.pop("session", None)
@@ -1243,6 +1369,7 @@ class ComputerUseServer:
                         name,
                         arguments,
                         element_token_windows=session_state.element_token_windows,
+                        launch_path=launch_path,
                     )
                     async with target_lock:
                         await asyncio.to_thread(

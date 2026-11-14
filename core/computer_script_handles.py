@@ -30,13 +30,20 @@ class AppHandleDescriptor:
 
 
 @dataclass(frozen=True)
+class PathAppHandleDescriptor:
+    """An immutable Windows launch target, never a running-app identity."""
+
+    path: str
+
+
+@dataclass(frozen=True)
 class WindowHandleDescriptor:
     pid: int
     window_id: int
     app: AppHandleDescriptor
 
 
-HandleDescriptor = AppHandleDescriptor | WindowHandleDescriptor
+HandleDescriptor = AppHandleDescriptor | PathAppHandleDescriptor | WindowHandleDescriptor
 DiscoveryCall = Callable[
     [str, Mapping[str, Any]],
     Awaitable[dict[str, Any]],
@@ -108,6 +115,13 @@ def parse_handle_descriptor(value: Any) -> HandleDescriptor | None:
             bundle_id=bundle_id,
             name=name,
         )
+    if kind == "app_path":
+        if set(value) != {"kind", "path"}:
+            raise ComputerScriptHandleError("invalid_computer_script_descriptor")
+        path = _optional_nonempty_string(value.get("path"))
+        if path is None:
+            raise ComputerScriptHandleError("invalid_computer_script_descriptor")
+        return PathAppHandleDescriptor(path=path)
     if kind == "window":
         if set(value) != {"kind", "pid", "window_id", "app"}:
             raise ComputerScriptHandleError("invalid_computer_script_descriptor")
@@ -140,7 +154,17 @@ def bind_handle_to_request(
         if script_tool_requires_handle(tool):
             raise ComputerScriptHandleError("computer_script_descriptor_required")
         return
+    if isinstance(descriptor, PathAppHandleDescriptor):
+        if (
+            tool != "launch_app"
+            or arguments.get("path") != descriptor.path
+            or set(arguments) - {"path", "additional_arguments", "start_minimized", "session"}
+        ):
+            raise ComputerScriptHandleError("invalid_computer_script_descriptor")
+        return
     if isinstance(descriptor, AppHandleDescriptor):
+        if "path" in arguments:
+            raise ComputerScriptHandleError("invalid_computer_script_descriptor")
         if tool not in _APP_HANDLE_TOOLS:
             raise ComputerScriptHandleError("invalid_computer_script_descriptor")
         if tool == "launch_app":
@@ -191,9 +215,16 @@ async def validate_handle_is_current(
     with one pid-scoped ``list_windows``: the exact ``(pid, window_id)`` pair
     identifies the window for the whole login session, so the app list adds
     no identity and costs a full application scan.
+
+    A path descriptor is launch-only: the Controller checks its executable path.
+    It never discovers or reuses an already-running application.
     """
 
     if descriptor is None:
+        return None
+    if isinstance(descriptor, PathAppHandleDescriptor):
+        if tool != "launch_app":
+            raise ComputerScriptHandleError("invalid_computer_script_descriptor")
         return None
     if isinstance(descriptor, WindowHandleDescriptor):
         windows_result = await discover("list_windows", {"pid": descriptor.pid})
