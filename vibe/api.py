@@ -2804,6 +2804,24 @@ def get_vault_secrets(
     return {"ok": True, "secrets": [vault_public_capabilities(secret) for secret in secrets]}
 
 
+def get_vault_hd_reconciliation(name: str, *, user_context: Any = None) -> dict:
+    """Return a strict public snapshot; never treat a list card as identity."""
+    from storage import vault_service
+
+    try:
+        with _vault_engine().connect() as conn:
+            snapshot = vault_service.get_hd_reconciliation(conn, name, user_context=user_context)
+    except vault_service.InvalidSecretNameError as exc:
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.InvalidHdWalletError as exc:
+        raise VaultApiError(str(exc), code="invalid_hd_wallet", status=409) from exc
+    return {"ok": True, "reconciliation": snapshot}
+
+
 def get_vault_tags(*, query: Optional[str] = None, tag_type: Optional[str] = None) -> dict:
     from storage import vault_service
 
@@ -3373,6 +3391,9 @@ def create_vault_agent_binding(payload: dict) -> dict:
             meta = record_meta
             if meta.get("protection") != "protected":
                 raise VaultApiError("agent binding is only valid for protected secrets", code="not_protected", status=409)
+            # Revalidate the selected record and its static-only member set before
+            # issuing a DEK context or discovering the resident custody agent.
+            vault_service.get_protected_record_envelope(conn, name)
             key = _load_or_create_vault_daemon_binding_key(conn)
             if remember_duration:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
@@ -3634,13 +3655,13 @@ def _attach_signed_sign_operation_context(
                 release["derivation"] = delivery["derivation"]
                 release["signingKey"] = delivery["signing_key"]
             if meta.get("protection") == "protected":
-                signing_key = vault_service.get_signing_public_key(conn, persisted_name)
+                signing_key = vault_service.get_signing_public_key(conn, persisted_name, derivation=delivery.get("derivation"), scheme=persisted_scheme)
                 if exact_message:
                     # Check the immutable request key against the current record before
                     # signing the release; caller metadata is never a binding source.
                     vault_service.validate_sign_request(
                         conn, request_id, name=persisted_name, scheme=persisted_scheme,
-                        message_hex=persisted_message, signing_context=signing_context,
+                        message_hex=persisted_message, signing_context=signing_context, derivation=delivery.get("derivation"),
                     )
                     public_key = delivery["signing_key"]["public_key"]
                 else:
@@ -3970,6 +3991,35 @@ def _vault_hd_keypair_spec(payload: dict, *, kind: str, protection: str, public_
     return box
 
 
+def _validate_protected_hd_create(payload: dict) -> None:
+    """The new browser-custody branch accepts no alternate authority/custody input."""
+    from storage import vault_crypto, vault_hd, vault_protected_hd
+
+    allowed = {
+        "name", "kind", "signer_kind", "protection", "sealed", "accounts", "expected_account0",
+        "description", "tags", "policy", "links", "provision_request_id", "establishing_vmk",
+        "authz_factor_registration",
+    }
+    try:
+        if set(payload) - allowed or payload.get("kind") != "keypair":
+            raise ValueError("protected HD accepts only an opaque sealed wallet, public accounts and creation metadata")
+        if not isinstance(payload.get("name"), str) or not vault_crypto.is_valid_secret_name(payload["name"]):
+            raise ValueError("protected HD requires its exact canonical record name")
+        envelope = payload.get("sealed")
+        if (not isinstance(envelope, dict) or set(envelope) != {"ciphertext", "nonce", "wrap_meta"}
+                or any(not isinstance(envelope[key], str) or not envelope[key] for key in envelope)):
+            raise ValueError("protected HD requires exactly three raw string envelope fields")
+        if "establishing_vmk" in payload and type(payload["establishing_vmk"]) is not bool:
+            raise ValueError("establishing_vmk must be a boolean")
+        policy = payload.get("policy")
+        if policy is not None and (not isinstance(policy, dict) or "always_ask" in policy):
+            raise ValueError("protected HD always requires browser approval, not row policy")
+        vault_protected_hd.public_table(payload.get("accounts"))
+        vault_hd.validate_expected_account0(payload.get("expected_account0"), profile=vault_hd.BITCOIN_PROFILE)
+    except ValueError as exc:
+        raise VaultApiError(str(exc), code="invalid_hd_wallet", status=409) from exc
+
+
 def create_vault_secret(
     payload: dict,
     *,
@@ -3980,6 +4030,9 @@ def create_vault_secret(
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
+    protected_hd = payload.get("signer_kind") == vault_hd.SIGNER_KIND and payload.get("protection") == "protected"
+    if protected_hd:
+        _validate_protected_hd_create(payload)
     _reject_plaintext_value_fields(payload)
     name = str(payload.get("name") or "").strip()
     if not vault_crypto.is_valid_secret_name(name):
@@ -4022,16 +4075,16 @@ def create_vault_secret(
         kind=kind,
         default_field=default_field,
     )
-    hd_keypair = _vault_hd_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
+    hd_keypair = None if protected_hd else _vault_hd_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
     expected_account0 = None
     if "expected_account0" in payload:
         try:
             expected_account0 = vault_hd.validate_expected_account0(
-                payload["expected_account0"], profile=payload.get("keypair", {}).get("profile"),
+                payload["expected_account0"], profile=vault_hd.BITCOIN_PROFILE if protected_hd else payload.get("keypair", {}).get("profile"),
             )
         except ValueError as exc:
             raise VaultApiError(str(exc), code="invalid_hd_wallet") from exc
-    solana_keypair = None if hd_keypair is not None else _vault_solana_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
+    solana_keypair = None if hd_keypair is not None or protected_hd else _vault_solana_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
     atomic_protected_establishment = establishing_vmk and protection == "protected"
     try:
         user_context = vault_service.require_secret_create_access(user_context=user_context)
@@ -4141,7 +4194,7 @@ def create_vault_secret(
                 conn,
                 name=name,
                 sealed=sealed,
-                fields=sealed_fields,
+                fields=None if protected_hd else sealed_fields,
                 default_field=default_field if kind != "keypair" else None,
                 tags=tags or None,
                 protection=protection,
@@ -4155,6 +4208,7 @@ def create_vault_secret(
                 authz_factor_origin=origin,
                 provision_request_id=provision_request_id,
                 user_context=user_context,
+                **({"accounts": payload["accounts"], "expected_account0": expected_account0} if protected_hd else {}),
                 **({"account0_always_ask": payload["account0_always_ask"]} if "account0_always_ask" in payload else {}),
             )
     except vault_service.InvalidSecretNameError as exc:
@@ -4195,8 +4249,9 @@ def create_vault_secret(
         raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidSigningKeyError as exc:
         raise VaultApiError(
-            str(exc), code="invalid_keypair", status=409,
-            message_key="vault.signing.invalidKey" if hd_keypair is not None else "vault.signing.invalidProtectedSolanaRecord",
+            str(exc), code="invalid_hd_wallet" if protected_hd else "invalid_keypair", status=409,
+            message_key=("vault.hd.invalidWallet" if protected_hd else
+                         "vault.signing.invalidKey" if hd_keypair is not None else "vault.signing.invalidProtectedSolanaRecord"),
         ) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
@@ -4206,7 +4261,13 @@ def create_vault_secret(
         request_id=str(payload.get("provision_request_id") or "") or None,
         request_status="fulfilled" if payload.get("provision_request_id") else None,
     )
-    return {"ok": True, "secret": vault_public_capabilities(meta)}
+    # Storage captured this inside the protected create savepoint. Pop it from
+    # the ephemeral result so general public cards keep their existing shape.
+    reconciliation = meta.pop("reconciliation") if protected_hd else None
+    result = {"ok": True, "secret": vault_public_capabilities(meta)}
+    if protected_hd:
+        result["reconciliation"] = reconciliation
+    return result
 
 
 def prepare_vault_hd_bitcoin_types(name: str, payload: dict, *, user_context: Any = None) -> dict:
@@ -4890,19 +4951,29 @@ def _validate_sign_parameters(payload: dict) -> None:
         )
 
 
-def _preflight_hd_signing(engine, name: str, derivation: dict | None, scheme: str, *, user_context: Any = None) -> None:
-    """Gate HD custody outside write transactions, after validating the selected row."""
-    from storage import vault_service
+def _preflight_hd_signing(engine, name: str, derivation: dict | None, scheme: str, *, user_context: Any = None,
+                          intake: bool = True) -> dict | None:
+    """Protected custody wins before any avault discovery; normalize only intake."""
+    from storage import vault_protected_hd, vault_service
 
     with engine.connect() as conn:
         row = vault_service.require_secret_access(conn, name, user_context=user_context)
         if row.get("signer_kind") != "hd-seed" and derivation is None:
-            return
+            return None
+        protected_hd = row.get("signer_kind") == "hd-seed" and row.get("protection") == "protected"
+        if protected_hd:
+            try:
+                derivation = vault_protected_hd.selection(derivation, intake=intake)
+            except ValueError as exc:
+                raise vault_service.InvalidHdWalletError(str(exc)) from exc
         vault_service.get_signing_public_key(conn, name, derivation=derivation, scheme=scheme, user_context=user_context)
+        if protected_hd:
+            return derivation
     try:
         _require_avault_hd_seed_surface(bitcoin_types="address_type" in (derivation or {}))
     except AvaultError as exc:
         raise _vault_api_error_from_avault(exc, prefix="HD signing unavailable") from exc
+    return derivation
 
 
 def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
@@ -4918,7 +4989,7 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     try:
-        _preflight_hd_signing(engine, name, derivation, scheme, user_context=user_context)
+        derivation = _preflight_hd_signing(engine, name, derivation, scheme, user_context=user_context)
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name, user_context=user_context)
             if meta.get("kind") != "keypair":
@@ -5850,16 +5921,6 @@ def _protected_signing_public_key_bytes(meta: dict) -> bytes:
     return public_key_bytes
 
 
-def _signature_bytes_for_verification(signature: dict[str, Any]) -> bytes:
-    raw_signature = signature.get("signature")
-    if not isinstance(raw_signature, str) or not raw_signature:
-        raise _protected_sign_invalid("signature payload requires a non-empty signature")
-    try:
-        return bytes.fromhex(raw_signature)
-    except ValueError as exc:
-        raise _protected_sign_invalid("signature must be hex-encoded bytes") from exc
-
-
 def _normalized_protected_signature(signature: dict[str, Any]) -> dict[str, Any]:
     allowed_keys = {"signature", "recovery_id"}
     extra_keys = set(signature) - allowed_keys
@@ -5871,242 +5932,6 @@ def _normalized_protected_signature(signature: dict[str, Any]) -> dict[str, Any]
     return normalized
 
 
-def _verify_protected_ecdsa_signature(
-    *,
-    public_key_bytes: bytes,
-    digest_bytes: bytes,
-    scheme: str,
-    signature: dict[str, Any],
-) -> None:
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec, utils
-
-    sig_bytes = _signature_bytes_for_verification(signature)
-    recovery_id = signature.get("recovery_id")
-    try:
-        public_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), public_key_bytes)
-    except ValueError as exc:
-        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point") from exc
-    if scheme == "ecdsa-secp256k1-recoverable":
-        if len(sig_bytes) != 64:
-            raise _protected_sign_invalid("recoverable secp256k1 signatures must be 64 bytes")
-        if type(recovery_id) is not int or recovery_id not in {0, 1, 2, 3}:
-            raise _protected_sign_invalid("recoverable secp256k1 signatures require recovery_id 0..3")
-        r = int.from_bytes(sig_bytes[:32], "big")
-        s = int.from_bytes(sig_bytes[32:], "big")
-        if not (1 <= r < _SECP256K1_N and 1 <= s <= _SECP256K1_N // 2):
-            raise _protected_sign_invalid("secp256k1 signatures must use valid r/s and low-S")
-        sig_bytes = utils.encode_dss_signature(r, s)
-    else:
-        try:
-            r, s = utils.decode_dss_signature(sig_bytes)
-        except (ValueError, TypeError) as exc:
-            raise _protected_sign_invalid("DER secp256k1 signatures must be valid DER") from exc
-        if not (1 <= r < _SECP256K1_N and 1 <= s <= _SECP256K1_N // 2):
-            raise _protected_sign_invalid("secp256k1 signatures must use valid r/s and low-S")
-        if recovery_id is not None:
-            raise _protected_sign_invalid("DER secp256k1 signatures must not include recovery_id")
-    try:
-        public_key.verify(sig_bytes, digest_bytes, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
-    except InvalidSignature as exc:
-        raise _protected_sign_invalid("browser signature does not verify against signing_public_key") from exc
-    if scheme == "ecdsa-secp256k1-recoverable":
-        _verify_recoverable_signature_recovery_id(
-            public_key_bytes=public_key_bytes,
-            digest_bytes=digest_bytes,
-            r=r,
-            s=s,
-            recovery_id=recovery_id,
-        )
-
-
-_SECP256K1_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-_SECP256K1_G = (
-    0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
-    0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8,
-)
-_Secp256k1Point = tuple[int, int] | None
-
-
-def _secp256k1_mod_sqrt(value: int) -> int | None:
-    root = pow(value, (_SECP256K1_P + 1) // 4, _SECP256K1_P)
-    return root if pow(root, 2, _SECP256K1_P) == value % _SECP256K1_P else None
-
-
-def _secp256k1_decompress_public_key(public_key_bytes: bytes) -> _Secp256k1Point:
-    if len(public_key_bytes) == 33 and public_key_bytes[0] in {2, 3}:
-        x = int.from_bytes(public_key_bytes[1:], "big")
-        if x >= _SECP256K1_P:
-            return None
-        y = _secp256k1_mod_sqrt((pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P)
-        if y is None:
-            return None
-        if (y % 2) != (public_key_bytes[0] & 1):
-            y = _SECP256K1_P - y
-        return (x, y)
-    if len(public_key_bytes) == 65 and public_key_bytes[0] == 4:
-        x = int.from_bytes(public_key_bytes[1:33], "big")
-        y = int.from_bytes(public_key_bytes[33:], "big")
-        if x >= _SECP256K1_P or y >= _SECP256K1_P or (pow(y, 2, _SECP256K1_P) - pow(x, 3, _SECP256K1_P) - 7) % _SECP256K1_P:
-            return None
-        return (x, y)
-    return None
-
-
-def _secp256k1_lift_x(x: int) -> _Secp256k1Point:
-    if x >= _SECP256K1_P:
-        return None
-    y_sq = (pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P
-    y = _secp256k1_mod_sqrt(y_sq)
-    if y is None:
-        return None
-    return (x, y if y % 2 == 0 else _SECP256K1_P - y)
-
-
-def _secp256k1_add(point_a: _Secp256k1Point, point_b: _Secp256k1Point) -> _Secp256k1Point:
-    if point_a is None:
-        return point_b
-    if point_b is None:
-        return point_a
-    x1, y1 = point_a
-    x2, y2 = point_b
-    if x1 == x2 and (y1 + y2) % _SECP256K1_P == 0:
-        return None
-    if point_a == point_b:
-        slope = (3 * x1 * x1 * pow(2 * y1, -1, _SECP256K1_P)) % _SECP256K1_P
-    else:
-        slope = ((y2 - y1) * pow(x2 - x1, -1, _SECP256K1_P)) % _SECP256K1_P
-    x3 = (slope * slope - x1 - x2) % _SECP256K1_P
-    y3 = (slope * (x1 - x3) - y1) % _SECP256K1_P
-    return (x3, y3)
-
-
-def _secp256k1_mul(scalar: int, point: _Secp256k1Point) -> _Secp256k1Point:
-    result: _Secp256k1Point = None
-    addend = point
-    while scalar:
-        if scalar & 1:
-            result = _secp256k1_add(result, addend)
-        addend = _secp256k1_add(addend, addend)
-        scalar >>= 1
-    return result
-
-
-def _secp256k1_recover_ecdsa_public_key(r: int, s: int, digest_bytes: bytes, recovery_id: int) -> _Secp256k1Point:
-    if not (1 <= r < _SECP256K1_N and 1 <= s < _SECP256K1_N):
-        return None
-    x = r + (recovery_id >> 1) * _SECP256K1_N
-    if x >= _SECP256K1_P:
-        return None
-    y = _secp256k1_mod_sqrt((pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P)
-    if y is None:
-        return None
-    if (y % 2) != (recovery_id & 1):
-        y = _SECP256K1_P - y
-    point_r = (x, y)
-    if _secp256k1_mul(_SECP256K1_N, point_r) is not None:
-        return None
-    z = int.from_bytes(digest_bytes, "big") % _SECP256K1_N
-    r_inv = pow(r, -1, _SECP256K1_N)
-    return _secp256k1_mul(
-        r_inv,
-        _secp256k1_add(
-            _secp256k1_mul(s, point_r),
-            _secp256k1_mul(z, (_SECP256K1_G[0], (-_SECP256K1_G[1]) % _SECP256K1_P)),
-        ),
-    )
-
-
-def _verify_recoverable_signature_recovery_id(
-    *,
-    public_key_bytes: bytes,
-    digest_bytes: bytes,
-    r: int,
-    s: int,
-    recovery_id: int,
-) -> None:
-    expected = _secp256k1_decompress_public_key(public_key_bytes)
-    if expected is None:
-        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
-    recovered = _secp256k1_recover_ecdsa_public_key(r, s, digest_bytes, recovery_id)
-    if recovered != expected:
-        raise _protected_sign_invalid("recoverable signature recovery_id does not match signing_public_key")
-
-
-def _bip340_tagged_hash(tag: str, payload: bytes) -> bytes:
-    import hashlib
-
-    tag_hash = hashlib.sha256(tag.encode("utf-8")).digest()
-    return hashlib.sha256(tag_hash + tag_hash + payload).digest()
-
-
-def _xonly_public_key(public_key_bytes: bytes) -> bytes:
-    if len(public_key_bytes) == 32:
-        x_only = public_key_bytes
-    elif len(public_key_bytes) == 33 and public_key_bytes[0] in {2, 3}:
-        x_only = public_key_bytes[1:]
-    elif len(public_key_bytes) == 65 and public_key_bytes[0] == 4:
-        x_only = public_key_bytes[1:33]
-        x = int.from_bytes(x_only, "big")
-        y = int.from_bytes(public_key_bytes[33:], "big")
-        if x >= _SECP256K1_P or y >= _SECP256K1_P or (pow(y, 2, _SECP256K1_P) - pow(x, 3, _SECP256K1_P) - 7) % _SECP256K1_P:
-            raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
-    else:
-        raise _protected_sign_invalid("protected signing public key must be compressed, uncompressed, or x-only secp256k1")
-    if _secp256k1_lift_x(int.from_bytes(x_only, "big")) is None:
-        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
-    return x_only
-
-
-def _verify_protected_schnorr_signature(
-    *,
-    public_key_bytes: bytes,
-    digest_bytes: bytes,
-    signature: dict[str, Any],
-) -> None:
-    sig_bytes = _signature_bytes_for_verification(signature)
-    if len(sig_bytes) != 64:
-        raise _protected_sign_invalid("BIP340 Schnorr signatures must be 64 bytes")
-    if signature.get("recovery_id") is not None:
-        raise _protected_sign_invalid("BIP340 Schnorr signatures must not include recovery_id")
-    public_key_xonly = _xonly_public_key(public_key_bytes)
-    r = int.from_bytes(sig_bytes[:32], "big")
-    s = int.from_bytes(sig_bytes[32:], "big")
-    if r >= _SECP256K1_P or s >= _SECP256K1_N:
-        raise _protected_sign_invalid("browser signature does not verify against signing_public_key")
-    point_p = _secp256k1_lift_x(int.from_bytes(public_key_xonly, "big"))
-    if point_p is None:
-        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
-    challenge = int.from_bytes(_bip340_tagged_hash("BIP0340/challenge", sig_bytes[:32] + public_key_xonly + digest_bytes), "big") % _SECP256K1_N
-    point_r = _secp256k1_add(
-        _secp256k1_mul(s, _SECP256K1_G),
-        _secp256k1_mul(challenge, (point_p[0], (-point_p[1]) % _SECP256K1_P)),
-    )
-    if point_r is None or point_r[1] % 2 != 0 or point_r[0] != r:
-        raise _protected_sign_invalid("browser signature does not verify against signing_public_key")
-
-
-def _verify_protected_taproot_signature(
-    *,
-    public_key_bytes: bytes,
-    digest_bytes: bytes,
-    signature: dict[str, Any],
-) -> None:
-    from storage.vault_addresses import taproot_output_key_xonly
-
-    try:
-        output_key = taproot_output_key_xonly(public_key_bytes).to_bytes(32, "big")
-    except ValueError as exc:
-        raise _protected_sign_invalid("invalid Taproot signing public key") from exc
-    _verify_protected_schnorr_signature(
-        public_key_bytes=output_key,
-        digest_bytes=digest_bytes,
-        signature=signature,
-    )
-
-
 def _verify_protected_browser_signature(
     meta: dict,
     *,
@@ -6115,7 +5940,7 @@ def _verify_protected_browser_signature(
     signature: dict[str, Any],
     message_hex: str | None = None,
 ) -> None:
-    from storage import vault_solana
+    from storage import vault_signatures, vault_solana
 
     if scheme == vault_solana.SCHEME:
         signing_key = meta.get("signing_public_key")
@@ -6130,21 +5955,19 @@ def _verify_protected_browser_signature(
         return
     public_key_bytes = _protected_signing_public_key_bytes(meta)
     digest_bytes = bytes.fromhex(digest or "")
-    if scheme in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}:
-        _verify_protected_ecdsa_signature(
-            public_key_bytes=public_key_bytes,
-            digest_bytes=digest_bytes,
-            scheme=scheme,
-            signature=signature,
-        )
-        return
-    if scheme == "schnorr-secp256k1-bip340":
-        _verify_protected_schnorr_signature(public_key_bytes=public_key_bytes, digest_bytes=digest_bytes, signature=signature)
-        return
-    if scheme == "schnorr-secp256k1-bip341-keypath":
-        _verify_protected_taproot_signature(public_key_bytes=public_key_bytes, digest_bytes=digest_bytes, signature=signature)
-        return
-    raise _protected_sign_invalid(f"unsupported signature scheme: {scheme}")
+    verifier = {
+        "ecdsa-secp256k1-recoverable": vault_signatures.verify_ecdsa,
+        "ecdsa-secp256k1-der": vault_signatures.verify_ecdsa,
+        "schnorr-secp256k1-bip340": vault_signatures.verify_schnorr,
+        "schnorr-secp256k1-bip341-keypath": vault_signatures.verify_taproot,
+    }.get(scheme)
+    if verifier is None:
+        raise _protected_sign_invalid(f"unsupported signature scheme: {scheme}")
+    try:
+        verifier(public_key_bytes=public_key_bytes, digest_bytes=digest_bytes, signature=signature,
+                 **({"scheme": scheme} if scheme.startswith("ecdsa-") else {}))
+    except ValueError as exc:
+        raise _protected_sign_invalid(str(exc)) from exc
 
 
 def _verify_standard_signature(
@@ -6239,7 +6062,7 @@ def vault_sign(payload: dict) -> dict:
     approval_required_request: dict | None = None
     signing_binding: dict | None = None
     try:
-        _preflight_hd_signing(engine, name, derivation, scheme)
+        derivation = _preflight_hd_signing(engine, name, derivation, scheme, intake=not isinstance(payload.get("signature"), dict))
         if message_hex is not None and derivation is None:
             # Probe only standard custody, outside the request write transaction.
             # Protected requests never call avault, including version discovery.
@@ -6291,6 +6114,7 @@ def vault_sign(payload: dict) -> dict:
                         signing_context=signing_context,
                         requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
                         delivery=payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
+                        derivation=derivation,
                     )
                     protected_event = {
                         "scope": "request",
@@ -6303,6 +6127,8 @@ def vault_sign(payload: dict) -> dict:
                     request_id = str(payload.get("request_id") or "")
                     if not request_id:
                         raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
+                    if signer_kind == "hd-seed" and not all(field in payload for field in ("chain", "account")):
+                        raise vault_service.InvalidRequestError("protected HD completion must repeat the persisted chain and account")
                     sign_request = vault_service.validate_sign_request(
                         conn,
                         request_id,
@@ -6311,6 +6137,7 @@ def vault_sign(payload: dict) -> dict:
                         scheme=scheme,
                         message_hex=message_hex,
                         signing_context=signing_context,
+                        derivation=derivation,
                     )
                     delivery = sign_request.get("delivery") if isinstance(sign_request.get("delivery"), dict) else {}
                     persisted_scheme = delivery.get("scheme")
@@ -6326,7 +6153,7 @@ def vault_sign(payload: dict) -> dict:
                     signature = _normalized_protected_signature(signature)
                     # `meta` is the masked payload (derived addresses only, no raw key); source
                     # the pinned public key from storage for server-side verification.
-                    verify_meta = {**meta, "signing_public_key": vault_service.get_signing_public_key(conn, name)}
+                    verify_meta = {**meta, "signing_public_key": vault_service.get_signing_public_key(conn, name, derivation=derivation, scheme=persisted_scheme)}
                     _verify_protected_browser_signature(
                         verify_meta,
                         digest=persisted_digest,
@@ -6345,6 +6172,7 @@ def vault_sign(payload: dict) -> dict:
                         signing_context=persisted_context,
                         requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
                         browser_signed=True,
+                        derivation=derivation,
                     )
                     protected_event = {
                         "scope": "request",

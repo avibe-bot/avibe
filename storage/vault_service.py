@@ -35,7 +35,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from storage import vault_crypto, vault_webauthn
-from storage import vault_bitcoin, vault_hd, vault_policy, vault_setup, vault_solana
+from storage import vault_bitcoin, vault_hd, vault_policy, vault_protected_hd, vault_setup, vault_solana
 from storage.lock import LockHolderState, MigrationFileLock, probe_lock_holder, remove_unheld_lock
 from storage.models import (
     agent_sessions,
@@ -1078,7 +1078,7 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
     if row.get("signer_kind") == vault_hd.SIGNER_KIND:
         payload["account_limit"] = vault_hd.ACCOUNT_LIMIT
         try:
-            payload["accounts"] = vault_hd.public_accounts(public_meta)
+            payload["accounts"] = _hd_public_accounts(row)
             if public_meta.get("bitcoin_profile") == vault_hd.BITCOIN_PROFILE:
                 payload["bitcoin_profile"] = vault_hd.BITCOIN_PROFILE
         except ValueError:
@@ -1123,6 +1123,11 @@ def _protected_unlock_material(row: dict[str, Any]) -> dict[str, Any] | None:
     """
     if row.get("protection") != "protected":
         return None
+    if row.get("kind") in (None, "static"):
+        if not _secret_access_requestable(row):
+            return None
+    elif row.get("kind") != "keypair" or not _secret_agent_per_use_signable(row):
+        return None
     return {
         "name": str(row["name"]),
         "kind": row.get("kind"),
@@ -1136,6 +1141,8 @@ def _protected_unlock_material(row: dict[str, Any]) -> dict[str, Any] | None:
 
 def _protected_unlock_material_records(row: dict[str, Any]) -> list[dict[str, Any]]:
     if row.get("protection") != "protected":
+        return []
+    if row.get("kind") not in (None, "static") or not _secret_access_requestable(row):
         return []
     materials: list[dict[str, Any]] = []
     for entry in _record_entries(row):
@@ -1428,6 +1435,7 @@ def _hydrate_card_delete_metadata(conn: Connection, row: dict[str, Any], card: d
 
 def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
     card = dict(card)
+    card.pop("secret_unlock_material", None)
     secret_name = row.get("secret_name")
     if secret_name:
         secret_row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == secret_name)).mappings().first()
@@ -1440,6 +1448,7 @@ def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: d
         if not isinstance(option, dict):
             continue
         option_payload = dict(option)
+        option_payload.pop("unlock_material", None)
         versions = option_payload.get("member_versions") or []
         materials: list[dict[str, Any]] = []
         if isinstance(versions, list):
@@ -2415,12 +2424,31 @@ def _signing_policy_transition(
     return settings
 
 
+def _envelope_allows_record_kind(sealed: Sealed, kind: str) -> bool:
+    """A generic operation may use only its explicit kind or an untyped legacy envelope."""
+    try:
+        wrap = json.loads(sealed.wrap_meta)
+    except (ValueError, TypeError):
+        return True  # Preserve opaque legacy envelopes; custody still validates their format.
+    except RecursionError:
+        return False
+    if not isinstance(wrap, dict) or "record_meta" not in wrap:
+        return True
+    record = wrap["record_meta"]
+    return isinstance(record, dict) and record.get("kind") == kind
+
+
 def _secret_access_requestable(row: dict[str, Any]) -> bool:
-    return row.get("kind") != "keypair"
+    if row.get("kind") not in (None, "static") or row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        return False
+    try:
+        return all(_envelope_allows_record_kind(entry["envelope"], "static") for entry in _record_entries(row))
+    except VaultServiceError:
+        return False
 
 
 def _secret_access_grantable(row: dict[str, Any]) -> bool:
-    if row.get("kind") == "keypair":
+    if not _secret_access_requestable(row):
         return False
     if _secret_always_ask(row):
         return False
@@ -2433,8 +2461,14 @@ def _secret_agent_access_grantable(row: dict[str, Any]) -> bool:
 
 def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
     if row.get("kind") == "keypair" and row.get("signer_kind") == vault_hd.SIGNER_KIND:
-        return row.get("protection") == "standard"
+        try:
+            _hd_stored_accounts(row)
+            return True
+        except ValueError:
+            return False
     if row.get("kind") != "keypair" or row.get("signer_kind") not in (None, "local"):
+        return False
+    if not _envelope_allows_record_kind(_row_sealed(row), "keypair"):
         return False
     if row.get("protection") != "protected":
         return True
@@ -2464,6 +2498,8 @@ def sign_headless_allowed(row: dict[str, Any], *, derivation: dict[str, Any] | N
     """
     if row.get("signer_kind") == vault_hd.SIGNER_KIND:
         _row_signing_public_key(row, derivation=derivation)
+        if row.get("protection") != "standard":
+            return False
         return not (_secret_always_ask(row) or vault_hd.selected_account(_public_meta(row.get("public_meta")), derivation)["always_ask"])
     if derivation is not None:
         raise InvalidRequestError("chain/account are only valid for an HD seed wallet")
@@ -2481,22 +2517,52 @@ def sign_needs_approval(
     return not sign_headless_allowed(require_secret_access(conn, name, user_context=user_context), derivation=derivation)
 
 
+def _hd_stored_accounts(row: dict[str, Any]) -> list[dict[str, Any]]:
+    if row.get("kind") != "keypair" or row.get("signer_kind") != vault_hd.SIGNER_KIND:
+        raise ValueError("HD wallets require a keypair row")
+    meta = _public_meta(row.get("public_meta"))
+    if row.get("protection") == "protected":
+        return vault_protected_hd.stored_accounts(row["name"], _row_sealed(row), meta)
+    if row.get("protection") != "standard":
+        raise ValueError("invalid HD protection tier")
+    # Refuse a protected envelope retagged by an old client, without changing
+    # standard envelope-field validation/binding precedence on existing callers.
+    try:
+        wrap = json.loads(row["wrap_meta"])
+        if not isinstance(wrap, dict) or wrap.get("scheme") != vault_hd.WRAP_SCHEME:
+            raise ValueError("HD signing record does not match its custody tier")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("HD signing record does not match its custody tier") from exc
+    return vault_hd.stored_accounts(meta)
+
+
+def _hd_public_accounts(row: dict[str, Any]) -> list[dict[str, Any]]:
+    _hd_stored_accounts(row)
+    meta = _public_meta(row.get("public_meta"))
+    if row.get("protection") == "protected":
+        return vault_protected_hd.public_accounts(row["name"], _row_sealed(row), meta)
+    return vault_hd.public_accounts(meta)
+
+
 def _row_signing_public_key(
     row: dict[str, Any], *, derivation: dict[str, Any] | None = None, scheme: str | None = None,
 ) -> dict[str, Any] | None:
     meta = _public_meta(row.get("public_meta"))
     if row.get("signer_kind") == vault_hd.SIGNER_KIND:
-        if row.get("kind") != "keypair" or row.get("protection") != "standard":
-            raise InvalidHdWalletError("HD seed wallets support only standard-tier keypairs")
         try:
+            _hd_stored_accounts(row)
             selection = vault_hd.validate_derivation(derivation)
             if scheme is not None and scheme != vault_hd.signing_scheme(selection):
                 raise ValueError("signature scheme does not match the HD chain")
+            if row.get("protection") == "protected":
+                return vault_protected_hd.signing_public_key(row["name"], _row_sealed(row), meta, selection)
             return vault_hd.signing_public_key(meta, selection)
         except ValueError as exc:
             raise InvalidHdWalletError(str(exc)) from exc
     if derivation is not None:
         raise InvalidRequestError("chain/account are only valid for an HD seed wallet")
+    if not _envelope_allows_record_kind(_row_sealed(row), "keypair"):
+        raise InvalidSigningKeyError("ordinary signing requires a keypair or legacy-keypair envelope")
     key = meta.get("signing_public_key")
     return key if isinstance(key, dict) else None
 
@@ -2627,7 +2693,7 @@ def validate_bitcoin_signing_context(
         raise InvalidSigningContextError(str(exc)) from exc
 
 
-def _validate_persisted_signing_context(conn: Connection, name: str, delivery: dict[str, Any]) -> None:
+def _validate_persisted_signing_context(conn: Connection, name: str, delivery: dict[str, Any], *, require_snapshot: bool = False) -> None:
     """Re-check a stored sign request against the key as it is now, before it is claimed or settled."""
     context = delivery.get("signing_context")
     scheme = delivery.get("scheme")
@@ -2638,6 +2704,21 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
     if row.get("signer_kind") == vault_hd.SIGNER_KIND:
         if delivery.get("signing_key") != hd_signing_binding(row, selection):
             raise InvalidRequestError("HD signing record does not match the sign request")
+        if protected:
+            try:
+                vault_protected_hd.validate_context(selection, context, digest=delivery.get("digest"), message_hex=delivery.get("message_hex"))
+            except ValueError as exc:
+                raise InvalidSigningContextError(str(exc)) from exc
+            operation = delivery.get("operation_context")
+            if operation is not None or require_snapshot:
+                expected_release = {
+                    "name": name, "scheme": scheme, "publicKey": signing_key["public_key"],
+                    "derivation": selection, "signingKey": delivery["signing_key"], "signingContext": context,
+                    **({"messageHex": delivery.get("message_hex")} if scheme == vault_solana.SCHEME else {"digest": delivery.get("digest")}),
+                }
+                if (not isinstance(operation, dict) or operation.get("purpose") != "sign"
+                        or operation.get("release") != expected_release):
+                    raise InvalidRequestError("protected HD signed snapshot does not match the sign request")
     validate_signing_pairing(
         context, scheme=scheme, message_hex=delivery.get("message_hex"), signing_key=signing_key, protected=protected,
     )
@@ -2682,8 +2763,8 @@ def _reject_unsignable_keypair(row: dict[str, Any], name: str) -> None:
 
 
 def _reject_keypair_value_delivery(row: dict[str, Any], name: str) -> None:
-    if row.get("kind") == "keypair":
-        raise KeypairNotValueDeliverableError(f"{name} is a signing key; use vault_sign instead of value delivery")
+    if not _secret_access_requestable(row):
+        raise KeypairNotValueDeliverableError(f"{name} is not a static value; use vault_sign for a signing key")
 
 
 def _audit_reference_secret_names(
@@ -2935,6 +3016,34 @@ def _read_vault_setup(conn: Connection) -> dict[str, Any] | None:
         return stored
     except (ValueError, TypeError) as exc:
         raise SigningPolicyError("factor_unavailable", "Stored shared Vault setup is not usable") from exc
+
+
+def _require_protected_hd_current_root(conn: Connection, wrap_meta: str) -> None:
+    """Bind the new HD branch to the current root without enrolling/promoting it.
+
+    Legacy factorless custody remains usable. The policy proof codec is not the
+    root codec: HD permits finite extension numbers and deeper bounded JSON.
+    """
+    raw = conn.execute(select(state_meta.c.value_json).where(state_meta.c.key == vault_setup.META_KEY)).scalar_one_or_none()
+    try:
+        if raw is not None:
+            setup = json.loads(raw)
+            if not isinstance(setup, dict) or type(setup.get("v")) is not int or setup["v"] != 1:
+                raise ValueError("invalid durable Vault setup")
+            current = setup.get("wrap_meta")
+            vault_protected_hd.root_meta(current)
+        else:
+            current = _legacy_protected_vmk_wrap_meta(conn)
+            if current is not None:
+                vault_protected_hd.root_meta(current)
+    except (ValueError, TypeError) as exc:
+        raise SigningPolicyError("factor_unavailable", "Stored shared Vault root is not usable") from exc
+    if current is None:
+        if _has_any_webauthn_factor(conn):
+            raise SigningPolicyError("factor_unavailable", "The existing authorization factor has no shared Vault root")
+        raise ProtectedAuthzSetupRequiredError("protected HD creation requires the existing shared Vault root")
+    if not vault_protected_hd.same_root(current, wrap_meta):
+        raise VaultAlreadyInitializedError("a different shared Vault root is already established")
 
 
 def _persist_vault_setup(conn: Connection, base: dict[str, Any], **creation: Any) -> dict[str, Any]:
@@ -3631,6 +3740,8 @@ def create_secret(
     source: str = "manual",
     policy: dict[str, Any] | None = None,
     public_meta: dict[str, Any] | None = None,
+    accounts: Any = _UNSET,
+    expected_account0: Any = _UNSET,
     account0_always_ask: Any = _UNSET,
     fields: list[dict[str, Any]] | None = None,
     default_field: str | None = None,
@@ -3648,12 +3759,17 @@ def create_secret(
     registration or root from a failed first create.
     """
     establishing = establishing_vmk and protection == "protected"
-    if establishing:
+    protected_hd = signer_kind == vault_hd.SIGNER_KIND and protection == "protected"
+    if establishing or protected_hd:
         require_secret_create_access(user_context=user_context)
-        _reserve_vault_setup(conn)
-    with conn.begin_nested() if establishing else nullcontext():
+        if establishing:
+            _reserve_vault_setup(conn)
+        else:
+            conn.execute(vault_secrets.update().where(vault_secrets.c.name == name).values(use_count=vault_secrets.c.use_count))
+    with conn.begin_nested() if establishing or protected_hd else nullcontext():
         return _create_secret(conn, name=name, sealed=sealed, tags=tags, protection=protection, kind=kind,
             signer_kind=signer_kind, description=description, source=source, policy=policy, public_meta=public_meta,
+            accounts=accounts, expected_account0=expected_account0,
             account0_always_ask=account0_always_ask,
             fields=fields, default_field=default_field, establishing_vmk=establishing_vmk,
             authz_factor_registration=authz_factor_registration, authz_factor_origin=authz_factor_origin,
@@ -3673,6 +3789,8 @@ def _create_secret(
     source: str = "manual",
     policy: dict[str, Any] | None = None,
     public_meta: dict[str, Any] | None = None,
+    accounts: Any = _UNSET,
+    expected_account0: Any = _UNSET,
     account0_always_ask: Any = _UNSET,
     fields: list[dict[str, Any]] | None = None,
     default_field: str | None = None,
@@ -3710,6 +3828,22 @@ def _create_secret(
     if policy is not None and (not isinstance(policy, dict) or vault_policy.REVISION_KEY in policy):
         raise InvalidRequestError("policy revision is storage-owned")
     context = require_secret_create_access(user_context=user_context)
+    protected_hd = signer_kind == vault_hd.SIGNER_KIND and protection == "protected"
+    if protected_hd:
+        if public_meta is not None or fields is not None or default_field is not None:
+            raise InvalidHdWalletError("protected HD rejects caller public_meta, fields and default_field")
+        if kind != "keypair" or policy and "always_ask" in policy:
+            raise InvalidHdWalletError("protected HD requires a keypair with per-signature browser approval")
+        try:
+            public_meta = vault_protected_hd.initial_meta(name, sealed, accounts, expected_account0)
+        except ValueError as exc:
+            raise InvalidHdWalletError(str(exc)) from exc
+    elif accounts is not _UNSET or expected_account0 is not _UNSET:
+        raise InvalidHdWalletError("public accounts and storage expectations are protected-HD-only")
+    elif vault_protected_hd.declares_record(sealed):
+        raise InvalidHdWalletError("a protected HD envelope requires the protected HD creation contract")
+    elif kind == "static" and not _envelope_allows_record_kind(sealed, "static"):
+        raise InvalidRequestError("static values require a static or legacy-static envelope")
     establishing_protected_vault = establishing_vmk and protection == "protected"
     if establishing_protected_vault:
         _reserve_vault_setup(conn)
@@ -3719,6 +3853,8 @@ def _create_secret(
             raise InvalidProtectedAuthzError(str(exc)) from exc
         _establish_vault_setup(conn, sealed.wrap_meta, authz_factor_registration,
                                rp_id=authz_context.rp_id, origin=authz_context.origin)
+    elif protected_hd:
+        _require_protected_hd_current_root(conn, sealed.wrap_meta)
 
     provision_row, _existing_secret = _preflight_secret_create_name(
         conn,
@@ -3733,7 +3869,7 @@ def _create_secret(
     if description:
         public_meta["description"] = description
     signing_metadata = public_meta.get("signing_public_key")
-    if signer_kind == vault_hd.SIGNER_KIND:
+    if signer_kind == vault_hd.SIGNER_KIND and not protected_hd:
         if kind != "keypair" or protection != "standard" or signing_metadata is not None:
             raise InvalidSigningKeyError("HD seed wallets require a standard-tier keypair and account public keys")
         if policy and "always_ask" in policy:
@@ -3755,7 +3891,7 @@ def _create_secret(
             public_meta["hd_accounts"] = expected
         except ValueError as exc:
             raise InvalidSigningKeyError(str(exc)) from exc
-    elif "hd_accounts" in public_meta:
+    elif "hd_accounts" in public_meta and not protected_hd:
         raise InvalidSigningKeyError("HD account metadata requires signer_kind hd-seed")
     if (
         protection == "protected"
@@ -3790,6 +3926,8 @@ def _create_secret(
         envelope = raw_field.get("sealed") or raw_field.get("envelope")
         if not isinstance(envelope, Sealed):
             raise VaultServiceError("fields entries require sealed envelopes")
+        if not _envelope_allows_record_kind(envelope, "static"):
+            raise InvalidRequestError("static fields require a static or legacy-static envelope")
         field_names_seen.add(field_name)
         stored_fields.append({
             "name": field_name,
@@ -3833,6 +3971,20 @@ def _create_secret(
         if existing_name is not None and existing_name != name:
             raise SecretNameCaseConflictError(name, existing_name) from exc
         raise SecretExistsError(name) from exc
+    if protected_hd:
+        # Explicitly verify the persisted record inside the owning rollback boundary;
+        # _meta_payload intentionally degrades corrupt rows and cannot serve as this gate.
+        inserted = _require_row(conn, name)
+        try:
+            if (inserted["id"] != secret_id or inserted["kind"] != "keypair"
+                    or inserted["protection"] != "protected" or inserted["signer_kind"] != vault_hd.SIGNER_KIND
+                    or _row_sealed(inserted) != sealed
+                    or _hd_stored_accounts(inserted) != public_meta["hd_accounts"]):
+                raise ValueError("protected HD create readback disagrees with its completed operation")
+            vault_protected_hd.initial_meta(name, _row_sealed(inserted), accounts, expected_account0)
+        except ValueError as exc:
+            raise InvalidHdWalletError(str(exc)) from exc
+        reconciliation = _protected_hd_reconciliation(inserted)
     _register_created_secret_resource_policy(conn, secret_id, context)
     audit(conn, "created", secret_name=name)
     decided_at = _now()
@@ -3848,6 +4000,10 @@ def _create_secret(
     # request-specific create still uses only that request's spec for the secret metadata,
     # but sibling waiters should not keep timing out or resurfacing stale rows.
     fulfill_pending_provision_requests_for_secret(conn, name, decided_at=decided_at)
+    if protected_hd:
+        # Ephemeral create result only; never add this all-account snapshot to
+        # general metadata/list projections or reconstruct it after commit.
+        return {**_meta_payload(inserted), "reconciliation": reconciliation}
     return _meta_payload(_require_row(conn, name))
 
 
@@ -4040,9 +4196,15 @@ def update_secret_classification(
     if not values:
         return _meta_payload(row)
     if row.get("signer_kind") == vault_hd.SIGNER_KIND and (
-        values.get("kind", row.get("kind")) != "keypair" or values.get("protection", row.get("protection")) != "standard"
+        values.get("kind", row.get("kind")) != "keypair"
+        or values.get("protection", row.get("protection")) != row.get("protection")
     ):
         raise InvalidRequestError("HD seed wallets cannot change kind or protection tier")
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND:
+        try:
+            _hd_stored_accounts(row)
+        except ValueError as exc:
+            raise InvalidHdWalletError(str(exc)) from exc
     if values.get("kind", row.get("kind")) != row.get("kind") or values.get("protection", row.get("protection")) != row.get("protection"):
         _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-classification-changed")
         _expire_active_grants_for_secret(conn, secret_name, cache=cache, reason="grant-expired-classification-changed")
@@ -4050,6 +4212,33 @@ def update_secret_classification(
     conn.execute(vault_secrets.update().where(vault_secrets.c.name == secret_name).values(**values))
     audit(conn, "updated", secret_name=secret_name, delivery={"fields": sorted(values)})
     return _meta_payload(_require_row(conn, secret_name))
+
+
+def _protected_hd_reconciliation(row: dict[str, Any]) -> dict[str, Any]:
+    """One immutable, value-free snapshot for create and exact-name recovery."""
+    try:
+        if (row.get("kind") != "keypair" or row.get("protection") != "protected"
+                or row.get("signer_kind") != vault_hd.SIGNER_KIND
+                or not isinstance(row.get("id"), str) or not row["id"]):
+            raise ValueError("reconciliation requires a saved protected HD wallet")
+        accounts = _hd_stored_accounts(row)
+        table = [{key: item[key] for key in vault_protected_hd.PUBLIC_FIELDS} for item in accounts]
+        return {
+            "name": row["name"], "secret_id": row["id"], "kind": "keypair", "protection": "protected",
+            "signer_kind": vault_hd.SIGNER_KIND, "bitcoin_profile": vault_hd.BITCOIN_PROFILE,
+            "envelope_sha256": _hd_envelope_sha256(row), "accounts": table,
+            "expected_account0": vault_protected_hd.account_addresses(table[0]),
+        }
+    except ValueError as exc:
+        raise InvalidHdWalletError(str(exc)) from exc
+
+
+def get_hd_reconciliation(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
+    """Read all public indices under create authority AND the saved-ID use ACL."""
+    if not isinstance(name, str) or not vault_crypto.is_valid_secret_name(name):
+        raise InvalidSecretNameError(name)
+    context = require_secret_create_access(user_context=user_context)
+    return _protected_hd_reconciliation(require_secret_access(conn, name, user_context=context))
 
 
 def get_secret_meta(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
@@ -4082,14 +4271,20 @@ def get_signing_public_key(
     )
 
 
+def _hd_envelope_sha256(row: dict[str, Any]) -> str:
+    # Frozen HD rev0.6: preserve all three original strings, including raw wrap.
+    envelope = json.dumps([row.get("ciphertext"), row.get("nonce"), row.get("wrap_meta")],
+                          separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(envelope.encode("utf-8")).hexdigest()
+
+
 def hd_signing_binding(row: dict[str, Any], derivation: dict[str, Any]) -> dict[str, str]:
     key = _row_signing_public_key(row, derivation=derivation)
     if row.get("signer_kind") != vault_hd.SIGNER_KIND:
         raise InvalidRequestError("HD binding requires an HD seed wallet")
-    envelope = json.dumps([row.get("ciphertext"), row.get("nonce"), row.get("wrap_meta")], separators=(",", ":"))
     return {
         "secret_id": row["id"], "public_key": key["public_key"],
-        "envelope_sha256": hashlib.sha256(envelope.encode()).hexdigest(),
+        "envelope_sha256": _hd_envelope_sha256(row),
     }
 
 
@@ -4167,11 +4362,16 @@ def update_hd_account(
         raise InvalidRequestError("always_ask must be a boolean")
     conn.execute(vault_secrets.update().where(vault_secrets.c.name == name).values(updated_at=vault_secrets.c.updated_at))
     row = _require_secret_resource_management(conn, _require_row(conn, name), user_context)
-    if row.get("kind") != "keypair" or row.get("signer_kind") != vault_hd.SIGNER_KIND or row.get("protection") != "standard":
-        raise InvalidRequestError("account settings require a standard HD seed wallet")
+    if row.get("kind") != "keypair" or row.get("signer_kind") != vault_hd.SIGNER_KIND:
+        raise InvalidRequestError("account settings require an HD seed wallet")
     meta = _public_meta(row.get("public_meta"))
     try:
-        accounts = vault_hd.stored_accounts(meta)
+        accounts = _hd_stored_accounts(row)
+        # The validator returns the server-owned mutable rows from this metadata object.
+        meta["hd_accounts"] = accounts
+        protected = row.get("protection") == "protected"
+        if protected and changes.get("always_ask", True) is not True:
+            raise ValueError("protected HD accounts always require browser approval")
         if account is None:
             enabled = sum(item["enabled"] for item in accounts)
             if enabled == vault_hd.ACCOUNT_LIMIT:
@@ -4180,8 +4380,9 @@ def update_hd_account(
             accounts[account]["enabled"] = True
             event = "account-enabled"
         else:
-            vault_hd.selected_account(meta, vault_hd.derivation("evm", account))
-            if "always_ask" in changes:
+            if type(account) is not int or not 0 <= account < vault_hd.ACCOUNT_LIMIT or not accounts[account]["enabled"]:
+                raise ValueError("HD account must be an enabled index 0..19")
+            if "always_ask" in changes and not protected:
                 accounts[account].update(_signing_policy_transition(conn, row, changes["always_ask"], account=account))
             accounts[account].update(changes)
             event = "account-updated"
@@ -4384,6 +4585,8 @@ def rotate_secret(
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     if row.get("signer_kind") == vault_hd.SIGNER_KIND:
         raise InvalidRequestError("an HD seed wallet cannot be rotated as a value; create a new wallet instead")
+    if not _envelope_allows_record_kind(sealed, "keypair" if row.get("kind") == "keypair" else "static"):
+        raise InvalidRequestError("the replacement envelope kind does not match the existing secret")
     _extra_field_rows(row, strict=True)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
@@ -4454,6 +4657,8 @@ def update_secret_field(
         raise SecretConflictError(f"secret {secret_name!r} changed while the field was being updated")
     if row.get("kind") == "keypair":
         raise FieldsNotSupportedError(f"{secret_name} does not support fields")
+    if not _envelope_allows_record_kind(sealed, "static"):
+        raise InvalidRequestError("static fields require a static or legacy-static envelope")
     _require_field_record(row, field_name, record)
     default_field = _default_field_name(row)
     extras = _extra_field_rows(row, strict=True)
@@ -4590,6 +4795,8 @@ def update_secret_fields(
             raise InvalidRequestError("value changes require field, record and a sealed envelope")
         field = item["field"]
         envelope = item["sealed"]
+        if not _envelope_allows_record_kind(envelope, "static"):
+            raise InvalidRequestError("static fields require a static or legacy-static envelope")
         opaque = {"ciphertext": envelope.ciphertext, "nonce": envelope.nonce, "wrap_meta": envelope.wrap_meta}
         if field == final_default:
             updates.update(opaque)
@@ -4791,8 +4998,13 @@ def record_signing_use(
         if signing_binding != hd_signing_binding(row, derivation):
             raise InvalidRequestError("HD signing record changed during signing")
         meta = _public_meta(row.get("public_meta"))
-        selected = vault_hd.selected_account(meta, derivation)
+        selected = (vault_protected_hd.selected_account(row["name"], _row_sealed(row), meta, derivation)
+                    if row.get("protection") == "protected" else vault_hd.selected_account(meta, derivation))
         session_id = requester.get("session_id") if isinstance(requester, dict) else None
+        if row.get("protection") == "protected":
+            # Requester metadata is descriptive, not a typed HD setting. Keep the
+            # original audit payload, but never poison the next account read.
+            session_id = (session_id.strip() or None) if isinstance(session_id, str) else None
         selected["last_signer"] = {"session_id": session_id, "at": now}
         values["public_meta"] = json.dumps(meta)
         delivery = {**(delivery or {}), "derivation": derivation, "signing_key": signing_binding}
@@ -4855,6 +5067,11 @@ def get_key_envelope(conn: Connection, name: str, *, user_context: Any = None) -
     browser-side signing (protected tier). The private key never returns to Python.
     """
     row = require_secret_access(conn, name, user_context=user_context)
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND and row.get("protection") == "protected":
+        try:
+            _hd_stored_accounts(row)
+        except ValueError as exc:
+            raise InvalidHdWalletError(str(exc)) from exc
     if row.get("ciphertext") is None or row.get("nonce") is None or row.get("wrap_meta") is None:
         raise VaultServiceError(f"{name} does not have a local key envelope")
     return _row_sealed(row)
@@ -5484,6 +5701,12 @@ def create_sign_request(
         raise InvalidRequestError(f"{name} is not a signing key")
     if row.get("signer_kind") not in (None, "local", vault_hd.SIGNER_KIND):
         raise InvalidRequestError(f"{name} is not locally signable")
+    if row.get("signer_kind") == vault_hd.SIGNER_KIND and row.get("protection") == "protected":
+        try:
+            derivation = vault_protected_hd.selection(derivation, intake=True)
+            vault_protected_hd.validate_context(derivation, signing_context, digest=digest, message_hex=message_hex)
+        except ValueError as exc:
+            raise InvalidSigningContextError(str(exc)) from exc
     signing_key = _row_signing_public_key(row, derivation=derivation, scheme=scheme)
     # Before the generic refusals below, so a Solana key gets the reason that applies to it.
     validate_signing_pairing(
@@ -5535,14 +5758,14 @@ def create_sign_request(
     if derivation is not None:
         delivery_payload["derivation"] = dict(derivation)
         delivery_payload["signing_key"] = hd_signing_binding(row, derivation)
-        account_meta = next(item for item in vault_hd.public_accounts(_public_meta(row.get("public_meta"))) if item["account"] == derivation["account"])
+        account_meta = next(item for item in _hd_public_accounts(row) if item["account"] == derivation["account"])
         if derivation["chain"] == "bitcoin" and "address_type" in derivation:
             address_type = derivation.get("address_type", "p2tr")
             address_field = {"p2pkh": "btc_legacy", "p2wpkh": "btc_segwit", "p2tr": "btc_taproot"}[address_type]
             account_meta.update({"bitcoin_address_type": address_type, "bitcoin_address": account_meta[address_field],
                                  "bitcoin_path": vault_hd.bitcoin_paths(derivation["account"])[address_type]})
         card.update({"derivation": dict(derivation), "account": account_meta})
-    if row.get("protection") == "protected" and scheme == vault_solana.SCHEME:
+    if row.get("protection") == "protected" and scheme == vault_solana.SCHEME and row.get("signer_kind") != vault_hd.SIGNER_KIND:
         delivery_payload["signing_key"] = {
             "secret_id": row["id"], "public_key": vault_solana.require_public_key(signing_key),
         }
@@ -5766,6 +5989,32 @@ def complete_sign_request(
     browser_signed: bool = False,
     derivation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Own the fresh completion snapshot, CAS and all effects even for caught errors.
+
+    This reservation is short: it happens only after the browser/custody wait and
+    before the first completion read. No writer spans user interaction.
+    """
+    conn.execute(vault_requests.update().where(vault_requests.c.id == request_id).values(status=vault_requests.c.status))
+    with conn.begin_nested():
+        return _complete_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme, signature=signature,
+            message_hex=message_hex, signing_context=signing_context, requester=requester,
+            browser_signed=browser_signed, derivation=derivation)
+
+
+def _complete_sign_request(
+    conn: Connection,
+    request_id: str,
+    *,
+    name: str,
+    digest: str | None = None,
+    scheme: str,
+    signature: dict[str, Any],
+    message_hex: str | None = None,
+    signing_context: dict[str, Any] | None = None,
+    requester: Any = None,
+    browser_signed: bool = False,
+    derivation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     row_dict = _load_request_for_transition(
         conn,
         request_id,
@@ -5779,7 +6028,12 @@ def complete_sign_request(
         raise InvalidRequestError("signature secret does not match the sign request")
     _, delivery = _request_json_payloads(row_dict)
     delivery_payload = delivery if isinstance(delivery, dict) else {}
-    if derivation is not None and row_dict["status"] != "signing":
+    secret = _require_row(conn, name)
+    protected_hd = secret.get("protection") == "protected" and secret.get("signer_kind") == vault_hd.SIGNER_KIND
+    if protected_hd:
+        if row_dict["status"] != "pending" or delivery_payload.get("derivation") is None or derivation is None:
+            raise InvalidRequestError("protected HD completion requires its pending selected request")
+    elif derivation is not None and row_dict["status"] != "signing":
         raise InvalidRequestError("HD signing must be claimed before completion")
     _require_matching_sign_request(
         delivery_payload,
@@ -5789,9 +6043,18 @@ def complete_sign_request(
         signing_context=signing_context,
         derivation=derivation,
     )
-    _validate_persisted_signing_context(conn, name, delivery_payload)
+    _validate_persisted_signing_context(conn, name, delivery_payload, require_snapshot=protected_hd)
     _validate_signature_payload(scheme, signature)
-    if _require_row(conn, name).get("protection") == "protected" and scheme == vault_solana.SCHEME:
+    if protected_hd:
+        operation = delivery_payload["operation_context"]
+        if operation.get("requestId") != request_id:
+            raise InvalidRequestError("protected HD signed snapshot targets a different request")
+        try:
+            vault_protected_hd.verify_signature(_row_signing_public_key(secret, derivation=derivation, scheme=scheme), derivation,
+                digest=delivery_payload.get("digest"), message_hex=delivery_payload.get("message_hex"), signature=signature)
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+    if secret.get("protection") == "protected" and scheme == vault_solana.SCHEME and not protected_hd:
         try:
             vault_solana.verify_signature(
                 delivery_payload["signing_key"]["public_key"],

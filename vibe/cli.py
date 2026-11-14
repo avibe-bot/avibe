@@ -11720,7 +11720,7 @@ def cmd_vault_sign(args):
             args, digest=digest, message_hex=message_hex, help_command=help_command,
         )
         engine = _open_vault_engine()
-        api._preflight_hd_signing(engine, name, derivation, scheme)
+        derivation = api._preflight_hd_signing(engine, name, derivation, scheme)
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
             if meta.get("kind") != "keypair":
@@ -20056,7 +20056,7 @@ def build_parser():
     vault_sign_parser.add_argument("name", help="Keypair secret name")
     vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="HD only; selects chain and scheme")
     vault_sign_parser.add_argument("--account", type=int, help="HD index 0..19 (default: 0)")
-    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="HD Bitcoin type (default: p2tr)")
+    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="HD BTC type; protected: p2tr only (default: p2tr)")
     vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",

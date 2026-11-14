@@ -6099,6 +6099,24 @@ def vault_secrets_get():
         return _vault_error_response(exc)
 
 
+@app.get("/api/vault/secrets/{name}/hd-reconciliation", include_in_schema=False)
+async def vault_hd_reconciliation_get(name: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            response = jsonify(await asyncio.to_thread(
+                api.get_vault_hd_reconciliation, name,
+                user_context=getattr(g, "authorization_context", None),
+            ))
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/vault/tags", methods=["GET"])
 def vault_tags_get():
     from vibe import api

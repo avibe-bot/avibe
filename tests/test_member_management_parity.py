@@ -151,7 +151,8 @@ def test_complete_registered_api_management_inventory():
     # + 1 HD Bitcoin public preparation mutation (Editor plus resource management).
     # + 3 shared Vault setup and exact-target policy authorization methods.
     # + 1 atomic Vault field save (Editor namespace plus resource management).
-    assert len(endpoints) == 332
+    # + 1 protected-HD exact reconciliation read (create's Editor floor plus saved-ID resource use).
+    assert len(endpoints) == 333
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
@@ -178,6 +179,7 @@ def test_complete_registered_api_management_inventory():
         assert (method, "/api/vault/secrets/{name}/fields/{field}") in endpoints
         assert http_authorization_policy(method, "/api/vault/secrets/LOGIN/fields/username").minimum_role == "editor"
     for method, path in (
+        ("GET", "/api/vault/secrets/{name}/hd-reconciliation"),
         ("POST", "/api/vault/secrets/{name}/fields"),
         ("POST", "/api/vault/secrets/{name}/accounts"),
         ("POST", "/api/vault/secrets/{name}/bitcoin-address-types"),

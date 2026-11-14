@@ -19,7 +19,7 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import select
 
-from storage import vault_service
+from storage import vault_service, vault_signatures
 from storage.models import agent_sessions, scopes, vault_audit, vault_auth_factors, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
@@ -100,13 +100,13 @@ def _browser_ecdsa_signature_for_digest(digest: str, *, key_value: int = 1) -> t
     )
     der = private_key.sign(bytes.fromhex(digest), ec.ECDSA(utils.Prehashed(hashes.SHA256())))
     r, s = utils.decode_dss_signature(der)
-    if s > api._SECP256K1_N // 2:
-        s = api._SECP256K1_N - s
+    if s > vault_signatures.N // 2:
+        s = vault_signatures.N - s
     recovery_id = next(
         index
         for index in range(4)
-        if api._secp256k1_recover_ecdsa_public_key(r, s, bytes.fromhex(digest), index)
-        == api._secp256k1_decompress_public_key(public_key)
+        if vault_signatures.recover_ecdsa(r, s, bytes.fromhex(digest), index)
+        == vault_signatures.decompress(public_key)
     )
     signature = {
         "signature": r.to_bytes(32, "big").hex() + s.to_bytes(32, "big").hex(),
