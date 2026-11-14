@@ -866,7 +866,7 @@ def test_optimize_route_reserves_single_candidate_atomically(monkeypatch, tmp_pa
     assert len(started) == 1
 
 
-def test_ra_tq_033_unavailable_retries_use_connector_backoff(monkeypatch) -> None:
+def test_ra_tq_033_unavailable_retries_cap_at_sixty_seconds(monkeypatch) -> None:
     """Outage retries bypass performance debt, but stay bounded after failure."""
     now = 2_000_000_000.0
     monkeypatch.setattr(remote_access.time, "time", lambda: now)
@@ -876,7 +876,7 @@ def test_ra_tq_033_unavailable_retries_use_connector_backoff(monkeypatch) -> Non
     )
     assert remote_access._reserve_recovery(object(), manual=False, emergency=True, now=now) is None
     remote_access._set_recovery_state(state="evaluating", last_trigger="availability")
-    for delay in (15, 30, 60, 120, 120):
+    for delay in (15, 30, 60, 60, 60):
         remote_access._finish_recovery(trigger="availability", result="failed", previous_median=None, result_median=None)
         remote_access._RECOVERY_THREAD = None
         assert remote_access._parse_timestamp(remote_access._recovery_payload()["next_attempt_at"]) == pytest.approx(now + delay)

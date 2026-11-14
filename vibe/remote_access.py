@@ -132,6 +132,7 @@ STATUS_REPORT_DRAIN_SECONDS = 1.0
 RECOVERY_READY_TIMEOUT_SECONDS = 30.0
 START_PREFERRED_READY_TIMEOUT_SECONDS = 8.0
 CONNECTOR_RESTART_MAX_DELAY_SECONDS = 120.0
+AVAILABILITY_RECOVERY_MAX_DELAY_SECONDS = 60.0
 # Outlasts a start's worst-case hold: 8 s readiness + 8 s stop_pid + the respawn.
 CONNECTOR_LIFECYCLE_WAIT_SECONDS = 20.0
 # Record cleanups that nothing repeats wait at least 3x the longest bounded hold
@@ -1747,6 +1748,7 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
             payload,
             timeout=5.0,
         )
+        _clear_availability_cooldown(source="runtime_status")
         try:
             if direct_lifecycle is not None:
                 direct_lifecycle.accept_runtime_status_response(
@@ -3013,6 +3015,19 @@ def _parse_timestamp(value: Any) -> float | None:
         return None
 
 
+def _clear_availability_cooldown(*, source: str) -> None:
+    """Use existing in-process successes; do not alter performance debt or lanes."""
+    with _RECOVERY_LOCK:
+        if _RECOVERY_STATE.get("last_trigger") != "availability" or _RECOVERY_STATE.get("state") != "cooldown":
+            return
+        deadline = _RECOVERY_STATE.get("next_attempt_at")
+        _RECOVERY_STATE.update(state="idle", next_attempt_at=None, attempt_count_window=0)
+    logger.info(
+        "Tunnel availability cooldown cleared source=%s previous_cooldown_deadline=%s cooldown_deadline=None",
+        source, deadline,
+    )
+
+
 def _recovery_refusal_locked(*, manual: bool, emergency: bool, now: float) -> str | None:
     if _RECOVERY_THREAD is not None:
         return "route_optimization_evaluating"
@@ -3047,7 +3062,7 @@ def _connector_retry_delay(attempt_count: int) -> float:
 
 def _recovery_backoff_seconds(attempt_count: int, *, trigger: str | None = None) -> float:
     if trigger == "availability":
-        return _connector_retry_delay(attempt_count)
+        return min(_connector_retry_delay(attempt_count), AVAILABILITY_RECOVERY_MAX_DELAY_SECONDS)
     return (60, 120, 300)[min(max(attempt_count - 1, 0), 2)]
 
 
@@ -3311,6 +3326,11 @@ def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -
                 return _optimization_refused(current, refusal, now)
             _RECOVERY_CANCEL_EVENT.clear()
             _set_recovery_state(state="evaluating", last_trigger=effective_trigger)
+            logger.info(
+                "Tunnel recovery started mode=%s trigger=%s cooldown_deadline=%s",
+                "manual" if manual else "automatic", effective_trigger,
+                _recovery_payload().get("next_attempt_at"),
+            )
             thread.start()
     except _ConnectorLifecycleBusy:
         return _optimization_refused(current, "remote_access_busy", now)
@@ -3318,7 +3338,7 @@ def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -
         with _RECOVERY_LOCK:
             if _RECOVERY_THREAD is locals().get("thread"):
                 _RECOVERY_THREAD = None
-        _finish_recovery(trigger=trigger, result="failed", previous_median=None, result_median=None)
+        _finish_recovery(trigger=trigger, result="failed", previous_median=None, result_median=None, manual=manual)
         return {**current, "ok": False, "error": "route_optimization_start_failed", "detail": str(exc)}
     return {**status(config), "ok": True, "optimization_started": True}
 
@@ -3666,6 +3686,7 @@ def _finish_recovery(
     result_p95: float | None = None,
     previous_p99: float | None = None,
     result_p99: float | None = None,
+    manual: bool | None = None,
 ) -> None:
     now = time.time()
     _QUALITY_EVALUATOR.reset_healthy_samples()
@@ -3690,6 +3711,11 @@ def _finish_recovery(
         result_p99_ms=result_p99,
         next_attempt_at=tunnel_quality.utc_timestamp(next_attempt) if next_attempt is not None else None,
         attempt_count_window=attempt_count,
+    )
+    logger.info(
+        "Tunnel recovery finished mode=%s trigger=%s result=%s cooldown_deadline=%s",
+        "manual" if manual else ("automatic" if manual is False else "unknown"), trigger, result,
+        tunnel_quality.utc_timestamp(next_attempt) if next_attempt is not None else None,
     )
     _report_runtime_status_async(event="route_optimization")
 
@@ -3761,6 +3787,7 @@ def _run_route_optimization(
             )
             _finish_recovery(
                 trigger=recovery_trigger,
+                manual=manual,
                 result=result,
                 previous_median=previous_median,
                 result_median=None,
@@ -3820,6 +3847,7 @@ def _run_route_optimization(
             result_median = float(result_rtt["median"]) if isinstance(result_rtt, dict) and result_rtt.get("median") is not None else None
             _finish_recovery(
                 trigger=recovery_trigger,
+                manual=manual,
                 result="no_improvement",
                 previous_median=previous_median,
                 result_median=result_median,
@@ -3885,6 +3913,7 @@ def _run_route_optimization(
                 logger.warning("Old Tunnel connector remains tracked after drain failed pid=%s", old_pid)
         _finish_recovery(
             trigger=recovery_trigger,
+            manual=manual,
             result="improved",
             previous_median=previous_median,
             result_median=result_median,
@@ -3897,6 +3926,7 @@ def _run_route_optimization(
         logger.warning("Tunnel route optimization failed", exc_info=True)
         _finish_recovery(
             trigger=recovery_trigger,
+            manual=manual,
             result="failed",
             previous_median=previous_median,
             result_median=None,
@@ -4018,7 +4048,9 @@ def _quality_monitor_loop(
     global _QUALITY_MONITOR_STARTED
     last_report_at = 0.0
     restart_schedule = _ConnectorRestartSchedule()
-    request_session = _public_probe_session()
+    request_probe = tunnel_quality.BackgroundRequestPathProbe(
+        _public_probe_session, attempts=REQUEST_PATH_PROBE_ATTEMPTS, timeout=REQUEST_PATH_PROBE_TIMEOUT_SECONDS,
+    )
     try:
         while quality_path == _quality_state_path() and quality_path.parent.exists():
             started_at = time.monotonic()
@@ -4059,26 +4091,20 @@ def _quality_monitor_loop(
             configured_protocol = _configured_protocol(loaded) if loaded is not None else "auto"
             effective_protocol = _effective_protocol(active, sample)
             _normalize_recovery_schedule(legacy=False, now=time.time())
-            request_path_sample = None
             recovery_state = _recovery_payload().get("state")
             public_health_url = _public_health_url(loaded) if loaded is not None else None
-            if (
+            probe_allowed = (
                 running
                 and public_health_url is not None
                 and not _is_cloudflared_pid(candidate.get("pid"))
                 and not _is_cloudflared_pid(draining.get("pid"))
                 and _pending_tail_rollback() is None
                 and recovery_state not in {"evaluating", "draining"}
-            ):
-                try:
-                    request_path_sample = tunnel_quality.probe_request_path(
-                        request_session,
-                        public_health_url,
-                        attempts=REQUEST_PATH_PROBE_ATTEMPTS,
-                        timeout=REQUEST_PATH_PROBE_TIMEOUT_SECONDS,
-                    )
-                except Exception:
-                    logger.debug("Tunnel request-path probe failed", exc_info=True)
+            )
+            request_path_sample = request_probe.poll(
+                (active.get("pid"), active.get("started_at"), metrics_url, effective_protocol, public_health_url),
+                public_health_url if probe_allowed else None,
+            )
             previous_snapshot = tunnel_quality_snapshot()
             snapshot = None
             try:
@@ -4088,6 +4114,8 @@ def _quality_monitor_loop(
                     if _observe_quality_context(
                         effective_protocol if sample is not None else None, sampled_connector=active,
                     ):
+                        if request_path_sample is not None and any(request_path_sample.successes):
+                            _clear_availability_cooldown(source="public_health_probe")
                         snapshot = _QUALITY_EVALUATOR.update(
                             sample,
                             connector_count=connector_count,
@@ -4135,7 +4163,8 @@ def _quality_monitor_loop(
                 last_report_at = now
             time.sleep(max(0.1, interval_seconds - (time.monotonic() - started_at)))
     finally:
-        request_session.close()
+        # Never join a resolver that outlives this monitor.
+        request_probe.close()
         with _QUALITY_MONITOR_LOCK:
             _QUALITY_MONITOR_STARTED = False
 
