@@ -93,7 +93,7 @@ Low-disk coverage additionally passes 182 focused admission/backup/preflight/
 readiness tests and 172 importer/startup/no-copy consumers. The new cases include
 existing backup/lifecycle preservation, crash-left WAL without a live keeper,
 hot-journal refusal before recovery, read-only callers, and honest diagnostics
-when capacity falls after completed recovery. Nine tiny harness tests exercise
+when capacity falls after completed recovery. Sixteen tiny harness tests exercise
 real store APIs with inline/compact gates, subprocess isolation, desktop refusal
 and a small message-shape fixture. These counts are local focused runs, not a
 full-suite or large-database result.

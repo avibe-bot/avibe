@@ -8,7 +8,7 @@ published-predecessor compatibility probe do not replace this run.
 
 Use the repository regression runner to provision an isolated **local Incus
 worktree target**, with no owner data, credentials or live service traffic.
-The exercise owner must approve its fixed root-disk quota, inspect host-pool and
+The exercise owner must approve its fixed data-filesystem quota, inspect host-pool and
 guest capacity before/after, hold the target for the entire run, and delete the
 target afterwards. Never generate a multi-GB fixture or fill disk on the desktop
 or shared storage pool. Never reset an existing regression target.
@@ -19,11 +19,17 @@ its published SHA256 (the wheel used for the reader proof was
 artifact/installation evidence with the report. The harness also verifies
 installed version and import path; those checks alone do not attest an arbitrary
 locally modified installation. The candidate checkout must be clean at the exact
-reviewed commit. No source substitution into the predecessor is allowed.
+reviewed commit. The runner's source sync intentionally omits `.git`; use a
+separate shallow checkout of that exact commit inside the disposable guest and
+reuse its dependency interpreter, rather than fabricating Git metadata or
+weakening the clean-head check. No source substitution into the predecessor is allowed.
 
 `scripts/sqlite_epoch3_measure.py` refuses large work outside a Linux Incus
 container or when guest filesystem capacity does not reflect the provisioned
-12–16 GiB quota. If the guest reports shared-pool capacity instead, stop and fix
+12–16 GiB quota on the filesystem containing the test root. A bounded data
+volume attached at the test state directory also satisfies this requirement;
+container-root quota labels without an enforced filesystem limit do not. If the
+guest reports shared-pool capacity instead, stop and fix
 provisioning with the exercise owner; do not bypass the guard or fill the pool.
 The driver neither changes quotas nor starts/stops services. Every worker uses
 an isolated HOME/Avibe/XDG/temp tree and only synthetic state.
