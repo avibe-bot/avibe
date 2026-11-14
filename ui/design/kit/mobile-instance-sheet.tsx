@@ -377,7 +377,7 @@ function NamedHeader({ name }: { name: string }) {
     <header className="absolute inset-x-0 top-0 z-50 flex h-[calc(2.75rem+env(safe-area-inset-top))] items-center justify-between gap-2 border-b border-border bg-background px-4 pt-[env(safe-area-inset-top)]">
       <button type="button" className="flex min-w-0 items-center gap-2 rounded-md" aria-label={t(`当前实例 ${name}，切换实例`, `Current instance ${name}, switch instance`)}>
         <img src={logo} alt="" className="size-6 shrink-0 rounded-md border border-mint/30 bg-mint/[0.08] object-cover" />
-        <span className="truncate text-[13px] font-semibold">{name}</span>
+        <span className="truncate text-sm font-semibold">{name}</span>
         <ChevronDown className="size-3.5 shrink-0 text-muted" />
       </button>
       <span className="inline-flex size-11 shrink-0 items-center justify-center rounded-full">
