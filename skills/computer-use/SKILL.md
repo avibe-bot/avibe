@@ -189,11 +189,13 @@ kernel, SDK, saved flows, and safety rules above are the same.
   ```js
   const excel = await computer.app({ path: "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE" });
   const launched = await excel.launch({ additional_arguments: ["C:\\Reports\\q3.xlsx"] });
+  const win = await launched.app.waitFor({ onScreen: true });
   ```
-  A path handle only launches: each launch starts a new process, and the
-  result names that process. Work in the new window from the result; do not
-  use a path handle to find an app that is already open. Do not combine `path`
-  with `name` or `bundleId`; on macOS keep using those.
+  A path handle only launches. Each `launch` starts a new process and returns
+  an ordinary app handle for it, which you use as usual. The path handle never
+  finds or reuses an app that is already open; use a `name` handle for that.
+  Do not combine `path` with `name` or `bundleId`. On macOS `path` is refused:
+  keep using `bundleId` or `name` there.
 - Store apps, stubs that hand off to another process (such as the files in
   `WindowsApps`), apps with several plausible or no reliable `.exe`, links,
   and files that open in their default app cannot be launched. Tell the owner:
