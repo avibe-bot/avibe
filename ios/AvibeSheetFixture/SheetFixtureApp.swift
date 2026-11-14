@@ -23,6 +23,9 @@ final class SheetFixtureAppDelegate: UIResponder, UIApplicationDelegate {
 private final class SheetFixtureRootViewController: UIViewController {
     private var sheetController: MobileOnboardingViewController?
     private var hasStarted = false
+    private var documentReady = false
+    private var fetchCount = 0
+    private var documentReadinessTask: Task<Void, Never>?
     // These controls exist only in the simulator fixture app, never Avibe.
     private let captureState = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_CAPTURE_STATE"]
     private lazy var coordinator: MobileSessionCoordinator = {
@@ -33,7 +36,8 @@ private final class SheetFixtureRootViewController: UIViewController {
             snapshot: captureState == nil ? Self.snapshot : captureSnapshot,
             failRefresh: captureState == "stale",
             didFetch: { [weak self] count in
-                self?.sheetController?.view.accessibilityValue = "fetch-\(count)"
+                self?.fetchCount = count
+                self?.publishReadiness()
             }
         )
         return MobileSessionCoordinator(
@@ -131,11 +135,11 @@ private final class SheetFixtureRootViewController: UIViewController {
                 self?.dismissFixtureSheet() ?? false
             }
         )
-        if realBundle {
-            controller.view.accessibilityIdentifier = "real-bundle-capture-surface"
-        }
+        controller.view.accessibilityIdentifier = "fixture-document-surface"
         controller.modalPresentationStyle = .pageSheet
         sheetController = controller
+        publishReadiness()
+        observeDocument(in: controller)
         controller.overrideUserInterfaceStyle = overrideUserInterfaceStyle
         if captureState == "first-run" {
             addChild(controller)
@@ -148,10 +152,46 @@ private final class SheetFixtureRootViewController: UIViewController {
         }
     }
 
+    /// The WKWebView can exist before its WebContent process has loaded a
+    /// document. Publish a native-only gate; do not replace the production
+    /// navigation delegate or treat a rendered page as proof of its content.
+    private func observeDocument(in controller: MobileOnboardingViewController) {
+        let webView = controller.view.subviews.compactMap { $0 as? WKWebView }.first!
+        documentReadinessTask = Task { @MainActor [weak self, weak controller, weak webView] in
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(120))
+            while clock.now < deadline {
+                guard let self, let controller, let webView,
+                      self.sheetController === controller, !Task.isCancelled else { return }
+                let loaded = try? await webView.evaluateJavaScript(
+                    """
+                    document.readyState === "complete"
+                      && location.protocol === "avibe-app:"
+                      && location.host === "bundle"
+                      && location.pathname === "/mobile.html"
+                    """
+                ) as? Bool
+                guard self.sheetController === controller, !Task.isCancelled else { return }
+                if loaded == true {
+                    self.documentReady = true
+                    self.publishReadiness()
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    private func publishReadiness() {
+        sheetController?.view.accessibilityValue =
+            "\(documentReady ? "document-ready" : "document-loading");fetch-\(fetchCount)"
+    }
+
     @discardableResult
     private func dismissFixtureSheet() -> Bool {
         guard let controller = sheetController else { return false }
         controller.dismiss(animated: true) { [weak self] in
+            self?.documentReadinessTask?.cancel()
             self?.sheetController = nil
         }
         return true
