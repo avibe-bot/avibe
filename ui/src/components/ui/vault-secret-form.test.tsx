@@ -184,6 +184,16 @@ it('keeps the legacy single-value create payload until fields are added', async 
   expect(api.createVaultSecret.mock.calls[0][0]).not.toHaveProperty('default_field');
 });
 
+it.each([
+  ['a new secret', {}],
+  ['an Agent request', { provisionRequestId: 'request', requestSpec: { description: 'Login' } }],
+])('explains several fields in Add field’s info, not in a line under it (%s)', async (_, extra) => {
+  render(form(<VaultSecretForm fixedName="LOGIN" onCancel={vi.fn()} onCreated={vi.fn()} {...extra} />));
+  expect(screen.queryByText(en.vaults.fields.multiHint)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.moreInfo }));
+  expect(await screen.findByText(en.vaults.fields.multiHint)).toBeTruthy();
+});
+
 it('preserves a selected file instead of silently switching it to empty field rows', async () => {
   const { container } = render(form(<VaultSecretForm fixedName="TOKEN" onCancel={vi.fn()} onCreated={vi.fn()} />));
   fireEvent.click(screen.getByRole('radio', { name: 'File' }));

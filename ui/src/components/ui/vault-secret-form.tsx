@@ -298,10 +298,11 @@ export const VaultSecretForm: React.FC<{
   // only sets the options, never a value. `valueFromGenerator` marks the field as generated until it
   // is typed over; it holds no copy of the value, so clearing the field (as sealing does) clears
   // everything. Both tiers alike: the value is in this form like a typed one, sealed only at Save.
-  const specRecipe = useMemo(
+  const specPreset = useMemo(
     () => recipeFromSpec((requestSpec as { generate?: unknown } | null | undefined)?.generate),
     [requestSpec],
   );
+  const specRecipe = specPreset?.recipe ?? null;
   const specRecipeField = (requestSpec as { generate?: { field?: unknown } } | null | undefined)?.generate?.field;
   const [recipe, setRecipe] = useState<GenerateRecipe>(specRecipe ?? DEFAULT_PASSWORD_RECIPE);
   const [valueFromGenerator, setValueFromGenerator] = useState(false);
@@ -1130,6 +1131,7 @@ export const VaultSecretForm: React.FC<{
               labelled
               showLabel={!value}
               suggested={Boolean(specRecipe) && !specRecipeField}
+              suggestionAdjusted={Boolean(specPreset?.adjusted) && recipe === specRecipe}
               disabled={submitting}
             >
               {showValue && generatorOpen !== 'value' ? (
@@ -1144,7 +1146,7 @@ export const VaultSecretForm: React.FC<{
                   required
                   spellCheck={false}
                   autoComplete="off"
-                  className={cn('min-h-[76px] min-w-0 flex-1 resize-y pr-12 font-mono text-xs leading-relaxed', valueGenerated && 'border-mint/40 bg-mint-soft/40')}
+                  className={cn('min-h-[76px] min-w-0 flex-1 resize-y font-mono text-xs leading-relaxed', valueGenerated && 'border-mint/40 bg-mint-soft/40')}
                 />
               ) : (
                 <Input
@@ -1161,11 +1163,7 @@ export const VaultSecretForm: React.FC<{
                   spellCheck={false}
                   autoComplete="off"
                   aria-label={t('vaults.dialog.value')}
-                  className={cn(
-                    'min-w-0 flex-1 pr-12 font-mono text-xs md:group-focus-within/gen:pr-36',
-                    !value && 'max-md:pr-36',
-                    valueGenerated && 'border-mint/40 bg-mint-soft/40',
-                  )}
+                  className={cn('min-w-0 flex-1 font-mono text-xs', valueGenerated && 'border-mint/40 bg-mint-soft/40')}
                 />
               )}
             </VaultGenerateControl>
@@ -1313,6 +1311,7 @@ export const VaultSecretForm: React.FC<{
                   onOpenChange={(open) => setGeneratorOpen(open ? row.id : null)}
                   triggerOutside
                   suggested={!row.recipe && Boolean(specRecipe) && rowPreset(row, index) === specRecipe}
+                  suggestionAdjusted={!row.recipe && Boolean(specPreset?.adjusted) && rowPreset(row, index) === specRecipe}
                   disabled={submitting}
                 >
                   {input}
@@ -1344,16 +1343,17 @@ export const VaultSecretForm: React.FC<{
       <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
       {valueField}
       <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
-        <Button type="button" variant="ghost" size="xs" className="px-2.5 text-[13px] text-muted hover:text-foreground"
-          disabled={submitting || staticSource === 'file'} onClick={addFieldRow}>
-          <Plus />
-          {t('vaults.fields.add')}
-        </Button>
+        <span className="mr-1.5 flex items-center">
+          <Button type="button" variant="ghost" size="xs" className="px-2.5 text-[13px] text-muted hover:text-foreground"
+            disabled={submitting || staticSource === 'file'} onClick={addFieldRow}>
+            <Plus />
+            {t('vaults.fields.add')}
+          </Button>
+          <InfoHint hover content={t('vaults.fields.multiHint')} label={t('vaults.dialog.moreInfo')} />
+        </span>
         <VaultFieldTemplateMenu disabled={submitting || staticSource === 'file'} onApply={applyFieldTemplate} />
       </div>
-      <span className="text-[11px] text-muted">
-        {staticSource === 'file' ? t('vaults.fields.singleFile') : t('vaults.fields.multiHint')}
-      </span>
+      {staticSource === 'file' ? <span className="text-[11px] text-muted">{t('vaults.fields.singleFile')}</span> : null}
     </div>
   );
 

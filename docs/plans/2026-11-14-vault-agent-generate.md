@@ -22,8 +22,9 @@ random generator and sealing algorithm belong to avault.
   `--no-digits`, `--no-symbols`, `--no-lookalikes`; hex/base64 use `--bytes N`.
   Only the existing three-string Sealed envelope returns to Python. Custody
   output is not echoed in errors. Version errors expose the fixed version floor.
-- Password defaults: 24 characters, 12..128; letters always, digits/symbols on,
-  lookalikes allowed. Hex/base64 default to 32 bytes, 16..64. Cross-type,
+- Password defaults: 24 characters, 12..100 (avault 0.1.13 makes no fewer than
+  12; shorter is refused before custody and pointed to a request preset);
+  letters always, digits/symbols on, lookalikes allowed. Hex/base64 default to 32 bytes, 16..64. Cross-type,
   unknown, wrong-type or out-of-range recipe options reject the entire call.
   Python does not implement or test the RNG algorithm.
 - A preflight snapshot is repeated under a short writer reservation after

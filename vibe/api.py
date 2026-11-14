@@ -10711,6 +10711,9 @@ def avault_agent_pubkey() -> dict:
 
 
 AVAULT_GENERATE_SECRET_MIN_VERSION = "0.1.13"
+# The shortest password avault generate-secret makes (0.1.13 accepts 12..=128). Requests and the
+# browser generator start at vault_service.GENERATE_PASSWORD_LENGTH; direct generation cannot yet.
+AVAULT_GENERATE_PASSWORD_MIN_LENGTH = 12
 
 
 def avault_generate_secret(name: str, recipe: dict):

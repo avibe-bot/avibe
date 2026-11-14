@@ -51,6 +51,13 @@ def _generate(request: ControlRequest) -> dict[str, Any]:
                 recipe = vs.normalize_generate_recipe(args.recipe)
             except vs.VaultServiceError as exc:
                 raise cli.TaskCliError(str(exc), code="invalid_generate_recipe", help_command=HELP) from exc
+            shortest, longest = api.AVAULT_GENERATE_PASSWORD_MIN_LENGTH, vs.GENERATE_PASSWORD_LENGTH[1]
+            if recipe["type"] == "password" and recipe["length"] < shortest:
+                raise cli.TaskCliError(
+                    f"vibe vault generate makes passwords of {shortest} to {longest} characters",
+                    code="invalid_generate_recipe", help_command=HELP,
+                    hint="For a shorter password, use vibe vault request with a generate preset; the user generates it in the browser.",
+                )
             engine = get_cached_sqlite_engine()
             with engine.connect() as conn:
                 snapshot = generation.capture_target(conn, args.name, args.field)

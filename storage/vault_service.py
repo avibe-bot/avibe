@@ -924,6 +924,10 @@ def _stored_fetch_policy_visible_snapshot(policy: dict[str, Any]) -> dict[str, A
     return snapshot
 
 
+# Password characters a generator recipe may ask for (the browser generator's PASSWORD_LENGTH).
+GENERATE_PASSWORD_LENGTH = (8, 100)
+
+
 def normalize_generate_recipe(recipe: Any) -> dict[str, Any]:
     """Validate a value-free generation hint; this never generates or saves a value."""
     if not isinstance(recipe, dict):
@@ -939,8 +943,9 @@ def normalize_generate_recipe(recipe: Any) -> dict[str, Any]:
     normalized: dict[str, Any] = {"type": recipe_type}
     if recipe_type == "password":
         length = recipe.get("length", 24)
-        if type(length) is not int or not 12 <= length <= 128:
-            raise VaultServiceError("generate.length must be an integer from 12 to 128")
+        low, high = GENERATE_PASSWORD_LENGTH
+        if type(length) is not int or not low <= length <= high:
+            raise VaultServiceError(f"generate.length must be an integer from {low} to {high}")
         normalized["length"] = length
         for key, default in (("digits", True), ("symbols", True), ("no_lookalikes", False)):
             value = recipe.get(key, default)
