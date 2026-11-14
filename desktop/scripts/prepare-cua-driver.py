@@ -217,10 +217,11 @@ def extract_driver_source(manifest: dict, archive_path: Path, destination: Path)
     return source_root
 
 
-def run(command: list[str], *, merge_stderr: bool = True) -> str:
+def run(command: list[str], *, merge_stderr: bool = True, encoding: str | None = None) -> str:
     return subprocess.check_output(
         command,
         text=True,
+        encoding=encoding,
         stderr=subprocess.STDOUT if merge_stderr else None,
     )
 
@@ -298,10 +299,10 @@ def verify_built_contract(binary: Path) -> None:
 
 def verify_windows_built_contract(binary: Path) -> None:
     """Windows inputs differ from macOS; check the captured, policy-filtered schemas."""
-    if run([str(binary), "--version"]).strip() != "cua-driver 0.31.0":
+    if run([str(binary), "--version"], encoding="utf-8").strip() != "cua-driver 0.31.0":
         raise ValueError("patched Windows Cua Driver reports an unexpected version")
     try:
-        docs = json.loads(run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False))
+        docs = json.loads(run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False, encoding="utf-8"))
         actual = {tool["name"]: tool["input_schema"] for tool in docs["tools"]}
         snapshot = json.loads(WINDOWS_TOOL_SNAPSHOT.read_text(encoding="utf-8"))
         expected = {tool["name"]: tool["inputSchema"] for tool in snapshot["tools"]}

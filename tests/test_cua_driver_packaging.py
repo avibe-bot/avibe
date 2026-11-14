@@ -7,6 +7,7 @@ from pathlib import Path
 from runpy import run_path
 import shutil
 import subprocess
+import sys
 import tarfile
 
 import pytest
@@ -56,6 +57,49 @@ def test_windows_driver_requires_an_amd64_pe_executable(tmp_path: Path, case: st
     else:
         with pytest.raises(ValueError, match="PE"):
             desktop_release.verify_windows_driver_pe(binary)
+
+
+def test_windows_snapshot_hash_survives_git_autocrlf_checkout(tmp_path: Path) -> None:
+    """Git's Windows checkout filter must preserve the bytes pinned by the manifest."""
+    root = Path(__file__).parents[1]
+    relative = Path("desktop/cua-driver/tools-windows-v0.31.0.json")
+    snapshot = tmp_path / relative
+    snapshot.parent.mkdir(parents=True)
+    shutil.copyfile(root / ".gitattributes", tmp_path / ".gitattributes")
+    shutil.copyfile(root / relative, snapshot)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    command = ["git", "-C", str(tmp_path), "-c", "core.autocrlf=true"]
+    subprocess.run([*command, "add", ".gitattributes", relative.as_posix()], check=True)
+    snapshot.unlink()
+    subprocess.run([*command, "checkout-index", "--all", "--force"], check=True)
+    manifest = _SCRIPT["load_manifest"]()
+    assert _SCRIPT["digest"](snapshot) == manifest["driver"]["windows"]["tool_snapshot_sha256"]
+    assert snapshot.read_bytes() == (root / relative).read_bytes()
+
+
+def test_windows_documentation_is_utf8_even_under_a_legacy_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use real subprocess decoding; CP1252 must not corrupt the pinned schema descriptions."""
+    tools = json.loads(_SCRIPT["WINDOWS_TOOL_SNAPSHOT"].read_text(encoding="utf-8"))["tools"]
+    docs = {"tools": [{"name": tool["name"], "input_schema": tool["inputSchema"]} for tool in tools]}
+    docs_path = tmp_path / "docs.json"
+    docs_path.write_text(json.dumps(docs, ensure_ascii=False), encoding="utf-8")
+    assert any(byte >= 128 for byte in docs_path.read_bytes())
+    version_path = tmp_path / "version.txt"
+    version_path.write_bytes(b"cua-driver 0.31.0\n")
+    original = subprocess.check_output
+
+    def invoke(command: list[str], **kwargs: object) -> str:
+        path = version_path if command[1:] == ["--version"] else docs_path
+        return original([
+            sys.executable, "-c", "import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())", str(path),
+        ], **kwargs)
+
+    # Exercise the legacy Windows default independent of this test host's locale.
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    monkeypatch.setattr(subprocess, "check_output", invoke)
+    _SCRIPT["verify_windows_built_contract"](tmp_path / "cua-driver.exe")
 
 
 def test_windows_snapshot_keeps_shared_policy_but_not_macos_input_schemas() -> None:
