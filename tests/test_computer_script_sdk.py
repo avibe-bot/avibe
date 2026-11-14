@@ -74,8 +74,10 @@ def _fake_controller(
     response_delay_by_tool: dict[str, float] | None = None,
     apps: list[dict] | None = None,
     app_responses: list[list[dict]] | None = None,
+    app_lookup_error: str | None = None,
     windows: list[dict] | None = None,
     launch_pid: int | None = 41,
+    launch_metadata: dict | None = None,
     interaction_errors: dict[str, str] | None = None,
     observation_screenshot_modes: list[str] | None = None,
 ) -> Iterator[tuple[ThreadingHTTPServer, list[dict]]]:
@@ -164,6 +166,11 @@ def _fake_controller(
                             ]
                         }
                     )
+                    if app_lookup_error is not None:
+                        body = _result(
+                            {"code": app_lookup_error, "dispatched": False},
+                            is_error=True,
+                        )
                 elif tool == "list_windows":
                     body = _result(
                         {
@@ -397,6 +404,7 @@ def _fake_controller(
                     launch_payload = {
                         "effect": "confirmed",
                         "route": "system_api",
+                        **(launch_metadata or {}),
                     }
                     if launch_pid is not None:
                         launch_payload["pid"] = launch_pid
@@ -444,8 +452,10 @@ def _run_node_script(
     response_delay_by_tool: dict[str, float] | None = None,
     apps: list[dict] | None = None,
     app_responses: list[list[dict]] | None = None,
+    app_lookup_error: str | None = None,
     windows: list[dict] | None = None,
     launch_pid: int | None = 41,
+    launch_metadata: dict | None = None,
     interaction_errors: dict[str, str] | None = None,
     observation_screenshot_modes: list[str] | None = None,
 ) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
@@ -475,8 +485,10 @@ def _run_node_script(
         response_delay_by_tool=response_delay_by_tool,
         apps=apps,
         app_responses=app_responses,
+        app_lookup_error=app_lookup_error,
         windows=windows,
         launch_pid=launch_pid,
+        launch_metadata=launch_metadata,
         interaction_errors=interaction_errors,
         observation_screenshot_modes=observation_screenshot_modes,
     ) as (server, requests):
@@ -2019,6 +2031,236 @@ export default async () => {
         "bundle_id": "com.apple.mail",
         "name": None,
     }
+
+
+@pytest.mark.parametrize("bundle_id", [None, "example.app"])
+def test_sdk_path_launch_binds_only_the_original_created_pid(
+    tmp_path: Path, bundle_id: str | None,
+) -> None:
+    # One existing metadata lookup binds only the original created PID. Launch
+    # display metadata need not match list_apps and must not supply identity.
+    requested = r"C:\Apps\Example.exe"
+    argv = ["", "two words", 'a"b', "$HOME", "&", "--flag"]
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+Object.defineProperty(process, "platform", { value: "win32" });
+export default async () => {
+  const target = await computer.app({ path: "C:\\\\Apps\\\\Example.exe" });
+  const result = await target.launch({
+    additional_arguments: ["", "two words", 'a"b', "$HOME", "&", "--flag"],
+    start_minimized: true,
+  });
+  const window = await result.app.window({ windowId: 9 });
+  await window.observe();
+  await result.app.forceQuit();
+  return {
+    initialPath: target.path,
+    pid: result.app.pid, name: result.app.name,
+    launchOnly: target.pid === undefined && target.window === undefined &&
+      target.forceQuit === undefined && target.waitFor === undefined,
+    frozen: Object.isFrozen(target) && Object.isFrozen(result.app),
+  };
+};
+""",
+        apps=[
+            {"pid": 7, "name": "Example", "running": True},
+            {"pid": 41, "name": "Example", "bundle_id": bundle_id, "running": True},
+        ],
+        launch_metadata={"name": requested, "bundle_id": None, "running": True},
+    )
+    assert payload == {
+        "ok": True,
+        "result": {
+            "initialPath": requested,
+            "pid": 41, "name": "Example", "launchOnly": True, "frozen": True,
+        },
+    }
+    tools = [r["payload"] for r in requests if r["path"].endswith("/request")]
+    assert [r["tool"] for r in tools] == [
+        "launch_app", "list_apps", "list_windows", "get_window_state", "kill_app",
+    ]
+    assert tools[0]["descriptor"] == {
+        "kind": "app_path", "path": requested,
+    }
+    assert tools[0]["arguments"] == {
+        "path": requested, "additional_arguments": argv, "start_minimized": True,
+    }
+    live = {
+        "kind": "app", "bundle_id": bundle_id,
+        "name": "Example" if bundle_id is None else None, "pid": 41,
+    }
+    assert tools[2]["descriptor"] == live
+    assert tools[3]["descriptor"] == {
+        "kind": "window", "pid": 41, "window_id": 9, "app": live,
+    }
+    assert tools[4]["descriptor"] == live
+
+
+@pytest.mark.parametrize(
+    ("selector", "platform", "code"),
+    [
+        ({"path": r"C:\Apps\Example.exe"}, "darwin", "platform_unsupported"),
+        ({"path": r"C:\Apps\Example.exe"}, "linux", "platform_unsupported"),
+        ({"path": r"C:\Apps\Example.exe", "name": "Example"}, "win32", "invalid_selector"),
+        ({"path": r"C:\Apps\Example.exe", "bundleId": "example"}, "win32", "invalid_selector"),
+        ({"path": r"C:\Apps\Example.exe", "index": 0}, "win32", "invalid_selector"),
+        ({"path": "example.exe"}, "win32", "invalid_selector"),
+        ({"path": r"C:Example.exe"}, "win32", "invalid_selector"),
+        ({"path": "/tmp/example.exe"}, "win32", "invalid_selector"),
+        ({"path": r"\\server\share\example.exe"}, "win32", "invalid_selector"),
+        ({"path": None}, "win32", "invalid_selector"),
+    ],
+)
+def test_sdk_path_selector_refuses_invalid_targets_before_io(
+    tmp_path: Path, selector: dict, platform: str, code: str,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        'import { computer } from "@avibe/computer";\n'
+        f'Object.defineProperty(process, "platform", {{ value: {json.dumps(platform)} }});\n'
+        f'export default async () => computer.app({json.dumps(selector)});',
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == code
+    assert not [r for r in requests if r["path"].endswith("/request")]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"path": r"C:\Other.exe"}, {"name": "Example"}, {"bundle_id": "example"},
+        {"launch_path": r"C:\Example.exe"}, {"aumid": "example"},
+        {"urls": []}, {"reuse": True}, {"creates_new_application_instance": True},
+        {"unknown": True}, {"additional_arguments": "--flag"},
+        {"additional_arguments": [1]}, {"start_minimized": 1},
+    ],
+)
+def test_sdk_path_launch_refuses_extra_selectors_and_invalid_options(
+    tmp_path: Path, options: dict,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        'import { computer } from "@avibe/computer";\n'
+        'Object.defineProperty(process, "platform", { value: "win32" });\n'
+        'export default async () => {\n'
+        '  const target = await computer.app({ path: "C:\\\\Apps\\\\Example.exe" });\n'
+        f'  return target.launch({json.dumps(options)});\n'
+        '};',
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_selector"
+    assert not [r for r in requests if r["path"].endswith("/request")]
+
+
+@pytest.mark.parametrize(
+    "apps",
+    [
+        [],
+        [{"pid": 7, "name": "Example", "running": True}],
+        [{"pid": 41, "name": "Example", "running": False}],
+        [{"pid": 41, "name": "Example", "running": 1}],
+        [{"pid": 41, "name": "Example"}],
+        [{"pid": 41, "running": True}],
+        [{"pid": 41, "name": "", "bundle_id": "", "running": True}],
+        [{"pid": 41, "name": 123, "bundle_id": None, "running": True}],
+        [{"pid": 41, "name": "Example", "running": True}] * 2,
+        [
+            {"pid": 41, "name": "Example", "running": True},
+            {"pid": 41, "name": "Example", "running": False},
+        ],
+    ],
+)
+def test_sdk_path_launch_refuses_missing_or_ambiguous_created_pid_metadata(
+    tmp_path: Path, apps: list[dict],
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        'import { computer } from "@avibe/computer";\n'
+        'Object.defineProperty(process, "platform", { value: "win32" });\n'
+        'export default async () => {\n'
+        '  const target = await computer.app({ path: "C:\\\\Apps\\\\Example.exe" });\n'
+        '  return target.launch();\n'
+        '};',
+        apps=apps,
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_computer_use_response"
+    assert payload["error"]["ambiguous"] is True
+    assert [r["payload"]["tool"] for r in requests if r["path"].endswith("/request")] == [
+        "launch_app", "list_apps",
+    ]
+
+
+def test_sdk_path_metadata_failure_does_not_erase_the_completed_launch(
+    tmp_path: Path,
+) -> None:
+    # A refusal of the subsequent read is not proof the preceding launch did
+    # nothing. Keep the combined step ambiguous and report its original PID.
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        'import { computer } from "@avibe/computer";\n'
+        'Object.defineProperty(process, "platform", { value: "win32" });\n'
+        'export default async () => {\n'
+        '  const target = await computer.app({ path: "C:\\\\Apps\\\\Example.exe" });\n'
+        '  return target.launch();\n'
+        '};',
+        app_lookup_error="computer_use_unavailable",
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_computer_use_response"
+    assert payload["error"]["ambiguous"] is True
+    assert "Launch returned PID 41" in payload["error"]["message"]
+    assert [r["payload"]["tool"] for r in requests if r["path"].endswith("/request")] == [
+        "launch_app", "list_apps",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("pid", "running"), [(None, True), (0, True), (-1, True), (True, True), (41, False)],
+)
+def test_sdk_path_launch_refuses_missing_invalid_or_exited_created_pid(
+    tmp_path: Path, pid: int | None, running: bool,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+Object.defineProperty(process, "platform", { value: "win32" });
+export default async () => {
+  const target = await computer.app({ path: "C:\\\\Apps\\\\Example.exe" });
+  return target.launch();
+};
+""",
+        launch_pid=pid,
+        launch_metadata={"name": "Example", "running": running},
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_computer_use_response"
+    assert payload["error"]["ambiguous"] is True
+    assert [r["payload"]["tool"] for r in requests if r["path"].endswith("/request")] == [
+        "launch_app",
+    ]
+
+
+@pytest.mark.parametrize("selector", [{"name": "Mail"}, {"bundleId": "com.apple.mail"}])
+def test_sdk_name_handle_cannot_be_retargeted_by_launch_path(
+    tmp_path: Path, selector: dict,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        'import { computer } from "@avibe/computer";\n'
+        'export default async () => {\n'
+        f'  const target = await computer.app({json.dumps(selector)});\n'
+        '  return target.launch({ path: "C:\\\\Apps\\\\Example.exe" });\n'
+        '};',
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_selector"
+    assert [r["payload"]["tool"] for r in requests if r["path"].endswith("/request")] == [
+        "list_apps",
+    ]
 
 
 def test_sdk_element_double_click_uses_the_dedicated_tool(tmp_path: Path) -> None:

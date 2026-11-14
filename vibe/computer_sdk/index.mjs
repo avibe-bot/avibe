@@ -45,6 +45,8 @@ const APP_SELECTOR_FIELDS = new Set([
   "name",
   "nameContains",
 ]);
+const PATH_SELECTOR_FIELDS = new Set(["path"]);
+const PATH_LAUNCH_FIELDS = new Set(["additional_arguments", "start_minimized"]);
 const WINDOW_SELECTOR_FIELDS = new Set([
   ...BASE_SELECTOR_FIELDS,
   "title",
@@ -85,6 +87,20 @@ function appDescriptor(record) {
     bundle_id: bundleId,
     name,
   });
+}
+
+function pathDescriptor(path) {
+  return Object.freeze({ kind: "app_path", path });
+}
+
+function isExecutablePath(path) {
+  // Only a lexical check. The Controller owns filesystem canonicalization,
+  // local-drive admission. This target only launches a new process.
+  return (
+    typeof path === "string" &&
+    /^[a-z]:[\\/].+\.exe$/i.test(path) &&
+    !/[\x00-\x1f\x7f]/.test(path)
+  );
 }
 
 function windowDescriptor(app, record) {
@@ -624,7 +640,24 @@ class Computer {
   }
 
   async app(selector = {}) {
-    return sdkStep("computer.app", async () => this._resolveApp(selector));
+    return sdkStep("computer.app", async () => {
+      if (selector && typeof selector === "object" && "path" in selector) {
+        validateSelector(selector, PATH_SELECTOR_FIELDS, "Application path");
+        if (process.platform !== "win32") {
+          throw new Unavailable(
+            "Executable path targets are supported only on Windows.",
+            { code: "platform_unsupported" },
+          );
+        }
+        if (!isExecutablePath(selector.path)) {
+          invalidSelector(
+            "Application path", "requires an absolute Windows .exe path", "path",
+          );
+        }
+        return new PathAppHandle(selector.path);
+      }
+      return this._resolveApp(selector);
+    });
   }
 
   async waitFor(selector = {}, options) {
@@ -664,6 +697,11 @@ class AppHandle {
   async launch(options = {}) {
     return sdkStep("app.launch", async () => {
       const descriptor = this._descriptor;
+      if (options && typeof options === "object" && "path" in options) {
+        invalidSelector(
+          "Application launch", "cannot combine name or bundle identity with path", "path",
+        );
+      }
       const argumentsValue = { ...options };
       if (this.bundleId) {
         argumentsValue.bundle_id = this.bundleId;
@@ -737,6 +775,71 @@ class AppHandle {
     const records = Array.isArray(windows) ? windows : [];
     const record = selectWindow(records, selector);
     return new WindowHandle(this, selector, record);
+  }
+}
+
+class PathAppHandle {
+  constructor(path) {
+    this.path = path;
+    Object.defineProperty(this, "_descriptor", { value: pathDescriptor(path) });
+    Object.freeze(this);
+  }
+
+  async launch(options = {}) {
+    return sdkStep("app.launch", async () => {
+      validateSelector(options, PATH_LAUNCH_FIELDS, "Application path launch");
+      if (
+        options.additional_arguments !== undefined &&
+        (!Array.isArray(options.additional_arguments) ||
+          !Array.from(options.additional_arguments).every(
+            (argument) => typeof argument === "string",
+          ))
+      ) {
+        invalidSelector(
+          "Application path launch", "requires a string array", "additional_arguments",
+        );
+      }
+      if (
+        options.start_minimized !== undefined &&
+        typeof options.start_minimized !== "boolean"
+      ) {
+        invalidSelector(
+          "Application path launch", "requires a boolean", "start_minimized",
+        );
+      }
+      const result = await callHandleTool(this, "launch_app", {
+        ...options,
+        path: this.path,
+      });
+      const payload = structured(result);
+      if (
+        !Number.isSafeInteger(payload.pid) || payload.pid <= 0 ||
+        payload.running === false
+      ) {
+        invalidHandleResponse("The Controller did not return a live created process PID.");
+      }
+      let apps;
+      try {
+        apps = structured(await callTool("list_apps", {})).apps;
+      } catch {
+        invalidHandleResponse(
+          `Launch returned PID ${payload.pid}, but its metadata lookup failed. No app handle was returned.`,
+        );
+      }
+      const records = Array.isArray(apps) ? apps : [];
+      const matches = records.filter((record) => record?.pid === payload.pid);
+      if (matches.length !== 1 || matches[0].running !== true) {
+        invalidHandleResponse(
+          `Launch returned PID ${payload.pid}, but it is not uniquely observable as a live application. No app handle was returned.`,
+        );
+      }
+      // One metadata lookup for the original created PID, not image identity
+      // proof. Never search by name or replace an exited launcher's PID.
+      return {
+        ...effectResult(result),
+        app: new AppHandle(matches[0]),
+      };
+    });
   }
 }
 
