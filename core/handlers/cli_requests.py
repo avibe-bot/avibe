@@ -302,6 +302,10 @@ async def handle_control_request(
 ) -> dict[str, Any]:
     try:
         request = ControlRequest.from_payload(payload)
+        if request.operation == "vault.generate":
+            from core.handlers.vault_generation import handle_generate_control_request
+
+            return await handle_generate_control_request(request, run_sync=run_sync)
         if request.operation in {"vault.fetch", "vault.fetch.await"}:
             from core.handlers.vault_requests import handle_vault_control_request
 

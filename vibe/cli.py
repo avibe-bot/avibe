@@ -250,7 +250,15 @@ class VibeArgumentParser(argparse.ArgumentParser):
                     lifted_command = ["--", *parsed_args[separator_index + 1 :]]
                     parsed_args = [*parsed_args[:separator_index]]
 
-        parsed = super().parse_args(parsed_args, namespace)
+        # argparse reports leftover unknown flags on the root parser rather
+        # than this leaf; generation promises a stable, actionable help hint.
+        previous_help = self.error_help_command
+        if self.prog == "vibe" and parsed_args[:2] == ["vault", "generate"]:
+            self.error_help_command = "vibe vault generate --help"
+        try:
+            parsed = super().parse_args(parsed_args, namespace)
+        finally:
+            self.error_help_command = previous_help
         if lifted_attribute is not None:
             setattr(parsed, lifted_attribute, lifted_command)
         return parsed
@@ -9830,6 +9838,7 @@ def _vault_secret_row(secret: dict) -> dict:
             "fields": fields,
             "default_field": default_field if len(fields) > 1 else None,
             "fields_state": "corrupt" if secret.get("fields_state") == "corrupt" else None,
+            "generated": secret.get("generated") or None,
             "tags": secret.get("tags"),
             "description": secret.get("description"),
             "policy": secret.get("policy"),
@@ -10200,6 +10209,30 @@ def _vault_edit_payload_from_args(args, *, current: dict, help_command: str) -> 
     if not payload:
         raise TaskCliError("no metadata fields were provided", code="missing_metadata", help_command=help_command)
     return payload
+
+
+def cmd_vault_generate(args):
+    """Thin value-free client: generation and storage belong to the service."""
+    recipe = {"type": args.type}
+    for key in ("length", "bytes", "no_lookalikes"):
+        value = getattr(args, key, None)
+        if value is not None:
+            recipe[key] = value
+    for key in ("digits", "symbols"):
+        value = getattr(args, f"no_{key}", None)
+        if value is not None:
+            recipe[key] = not value
+    arguments = {key: getattr(args, key, None) for key in (
+        "name", "field", "protection", "description", "tag", "skill", "allow_host", "fetch_auth", "auth_name",
+    )}
+    arguments["recipe"] = recipe
+    response = _vault_control_request("vault.generate", arguments, timeout=65.0)
+    payload = response["payload"]
+    if not payload.get("ok"):
+        payload.setdefault("help_command", "vibe vault generate --help")
+    stream = sys.stdout if payload.get("ok") else sys.stderr
+    print(_json_text(payload, stream=stream), file=stream)
+    return response["exit_code"]
 
 
 def cmd_vault_edit(args):
@@ -12141,7 +12174,8 @@ def _vault_control_request(operation: str, arguments: dict, *, timeout: float) -
         response = internal_client.control_request_sync(new_request(operation, arguments).to_payload(), timeout=timeout)
         return validate_vault_result(response, operation)
     except internal_client.InternalServerUnavailable:
-        return failure("service_unavailable", "Avibe service unavailable; Vault fetch not executed")
+        action = "generation" if operation == "vault.generate" else "fetch"
+        return failure("service_unavailable", f"Avibe service unavailable; Vault {action} not executed")
     except (internal_client.InternalServerTimeout, ValueError):
         return failure("execution_unknown", "Vault request result could not be confirmed; do not replay it", execution="execution_unknown")
 
@@ -19941,6 +19975,38 @@ def build_parser():
     )
     _add_json_noop(vault_remove_parser)
 
+    vault_generate_parser = vault_subparsers.add_parser(
+        "generate",
+        help="Generate and seal a new Standard secret without seeing its value",
+        description=(
+            "The running Avibe service asks avault to generate and seal one static Standard record. "
+            "No value is returned. Creates a new secret, or an explicitly named NEW field of an existing "
+            "Standard static secret. Never overwrites or rotates values. Use vibe vault request for "
+            "existing values or Protected secrets. Requires editor capability and a compatible service/avault."
+        ),
+        epilog=(
+            "Examples: vibe vault generate LOGIN --field password --length 32 --no-lookalikes; "
+            "vibe vault generate LOGIN --field api_token --type hex --bytes 32"
+        ),
+        error_help_command="vibe vault generate --help",
+    )
+    vault_generate_parser.add_argument("name", help="New secret name, or existing static Standard secret for a new field")
+    vault_generate_parser.add_argument("--field", help="New field label; new secrets default to value")
+    vault_generate_parser.add_argument("--type", choices=["password", "hex", "base64"], default="password", help="Format (default password)")
+    vault_generate_parser.add_argument("--length", type=int, help="Password characters, 12..128 (default 24); password only")
+    vault_generate_parser.add_argument("--bytes", type=int, help="Random bytes, 16..64 (default 32); hex/base64 only")
+    vault_generate_parser.add_argument("--no-digits", action="store_true", default=None, help="Exclude digits; password only")
+    vault_generate_parser.add_argument("--no-symbols", action="store_true", default=None, help="Exclude symbols; password only")
+    vault_generate_parser.add_argument("--no-lookalikes", action="store_true", default=None, help="Exclude 0 O 1 l I; password only")
+    vault_generate_parser.add_argument("--description", help="Set description")
+    vault_generate_parser.add_argument("--tag", action="append", metavar="TAG[,TAG2]", help="Replace normal tags; preserve skill tags (repeatable)")
+    vault_generate_parser.add_argument("--skill", action="append", metavar="SKILL[,SKILL2]", help="Replace skill tags; preserve normal tags (repeatable)")
+    vault_generate_parser.add_argument("--allow-host", action="append", metavar="HOST[,HOST2]", help="Replace allowed fetch hosts (repeatable)")
+    vault_generate_parser.add_argument("--fetch-auth", choices=["bearer", "header", "query"], help="Set fetch credential injection mode")
+    vault_generate_parser.add_argument("--auth-name", help="Header/query name for --fetch-auth header/query")
+    vault_generate_parser.add_argument("--protection", help=argparse.SUPPRESS)
+    _add_json_noop(vault_generate_parser)
+
     vault_edit_parser = vault_subparsers.add_parser(
         "edit",
         help="Edit value-free secret metadata",
@@ -21293,6 +21359,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("vault", "request"): "editor",
     ("vault", "inject"): "editor",
     ("vault", "export"): "editor",
+    ("vault", "generate"): "editor",
     ("vault", "edit"): "editor",
     ("vault", "remove"): "editor",
     ("vault", "key", "export"): "owner",
@@ -21479,8 +21546,8 @@ def main():
             # The service resolves and checks a named mutation's authority. Doing
             # it here would open SQLite in every otherwise thin CLI process.
             _dispatch_parsed_command(parser, args)
-        if args.command == "vault" and args.vault_command == "fetch":
-            sys.exit(cmd_vault_fetch(args))
+        if args.command == "vault" and args.vault_command in {"fetch", "generate"}:
+            sys.exit(cmd_vault_generate(args) if args.vault_command == "generate" else cmd_vault_fetch(args))
 
     from vibe.authorization import invocation_authority
 
@@ -21680,6 +21747,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_vault_find(args))
         if args.vault_command == "tags":
             sys.exit(cmd_vault_tags(args))
+        if args.vault_command == "generate":
+            sys.exit(cmd_vault_generate(args))
         if args.vault_command == "edit":
             sys.exit(cmd_vault_edit(args))
         if args.vault_command == "remove":
