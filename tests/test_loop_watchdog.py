@@ -292,11 +292,60 @@ def test_fixed_vocabulary_covers_attribution_paths_and_resolves_late_modules(cap
     assert not event["truncated"]
 
 
+def test_fixed_label_resolution_never_dispatches_metaclass_or_member_descriptors(monkeypatch) -> None:
+    # Bypassing __getattribute__ is not sufficient: type.__getattribute__ still
+    # honors a metaclass __dict__ descriptor. Use the canonical built-in one.
+    from types import ModuleType
+    calls = []
+    class Meta(type):
+        @property
+        def __dict__(cls):
+            calls.append("metaclass")
+            raise AssertionError("descriptor must not run")
+    class Owner(metaclass=Meta):
+        @property
+        def wait(self):
+            calls.append("member")
+            raise AssertionError("descriptor must not run")
+        def meta(self):
+            pass
+    module = ModuleType("core.agent_core.tools.jobs")
+    module.LocalJobHost = Owner
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    watchdog = EventLoopWatchdog(SimpleNamespace())
+    watchdog._refresh_code_labels()
+    assert calls == []
+    assert watchdog._code_labels[id(Owner.meta.__code__)][1] == (
+        "core/agent_core/tools/jobs.py", "LocalJobHost.meta",
+    )
+
+
+def test_closed_loop_still_drains_pending_slow_gc(caplog) -> None:
+    # The closed-loop scheduling path exits before ordinary reporting, but
+    # must retain the old final-drain behavior rather than lose a queued GC.
+    caplog.set_level(logging.WARNING, logger="core.loop_watchdog")
+    loop = asyncio.new_event_loop()
+    loop.close()
+    now = [0.0]
+    watchdog = EventLoopWatchdog(loop, monotonic=lambda: now[0])
+    info = {"generation": 2, "collected": 1, "uncollectable": 0}
+    watchdog._observe_gc("start", info)
+    now[0] = 0.3
+    watchdog._observe_gc("stop", info)
+    watchdog._stopped = SimpleNamespace(wait=lambda timeout: False)
+    watchdog._run()
+    assert not watchdog._gc_reports
+    (message,) = _messages(caplog, logging.WARNING)
+    assert message.startswith("Slow garbage collection: duration_ms=300.0 generation=2 collected=1 ")
+
+
 def test_gc_flags_and_wake_lateness_precede_reporting_and_exclude_previous_work(caplog, monkeypatch) -> None:
     # Deterministic scalar clock: reporting consumes 100s, but that is not the
     # next wait's scheduler lateness. No real delay, load or collection occurs.
     caplog.set_level(logging.INFO, logger="core.loop_watchdog")
     now = [0.0]
+    unix = [1_700_000_000.0]
+    monkeypatch.setattr(watchdog_module.time, "time", lambda: unix[0])
     callbacks = []
     watchdog = EventLoopWatchdog(SimpleNamespace(_thread_id=123, call_soon_threadsafe=callbacks.append),
                                  poll_seconds=1, monotonic=lambda: now[0])
@@ -309,16 +358,24 @@ def test_gc_flags_and_wake_lateness_precede_reporting_and_exclude_previous_work(
         if delay is None:
             return True
         now[0] += delay
+        unix[0] += delay
         waits.append(now[0])
         if len(waits) == 2:
             watchdog._observe_gc("stop", info)
             callbacks.pop()()  # recovery before a new independent stall
         return False
     watchdog._stopped = SimpleNamespace(wait=wait)
+    original_refresh = watchdog._refresh_code_labels
+    def delayed_resolution():
+        original_refresh()
+        now[0] += 0.25
+        unix[0] += 0.25
+    monkeypatch.setattr(watchdog, "_refresh_code_labels", delayed_resolution)
     original_report_gc = watchdog._report_gc
     def slow_reporting():
         original_report_gc()
         now[0] += 100.0
+        unix[0] += 100.0
     monkeypatch.setattr(watchdog, "_report_gc", slow_reporting)
     monkeypatch.setattr(sys, "_current_frames", lambda: {})
     watchdog._run()
@@ -328,6 +385,12 @@ def test_gc_flags_and_wake_lateness_precede_reporting_and_exclude_previous_work(
     assert [event["gc_active"] for event in events] == [True, False]
     assert [event["watchdog_wake_lateness_ms"] for event in events] == [1500.0, 2000.0]
     assert [event["lag_ms"] for event in events] == [2500.0, 103000.0]
+    # Sampling is after label resolution, whereas lag/lateness remain the
+    # pre-report wake observations; the absolute time survives offline export.
+    assert [event["sampled_at_unix"] for event in events] == [1_700_000_002.75, 1_700_000_207.0]
+    exported = [parse_watchdog_event(RedactingFormatter(APPLICATION_LOG_FORMAT).format(record))
+                for record in caplog.records if EVENT_MARKER in record.getMessage()]
+    assert [event["sampled_at_unix"] for event in exported] == [1_700_000_002.75, 1_700_000_207.0]
     assert any("Slow garbage collection: duration_ms=" in msg for msg in _messages(caplog, logging.WARNING))
 
 
@@ -390,6 +453,8 @@ def test_offline_export_rejects_unsafe_unknown_malformed_and_legacy_lines(caplog
         {"version": True}, {"version": 2}, {"kind": "unknown"}, {"private": "secret"},
         {"loop_id": True}, {"loop_thread_id": "private name"}, {"lag_ms": float("nan")},
         {"watchdog_wake_lateness_ms": float("inf")}, {"gc_active": "secret"},
+        {"sampled_at_unix": float("nan")}, {"sampled_at_unix": float("inf")},
+        {"sampled_at_unix": -1}, {"sampled_at_unix": True}, {"sampled_at_unix": "private"},
         {"sample_status": "unknown"}, {"frames": {}}, {"truncated": 1},
         {"sample_status": "ok", "frames": [{"file": "/private/a.py", "function": "secret", "line": 42}]},
         {"sample_status": "ok", "frames": [{"file": "copy.py", "function": "private", "line": 42}]},

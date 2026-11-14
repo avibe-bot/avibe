@@ -9,6 +9,8 @@ explicitly redacted. The JSON event is limited to 8 KiB. C calls themselves and
 unlisted or dynamically generated Python code are deliberate blind spots.
 
 GC-active at sampling and watchdog wake lateness are signals, not causality.
+``lag_ms`` is observed at wake; ``sampled_at_unix`` is taken after bounded label
+resolution, adjacent to the GC-state/frame snapshot, for offline correlation.
 Wake lateness measures only the timed wait, before any reporting work; it cannot
 distinguish OS scheduling, GIL contention or GC. Process-wide GC timing retains
 the newest 64 collections longer than 200 ms, without heap census or GC policy
@@ -145,7 +147,7 @@ class EventLoopWatchdog:
                 try:
                     self._loop.call_soon_threadsafe(self._answer)
                 except RuntimeError:
-                    return  # the loop is closed
+                    break  # the loop is closed; still drain queued GC reports below
             try:
                 if not self._stall_reported and now - answered_at >= self._stall_seconds:
                     self._stall_reported = True
@@ -171,7 +173,7 @@ class EventLoopWatchdog:
                 if type(owner) is ModuleType:
                     owner = ModuleType.__getattribute__(owner, "__dict__").get(part)
                 elif isinstance(owner, type):
-                    owner = type.__getattribute__(owner, "__dict__").get(part)
+                    owner = type.__dict__["__dict__"].__get__(owner).get(part)
                 else:
                     owner = None
                     break
@@ -188,7 +190,6 @@ class EventLoopWatchdog:
     def _loop_stack(self, loop_thread: int | None) -> tuple[list[dict], str, bool]:
         frame = all_frames = code = None
         try:
-            self._refresh_code_labels()  # fixed unresolved entries only; no healthy-tick work
             if loop_thread is None:
                 return [], "missing", False
             # CPython exposes only an all-thread snapshot. Drop every other
@@ -217,13 +218,19 @@ class EventLoopWatchdog:
             frame = all_frames = code = None
 
     def _report_stall(self, lag: float, wake_lateness: float) -> None:
-        gc_active = self._gc_started_at is not None
+        try:
+            self._refresh_code_labels()  # fixed unresolved entries only; no healthy-tick work
+        except Exception:
+            # Existing fixed labels remain safe; unresolved frames stay redacted.
+            pass
         loop_thread = self._loop_thread_id or getattr(self._loop, "_thread_id", None)
+        sampled_at_unix = time.time()
+        gc_active = self._gc_started_at is not None
         frames, status, truncated = self._loop_stack(loop_thread)
         event = {
             "version": 1, "kind": "loop_stall", "loop_id": id(self._loop),
             "loop_thread_id": loop_thread, "watchdog_thread_id": threading.get_ident(),
-            "lag_ms": round(lag * 1000, 3), "gc_active": gc_active,
+            "lag_ms": round(lag * 1000, 3), "sampled_at_unix": sampled_at_unix, "gc_active": gc_active,
             "watchdog_wake_lateness_ms": round(wake_lateness * 1000, 3),
             "sample_status": status, "frames": frames, "truncated": truncated,
         }

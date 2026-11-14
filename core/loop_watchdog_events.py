@@ -49,7 +49,7 @@ _LOG_LINE = re.compile(
 )
 _EVENT_KEYS = frozenset((
     "version", "kind", "loop_id", "loop_thread_id", "watchdog_thread_id", "lag_ms",
-    "gc_active", "watchdog_wake_lateness_ms", "sample_status", "frames", "truncated",
+    "sampled_at_unix", "gc_active", "watchdog_wake_lateness_ms", "sample_status", "frames", "truncated",
 ))
 
 
@@ -57,7 +57,7 @@ def _integer(value: object, maximum: int = 2**64 - 1) -> bool:
     return type(value) is int and 0 <= value <= maximum
 
 
-def _duration(value: object) -> bool:
+def _nonnegative_number(value: object) -> bool:
     return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1e15
 
 
@@ -76,6 +76,8 @@ def parse_watchdog_event(line: str) -> dict | None:
     Frames are innermost-first. Redacted frames still count toward the depth
     limit; ``truncated`` means the stack is incomplete. GC-active and watchdog
     wake lateness are contemporaneous signals, not claims about stall causality.
+    ``sampled_at_unix`` can be joined to slow-GC end times; heartbeat lag is
+    observed at the preceding wake, not recomputed at this sample timestamp.
     No raw line, logger envelope, exception text or unknown field is returned.
     """
     if not isinstance(line, str) or len(line) > MAX_EVENT_BYTES + 512:
@@ -96,7 +98,7 @@ def parse_watchdog_event(line: str) -> dict | None:
             return None
         if event["loop_thread_id"] is not None and not _integer(event["loop_thread_id"]):
             return None
-        if not all(_duration(event[key]) for key in ("lag_ms", "watchdog_wake_lateness_ms")):
+        if not all(_nonnegative_number(event[key]) for key in ("lag_ms", "watchdog_wake_lateness_ms", "sampled_at_unix")):
             return None
         if any(type(event[key]) is not bool for key in ("gc_active", "truncated")):
             return None
