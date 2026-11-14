@@ -7,6 +7,7 @@ from pathlib import Path
 from runpy import run_path
 import shutil
 import subprocess
+import sys
 import tarfile
 
 import pytest
@@ -17,6 +18,206 @@ from scripts import desktop_release
 _SCRIPT = run_path(
     str(Path(__file__).parents[1] / "desktop/scripts/prepare-cua-driver.py")
 )
+
+
+def windows_pe_bytes() -> bytes:
+    """A bounded AMD64 PE32+ fixture for packaging checks, not executable code."""
+    image = bytearray(512)
+    image[:2] = b"MZ"
+    image[60:64] = (64).to_bytes(4, "little")
+    image[64:68] = b"PE\x00\x00"
+    image[68:70] = (0x8664).to_bytes(2, "little")
+    image[70:72] = (1).to_bytes(2, "little")
+    image[84:86] = (112).to_bytes(2, "little")
+    image[86:88] = (0x0002).to_bytes(2, "little")
+    image[88:90] = (0x020B).to_bytes(2, "little")
+    return bytes(image)
+
+
+@pytest.mark.parametrize("case", ["amd64", "arm64", "x86", "dll", "dos", "signature", "truncated", "optional"])
+def test_windows_driver_requires_an_amd64_pe_executable(tmp_path: Path, case: str) -> None:
+    """A renamed ARM64/32-bit/DLL or malformed build must never enter x64 resources."""
+    image = bytearray(windows_pe_bytes())
+    if case in {"arm64", "x86"}:
+        image[68:70] = (0xAA64 if case == "arm64" else 0x014C).to_bytes(2, "little")
+    elif case == "dll":
+        image[86:88] = (0x2002).to_bytes(2, "little")
+    elif case == "dos":
+        image[:2] = b"no"
+    elif case == "signature":
+        image[64:68] = b"nope"
+    elif case == "truncated":
+        image = image[:90]
+    elif case == "optional":
+        image[88:90] = (0x010B).to_bytes(2, "little")
+    binary = tmp_path / "cua-driver.exe"
+    binary.write_bytes(image)
+    if case == "amd64":
+        desktop_release.verify_windows_driver_pe(binary)
+    else:
+        with pytest.raises(ValueError, match="PE"):
+            desktop_release.verify_windows_driver_pe(binary)
+
+
+def test_windows_snapshot_hash_survives_git_autocrlf_checkout(tmp_path: Path) -> None:
+    """Git's Windows checkout filter must preserve the bytes pinned by the manifest."""
+    root = Path(__file__).parents[1]
+    relative = Path("desktop/cua-driver/tools-windows-v0.31.0.json")
+    snapshot = tmp_path / relative
+    snapshot.parent.mkdir(parents=True)
+    shutil.copyfile(root / ".gitattributes", tmp_path / ".gitattributes")
+    shutil.copyfile(root / relative, snapshot)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    command = ["git", "-C", str(tmp_path), "-c", "core.autocrlf=true"]
+    subprocess.run([*command, "add", ".gitattributes", relative.as_posix()], check=True)
+    snapshot.unlink()
+    subprocess.run([*command, "checkout-index", "--all", "--force"], check=True)
+    manifest = _SCRIPT["load_manifest"]()
+    assert _SCRIPT["digest"](snapshot) == manifest["driver"]["windows"]["tool_snapshot_sha256"]
+    assert snapshot.read_bytes() == (root / relative).read_bytes()
+
+
+def test_windows_documentation_is_utf8_even_under_a_legacy_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use real subprocess decoding; CP1252 must not corrupt the pinned schema descriptions."""
+    tools = json.loads(_SCRIPT["WINDOWS_TOOL_SNAPSHOT"].read_text(encoding="utf-8"))["tools"]
+    docs = {"tools": [{"name": tool["name"], "input_schema": tool["inputSchema"]} for tool in tools]}
+    docs_path = tmp_path / "docs.json"
+    docs_path.write_text(json.dumps(docs, ensure_ascii=False), encoding="utf-8")
+    assert any(byte >= 128 for byte in docs_path.read_bytes())
+    version_path = tmp_path / "version.txt"
+    version_path.write_bytes(b"cua-driver 0.31.0\n")
+    original = subprocess.check_output
+
+    def invoke(command: list[str], **kwargs: object) -> str:
+        path = version_path if command[1:] == ["--version"] else docs_path
+        return original([
+            sys.executable, "-c", "import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())", str(path),
+        ], **kwargs)
+
+    # Exercise the legacy Windows default independent of this test host's locale.
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    monkeypatch.setattr(subprocess, "check_output", invoke)
+    _SCRIPT["verify_windows_built_contract"](tmp_path / "cua-driver.exe")
+
+
+def test_windows_snapshot_keeps_shared_policy_but_not_macos_input_schemas() -> None:
+    manifest = _SCRIPT["load_manifest"]()
+    snapshot = _SCRIPT["load_windows_snapshot"](manifest)
+    tools = {tool["name"]: tool for tool in snapshot["tools"]}
+    assert len(tools) == 29
+    assert "delivery_mode" in tools["click"]["inputSchema"]["properties"]
+    assert "click_mode" not in tools["click"]["inputSchema"]["properties"]
+    assert "path" in tools["launch_app"]["inputSchema"]["properties"]
+    assert snapshot["target"] == "x86_64-pc-windows-msvc"
+
+
+@pytest.mark.parametrize("mutation", [None, "macos-inputs", "missing-tool", "version"])
+def test_windows_built_contract_checks_all_allowed_tool_schemas(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mutation: str | None,
+) -> None:
+    """The macOS-only raw-click check cannot validate the Windows surface."""
+    snapshot_path = _SCRIPT["TOOL_SNAPSHOT"] if mutation == "macos-inputs" else _SCRIPT["WINDOWS_TOOL_SNAPSHOT"]
+    tools = json.loads(snapshot_path.read_text())["tools"]
+    docs = {"tools": [{"name": tool["name"], "input_schema": tool["inputSchema"]} for tool in tools]}
+    if mutation == "missing-tool":
+        docs["tools"].pop()
+
+    def output(command: list[str], **kwargs: object) -> str:
+        if command[1:] == ["--version"]:
+            return "cua-driver 0.47.8" if mutation == "version" else "cua-driver 0.31.0\n"
+        assert command[1:] == ["dump-docs", "--type", "mcp"]
+        assert kwargs["stderr"] is None
+        return json.dumps(docs)
+
+    monkeypatch.setattr(subprocess, "check_output", output)
+    if mutation:
+        with pytest.raises(ValueError, match="Windows Cua Driver"):
+            _SCRIPT["verify_windows_built_contract"](tmp_path / "cua-driver.exe")
+    else:
+        _SCRIPT["verify_windows_built_contract"](tmp_path / "cua-driver.exe")
+
+
+@pytest.mark.parametrize("target", ["x86_64-pc-windows-msvc", "aarch64-apple-darwin", "x86_64-apple-darwin"])
+def test_source_build_selects_only_the_pinned_driver_and_native_suffix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: str,
+) -> None:
+    """Windows cargo output has .exe; macOS keeps its existing command and path."""
+    script = _SCRIPT["build_driver"].__globals__
+    monkeypatch.setitem(script, "ROOT", tmp_path)
+    commands: list[list[str]] = []
+    checked: list[tuple[Path, str]] = []
+    built = tmp_path / "target/cua-driver-patched" / target / "release" / (
+        "cua-driver.exe" if target == "x86_64-pc-windows-msvc" else "cua-driver"
+    )
+
+    def cargo(command: list[str], **kwargs: object) -> None:
+        commands.append(command)
+        assert kwargs["cwd"] == tmp_path / "source/libs/cua-driver/rust"
+        assert kwargs["env"]["CARGO_INCREMENTAL"] == "0"
+        assert kwargs["env"]["CARGO_TARGET_DIR"] == str(tmp_path / "target/cua-driver-patched")
+        built.parent.mkdir(parents=True)
+        built.write_bytes(b"compiler fixture")
+
+    monkeypatch.setattr(subprocess, "run", cargo)
+    monkeypatch.setitem(script, "verify_architecture", lambda binary, triple: checked.append((binary, triple)))
+    result = _SCRIPT["build_driver"]({}, tmp_path / "source", target)
+    assert result == built
+    assert commands == [["cargo", "build", "--locked", "--release", "-p", "cua-driver", "--bin", "cua-driver", "--target", target]]
+    assert checked == [(built, target)]
+
+
+def test_windows_preparation_uses_full_patch_without_macos_signing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A Windows prepare/reuse must keep the source-build provenance and skip codesign."""
+    target = "x86_64-pc-windows-msvc"
+    manifest = _SCRIPT["load_manifest"]()
+    patch = Path("desktop/cua-driver") / manifest["driver"]["patch"]["file"]
+    built = tmp_path / "cua-driver.exe"
+    built.write_bytes(windows_pe_bytes())
+    script = _SCRIPT["prepare"].__globals__
+    events: list[str] = []
+    monkeypatch.setitem(script, "extract_driver_source", lambda *_: tmp_path / "source")
+
+    def apply(*_: object) -> Path:
+        events.append("full-patch")
+        return patch
+
+    def build(*args: object) -> Path:
+        assert args[-1] == target
+        events.append("build")
+        return built
+
+    monkeypatch.setitem(script, "apply_driver_patch", apply)
+    monkeypatch.setitem(script, "build_driver", build)
+    monkeypatch.setitem(script, "verify_windows_built_contract", lambda _: events.append("windows-contract"))
+    monkeypatch.setitem(script, "sign_adhoc", lambda _: pytest.fail("Windows must not be signed"))
+    monkeypatch.setitem(script, "verify_code_signature", lambda _: pytest.fail("Windows must not use codesign"))
+    monkeypatch.setitem(script, "verify_built_contract", lambda _: pytest.fail("Windows must not use macOS schemas"))
+    output = _SCRIPT["prepare"](target, source_archive=tmp_path / "source.tar.gz", output_dir=tmp_path / "binaries")
+    assert output.name == "cua-driver-x86_64-pc-windows-msvc.exe"
+    assert events == ["full-patch", "build", "windows-contract"]
+    provenance_path = output.with_name(output.name + ".provenance.json")
+    provenance = desktop_release.driver_provenance(target, output, provenance_path, packaged_driver=output)
+    assert provenance["schema_version"] == 2
+    assert provenance["build_origin"] == "repository_patch_built"
+    assert provenance["tool_snapshot_sha256"] == manifest["driver"]["windows"]["tool_snapshot_sha256"]
+    assert provenance["patch_sha256"] == manifest["driver"]["patch"]["sha256"]
+    assert "packaged_cdhash" not in provenance
+    assert _SCRIPT["prepare"](target, output_dir=output.parent, reuse=True) == output
+    assert events == ["full-patch", "build", "windows-contract", "windows-contract"]
+    output.write_bytes(b"wrong executable")
+    _SCRIPT["prepare"](target, source_archive=tmp_path / "source.tar.gz", output_dir=output.parent, reuse=True)
+    assert events[-3:] == ["full-patch", "build", "windows-contract"]
+
+
+@pytest.mark.parametrize("target", ["aarch64-pc-windows-msvc", "x86_64-unknown-linux-gnu"])
+def test_preparation_rejects_unapproved_targets_before_staging(tmp_path: Path, target: str) -> None:
+    with pytest.raises(ValueError, match="unsupported"):
+        _SCRIPT["prepare"](target, output_dir=tmp_path / "binaries")
+    assert not (tmp_path / "binaries").exists()
 
 
 def test_managed_policy_matches_the_pinned_tool_snapshot() -> None:

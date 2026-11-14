@@ -214,7 +214,10 @@ jobs:
             --installer "$env:CERTUM_INSTALLER" `
             --runtime windows-input/runtime `
             --output desktop-package `
-            --signing certum-authenticode
+            --signing certum-authenticode `
+            --prepared-driver windows-input/computer-use/cua-driver.exe `
+            --driver windows-input/computer-use/cua-driver.exe `
+            --driver-provenance-path windows-input/computer-use/driver-provenance.json
 
       - name: Upload signed Windows artifact for updater finalization
         if: needs.resolve-desktop-release.outputs.updater_enabled == 'true'
