@@ -172,8 +172,11 @@ kernel, SDK, saved flows, and safety rules above are the same.
   local drive (such as `C:\...\app.exe`); network, relative, and other paths
   are refused. To open an app the owner named, first check `observe apps`: if
   it is already running, attach to its window instead of launching. Otherwise
-  take a `desktop` entry's `launch_path`, pass its `.exe` path as the launch
-  `path`, and pass any arguments after it as additional arguments. Never ask
+  read a `desktop` entry's `launch_path`: it is the shortcut's whole command
+  line, the `.exe` path first (quoted when it contains spaces), then any
+  arguments. Split it yourself; never pass it whole, and never expand `%VAR%`
+  references or run it through a shell. Then launch it by that `.exe` path
+  with those arguments. A `shell:appsFolder` entry is a Store app and cannot be launched. Never ask
   the owner for a path, and never guess or build one yourself.
 - Store (`uwp`) apps, apps with no trustworthy `.exe` path, links, and files
   that open in their default app cannot be launched. Avibe also refuses a
