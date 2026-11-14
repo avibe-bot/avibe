@@ -81,12 +81,12 @@ patch, whose raw selector stays background-only.
 Patch: `patches/0002-windows-security-boundary.patch`
 
 Apply this supplement only to the pinned source **after the complete, unchanged
-0001 patch**. Production `sources.json`, tool snapshots, and preparation still
-select 0001 alone; this source foundation does not enable Windows Computer Use.
-The hosted Windows source-test step explicitly applies both patches, records
-source/patch/test-binary hashes, and requires all 11 selected native tests with
-JUnit no-skip/count evidence. Passing those fixtures is not signed-installer or
-interactive GUI acceptance.
+0001 patch**. Production `sources.json`, the Windows tool snapshot, and
+preparation now select the ordered 0001 → 0002 chain; macOS preparation still
+selects 0001 alone. The hosted Windows source-test step explicitly applies both
+patches, records source/patch/test-binary hashes, and requires all 11 selected
+native tests with JUnit no-skip/count evidence. Passing those fixtures is not
+signed-installer or interactive GUI acceptance.
 
 The supplement refuses elevated, above-Medium, UIAccess, or unreadable driver
 tokens at startup/readmission, removes elevation workarounds, and makes protected

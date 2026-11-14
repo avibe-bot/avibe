@@ -114,9 +114,9 @@ def test_production_capture_is_wired_into_the_existing_windows_job():
 def test_windows_manifest_records_ordered_final_patch():
     manifest = json.loads((ROOT / "desktop/cua-driver/sources.json").read_text())
     windows = manifest["driver"]["windows"]
-    assert windows["patch_order"] == [
-        "patches/0001-macos-raw-single-click.patch",
-        "patches/0002-windows-security-boundary.patch",
+    assert windows["patches"] == [
+        {"file": windows["patch_order"][0], "sha256": "c464b2cbd3416aeb15dffee396bc0dcf5aa0b01748af8dd79bd84c9a2f58125e"},
+        {"file": windows["patch_order"][1], "sha256": "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f"},
     ]
     assert windows["patch"]["sha256"] == "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f"
 

@@ -16,7 +16,7 @@
     "windows": {
       "target": "x86_64-pc-windows-msvc",
       "tool_snapshot": "tools-windows-v0.31.0.json",
-      "tool_snapshot_sha256": "15bfc894df97f82e891ef251dec569e1cfff1ffd41148269eb681758d0bbd74d",
+      "tool_snapshot_sha256": "0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293",
       "patch_order": [
         "patches/0001-macos-raw-single-click.patch",
         "patches/0002-windows-security-boundary.patch"
@@ -26,7 +26,17 @@
         "file": "patches/0002-windows-security-boundary.patch",
         "sha256": "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f",
         "contract": "ordinary-user Windows Computer Use admission; conventional MCP wire; no privileged fallback"
-      }
+      },
+      "patches": [
+        {
+          "file": "patches/0001-macos-raw-single-click.patch",
+          "sha256": "c464b2cbd3416aeb15dffee396bc0dcf5aa0b01748af8dd79bd84c9a2f58125e"
+        },
+        {
+          "file": "patches/0002-windows-security-boundary.patch",
+          "sha256": "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f"
+        }
+      ]
     },
     "source": {
       "archive": "cua-5272e492d61b96caf08e3bf434d91126c1f3dccc.tar.gz",

@@ -50,7 +50,7 @@ def secret_references(value):
 def driver_provenance_payload(target, prepared_binary_sha256):
     pinned_driver = release.pinned_driver_source(target)
     arch = release.TARGETS[target][1]
-    return {
+    payload = {
         "schema_version": 2,
         "version": pinned_driver["version"],
         "tag": pinned_driver["tag"],
@@ -67,6 +67,10 @@ def driver_provenance_payload(target, prepared_binary_sha256):
         "prepared_binary_sha256": prepared_binary_sha256,
         "build_origin": "repository_patch_built",
     }
+    if target == "x86_64-pc-windows-msvc":
+        payload["patch_order"] = pinned_driver["patch_order"]
+        payload["patch_chain"] = pinned_driver["patch_chain"]
+    return payload
 
 
 def assemble_assets(root, source=SOURCE, *, tag=TAG):

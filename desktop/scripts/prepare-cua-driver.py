@@ -42,6 +42,32 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
+def windows_patch_chain(manifest: dict) -> list[dict[str, str]]:
+    windows = manifest["driver"]["windows"]
+    chain = windows.get("patches")
+    order = windows.get("patch_order")
+    if not isinstance(chain, list) or not isinstance(order, list) or not chain:
+        raise ValueError("invalid ordered Windows Cua Driver patch chain")
+    if [item.get("file") for item in chain if isinstance(item, dict)] != order:
+        raise ValueError("Windows Cua Driver patch order does not match its chain")
+    if any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("file"), str)
+        or not isinstance(item.get("sha256"), str)
+        or SHA256.fullmatch(item["sha256"]) is None
+        for item in chain
+    ):
+        raise ValueError("invalid Windows Cua Driver patch chain entry")
+    return chain
+
+
+def patch_chain_for_target(manifest: dict, target: str) -> list[dict[str, str]]:
+    if target == WINDOWS_TARGET:
+        return windows_patch_chain(manifest)
+    patch = manifest["driver"]["patch"]
+    return [{"file": patch["file"], "sha256": patch["sha256"]}]
+
+
 def load_manifest(path: Path = SOURCES) -> dict:
     payload = json.loads(path.read_text(encoding="utf-8"))
     driver = payload.get("driver")
@@ -102,6 +128,10 @@ def load_manifest(path: Path = SOURCES) -> dict:
     if "perception" in json.dumps(payload).lower():
         raise ValueError("Cua perception assets must not enter the Phase 1 package")
     verify_managed_policy_surface()
+    for entry in windows_patch_chain(payload):
+        patch_path = path.parent / entry["file"]
+        if not patch_path.is_file() or digest(patch_path) != entry["sha256"]:
+            raise ValueError("pinned Windows Cua Driver patch chain hash mismatch")
     load_windows_snapshot(payload)
     return payload
 
@@ -127,8 +157,8 @@ def load_windows_snapshot(manifest: dict) -> dict:
         or snapshot.get("driver_version") != driver["version"]
         or snapshot.get("source_tag") != driver["tag"]
         or snapshot.get("source_commit") != driver["source_commit"]
-        or snapshot.get("source_variant") != driver["patch"]["variant"]
-        or snapshot.get("patch_sha256") != driver["patch"]["sha256"]
+        or snapshot.get("source_variant") != windows["patch"]["variant"]
+        or snapshot.get("patch_sha256") != windows["patch"]["sha256"]
         or digest(WINDOWS_TOOL_SNAPSHOT) != windows["tool_snapshot_sha256"]
     ):
         raise ValueError("pinned Windows Cua Driver tool snapshot hash or source mismatch")
@@ -239,6 +269,16 @@ def apply_driver_patch(manifest: dict, source_root: Path) -> Path:
     return patch
 
 
+def apply_driver_patches(manifest: dict, source_root: Path, target: str) -> list[Path]:
+    """Apply the complete ordered patch chain for the requested target."""
+    patches: list[Path] = []
+    for entry in patch_chain_for_target(manifest, target):
+        selected = json.loads(json.dumps(manifest))
+        selected["driver"]["patch"] = entry
+        patches.append(apply_driver_patch(selected, source_root))
+    return patches
+
+
 def build_driver(manifest: dict, source_root: Path, target: str) -> Path:
     workspace = source_root / "libs" / "cua-driver" / "rust"
     target_dir = ROOT / "target" / "cua-driver-patched"
@@ -298,18 +338,26 @@ def verify_built_contract(binary: Path) -> None:
 
 
 def verify_windows_built_contract(binary: Path) -> None:
-    """Windows inputs differ from macOS; check the captured, policy-filtered schemas."""
+    """Check the final Windows binary against the captured tools/list surface."""
     if run([str(binary), "--version"], encoding="utf-8").strip() != "cua-driver 0.31.0":
         raise ValueError("patched Windows Cua Driver reports an unexpected version")
     try:
-        docs = json.loads(run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False, encoding="utf-8"))
-        actual = {tool["name"]: tool["input_schema"] for tool in docs["tools"]}
+        capture = run_path(str(ROOT / "scripts" / "capture-windows-cua-driver.py"))
+        tools_response, _tools_raw, _tools_stderr = capture["run_tools_list"](binary, timeout=120)
+        actual_tools = tools_response["result"]["tools"]
+        actual_by_name = {tool["name"]: tool for tool in actual_tools}
+        docs = json.loads(
+            run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False, encoding="utf-8")
+        )
+        docs_by_name = {tool["name"]: tool for tool in docs["tools"]}
         snapshot = json.loads(WINDOWS_TOOL_SNAPSHOT.read_text(encoding="utf-8"))
-        expected = {tool["name"]: tool["inputSchema"] for tool in snapshot["tools"]}
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise ValueError("patched Windows Cua Driver tool schemas are unreadable") from exc
-    if any(actual.get(name) != schema for name, schema in expected.items()):
-        raise ValueError("patched Windows Cua Driver does not match the pinned tool snapshot")
+        expected = {tool["name"]: tool for tool in snapshot["tools"]}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("patched Windows Cua Driver tool metadata is unreadable") from exc
+    if any(actual_by_name.get(name) != tool for name, tool in expected.items()):
+        raise ValueError("patched Windows Cua Driver tools/list does not match the pinned tool snapshot")
+    if any(docs_by_name.get(name, {}).get("input_schema") != tool["inputSchema"] for name, tool in expected.items()):
+        raise ValueError("patched Windows Cua Driver dump-docs does not match the pinned tool snapshot")
 
 
 def sign_adhoc(binary: Path) -> None:
@@ -331,7 +379,8 @@ def provenance_record(
     manifest: dict, target: str, *, patch_sha256: str, binary_sha256: str
 ) -> dict:
     driver = manifest["driver"]
-    return {
+    patch = driver["windows"]["patch"] if target == WINDOWS_TARGET else driver["patch"]
+    record = {
         "schema_version": 2,
         "version": driver["version"],
         "tag": driver["tag"],
@@ -340,14 +389,19 @@ def provenance_record(
         "arch": TARGET_ARCH[target],
         "source_archive": driver["source"]["archive"],
         "source_archive_sha256": driver["source"]["sha256"],
-        "patch_variant": driver["patch"]["variant"],
-        "patch_file": driver["patch"]["file"],
+        "patch_variant": patch["variant"],
+        "patch_file": patch["file"],
         "patch_sha256": patch_sha256,
-        "patch_contract": driver["patch"]["contract"],
+        "patch_contract": patch["contract"],
         "tool_snapshot_sha256": digest(WINDOWS_TOOL_SNAPSHOT if target == WINDOWS_TARGET else TOOL_SNAPSHOT),
         "prepared_binary_sha256": binary_sha256,
         "build_origin": "repository_patch_built",
     }
+    if target == WINDOWS_TARGET:
+        chain = windows_patch_chain(manifest)
+        record["patch_order"] = [entry["file"] for entry in chain]
+        record["patch_chain"] = chain
+    return record
 
 
 def reuse_verified(manifest: dict, target: str, output: Path) -> bool:
@@ -365,7 +419,7 @@ def reuse_verified(manifest: dict, target: str, output: Path) -> bool:
         recorded = json.loads(provenance_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
-    patch = ROOT / "cua-driver" / manifest["driver"]["patch"]["file"]
+    patch = ROOT / "cua-driver" / patch_chain_for_target(manifest, target)[-1]["file"]
     expected = provenance_record(
         manifest,
         target,
@@ -411,7 +465,7 @@ def prepare(
         if source_archive is None:
             download(driver["source"]["url"], resolved_archive)
         source_root = extract_driver_source(manifest, resolved_archive, work / "source")
-        patch = apply_driver_patch(manifest, source_root)
+        patches = apply_driver_patches(manifest, source_root, target)
         prepared = build_driver(manifest, source_root, target)
         if target == WINDOWS_TARGET:
             verify_windows_built_contract(prepared)
@@ -425,7 +479,7 @@ def prepare(
         provenance = provenance_record(
             manifest,
             target,
-            patch_sha256=digest(patch),
+            patch_sha256=digest(patches[-1]),
             binary_sha256=digest(output),
         )
         provenance_output = output.with_name(f"{output.name}.provenance.json")
