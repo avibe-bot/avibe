@@ -160,6 +160,26 @@ jobs:
         shell: powershell
         run: ./scripts/test-windows-update.ps1
 
+      - name: Verify Windows Cua Driver security boundary as ordinary user
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: "PyYAML==6.0.3"
+          if ($LASTEXITCODE -ne 0) { throw 'Native source dependency installation failed.' }
+          ./scripts/test-windows-driver-source.ps1
+
+      - name: Upload Windows Cua Driver security evidence
+        if: ${{ always() && runner.os == 'Windows' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: windows-cua-driver-security-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/avibe-windows-driver-security-*/provenance.json
+            ${{ runner.temp }}/avibe-windows-driver-security-*/junit-*.xml
+            ${{ runner.temp }}/avibe-windows-driver-security-*/logs/**
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Build the shell
         run: cargo build --locked --workspace
 

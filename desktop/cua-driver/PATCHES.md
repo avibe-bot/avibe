@@ -75,3 +75,60 @@ Foreground delivery is the unpatched driver's own `delivery_mode:
 "foreground"` rung, and window activation is its `bring_to_front` tool. Both
 are forwarded unchanged since #3050; neither is an implicit fallback for this
 patch, whose raw selector stays background-only.
+
+## Windows security and literal-launch supplement (not yet packaged)
+
+Patch: `patches/0002-windows-security-boundary.patch`
+
+Apply this supplement only to the pinned source **after the complete, unchanged
+0001 patch**. Production `sources.json`, tool snapshots, and preparation still
+select 0001 alone; this source foundation does not enable Windows Computer Use.
+The hosted Windows source-test step explicitly applies both patches, records
+source/patch/test-binary hashes, and requires all 11 selected native tests with
+JUnit no-skip/count evidence. Passing those fixtures is not signed-installer or
+interactive GUI acceptance.
+
+The supplement refuses elevated, above-Medium, UIAccess, or unreadable driver
+tokens at startup/readmission, removes elevation workarounds, and makes protected
+or unverifiable target refusals explicit. Windows `launch_app` accepts only an
+absolute local fixed-drive `.exe` path, optional string-array arguments, and
+`start_minimized` (besides existing internal session metadata). It creates a new
+process directly, never attaches to an existing process or follows a shell,
+association, name, AUMID, or derived-token fallback.
+
+A single ordinary file open resolves the final OS path spelling, checks disk,
+non-directory, `.exe`, and fixed-drive properties, then closes the file. The
+exact final spelling is launched. An OS-final component ending in an ASCII
+period or space is refused rather than stripping its verbatim prefix and
+potentially launching a different existing path. This is a check of the final
+string only, not an input dot/dotdot restriction or ancestor walk. Same-user
+executable replacement is not a security boundary: there are no file-ID locks,
+ancestor handles, reparse bans, lowercase identity transforms, or
+case-sensitive-directory restrictions.
+
+The target receives `CreateEnvironmentBlock` for the ordinary token with caller
+inheritance disabled, an executable-parent cwd, no inherited handles, and
+explicit target-only Job breakaway. Driver/helpers remain contained by their
+owning shell. Application-internal handoff is not adopted: the response retains
+the original created PID and reports whether it is still running. Ordinary app
+metadata remains the existing `list_apps` responsibility; launch performs no
+additional installed-app scan.
+
+### Known-by-design shared-source scope
+
+The supplement changes three core source files: `protocol.rs`, `tool.rs`, and
+new `windows_launch_ownership_tests.rs`. Their ownership additions are Windows
+cfg-only. `ToolResult` carries a serde-skipped internal original process handle;
+there is no JSON/wire/caller evidence field. Registration reads both PID and
+creation FILETIME from that original handle, requires fresh fingerprint equality,
+and retains the handle across the await and ownership mark. Missing, failed,
+exited, or mismatched evidence cannot grant ownership. Existing fingerprint
+reproof is retained; Windows termination additionally checks PID and creation
+time on the same handle used for termination. There is no PID-only fallback.
+Mac/Linux registration paths and the ownership ledger shape are unchanged.
+
+Expected Windows tool-metadata differences from 0001 are `hotkey.description`,
+`list_apps.description`, and `launch_app` description/schema descriptions plus
+`idempotent=false`. Packaging must derive its snapshot from actual patched MCP
+`tools/list`; `dump-docs` alone is insufficient. Refresh packaging provenance and
+perform native/signed acceptance in the separate integration before activation.
