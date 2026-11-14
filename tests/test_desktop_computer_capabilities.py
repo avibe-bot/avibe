@@ -137,6 +137,7 @@ def test_workbench_status_supports_adopted_runtime_when_native_shell_is_live(
         "supported": True,
         "status": "needs_permission",
         "reason": "screen_recording",
+        "host_platform": "macos",
     }
     assert response.headers["Cache-Control"] == "no-store"
 
@@ -165,6 +166,7 @@ def test_workbench_keeps_first_install_and_recovery_visible_for_live_shell(
         "supported": True,
         "status": status,
         "reason": reason,
+        "host_platform": "macos",
     }
 
 
@@ -195,6 +197,7 @@ def test_workbench_status_supports_shell_started_runtime_from_the_same_state_sou
         "supported": True,
         "status": "off",
         "reason": "toggle_off",
+        "host_platform": "macos",
     }
     assert response.headers["Cache-Control"] == "no-store"
 
@@ -238,6 +241,7 @@ def test_workbench_ready_status_reflects_controller_ipc_health(
         "supported": True,
         "status": expected_status,
         "reason": expected_reason,
+        "host_platform": "macos",
     }
     assert response.headers["Cache-Control"] == "no-store"
 
@@ -264,5 +268,26 @@ def test_workbench_status_hides_computer_use_without_live_native_shell(
         "supported": False,
         "status": "unavailable",
         "reason": "unsupported_host",
+        "host_platform": "macos",
     }
     assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_workbench_status_reports_server_host_platform_for_unsupported_windows_host(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ui_server, "_desktop_host_platform", lambda: "windows")
+    monkeypatch.setattr(ui_server, "_desktop_computer_use_supported", lambda: False)
+
+    response = app.test_client().get(
+        "/api/desktop/computer-use/status",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "supported": False,
+        "status": "unavailable",
+        "reason": "unsupported_host",
+        "host_platform": "windows",
+    }
