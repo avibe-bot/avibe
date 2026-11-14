@@ -7491,7 +7491,12 @@
     "changeEmail": "Change email",
     "resendCode": "Resend code",
     "consentTitle": "Connect to {{name}}?",
-    "consentBody": "Allow this instance to verify your account and open your workspace.",
+    "consentBody": "{{name}} wasn't created by you. If you continue, it will receive your account email to sign you in.",
+    "consentAlsoReceives": "It will also receive: {{items}}",
+    "consentAlsoOther": "And also: {{items}}",
+    "consentScopes": {
+      "profile": "your profile name"
+    },
     "allow": "Allow and connect",
     "deny": "Decline",
     "connectingTo": "Connecting to {{name}}",

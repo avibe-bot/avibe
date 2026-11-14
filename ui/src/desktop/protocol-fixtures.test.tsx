@@ -4,6 +4,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it, vi } from 'vitest';
 import en from '../i18n/en.json';
+import zh from '../i18n/zh.json';
 import { AccountApp } from './AccountApp';
 import { DESKTOP_CLIENT_STATE_EVENT, type DesktopClientRequest } from './bridge';
 import states from './__fixtures__/instance-client-v1/states.json';
@@ -13,8 +14,8 @@ import requests from './__fixtures__/instance-client-v1/requests.json';
 // The prior peer tests construct U1-shaped state. These exact S1 samples catch
 // consumer field drift by entering the real account hook and rendered actions.
 const i18n = createInstance();
-await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+await i18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
+afterEach(async () => { cleanup(); vi.unstubAllGlobals(); await i18n.changeLanguage('en'); });
 function mount(initial: unknown, response: (request: DesktopClientRequest) => unknown) {
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', initial);
@@ -40,11 +41,35 @@ it('AUTH-SETUP-177 consumes the native UTF-8 catalog and sends its opaque instan
 it('AUTH-SETUP-177 consumes native consent before switching and sends explicit approval', async () => {
   const invoke = mount(states.consent, (request) => ({ ...replies.success, request_id: request.request_id, state: states.consent }));
   expect(await screen.findByRole('heading', { name: 'Connect to 工作室 Studio?' })).toBeTruthy();
-  expect(screen.getByText('openid profile email')).toBeTruthy();
+  expect(screen.getByText("工作室 Studio wasn't created by you. If you continue, it will receive your account email to sign you in.")).toBeTruthy();
+  expect(screen.getByText('It will also receive: your profile name')).toBeTruthy();
+  expect(screen.queryByText(/openid/)).toBeNull();
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
   fireEvent.click(screen.getByRole('button', { name: 'Allow and connect' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   expect(invoke.mock.calls[1][1].request.action).toEqual(requests.find((entry) => entry.action.type === 'decide_consent' && entry.action.approve)!.action);
+});
+
+// Raw OAuth scope is protocol vocabulary; the consent view states what the
+// instance receives in plain words and still names anything beyond the email.
+it.each([
+  ['en', 'openid email', [], ['It will also receive', 'And also']],
+  ['en', 'openid email profile', ['It will also receive: your profile name'], ['And also']],
+  ['en', 'openid email offline_access', ['And also: offline_access'], ['It will also receive']],
+  ['zh', 'openid email', [], ['它还会获得', '另外还有']],
+  ['zh', 'openid profile email', ['它还会获得：你的个人资料名称'], ['另外还有']],
+  ['zh', 'openid email offline_access', ['另外还有：offline_access'], ['它还会获得']],
+])('AUTH-SETUP-177 consent copy (%s, %s) names received data in plain words', async (lng, scope, present, absent) => {
+  await i18n.changeLanguage(lng);
+  const state = { ...states.consent, consent: { ...states.consent.consent, scope } };
+  mount(state, (request) => ({ ...replies.success, request_id: request.request_id, state }));
+  const body = lng === 'en'
+    ? "工作室 Studio wasn't created by you. If you continue, it will receive your account email to sign you in."
+    : '工作室 Studio 不是你创建的实例。继续后，它会获得你的账号邮箱，用来让你登录。';
+  expect(await screen.findByText(body)).toBeTruthy();
+  for (const text of present) expect(screen.getByText(text)).toBeTruthy();
+  for (const text of absent) expect(screen.queryByText(new RegExp(text))).toBeNull();
+  expect(screen.queryByText(/openid/)).toBeNull();
 });
 
 it.each([1, 2])('AUTH-SETUP-171 preserves direct recovery material only in the current generation (%s), independently of snapshot revision', async (generation) => {

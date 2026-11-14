@@ -122,7 +122,7 @@ export function AccountApp() {
       onResendCode={() => void act({ type: 'request_otp', email: state.account.email ?? email })}
       onContinueLocal={() => leave('return_local')} />;
   } else if (state.consent) {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.consentTitle', { name: state.consent.instance_name })}>{t('desktopClient.consentBody')}</Heading><Notice><p>{state.consent.host}</p><p className="mt-2 break-words">{state.consent.scope}</p></Notice>{failure}<div className="mt-7 flex gap-3"><Button variant="brand" disabled={busy} onClick={() => void act({ type: 'decide_consent', approve: true })}>{t('desktopClient.allow')}</Button><Button variant="outline" disabled={busy} onClick={() => void act({ type: 'decide_consent', approve: false })}>{t('desktopClient.deny')}</Button></div></div>;
+    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.consentTitle', { name: state.consent.instance_name })}>{t('desktopClient.consentBody', { name: state.consent.instance_name })}</Heading><Notice><p>{state.consent.host}</p><ConsentExtras scope={state.consent.scope} /></Notice>{failure}<div className="mt-7 flex gap-3"><Button variant="brand" disabled={busy} onClick={() => void act({ type: 'decide_consent', approve: true })}>{t('desktopClient.allow')}</Button><Button variant="outline" disabled={busy} onClick={() => void act({ type: 'decide_consent', approve: false })}>{t('desktopClient.deny')}</Button></div></div>;
   } else if (state.connection.status === 'switching' || state.connection.status === 'remote_unreachable') {
     const switching = state.connection.status === 'switching';
     const target = state.connection.pending ?? state.connection.committed;
@@ -149,6 +149,23 @@ export function AccountApp() {
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
     {state?.remote_auxiliary === 'disabled_incomplete' && <footer className="shrink-0 border-t border-edge bg-surface px-4 py-2 text-xs text-muted">{t('desktopClient.auxiliaryIncomplete')}</footer>}
   </div>;
+}
+
+// Scopes the plain consent sentence already covers; anything else is named below it.
+const COVERED_SCOPES = new Set(['openid', 'email']);
+const KNOWN_SCOPES = { profile: 'desktopClient.consentScopes.profile' } as const;
+const knownScope = (token: string) => Object.hasOwn(KNOWN_SCOPES, token) ? KNOWN_SCOPES[token as keyof typeof KNOWN_SCOPES] : null;
+
+function ConsentExtras({ scope }: { scope: string }) {
+  const { t, i18n } = useTranslation();
+  const extras = [...new Set(scope.split(/\s+/).filter((token) => token && !COVERED_SCOPES.has(token)))];
+  const known = extras.flatMap((token) => { const key = knownScope(token); return key ? [t(key)] : []; });
+  const unknown = extras.filter((token) => !knownScope(token));
+  const list = (items: string[]) => new Intl.ListFormat(i18n.language, { type: 'conjunction' }).format(items);
+  return <>
+    {known.length > 0 && <p className="mt-2">{t('desktopClient.consentAlsoReceives', { items: list(known) })}</p>}
+    {unknown.length > 0 && <p className="mt-2 break-words">{t('desktopClient.consentAlsoOther', { items: list(unknown) })}</p>}
+  </>;
 }
 
 function InstanceRow({ name, detail, selected, local, offline, busy, onClick }: {
