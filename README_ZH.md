@@ -60,7 +60,7 @@ App 由 Apple 签名并公证，不用另外装任何东西，有新版本会自
 
 两个系统上，第 3 步都只是登录一次：
 
-<p align="center"><img src="assets/screenshots/v6/setup-providers-zh.png" alt="设置向导里添加模型的对话框：用 Claude、ChatGPT、Gemini、Kimi 或 xAI 登录，也可以切到 API Key 标签页" width="640"></p>
+<p align="center"><img src="assets/screenshots/v6/setup-providers-zh.png" alt="设置向导里添加模型的对话框：用 Claude、ChatGPT、Gemini、Kimi 或 xAI 登录，也可以切到 API Key 标签页" width="440"></p>
 
 ### iPhone
 
@@ -75,11 +75,10 @@ iPhone App 目前是公开测试版。
 ### Linux 与服务器
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash
-vibe
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
-`vibe` 会启动 Avibe，并在浏览器里打开设置向导。没有屏幕的机器，运行 `vibe remote` 把它和你的 avibe.bot 账号配对，就能从别的设备打开。脚本是开源的，不放心可以先读一遍 [install.sh](https://github.com/avibe-bot/avibe/blob/master/install.sh)。更多说明见[安装指南](https://docs.avibe.bot/zh/get-started/install)。
+这条命令会装好 `vibe` 命令、启动 Avibe，并在浏览器里打开设置向导。没有屏幕的机器，运行 `vibe remote` 把它和你的 avibe.bot 账号配对，就能从别的设备打开。脚本是开源的，不放心可以先读一遍 [install.sh](https://github.com/avibe-bot/avibe/blob/master/install.sh)。更多说明见[安装指南](https://docs.avibe.bot/zh/get-started/install)。
 
 <details>
 <summary>想在 Windows 或 macOS 上用命令行？</summary>

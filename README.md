@@ -60,7 +60,7 @@ The installer is signed, and Windows may ask you to confirm the first time you r
 
 On both, step 3 is one sign-in:
 
-<p align="center"><img src="assets/screenshots/v6/setup-providers-en.png" alt="The setup dialog for adding a model: sign in with Claude, ChatGPT, Gemini, Kimi, or xAI, or switch to the API Key tab" width="640"></p>
+<p align="center"><img src="assets/screenshots/v6/setup-providers-en.png" alt="The setup dialog for adding a model: sign in with Claude, ChatGPT, Gemini, Kimi, or xAI, or switch to the API Key tab" width="440"></p>
 
 ### iPhone
 
@@ -75,11 +75,10 @@ The iPhone app is a public beta.
 ### Linux and servers
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash
-vibe
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
-`vibe` starts Avibe and opens setup in your browser. On a machine with no screen, run `vibe remote` to pair it with your avibe.bot account and open it from another device. The script is open source: read [install.sh](https://github.com/avibe-bot/avibe/blob/master/install.sh) first if you like. More in the [install guide](https://docs.avibe.bot/get-started/install).
+This installs the `vibe` command, starts Avibe, and opens setup in your browser. On a machine with no screen, run `vibe remote` to pair it with your avibe.bot account and open it from another device. The script is open source: read [install.sh](https://github.com/avibe-bot/avibe/blob/master/install.sh) first if you like. More in the [install guide](https://docs.avibe.bot/get-started/install).
 
 <details>
 <summary>Prefer the command line on Windows or macOS?</summary>
