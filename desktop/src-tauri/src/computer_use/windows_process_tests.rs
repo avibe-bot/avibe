@@ -1,3 +1,7 @@
+// No production admission bypass for tests: hosted Windows CI runs elevated.
+// Run each acceptance test explicitly with its exact name and `-- --ignored`;
+// do not run fixture_child/fixture_host standalone or count ignored tests as a
+// native lifecycle pass. All fixtures write only below their parent's TempDir.
 use super::*;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
@@ -117,6 +121,7 @@ fn fixture_host() {
 }
 
 #[test]
+#[ignore = "acceptance: run as a non-elevated Windows x64 user"]
 fn suspended_child_never_executes_and_drop_terminates_it() {
     let directory = tempfile::tempdir().unwrap();
     let child = suspended("hold", directory.path());
@@ -129,6 +134,7 @@ fn suspended_child_never_executes_and_drop_terminates_it() {
 }
 
 #[tokio::test]
+#[ignore = "acceptance: run as a non-elevated Windows x64 user"]
 async fn failed_start_and_suspended_stop_leave_no_running_child() {
     let directory = tempfile::tempdir().unwrap();
     assert!(OwnedDriver::spawn_suspended(
@@ -146,6 +152,7 @@ async fn failed_start_and_suspended_stop_leave_no_running_child() {
 }
 
 #[tokio::test]
+#[ignore = "acceptance: run as a non-elevated Windows x64 user"]
 async fn stop_is_graceful_for_eof_and_forceful_for_remaining_descendants() {
     for mode in ["eof", "tree"] {
         let directory = tempfile::tempdir().unwrap();
@@ -170,6 +177,7 @@ async fn stop_is_graceful_for_eof_and_forceful_for_remaining_descendants() {
 }
 
 #[tokio::test]
+#[ignore = "acceptance: run as a non-elevated Windows x64 user"]
 async fn cancelled_stop_terminates_owned_child_and_allows_fresh_start() {
     let directory = tempfile::tempdir().unwrap();
     let child = suspended("hold", directory.path()).resume().unwrap();
@@ -192,6 +200,7 @@ impl Drop for Host {
 }
 
 #[test]
+#[ignore = "acceptance: run as a non-elevated Windows x64 user"]
 fn killed_shell_cleans_suspended_and_running_children_without_destructors() {
     for mode in ["suspended", "running"] {
         let directory = tempfile::tempdir().unwrap();
