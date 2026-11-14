@@ -8,8 +8,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Skeleton } from '../components/ui/skeleton';
 import { cn } from '../lib/utils';
-import logo from '../assets/logo.png';
-import mailMascot from '../assets/pet/vibey-message.png';
+import { AccountLoginView } from './AccountLoginView';
 import { isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type Instance } from './bridge';
 import { useAccountClient } from './useAccountClient';
 
@@ -88,8 +87,10 @@ export function AccountApp() {
   }, [send]);
   const localButton = <Button variant="ghost" onClick={() => leave('return_local')}>{t('desktopClient.continueLocal')}</Button>;
   const instances = () => { setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' }); };
-  const failure = error && <Notice warning>{t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request')}</Notice>;
+  const errorMessage = error && t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
+  const failure = errorMessage && <Notice warning>{errorMessage}</Notice>;
   let content: ReactNode;
+  let centerLogin = false;
   if (!state) {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
   } else if (view === 'sign-out') {
@@ -111,10 +112,15 @@ export function AccountApp() {
         <Button variant="link" className="mt-3 px-0" onClick={() => { setCode(''); setMethod(method === 'totp' ? 'recovery' : 'totp'); }}>{t(method === 'totp' ? 'desktopClient.useRecovery' : 'desktopClient.useAuthenticator')}</Button>
       </>}<div className="mt-6">{failure}{localButton}</div></div>;
   } else if (state.account.status !== 'signed_in') {
+    centerLogin = true;
     const verify = state.account.status === 'verifying' && !editEmail;
-    content = <div className="mx-auto grid min-h-full max-w-5xl grid-cols-2 overflow-hidden rounded-3xl border border-edge bg-surface"><div className="flex flex-col justify-center p-10" style={{ background: 'var(--gradient-wizard-platforms)' }}><img src={logo} className="mb-8 size-9" alt="" /><img src={mailMascot} className="mb-7 size-40 object-contain" alt="" /><h1 className="whitespace-pre-line text-3xl font-semibold leading-tight tracking-tight">{t('desktopClient.loginHero')}</h1><p className="mt-5 max-w-sm text-sm leading-7 text-muted">{t('desktopClient.loginHeroBody')}</p></div><div className="flex flex-col justify-center p-8"><Heading title={t(verify ? 'desktopClient.checkInbox' : 'desktopClient.loginTitle')}>{verify ? t('desktopClient.codeSent', { email: state.account.email }) : t('desktopClient.loginBody')}</Heading>
-      <form onSubmit={(event) => { event.preventDefault(); void act(verify ? { type: 'verify_otp', code } : { type: 'request_otp', email: email.trim() }); }}><Label htmlFor="desktop-auth-field">{t(verify ? 'desktopClient.emailCode' : 'desktopClient.email')}</Label><Input id="desktop-auth-field" className={cn('mt-2 h-12', verify && 'text-xl tracking-widest')} type={verify ? 'text' : 'email'} inputMode={verify ? 'numeric' : 'email'} autoComplete={verify ? 'one-time-code' : 'email'} value={verify ? code : email} onChange={(event) => verify ? setCode(event.target.value) : setEmail(event.target.value)} required aria-invalid={!!error} /><p className="mt-3 text-xs leading-6 text-muted">{t(verify ? 'desktopClient.codeHelp' : 'desktopClient.registrationDisclosure')}</p><Button variant="brand" size="lg" className="mt-6 w-full rounded-full" disabled={busy || !(verify ? code.trim() : email.trim())}>{busy && <RefreshCw className="size-4 animate-spin" />}{t(verify ? 'desktopClient.verifySignIn' : 'desktopClient.sendCode')}<ArrowRight className="size-4" /></Button></form>
-      {verify && <div className="mt-4 flex flex-wrap justify-between gap-2"><Button variant="link" size="sm" disabled={busy} onClick={() => { setCode(''); setEmail(state.account.email ?? ''); setEditEmail(true); }}>{t('desktopClient.changeEmail')}</Button><Button variant="link" size="sm" disabled={busy} onClick={() => void act({ type: 'request_otp', email: state.account.email ?? email })}>{t('desktopClient.resendCode')}</Button></div>}<div className="mt-6">{failure}{localButton}</div></div></div>;
+    content = <AccountLoginView verify={verify} email={state.account.email ?? ''}
+      value={verify ? code : email} busy={busy} errorMessage={errorMessage}
+      onValueChange={verify ? setCode : setEmail}
+      onSubmit={() => void act(verify ? { type: 'verify_otp', code } : { type: 'request_otp', email: email.trim() })}
+      onChangeEmail={() => { setCode(''); setEmail(state.account.email ?? ''); setEditEmail(true); }}
+      onResendCode={() => void act({ type: 'request_otp', email: state.account.email ?? email })}
+      onContinueLocal={() => leave('return_local')} />;
   } else if (state.consent) {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.consentTitle', { name: state.consent.instance_name })}>{t('desktopClient.consentBody')}</Heading><Notice><p>{state.consent.host}</p><p className="mt-2 break-words">{state.consent.scope}</p></Notice>{failure}<div className="mt-7 flex gap-3"><Button variant="brand" disabled={busy} onClick={() => void act({ type: 'decide_consent', approve: true })}>{t('desktopClient.allow')}</Button><Button variant="outline" disabled={busy} onClick={() => void act({ type: 'decide_consent', approve: false })}>{t('desktopClient.deny')}</Button></div></div>;
   } else if (state.connection.status === 'switching' || state.connection.status === 'remote_unreachable') {
@@ -140,7 +146,7 @@ export function AccountApp() {
   return <div className="flex h-dvh flex-col bg-background text-foreground">
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
     <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>
-    <main className="min-h-0 flex-1 overflow-y-auto px-10 pb-5" aria-busy={busy}>{content}</main>
+    <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
     {state?.remote_auxiliary === 'disabled_incomplete' && <footer className="shrink-0 border-t border-edge bg-surface px-4 py-2 text-xs text-muted">{t('desktopClient.auxiliaryIncomplete')}</footer>}
   </div>;
 }

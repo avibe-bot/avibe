@@ -8,7 +8,7 @@ import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
 import { DesktopAccountRow } from './DesktopAccountRow';
 
 const mock = vi.hoisted(() => ({
-  present: vi.fn(), remote: false, phase: 'available',
+  present: vi.fn(), remote: false, phase: 'available', signedIn: true,
   invoke: vi.fn(), getVersion: vi.fn(),
 }));
 vi.mock('../context/ApiContext', () => ({ useApi: () => ({ getVersion: mock.getVersion }) }));
@@ -17,7 +17,7 @@ vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
 vi.mock('./useDesktopClient', () => ({
   usePresentDesktopClient: () => mock.present,
   useDesktopClientProjection: () => ({
-    account: { status: 'signed_in', identity: { id: 'fixture', email: 'max@example.test' } },
+    account: { status: mock.signedIn ? 'signed_in' : 'signed_out', identity: { id: 'fixture', email: 'max@example.test' } },
     connection: { status: mock.remote ? 'remote_connected' : 'local', committed: { kind: mock.remote ? 'remote' : 'local', name: 'Studio', instance_id: 'studio' }, pending: null },
     local: { name: '小麦的 Mac', remote_access: 'off' },
     desktop: { version: '3.2.6rc12', update: { phase: mock.phase, latest: '3.2.7' } },
@@ -27,7 +27,7 @@ vi.mock('./useDesktopClient', () => ({
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
 beforeEach(() => {
-  mock.remote = false; mock.phase = 'available';
+  mock.remote = false; mock.phase = 'available'; mock.signedIn = true;
   mock.getVersion.mockResolvedValue({ current: '3.2.6rc12', latest: '3.2.7', has_update: true, managed_by: 'desktop' });
   mock.invoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
     ? { phase: mock.phase, latest: '3.2.7', channel: 'test', prereleases: true, skippedVersion: null, interactive: false }
@@ -96,4 +96,31 @@ it('AUTH-SETUP-178 remote Runtime presents the trusted native decision without l
   fireEvent(window, event);
   expect(event.defaultPrevented).toBe(true);
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
+});
+
+// The previous updater-only test never exercised the account trigger: signed-out
+// users received a redundant menu instead of the guarded native account view.
+it('AUTH-SETUP-177 signed-out footer directly presents account without opening a menu', async () => {
+  mock.signedIn = false;
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+  fireEvent.click(screen.getByRole('button', { name: /Sign in \/ sign up/ }));
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith('account');
+  expect(document.querySelector('[data-instance-menu]')).toBeNull();
+});
+
+it('AUTH-SETUP-178 signed-in menu keeps instance actions separate from remote access status', async () => {
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  fireEvent.click(trigger);
+  expect(trigger.getAttribute('aria-expanded')).toBe('true');
+  expect(mock.present).not.toHaveBeenCalled();
+  const status = screen.getByText('Remote access to this Mac');
+  expect(status.closest('button, a, [role="button"]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Switch instance' }));
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith('instances');
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+  expect(mock.present).toHaveBeenLastCalledWith('sign-out');
 });
