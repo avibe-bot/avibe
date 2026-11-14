@@ -1,9 +1,25 @@
+import { Route, Routes } from 'react-router-dom';
+import { AppShell, AppShellFooter } from '@/components/AppShell';
+import { VersionBadge } from '@/components/VersionBadge';
+import { Workbench } from '@/components/Workbench';
+import { DesktopAccountRowView } from '@/desktop/DesktopAccountRowView';
 import { AccountLoginView } from '@/desktop/AccountLoginView';
 import { frames } from '../../frame';
 import { DesktopInstances } from '../../kit/desktop-instances';
-import { desktopInstanceFrames, loginViewProps } from './instances-fixtures';
+import { accountRowViewProps, desktopInstanceFrames, loginViewProps } from './instances-fixtures';
 
 const designFrames = frames(desktopInstanceFrames.map(({ fixture, ...frame }) => {
+  const footer = accountRowViewProps(fixture);
+  if (footer) return {
+    ...frame, status: 'shipped',
+    render: () => <Routes>
+      <Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}>
+        <DesktopAccountRowView {...footer} localUpdater={<VersionBadge openUpward />} />
+      </AppShellFooter>} />}>
+        <Route path="/" element={<Workbench />} />
+      </Route>
+    </Routes>,
+  };
   const login = loginViewProps(fixture);
   return login ? {
     ...frame, status: 'shipped', title: `${frame.title} · product card`,

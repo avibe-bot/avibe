@@ -109,9 +109,9 @@ export function PlacementShell({ fixture, placement = 'bottom', remote = true, c
 /** Recommended C: no account/instance controls share a page's top-right action region. */
 export function DesktopInstances({ fixture }: { fixture: DesktopInstanceFixture }) {
   const t = copy(fixture.lang), { state } = fixture;
-  const remote = ['account', 'instances', 'offline', 'mini', 'updates'].includes(state);
-  const workbench = ['account', 'mini', 'signed-out', 'updates'].includes(state);
+  const remote = ['instances', 'offline', 'mini', 'updates'].includes(state);
+  const workbench = ['mini', 'updates'].includes(state);
   const page = ['instances', 'empty', 'loading', 'list-error'].includes(state) ? <Picker fixture={fixture} /> : ['registering', 'registered', 'registration-error', 'conflict'].includes(state) ? <Registration fixture={fixture} /> : ['add', 'advanced'].includes(state) ? <Add fixture={fixture} /> : state === 'setup-entry' ? <SetupEntry t={t} /> : <Connection fixture={fixture} />;
-  if (workbench) return <div className="relative h-full"><PlacementShell fixture={fixture} remote={remote} menu={state === 'account'} updatePanel={state === 'updates'} page={<Workbench />} />{state === 'mini' && <Mini t={t} />}</div>;
+  if (workbench) return <div className="relative h-full"><PlacementShell fixture={fixture} remote={remote} updatePanel={state === 'updates'} page={<Workbench />} />{state === 'mini' && <Mini t={t} />}</div>;
   return <div lang={fixture.lang} className="relative flex h-full flex-col bg-background text-foreground"><div aria-hidden="true" className="h-7 shrink-0 bg-surface" /><div className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm"><ArrowLeft className="size-4" />{state === 'setup-entry' ? t('返回设置', 'Back to setup') : t('返回工作台', 'Back to Workbench')}</Button></div><main className="min-h-0 flex-1 overflow-y-auto px-10 pb-5">{page}</main><footer className="shrink-0 border-t border-edge bg-surface px-4 py-2"><div className="w-56"><AccountEntry fixture={fixture} placement="bottom" remote={remote} /></div></footer></div>;
 }

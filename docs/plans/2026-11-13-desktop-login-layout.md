@@ -66,3 +66,42 @@ typecheck passes; scoped capture and export each cover twelve shots (three
 states, two languages, two themes), with no console errors or unfixtured API
 requests. Email, verification and invalid-code captures were visually inspected.
 Private review page: https://max-app.avibe.bot/show/sesuzge7suz9p/ .
+
+
+## Canonical footer consumer repair
+
+After #3688 merged, the branch was mechanically rebased onto
+cbd4af9552eb984780e57870a01a04d91616cd67. The original local VersionBadge and
+remote guarded updater presentation remain unchanged. The subsequent review
+identified the same design-consumer root cause on the account footer. The
+orchestrator independently diagnosed the repeated class and authorized only the
+canonical signed-out/account footer states in this PR.
+
+DesktopAccountRow retains projection and presentation hooks, controlled menu
+state, native update events, navigation guards, and the real VersionBadge. Its
+DesktopAccountRowView receives typed nonsecret projection, controlled menu state,
+presentation callbacks, and the local updater node. The four canonical footer
+frames use this same view through the real AppShell footer slot and
+AppShellFooter, with synthetic props and the product VersionBadge. They do not
+install native bridge globals or change the top-level window guard.
+
+The kit no longer routes these canonical states through its Workbench footer.
+AccountEntry/Account remain only for proposal consumers that still need them;
+instance pages, top/compact layouts, Mini and later phases are not migrated.
+
+The existing design DOM check now requires these exact frame IDs to render the
+product row inside the real sidebar footer and rejects the old bottom kit entry.
+It failed before the repair on account-en because no product row existed. The
+remaining proposal invariants stay in that check; the already-shipped login
+card frames correctly have no footer. Existing product tests exercise the
+container-to-view wiring and original updater behavior without new bridge mocks.
+Repair evidence is under /tmp/rc16-login-ui-sesuzge7suz9p/footer-repair.
+
+After extraction, 63 footer/updater unit cases and 35 actual AppShell/account
+browser cases pass. UI/account builds, lint, test/browser types and design types
+pass. The updated DOM check passes all 112 frame/theme combinations. Scoped
+capture/export produces eight footer images with zero console errors or
+unfixtured reads. Signed-out and controlled-open screenshots were inspected;
+the open product browser menu and design menu share geometry at 1200x800.
+VersionBadge, the bridge and presentation hooks remain byte-identical to the
+pre-extraction candidate. Earlier native replay retains its original head pin.
