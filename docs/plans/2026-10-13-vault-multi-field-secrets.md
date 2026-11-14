@@ -236,8 +236,10 @@ saves, or authorizes anything: the browser may use it to preset the user's
 explicit generator action on either tier. Recipes are strict objects:
 
 - Password: `{"type":"password","length":24,"digits":true,"symbols":true,"no_lookalikes":false}`.
-  `length` is 12–128 characters; the other options are booleans. Omitted options
-  use these defaults.
+  `length` is 8–100 characters, the browser generator's range (a request saved
+  earlier with up to 128 presets 100 and says so). Agent direct generation is
+  12–100 by design (`vibe vault generate`); the other options are
+  booleans. Omitted options use these defaults.
 - Hex or standard padded Base64: `{"type":"hex","bytes":32}` or
   `{"type":"base64","bytes":32}`. `bytes` is 16–64 and defaults to 32;
   password options are not accepted for these types.
