@@ -664,7 +664,7 @@ describe('the edit dialog saves its fields with its one Save', () => {
     tags: [], source: 'user', policy: {}, last_used_at: null, use_count: 0, created_at: 'c', updated_at: 'version-1',
   } as VaultSecret;
   beforeEach(() => {
-    api.updateVaultSecret.mockClear();
+    api.updateVaultSecret.mockReset().mockResolvedValue({ ok: true });
     api.updateVaultSecretFields.mockReset();
     api.listVaultSecrets.mockResolvedValue({ secrets: [login] } as never);
   });
@@ -679,6 +679,46 @@ describe('the edit dialog saves its fields with its one Save', () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('LOGIN'));
     expect(api.updateVaultSecretFields).toHaveBeenCalledOnce();
     expect(api.updateVaultSecretFields.mock.invocationCallOrder[0]).toBeLessThan(api.updateVaultSecret.mock.invocationCallOrder[0]);
+  });
+
+  // Field acceptance and dialog success are separate: a metadata failure must never replay an
+  // accepted combined edit. Ordering-only tests above cannot catch a second-click replay.
+  it.each(['response', 'rejection'] as const)('does not replay accepted fields after metadata %s and retry', async (failure) => {
+    const accepted = { ...login, default_field: 'credential', fields: ['credential', 'password'], updated_at: 'version-2' };
+    api.updateVaultSecretFields.mockResolvedValue({ ok: true, secret: accepted });
+    if (failure === 'response') api.updateVaultSecret.mockResolvedValueOnce({ ok: false });
+    else api.updateVaultSecret.mockRejectedValueOnce(new Error('synthetic metadata failure'));
+    api.updateVaultSecret.mockResolvedValueOnce({ ok: true });
+    const onSaved = vi.fn();
+    render(form(<VaultSecretForm editSecret={login} onCancel={vi.fn()} onCreated={vi.fn()} onSaved={onSaved} />));
+    change('Default field name', 'credential');
+    change('Value for password', 'synthetic-default');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+    change('New field name', 'password');
+    change('New field value', 'synthetic-extra');
+    change('Description', 'synthetic-metadata');
+    save();
+    await waitFor(() => expect(api.updateVaultSecret).toHaveBeenCalledOnce());
+    await waitFor(() => expect((screen.getByRole('button', { name: en.vaults.dialog.save }) as HTMLButtonElement).disabled).toBe(false));
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(api.updateVaultSecretFields).toHaveBeenCalledOnce();
+    expect(api.updateVaultSecretFields.mock.calls[0].slice(0, 2)).toEqual(['LOGIN', {
+      expected_updated_at: 'version-1', default_field: 'credential',
+      values: [
+        { field: 'credential', record: 'LOGIN', blind_box: blindBox },
+        { field: 'password', record: 'LOGIN.password', blind_box: blindBox },
+      ], remove: ['username'],
+    }]);
+    expect(sealBlindBox).toHaveBeenCalledTimes(2);
+    expect(api.updateVaultSecretFields.mock.invocationCallOrder[0]).toBeLessThan(api.updateVaultSecret.mock.invocationCallOrder[0]);
+    save();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('LOGIN'));
+    expect(api.updateVaultSecret).toHaveBeenCalledTimes(2);
+    expect(api.updateVaultSecret.mock.calls[1][1]).toMatchObject({ description: 'synthetic-metadata' });
+    expect(api.updateVaultSecretFields).toHaveBeenCalledOnce();
+    expect(sealBlindBox).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the dialog open and sends no metadata when the fields are not written', async () => {
