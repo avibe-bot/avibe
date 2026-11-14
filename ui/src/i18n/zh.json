@@ -6502,7 +6502,8 @@
       },
       "account": "账户",
       "path": "派生路径 {{path}}",
-      "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。"
+      "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。",
+      "solanaBlockhashHint": "如果此交易使用近期区块哈希，可能会在等待批准期间过期。需要延后提交时，请使用持久 nonce。"
     },
     "request": {
       "provide": "填写",

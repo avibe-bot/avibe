@@ -6502,7 +6502,8 @@
       },
       "account": "Account",
       "path": "Derivation path {{path}}",
-      "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise."
+      "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise.",
+      "solanaBlockhashHint": "If this transaction uses a recent blockhash, it may expire while awaiting approval. Use a durable nonce for delayed submission."
     },
     "request": {
       "provide": "provide",
