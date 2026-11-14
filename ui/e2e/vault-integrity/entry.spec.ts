@@ -315,11 +315,37 @@ test('unsupported reveal/edit stops before preparation, but metadata and cancel 
   await expectSingleDocumentJourney(page, observed, url, saved);
 });
 
-// A press on Save that starts while the edited field name still has focus. The press moves focus
-// off the name; nothing above Save may move between the press and its release, or the release lands
-// beside Save and the click is lost. The press and release are split, with rendering settled
-// between them, so the check does not depend on runner timing.
-test('a Save press that starts while a field name has focus still saves', async ({ context, page }) => {
+// A press on Save that starts while a field name still has focus. The press moves focus off the
+// name; nothing above Save may move between the press and its release, or the release lands beside
+// Save and the click is lost. Save is scrolled just into view, as a pointer click scrolls it (its
+// bottom at the scroller's edge, so the dialog's padding stays below and a shorter body cannot pull
+// the scroll back), the dialog's entrance has finished, and the press and release are split with the
+// blur rendered between them, so the check does not depend on runner timing.
+async function pressSaveFromFocusedName(page: Page, dialog: ReturnType<Page['getByRole']>, name: ReturnType<Page['getByRole']>) {
+  const saveButton = dialog.getByRole('button', { name: en.vaults.dialog.save, exact: true });
+  await expect(saveButton).toBeEnabled();
+  await saveButton.evaluate((element) => element.scrollIntoView({ block: 'end' }));
+  await dialog.evaluate(async (element) => { await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined))); });
+  await expect(name).toBeFocused();
+  const center = async () => {
+    const box = await saveButton.boundingBox();
+    if (!box) throw new Error('Save has no box');
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  };
+  const pressed = await center();
+  await page.mouse.move(pressed.x, pressed.y);
+  await page.mouse.down();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(name).not.toBeFocused();
+  // Save stays where the press began (its pressed look scales it about its centre).
+  expect(Math.abs((await center()).y - pressed.y)).toBeLessThan(1);
+  await page.mouse.up();
+}
+
+for (const [label, edit, saved] of [
+  ['an edited default field name', 'rename', [`POST /api/vault/secrets/${secret.name}/fields`, `PATCH /api/vault/secrets/${secret.name}`]],
+  ['an empty new field', 'add', [`PATCH /api/vault/secrets/${secret.name}`]],
+] as const) test(`a Save press that starts on ${label} still saves`, async ({ context, page }) => {
   const origin = 'http://192.0.2.1:5123';
   const observed = await harness(context, page, origin);
   const timeline = await installTimeline(context, page, observed.writes);
@@ -328,37 +354,24 @@ test('a Save press that starts while a field name has focus still saves', async 
   page.setDefaultTimeout(8_000);
   await page.getByRole('menuitem', { name: en.vaults.editSecret }).click();
   const dialog = page.getByRole('dialog');
-  const name = dialog.getByLabel('Default field name');
-  await name.fill('password');
+  let name = dialog.getByRole('textbox', { name: 'Default field name', exact: true });
+  if (edit === 'rename') {
+    await name.fill('password');
+  } else {
+    // A new field row left empty is not saved and does not block Save.
+    await dialog.getByRole('button', { name: en.vaults.fields.add }).click();
+    name = dialog.getByRole('textbox', { name: en.vaults.fields.newName, exact: true });
+  }
   await expect(name).toBeFocused();
   await expect(dialog.getByText(en.vaults.fields.nameRule)).toBeVisible();
-  const saveButton = dialog.getByRole('button', { name: en.vaults.dialog.save, exact: true });
-  await expect(saveButton).toBeEnabled();
-  // Save scrolled just into view (its bottom at the scroller's edge, as a pointer click scrolls it,
-  // so the dialog's padding stays below and a shorter body does not pull the scroll back), and the
-  // dialog's entrance finished, so the press lands where Save is drawn.
-  await saveButton.evaluate((element) => element.scrollIntoView({ block: 'end' }));
-  await dialog.evaluate(async (element) => { await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined))); });
-  await expect(name).toBeFocused();
-  const box = await saveButton.boundingBox();
-  if (!box) throw new Error('Save has no box');
-  const x = box.x + box.width / 2;
-  const y = box.y + box.height / 2;
-  const saved = [`POST /api/vault/secrets/${secret.name}/fields`, `PATCH /api/vault/secrets/${secret.name}`];
-  const fieldWrite = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/vault/secrets/${secret.name}/fields`);
-  const metadataWrite = page.waitForResponse((response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/vault/secrets/${secret.name}`);
+  const writes = saved.map((write) => page.waitForResponse((response) => `${response.request().method()} ${new URL(response.url()).pathname}` === write));
   timeline.mark('save-press-start');
-  await page.mouse.move(x, y);
-  await page.mouse.down();
-  // Let the blur render before the release, as a slow hand or a loaded runner would.
-  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  await expect(name).not.toBeFocused();
-  await page.mouse.up();
+  await pressSaveFromFocusedName(page, dialog, name);
   timeline.observeAfterClick();
-  await Promise.all([fieldWrite, metadataWrite]);
+  await Promise.all(writes);
   expect(observed.writes).toEqual(saved);
   await expect(dialog).toHaveCount(0);
-  await expectSingleDocumentJourney(page, observed, url, saved);
+  await expectSingleDocumentJourney(page, observed, url, [...saved]);
 });
 
 test('unsupported create preserves Settings return, draft clearing, Standard and cancel', async ({ context, page }) => {

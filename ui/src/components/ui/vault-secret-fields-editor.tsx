@@ -102,7 +102,6 @@ export function VaultSecretFieldsEditor({
   const defaultLabelDirtyRef = useRef(false);
   const [newField, setNewField] = useState<string | null>(null);
   const [newValue, setNewValue] = useState('');
-  const [newNameTouched, setNewNameTouched] = useState(false);
   // Saved extra fields the user removed in this dialog; they go with the Save.
   const [removed, setRemoved] = useState<string[]>([]);
   const [focusedName, setFocusedName] = useState<'default' | 'new' | null>(null);
@@ -358,7 +357,6 @@ export function VaultSecretFieldsEditor({
         if (result.ok && result.secret) {
           clearAll();
           setNewField(null);
-          setNewNameTouched(false);
           setRemoved([]);
         }
         return result;
@@ -376,7 +374,6 @@ export function VaultSecretFieldsEditor({
   const discardNewField = () => {
     setNewField(null);
     setNewValue('');
-    setNewNameTouched(false);
   };
 
   // Names are checked against the names the secret will have after Save: the default's new label,
@@ -470,10 +467,7 @@ export function VaultSecretFieldsEditor({
               label: t('vaults.fields.newName'),
               onChange: setNewField,
               onFocus: () => setFocusedName('new'),
-              onBlur: () => {
-                setFocusedName(null);
-                setNewNameTouched(true);
-              },
+              onBlur: () => setFocusedName(null),
               autoFocus: true,
             }}
             value={{
@@ -483,7 +477,9 @@ export function VaultSecretFieldsEditor({
               onChange: setNewValue,
             }}
             remove={{ label: t('vaults.fields.discardNew'), onRemove: discardNewField }}
-            issue={newIssue === 'nameRequired' && !newNameTouched && !newValue ? null : newIssue}
+            // A blank name matters only once the new field has a value: an empty new row is not
+            // saved and does not block Save, so leaving it says nothing (and moves nothing).
+            issue={newIssue === 'nameRequired' && !newValue ? null : newIssue}
             disabled={fieldMutationLocked}
           />
         )}

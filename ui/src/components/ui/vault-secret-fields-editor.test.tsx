@@ -275,6 +275,19 @@ it('keeps the field-name rule in place, hidden and unannounced, when the name lo
   expect(rule.getAttribute('aria-hidden')).toBe('true');
 });
 
+it('says nothing about an empty new field’s blank name when it loses focus; it is not saved', () => {
+  renderEditor();
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  const name = screen.getByLabelText('New field name');
+  fireEvent.blur(name);
+  expect(screen.queryByText(en.vaults.fields.nameRequired)).toBeNull();
+  expect(lastState()).toEqual({ dirty: false, valid: true });
+  // Once it has a value, the blank name is what blocks Save, and it says so.
+  change('New field value', 'seed');
+  expect(screen.getByText(en.vaults.fields.nameRequired)).toBeTruthy();
+  expect(lastState()).toEqual({ dirty: true, valid: false });
+});
+
 it('saves nothing and reports clean when nothing changed', async () => {
   renderEditor();
   expect(lastState()).toEqual({ dirty: false, valid: true });
