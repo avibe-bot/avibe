@@ -19,6 +19,13 @@ PUBLIC_INSTALL_COMMAND = (
 )
 
 
+def test_public_installer_urls_are_short_and_user_facing():
+    powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
+    assert "# Usage: irm https://avibe.bot/install.ps1 | iex" in powershell
+    assert "https://avibe.bot/install.ps1" in powershell
+    assert "https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1" not in powershell
+
+
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(textwrap.dedent(content), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)

@@ -82,7 +82,7 @@ import {
 } from './vault-hd-wallet-steps';
 import { AskTurnOffNote } from './vault-ask-turn-off-note';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
-import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
+import { VaultSecretFieldsEditor, type VaultFieldsCommit } from './vault-secret-fields-editor';
 import { VaultSolanaKeyFields } from './vault-solana-key-fields';
 import { VaultGenerateControl, VaultGeneratedBadge } from './vault-generate';
 
@@ -221,6 +221,9 @@ export const VaultSecretForm: React.FC<{
   const [focusField, setFocusField] = useState<{ id: number; part: 'name' | 'value' } | null>(null);
   const [focusedNameId, setFocusedNameId] = useState<number | null>(null);
   const [fieldEditBusy, setFieldEditBusy] = useState(false);
+  // The edit dialog's field changes, committed by its Save (one atomic request), or dropped.
+  const fieldsCommitRef = useRef<VaultFieldsCommit | null>(null);
+  const [fieldsState, setFieldsState] = useState({ dirty: false, valid: true });
   const staticValueRef = useRef('');
   const setStaticValue = useCallback((next: string) => {
     staticValueRef.current = next;
@@ -532,7 +535,7 @@ export const VaultSecretForm: React.FC<{
         : signingKey != null
     : staticValueReady;
   const canSubmit = isEdit
-    ? !submitting && !fieldEditBusy
+    ? !submitting && !fieldEditBusy && fieldsState.valid
     : Boolean(secretNameValid && valueReady) &&
       !submitting &&
       (isHd
@@ -842,6 +845,9 @@ export const VaultSecretForm: React.FC<{
         return;
       }
       if (isEdit && editSecret) {
+        // Field changes first, in one atomic request; if they aren't written the dialog stays open
+        // with them (the editor shows why) and the metadata isn't sent either.
+        if (fieldsCommitRef.current?.dirty() && !(await fieldsCommitRef.current.commit())) return;
         // Value-free metadata edit: the shared validation above already ran; PATCH
         // description / tags / policy. Only the visible fetch policy (allowed_hosts + auth) is
         // sent; the backend preserves internal keys such as always_ask.
@@ -1575,7 +1581,8 @@ export const VaultSecretForm: React.FC<{
           <Lock className="size-3 shrink-0" />
           {t('vaults.edit.lockedHint')}
         </p>
-        {!isKeypair && <VaultSecretFieldsEditor key={editSecret.name} secret={editSecret} disabled={submitting} onBusyChange={setFieldEditBusy} />}
+        {!isKeypair && <VaultSecretFieldsEditor key={editSecret.name} secret={editSecret} disabled={submitting} onBusyChange={setFieldEditBusy}
+          commitRef={fieldsCommitRef} onChange={setFieldsState} />}
 
         <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
