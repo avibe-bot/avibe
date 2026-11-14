@@ -13,6 +13,11 @@
       "asset": "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz",
       "sha256": "06cd80b153bdf046dc067fb593e0fc648e780afa37a902ca0515ac25f32f9a4f"
     },
+    "windows": {
+      "target": "x86_64-pc-windows-msvc",
+      "tool_snapshot": "tools-windows-v0.31.0.json",
+      "tool_snapshot_sha256": "15bfc894df97f82e891ef251dec569e1cfff1ffd41148269eb681758d0bbd74d"
+    },
     "source": {
       "archive": "cua-5272e492d61b96caf08e3bf434d91126c1f3dccc.tar.gz",
       "url": "https://codeload.github.com/trycua/cua/tar.gz/5272e492d61b96caf08e3bf434d91126c1f3dccc",
