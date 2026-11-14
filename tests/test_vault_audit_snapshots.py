@@ -261,7 +261,7 @@ def test_additive_migration_preserves_audit_bytes_and_epoch(tmp_path):
         )
         before = conn.execute("SELECT * FROM vault_audit").fetchall()
         epoch = conn.execute("SELECT * FROM state_meta WHERE key = 'compatibility_epoch'").fetchall()
-    migrations.run_migrations(db)
+    migrations.run_migrations(db, revision="20261112_0088")
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT * FROM vault_audit").fetchall() == before
         assert conn.execute("SELECT * FROM state_meta WHERE key = 'compatibility_epoch'").fetchall() == epoch

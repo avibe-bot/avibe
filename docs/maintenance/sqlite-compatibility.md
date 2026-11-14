@@ -67,8 +67,16 @@ C-alt's projection-aware reader shipped in `gh-v3.2.5rc19` with support for
 that admission set to `{1, 2, 3}` only for a full unknown exact future revision
 whose current required schema is present. It does not declare the current graph
 as epoch 3, advance the persisted marker, or authorize any writer suppression.
-The coordinated 3.2.7 boundary owns the epoch-3 breaking revision and must
-activate cache, Vault snapshot, and Skill catalog reference writes together.
+The coordinated 3.2.7 boundary is breaking revision `20261114_0089`: it advances
+marker and stamp together, adds indexed Skill reference cleanup and Session
+cache cleanup triggers, and initializes the durable Vault snapshot ID allocator.
+It activates cache, Vault snapshot and Skill catalog reference writes together
+only when the candidate build also has an epoch-3 published-predecessor proof.
+There is no historical row rewrite, reference backfill, Vault GC or VACUUM.
+Building the Skill reference index is a one-time scan during the migration;
+subsequent cleanup uses indexed digest lookups, including old 3.2.6 deletes.
+The normal breaking upgrade snapshot remains mandatory on populated state.
+See [the coordinated writer plan](../plans/epoch3-writer-activation.md).
 Breaking revision `20261108_0083` activates epoch 2; it always takes the
 conservative upgrade snapshot on populated state, even in an activated build. The epoch/stamp commit together, without
 backfilling or deleting any history. Only exact supported committed Vibey calls
@@ -134,12 +142,15 @@ runs it again immediately before packaging, and `--activate` fills just
 `storage.compatibility.VERIFIED_PREDECESSOR_EPOCH` with the verified epoch.
 `None` disables the capability; pre-protocol or unsupported predecessors leave
 it `None`, with an explicit **not-applicable**, never a passing rollback claim.
-The source literal is now `2` after actual RC19, RC20 and RC21 wheels passed at epoch 2,
-including trace-suppressed canonical tool presentation through Activity and SQL.
-The [representation contract](../plans/vibey-tool-activity-projection.md#released-reader-proof)
-records the wheel digests and RC18 refusal evidence. The no-copy decision still
-requires a proven additive same-epoch path; activation cannot skip the epoch-2
-transition's rollback snapshot.
+The source literal is now `3` after the actual published 3.2.6 wheel passed the
+extended three-representation read/write/cleanup round trip and existing tool
+projection checks. Earlier RC19, RC20 and RC21 wheels established epoch-2 proof.
+The [coordinated writer plan](../plans/epoch3-writer-activation.md) records the
+3.2.6 wheel digest and remaining populated Incus/performance gates. The
+[representation contract](../plans/vibey-tool-activity-projection.md#released-reader-proof)
+records the earlier wheel digests and RC18 refusal evidence. The no-copy decision
+still requires a proven additive same-epoch path; neither epoch transition may
+skip its rollback snapshot.
 CI rechecks an activated literal against the actual published predecessor;
 the publisher independently fills or clears it before packaging.
 A failed applicable reader/writer test stops the build. The literal ships in the

@@ -26,6 +26,13 @@ from tests.test_skill_observability import NOW, engine, seed_session, skill, wri
 from vibe.authorization import AuthorizationContext
 
 
+@pytest.fixture(autouse=True)
+def released_inline_writer(monkeypatch):
+    # This module proves the reader-first contract; writer activation has its
+    # own suite, including duplicate receipts and lifecycle cleanup.
+    monkeypatch.setattr("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", 2)
+
+
 def catalog(*, entries=True, session_id=None):
     event = runtime.observation(
         "skill.catalog_result", runtime.catalog_result([skill()] if entries else []), session_id=session_id
@@ -66,7 +73,7 @@ def test_populated_upgrade_and_production_writes_keep_exact_inline_bytes(tmp_pat
         assert conn.exec_driver_sql("SELECT 1 FROM sqlite_master WHERE name='skill_catalogs'").first() is None
         assert dict(conn.execute(select(agent_events)).mappings().one()) == before
     db.dispose()
-    migrations.run_migrations(path)
+    migrations.run_migrations(path, revision="20261112_0088")
     db = create_sqlite_engine(path)
     try:
         with db.begin() as conn:

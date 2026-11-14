@@ -15,19 +15,26 @@ COMPATIBILITY_EPOCH_KEY = "compatibility_epoch"
 # Epoch 2 activates C-alt's projection-only tool steps. RC19 shipped support for
 # both epochs before the representation transition; older readers must refuse.
 VIBEY_TOOL_PROJECTION_EPOCH = 2
-# Epoch 3 is a reader bridge only in this release. The coordinated writer
-# activation will advance the persisted marker in a later release; accepting
-# this future marker must never enable an epoch-2 writer gate.
+# 3.2.6 shipped the epoch-3 reader bridge before 3.2.7's coordinated activation.
+# Reader admission remains independent of the writer capability below.
 READER_COMPATIBILITY_EPOCH = 3
 SUPPORTED_COMPATIBILITY_EPOCHS = frozenset({1, VIBEY_TOOL_PROJECTION_EPOCH, READER_COMPATIBILITY_EPOCH})
 BRIDGE_REVISION = "20261108_0076"
 PRE_BRIDGE_REVISION = "20261107_0075"
-# Activate only after exercising the immediately previous published wheel (RC19
-# floor and RC21 predecessor verified epoch 2, including tool presentation).
-# CI rechecks that contract; the publisher overwrites the literal from its own
-# probe before packaging. None keeps unverified builds conservative.
+# The actual 3.2.6 wheel passed the epoch-3 read/write/cleanup round trip,
+# including existing tool projection. CI rechecks; the publisher independently
+# fills this literal before packaging. None keeps unverified builds conservative.
 # This is binary capability, not a persisted DB marker/version gate.
-VERIFIED_PREDECESSOR_EPOCH: int | None = 2
+VERIFIED_PREDECESSOR_EPOCH: int | None = 3
+COORDINATED_WRITER_EPOCH = 3
+
+
+def permits_compact_writes(conn: Connection) -> bool:
+    """All three writers share the same released-reader proof and DB boundary."""
+    return (
+        VERIFIED_PREDECESSOR_EPOCH == COORDINATED_WRITER_EPOCH
+        and read_compatibility_epoch(conn.connection.driver_connection) == COORDINATED_WRITER_EPOCH
+    )
 
 
 def permits_tool_trace_suppression(conn: Connection) -> bool:
@@ -36,9 +43,12 @@ def permits_tool_trace_suppression(conn: Connection) -> bool:
     The build's released-reader proof and this transaction's database marker
     must both authorize the representation. Never infer it from Session.backend.
     """
-    if VERIFIED_PREDECESSOR_EPOCH != VIBEY_TOOL_PROJECTION_EPOCH:
+    if VERIFIED_PREDECESSOR_EPOCH not in (VIBEY_TOOL_PROJECTION_EPOCH, COORDINATED_WRITER_EPOCH):
         return False
-    return read_compatibility_epoch(conn.connection.driver_connection) == VIBEY_TOOL_PROJECTION_EPOCH
+    epoch = read_compatibility_epoch(conn.connection.driver_connection)
+    return epoch == VIBEY_TOOL_PROJECTION_EPOCH or (
+        epoch == COORDINATED_WRITER_EPOCH and VERIFIED_PREDECESSOR_EPOCH == COORDINATED_WRITER_EPOCH
+    )
 
 
 class CompatibilityEpochError(ValueError):

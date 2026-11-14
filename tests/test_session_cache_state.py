@@ -24,7 +24,10 @@ from tests.test_transcript_store_contract import SESSION, _SQLite, _started
 
 
 @pytest.fixture
-async def backend():
+async def backend(monkeypatch):
+    # These are the released reader/inline-writer coexistence fixtures. Actual
+    # activated writes are exercised independently in test_epoch3_writers.
+    monkeypatch.setattr("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", 2)
     value = _SQLite(adapter=False)
     await _started(value)
     yield value
@@ -254,8 +257,8 @@ def test_additive_upgrade_preserves_legacy_rows_and_epoch_without_backfill(tmp_p
         )
         before = conn.execute("SELECT * FROM messages").fetchall()
         epoch = conn.execute("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").fetchone()
-    run_migrations(path)
-    run_migrations(path)  # reopening must not backfill either
+    run_migrations(path, revision="20261112_0088")
+    run_migrations(path, revision="20261112_0088")  # reader release reopening must not backfill either
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT * FROM messages").fetchall() == before
         assert conn.execute("SELECT count(*) FROM session_cache_state").fetchone() == (0,)

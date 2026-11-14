@@ -304,6 +304,11 @@ def record(
             raise ObservationError("observation_id_conflict")
         return "duplicate"
 
+    if event["event_type"] == "skill.catalog_result":
+        from storage.skill_catalogs import compact_event
+
+        compact_event(conn, event["id"], event["content"])
+
     entries = event["content"]["entries"] if event["event_type"] == "skill.catalog_result" else [event["content"]]
     for entry in entries:
         if entry["skill_key"] is None:

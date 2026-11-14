@@ -238,10 +238,11 @@ async def test_cache_facts_round_trip_and_latest_audits_restore_without_entering
     tracker.finish(cache, message)
     response = await store.append_response(SESSION, message, final=True, cache=cache)
     loaded = await store.load(SESSION)
-    assert loaded[-1].payload["cache"] == cache
+    expected_inline = cache if isinstance(backend, _Fake) else {key: value for key, value in cache.items() if key != "prefix"}
+    assert loaded[-1].payload["cache"] == expected_inline
     backend.fork("child", SESSION, response)
     inherited = await store.load("child")
-    assert inherited[-1].payload["cache"] == cache
+    assert inherited[-1].payload["cache"] == expected_inline
     later = tracker.begin(request, loaded, now=200)
     tracker.finish(later, message)
     await store.append_audit(SESSION, "attempt", {
