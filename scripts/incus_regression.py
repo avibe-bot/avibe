@@ -300,6 +300,25 @@ def describe_instance_hold(record: dict | None) -> str | None:
     return f"HELD: owner={owner}; reason={reason}; since={since}"
 
 
+def require_mutation_hold(
+    target: RegressionTarget, record: dict | None, owner: str | None, *, bootstrap: bool = False
+) -> None:
+    """Authorize target mutations using the instance's hold, while its update lock is held."""
+    hold = describe_instance_hold(record)
+    if hold is None:
+        if target.target == MASTER_TARGET and not (bootstrap and record is None):
+            raise RegressionError(
+                "master requires holding it first: hold --target master --owner <you> --reason <reason>"
+            )
+        return
+    held_owner = str((record or {}).get("config", {}).get(HOLD_CONFIG_KEYS[0]) or "").strip()
+    if not held_owner or not owner or owner.strip() != held_owner:
+        raise RegressionError(
+            f"{target.slug} is held by {held_owner or 'unknown'}: {hold}. "
+            "Pass --hold-owner matching the hold owner; do not replace another owner's hold."
+        )
+
+
 def instance_exists(runner: Runner, remote: str | None, project: str, instance: str) -> bool:
     return instance_record(runner, remote, project, instance) is not None
 
@@ -2861,8 +2880,8 @@ def cmd_up(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     loaded_env_file = load_env_file(repo_root, args.env_file)
     show_runtime_build_timeout()
+    require_incus()
     if not args.dry_run:
-        require_incus()
         require_source_sync()
     metadata = WorktreeMetadata(repo_root, args.remote)
     # The lock comes before the row, because the lock is what says a run holds
@@ -2885,8 +2904,12 @@ def cmd_up(args: argparse.Namespace) -> int:
         try:
             with metadata.locked(dry_run=args.dry_run):
                 target = resolve_target(args, repo_root, dry_run=args.dry_run, slug=slug)
+                # Even previews must read the real hold: an empty dry-run
+                # inventory cannot authorize a held target or master bootstrap.
+                hold_runner = Runner(dry_run=False) if args.dry_run else runner
+                record = instance_record(hold_runner, args.remote, target.project, target.instance)
+                require_mutation_hold(target, record, getattr(args, "hold_owner", None), bootstrap=True)
                 reservation = metadata.reserve(target, dry_run=args.dry_run)
-            record = instance_record(runner, args.remote, target.project, target.instance)
             target_exists = record is not None
             seed = resolve_seed(target, requested=args.seed, record=record, reset_mode=args.reset_mode)
             if not args.dry_run and not target_exists and args.remote is None:
@@ -3065,9 +3088,13 @@ def cmd_down(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
     target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
-    if not args.dry_run:
-        require_incus()
-    Runner(dry_run=args.dry_run).run(incus("stop", remote_ref(args.remote, target.instance), project=target.project), check=False)
+    require_incus()
+    with target_update_lock(repo_root, args.remote, target.project, dry_run=args.dry_run, blocking=False):
+        runner = Runner(dry_run=args.dry_run)
+        hold_runner = Runner(dry_run=False) if args.dry_run else runner
+        record = instance_record(hold_runner, args.remote, target.project, target.instance)
+        require_mutation_hold(target, record, getattr(args, "hold_owner", None))
+        runner.run(incus("stop", remote_ref(args.remote, target.instance), project=target.project), check=False)
     return 0
 
 
@@ -3362,6 +3389,7 @@ def build_parser() -> argparse.ArgumentParser:
     up = subparsers.add_parser("up", help="Create/update a regression environment.")
     add_common(up)
     add_target_args(up)
+    up.add_argument("--hold-owner", help="Must match an existing hold's owner; an existing master always requires a hold.")
     up.add_argument("--image", default=DEFAULT_IMAGE)
     up.add_argument("--storage-pool", default=DEFAULT_STORAGE_POOL)
     up.add_argument("--network", default=DEFAULT_NETWORK)
@@ -3403,6 +3431,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(name)
         add_common(sub)
         add_target_args(sub)
+        if name == "down":
+            sub.add_argument("--hold-owner", help="Must match an existing hold's owner; master always requires a hold.")
         if name == "delete":
             sub.add_argument("--yes", action="store_true")
             sub.add_argument("--ignore-hold", action="store_true", help="Explicitly override an environment's hold.")
