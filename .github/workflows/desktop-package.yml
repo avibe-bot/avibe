@@ -325,6 +325,9 @@ jobs:
           python desktop/scripts/prepare-cua-driver.py --target "${{ matrix.target }}" --defer-windows-contract
           if ($LASTEXITCODE -ne 0) { throw "Windows Cua Driver preparation failed" }
           $evidence = Join-Path $env:RUNNER_TEMP 'avibe-windows-driver-package-evidence'
+          # Capture tools/list and dump-docs from the staged EXE. The same fixture
+          # also runs 11 native selectors in separate source-built test binaries;
+          # those selectors are source evidence, not production-EXE action smoke.
           pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
             -File desktop/scripts/test-windows-driver-source.ps1 `
             -CaptureProductionDriver `
@@ -344,8 +347,10 @@ jobs:
           python scripts/desktop_release.py verify-driver-prepared `
             --target "${{ matrix.target }}" `
             --driver $driver `
-            --provenance-path "${driver}.provenance.json"
-          if ($LASTEXITCODE -ne 0) { throw "Windows Cua Driver provenance verification failed" }
+            --provenance-path "${driver}.provenance.json" `
+            --windows-evidence $evidence `
+            --summary $env:GITHUB_STEP_SUMMARY
+          if ($LASTEXITCODE -ne 0) { throw "Windows Cua Driver provenance/capture binding verification failed" }
 
       - name: Verify prepared Cua Driver provenance
         if: runner.os == 'macOS'
