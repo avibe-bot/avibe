@@ -138,13 +138,17 @@ final class DirectIrohBindingTests: XCTestCase {
         let writeTask = Task {
             try await stream.write(Data(repeating: 0xA2, count: 16 * 1024 * 1024))
         }
-        _ = try await accepting.value
+        let acceptedServerStream = try await accepting.value
+        defer {
+            withExtendedLifetime(acceptedServerStream) {}
+        }
         // Keep the peer from consuming either half. The small receive window
         // makes the write exercise flow-control backpressure rather than a
         // merely buffered localhost transfer.
         try await Task.sleep(for: .milliseconds(100))
         let nativeCallsStarted = await waitForStarted(recorder)
         XCTAssertTrue(nativeCallsStarted)
+        XCTAssertFalse(recorder.allSettled)
 
         let cancelledAt = Date()
         stream.cancel()
