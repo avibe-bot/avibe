@@ -73,7 +73,7 @@ def test_snapshot_survives_logging_shutdown_and_main_return(tmp_path):
             try:
                 while time.monotonic() < until:
                     text = path.read_text() if path.exists() else ''
-                    if 'in held_worker' in text:
+                    if 'in held_worker' in text and 'Shutdown phase=thread_executor_join_start' in text:
                         print(json.dumps({'text': text, 'file_count': len(list(root.glob('shutdown-*.log')))}))
                         return
                     time.sleep(0.01)
