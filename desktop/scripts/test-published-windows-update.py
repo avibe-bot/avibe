@@ -139,20 +139,45 @@ def main():
             return next((window for window in app.windows() if window.menu()), None)
         window = wait_for(menu_window, 120, "No installed application menu")
         window.capture_as_image().save(str(EVIDENCE / "installed-window.png"))
-        # Native menu is the shipped user-facing channel control. It checks
-        # immediately and presents the native offer on the fresh account view.
-        window.menu_select("File->Get Pre-release Updates")
+        # RC builds start on the Test channel and may already be checking or
+        # presenting an offer. Observe that first; never toggle an already
+        # checked channel off, and never force a disabled native control.
         desktop = Desktop(backend="uia")
+        check_requested = False
+        last_menu = None
+
         def offer():
+            nonlocal check_requested, last_menu
             for dialog in desktop.windows(process=original.pid):
                 texts = [control.window_text() for control in dialog.descendants()]
                 joined = "\n".join(texts)
+                save("last-native-view.json", {"texts": texts})
                 if exact_offer(joined):
                     buttons = [control for control in dialog.descendants(control_type="Button") if control.window_text() == "Download and Install"]
                     if len(buttons) == 1:
                         return dialog, buttons[0], joined
+            channel = window.menu_item("File->Get Pre-release Updates")
+            state = {"enabled": channel.is_enabled(), "checked": channel.is_checked()}
+            if state != last_menu:
+                save("channel-readiness.json", state)
+                last_menu = state
+            if not check_requested and state["enabled"]:
+                if not state["checked"]:
+                    channel.click_input()
+                    check_requested = True
+                else:
+                    # The updater label reflects its current phase. Select only
+                    # the idle/current/available/error action, never a busy one.
+                    labels = {"Check for Desktop Updates…", "This app is up to date.",
+                              "Update available", "Update failed — retry"}
+                    labels |= {f"{label} — {OLD}" for label in labels}
+                    items = window.menu_item("File").sub_menu().items()
+                    actions = [item for item in items if item.text() in labels and item.is_enabled()]
+                    if len(actions) == 1:
+                        actions[0].click_input()
+                        check_requested = True
             return None
-        dialog, button, text = wait_for(offer, 180, "Exact RC17 to RC19 native offer not found; no installation authorized")
+        dialog, button, text = wait_for(offer, 240, "Exact RC17 to RC19 native offer not found; no installation authorized")
         save("offer.json", {"text": text, "pid": original.pid, "expected_target": NEW})
         dialog.capture_as_image().save(str(EVIDENCE / "update-offer.png"))
         button.click_input()
@@ -181,9 +206,9 @@ def main():
         collector.join(timeout=10)
         # App-generated public updater status only. No config/db/credential copy.
         for root in (Path(os.environ["APPDATA"]), Path(os.environ["LOCALAPPDATA"])):
-            for status in (root / "bot.avibe.desktop").glob("desktop-update*.json"):
-                if "request" not in status.name:
-                    shutil.copyfile(status, EVIDENCE / (root.name + "-" + status.name))
+            status = root / "bot.avibe.desktop" / "update-status.json"
+            if status.is_file():
+                shutil.copyfile(status, EVIDENCE / (root.name + "-" + status.name))
 
 
 if __name__ == "__main__":
