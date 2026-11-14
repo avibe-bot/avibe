@@ -95,6 +95,42 @@ Windows readiness. macOS admission remains unchanged.
   and health behavior is unchanged.
 
 
+## Windows literal executable launch contract (2026-11-14)
+
+This is an inactive Controller/SDK producer contract; it does not remove the
+Windows readiness refusal above. The public SDK target is
+`computer.app({path})`, with exact wire descriptor `{kind: "app_path", path}`.
+It is launch-only, never an existing-app selector or a nested window identity.
+Each launch requests a new process; the created PID must never be replaced by
+a same-name process. Existing running apps keep ordinary name/bundle handles.
+The SDK consumer is delivered separately after this producer lands.
+
+Windows `launch_app` accepts only `path`, optional `additional_arguments`
+(string array) and `start_minimized` (boolean), plus the Controller-owned
+session. Mixed name/bundle/path selectors, caller environment and cwd are
+rejected. macOS name/bundle launch behavior is unchanged; path launch is
+explicitly Windows-only.
+
+The Controller accepts a literal absolute drive-letter `.exe` path, without
+NUL, alternate data streams, UNC or device namespaces. It opens the file once
+with ordinary read/write/delete sharing, follows normal Windows resolution,
+checks a regular disk file on a local fixed drive, and obtains the final DOS
+path from that handle. Only the OS-added verbatim prefix is removed; spelling
+and case are preserved. That same canonical string is forwarded and used as
+the sole launch lock key. Dot components, short names and reparse paths are
+resolved by Windows rather than a separate ancestry policy. The handle closes
+before dispatch. There are no file-ID alias locks, directory walks, case-policy
+refusals, retained file guards, process-image attestation or attachment checks;
+this is ordinary same-user launch admission, not same-user TOCTOU isolation.
+
+The source driver owns new-process creation, OS-created environment with
+inheritance disabled, executable-parent cwd, no inherited handles,
+target-only breakaway and elevated-launch refusal. The Controller does not
+synthesize a replacement PID or alter source launch metadata. Native admission
+coverage runs in the existing Windows Computer Use CI step: seven foundation
+cases plus two path cases, exactly nine executed with no skips. SDK/source
+creation semantics and Windows end-to-end acceptance remain separate gates.
+
 Foreground input and window activation are ordinary Computer Use operations.
 The Controller forwards `delivery_mode: "foreground"` and focus-changing
 chords, and the managed surface adds the pinned driver's `bring_to_front`
