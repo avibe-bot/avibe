@@ -95,6 +95,7 @@ export const TagInput: React.FC<TagInputProps> = ({
   // so its click was lost. A press runs from pointerdown to its click (on a touch screen the click
   // comes after pointerup), or to pointercancel; a press with no click ends a moment after release.
   const [held, setHeld] = useState<string | null>(null);
+  const heldRef = useRef<string | null>(null);
   const pressing = useRef(false);
   const afterPress = useRef<(() => void) | null>(null);
   useEffect(() => {
@@ -127,6 +128,17 @@ export const TagInput: React.FC<TagInputProps> = ({
       window.removeEventListener('pointerup', up, true);
     };
   }, []);
+
+  // The held value appears as a chip and leaves the input. Only once: the deferred call does
+  // nothing after an earlier settle (re-entering the input), so it can never clear a later draft.
+  const settleHeld = () => {
+    afterPress.current = null;
+    if (heldRef.current === null) return;
+    heldRef.current = null;
+    setHeld(null);
+    setDraft('');
+    setHighlight(-1);
+  };
 
   const add = (value: string) => {
     if (!values.includes(value)) onChange([...values, value]);
@@ -206,7 +218,12 @@ export const TagInput: React.FC<TagInputProps> = ({
           onChange={(event) => setDraftSafe(event.target.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          onFocus={() => setFocused(true)}
+          onFocus={() => {
+            // Back in the input before the press finished: the held value is a chip now, and
+            // what the user types next is a new draft that nothing deferred may clear.
+            settleHeld();
+            setFocused(true);
+          }}
           onBlur={() => {
             setFocused(false);
             const cleaned = normalize(draft);
@@ -216,12 +233,9 @@ export const TagInput: React.FC<TagInputProps> = ({
             }
             onChange([...values, cleaned]);
             onPendingChange?.(false);
+            heldRef.current = cleaned;
             setHeld(cleaned);
-            afterPress.current = () => {
-              setHeld(null);
-              setDraft('');
-              setHighlight(-1);
-            };
+            afterPress.current = settleHeld;
           }}
           placeholder={values.length ? undefined : placeholder}
           aria-label={ariaLabel}

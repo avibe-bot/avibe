@@ -81,11 +81,29 @@ it.each([
   type('prod');
   fireEvent.pointerDown(window);
   fireEvent.blur(input());
+  expect(chip('prod')).toBeNull();
   end();
   act(() => { vi.advanceTimersByTime(Math.max(0, wait - 1)); });
   if (wait) expect(chip('prod')).toBeNull();
   act(() => { vi.advanceTimersByTime(1); });
   expect(chip('prod')).toBeTruthy();
+});
+
+it('shows the held chip when the input is entered again, and never clears what is typed next', () => {
+  render(<Harness />);
+  type('prod');
+  fireEvent.pointerDown(window);
+  fireEvent.blur(input());
+  // Released with no click, then back in the input by keyboard before the release settles.
+  fireEvent.pointerUp(window);
+  fireEvent.focus(input());
+  expect(chip('prod')).toBeTruthy();
+  expect(input().value).toBe('');
+  fireEvent.change(input(), { target: { value: 'next' } });
+  act(() => { vi.advanceTimersByTime(1000); });
+  expect(input().value).toBe('next');
+  expect(pending.at(-1)).toBe(true);
+  expect(changes).toEqual([['prod']]);
 });
 
 it('keeps an invalid draft as a pending draft on a blur during a press, as on any blur', () => {
