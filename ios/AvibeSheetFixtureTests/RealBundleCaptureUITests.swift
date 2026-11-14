@@ -58,7 +58,7 @@ final class RealBundleCaptureUITests: XCTestCase {
                         case "stale":
                             requireText(chinese
                                 ? "没能更新实例列表，下面是上次的结果，在线状态可能已经变了。"
-                                : "Couldn’t update the list. These are the last results; who is online may have changed.", in: app)
+                                : "Couldn’t update the list. This is the last result; online status may have changed.", in: app)
                         case "account":
                             let account = app.webViews.firstMatch.buttons.matching(NSPredicate(
                                 format: "label CONTAINS %@", "alex@example.invalid"
