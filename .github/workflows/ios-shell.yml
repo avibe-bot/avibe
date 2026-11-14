@@ -148,3 +148,25 @@ jobs:
           path: ${{ runner.temp }}/AvibeTests.xcresult
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Run sheet gesture XCUITest fixture
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme AvibeSheetFixture \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Upload sheet gesture XCUITest result bundle
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-sheet-fixture-xcresult
+          path: ${{ runner.temp }}/AvibeSheetFixtureTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7

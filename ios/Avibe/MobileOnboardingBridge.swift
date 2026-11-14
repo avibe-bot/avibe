@@ -125,6 +125,7 @@ enum MobileBridgeMethod: String, CaseIterable {
     case sessionSelectInstance = "session.selectInstance"
     case sessionLogout = "session.logout"
     case appOpenExternal = "app.openExternal"
+    case appDismiss = "app.dismiss"
     case appReturnToInstance = "app.returnToInstance"
 }
 
@@ -252,13 +253,16 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     weak var trustedWebView: WKWebView?
     private let coordinator: MobileSessionCoordinator
     private let returnToRuntime: () -> Bool
+    private let dismissSurface: () -> Bool
 
     init(
         coordinator: MobileSessionCoordinator,
-        returnToRuntime: @escaping () -> Bool
+        returnToRuntime: @escaping () -> Bool,
+        dismissSurface: @escaping () -> Bool
     ) {
         self.coordinator = coordinator
         self.returnToRuntime = returnToRuntime
+        self.dismissSurface = dismissSurface
     }
 
     func userContentController(
@@ -393,6 +397,14 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         options: [:]
                     )
                     reply(replyHandler, result: ["opened": opened])
+                case .appDismiss:
+                    guard request.params.isEmpty else {
+                        throw MobileAccountError.invalidRequest
+                    }
+                    guard dismissSurface() else {
+                        throw MobileAccountError.runtimeUnavailable
+                    }
+                    reply(replyHandler, result: NSNull())
                 case .appReturnToInstance:
                     guard returnToRuntime() else {
                         throw MobileAccountError.runtimeUnavailable
@@ -438,6 +450,7 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
     UIGestureRecognizerDelegate
 {
     private let coordinator: MobileSessionCoordinator
+    private let startScreen: MobileOnboardingStartScreen
     /// Over a live runtime the hidden transport waits for the first account
     /// transition, which releases that runtime before it starts one.
     private let startsAccountSurfaceOnAppear: Bool
@@ -453,7 +466,8 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         coordinator: MobileSessionCoordinator,
         startScreen: MobileOnboardingStartScreen = .instances,
         resourceURL: URL? = nil,
-        returnToRuntime: @escaping () -> Bool = { false }
+        returnToRuntime: @escaping () -> Bool = { false },
+        dismissSurface: @escaping () -> Bool = { false }
     ) {
         let resourceDirectoryURL = resourceURL?.deletingLastPathComponent()
             ?? Bundle.main.resourceURL!.appendingPathComponent(
@@ -470,12 +484,14 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         components.fragment = startScreen.rawValue
         let resolvedResourceURL = components.url!
         self.coordinator = coordinator
+        self.startScreen = startScreen
         startsAccountSurfaceOnAppear = startScreen != .runtimeAccount
         self.resourceURL = resolvedResourceURL
         self.schemeHandler = schemeHandler
         handler = MobileBridgeHandler(
             coordinator: coordinator,
-            returnToRuntime: returnToRuntime
+            returnToRuntime: returnToRuntime,
+            dismissSurface: dismissSurface
         )
         webView = WKWebView(
             frame: .zero,
@@ -542,6 +558,7 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        configureSheetPresentation()
         if startsAccountSurfaceOnAppear {
             coordinator.activateAccountSurface()
         }
@@ -550,6 +567,22 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         }
         hasLoadedBundledPage = true
         webView.load(URLRequest(url: resourceURL))
+    }
+
+    private func configureSheetPresentation() {
+        guard
+            startScreen == .sheet,
+            let sheet = (presentationController ?? parent?.presentationController)
+                as? UISheetPresentationController
+        else {
+            return
+        }
+        sheet.detents = [.large()]
+        sheet.prefersScrollingExpandsWhenScrolledToEdge = false
+        sheet.prefersGrabberVisible = true
+        let contentOwner = parent ?? self
+        contentOwner.setContentScrollView(webView.scrollView, for: .all)
+        contentOwner.view.accessibilityViewIsModal = true
     }
 
     @objc

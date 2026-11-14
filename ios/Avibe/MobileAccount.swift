@@ -732,31 +732,37 @@ final class MobileSessionCoordinator {
     }
 
     func refresh() async throws -> MobileSessionState {
-        return try await runExclusive {
+        let keepsRuntime = snapshot != nil
+        return try await runExclusive(keepingSelection: keepsRuntime) {
             let previousAccountID = self.snapshot?.account.id
-            let requestGeneration = self.beginAccountTransition(
-                clearSelection: false
-            )
+            let requestGeneration = self.generation
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
                 await self.preparePushLogout()
-                self.clearStoredSelection()
+                self.beginAccountTransition(clearSelection: true)
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
-            if
-                case .signedIn(let fresh) = discovery,
-                previousAccountID != nil,
-                previousAccountID != fresh.account.id
-            {
+            switch discovery {
+            case .signedIn(let fresh):
+                if
+                    let previousAccountID,
+                    previousAccountID != fresh.account.id
+                {
+                    await self.preparePushLogout()
+                    self.beginAccountTransition(clearSelection: true)
+                    await self.replaceWithFreshSignedOutStore()
+                    return .signedOut
+                }
+                self.signedOutStoreIsFresh = false
+                return self.state(for: fresh)
+            case .secondFactorRequired:
                 await self.preparePushLogout()
-                self.clearStoredSelection()
-                await self.replaceWithFreshSignedOutStore()
-                return .signedOut
+                self.beginAccountTransition(clearSelection: true)
+                self.signedOutStoreIsFresh = false
+                return self.state(for: discovery)
             }
-            self.signedOutStoreIsFresh = false
-            return self.state(for: discovery)
         }
     }
 
@@ -1095,7 +1101,9 @@ final class MobileSessionCoordinator {
             runtime.generation == generation,
             runtime.websiteDataStoreIdentifier == websiteDataStore.identifier,
             let snapshot,
-            snapshot.instances.contains(runtime.instance),
+            snapshot.instances.contains(where: {
+                $0.id == runtime.instance.id && $0.url == runtime.instance.url
+            }),
             let selection = storedSelection(),
             selection.accountID == snapshot.account.id,
             selection.instanceID == runtime.instance.id,
