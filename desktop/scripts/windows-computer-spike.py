@@ -106,6 +106,40 @@ class MCP:
         self.log.close()
 
 
+class AvibeMCP(MCP):
+    """Exercise Avibe's real proxy transport, not its unavailable admission layer.
+
+    The descriptor is fixture-owned; it is never persisted as desktop state and
+    does not claim that the Windows shell or Controller supports the feature.
+    """
+    def __init__(self, executable, pipe, directory):
+        from core.computer_server import JsonRpcUpstream
+        from core.computer_use import ComputerUseState, ToolSnapshot
+        self.number = 0
+        self.directory = directory
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread.start()
+        state = ComputerUseState(
+            schema_version=1, enabled=True, state="ready", reason=None,
+            shell_pid=os.getpid(), instance_id="spike-fixture", generation=1,
+            driver_version=directory, tool_snapshot=ToolSnapshot(Path("unused"), "unused"),
+            socket_path=pipe, proxy_executable=str(executable), host_bundle_id="spike.fixture",
+        )
+        self.upstream = asyncio.run_coroutine_threadsafe(JsonRpcUpstream.start(state), self.loop).result(65)
+        self.schemas = {x["name"]: x for x in self.request("tools/list", {}).get("tools", [])}
+        save(f"{directory}/tools.json", self.schemas)
+
+    def request(self, method, params):
+        self.number += 1
+        return asyncio.run_coroutine_threadsafe(self.upstream.request(method, params), self.loop).result(65)
+
+    def close(self):
+        asyncio.run_coroutine_threadsafe(self.upstream.close(), self.loop).result(10)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=5)
+
+
 def structured(result):
     value = result.get("structuredContent")
     if value is not None:
@@ -176,7 +210,7 @@ def run_version(version, digest):
     notepad_pid = None
     try:
         time.sleep(2)
-        client = MCP(exe, pipe, version)
+        client = AvibeMCP(exe, pipe, version)
         client.call("health_report", {})
         client.call("start_session", {"session": "spike"})
         client.call("get_desktop_state", {"session": "spike"})
@@ -199,7 +233,10 @@ def run_version(version, digest):
             raise RuntimeError("Driver list_windows found no Notepad window")
         wid = window.get("window_id", window.get("id", window.get("hwnd")))
         target = {"pid": notepad_pid, "window_id": wid, "session": "spike"}
-        before = client.call("get_window_state", target)
+        observe = dict(target)
+        if "full_output" in client.schemas["get_window_state"]["inputSchema"]["properties"]:
+            observe["full_output"] = True
+        before = client.call("get_window_state", observe)
         app = Application(backend="win32").connect(process=notepad_pid)
         native = app.window(handle=int(wid))
         elements = structured(before).get("elements", [])
@@ -208,7 +245,7 @@ def run_version(version, digest):
         if editors and editors[0].get("element_token"):
             args["element_token"] = editors[0]["element_token"]
         client.call("type_text", args)
-        after = client.call("get_window_state", target)
+        after = client.call("get_window_state", observe)
         def read_text():
             return [c.window_text() for c in native.descendants() if "edit" in c.class_name().lower()]
         texts = read_text()
@@ -217,30 +254,42 @@ def run_version(version, digest):
             args["delivery_mode"] = "foreground"
             args.pop("element_token", None)
             client.call("type_text", args)
-            after = client.call("get_window_state", target)
+            after = client.call("get_window_state", observe)
             texts = read_text()
         save(f"{version}/native-text-readback.json", {"expected": TEXT, "actual": texts})
         if not any(TEXT in text for text in texts):
             raise RuntimeError("Chinese text not independently visible in Notepad")
+        # Foreground delivery restores the prior app, which immediately closes
+        # a menu. Persistently activate this exact observed fixture first.
+        activation = client.call("bring_to_front", target)
+        save(f"{version}/activation-readback.json", {"driver": structured(activation),
+             "foreground_hwnd": ctypes.windll.user32.GetForegroundWindow(), "expected_hwnd": wid})
+        if ctypes.windll.user32.GetForegroundWindow() != int(wid):
+            raise RuntimeError("Notepad activation not verified; no menu click")
+        after = client.call("get_window_state", observe)
         elements = structured(after).get("elements", [])
         menus = [e for e in elements if str(e.get("label", e.get("name", ""))).replace("&", "").lower() == "file"]
-        if menus and menus[0].get("element_token"):
-            click = dict(target, element_token=menus[0]["element_token"])
+        if menus and menus[0].get("screenshot_frame"):
+            frame = menus[0]["screenshot_frame"]
+            click = dict(target, x=frame["x"]+frame["w"]/2, y=frame["y"]+frame["h"]/2, delivery_mode="foreground")
         else:
-            # Observe native menu geometry; delivery remains entirely Cua Driver.
-            item = native.menu_item("File")
-            rect = item.rectangle()
-            origin = native.client_to_screen((0, 0))
-            click = dict(target, x=(rect.left+rect.right)/2-origin[0], y=(rect.top+rect.bottom)/2-origin[1], delivery_mode="foreground")
-            save(f"{version}/native-menu-geometry.json", {"rect": [rect.left, rect.top, rect.right, rect.bottom], "client_origin": origin})
+            # Native observation only; action is delivered by Cua through Avibe's proxy.
+            rect = native.menu_item("File").rectangle()
+            bounds = structured(after)["window_bounds"]
+            click = dict(target, x=(rect.left+rect.right)/2-bounds["x"], y=(rect.top+rect.bottom)/2-bounds["y"], delivery_mode="foreground")
+            save(f"{version}/native-menu-geometry.json", {"rect": [rect.left, rect.top, rect.right, rect.bottom], "window_bounds": bounds})
         client.call("click", click)
-        client.call("get_window_state", target)
+        client.call("get_window_state", observe)
+        client.call("get_desktop_state", {"session": "spike"})
         native.capture_as_image().save(str(OUT / f"{version}-notepad-final.png"))
         menu_hwnd = ctypes.windll.user32.FindWindowW("#32768", None)
         save(f"{version}/result.json", {"text_ok": True, "menu_popup_hwnd": menu_hwnd,
             "menu_popup_observed": bool(menu_hwnd), "notepad_pid": notepad_pid,
             "daemon_pid": daemon.pid, "driver_direct_embedded_proxy": True,
+            "avibe_json_rpc_upstream": True, "fixture_descriptor_only": True,
             "avibe_shell_hosted": False, "avibe_cli_end_to_end": False})
+        if not menu_hwnd:
+            raise RuntimeError("Menu popup not independently observed")
     finally:
         if client:
             client.close()
