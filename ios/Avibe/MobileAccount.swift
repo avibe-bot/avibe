@@ -532,6 +532,7 @@ final class MobileSessionCoordinator {
     /// is released when the operation ends rather than under it.
     private var releasesSurfaceAfterOperation = false
     private var signedOutStoreIsFresh = false
+    private var authoritativeSignedOutTransitionInProgress = false
     private var pendingStoreReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
     ] = []
@@ -582,6 +583,7 @@ final class MobileSessionCoordinator {
     }
 
     func activateAccountSurface() {
+        releasesSurfaceAfterOperation = false
         guard transport == nil else {
             return
         }
@@ -614,6 +616,9 @@ final class MobileSessionCoordinator {
         if signedOutStoreIsFresh {
             return .signedOut
         }
+        if authoritativeSignedOutTransitionInProgress {
+            return .signedOut
+        }
         if case .resetting = phase, snapshot == nil {
             // logout() has already invalidated the old account and is
             // replacing the page. The replacement must not race the reset's
@@ -626,12 +631,14 @@ final class MobileSessionCoordinator {
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
                 await self.preparePushLogout()
+                self.authoritativeSignedOutTransitionInProgress = true
                 self.beginAccountTransition(clearSelection: true)
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
             if self.belongsToAnotherAccount(discovery) {
                 await self.preparePushLogout()
+                self.authoritativeSignedOutTransitionInProgress = true
                 self.beginAccountTransition(clearSelection: true)
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
@@ -746,6 +753,7 @@ final class MobileSessionCoordinator {
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
                 await self.preparePushLogout()
+                self.authoritativeSignedOutTransitionInProgress = true
                 self.beginAccountTransition(clearSelection: true)
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
@@ -757,6 +765,7 @@ final class MobileSessionCoordinator {
                     previousAccountID != fresh.account.id
                 {
                     await self.preparePushLogout()
+                    self.authoritativeSignedOutTransitionInProgress = true
                     self.beginAccountTransition(clearSelection: true)
                     await self.replaceWithFreshSignedOutStore()
                     return .signedOut
@@ -1268,6 +1277,8 @@ final class MobileSessionCoordinator {
     }
 
     private func replaceWithFreshSignedOutStore() async {
+        authoritativeSignedOutTransitionInProgress = true
+        defer { authoritativeSignedOutTransitionInProgress = false }
         deactivateAccountSurface()
         snapshot = nil
         secondFactorEmail = nil

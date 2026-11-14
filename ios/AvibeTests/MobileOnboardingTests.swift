@@ -654,6 +654,49 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(dismissCalls, 1)
     }
 
+    func testSheetRejectsAuthMethodsWithoutMutatingTheRuntime() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var requestCount = 0
+        transport.requestOTPHandler = { _ in
+            requestCount += 1
+            return 60
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport]
+        )
+        let controller = MobileOnboardingViewController(
+            coordinator: coordinator,
+            startScreen: .sheet
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 390, height: 844)
+        )
+        defer { window.isHidden = true }
+
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Personal Avibe\")"
+        }
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.requestOtp', {email: 'alex@example.com'});
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(result, MobileAccountError.forbidden.code)
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
+    }
+
     func testBundledPageSignsInWithThePasswordThroughTheBridge() async throws {
         let signedOutTransport = FakeMobileAuthTransport()
         let loginTransport = FakeMobileAuthTransport()
@@ -1536,6 +1579,33 @@ final class MobileOnboardingTests: XCTestCase {
         allowRefresh.fulfill()
         _ = try await refresh.value
         XCTAssertTrue(refreshTransport.invalidated)
+    }
+
+    func testReopeningSheetCancelsDeferredTransportRelease() async throws {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let refreshStarted = expectation(description: "refresh started")
+        let allowRefresh = expectation(description: "refresh may finish")
+        transport.fetchSessionHandler = {
+            refreshStarted.fulfill()
+            await self.fulfillment(of: [allowRefresh], timeout: 30)
+            return .signedIn(snapshot(self.snapshot(accountID: "account-1")))
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport]
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+
+        let refresh = Task { try await coordinator.refresh() }
+        await fulfillment(of: [refreshStarted], timeout: 30)
+        coordinator.leaveAccountSurface()
+        coordinator.activateAccountSurface()
+        allowRefresh.fulfill()
+        _ = try await refresh.value
+        XCTAssertFalse(transport.invalidated)
     }
 
     func testLogoutAllowsReplacementBootstrapDuringReset() async throws {

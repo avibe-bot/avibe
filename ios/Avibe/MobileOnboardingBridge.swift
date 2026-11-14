@@ -254,15 +254,18 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let coordinator: MobileSessionCoordinator
     private let returnToRuntime: () -> Bool
     private let dismissSurface: () -> Bool
+    private let sheetMethodsOnly: Bool
 
     init(
         coordinator: MobileSessionCoordinator,
         returnToRuntime: @escaping () -> Bool,
-        dismissSurface: @escaping () -> Bool
+        dismissSurface: @escaping () -> Bool,
+        sheetMethodsOnly: Bool
     ) {
         self.coordinator = coordinator
         self.returnToRuntime = returnToRuntime
         self.dismissSurface = dismissSurface
+        self.sheetMethodsOnly = sheetMethodsOnly
     }
 
     func userContentController(
@@ -308,6 +311,18 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 return
             }
             do {
+                if sheetMethodsOnly {
+                    switch request.method {
+                    case .authRequestOTP,
+                         .authVerifyOTP,
+                         .authSignInWithPassword,
+                         .authVerifySecondFactor,
+                         .authVerifyPasskey:
+                        throw MobileAccountError.forbidden
+                    default:
+                        break
+                    }
+                }
                 switch request.method {
                 case .sessionBootstrap:
                     let state = try await coordinator.bootstrap()
@@ -492,7 +507,8 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         handler = MobileBridgeHandler(
             coordinator: coordinator,
             returnToRuntime: returnToRuntime,
-            dismissSurface: dismissSurface
+            dismissSurface: dismissSurface,
+            sheetMethodsOnly: startScreen == .sheet
         )
         webView = WKWebView(
             frame: .zero,
