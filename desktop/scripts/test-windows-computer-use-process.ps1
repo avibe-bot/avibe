@@ -137,7 +137,11 @@ try {
                     $owned = [Diagnostics.Process]::GetProcessById([int]$row.ProcessId)
                     $null = $owned.SafeHandle
                     if ($owned.HasExited) { continue }
-                    if ($owned.StartTime.ToUniversalTime() -ne $row.CreationDate.ToUniversalTime()) { throw 'Fixture PID identity changed during cleanup.' }
+                    # CIM datetime carries microseconds; native FILETIME can
+                    # additionally carry a 100 ns digit. Compare at CIM precision.
+                    $created = $owned.StartTime.ToUniversalTime()
+                    $created = $created.AddTicks(-($created.Ticks % 10))
+                    if ($created -ne $row.CreationDate.ToUniversalTime()) { throw 'Fixture PID identity changed during cleanup.' }
                     $owner = Invoke-CimMethod -InputObject $row -MethodName GetOwnerSid -OperationTimeoutSec 5
                     if ($owned.HasExited) { continue }
                     if ($owner.ReturnValue -ne 0 -or $owner.Sid -ne $user.SID.Value) { throw 'Could not verify fixture process ownership.' }
