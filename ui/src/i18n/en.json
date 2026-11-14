@@ -6615,8 +6615,8 @@
         "set": "Set"
       },
       "protected": {
-        "generateHint": "Next, the secure window makes 12 words; write them down, then tap 3 of them to check. An optional passphrase is set there too.",
-        "importHint": "Paste the words in the secure window: each word is checked, and account #0’s addresses show so you can compare before saving. A passphrase, if any, goes there too.",
+        "generateHint": "Next, in the secure window: add a passphrase if you want one (optional), then you get 12 words; write them down, then tap 3 of them to check.",
+        "importHint": "Next, in the secure window: paste the words (each is checked as you paste) and the passphrase if your old wallet used one; account #0’s addresses show so you can compare before saving.",
         "info": "The words and passphrase are handled only in this separate secure window; they are never handed to the main Avibe page or an Agent. Saving is confirmed with your Passkey.",
         "tierNote": "Protected: every signature by every account is approved in the secure window with your Passkey.",
         "launchCreate": "Generate the words in the secure window",

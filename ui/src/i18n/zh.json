@@ -6615,8 +6615,8 @@
         "set": "已设置"
       },
       "protected": {
-        "generateHint": "下一步在安全窗口里生成 12 个词，抄下来后点 3 个词核对。Passphrase（可选）也在那里设置。",
-        "importHint": "在安全窗口里粘贴助记词：逐词检查，并显示账户 #0 的地址，可以先核对再保存。Passphrase（如有）也在那里填。",
+        "generateHint": "下一步在安全窗口里进行：可选添加 Passphrase，然后生成 12 个词，抄下来后点 3 个词核对。",
+        "importHint": "下一步在安全窗口里进行：粘贴助记词（逐词检查）和原钱包的 Passphrase（如有），并显示账户 #0 的地址，可以先核对再保存。",
         "info": "助记词和 Passphrase 只在这个独立的安全窗口里处理，不会交给 Avibe 主页面或 Agent。保存时用 Passkey 确认。",
         "tierNote": "保护档：每个账户的每次签名，都要你在安全窗口里用 Passkey 批准。",
         "launchCreate": "在安全窗口中生成助记词",
