@@ -7468,7 +7468,12 @@
     "changeEmail": "修改邮箱",
     "resendCode": "重新发送",
     "consentTitle": "连接到 {{name}}？",
-    "consentBody": "允许此实例验证你的账号并打开工作区。",
+    "consentBody": "{{name}} 不是你的实例。继续后，它会获得你的账号邮箱，用来让你登录。",
+    "consentAlsoReceives": "它还会获得：{{items}}",
+    "consentAlsoOther": "另外还有：{{items}}",
+    "consentScopes": {
+      "profile": "你的个人资料名称"
+    },
     "allow": "允许并连接",
     "deny": "拒绝",
     "connectingTo": "正在连接 {{name}}",
