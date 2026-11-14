@@ -1,0 +1,212 @@
+{
+  "status": "PROPOSED consumer parity vectors; not joint freeze or product test acceptance",
+  "source_commit": "14a33c676e13f50eb4bd122222b3b10e23bceff5",
+  "source_path": "storage/vault_service.py",
+  "source_function": "hd_signing_binding",
+  "source_function_sha256": "b0a8563d17771dd0941d80c63ff2f1cdcd48615e8a281831eef626567ba1414c",
+  "codec": "sha256(utf8(json.dumps([ciphertext,nonce,wrap_meta],separators=(\",\",\":\"),ensure_ascii=True))); each input is a string, wrap_meta remains raw",
+  "scope": "Fingerprint serialization only. Envelope/parser/AAD validity is a separate gate. Surrogate vectors pin codec behavior, not permission for operation canonical JSON.",
+  "cases": [
+    {
+      "id": "ascii",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"v\":1,\"scheme\":\"machine-aesgcm-v1\",\"copies\":[]}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"v\\\":1,\\\"scheme\\\":\\\"machine-aesgcm-v1\\\",\\\"copies\\\":[]}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b5c22765c223a312c5c22736368656d655c223a5c226d616368696e652d61657367636d2d76315c222c5c22636f706965735c223a5b5d7d225d",
+      "sha256": "f7f015f4a1aa7bb25a4d9522fcd2c75b035b982fffd6b15a4351310daadafc28"
+    },
+    {
+      "id": "ascii-controls-and-del",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\u007f"
+      ],
+      "note": "Codec-only strings, not a structurally valid envelope.",
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f !\\\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\\u007f\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c225c75303030305c75303030315c75303030325c75303030335c75303030345c75303030355c75303030365c75303030375c625c745c6e5c75303030625c665c725c75303030655c75303030665c75303031305c75303031315c75303031325c75303031335c75303031345c75303031355c75303031365c75303031375c75303031385c75303031395c75303031615c75303031625c75303031635c75303031645c75303031655c753030316620215c22232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e5c7530303766225d",
+      "sha256": "53037bba43066786514d17ec8c5251a37db6a0ca4df02c8ac223b1aa2369b917"
+    },
+    {
+      "id": "latin1",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "\u0080\u0081\u0082\u0083\u0084\u0085\u0086\u0087\u0088\u0089\u008a\u008b\u008c\u008d\u008e\u008f\u0090\u0091\u0092\u0093\u0094\u0095\u0096\u0097\u0098\u0099\u009a\u009b\u009c\u009d\u009e\u009f\u00a0\u00a1\u00a2\u00a3\u00a4\u00a5\u00a6\u00a7\u00a8\u00a9\u00aa\u00ab\u00ac\u00ad\u00ae\u00af\u00b0\u00b1\u00b2\u00b3\u00b4\u00b5\u00b6\u00b7\u00b8\u00b9\u00ba\u00bb\u00bc\u00bd\u00be\u00bf\u00c0\u00c1\u00c2\u00c3\u00c4\u00c5\u00c6\u00c7\u00c8\u00c9\u00ca\u00cb\u00cc\u00cd\u00ce\u00cf\u00d0\u00d1\u00d2\u00d3\u00d4\u00d5\u00d6\u00d7\u00d8\u00d9\u00da\u00db\u00dc\u00dd\u00de\u00df\u00e0\u00e1\u00e2\u00e3\u00e4\u00e5\u00e6\u00e7\u00e8\u00e9\u00ea\u00eb\u00ec\u00ed\u00ee\u00ef\u00f0\u00f1\u00f2\u00f3\u00f4\u00f5\u00f6\u00f7\u00f8\u00f9\u00fa\u00fb\u00fc\u00fd\u00fe\u00ff"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f\\u00a0\\u00a1\\u00a2\\u00a3\\u00a4\\u00a5\\u00a6\\u00a7\\u00a8\\u00a9\\u00aa\\u00ab\\u00ac\\u00ad\\u00ae\\u00af\\u00b0\\u00b1\\u00b2\\u00b3\\u00b4\\u00b5\\u00b6\\u00b7\\u00b8\\u00b9\\u00ba\\u00bb\\u00bc\\u00bd\\u00be\\u00bf\\u00c0\\u00c1\\u00c2\\u00c3\\u00c4\\u00c5\\u00c6\\u00c7\\u00c8\\u00c9\\u00ca\\u00cb\\u00cc\\u00cd\\u00ce\\u00cf\\u00d0\\u00d1\\u00d2\\u00d3\\u00d4\\u00d5\\u00d6\\u00d7\\u00d8\\u00d9\\u00da\\u00db\\u00dc\\u00dd\\u00de\\u00df\\u00e0\\u00e1\\u00e2\\u00e3\\u00e4\\u00e5\\u00e6\\u00e7\\u00e8\\u00e9\\u00ea\\u00eb\\u00ec\\u00ed\\u00ee\\u00ef\\u00f0\\u00f1\\u00f2\\u00f3\\u00f4\\u00f5\\u00f6\\u00f7\\u00f8\\u00f9\\u00fa\\u00fb\\u00fc\\u00fd\\u00fe\\u00ff\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c225c75303038305c75303038315c75303038325c75303038335c75303038345c75303038355c75303038365c75303038375c75303038385c75303038395c75303038615c75303038625c75303038635c75303038645c75303038655c75303038665c75303039305c75303039315c75303039325c75303039335c75303039345c75303039355c75303039365c75303039375c75303039385c75303039395c75303039615c75303039625c75303039635c75303039645c75303039655c75303039665c75303061305c75303061315c75303061325c75303061335c75303061345c75303061355c75303061365c75303061375c75303061385c75303061395c75303061615c75303061625c75303061635c75303061645c75303061655c75303061665c75303062305c75303062315c75303062325c75303062335c75303062345c75303062355c75303062365c75303062375c75303062385c75303062395c75303062615c75303062625c75303062635c75303062645c75303062655c75303062665c75303063305c75303063315c75303063325c75303063335c75303063345c75303063355c75303063365c75303063375c75303063385c75303063395c75303063615c75303063625c75303063635c75303063645c75303063655c75303063665c75303064305c75303064315c75303064325c75303064335c75303064345c75303064355c75303064365c75303064375c75303064385c75303064395c75303064615c75303064625c75303064635c75303064645c75303064655c75303064665c75303065305c75303065315c75303065325c75303065335c75303065345c75303065355c75303065365c75303065375c75303065385c75303065395c75303065615c75303065625c75303065635c75303065645c75303065655c75303065665c75303066305c75303066315c75303066325c75303066335c75303066345c75303066355c75303066365c75303066375c75303066385c75303066395c75303066615c75303066625c75303066635c75303066645c75303066655c7530306666225d",
+      "sha256": "5b7c1275842a6afc6ee635cce1d6344bfe15d043ecf0e54641c7cd17cc3e7ca6"
+    },
+    {
+      "id": "cjk",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"label\":\"\u7528\u6237\"}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"label\\\":\\\"\\u7528\\u6237\\\"}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b5c226c6162656c5c223a5c225c75373532385c75363233375c227d225d",
+      "sha256": "956a3d4ad5b54e07761cdf68f198c74efe2625826f28b6e5f1830f06997298c1"
+    },
+    {
+      "id": "line-separators",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "x\u2028y\u2029z"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"x\\u2028y\\u2029z\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c22785c7532303238795c75323032397a225d",
+      "sha256": "9897908e741813e4c054973d78a03884176330dd2ac0d115ca97cfe561d100f6"
+    },
+    {
+      "id": "non-bmp",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "\ud800\udc00\ud83d\ude80\udbff\udfff"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"\\ud800\\udc00\\ud83d\\ude80\\udbff\\udfff\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c225c75643830305c75646330305c75643833645c75646538305c75646266665c7564666666225d",
+      "sha256": "c9bf2b75d66768ae674ff971473e35fb8ce9400eaa0bc46f2a95fdaecde131ae"
+    },
+    {
+      "id": "private-bmp",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "\ue000\ufeff\uffff"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"\\ue000\\ufeff\\uffff\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c225c75653030305c75666566665c7566666666225d",
+      "sha256": "f58b6251cdfeb5b98fb8851b148fea33b22a563e4431bc7fc7dd04095960905f"
+    },
+    {
+      "id": "lone-high-surrogate",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "x\ud800y"
+      ],
+      "note": "Codec-only; operation canonical JSON rejects this scalar-domain case.",
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"x\\ud800y\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c22785c756438303079225d",
+      "sha256": "8d5f962720bd80cb8d3a5def826526298fa23048935bb4c8aab50887bf7eaa05"
+    },
+    {
+      "id": "lone-low-surrogate",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "x\udfffy"
+      ],
+      "note": "Codec-only; operation canonical JSON rejects this scalar-domain case.",
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"x\\udfffy\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c22785c756466666679225d",
+      "sha256": "5417f569161281af00e8a644eaa17cc446361a358bd9b3cb60511bef62e4e24e"
+    },
+    {
+      "id": "raw-wrap-order-a",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"a\":1,\"b\":2}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"a\\\":1,\\\"b\\\":2}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b5c22615c223a312c5c22625c223a327d225d",
+      "sha256": "7fb1c1307995f942940d91a0a7fd47880200cbd444c31c31a9fa6ac3c2c7bd66"
+    },
+    {
+      "id": "raw-wrap-order-b",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"b\":2,\"a\":1}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"b\\\":2,\\\"a\\\":1}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b5c22625c223a322c5c22615c223a317d225d",
+      "sha256": "a13949559e2aa9abe8aabaa921fa6acb1710e108931ac8aac063c61d80027d64"
+    },
+    {
+      "id": "raw-wrap-spaced",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{ \"a\": 1, \"b\": 2 }"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{ \\\"a\\\": 1, \\\"b\\\": 2 }\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b205c22615c223a20312c205c22625c223a2032207d225d",
+      "sha256": "20c47755669db22945d872bf74141f70780de4782a94f67c7b27a7d3c93a48bd"
+    },
+    {
+      "id": "raw-wrap-literal-unicode",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"label\":\"\u7528\u6237 \ud83d\ude80\"}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"label\\\":\\\"\\u7528\\u6237 \\ud83d\\ude80\\\"}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b5c226c6162656c5c223a5c225c75373532385c7536323337205c75643833645c75646538305c227d225d",
+      "sha256": "23cd21f67f669825944bc06306f8a58b77723695d2cd47ccc0d1a05de125cbde"
+    },
+    {
+      "id": "raw-wrap-escaped-unicode",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"label\":\"\\u7528\\u6237 \\ud83d\\ude80\"}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"label\\\":\\\"\\\\u7528\\\\u6237 \\\\ud83d\\\\ude80\\\"}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b5c226c6162656c5c223a5c225c5c75373532385c5c7536323337205c5c75643833645c5c75646538305c227d225d",
+      "sha256": "9d071df36419d082fa30cd9b29053c71a3841ce809b5f0e064c9602aeba55ff3"
+    },
+    {
+      "id": "raw-wrap-slash-quote-backslash",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"x\":\"/\\/\\\"\\\\\"}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"x\\\":\\\"/\\\\/\\\\\\\"\\\\\\\\\\\"}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b5c22785c223a5c222f5c5c2f5c5c5c225c5c5c5c5c227d225d",
+      "sha256": "47a7317182e48c3d8f9c3a8a47b5d7d6ebf351bd252493b4d50171a18ade4bad"
+    },
+    {
+      "id": "one-byte-ciphertext-change",
+      "input": [
+        "Z2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"v\":1,\"scheme\":\"machine-aesgcm-v1\",\"copies\":[]}"
+      ],
+      "serialized": "[\"Z2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"v\\\":1,\\\"scheme\\\":\\\"machine-aesgcm-v1\\\",\\\"copies\\\":[]}\"]",
+      "utf8_hex": "5b225a326c77614756796447563464413d3d222c22626d39755932553d222c227b5c22765c223a312c5c22736368656d655c223a5c226d616368696e652d61657367636d2d76315c222c5c22636f706965735c223a5b5d7d225d",
+      "sha256": "8a30d45daa7cb00b6565da0f3701ff219469f7cab06b617c72981afa8915d0d2"
+    },
+    {
+      "id": "one-byte-nonce-change",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "Zm9uY2U=",
+        "{\"v\":1,\"scheme\":\"machine-aesgcm-v1\",\"copies\":[]}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"Zm9uY2U=\",\"{\\\"v\\\":1,\\\"scheme\\\":\\\"machine-aesgcm-v1\\\",\\\"copies\\\":[]}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c225a6d39755932553d222c227b5c22765c223a312c5c22736368656d655c223a5c226d616368696e652d61657367636d2d76315c222c5c22636f706965735c223a5b5d7d225d",
+      "sha256": "dfd4d892920458765c2081406b0837ca028a13d52866fb1d07ec2db7c53be3ac"
+    },
+    {
+      "id": "one-byte-wrap-change",
+      "input": [
+        "Y2lwaGVydGV4dA==",
+        "bm9uY2U=",
+        "{\"v\":2,\"scheme\":\"machine-aesgcm-v1\",\"copies\":[]}"
+      ],
+      "serialized": "[\"Y2lwaGVydGV4dA==\",\"bm9uY2U=\",\"{\\\"v\\\":2,\\\"scheme\\\":\\\"machine-aesgcm-v1\\\",\\\"copies\\\":[]}\"]",
+      "utf8_hex": "5b2259326c77614756796447563464413d3d222c22626d39755932553d222c227b5c22765c223a322c5c22736368656d655c223a5c226d616368696e652d61657367636d2d76315c222c5c22636f706965735c223a5b5d7d225d",
+      "sha256": "b36a54386cf71115361f18258997f942611e7c2d3f075dcf5b7570e967c834fd"
+    }
+  ]
+}

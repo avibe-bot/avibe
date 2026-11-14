@@ -6339,7 +6339,7 @@
       "protection": "Who can unlock this secret?",
       "protectedProtection": "Protected",
       "standardProtection": "Standard",
-      "protectedHelp": "The agent can't use it on its own: you unlock it with your passkey in your browser each time (end-to-end encrypted), so it stays safe even if this computer is stolen. Good for crypto wallets and other important secrets.",
+      "protectedHelp": "The agent can't use it on its own: you unlock it with your Passkey in your browser each time (end-to-end encrypted), so it stays safe even if this computer is stolen. Good for crypto wallets and other important secrets.",
       "standardHelp": "The agent can use it on its own. Good for API keys, environment variables, and most secrets.",
       "alwaysAskSign": "Ask me before every signature",
       "alwaysAskSignHelp": "Standard keys can sign on their own. With this on, every signature needs your approval in the browser. It guards against mistakes, not against someone who already controls this computer; keep only amounts you can afford to lose in a Standard key.",
@@ -6612,6 +6612,45 @@
         "backupReminder": "This wallet also has a passphrase. Write it down separately from the words: recovering needs both, and the passphrase must be exact.",
         "recovery": "If this computer is lost, only these words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing.",
         "set": "Set"
+      },
+      "protected": {
+        "generateHint": "Next, in the secure window: add a passphrase if you want one (optional), then you get 12 words; write them down, then tap 3 of them to check.",
+        "importHint": "Next, in the secure window: paste the words (each is checked as you paste) and the passphrase if your old wallet used one; account #0’s addresses show so you can compare before saving.",
+        "info": "The words and passphrase are handled only in this separate secure window; they are never handed to the main Avibe page or an Agent. Saving is confirmed with your Passkey.",
+        "tierNote": "Protected: every signature by every account is approved in the secure window with your Passkey.",
+        "launchCreate": "Generate the words in the secure window",
+        "launchImport": "Import wallet in the secure window",
+        "waitingCta": "Waiting for the secure window…",
+        "savingCta": "Saving…",
+        "checkingCta": "Checking…",
+        "checkAgain": "Check again",
+        "notice": {
+          "waiting": "The secure window is open. When you finish there, the result shows here; nothing is typed on this page.",
+          "blocked": "The browser blocked the secure window. Allow pop-ups for this site and try again.",
+          "cancelled": "Cancelled; nothing was saved. You can try again.",
+          "closed": "The secure window was closed; nothing was saved. You can try again.",
+          "timeout": "The secure window wasn’t finished within 5 minutes; nothing was saved. Trying again starts over.",
+          "reset": "The protected vault was locked or reset meanwhile, so this attempt was dropped; nothing was saved.",
+          "unavailable": "This version of the secure window can’t make protected seed phrase wallets yet; nothing was saved.",
+          "failed": "The secure window couldn’t finish; nothing was saved. Try again.",
+          "saving": "The secure window finished; saving the encrypted wallet. Keep this page open.",
+          "checking": "No confirmed reply to the save yet; checking with Avibe whether this wallet was saved. No new words are made and nothing is saved twice. Keep this page open.",
+          "unconfirmed": "Can’t confirm yet whether it was saved. Keep the words you wrote down, don’t send funds to it, and don’t create another wallet with this name. Check again, or look for {{name}} in the vault’s key list later.",
+          "refusal": "Avibe answered: {{message}}",
+          "mismatch": "Can’t confirm that the {{name}} saved in Avibe is the wallet the secure window just made. Don’t send funds to its addresses. Keep your written words."
+        },
+        "done": {
+          "recovery": "If the Passkey is lost, the words plus the original passphrase (if any) still recover the wallet. But anyone with them can move the funds outside Avibe. A database backup alone cannot restore signing.",
+          "body": "Account #0 has these addresses on the three chains. Once these addresses are funded, an Agent can request signatures; you approve each one with your Passkey."
+        },
+        "approveEvery": "Approve every signature",
+        "blocked": "Not confirmed as the wallet that was just created: don’t send funds to it.",
+        "verified": "Checked: the wallet Avibe saved matches the one the secure window made.",
+        "refusals": {
+          "secret_exists": "A secret with this name already exists",
+          "secret_name_case_conflict": "A secret with this name in different letter case already exists",
+          "vault_already_initialized": "The protected vault was just set up elsewhere"
+        }
       }
     },
     "generate": {

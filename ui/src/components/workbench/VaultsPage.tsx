@@ -134,7 +134,7 @@ const SecretRow: React.FC<{
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono text-sm font-semibold"><SearchHighlight text={s.name} terms={terms} /></span>
-          {isWallet ? <HdWalletBadges count={s.accounts?.length ?? 0} /> : isProtected ? (
+          {isWallet ? <HdWalletBadges count={s.accounts?.length ?? 0} protectedWallet={isProtected} /> : isProtected ? (
             <Badge variant="warning">{t('vaults.protected')}</Badge>
           ) : (
             <Badge variant="secondary">{t('vaults.standard')}</Badge>
@@ -154,7 +154,7 @@ const SecretRow: React.FC<{
           <span role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</span>
         ) : null}
         {walletBlocked ? (
-          <span role="alert" className="mt-1 text-xs font-semibold text-destructive-ink">{t('vaults.hd.blocked')}</span>
+          <span role="alert" className="mt-1 text-xs font-semibold text-destructive-ink">{t(isProtected ? 'vaults.hd.protected.blocked' : 'vaults.hd.blocked')}</span>
         ) : isWallet ? (
           // A wallet's accounts at a glance; their addresses are one click away, in the accounts dialog.
           <div className="mt-1 flex flex-wrap items-center gap-1.5">

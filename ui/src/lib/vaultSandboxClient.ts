@@ -53,6 +53,7 @@ import {
   type PolicyDowngradeContext,
   type PolicyDowngradeResult,
 } from './vaultPolicyWire';
+import { parseProtectedHdSealResult, type ProtectedHdSealResult } from './vaultProtectedHd';
 
 const CHANNEL = 'avibe.vault.crypto';
 const VERSION = 2;
@@ -69,7 +70,11 @@ const SURFACE_REFRESH_INTERVAL_MS = 10_000;
 
 // Ops a newer pinned build may add. Each is checked against the build's capabilities when used,
 // never added to REQUIRED_OPS: an older pin that lacks one must keep unlock/sign/reveal working.
-type OptionalSandboxOp = typeof POLICY_DOWNGRADE_OP;
+type OptionalSandboxOp = typeof POLICY_DOWNGRADE_OP | typeof PROTECTED_HD_OP;
+/** Protected seed-phrase wallets (contract rev0.7): offered only when the pinned build lists it. */
+export const PROTECTED_HD_OP = 'sealHdWallet' as const;
+// The sandbox's own 300 s ceremony deadline plus a short grace for its terminal reply (rev0.6 §4).
+const PROTECTED_HD_TIMEOUT_MS = 305_000;
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | OptionalSandboxOp | 'handshake';
 type ParentOnlySandboxOp = 'set-appearance';
 type PendingRequest = {
@@ -886,6 +891,29 @@ export class VaultSandboxClient {
     });
     const parsed = parsePolicyDowngradeResult(result, payload.context);
     if (!parsed) throw new VaultSandboxError('policy_result_invalid', 'Sandbox returned an unexpected policy authorization');
+    return parsed;
+  }
+
+  /**
+   * Create or import a protected seed-phrase wallet (contract rev0.7 §4). The words, passphrase,
+   * three-word check and account #0 review all happen in the sandbox window the caller opened from
+   * its click; the payload is exactly `{name, mode, wrapMeta}` and the window's id travels in the
+   * envelope only. The answer must be exactly the four-field result, or nothing is returned.
+   */
+  async sealHdWallet(
+    payload: { name: string; mode: 'create' | 'import'; wrapMeta: string },
+    authorizationWindow: string,
+  ): Promise<ProtectedHdSealResult> {
+    if (!(await this.supports(PROTECTED_HD_OP))) {
+      throw new VaultSandboxError('protected_hd_unavailable', 'This sandbox build cannot create protected seed-phrase wallets');
+    }
+    const result = await this.request<unknown>(
+      PROTECTED_HD_OP,
+      { name: payload.name, mode: payload.mode, wrapMeta: payload.wrapMeta },
+      { timeoutMs: PROTECTED_HD_TIMEOUT_MS, interactive: true, authorizationWindow },
+    );
+    const parsed = parseProtectedHdSealResult(result);
+    if (!parsed) throw new VaultSandboxError('protected_hd_result_invalid', 'Sandbox returned an unexpected protected wallet result');
     return parsed;
   }
 

@@ -25,11 +25,11 @@ import { HdAccountAddressList } from './vault-hd-wallet-steps';
 export { AccountIndex } from './vault-hd-account-index';
 import { AccountIndex } from './vault-hd-account-index';
 
-export function HdWalletBadges({ count }: { count: number }) {
+export function HdWalletBadges({ count, protectedWallet = false }: { count: number; protectedWallet?: boolean }) {
   const { t } = useTranslation();
   return (
     <>
-      <Badge variant="secondary">{t('vaults.standard')}</Badge>
+      {protectedWallet ? <Badge variant="warning">{t('vaults.protected')}</Badge> : <Badge variant="secondary">{t('vaults.standard')}</Badge>}
       <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet-ink">
         <Layers className="size-3" />
         {t('vaults.hd.wallet.badge', { count })}
@@ -80,10 +80,12 @@ function LastSigned({ account }: { account: VaultHdAccount }) {
   );
 }
 
-function AccountCard({ wallet, account, fresh, canManage, onChanged }: {
+function AccountCard({ wallet, account, fresh, canManage, protectedWallet = false, onChanged }: {
   wallet: string;
   account: VaultHdAccount;
   fresh?: boolean;
+  /** A protected wallet: every signature is approved in the sandbox window, so there is no switch. */
+  protectedWallet?: boolean;
   /** Renaming and ask-before-signing are a manager's actions (the account PATCH needs it). */
   canManage: boolean;
   onChanged: (secret: VaultSecret) => void;
@@ -96,7 +98,7 @@ function AccountCard({ wallet, account, fresh, canManage, onChanged }: {
   const [error, setError] = useState<string | null>(null);
   // Turning it off takes a fresh Passkey confirmation through the pinned sandbox (contract v1.1);
   // offered only when that build can do it. Turning it on stays an ordinary edit.
-  const askOff = useAskTurnOff({ name: wallet, account: account.account }, account.always_ask && canManage, onChanged);
+  const askOff = useAskTurnOff({ name: wallet, account: account.account }, account.always_ask && canManage && !protectedWallet, onChanged);
   const canTurnOff = askOff.state.phase === 'ready';
   const turningOff = askOff.state.phase === 'working';
   const patch = async (payload: { name?: string | null; always_ask?: boolean }) => {
@@ -150,28 +152,35 @@ function AccountCard({ wallet, account, fresh, canManage, onChanged }: {
             ) : null}
           </span>
         )}
-        <span className="ml-auto flex shrink-0 items-center gap-2">
-          <span className="flex items-center gap-1 text-[11.5px] text-muted">
-            {/* On and this build can't turn it off: say so; when it can, the switch itself is the way off. */}
-            {account.always_ask && !canTurnOff && !turningOff ? (
-              <span title={t('vaults.hd.wallet.askLocked')} className="inline-flex">
-                <Lock className="size-3" aria-label={t('vaults.hd.wallet.askLocked')} />
-              </span>
-            ) : null}
-            {t('vaults.hd.wallet.ask')}
+        {protectedWallet ? (
+          <span className="ml-auto flex shrink-0 items-center gap-1 text-[11.5px] text-muted">
+            <Lock className="size-3" />
+            {t('vaults.hd.protected.approveEvery')}
           </span>
-          <Switch
-            size="sm"
-            checked={account.always_ask}
-            disabled={busy || turningOff || !canManage || (account.always_ask && !canTurnOff)}
-            onCheckedChange={(checked) => { if (checked) void patch({ always_ask: true }); else askOff.turnOff(); }}
-            label={t('vaults.hd.wallet.ask')}
-          />
-        </span>
+        ) : (
+          <span className="ml-auto flex shrink-0 items-center gap-2">
+            <span className="flex items-center gap-1 text-[11.5px] text-muted">
+              {/* On and this build can't turn it off: say so; when it can, the switch itself is the way off. */}
+              {account.always_ask && !canTurnOff && !turningOff ? (
+                <span title={t('vaults.hd.wallet.askLocked')} className="inline-flex">
+                  <Lock className="size-3" aria-label={t('vaults.hd.wallet.askLocked')} />
+                </span>
+              ) : null}
+              {t('vaults.hd.wallet.ask')}
+            </span>
+            <Switch
+              size="sm"
+              checked={account.always_ask}
+              disabled={busy || turningOff || !canManage || (account.always_ask && !canTurnOff)}
+              onCheckedChange={(checked) => { if (checked) void patch({ always_ask: true }); else askOff.turnOff(); }}
+              label={t('vaults.hd.wallet.ask')}
+            />
+          </span>
+        )}
       </div>
-      {account.always_ask && canManage ? <AskTurnOffNote state={askOff.state} /> : null}
+      {account.always_ask && canManage && !protectedWallet ? <AskTurnOffNote state={askOff.state} /> : null}
       <LastSigned account={account} />
-      <HdAccountAddressList account={account} />
+      <HdAccountAddressList account={account} hint={!protectedWallet} />
       {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
     </div>
   );
@@ -220,7 +229,8 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
   const onChangedRef = useRef(onChanged);
   useEffect(() => { onChangedRef.current = onChanged; }, [onChanged]);
   useEffect(() => {
-    if (!open || !canManage || secret.bitcoin_profile === 'bitcoin-address-types-v1') return;
+    // A protected wallet already holds every Bitcoin key in its sealed table; nothing to prepare.
+    if (!open || !canManage || secret.protection === 'protected' || secret.bitcoin_profile === 'bitcoin-address-types-v1') return;
     let cancelled = false;
     void api.prepareVaultBitcoinAddressTypes(secret.name, { handleError: false }).then((result) => {
       if (cancelled) return;
@@ -250,7 +260,7 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
             <div className="flex min-w-0 flex-1 flex-col gap-1">
               <span className="flex flex-wrap items-center gap-2">
                 <span className="truncate font-mono text-[15px] font-semibold text-foreground">{secret.name}</span>
-                <HdWalletBadges count={accounts.length} />
+                <HdWalletBadges count={accounts.length} protectedWallet={secret.protection === 'protected'} />
               </span>
               <span className="text-xs text-muted">{t('vaults.hd.wallet.used', { count: accounts.length, limit })}</span>
             </div>
@@ -272,7 +282,8 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
           ) : null}
           <div className="flex flex-col gap-2.5">
             {accounts.map((account) => (
-              <AccountCard key={account.account} wallet={secret.name} account={account} fresh={fresh === account.account} canManage={canManage} onChanged={onChanged} />
+              <AccountCard key={account.account} wallet={secret.name} account={account} fresh={fresh === account.account} canManage={canManage}
+                protectedWallet={secret.protection === 'protected'} onChanged={onChanged} />
             ))}
           </div>
           {!canManage ? (

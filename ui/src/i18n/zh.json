@@ -6339,7 +6339,7 @@
       "protection": "谁能解锁这条密钥？",
       "protectedProtection": "保护档",
       "standardProtection": "标准档",
-      "protectedHelp": "AI 不能自行使用：每次都要你在浏览器里用 passkey 解锁（端到端加密），电脑被偷也打不开。适合加密钱包和重要密钥。",
+      "protectedHelp": "AI 不能自行使用：每次都要你在浏览器里用 Passkey 解锁（端到端加密），电脑被偷也打不开。适合加密钱包和重要密钥。",
       "standardHelp": "AI 可以自行使用。适合 API Key、环境变量和大多数密钥。",
       "alwaysAskSign": "每次签名都要我确认",
       "alwaysAskSignHelp": "标准档密钥默认可以自己签名。打开后，每次签名都要你在浏览器里亲自批准。它防的是误操作，防不了已经控制这台电脑的人；标准档密钥里只放你能承受损失的金额。",
@@ -6612,6 +6612,45 @@
         "backupReminder": "这个钱包还设置了 Passphrase。把它和这些词分开记下：恢复时两样都要，Passphrase 要一字不差。",
         "recovery": "这台电脑丢失时，只有这些词加上你设置的 Passphrase（一字不差）能找回资金。只靠数据库备份无法恢复签名。",
         "set": "已设置"
+      },
+      "protected": {
+        "generateHint": "下一步在安全窗口里进行：可选添加 Passphrase，然后生成 12 个词，抄下来后点 3 个词核对。",
+        "importHint": "下一步在安全窗口里进行：粘贴助记词（逐词检查）和原钱包的 Passphrase（如有），并显示账户 #0 的地址，可以先核对再保存。",
+        "info": "助记词和 Passphrase 只在这个独立的安全窗口里处理，不会交给 Avibe 主页面或 Agent。保存时用 Passkey 确认。",
+        "tierNote": "保护档：每个账户的每次签名，都要你在安全窗口里用 Passkey 批准。",
+        "launchCreate": "在安全窗口中生成助记词",
+        "launchImport": "在安全窗口中导入钱包",
+        "waitingCta": "等安全窗口完成…",
+        "savingCta": "正在保存…",
+        "checkingCta": "正在核对…",
+        "checkAgain": "再核对一次",
+        "notice": {
+          "waiting": "安全窗口已打开。在那里完成后，这里会自动显示结果；什么都不会在这个页面输入。",
+          "blocked": "浏览器拦住了安全窗口。允许这个网站弹出窗口后再点一次。",
+          "cancelled": "已取消，什么都没有保存。可以再试一次。",
+          "closed": "安全窗口关了，什么都没有保存。可以再试一次。",
+          "timeout": "安全窗口 5 分钟内没有完成，什么都没有保存。再试一次会重新开始。",
+          "reset": "保护档在这期间被锁定或重置，这次操作作废，什么都没有保存。",
+          "unavailable": "当前版本的安全窗口还不能创建保护档助记词钱包，什么都没有保存。",
+          "failed": "安全窗口没能完成，什么都没有保存。请再试一次。",
+          "saving": "安全窗口已完成，正在保存加密后的钱包。请不要关闭这个页面。",
+          "checking": "还没收到确定的保存结果，正在向 Avibe 核对这个钱包是否已经保存。不会重新生成助记词，也不会再保存一份。请不要关闭这个页面。",
+          "unconfirmed": "还无法确认是否已保存。请保留抄好的助记词，先不要往里转账，也不要再新建一个同名钱包；可以再核对一次，或稍后在保险库里的密钥列表查看 {{name}}。",
+          "refusal": "Avibe 的回复：{{message}}",
+          "mismatch": "无法确认 Avibe 里保存的 {{name}} 就是安全窗口刚生成的钱包。不要往它的地址转账，请保留抄好的助记词。"
+        },
+        "done": {
+          "recovery": "Passkey 丢了，靠这些词和原来的 Passphrase（如有）仍能找回钱包。但有词和 Passphrase 的人，可以在 Avibe 之外直接动用资金。只靠数据库备份无法恢复签名。",
+          "body": "账户 #0 在三条链上的地址如下。往这些地址充值后，Agent 可以发起签名，每次都要你用 Passkey 批准。"
+        },
+        "approveEvery": "每次签名都批准",
+        "blocked": "未能确认这就是刚创建的钱包：不要往里转账。",
+        "verified": "已核对：Avibe 保存的钱包和安全窗口生成的一致。",
+        "refusals": {
+          "secret_exists": "已有同名密钥",
+          "secret_name_case_conflict": "已有只差大小写的同名密钥",
+          "vault_already_initialized": "保护档刚在别处完成设置"
+        }
       }
     },
     "generate": {

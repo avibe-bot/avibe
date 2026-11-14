@@ -10,6 +10,7 @@ import {
 } from '@/context/ApiContext';
 import {
   getVaultSandboxClient,
+  PROTECTED_HD_OP,
   resetVaultSandboxClient,
   subscribeVaultStateEvents,
   type ApproveReleaseItem,
@@ -17,10 +18,12 @@ import {
   type VaultSandboxSignScheme,
   type VaultSandboxSigningContext,
   type VaultStateEvent,
+  VaultSandboxError,
 } from './vaultSandboxClient';
 import { type BlindBox, type ProtectedRecordEnvelope, type SignatureResult } from './vaultCrypto';
 import { assertVaultEntryAvailable, vaultEntryIssue } from './vaultEntry';
 import { invalidateVaultSandboxPolicy } from './vaultSandboxPolicy';
+import type { ProtectedHdSealResult } from './vaultProtectedHd';
 
 /**
  * Value-free protected material hydrated into UI approval cards. The parent app brokers it to the
@@ -371,6 +374,37 @@ export function useProtectedVault() {
     [],
   );
 
+  /**
+   * Make or import a protected seed-phrase wallet in the sandbox window opened by the caller's click
+   * (contract rev0.7 §4). The vault must exist (locked is fine: the window unlocks it itself); the
+   * window gets only the name, the mode and this vault's base root.
+   */
+  const sealHdWallet = useCallback(
+    async (
+      name: string,
+      mode: 'create' | 'import',
+      authorizationWindow: string,
+    ): Promise<ProtectedHdSealResult & { authzFactorRegistration?: VaultWebAuthnRegistrationPayload }> => {
+      assertVaultEntryAvailable();
+      const wrapMeta = sessionVault.wrapMeta;
+      if (!wrapMeta) throw new Error('vault-not-setup');
+      const freshSetup = sessionVault.freshSetup;
+      const registration = sessionVault.authzFactorRegistration;
+      const sandbox = await getVaultSandboxClient();
+      const sealed = await sandbox.sealHdWallet({ name, mode, wrapMeta }, authorizationWindow);
+      // The page's setup/root snapshot must still be the one the window used (rev0.6 §4): a reset or
+      // a new setup in between drops the result here, before anything is sent to Avibe. The window's
+      // own establishment flag is sent as it reports it, as every protected seal does (the shared
+      // setup lifecycle lets it stay true after the root is committed; the daemon reconciles it).
+      if (sessionVault.wrapMeta !== wrapMeta || sessionVault.freshSetup !== freshSetup
+        || (freshSetup && sessionVault.authzFactorRegistration !== registration)) {
+        throw new VaultSandboxError('sandbox_reset', 'The protected vault changed while the wallet was being made', true);
+      }
+      return { ...sealed, authzFactorRegistration: freshSetup ? (registration ?? undefined) : undefined };
+    },
+    [],
+  );
+
   const afterCreated = useCallback(() => {
     sessionVault.freshSetup = false;
     sessionVault.authzFactorRegistration = null;
@@ -488,6 +522,7 @@ export function useProtectedVault() {
     setupPasskey,
     unlockPasskey,
     sealValue,
+    sealHdWallet,
     signProtectedRequest,
     approveProtectedRelease,
     revealProtectedValue,
@@ -547,4 +582,21 @@ export function useVaultLock(): { unlocked: boolean; remainingMs: number; lockNo
   const expiresAt = vaultUnlockExpiresAt();
   const remainingMs = expiresAt ? Math.max(0, expiresAt - now) : 0;
   return { unlocked, remainingMs, lockNow: () => void lockVault(true) };
+}
+
+/** Whether the pinned sandbox build can create protected seed-phrase wallets; null while unknown. */
+export function useProtectedHdSupported(enabled: boolean): boolean | null {
+  const allowed = enabled && !vaultEntryIssue();
+  const [supported, setSupported] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!allowed) return;
+    let alive = true;
+    getVaultSandboxClient()
+      .then((client) => client.supports(PROTECTED_HD_OP))
+      .then((value) => { if (alive) setSupported(value); }, () => { if (alive) setSupported(false); });
+    return () => {
+      alive = false;
+    };
+  }, [allowed]);
+  return allowed ? supported : null;
 }

@@ -20,12 +20,12 @@ import { Textarea } from './textarea';
 
 /** A one-line notice in the dialog. */
 export function HdNotice({ tone, icon: Icon, children }: {
-  tone: 'warning' | 'error' | 'violet';
+  tone: 'neutral' | 'warning' | 'error' | 'violet';
   icon: ComponentType<{ className?: string }>;
   children: ReactNode;
 }) {
-  const box = { warning: 'border-gold/40 bg-gold/10', error: 'border-destructive/40 bg-destructive/10', violet: 'border-violet/30 bg-violet-soft' }[tone];
-  const ink = { warning: 'text-gold-ink', error: 'text-destructive-ink', violet: 'text-violet-ink' }[tone];
+  const box = { neutral: 'border-edge bg-surface-2', warning: 'border-gold/40 bg-gold/10', error: 'border-destructive/40 bg-destructive/10', violet: 'border-violet/30 bg-violet-soft' }[tone];
+  const ink = { neutral: 'text-muted', warning: 'text-gold-ink', error: 'text-destructive-ink', violet: 'text-violet-ink' }[tone];
   return (
     <div role={tone === 'error' ? 'alert' : 'note'} className={cn('flex items-start gap-2.5 rounded-[10px] border px-3 py-2.5 text-[12.5px] leading-snug text-foreground', box)}>
       <Icon className={cn('mt-0.5 size-4 shrink-0', ink)} />
@@ -200,13 +200,16 @@ export function HdCheckStep({ quiz, chosen, onChoose }: {
  *  Bitcoin is one row whose label switches between the types the account can sign for; `types`
  *  overrides the account's own list (the pre-save preview offers what the wallet will have). With
  *  Taproot alone, a hint says Phantom and others show SegWit by default. */
-export function HdAccountAddressList({ account, types }: {
+export function HdAccountAddressList({ account, types, hint = true }: {
   account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> & {
     btc_segwit?: string;
     btc_legacy?: string;
     bitcoin_address_types?: BitcoinAddressType[];
   };
   types?: BitcoinAddressType[];
+  /** The ⓘ beside a lone Taproot (other wallets show SegWit by default). A protected wallet, which
+   *  can sign for Taproot only, shows the plain label instead. */
+  hint?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -216,7 +219,7 @@ export function HdAccountAddressList({ account, types }: {
         // An account the server has not prepared lists no types: Taproot only, never inferred.
         types={types ?? account.bitcoin_address_types ?? ['p2tr']}
         addresses={{ p2tr: account.btc_taproot, p2wpkh: account.btc_segwit, p2pkh: account.btc_legacy }}
-        singleHint={<InfoHint hover content={t('vaults.hd.btcTaprootInfo')} label={t('vaults.dialog.moreInfo')} />}
+        singleHint={hint ? <InfoHint hover content={t('vaults.hd.btcTaprootInfo')} label={t('vaults.dialog.moreInfo')} /> : undefined}
       />
       <SigningAddressRow label={t('vaults.addresses.solana')} value={account.solana} labelClassName="sm:w-[104px]" />
     </div>
@@ -224,11 +227,15 @@ export function HdAccountAddressList({ account, types }: {
 }
 
 /** Done: account #0 is ready and checked, and the user learns how to point an Agent at it. */
-export function HdDoneStep({ name, account, withPassphrase = false }: {
+export function HdDoneStep({ name, account, withPassphrase = false, protectedTier = false }: {
   name: string;
   account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'>;
   /** The wallet was made with a passphrase: recovery names both, not "if one was set". */
   withPassphrase?: boolean;
+  /** A protected wallet (made in the sandbox window). The same screen, with three differences its
+   *  custody forces: Bitcoin is Taproot only (plain label), the check is the daemon's snapshot against
+   *  the window's result, and recovery also covers a lost Passkey. */
+  protectedTier?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -238,20 +245,22 @@ export function HdDoneStep({ name, account, withPassphrase = false }: {
           <Check className="size-6" strokeWidth={2.5} />
         </span>
         <span className="text-[16px] font-semibold text-foreground">{t('vaults.hd.done.title', { name })}</span>
-        <span className="max-w-sm text-[12.5px] leading-snug text-muted">{t('vaults.hd.done.body')}</span>
+        <span className="max-w-sm text-[12.5px] leading-snug text-muted">{t(protectedTier ? 'vaults.hd.protected.done.body' : 'vaults.hd.done.body')}</span>
       </div>
       <div className="flex flex-col gap-2 rounded-[10px] border border-edge bg-surface-2 p-3">
         <span className="flex items-center gap-2 text-[12.5px] font-semibold text-foreground">
           <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">{t('vaults.hd.accountIndex', { account: 0 })}</span>
           {t('vaults.hd.mainAccount')}
         </span>
-        <HdAccountAddressList account={account} />
+        {protectedTier ? <HdAccountAddressList account={account} types={['p2tr']} hint={false} /> : <HdAccountAddressList account={account} />}
         <span className="flex items-center gap-1.5 text-[11.5px] text-mint-ink">
           <CircleCheck className="size-3.5 shrink-0" />
-          {t('vaults.hd.done.verified')}
+          {t(protectedTier ? 'vaults.hd.protected.verified' : 'vaults.hd.done.verified')}
         </span>
       </div>
-      {withPassphrase ? (
+      {protectedTier ? (
+        <HdNotice tone="warning" icon={AlertTriangle}>{t('vaults.hd.protected.done.recovery')}</HdNotice>
+      ) : withPassphrase ? (
         <HdNotice tone="warning" icon={AlertTriangle}>{t('vaults.hd.passphrase.recovery')}</HdNotice>
       ) : (
         <span className="text-[12px] text-muted">{t('vaults.hd.done.recovery')}</span>
