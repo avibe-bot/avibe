@@ -94,6 +94,7 @@ export function useProtectedHdCreate() {
   const knownId = useRef<string | null>(null);
   // Whether this operation keeps its wallet blocked: until an exact match, or a definite refusal.
   const holdsBlock = useRef(false);
+  const pendingSince = useRef(0);
   const onSavedRef = useRef<() => void>(() => undefined);
   // Closing the dialog while the window is open closes the window too, and a result that arrives
   // after that is dropped before anything is sent: nothing is saved behind a closed dialog.
@@ -130,9 +131,10 @@ export function useProtectedHdCreate() {
     } catch {
       // Unreachable, timed out or not JSON: still unconfirmed.
     }
-    // Not confirmed: keep (or restore) the block, now as an ordinary one. A list that starts after
-    // this point and does not show the name proves no such wallet exists, so it may then be pruned.
-    if (holdsBlock.current) blockHdWallet(op.name);
+    // Not confirmed: the save's outcome is still unknown (a dropped answer settles nothing on the
+    // server), so the block stays pending, dated from when the save started: list pruning keeps it
+    // until an exact match or a definite refusal, and only ages it after the longest a save can take.
+    if (holdsBlock.current) blockHdWallet(op.name, pendingSince.current, true);
     setPhase({ kind: 'unconfirmed', refusal });
   }, [api, confirmWith]);
 
@@ -168,7 +170,8 @@ export function useProtectedHdCreate() {
       // before the request leaves until an exact match, so closing the dialog while it is pending
       // never shows a wallet that is not confirmed. A definite refusal lifts only this block.
       const blockedBefore = isHdWalletBlocked(input.name);
-      blockHdWallet(input.name, Date.now(), true);
+      pendingSince.current = Date.now();
+      blockHdWallet(input.name, pendingSince.current, true);
       holdsBlock.current = true;
       const payload: VaultCreatePayload = {
         name: input.name,

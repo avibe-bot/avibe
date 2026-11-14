@@ -339,3 +339,14 @@ it('an empty or unreadable save answer is not a refusal: the wallet stays blocke
   await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }));
   expect(isHdWalletBlocked(NAME)).toBe(true);
 });
+
+it('after a lost answer and a failed check, the block stays pending through list pruning', async () => {
+  await openProtected();
+  api.createVaultSecret.mockRejectedValue(new TypeError('Failed to fetch'));
+  api.getVaultHdReconciliation.mockResolvedValue({ ok: false, code: 'secret_not_found' });
+  await launch();
+  await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }));
+  // The server may still be committing: a later list that does not show the wallet yet keeps the block.
+  pruneHdWalletBlocks([], Date.now() + 60_000);
+  expect(isHdWalletBlocked(NAME)).toBe(true);
+});
