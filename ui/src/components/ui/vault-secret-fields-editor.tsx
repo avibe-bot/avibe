@@ -477,9 +477,10 @@ export function VaultSecretFieldsEditor({
               onChange: setNewValue,
             }}
             remove={{ label: t('vaults.fields.discardNew'), onRemove: discardNewField }}
-            // A blank name matters only once the new field has a value: an empty new row is not
-            // saved and does not block Save, so leaving it says nothing (and moves nothing).
-            issue={newIssue === 'nameRequired' && !newValue ? null : newIssue}
+            // An empty new row is skipped by Save only while nothing else changed; then its blank
+            // name is no error, and leaving it says nothing (and moves nothing). Once it blocks Save
+            // (it has a value, or other changes make it count), the error shows at once, not on blur.
+            issue={newIssue === 'nameRequired' && !newValue && !dirty ? null : newIssue}
             disabled={fieldMutationLocked}
           />
         )}

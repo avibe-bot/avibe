@@ -288,6 +288,20 @@ it('says nothing about an empty new field’s blank name when it loses focus; it
   expect(lastState()).toEqual({ dirty: true, valid: false });
 });
 
+it('explains an empty new field’s blank name at once when other changes make it block Save', () => {
+  renderEditor();
+  change('Default field name', 'credential');
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  const name = screen.getByLabelText('New field name');
+  const error = screen.getByText(en.vaults.fields.nameRequired);
+  expect(name.getAttribute('aria-invalid')).toBe('true');
+  expect(name.getAttribute('aria-describedby')).toBe(error.id);
+  expect(lastState()).toEqual({ dirty: true, valid: false });
+  // Already shown before the blur, so leaving the name changes nothing.
+  fireEvent.blur(name);
+  expect(screen.getByText(en.vaults.fields.nameRequired)).toBe(error);
+});
+
 it('saves nothing and reports clean when nothing changed', async () => {
   renderEditor();
   expect(lastState()).toEqual({ dirty: false, valid: true });
