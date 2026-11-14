@@ -58,6 +58,7 @@
 		100000000000000000000133 /* Iroh.xcframework in App Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000131 /* Iroh.xcframework */; };
 		100000000000000000000134 /* libIrohLib.a in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000132 /* libIrohLib.a */; };
 		100000000000000000000135 /* Iroh.xcframework in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000131 /* Iroh.xcframework */; };
+		100000000000000000000136 /* DirectIrohBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000136 /* DirectIrohBinding.swift */; };
 		1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A1 /* FormAccessoryBar.swift */; };
 		1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A2 /* NativePushCoordinator.swift */; };
 		1000000000000000000000A3 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
@@ -159,6 +160,7 @@
 		200000000000000000000130 /* IrohLib.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrohLib.swift; sourceTree = "<group>"; };
 		200000000000000000000131 /* Iroh.xcframework */ = {isa = PBXFileReference; explicitFileType = wrapper.xcframework; path = Iroh.xcframework; sourceTree = "<group>"; };
 		200000000000000000000132 /* libIrohLib.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libIrohLib.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000136 /* DirectIrohBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohBinding.swift; sourceTree = "<group>"; };
 		2000000000000000000000A1 /* FormAccessoryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormAccessoryBar.swift; sourceTree = "<group>"; };
 		2000000000000000000000A2 /* NativePushCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinator.swift; sourceTree = "<group>"; };
 		2000000000000000000000A3 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCrypto.swift; sourceTree = "<group>"; };
@@ -253,6 +255,7 @@
 				200000000000000000000007 /* WebViewController.swift */,
 				200000000000000000000120 /* DirectIrohByteStream.swift */,
 				200000000000000000000121 /* DirectIrohEngine.swift */,
+				200000000000000000000136 /* DirectIrohBinding.swift */,
 				200000000000000000000122 /* DirectIrohTransport.swift */,
 				200000000000000000000123 /* DirectRendezvous.swift */,
 				200000000000000000000124 /* DirectRendezvousFetcher.swift */,
@@ -651,6 +654,7 @@
 				100000000000000000000007 /* WebViewController.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
+				100000000000000000000136 /* DirectIrohBinding.swift in Sources */,
 				100000000000000000000122 /* DirectIrohTransport.swift in Sources */,
 				100000000000000000000123 /* DirectRendezvous.swift in Sources */,
 				100000000000000000000124 /* DirectRendezvousFetcher.swift in Sources */,
