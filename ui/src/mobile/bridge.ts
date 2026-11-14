@@ -168,8 +168,13 @@ export const returnToMobileInstance = (): Promise<null> =>
 export const dismissMobileSheet = (): Promise<null> =>
   call('app.dismiss');
 
-/** The page native opens as a sheet over the selected instance. */
+/** The page native opens as a sheet over the selected instance (the avatar). */
 export const SHEET_HASH = '#sheet';
+/** The same sheet opened from the instance's name: the instance list without the account. */
+export const SHEET_INSTANCES_HASH = '#sheet-instances';
+
+export const isSheetHash = (hash: string): boolean =>
+  hash === SHEET_HASH || hash === SHEET_INSTANCES_HASH;
 
 /**
  * avibe.bot's Account security page: where an account turns on two-step

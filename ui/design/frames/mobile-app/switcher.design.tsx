@@ -12,8 +12,12 @@ import { IOS_APP_CAPABILITIES, IPHONE_17_PRO } from '../../shell/fixtures';
 import { agentsApi, mainRunningFixtures } from '../../shell/teamFixtures';
 import { homeFactsApi, workbenchFixtures } from '../workbench/fixtures';
 import { copyFor } from '../desktop/instances-fixtures';
+import { phoneShell } from '../workbench/fixtures';
+import { Workbench } from '@/components/Workbench';
+import { InstanceSheetPage } from '@/mobile/MobileOnboarding';
+import type { MobileInstance } from '@/mobile/bridge';
 import {
-  FirstRunPage, InstanceSheet, NamedHome, RuntimeFailed, SheetAccount, SheetLanguage,
+  FirstRunPage, InstanceSheet, NativeSheet, RuntimeFailed, SheetAccount, SheetLanguage,
   type SheetInstance, type SheetState,
 } from '../../kit/mobile-instance-sheet';
 
@@ -36,24 +40,50 @@ const firstRun = [lab, personal, team, weekend];
 
 const SMALL = { width: 375, height: 667, safeArea: { top: 20, bottom: 0 } };
 
-function nativeFixtures(lang: 'zh' | 'en', accountEmail = email) {
+/** Variant B's shell: it names the selected instance (`instancePresentation`, `app.info`). */
+const B_SHELL = { ...IOS_APP_CAPABILITIES, instancePresentation: 1 };
+
+function nativeFixtures(lang: 'zh' | 'en', accountEmail = email, b = false) {
   return workbenchFixtures({
     ...agentsApi,
     ...homeFactsApi({ model: true, push: false, computerUse: true, chatApps: true, paired: true }),
     '/api/session': { remote: true, authenticated: true, email: accountEmail },
-  }, { ...mainRunningFixtures, nativeShell: IOS_APP_CAPABILITIES, copy: copyFor(lang === 'en' ? en : zh) });
+  }, {
+    ...mainRunningFixtures,
+    nativeShell: b ? B_SHELL : IOS_APP_CAPABILITIES,
+    ...(b ? { nativeInstanceName: personal.name } : {}),
+    copy: copyFor(lang === 'en' ? en : zh),
+  });
 }
 
-function both(name: string, title: string, render: () => ReactNode, options: { size?: typeof SMALL; email?: string } = {}): FrameSpec[] {
+/** The App's session as the bundled page reads it, for the shipped sheet. */
+const asMobile = (instance: SheetInstance): MobileInstance => ({
+  id: instance.id,
+  name: instance.name,
+  host: instance.host,
+  url: `https://${instance.host}`,
+  relationship: instance.owner ? 'shared' : 'owner',
+  owner_email: instance.owner ?? null,
+  available: instance.online,
+});
+const bSession = {
+  status: 'signedIn' as const,
+  account: { id: 'account', email },
+  selected_instance_id: personal.id,
+  instances: [personal, ...others].map(asMobile),
+};
+const noop = () => {};
+
+function both(name: string, title: string, render: () => ReactNode, options: { size?: typeof SMALL; email?: string; b?: boolean; status?: FrameSpec['status'] } = {}): FrameSpec[] {
   const size = options.size ?? IPHONE_17_PRO;
   return (['zh', 'en'] as const).map((lang) => ({
     name: `${name}-${lang}`,
     title: `${title} · ${lang === 'zh' ? '中文' : 'English'}`,
     ...size,
-    status: 'approved',
+    status: options.status ?? 'approved',
     themes: ['light', 'dark'],
     route: '/',
-    fixtures: nativeFixtures(lang, options.email),
+    fixtures: nativeFixtures(lang, options.email, options.b),
     render: () => <SheetLanguage lang={lang}>{render()}</SheetLanguage>,
   }));
 }
@@ -83,8 +113,22 @@ const designFrames = frames([
   // Native: the instance failed to load.
   ...both('runtime-failed', '原生 · 实例打不开：重试 / 其他实例（打开同一张 sheet，不先关掉实例）', () => <RuntimeFailed instance={personal} />),
   // B · the header names the instance (needs a Runtime release; older instances keep 「Avibe」 + avatar).
-  ...both('b-home', 'B · Home 顶栏写当前实例名，点名字开 sheet，头像只管账户', () => <NamedHome current={personal} />),
-  ...both('b-sheet', 'B · 点名字打开的 sheet（没有账户行）', () => <InstanceSheet state="default" current={personal} others={others} email={email} named />),
+  // B renders the shipped header and the shipped sheet page (#3773).
+  ...both('b-home', 'B · Home 顶栏写当前实例名，点名字开 sheet，头像只管账户', phoneShell('/', <Workbench />), { b: true, status: 'shipped' }),
+  ...both('b-sheet', 'B · 点名字打开的 sheet（没有账户行）', () => (
+    <NativeSheet>
+      <InstanceSheetPage
+        session={bSession}
+        locked={false}
+        refreshing={false}
+        stale={false}
+        rows={{ openingId: null, failure: null, expandedId: null, onOpen: noop }}
+        onClose={noop}
+        onRefresh={noop}
+        onAdd={noop}
+      />
+    </NativeSheet>
+  ), { b: true }),
 ]);
 
 export default designFrames;

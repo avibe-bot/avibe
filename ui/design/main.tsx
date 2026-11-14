@@ -59,9 +59,14 @@ async function boot() {
   // The phone app defines its bridge at document start, before any page script (`src/lib/native.ts`).
   if (shown?.fixtures?.nativeShell) {
     const capabilities = shown.fixtures.nativeShell;
+    const instanceName = shown.fixtures.nativeInstanceName;
+    // `app.info` answers as the shell does; every other call answers nothing.
+    const call = async (method: string) => (method === 'app.info'
+      ? { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, ...(instanceName ? { instance: { name: instanceName } } : {}) }
+      : null);
     Object.defineProperty(window, 'avibeNative', {
       configurable: true,
-      value: { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, call: async () => null, on: () => () => {} },
+      value: { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, call, on: () => () => {} },
     });
   }
   window.__DESIGN__ = {
