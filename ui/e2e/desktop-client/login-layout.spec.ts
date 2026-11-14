@@ -63,8 +63,7 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await expect(menu).toHaveCSS('opacity', '1');
     const action = menu.getByRole('button', { name: lang === 'en' ? 'Switch instance' : '切换实例' });
     expect(await action.evaluate((node) => getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
-    const status = menu.getByText(lang === 'en' ? 'Remote access to this Mac' : '本机远程访问', { exact: true });
-    expect(await status.evaluate((node) => node.closest('button, a, [role="button"]') === null)).toBe(true);
+    await expect(menu.getByText(lang === 'en' ? 'Remote access to this Mac' : '本机远程访问', { exact: true })).toHaveCount(0);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('account-menu.png') });
     await page.keyboard.press('Escape');
     await expect(trigger).toBeFocused();

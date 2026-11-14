@@ -43,13 +43,13 @@ try {
               count: document.querySelectorAll('[data-desktop-account-row]').length,
               inSidebar: Boolean(productFooter?.closest('aside')),
               toolsHeight: productFooter?.firstElementChild.getBoundingClientRect().height,
-              // The shared bottom row (ui/design: chrome/bottom-row) leads with the status dot.
-              statusX: rect(productRow.querySelector('[data-sidebar-status-row] [data-status-indicator]')).left,
+              avatarX: rect(productRow.querySelector('[data-account-avatar]')).left,
               expanded: accountTrigger?.getAttribute('aria-expanded'),
               chevron: Boolean(productRow.querySelector('[data-account-chevron]')),
               menu: Boolean(document.querySelector('[data-instance-menu]')),
               version: productRow.querySelector('[data-version-trigger] button')?.getAttribute('title'),
             } : null,
+            switcher: !!document.querySelector('[data-instance-switcher]'),
             entries: [...document.querySelectorAll('[data-placement-entry="bottom"]')].map(entry => {
               const indicator = entry.querySelector('[data-status-indicator]');
               const label = entry.querySelector('[data-account-label]');
@@ -59,15 +59,14 @@ try {
                 connection: entry.dataset.connectionStatus,
                 available: entry.dataset.updateAvailable,
                 compact: entry.dataset.compact,
-                // The bottom row leads with the status; the compact rail keeps its avatar.
-                leadX: rect(entry.querySelector(entry.dataset.compact === 'true' ? '[data-account-avatar]' : '[data-status-indicator]')).left,
+                avatarX: rect(entry.querySelector('[data-account-avatar]')).left,
                 updatePresent: Boolean(update),
                 updateVisible: update ? update.getClientRects().length > 0 && getComputedStyle(update).visibility === 'visible' : false,
                 // Popup open state is independent too; compare the actual trigger contents/label.
                 updateMarkup: update ? `${update.innerHTML}|${update.getAttribute('aria-label')}|${update.className}` : null,
                 indicatorMarkup: indicator?.outerHTML,
-                labelGap: label ? rect(label).left - rect(indicator).right : null,
-                chevronGap: chevron ? rect(chevron).left - rect(label).right : null,
+                labelGap: label ? rect(indicator).left - rect(label).right : null,
+                chevronGap: chevron ? rect(chevron).left - rect(indicator).right : null,
               };
             }),
             menus: [...document.querySelectorAll('[data-update-menu],[data-instance-menu]')].map(rect),
@@ -83,8 +82,9 @@ try {
           };
         });
         const key = `${frame.id}.${theme}`;
-        const productFooter = /^desktop\/instances\/(signed-out|account)-(zh|en)$/.test(frame.id);
-        const productLogin = /^desktop\/instances\/(email|code|code-error)-(zh|en)$/.test(frame.id);
+        const productFooter = /^desktop\/instances\/(signed-out|account|account-remote-disabled|account-long)-(zh|en)$/.test(frame.id);
+        const productLogin = /^desktop\/instances\/(email|code|code-error|password|password-help|two-factor|recovery)-(zh|en)$/.test(frame.id);
+        const productSwitcher = /^desktop\/instances\/(instances|empty|loading|list-error|offline|switching|consent|switch-error|upgrade-error|offline-help|long-content)-(zh|en)$/.test(frame.id);
         if (productFooter) {
           assert.ok(actual.product, `${key}: canonical footer must render the product row`);
           assert.equal(frame.status, 'shipped', `${key}: product-backed frame status`);
@@ -92,12 +92,15 @@ try {
           assert.equal(actual.product.count, 1, `${key}: one product row`);
           assert.equal(actual.product.inSidebar, true, `${key}: real AppShell sidebar footer`);
           assert.equal(actual.product.toolsHeight, 39, `${key}: real Apps/Settings tools row`);
-          assert.equal(actual.product.statusX, 16, `${key}: product Apps-container alignment`);
+          assert.equal(actual.product.avatarX, 24, `${key}: padded product account trigger`);
           assert.equal(actual.product.version, 'v3.2.6rc9', `${key}: product VersionBadge`);
           const signedIn = frame.id.includes('/account-');
           assert.equal(actual.product.chevron, signedIn, `${key}: signed-out entry has no menu chevron`);
           assert.equal(actual.product.menu, signedIn, `${key}: controlled account menu`);
           assert.equal(actual.product.expanded, signedIn ? 'true' : null, `${key}: account expansion semantics`);
+        } else if (productSwitcher) {
+          assert.ok(actual.switcher, `${key}: product switcher`);
+          assert.equal(actual.entries.length, 0, `${key}: no kit footer in bundled instance view`);
         } else if (productLogin) {
           assert.equal(actual.entries.length, 0, `${key}: product login card has no kit footer`);
         } else {
@@ -107,7 +110,7 @@ try {
           assert.ok(['true', 'false'].includes(entry.available), `${key}: explicit boolean fixture`);
           assert.equal(entry.updatePresent, entry.available === 'true', `${key}: update presence follows availability only`);
           assert.equal(entry.updateVisible, entry.available === 'true', `${key}: connection must not hide the update`);
-          assert.ok(Math.abs(entry.leadX - 16) <= 2, `${key}: Apps-container alignment (${entry.leadX})`);
+          assert.equal(entry.avatarX, 16, `${key}: Apps-container alignment`);
           for (const gap of [entry.labelGap, entry.chevronGap]) {
             if (gap !== null) assert.ok(gap >= 0 && gap <= 8, `${key}: adjacent connection indicator/chevron (${gap}px)`);
           }
@@ -150,7 +153,8 @@ try {
     }
   }
   for (const lang of ['zh', 'en']) for (const theme of ['light', 'dark']) {
-    for (const connection of ['signed-in', 'signed-out', 'switching', 'offline']) {
+    // Offline now renders the bundled product switcher, which has no Runtime footer.
+    for (const connection of ['signed-in', 'signed-out', 'switching']) {
       assert.ok(combinations.has(`${lang}:${theme}:${connection}:true`), `${lang}/${theme}: missing ${connection}+update fixture`);
     }
     assert.ok(combinations.has(`${lang}:${theme}:signed-in:false`), `${lang}/${theme}: normal version baseline`);

@@ -29,5 +29,5 @@ export function DesktopAccountRow() {
   const open = (view: Parameters<typeof present>[0]) => { setPanel(null); present(view); };
   return <DesktopAccountRowView state={state} menuOpen={panel === 'account'}
     onMenuOpenChange={(value) => setPanel(value ? 'account' : null)}
-    onPresent={open} localUpdater={<VersionBadge openUpward />} />;
+    onPresent={open} localRemoteUrl={state.local.remote_access_url ?? null} localUpdater={<VersionBadge openUpward />} />;
 }

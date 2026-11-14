@@ -31,7 +31,7 @@ function mount(initial: unknown, response: (request: DesktopClientRequest) => un
 it('AUTH-SETUP-177 consumes the native UTF-8 catalog and sends its opaque instance id', async () => {
   const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id }));
   expect(await screen.findByText('工作室 Studio')).toBeTruthy();
-  expect(screen.getByText('This Mac · 小明的 Mac')).toBeTruthy();
+  expect(screen.getByText('小明的 Mac')).toBeTruthy();
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
   fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
@@ -101,7 +101,7 @@ it.each([1, 2])('AUTH-SETUP-171 preserves direct recovery material only in the c
     fireEvent.click(screen.getByRole('button', { name: 'I have saved these codes' }));
   }
   expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull();
-  expect(screen.getByText('This Mac · 最新的 Mac')).toBeTruthy();
+  expect(screen.getByText('最新的 Mac')).toBeTruthy();
   expect(JSON.stringify(window.__AVIBE_DESKTOP_CLIENT_STATE__)).not.toContain(replies.totp_enrollment.result.secret);
   expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain(replies.totp_enrolled.result.recoveryCodes[0]);
 });
@@ -129,4 +129,162 @@ it('keeps the native instance order inside each section, with the current shared
   const shared = within(screen.getByRole('heading', { name: 'Shared with you' }).closest('section')!).getAllByRole('button');
   expect(within(shared[0]).getByLabelText('Current')).toBeTruthy();
   expect(within(shared[1]).queryByLabelText('Current')).toBeNull();
+});
+
+// The old full-page transition and bottom error never kept the selected row visible.
+// Exercise AccountApp + the real bridge hook with a deferred native reply.
+it('keeps opening, failure and retry on the selected instance without replacing the list', async () => {
+  let finish!: (value: unknown) => void;
+  let pendingRequest!: DesktopClientRequest;
+  const invoke = mount(states.signed_in, (request) => {
+    if (request.action.type === 'select_instance') {
+      pendingRequest = request;
+      return new Promise((resolve) => { finish = resolve; });
+    }
+    return { ...replies.success, request_id: request.request_id };
+  });
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
+  const row = document.querySelector('[data-instance-id="instance-owned-fixture"]') ?? screen.getByText('工作室 Studio').closest('[data-instance-id]');
+  expect(row).toBeTruthy();
+  expect(within(row as HTMLElement).getByText('Opening…')).toBeTruthy();
+  expect(document.querySelector('[data-instance-mask]')).toBeTruthy();
+  for (const button of document.querySelectorAll('[data-instance-list] button')) expect((button as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => finish({ ...replies.success, request_id: pendingRequest.request_id, ok: false, error: { code: 'instance_upgrade_required' } }));
+  expect(within(row as HTMLElement).getByRole('alert').textContent).toContain(en.desktopClient.errors.upgrade);
+  expect(document.querySelector('[data-instance-mask]')).toBeNull();
+  fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+  await act(async () => finish({ ...replies.success, request_id: pendingRequest.request_id }));
+});
+
+it('expands an offline row locally and refreshes without issuing select_instance', async () => {
+  const initial = structuredClone(states.signed_in);
+  initial.catalog.instances[0].available = false;
+  const invoke = mount(initial, (request) => ({ ...replies.success, state: initial, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
+  const row = screen.getByText('工作室 Studio').closest('[data-instance-id]') as HTMLElement;
+  expect(within(row).getByText(en.desktopClient.offlineInstructions)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledOnce();
+  fireEvent.click(within(row).getByRole('button', { name: 'Refresh instances' }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  expect(invoke.mock.calls[1][1].request.action).toEqual({ type: 'refresh_instances' });
+});
+
+it('keeps the list under consent and Escape declines only that consent', async () => {
+  const invoke = mount(states.consent, (request) => ({ ...replies.success, request_id: request.request_id, state: states.consent }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  const dialog = screen.getByRole('dialog');
+  expect(document.querySelector('[data-instance-list]')).toBeTruthy();
+  fireEvent.keyDown(dialog, { key: 'Escape' });
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  expect(invoke.mock.calls[1][1].request.action).toEqual({ type: 'decide_consent', approve: false });
+});
+
+it('Escape during pending consent approval still cancels the native operation', async () => {
+  let finish!: (reply: unknown) => void;
+  let approval!: DesktopClientRequest;
+  const invoke = mount(states.consent, (request) => {
+    if (request.action.type === 'decide_consent') { approval = request; return new Promise((resolve) => { finish = resolve; }); }
+    return { ...replies.success, request_id: request.request_id, state: states.consent };
+  });
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: 'Allow and connect' }));
+  await waitFor(() => expect(approval).toBeDefined());
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+  expect(invoke.mock.calls[2][1].request.action).toEqual({ type: 'cancel' });
+  await act(async () => finish({ ...replies.success, request_id: approval.request_id }));
+});
+
+
+it.each([true, false])('deduplicates only a known authoritative local ID (%s), independently of enrollment and names', async (known) => {
+  const item = states.signed_in.catalog.instances[0];
+  const state = { ...states.signed_in,
+    local: { ...states.signed_in.local, name: item.name, instance_id: known ? item.id : null, remote_access_url: null },
+    enrollment: { ...states.signed_in.enrollment, instance_id: item.id },
+    connection: { status: 'remote_connected', pending: null, committed: { kind: 'remote', name: 'Another instance', instance_id: 'another', canonical_origin: 'https://another-app.avibe.bot' } },
+  };
+  const invoke = mount(state, (request) => ({ ...replies.success, state, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  const catalogRows = [...document.querySelectorAll('[data-instance-id]')];
+  expect(catalogRows.some((node) => node.getAttribute('data-instance-id') === item.id)).toBe(!known);
+});
+
+// Native advances generation when it starts selection; this is not a logout.
+// Use its accepted generation, never predict it from the submitted request.
+it.each([false, true])('selection generation advancement retains only a current row error (superseded=%s)', async (superseded) => {
+  let finish!: (reply: unknown) => void;
+  let request!: DesktopClientRequest;
+  const initial = structuredClone(states.signed_in);
+  const target = initial.catalog.instances[0];
+  const advanced = { ...initial, generation: initial.generation + 7, revision: initial.revision + 1,
+    connection: { ...initial.connection, status: 'switching', pending: { kind: 'remote', instance_id: target.id, name: target.name, canonical_origin: target.url } } };
+  const invoke = mount(initial, (input) => {
+    if (input.action.type === 'select_instance') { request = input; return new Promise((resolve) => { finish = resolve; }); }
+    return { ...replies.success, state: initial, request_id: input.request_id };
+  });
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
+  await waitFor(() => expect(request).toBeDefined());
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: advanced }));
+  expect(screen.getByText('Opening…')).toBeTruthy();
+  if (superseded) fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: {
+    ...initial, generation: advanced.generation + 9, account: { ...initial.account, status: 'signed_out', identity: null },
+  } }));
+  await act(async () => finish({ version: 1, request_id: request.request_id, ok: false,
+    state: { ...advanced, connection: initial.connection }, error: { code: 'instance_upgrade_required' } }));
+  if (superseded) expect(screen.queryByText(en.desktopClient.errors.upgrade)).toBeNull();
+  else {
+    const row = screen.getByText(target.name).closest('[data-instance-id]') as HTMLElement;
+    expect(within(row).getByRole('alert').textContent).toContain(en.desktopClient.errors.upgrade);
+    expect(within(row).getByRole('button', { name: 'Retry' })).toBeTruthy();
+  }
+});
+
+// Admission remains in native. The product must not turn a non-get_state result,
+// or a get_state reply overtaken by Escape, into a new automatic action.
+it.each(['non-get-state', 'canceled-get-state'] as const)('does not auto-consume an unadmitted receipt (%s)', async (mode) => {
+  let finish!: (reply: unknown) => void;
+  let initialRequest!: DesktopClientRequest;
+  const state = structuredClone(states.signed_in);
+  const invoke = mount(state, (request) => {
+    if (request.action.type === 'get_state' && mode === 'canceled-get-state') {
+      initialRequest = request; return new Promise((resolve) => { finish = resolve; });
+    }
+    return { ...replies.success, request_id: request.request_id, state,
+      ...(request.action.type === 'refresh_instances' ? { result: { type: 'sign_out_intent', intent_id: `unadmitted-${mode}`, generation: state.generation } } : {}) };
+  });
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  if (mode === 'non-get-state') fireEvent.click(screen.getByRole('button', { name: 'Refresh instances' }));
+  else {
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await act(async () => finish({ ...replies.success, request_id: initialRequest.request_id, state,
+      result: { type: 'sign_out_intent', intent_id: `unadmitted-${mode}`, generation: state.generation } }));
+  }
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  expect(invoke.mock.calls.map((call) => call[1].request.action.type)).not.toContain('sign_out');
+});
+
+// The same document may remount while native cleanup is pending. Re-reading
+// the same receipt must not submit a second cleanup request.
+it('deduplicates an admitted sign-out across same-document remounts while cleanup is in flight', async () => {
+  let finish!: (reply: unknown) => void;
+  let pending!: DesktopClientRequest;
+  const respond = (request: DesktopClientRequest) => {
+    if (request.action.type === 'sign_out') {
+      pending = request; return new Promise((resolve) => { finish = resolve; });
+    }
+    return { ...replies.success, request_id: request.request_id,
+      result: { type: 'sign_out_intent', intent_id: 'same-document-pending', generation: states.signed_in.generation } };
+  };
+  const first = mount(states.signed_in, respond);
+  await waitFor(() => expect(first.mock.calls.filter((call) => call[1].request.action.type === 'sign_out')).toHaveLength(1));
+  cleanup();
+  const second = mount(states.signed_in, respond);
+  await waitFor(() => expect(second).toHaveBeenCalledOnce());
+  await act(async () => { await Promise.resolve(); });
+  expect(second.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state']);
+  await act(async () => finish({ ...replies.success, request_id: pending.request_id }));
 });

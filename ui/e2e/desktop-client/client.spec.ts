@@ -32,26 +32,21 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       const requests = await installBridge(page, state, { projection: true });
       await language(page, lang);
       await page.goto(`/?theme=${theme}`);
-      // ui/design: chrome/bottom-row. The status dot leads the row, flush with the tools above; the
-      // version is flush right; the row sits no farther from the window's edge than from the tools.
-      await expect(page.locator('[data-sidebar-status-row] [data-status-indicator]')).toBeVisible();
+      const avatar = page.locator('[data-account-avatar]');
+      await expect(avatar).toBeVisible();
       const footer = page.locator('[data-sidebar-footer]');
       const measurements = await footer.evaluate((node) => {
         const rect = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
-        const tools = node.firstElementChild!.getBoundingClientRect();
-        const row = rect('[data-sidebar-status-row]');
-        return { dot: rect('[data-status-indicator]').x, tools: tools.x,
-          labelGap: rect('[data-account-label]').x - rect('[data-status-indicator]').right,
-          arrowGap: rect('[data-account-chevron]').x - rect('[data-account-label]').right,
-          versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right,
-          above: row.top - tools.bottom, below: window.innerHeight - row.bottom };
+        return { avatar: rect('[data-account-avatar]').x, tools: node.firstElementChild!.getBoundingClientRect().x,
+          dotGap: rect('[data-status-indicator]').x - rect('[data-account-label]').right,
+          arrowGap: rect('[data-account-chevron]').x - rect('[data-status-indicator]').right,
+          versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right };
       });
-      expect(measurements.dot).toBe(16);
+      expect(measurements.avatar).toBe(24);
       expect(measurements.tools).toBe(16);
-      expect(measurements.labelGap).toBeLessThanOrEqual(8);
-      expect(measurements.arrowGap).toBeLessThanOrEqual(8);
+      expect(measurements.dotGap).toBeLessThanOrEqual(6);
+      expect(measurements.arrowGap).toBeLessThanOrEqual(6);
       expect(measurements.versionRight).toBe(measurements.footerRight);
-      expect(measurements.below).toBeLessThanOrEqual(measurements.above);
       await expect(footer).not.toContainText('max@example.test');
       await page.locator('[data-version-trigger] button').click();
       const popup = page.getByRole('dialog', { name: lang === 'en' ? 'Version & Update' : '版本与更新' });
@@ -97,6 +92,8 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await expect(page.getByRole('heading', { name: /工作室 Studio/ })).toBeVisible();
       await page.screenshot({ animations: 'disabled', path: info.outputPath('consent.png') });
       await page.getByRole('button', { name: lang === 'en' ? 'Allow and connect' : '允许并连接' }).click();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+      await expect(page.locator('[data-instance-mask]')).toBeVisible();
       await page.keyboard.press('Escape');
       await expect.poll(() => requests.at(-1)?.action.type).toBe('cancel');
       expect(requests.some((request) => request.action.type === 'select_instance' && Object.keys(request.action).join(',') === 'type,instance_id')).toBe(true);
@@ -169,14 +166,13 @@ for (const method of ['totp', 'recovery', 'passkey'] as const) test(`AUTH-SETUP-
   expect(requests.at(-1)?.action).toEqual(method === 'passkey' ? { type: 'verify_passkey' } : { type: 'verify_second_factor', method, code: method === 'totp' ? '654321' : 'fixture-recovery' });
 });
 
-test('AUTH-SETUP-177 sign-out is a confirmation page; Back cancels and clears setup material', async ({ page }) => {
+test('AUTH-SETUP-177 a bare sign-out view never authorizes logout; Back clears setup material', async ({ page }) => {
   await isolateAccount(page); await language(page, 'en');
   const state = clientState(); signIn(state);
   const requests = await installBridge(page, state); await page.goto(`${ACCOUNT}?view=sign-out`);
   await expect(page.getByRole('heading', { name: 'Sign out' })).toBeVisible();
   expect(requests.map((request) => request.action.type)).toEqual(['get_state']);
-  await page.getByRole('button', { name: 'Sign out', exact: true }).click();
-  await expect.poll(() => requests.at(-1)?.action.type).toBe('sign_out');
+  await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toHaveCount(0);
   state.account = { ...state.account, status: 'second_factor_required', gate: 'enroll' };
   await page.goto(ACCOUNT);
   await page.getByRole('button', { name: 'Add authenticator' }).click();
@@ -184,4 +180,128 @@ test('AUTH-SETUP-177 sign-out is a confirmation page; Back cancels and clears se
   await page.getByRole('button', { name: 'Back to Workbench' }).click();
   await expect.poll(() => requests.at(-1)?.action.type).toBe('cancel');
   await expect(page.getByText('JBSWY3DPEHPK3PXP', { exact: true })).toHaveCount(0);
+});
+
+for (const lang of ['en', 'zh'] as const) test(`rc19 switch failure, offline instructions and wrapping ${lang}`, async ({ page }, info) => {
+  await page.setViewportSize({ width: 880, height: 600 });
+  const denied = await isolateAccount(page); await language(page, lang);
+  const state = clientState(); signIn(state);
+  state.catalog.instances[0].name = '工作室 Studio — a long name for the shared research and product development computer';
+  state.catalog.instances[1].owner_email = 'a-very-long-shared-account-name-for-the-research-team@example.test';
+  const requests = await installBridge(page, state, { selectError: 'instance_upgrade_required' });
+  await page.goto(`${ACCOUNT}?view=instances`);
+  const row = page.locator('[data-instance-id="studio"]');
+  await row.getByRole('button').click();
+  await expect(row.getByRole('alert')).toContainText(lang === 'en' ? 'This instance needs to upgrade Avibe' : '这个实例需要先升级 Avibe');
+  await expect(page.locator('[data-instance-switcher] > [role="alert"]')).toHaveCount(0);
+  await row.getByRole('button', { name: lang === 'en' ? 'Retry' : '重试', exact: true }).click();
+  await expect.poll(() => requests.filter((request) => request.action.type === 'select_instance').length).toBe(2);
+  const offline = page.locator('[data-instance-id="team"]');
+  await offline.getByRole('button').click();
+  await expect(offline).toContainText(lang === 'en' ? 'Open Avibe on that computer' : '去那台电脑打开 Avibe');
+  expect(requests.filter((request) => request.action.type === 'select_instance')).toHaveLength(2);
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('row-failure-offline.png') });
+  expect(await page.locator('main').evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await offline.getByRole('button', { name: lang === 'en' ? 'Refresh instances' : '刷新实例' }).click();
+  await expect.poll(() => requests.at(-1)?.action.type).toBe('refresh_instances');
+  expect(denied).toEqual([]);
+});
+
+test('rc19 pending target remains in the masked list', async ({ page }, info) => {
+  await isolateAccount(page); await language(page, 'en');
+  const state = clientState(); signIn(state);
+  state.connection.status = 'switching';
+  state.connection.pending = { kind: 'remote', name: '工作室 Studio', instance_id: 'studio', canonical_origin: 'https://studio-app.avibe.bot' };
+  await installBridge(page, state);
+  await page.goto(`${ACCOUNT}?view=instances`);
+  await expect(page.locator('[data-instance-id="studio"]')).toContainText('Opening…');
+  await expect(page.locator('[data-instance-mask]')).toBeVisible();
+  for (const button of await page.locator('[data-instance-list] button').all()) await expect(button).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Back to Workbench' })).toBeEnabled();
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('pending-list.png') });
+});
+
+for (const lang of ['en', 'zh'] as const) test(`rc19 password preserves email, clears secret, and continues through 2FA ${lang}`, async ({ page }, info) => {
+  const denied = await isolateAccount(page); await language(page, lang);
+  const state = clientState();
+  const requests = await installBridge(page, state, { factor: 'challenge' });
+  await page.goto(ACCOUNT);
+  await page.locator('#desktop-auth-field').fill('long-research-account@example.test');
+  await page.getByRole('button', { name: lang === 'en' ? 'Use password instead' : '使用密码登录' }).click();
+  await expect(page.locator('#desktop-auth-field')).toHaveValue('long-research-account@example.test');
+  await page.locator('#desktop-password').fill('synthetic-password-fixture');
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('password.png') });
+  await page.getByRole('button', { name: lang === 'en' ? 'Sign in' : '登录', exact: true }).click();
+  await expect(page.locator('[data-account-factor]')).toBeVisible();
+  expect(requests.find((request) => request.action.type === 'sign_in_password')?.action).toEqual({ type: 'sign_in_password', email: 'long-research-account@example.test', password: 'synthetic-password-fixture' });
+  expect(JSON.stringify(state)).not.toContain('synthetic-password');
+  expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('synthetic-password');
+  await page.getByRole('button', { name: lang === 'en' ? 'Use a recovery code' : '使用恢复码' }).click();
+  await page.locator('#factor-code').fill('fixture-recovery');
+  await page.getByRole('button', { name: lang === 'en' ? 'Verify' : '验证', exact: true }).click();
+  await expect.poll(() => requests.at(-1)?.action.type).toBe('verify_second_factor');
+  expect(denied).toEqual([]);
+});
+
+test('rc19 password failure and forgotten-password guidance keep email but clear the password', async ({ page }, info) => {
+  await isolateAccount(page); await language(page, 'en');
+  await installBridge(page, clientState(), { passwordError: 'invalid_credentials' });
+  await page.goto(ACCOUNT);
+  await page.locator('#desktop-auth-field').fill('max@example.test');
+  await page.getByRole('button', { name: 'Use password instead' }).click();
+  await page.locator('#desktop-password').fill('synthetic-wrong-password');
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('The email or password is incorrect');
+  await expect(page.locator('#desktop-password')).toHaveValue('');
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('password-error.png') });
+  await page.getByRole('button', { name: 'Forgot password?' }).click();
+  await expect(page.locator('#desktop-password')).toHaveCount(0);
+  await expect(page.locator('#desktop-auth-field')).toHaveValue('max@example.test');
+  await expect(page.getByRole('status')).toContainText('Account security at avibe.bot');
+});
+
+test('rc19 only a current native direct intent consumes sign-out once', async ({ page }) => {
+  await isolateAccount(page); await language(page, 'en');
+  const state = clientState(); signIn(state);
+  const requests = await installBridge(page, state, { signOutIntent: 'synthetic-intent' });
+  await page.goto(`${ACCOUNT}?view=sign-out`);
+  await expect.poll(() => requests.filter((request) => request.action.type === 'sign_out').length).toBe(1);
+  expect(requests.find((request) => request.action.type === 'sign_out')?.action).toEqual({ type: 'sign_out', intent_id: 'synthetic-intent' });
+  expect(JSON.stringify({ ...await page.evaluate(() => ({ ...localStorage, ...sessionStorage })) })).not.toContain('synthetic-intent');
+});
+
+// URL locale must win before any visible heading, even over the opposite stored preference.
+for (const locale of ['en', 'zh'] as const) test(`rc19 admitted locale controls first account render ${locale}`, async ({ page }) => {
+  await isolateAccount(page); await language(page, locale === 'en' ? 'zh' : 'en');
+  await installBridge(page, clientState());
+  await page.addInitScript(() => {
+    const seen: string[] = [];
+    (window as unknown as { __headings: string[] }).__headings = seen;
+    new MutationObserver(() => {
+      const title = document.querySelector('h1')?.textContent;
+      if (title && seen.at(-1) !== title) seen.push(title);
+    }).observe(document, { childList: true, subtree: true });
+  });
+  await page.goto(`${ACCOUNT}?view=account&locale=${locale}`);
+  const title = locale === 'en' ? 'Start with an email.' : '从一封邮件开始。';
+  await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __headings: string[] }).__headings)).toEqual([title]);
+});
+
+test('rc19 stale receipt cannot auto-logout and a failed current intent needs explicit retry', async ({ page }) => {
+  await isolateAccount(page); await language(page, 'en');
+  const state = clientState(); signIn(state);
+  const options = { signOutIntent: 'synthetic-failed-intent', signOutGeneration: 0, signOutError: 'cleanup_failed' };
+  const requests = await installBridge(page, state, options);
+  await page.goto(`${ACCOUNT}?view=sign-out`);
+  await expect.poll(() => requests.filter((request) => request.action.type === 'get_state').length).toBe(1);
+  await expect(page.getByRole('button', { name: 'Back to Workbench' }).last()).toBeVisible();
+  expect(requests.filter((request) => request.action.type === 'sign_out')).toHaveLength(0);
+  options.signOutGeneration = state.generation;
+  await page.reload();
+  await expect(page.getByRole('alert')).toBeVisible();
+  expect(requests.filter((request) => request.action.type === 'sign_out')).toHaveLength(1);
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect.poll(() => requests.filter((request) => request.action.type === 'sign_out').length).toBe(2);
+  expect(requests.at(-1)?.action).toEqual({ type: 'sign_out' });
 });

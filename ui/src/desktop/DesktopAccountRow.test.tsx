@@ -9,7 +9,7 @@ import { DesktopAccountRow } from './DesktopAccountRow';
 
 const mock = vi.hoisted(() => ({
   present: vi.fn(), remote: false, phase: 'available', signedIn: true,
-  invoke: vi.fn(), getVersion: vi.fn(),
+  invoke: vi.fn(), getVersion: vi.fn(), localUrl: null as string | null, localAccess: 'off',
 }));
 vi.mock('../context/ApiContext', () => ({ useApi: () => ({ getVersion: mock.getVersion }) }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ capabilities: { can_manage_instance: true } }) }));
@@ -19,7 +19,7 @@ vi.mock('./useDesktopClient', () => ({
   useDesktopClientProjection: () => ({
     account: { status: mock.signedIn ? 'signed_in' : 'signed_out', identity: { id: 'fixture', email: 'max@example.test' } },
     connection: { status: mock.remote ? 'remote_connected' : 'local', committed: { kind: mock.remote ? 'remote' : 'local', name: 'Studio', instance_id: 'studio' }, pending: null },
-    local: { name: '小麦的 Mac', remote_access: 'off' },
+    local: { name: '小麦的 Mac.local', remote_access: mock.localAccess, remote_access_url: mock.localUrl },
     desktop: { version: '3.2.6rc12', update: { phase: mock.phase, latest: '3.2.7' } },
     remote_auxiliary: 'disabled_incomplete',
   }),
@@ -27,7 +27,7 @@ vi.mock('./useDesktopClient', () => ({
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
 beforeEach(() => {
-  mock.remote = false; mock.phase = 'available'; mock.signedIn = true;
+  mock.remote = false; mock.phase = 'available'; mock.signedIn = true; mock.localUrl = null; mock.localAccess = 'off';
   mock.getVersion.mockResolvedValue({ current: '3.2.6rc12', latest: '3.2.7', has_update: true, managed_by: 'desktop' });
   mock.invoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
     ? {
@@ -142,18 +142,29 @@ it('AUTH-SETUP-177 signed-out footer directly presents account without opening a
   expect(document.querySelector('[data-instance-menu]')).toBeNull();
 });
 
-it('AUTH-SETUP-178 signed-in menu keeps instance actions separate from remote access status', async () => {
+it('AUTH-SETUP-178 signed-in menu groups account actions without a remote-access status row', async () => {
   const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
   render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
   const trigger = document.querySelector('[data-account-trigger]')!;
   fireEvent.click(trigger);
   expect(trigger.getAttribute('aria-expanded')).toBe('true');
   expect(mock.present).not.toHaveBeenCalled();
-  const status = screen.getByText('Remote access to this Mac');
-  expect(status.closest('button, a, [role="button"]')).toBeNull();
+  expect(screen.queryByText('Remote access to this Mac')).toBeNull();
+  expect(trigger.textContent).toBe('小麦的 Mac');
+  expect(trigger.getAttribute('title')).toBe('小麦的 Mac.local');
   fireEvent.click(screen.getByRole('button', { name: 'Switch instance' }));
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('instances');
   fireEvent.click(trigger);
   fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
   expect(mock.present).toHaveBeenLastCalledWith('sign-out');
+});
+
+// The address must come from the local native projection, even on a remote Runtime.
+it.each(['on', 'off', 'starting', 'unavailable'])('only shows the authoritative local link while access is on (%s)', async (access) => {
+  mock.remote = true; mock.localAccess = access; mock.localUrl = 'https://local-fixture-app.avibe.bot';
+  mount();
+  fireEvent.click(document.querySelector('[data-account-trigger]')!);
+  const link = screen.queryByRole('link', { name: mock.localUrl });
+  if (access === 'on') expect(link?.getAttribute('href')).toBe(mock.localUrl);
+  else expect(link).toBeNull();
 });
