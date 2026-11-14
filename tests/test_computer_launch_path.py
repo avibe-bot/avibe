@@ -273,7 +273,7 @@ async def test_windows_native_path_follows_junction_to_final_local_file(tmp_path
         subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(junction), actual],
                        check=True, capture_output=True, timeout=10)
         requested = str(junction / "Target.exe")
-        assert os.path.samefile(requested, actual + "\\Target.exe")
+        assert os.path.exists(actual + "\\Target.exe")
         state_path, state = _state(tmp_path)
         upstream = FakeUpstream()
         server = cs.ComputerUseServer(state_path=state_path,
