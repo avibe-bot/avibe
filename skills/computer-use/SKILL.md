@@ -65,7 +65,7 @@ once it stops changing or the timeout ends.
   background input still has no effect. Foreground input restores the previous
   frontmost window; `activate()` leaves the target frontmost.
 - When no on-screen window matches, call `const launched = await app.launch()`
-  once (on Windows, launch from its `.exe` path as described under Windows),
+  once (on Windows, launch through a path handle as described under Windows),
   then `await launched.app.waitFor({ onScreen: true })`. If no window
   appears, or activation stays unverified, stop and ask the owner. Never loop.
 - Treat driver `status: unverifiable` as unknown, not proof of effect. After
@@ -168,26 +168,38 @@ kernel, SDK, saved flows, and safety rules above are the same.
   Avibe cannot control that window and that reopening the app without "Run as
   administrator" lets you continue. Never retry it, ask the owner to elevate
   Avibe, or work around the refusal.
-- Avibe launches Windows apps only from the absolute path of an `.exe` on a
-  local drive (such as `C:\...\app.exe`); network, relative, and other paths
-  are refused. To open an app the owner named, first check `observe apps`: if
-  it is already running, attach to its window instead of launching. Otherwise
-  read a `desktop` entry's `launch_path`: it is the shortcut's whole command
-  line, the `.exe` path first (quoted when it contains spaces), then any
-  arguments. Split it yourself; never pass it whole, and never expand `%VAR%`
-  references or run it through a shell. Then launch it by that `.exe` path
-  with those arguments. A `shell:appsFolder` entry is a Store app and cannot be launched. Never ask
-  the owner for a path, and never guess or build one yourself.
-- Store (`uwp`) apps, apps with no trustworthy `.exe` path, links, and files
-  that open in their default app cannot be launched. Avibe also refuses a
-  launch by name ("Avibe cannot launch this app in the Windows Preview"). Then
-  tell the owner Avibe cannot launch it in the Windows Preview, ask them to
-  open it, wait for its window with `app.waitFor`, then observe and continue
-  there. Never try another launch route, a shell command, or elevation
-  instead, and do not retry the launch.
-- Avibe tracks only the process it started. Some apps hand their launch to a
-  copy that is already running, so if no window appears, look for the app in
-  `observe apps` before asking the owner.
+- Avibe launches a Windows app only from the absolute path of its `.exe` on a
+  local drive. Network, relative, and other paths are refused, and Avibe never
+  launches by name. To open an app the owner named, first check `observe
+  apps`: if it is already running, attach to its window instead of launching.
+- Otherwise resolve its `.exe` with read-only lookups, without asking the
+  owner for a path:
+  - its App Paths entry:
+    `(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\excel.exe').'(default)'`
+    (also try `HKCU:`);
+  - the target of its Start menu shortcut:
+    `(New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath`;
+  - a program on `PATH`: `(Get-Command excel.exe -CommandType Application).Source`.
+  Use a path only if it is an existing `.exe` on a local drive, it clearly
+  belongs to the app the owner named, and only one candidate remains. Pass
+  arguments as literal strings. Never copy a whole command line, a
+  `launch_path`, or a `%VAR%` reference into the path.
+- Then launch it through a path handle:
+  ```js
+  const excel = await computer.app({ path: "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE" });
+  const launched = await excel.launch({ additional_arguments: ["C:\\Reports\\q3.xlsx"] });
+  ```
+  A path handle matches only a process whose image is that exact file, never
+  an app with the same name. Do not combine `path` with `name` or `bundleId`;
+  on macOS keep using those.
+- Store apps, stubs that hand off to another process (such as the files in
+  `WindowsApps`), apps with several plausible or no reliable `.exe`, links,
+  and files that open in their default app cannot be launched. Tell the owner:
+  "Please open it first, then I can operate it." Then wait for its window
+  with `app.waitFor`, observe, and continue there. Never start it through a
+  shell command (such as `Start-Process`) and then attach, try another launch
+  route, or elevate, and do not retry the launch. If Avibe refuses a launch
+  ("Avibe cannot launch this app in the Windows Preview"), do the same.
 - To open a menu, `await win.activate()` and observe that this exact window is
   focused before the click: foreground delivery restores the previous window,
   which closes the menu again.
