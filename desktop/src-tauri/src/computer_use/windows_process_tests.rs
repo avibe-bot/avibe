@@ -227,6 +227,28 @@ fn killed_shell_cleans_suspended_and_running_children_without_destructors() {
 }
 
 #[test]
+#[ignore = "acceptance: run as an elevated Windows x64 user"]
+fn elevated_shell_is_refused_before_process_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = OwnedDriver::spawn_suspended(
+        &std::env::current_exe().unwrap(),
+        &fixture_args(),
+        &fixture_env("hold", directory.path()),
+        directory.path(),
+    );
+    let error = match result {
+        Ok(child) => {
+            drop(child);
+            panic!("run this acceptance test from an elevated Windows process");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(error.to_string(), "elevated_shell");
+    assert!(!directory.path().join("started").exists());
+}
+
+#[test]
 fn launch_encoding_preserves_arguments_and_never_inherits_environment() {
     let arguments = ["", "a b", "trailing\\", "a\\\"b", "中文"].map(OsString::from);
     let line = command_line(OsStr::new(r"C:\Program Files\driver.exe"), &arguments).unwrap();
