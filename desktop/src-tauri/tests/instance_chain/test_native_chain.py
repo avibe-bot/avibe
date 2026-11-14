@@ -72,7 +72,7 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
     environment["AVIBE_FIXTURE_UPDATE_CONFIG"] = str(update_config)
     if os.environ.get("DESKTOP_CHAIN_SHELL") == "1":
         environment["AVIBE_FIXTURE_SHELL"] = "1"
-        environment["AVIBE_FIXTURE_AUTO_UPDATE"] = os.environ.get("DESKTOP_CHAIN_AUTO_UPDATE", "0")
+        environment["AVIBE_FIXTURE_LEGACY_INSTALL"] = os.environ.get("DESKTOP_CHAIN_LEGACY_INSTALL", "0")
     executable = Path(os.environ["DESKTOP_NATIVE_PROBE"]).resolve()
     native = subprocess.Popen(
         [str(executable), str(fixture)],
@@ -222,7 +222,7 @@ def production_shell_chain(desktop_host, monkeypatch, tmp_path, request):
     options = getattr(request, "param", {})
     monkeypatch.setenv("DESKTOP_CHAIN_SHELL", "1")
     monkeypatch.setenv("DESKTOP_CHAIN_SSE", "1" if options.get("sse", True) else "0")
-    monkeypatch.setenv("DESKTOP_CHAIN_AUTO_UPDATE", "1" if options.get("automatic", False) else "0")
+    monkeypatch.setenv("DESKTOP_CHAIN_LEGACY_INSTALL", "1" if options.get("legacy_install_grant", False) else "0")
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     monkeypatch.setenv("AVIBE_COMPUTER_USE_STATE_DIR", str(tmp_path / "home/Library/Application Support/bot.avibe.desktop"))
     from vibe import internal_client
@@ -356,24 +356,24 @@ def test_production_deep_link_lifecycle_before_admission_keeps_received_authorit
 
 @pytest.mark.skipif(os.environ.get("DESKTOP_FIXTURE_UPDATER") != "1", reason="requires signed updater transport fixture build")
 @pytest.mark.parametrize("production_shell_chain", [
-    {"sse": True, "automatic": False},
-    {"sse": False, "automatic": True},
+    {"sse": True, "legacy_install_grant": False},
+    {"sse": False, "legacy_install_grant": True},
 ], indirect=True)
 def test_production_local_update_post_reaches_connection_while_remote(production_shell_chain):
     f = production_shell_chain
     login(f)
     select_studio(f)
     open_footer(f)
-    buttons = native_dialog(f)
-    f["send"](action="dialog", choice=buttons.index("Later"))
-    f["wait"]("dialog")
-    f["wait"]("update", lambda event: event["state"]["phase"] == "available")
+    assert trusted_action(f, {"type": "update_check"})["ok"]
+    checked = f["state"](lambda state: state["desktop"]["update"]["phase"] == "available")
+    # A released remote-install grant is never migrated into automatic policy.
+    assert checked["state"]["desktop"]["update"]["autoUpdate"] is False
     f["send"](action="shell_status")
     status = f["wait"]("shell_status")
     assert Path(status["data"]).is_relative_to(f["root"])
     assert status["notifications_enabled"] is True
     assert status["mini_window"] is False
-    if f["options"]["automatic"]:
+    if f["options"]["legacy_install_grant"]:
         f["send"](action="shell_control", operation="notifications", enabled=False)
         f["wait"]("shell_control")
     session = requests.Session()
@@ -388,28 +388,26 @@ def test_production_local_update_post_reaches_connection_while_remote(production
     assert response.status_code == 200, response.text
     result = response.json()
     assert result["ok"] is True
-    assert result["delivery"] == ("install" if f["options"]["automatic"] else "prompt")
-    remote = f["wait"]("update", lambda event: (event["state"].get("remoteRequest") or {}).get("phase") in ("awaiting_host", "downloading"))
-    assert remote["state"]["remoteRequest"]["requestId"] == result["request_id"]
-    assert remote["state"]["remoteRequest"]["target"] == f["updater"]["version"]
-    if f["options"]["automatic"]:
-        assert f["updater"]["requested"].wait(timeout=5)
-        # Automatic preference belongs to the accepted local mailbox ticket,
-        # independently of the viewed instance. Expire that exact ticket at
-        # the real Runtime owner before permitting the held inert download.
-        from vibe.desktop_update_request import expire_desktop_update_request
-        assert expire_desktop_update_request(result["request_id"])
-        expired = json.loads((Path(status["data"]) / "desktop-update-request.json").read_text())
-        assert (expired["request_id"], expired["target"], expired["state"]) == (
-            result["request_id"], f["updater"]["version"], "expired",
-        )
-        f["updater"]["release"].set()
-        f["wait"]("update", lambda event: (event["state"].get("remoteRequest") or {}).get("phase") == "expired")
-    else:
-        assert not f["updater"]["requested"].is_set()
+    assert result["delivery"] == "install"
+    remote = f["state"](lambda state: (state["desktop"]["update"].get("remoteRequest") or {}).get("phase") == "downloading")
+    receipt = remote["state"]["desktop"]["update"]["remoteRequest"]
+    assert receipt["requestId"] == result["request_id"]
+    assert receipt["target"] == f["updater"]["version"]
+    assert f["updater"]["requested"].wait(timeout=5)
+    # The explicit click authorizes this ticket regardless of the legacy grant
+    # or automatic policy. Expire it before releasing inert signed bytes.
+    from vibe.desktop_update_request import expire_desktop_update_request
+    assert expire_desktop_update_request(result["request_id"])
+    expired = json.loads((Path(status["data"]) / "desktop-update-request.json").read_text())
+    assert (expired["request_id"], expired["target"], expired["state"]) == (
+        result["request_id"], f["updater"]["version"], "expired",
+    )
+    f["updater"]["release"].set()
+    f["state"](lambda state: (state["desktop"]["update"].get("remoteRequest") or {}).get("phase") == "expired")
+    if f["options"]["sse"]:
         assert any(event.get("event") == "sse_update_nudge" for event in f["history"])
     assert not any(update["phase"] in ("installing", "installed") for update in f["updates"])
-    if f["options"]["automatic"]:
+    if f["options"]["legacy_install_grant"]:
         assert json.loads((f["root"] / "notifications.json").read_text()) == {"enabled": False}
 
 
@@ -838,61 +836,64 @@ def test_staged_document_cannot_commit_after_local_lifecycle_or_escape(native_ch
 
 def open_footer(f):
     f["ready"]("return Boolean(document.querySelector('[data-version-trigger]'));")
-    f["js"]("document.querySelector('[data-version-trigger]').click(); return true;")
-    f["ready"]("return Boolean(document.querySelector('[data-update-menu] button'));")
-    # This click navigates to the native presentation scheme. Sending the
-    # observation scheme in the same turn would replace that navigation.
-    f["send"](action="eval", script="document.querySelector('[data-update-menu] button').click();")
+    # This one click only presents the trusted panel; navigation never installs.
+    f["send"](action="eval", script="document.querySelector('[data-version-trigger]').click();")
+    f["wait"]("loaded", lambda event: "account/index.html?view=updates" in event["url"])
+    f["ready"]("return Boolean(window.__TAURI_INTERNALS__);")
 
-def native_dialog(f, expected=3):
-    deadline = time.monotonic() + 15
-    while True:
-        f["send"](action="dialog")
-        value = f["wait"]("dialog")
-        if len(value["buttons"]) == expected:
-            assert set(value["buttons"]) == ({"Download and Install", "Skip This Version", "Later"} if expected == 3 else {"Download and Install", "Later"})
-            return value["buttons"]
-        assert time.monotonic() < deadline, {"dialog": value, "updates": f["updates"]}
-        time.sleep(0.1)
+
+def trusted_action(f, action, generation=None):
+    if generation is None:
+        generation = f["state"](lambda _: True)["state"]["generation"]
+    request = {"version": 1, "request_id": str(uuid.uuid4()), "expected_generation": generation, "action": action}
+    return f["js"]("return await window.__TAURI_INTERNALS__.invoke('desktop_client_request', {request:"
+                   + json.dumps(request) + "});")
 
 
 @pytest.mark.skipif(os.environ.get("DESKTOP_FIXTURE_UPDATER") != "1", reason="requires signed updater transport fixture build")
-def test_actual_remote_footer_opens_native_confirmation_and_fences_download_completion(native_chain):
+def test_actual_remote_footer_opens_trusted_panel_and_fences_download_completion(native_chain):
+    # AUTH-SETUP-177/178: the old dialog fixture did not exercise panel actions.
     f = native_chain
     login(f)
     f["state"](lambda state: state["account"]["status"] == "signed_in")
     select_studio(f)
-
-    # The real U1 CTA is a presentation request. It must reach the actual native
-    # three-choice dialog, and Later must cause no artifact download.
+    denied = f["js"]("try { await window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                     "{version:1,request_id:'remote-update-denied',expected_generation:0,action:{type:'update_check'}}});"
+                     " return false; } catch { return true; }")
+    assert denied is True
     open_footer(f)
-    buttons = native_dialog(f)
-    f["send"](action="dialog", choice=buttons.index("Later"))
-    f["wait"]("dialog")
-    f["wait"]("update", lambda event: event["state"]["phase"] == "available")
+    assert not f["updater"]["requested"].is_set()
+    assert trusted_action(f, {"type": "update_check"})["ok"]
+    available = f["state"](lambda state: state["desktop"]["update"]["phase"] == "available")["state"]
+    before = available["desktop"]["update"]
+    for enabled in (True, False):
+        reply = trusted_action(f, {"type": "update_set_auto_update", "enabled": enabled})
+        assert reply["ok"]
+        update = reply["state"]["desktop"]["update"]
+        assert update["autoUpdate"] is enabled
+        assert (update["phase"], update["latest"], update["checkedAt"]) == (
+            before["phase"], before["latest"], before["checkedAt"],
+        )
+    assert trusted_action(f, {"type": "update_set_prereleases", "enabled": True})["ok"]
+    available = f["state"](lambda state: state["desktop"]["update"]["phase"] == "available")["state"]
+    assert available["desktop"]["update"]["prereleases"] is True
+    assert not trusted_action(f, {"type": "update_install", "target_version": "0.0.0"})["ok"]
     assert not f["updater"]["requested"].is_set()
 
-    # A confirmation that survives a generation change cannot start download.
-    open_footer(f)
-    buttons = native_dialog(f)
+    # Stale actions cannot download. Escape also fences an accepted download.
+    old_generation = available["generation"]
     f["send"](action="local_unavailable")
     f["wait"]("local_unavailable")
-    f["send"](action="dialog", choice=buttons.index("Download and Install"))
-    f["wait"]("dialog")
-    f["wait"]("update", lambda event: event["state"]["phase"] == "available")
+    install = {"type": "update_install", "target_version": f["updater"]["version"]}
+    stale = trusted_action(f, install, old_generation)
+    assert stale["error"]["code"] == "stale_generation"
     assert not f["updater"]["requested"].is_set()
-
-    # The same real owner must fence an already accepted download whose bytes
-    # arrive after local escape. The inert signed fixture is never installed.
-    open_footer(f)
-    buttons = native_dialog(f)
-    f["send"](action="dialog", choice=buttons.index("Download and Install"))
-    f["wait"]("dialog")
+    assert trusted_action(f, install)["ok"]
     assert f["updater"]["requested"].wait(timeout=10)
     f["send"](action="escape")
     assert f["wait"]("escaped")["ok"] is True
     f["updater"]["release"].set()
-    f["wait"]("update", lambda event: event["state"]["phase"] == "available")
+    f["state"](lambda state: state["desktop"]["update"]["phase"] == "available")
     assert not any(update["phase"] in ("installing", "installed") for update in f["updates"])
     assert f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")["credential_count"] == 1
 
@@ -961,8 +962,8 @@ def test_pending_remote_document_cannot_present_until_public_commit(native_chain
 
 
 @pytest.mark.skipif(os.environ.get("DESKTOP_FIXTURE_UPDATER") != "1", reason="requires signed updater transport fixture build")
-@pytest.mark.parametrize("boundary", ["accept", "stale", "expired"])
-def test_awaiting_remote_update_keeps_exact_ticket_through_native_host_approval(native_chain, boundary):
+@pytest.mark.parametrize("boundary", ["replaced", "expired"])
+def test_explicit_remote_update_needs_no_host_prompt_and_rechecks_its_ticket(native_chain, boundary):
     f = native_chain
     login(f)
     select_studio(f)
@@ -971,37 +972,26 @@ def test_awaiting_remote_update_keeps_exact_ticket_through_native_host_approval(
                "created_at": (now-timedelta(seconds=1)).isoformat(), "expires_at": (now+timedelta(minutes=5)).isoformat()}
     f["send"](action="remote_update", request=request)
     f["wait"]("remote_dispatched")
-    awaiting = f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "awaiting_host")
-    assert awaiting["state"]["remoteInstallAllowed"] is False
-    assert awaiting["state"]["remoteRequest"]["requestId"] == request["request_id"]
-    open_footer(f)
-    buttons = native_dialog(f, 2)
-    f["send"](action="dialog", choice=buttons.index("Later"))
-    f["wait"]("dialog")
-    assert not f["updater"]["requested"].is_set()
-    open_footer(f)
-    buttons = native_dialog(f, 2)
-    if boundary == "stale":
-        f["send"](action="local_unavailable")
-        f["wait"]("local_unavailable")
-    elif boundary == "expired":
-        request["state"] = "expired"
-        f["send"](action="remote_update", request=request)
-        f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "expired")
+    assert f["updater"]["requested"].wait(timeout=10)
+    download = f["state"](lambda state: (state["desktop"]["update"].get("remoteRequest") or {}).get("phase") == "downloading")
+    receipt = download["state"]["desktop"]["update"]["remoteRequest"]
+    assert receipt["requestId"] == request["request_id"]
+    assert receipt["target"] == request["target"]
+    assert not any((update.get("remoteRequest") or {}).get("phase") == "awaiting_host" for update in f["updates"])
+    if boundary == "replaced":
+        # An unrelated mailbox writer cannot revoke or settle the accepted
+        # download. Prove the original receipt survives before expiring it.
+        f["send"](action="remote_update", request={**request, "request_id": str(uuid.uuid4())})
         f["wait"]("remote_dispatched")
-    f["send"](action="dialog", choice=buttons.index("Download and Install"))
-    f["wait"]("dialog")
-    if boundary == "accept":
-        assert f["updater"]["requested"].wait(timeout=10)
-        download = f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "downloading")
-        assert download["state"]["remoteRequest"]["requestId"] == request["request_id"]
-        assert download["state"]["remoteRequest"]["target"] == request["target"]
-        f["send"](action="escape")
-        assert f["wait"]("escaped")["ok"] is True
-        f["updater"]["release"].set()
-        f["wait"]("update", lambda e: (e["state"].get("remoteRequest") or {}).get("phase") == "failed")
-    else:
-        # A later state command orders observation after the dialog callback.
-        f["state"](lambda _: True)
-        assert not f["updater"]["requested"].is_set()
+        retained = f["state"](lambda _: True)["state"]["desktop"]["update"]["remoteRequest"]
+        assert retained["requestId"] == request["request_id"]
+        assert retained["target"] == request["target"]
+        assert retained["phase"] == "downloading"
+    # This probe is deliberately not installable. Revoke the accepted ticket,
+    # not an unrelated one, before allowing verified bytes to reach the handoff.
+    f["send"](action="remote_update", request={**request, "state": "expired"})
+    f["wait"]("remote_dispatched")
+    f["updater"]["release"].set()
+    ended = f["state"](lambda state: (state["desktop"]["update"].get("remoteRequest") or {}).get("phase") in {"expired", "failed"})
+    assert ended["state"]["desktop"]["update"]["remoteRequest"]["requestId"] == request["request_id"]
     assert not any(update["phase"] in ("installing", "installed") for update in f["updates"])

@@ -511,11 +511,42 @@ def test_list_and_find_print_the_same_value_free_row(capfd, command):
         "description": "GitHub login",
         "policy": {"allowed_hosts": ["github.com"], "auth": {"type": "bearer"}},
     }
-    # A keypair takes no field refs; it says whether ``vibe vault sign`` can use it.
-    assert secrets["ETH_KEY"] == {"name": "ETH_KEY", "kind": "keypair", "protection": "standard", "per_use_sign": True}
+    # A keypair exposes whether the Agent can sign separately from ask-before-signing.
+    assert secrets["ETH_KEY"] == {
+        "name": "ETH_KEY", "kind": "keypair", "protection": "standard",
+        "agent_signable": True,
+    }
     assert secrets["REMOTE_ETH_KEY"] == {"name": "REMOTE_ETH_KEY", "kind": "keypair", "protection": "standard"}
-    assert secrets["PROTECTED_ETH_KEY"]["per_use_sign"] is True
+    assert secrets["PROTECTED_ETH_KEY"]["agent_signable"] is True
     assert "ct-" not in json.dumps(payload)
+
+
+def test_vault_rows_refresh_ask_before_signing_after_policy_toggle(capfd):
+    _create_standard_secret("TOGGLE_KEY", kind="keypair", signer_kind="local", sealed=_sealed("toggle"))
+
+    with cli._open_vault_engine().begin() as conn:
+        conn.execute(
+            vault_service.vault_secrets.update()
+            .where(vault_service.vault_secrets.c.name == "TOGGLE_KEY")
+            .values(policy=json.dumps({"always_ask": True}))
+        )
+    assert cli.cmd_vault_find(_ns(query="TOGGLE_KEY")) == 0
+    enabled = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert enabled["agent_signable"] is True
+    assert enabled["always_ask"] is True
+
+    # This test owns projection, so model the already-authorized policy downgrade
+    # directly; enforcement remains covered by the policy authorization tests.
+    with cli._open_vault_engine().begin() as conn:
+        conn.execute(
+            vault_service.vault_secrets.update()
+            .where(vault_service.vault_secrets.c.name == "TOGGLE_KEY")
+            .values(policy=json.dumps({"always_ask": False}))
+        )
+    assert cli.cmd_vault_find(_ns(query="TOGGLE_KEY")) == 0
+    disabled = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert disabled["agent_signable"] is True
+    assert disabled["always_ask"] is False
 
 
 def test_list_paginates_through_next_command_alone(capfd):

@@ -1210,6 +1210,34 @@ async def request_preview(
     return {"status_code": response.status_code, "body": response.json() if response.content else {}}
 
 
+async def desktop_update_idle(socket_path: Optional[Path] = None) -> dict[str, int]:
+    """Read fresh controller inactivity; no fallback may assert idleness."""
+    endpoint = await _resolve_endpoint_async(socket_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=_async_transport(endpoint),
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(3.0, connect=0.5),
+        ) as client:
+            response = await client.get("/internal/desktop/update/idle")
+            _validate_response(response, endpoint)
+    except httpx.ReadTimeout as exc:
+        raise InternalServerTimeout("Desktop update idle probe timed out") from exc
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable("Desktop update idle probe unavailable") from exc
+    if response.status_code != 200:
+        raise InternalServerUnavailable("Desktop update idle probe failed")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise InternalServerUnavailable("Invalid desktop update idle response") from exc
+    seconds = payload.get("idle_seconds") if isinstance(payload, dict) else None
+    if type(seconds) is not int or seconds < 0:
+        raise InternalServerUnavailable("Invalid desktop update idle duration")
+    return {"idle_seconds": seconds}
+
+
 async def list_running_agents(
     *,
     run_ids: Optional[list[str]] = None,

@@ -86,9 +86,10 @@ workspace to edit), and `updated_at`. An Agent row is its `name`, `backend`,
 `vibe vault find`, is the secret's `name`, `kind`, `protection`, `fields` (a
 multi-field secret adds `default_field`, the field `NAME` alone selects),
 `tags`, `description`, `policy`, a keypair's `signing_curve` and
-`signing_addresses`, and
-`per_use_sign: true` when `vibe vault sign` can use the key; it never holds a
-value. `vibe task show`, `vibe watch show`, `vibe runs show`,
+`signing_addresses`, and the current signing state: `always_ask: true` means each
+signature needs user approval, while a keypair's `agent_signable: true` only
+means an Agent can call `vibe vault sign`. They are independent states; the row
+never holds a value. `vibe task show`, `vibe watch show`, `vibe runs show`,
 `vibe session get`, `vibe agent show`, and `vibe show status` print the full
 record; add `--brief` to print exactly the row the matching list command
 prints. A removed Task or Watch shows `lifecycle_state: "removed"` and

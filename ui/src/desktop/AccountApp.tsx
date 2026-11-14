@@ -11,6 +11,9 @@ import { cn } from '../lib/utils';
 import { AccountLoginView } from './AccountLoginView';
 import { isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type Instance } from './bridge';
 import { useAccountClient } from './useAccountClient';
+import { UpdatePanel } from '../components/update/UpdatePanel';
+import { modelFromDesktopState } from '../components/update/updatePanelModel';
+import { useAcceptedInstall } from '../components/update/useAcceptedInstall';
 
 function Heading({ title, children }: { title: string; children?: ReactNode }) {
   const ref = useRef<HTMLHeadingElement>(null);
@@ -24,6 +27,7 @@ function Notice({ children, warning = false }: { children: ReactNode; warning?: 
 export function AccountApp() {
   const { t } = useTranslation();
   const { state, error, send } = useAccountClient();
+  const install = useAcceptedInstall(state?.desktop.update.phase);
   const [view, setView] = useState(() => {
     const initial = new URLSearchParams(window.location.search).get('view');
     return isDesktopClientView(initial) ? initial : 'account';
@@ -45,15 +49,14 @@ export function AccountApp() {
     if (material && material.generation !== state?.generation) setMaterial(null);
   }
   useEffect(() => () => { epoch.current += 1; }, []);
-
-  const act = useCallback(async (action: DesktopClientAction) => {
-    if (requestBusy.current) return;
+  const act = useCallback(async (action: DesktopClientAction): Promise<boolean> => {
+    if (requestBusy.current) return false;
     requestBusy.current = true;
     setBusy(true);
     const ticket = epoch.current;
     try {
       const reply = await send(action);
-      if (ticket !== epoch.current || !reply?.ok) return;
+      if (ticket !== epoch.current || !reply?.ok) return false;
       setCode('');
       if (action.type === 'request_otp') setEditEmail(false);
       if (action.type === 'begin_totp_enrollment' && reply.result?.type === 'totp_enrollment') {
@@ -61,6 +64,7 @@ export function AccountApp() {
       } else if (action.type === 'finish_totp_enrollment' && reply.result?.type === 'totp_enrolled') {
         setMaterial({ generation: reply.state.generation, result: reply.result });
       }
+      return true;
     } finally {
       requestBusy.current = false;
       setBusy(false);
@@ -93,6 +97,26 @@ export function AccountApp() {
   let centerLogin = false;
   if (!state) {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
+  } else if (view === 'updates') {
+    // The same panel as everywhere else, acting on this computer's desktop app (ui/design: update/panel/trusted-view).
+    const update = state.desktop.update;
+    const model = modelFromDesktopState(update, { current: state.desktop.version, installFailed: install.failed });
+    const target = update.latest;
+    const accepts = (action: string) => update.hostActions?.includes(action) ?? false;
+    content = <div className="mx-auto w-full max-w-md pt-12"><Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading><div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><UpdatePanel
+      model={model}
+      actions={{
+        check: { run: () => void act({ type: 'update_check' }), disabled: busy || ['checking', 'downloading', 'installing'].includes(update.phase) },
+        ...(update.phase === 'available' && target ? {
+          // Only an accepted request can fail as an install; a rejected one installed nothing.
+          update: { run: () => void act({ type: 'update_install', target_version: target }).then((ok) => { if (ok) install.accept(); }), disabled: busy },
+        } : {}),
+        ...(accepts('prereleases') ? { setPrereleases: (enabled: boolean) => void act({ type: 'update_set_prereleases', enabled }) } : {}),
+        ...(accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void act({ type: 'update_set_auto_update', enabled }) } : {}),
+        settingsBusy: busy,
+        close: () => leave('cancel'),
+      }}
+    /></div>{failure}</div>;
   } else if (view === 'sign-out') {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.signOut')}>{t('desktopClient.signOutBody')}</Heading>{failure}<div className="mt-7 flex gap-3"><Button variant="brand" onClick={() => leave('sign_out')}>{t('desktopClient.signOut')}</Button><Button variant="outline" onClick={() => leave('cancel')}>{t('common.cancel')}</Button></div></div>;
   } else if (view === 'setup-complete') {

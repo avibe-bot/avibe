@@ -843,6 +843,20 @@ def test_existing_instance_is_not_reinitialised() -> None:
     assert not any(" init " in f" {command} " for command in rendered)
     assert not any("soffice" in command or "libreoffice" in command for command in rendered)
     assert not any("chown -hR" in command or "chown -R" in command for command in rendered)
+    assert not any("bootcmd:" in command or "unattended-upgrades" in command for command in rendered)
+
+
+def test_first_boot_masks_automatic_apt_before_package_provisioning() -> None:
+    data = incus_regression.cloud_init_user_data()
+    assert data.index("bootcmd:") < data.index("packages:")
+    command = json.loads(data.split("bootcmd:\n  - ", 1)[1].splitlines()[0])
+    assert command == [
+        "systemctl", "mask", "--now",
+        "unattended-upgrades.service", "apt-daily.service", "apt-daily-upgrade.service",
+        "apt-daily.timer", "apt-daily-upgrade.timer",
+    ]
+    # Explicit provisioning still installs dependencies; only background jobs stop.
+    assert "package_update: true" in data
 
 
 def test_build_base_uses_publishable_temp_instance() -> None:
@@ -875,6 +889,11 @@ def test_build_base_uses_publishable_temp_instance() -> None:
 
     joined = "\n".join(" ".join(command) for command in commands)
     assert "--ephemeral" not in joined
+    launch = next(command for command in commands if "launch" in command)
+    user_data = launch[launch.index("--config") + 1]
+    assert user_data == "cloud-init.user-data=#cloud-config\n" + "\n".join(
+        incus_regression.unattended_apt_boot_config()
+    )
     assert "incus --project default launch images:ubuntu/24.04/cloud avibe-regression-base-build --storage default --network incusbr0" in joined
     assert "https://deb.nodesource.com/setup_22.x" in joined
     node_install = joined.split("apt-get install -y nodejs\n", 1)[1]
