@@ -99,6 +99,15 @@ def test_windows_documentation_is_utf8_even_under_a_legacy_locale(
     # Exercise the legacy Windows default independent of this test host's locale.
     monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
     monkeypatch.setattr(subprocess, "check_output", invoke)
+    monkeypatch.setitem(
+        _SCRIPT["verify_windows_built_contract"].__globals__,
+        "run_path",
+        lambda _path: {"run_tools_list": lambda *_args, **_kwargs: (
+            {"result": {"tools": tools}},
+            b"",
+            b"",
+        )},
+    )
     _SCRIPT["verify_windows_built_contract"](tmp_path / "cua-driver.exe")
 
 
@@ -132,6 +141,16 @@ def test_windows_built_contract_checks_all_allowed_tool_schemas(
         return json.dumps(docs)
 
     monkeypatch.setattr(subprocess, "check_output", output)
+    actual_tools = tools[:-1] if mutation == "missing-tool" else tools
+    monkeypatch.setitem(
+        _SCRIPT["verify_windows_built_contract"].__globals__,
+        "run_path",
+        lambda _path: {"run_tools_list": lambda *_args, **_kwargs: (
+            {"result": {"tools": actual_tools}},
+            b"",
+            b"",
+        )},
+    )
     if mutation:
         with pytest.raises(ValueError, match="Windows Cua Driver"):
             _SCRIPT["verify_windows_built_contract"](tmp_path / "cua-driver.exe")
@@ -174,7 +193,7 @@ def test_windows_preparation_uses_full_patch_without_macos_signing(
     """A Windows prepare/reuse must keep the source-build provenance and skip codesign."""
     target = "x86_64-pc-windows-msvc"
     manifest = _SCRIPT["load_manifest"]()
-    patch = Path("desktop/cua-driver") / manifest["driver"]["patch"]["file"]
+    patch = Path("desktop/cua-driver") / manifest["driver"]["windows"]["patch"]["file"]
     built = tmp_path / "cua-driver.exe"
     built.write_bytes(windows_pe_bytes())
     script = _SCRIPT["prepare"].__globals__
@@ -198,16 +217,29 @@ def test_windows_preparation_uses_full_patch_without_macos_signing(
     monkeypatch.setitem(script, "verify_built_contract", lambda _: pytest.fail("Windows must not use macOS schemas"))
     output = _SCRIPT["prepare"](target, source_archive=tmp_path / "source.tar.gz", output_dir=tmp_path / "binaries")
     assert output.name == "cua-driver-x86_64-pc-windows-msvc.exe"
-    assert events == ["full-patch", "build", "windows-contract"]
+    assert events == ["full-patch", "full-patch", "build", "windows-contract"]
     provenance_path = output.with_name(output.name + ".provenance.json")
     provenance = desktop_release.driver_provenance(target, output, provenance_path, packaged_driver=output)
     assert provenance["schema_version"] == 2
     assert provenance["build_origin"] == "repository_patch_built"
     assert provenance["tool_snapshot_sha256"] == manifest["driver"]["windows"]["tool_snapshot_sha256"]
-    assert provenance["patch_sha256"] == manifest["driver"]["patch"]["sha256"]
+    assert provenance["patch_sha256"] == manifest["driver"]["windows"]["patch"]["sha256"]
+    assert provenance["patch_order"] == manifest["driver"]["windows"]["patch_order"]
+    assert provenance["patch_chain"] == manifest["driver"]["windows"]["patches"]
     assert "packaged_cdhash" not in provenance
+    deferred = _SCRIPT["prepare"](
+        target,
+        source_archive=tmp_path / "source.tar.gz",
+        output_dir=tmp_path / "deferred",
+        verify_windows_contract=False,
+    )
+    assert deferred.name == "cua-driver-x86_64-pc-windows-msvc.exe"
+    assert events[-3:] == ["full-patch", "full-patch", "build"]
     assert _SCRIPT["prepare"](target, output_dir=output.parent, reuse=True) == output
-    assert events == ["full-patch", "build", "windows-contract", "windows-contract"]
+    assert events == [
+        "full-patch", "full-patch", "build", "windows-contract",
+        "full-patch", "full-patch", "build", "windows-contract",
+    ]
     output.write_bytes(b"wrong executable")
     _SCRIPT["prepare"](target, source_archive=tmp_path / "source.tar.gz", output_dir=output.parent, reuse=True)
     assert events[-3:] == ["full-patch", "build", "windows-contract"]

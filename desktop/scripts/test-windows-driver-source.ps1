@@ -1,3 +1,9 @@
+param(
+    [switch] $CaptureProductionDriver,
+    [string] $ProductionBinaryPath,
+    [string] $ProductionEvidencePath
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -21,6 +27,7 @@ $temp = Join-Path $fixtureRoot 'tmp'
 $testLogs = Join-Path $logs 'tests'
 $provenancePath = Join-Path $artifactRoot 'provenance.json'
 $helperPath = Join-Path $artifactRoot 'prepare-windows-source.py'
+$captureScript = Join-Path $PSScriptRoot 'capture-windows-cua-driver.py'
 New-Item -ItemType Directory -Force -Path $artifactRoot, $logs, $sourceWork, $fixtureRoot, $bin, $temp, $testLogs | Out-Null
 
 $tests = @(
@@ -55,6 +62,17 @@ $provenance = [ordered]@{
     patch_0002 = [ordered]@{ path = 'desktop/cua-driver/patches/0002-windows-security-boundary.patch'; sha256 = $null }
     test_binaries = @()
     expected_test_count = $tests.Count
+    ordinary_profile = [ordered]@{
+        account_scope = 'Users-only disposable account'
+        load_user_profile = $true
+        acl = [ordered]@{
+            fixture_root = 'Users:ReadAndExecute'
+            test_bin = 'Users:ReadAndExecute'
+            temp = 'Users:Modify'
+        }
+        environment = 'explicit allowlist with CI markers and UTF-8 settings'
+        cleanup = 'profile unload, account removal, owned-process cleanup, and fixture removal'
+    }
 }
 
 function Sha256([string] $Path) {
@@ -301,6 +319,9 @@ try {
     $provenance | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
 
     $environment = @{
+        GITHUB_ACTIONS = $env:GITHUB_ACTIONS
+        RUNNER_ENVIRONMENT = $env:RUNNER_ENVIRONMENT
+        RUNNER_OS = $env:RUNNER_OS
         AVIBE_TEST_EXPECTED_SID = $user.SID.Value
         AVIBE_LITERAL_TEST_DIR = $temp
         AVIBE_LITERAL_SENTINEL = 'synthetic-not-a-credential'
@@ -312,6 +333,96 @@ try {
         SystemRoot = $env:SystemRoot
         SystemDrive = $env:SystemDrive
         PATH = $env:PATH
+    }
+
+    if ($CaptureProductionDriver) {
+        if (-not (Test-Path -LiteralPath $captureScript -PathType Leaf)) {
+            throw "Production metadata capture script is missing: $captureScript"
+        }
+        if ($ProductionBinaryPath) {
+            $productionBinary = (Resolve-Path -LiteralPath $ProductionBinaryPath).Path
+            if (-not (Test-Path -LiteralPath $productionBinary -PathType Leaf)) {
+                throw "Provided production Cua Driver binary is missing: $ProductionBinaryPath"
+            }
+        } else {
+            $productionRows = Invoke-CargoJson $workspace @(
+                'build', '--locked', '--release', '-p', 'cua-driver', '--bin', 'cua-driver',
+                '--target', 'x86_64-pc-windows-msvc', '--message-format=json'
+            ) 'build-production'
+            $productionBinary = Join-Path $targetDir 'x86_64-pc-windows-msvc\release\cua-driver.exe'
+            if (-not (Test-Path -LiteralPath $productionBinary -PathType Leaf)) {
+                throw "Production Cua Driver build did not produce $productionBinary"
+            }
+        }
+        $captureBinary = Join-Path $bin 'production-cua-driver.exe'
+        Copy-Item -LiteralPath $productionBinary -Destination $captureBinary -Force
+        $productionWork = Join-Path $temp 'production-capture'
+        New-Item -ItemType Directory -Force -Path $productionWork | Out-Null
+        $capturePsi = [Diagnostics.ProcessStartInfo]::new()
+        $capturePsi.FileName = 'python'
+        $capturePsi.WorkingDirectory = $bin
+        $capturePsi.UseShellExecute = $false
+        $capturePsi.CreateNoWindow = $true
+        $capturePsi.LoadUserProfile = $true
+        $capturePsi.UserName = $name
+        $capturePsi.Domain = $env:COMPUTERNAME
+        $capturePsi.Password = $password
+        $capturePsi.RedirectStandardOutput = $true
+        $capturePsi.RedirectStandardError = $true
+        $capturePsi.Environment.Clear()
+        foreach ($entry in $environment.GetEnumerator()) { $capturePsi.Environment[$entry.Key] = [string]$entry.Value }
+        $capturePsi.Environment['PYTHONIOENCODING'] = 'utf-8'
+        $capturePsi.Environment['PYTHONUTF8'] = '1'
+        foreach ($argument in @(
+            $captureScript,
+            '--binary', $captureBinary,
+            '--output-dir', $productionWork,
+            '--source-commit', $provenance.source_commit,
+            '--patch-0001-sha256', $provenance.patch_0001.sha256,
+            '--patch-0002-sha256', $provenance.patch_0002.sha256
+        )) { $capturePsi.ArgumentList.Add([string]$argument) }
+        $captureProcess = [Diagnostics.Process]::new()
+        $captureProcess.StartInfo = $capturePsi
+        if (-not $captureProcess.Start()) { throw 'Could not start ordinary-user production metadata capture.' }
+        $captureStdoutTask = $captureProcess.StandardOutput.ReadToEndAsync()
+        $captureStderrTask = $captureProcess.StandardError.ReadToEndAsync()
+        if (-not $captureProcess.WaitForExit(180000)) {
+            try { $captureProcess.Kill() } catch { }
+            try { $captureProcess.WaitForExit(10000) } catch { }
+            throw 'Ordinary-user production metadata capture exceeded 180 seconds.'
+        }
+        $captureStdout = $captureStdoutTask.GetAwaiter().GetResult()
+        $captureStderr = $captureStderrTask.GetAwaiter().GetResult()
+        Set-Content -LiteralPath (Join-Path $logs 'production-capture.stdout') -Value $captureStdout -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $logs 'production-capture.stderr') -Value $captureStderr -Encoding UTF8
+        if ($captureProcess.ExitCode -ne 0) {
+            throw "Ordinary-user production metadata capture failed with exit $($captureProcess.ExitCode)."
+        }
+        try { $captureProcess.Dispose() } catch { }
+
+        $productionEvidence = Join-Path $artifactRoot 'production'
+        New-Item -ItemType Directory -Force -Path $productionEvidence | Out-Null
+        foreach ($file in @(
+            'capture.json', 'version.txt', 'version.stderr', 'dump-docs.raw.json',
+            'dump-docs.json', 'dump-docs.stderr', 'tools-list.raw.jsonl',
+            'tools-list.json', 'tools-list.stderr'
+        )) {
+            $path = Join-Path $productionWork $file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "Production capture output is missing $file"
+            }
+            Copy-Item -LiteralPath $path -Destination (Join-Path $productionEvidence $file)
+        }
+        Copy-Item -LiteralPath $captureBinary -Destination (Join-Path $productionEvidence 'cua-driver.exe')
+        Set-Content -LiteralPath (Join-Path $productionEvidence 'cua-driver.exe.sha256') -Value (Sha256 $captureBinary) -Encoding ASCII
+        $provenance.production_binary_sha256 = Sha256 $captureBinary
+        $provenance.production_capture = [ordered]@{
+            binary_name = 'cua-driver.exe'
+            tools_list = 'ordinary-user direct MCP tools/list'
+            dump_docs = 'ordinary-user dump-docs --type mcp'
+            desktop_actions = $false
+            snapshot_edited_by_capture = $false
+        }
     }
 
     foreach ($test in $tests) {
@@ -421,6 +532,14 @@ foreach ($test in $tests) {
     }
 }
 Write-GuardJunit
+if ($ProductionEvidencePath) {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $ProductionEvidencePath
+    New-Item -ItemType Directory -Force -Path $ProductionEvidencePath | Out-Null
+    Copy-Item -Recurse -Force -LiteralPath (Join-Path $artifactRoot 'production') -Destination $ProductionEvidencePath
+    Copy-Item -Force -LiteralPath $provenancePath -Destination (Join-Path $ProductionEvidencePath 'provenance.json')
+    Copy-Item -Recurse -Force -LiteralPath $logs -Destination (Join-Path $ProductionEvidencePath 'logs')
+    Get-ChildItem -LiteralPath $artifactRoot -Filter 'junit-*.xml' -File | Copy-Item -Destination $ProductionEvidencePath -Force
+}
 Verify-JunitEvidence
 if ($cleanupFailures.Count) { throw ($cleanupFailures -join '; ') }
 if ($fatal) { throw $fatal }

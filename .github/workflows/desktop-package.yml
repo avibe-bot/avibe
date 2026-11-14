@@ -316,17 +316,35 @@ jobs:
         shell: bash
         run: rm -rf desktop/target/release/bundle
 
-      - name: Prepare pinned Windows Cua Driver
+      - name: Prepare and verify pinned Windows Cua Driver as ordinary user
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: "PyYAML==6.0.3"
-          python desktop/scripts/prepare-cua-driver.py --target "${{ matrix.target }}"
+          $driver = "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.exe"
+          python desktop/scripts/prepare-cua-driver.py --target "${{ matrix.target }}" --defer-windows-contract
           if ($LASTEXITCODE -ne 0) { throw "Windows Cua Driver preparation failed" }
+          $evidence = Join-Path $env:RUNNER_TEMP 'avibe-windows-driver-package-evidence'
+          pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File desktop/scripts/test-windows-driver-source.ps1 `
+            -CaptureProductionDriver `
+            -ProductionBinaryPath (Resolve-Path -LiteralPath $driver).Path `
+            -ProductionEvidencePath $evidence
+          if ($LASTEXITCODE -ne 0) { throw "Ordinary-user Windows Cua Driver verification failed" }
+          Copy-Item -Force -LiteralPath "${driver}.provenance.json" -Destination (Join-Path $evidence 'driver-provenance.json')
+          $snapshot = Join-Path $env:RUNNER_TEMP 'tools-windows-v0.31.0.captured.json'
+          python desktop/scripts/generate-windows-cua-snapshot.py `
+            --tools-list (Join-Path $evidence 'production/tools-list.json') `
+            --dump-docs (Join-Path $evidence 'production/dump-docs.json') `
+            --output $snapshot
+          if ($LASTEXITCODE -ne 0) { throw "Windows Cua Driver snapshot generation failed" }
+          $expected = (Get-FileHash -LiteralPath 'desktop/cua-driver/tools-windows-v0.31.0.json' -Algorithm SHA256).Hash
+          $actual = (Get-FileHash -LiteralPath $snapshot -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "Ordinary-user production metadata does not match the pinned Windows tool snapshot" }
           python scripts/desktop_release.py verify-driver-prepared `
             --target "${{ matrix.target }}" `
-            --driver "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.exe" `
-            --provenance-path "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.exe.provenance.json"
+            --driver $driver `
+            --provenance-path "${driver}.provenance.json"
           if ($LASTEXITCODE -ne 0) { throw "Windows Cua Driver provenance verification failed" }
 
       - name: Verify prepared Cua Driver provenance
@@ -346,6 +364,14 @@ jobs:
           --features bundled-runtime
           --config tauri.release.conf.json
           -- --locked
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: runner.os == 'Windows' && env.DESKTOP_CACHE_WARMUP != 'true'
+        with:
+          name: avibe-windows-driver-packaging-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/avibe-windows-driver-package-evidence/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify macOS SDK and deployment target ceiling
         if: runner.os == 'macOS'

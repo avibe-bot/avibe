@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import runpy
 import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -71,6 +73,52 @@ def test_native_runner_applies_full_patch_before_supplement(monkeypatch, tmp_pat
     with pytest.raises(ValueError, match="0001 patch hash"):
         exec(helper, {})
     assert events == []
+
+
+def test_production_capture_uses_isolated_direct_mcp(monkeypatch, tmp_path):
+    capture = runpy.run_path(str(ROOT / "desktop/scripts/capture-windows-cua-driver.py"))
+    calls = []
+    response = {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "click"}]}}
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        assert kwargs["env"]["CUA_DRIVER_MCP_ENVELOPES"] == "0"
+        assert kwargs["env"]["CUA_DRIVER_PERMISSION_MODE"] == "standard"
+        assert kwargs["env"]["CUA_DRIVER_RS_TELEMETRY_ENABLED"] == "false"
+        assert kwargs["env"]["HOME"] != os.environ.get("HOME")
+        assert b'"method":"tools/list"' in kwargs["input"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(json.dumps({"id": 1, "result": {}}) + "\n" + json.dumps(response) + "\n").encode(),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(capture["subprocess"], "run", fake_run)
+    result, raw, stderr = capture["run_tools_list"](tmp_path / "cua-driver.exe", timeout=5)
+    assert result == response
+    assert raw.endswith(b"\n")
+    assert stderr == b""
+    assert calls[0][0] == [str(tmp_path / "cua-driver.exe"), "mcp", "--direct"]
+
+
+def test_production_capture_is_wired_into_the_existing_windows_job():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/desktop-shell.yml").read_text())
+    steps = workflow["jobs"]["shell"]["steps"]
+    source = next(step for step in steps if step.get("name") == "Verify Windows Cua Driver security boundary as ordinary user")
+    assert "-CaptureProductionDriver" in source["run"]
+    upload = next(step for step in steps if step.get("with", {}).get("name", "").startswith("windows-cua-driver-production-"))
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert upload["with"]["path"].strip().endswith("production/**")
+
+
+def test_windows_manifest_records_ordered_final_patch():
+    manifest = json.loads((ROOT / "desktop/cua-driver/sources.json").read_text())
+    windows = manifest["driver"]["windows"]
+    assert windows["patches"] == [
+        {"file": windows["patch_order"][0], "sha256": "c464b2cbd3416aeb15dffee396bc0dcf5aa0b01748af8dd79bd84c9a2f58125e"},
+        {"file": windows["patch_order"][1], "sha256": "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f"},
+    ]
+    assert windows["patch"]["sha256"] == "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f"
 
 
 def test_native_evidence_upload_is_bounded():

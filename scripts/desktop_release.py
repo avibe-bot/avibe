@@ -309,7 +309,8 @@ def asset_names(version: str, target: str) -> list[str]:
 
 def pinned_driver_source(target: str | None = None) -> dict:
     source = json.loads(CUA_DRIVER_SOURCES.read_text(encoding="utf-8"))["driver"]
-    return {
+    patch = source["windows"]["patch"] if target == "x86_64-pc-windows-msvc" else source["patch"]
+    pinned = {
         "version": source["version"],
         "tag": source["tag"],
         "source_commit": source["source_commit"],
@@ -318,15 +319,19 @@ def pinned_driver_source(target: str | None = None) -> dict:
         "archive_sha256": source["macos"]["sha256"],
         "source_archive": source["source"]["archive"],
         "source_archive_sha256": source["source"]["sha256"],
-        "patch_variant": source["patch"]["variant"],
-        "patch_file": source["patch"]["file"],
-        "patch_sha256": source["patch"]["sha256"],
-        "patch_contract": source["patch"]["contract"],
+        "patch_variant": patch["variant"],
+        "patch_file": patch["file"],
+        "patch_sha256": patch["sha256"],
+        "patch_contract": patch["contract"],
         "tool_snapshot_sha256": (
             source["windows"]["tool_snapshot_sha256"]
             if target == "x86_64-pc-windows-msvc" else source["tool_snapshot_sha256"]
         ),
     }
+    if target == "x86_64-pc-windows-msvc":
+        pinned["patch_order"] = source["windows"]["patch_order"]
+        pinned["patch_chain"] = source["windows"]["patches"]
+    return pinned
 
 
 def verify_windows_driver_pe(binary: Path) -> None:
@@ -409,6 +414,8 @@ def driver_provenance(
         "patch_contract",
         "tool_snapshot_sha256",
     )
+    if windows:
+        patched_fields += ("patch_order", "patch_chain")
     if (
         provenance.get("schema_version") != 2
         or any(provenance.get(field) != pinned[field] for field in patched_fields)

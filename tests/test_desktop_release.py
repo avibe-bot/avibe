@@ -50,7 +50,7 @@ def secret_references(value):
 def driver_provenance_payload(target, prepared_binary_sha256):
     pinned_driver = release.pinned_driver_source(target)
     arch = release.TARGETS[target][1]
-    return {
+    payload = {
         "schema_version": 2,
         "version": pinned_driver["version"],
         "tag": pinned_driver["tag"],
@@ -67,6 +67,10 @@ def driver_provenance_payload(target, prepared_binary_sha256):
         "prepared_binary_sha256": prepared_binary_sha256,
         "build_origin": "repository_patch_built",
     }
+    if target == "x86_64-pc-windows-msvc":
+        payload["patch_order"] = pinned_driver["patch_order"]
+        payload["patch_chain"] = pinned_driver["patch_chain"]
+    return payload
 
 
 def assemble_assets(root, source=SOURCE, *, tag=TAG):
@@ -426,9 +430,11 @@ def test_windows_handoff_binds_unchanged_helper_bytes(tmp_path, mutation):
 
 def test_windows_workflow_keeps_helper_provenance_through_outer_signing():
     """The staged paths are an inter-job artifact contract not exercised by Python calls."""
-    prepare = step("Prepare pinned Windows Cua Driver")
+    prepare = step("Prepare and verify pinned Windows Cua Driver as ordinary user")
     assert prepare["if"] == "runner.os == 'Windows'"
-    assert 'prepare-cua-driver.py --target "${{ matrix.target }}"' in prepare["run"]
+    assert 'prepare-cua-driver.py --target "${{ matrix.target }}" --defer-windows-contract' in prepare["run"]
+    assert "-ProductionBinaryPath" in prepare["run"]
+    assert "-ProductionEvidencePath" in prepare["run"]
     assert "verify-driver-prepared" in prepare["run"]
     assert "PyYAML==6.0.3" in prepare["run"]
     steps = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
@@ -1010,7 +1016,7 @@ def test_driver_workflows_parse_and_install_yaml_before_driver_validation():
     package = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
     shell = workflow("desktop-shell.yml")["jobs"]["shell"]["steps"]
     for steps, consumer_name in (
-        (package, "Prepare pinned Cua Driver sidecar"),
+        (package, "Prepare and verify pinned Windows Cua Driver as ordinary user"),
         (shell, "Validate private Runtime build inputs"),
     ):
         dependency = next(
@@ -1021,6 +1027,10 @@ def test_driver_workflows_parse_and_install_yaml_before_driver_validation():
         consumer = next(item for item in steps if item.get("name") == consumer_name)
         assert steps.index(dependency) < steps.index(consumer)
         assert "PyYAML==6.0.3" in dependency["run"]
+    windows_step = next(item for item in package if item.get("name") == "Prepare and verify pinned Windows Cua Driver as ordinary user")
+    assert "--defer-windows-contract" in windows_step["run"]
+    assert "-ProductionBinaryPath" in windows_step["run"]
+    assert "-ProductionEvidencePath" in windows_step["run"]
 
 
 @pytest.mark.parametrize(("value", "names"), [
