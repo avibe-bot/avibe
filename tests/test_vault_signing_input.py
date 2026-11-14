@@ -6,6 +6,7 @@ import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -140,6 +141,50 @@ def test_file_strict_utf8_bom_nonempty_shape_duplicates_and_sanitized_errors(tmp
     assert error.value.code == "invalid_signing_context"
     assert str(path) not in str(error.value)
     assert "do-not-echo" not in str(error.value)
+
+
+@pytest.mark.parametrize("source", ["file", "literal"])
+@pytest.mark.parametrize("failure", ["field", "json-path"])
+def test_cmd_sign_file_validator_errors_hide_contents_but_literal_errors_stay(tmp_path, monkeypatch, capsys, source, failure):
+    # The reader tests above cover transport/JSON errors, not messages from the
+    # downstream validator. Its field names and nested JSON paths are file data.
+    field = "REVIEWER_FILE_CONTENT_CANARY_4d61"
+    value = "FILE_VALUE_CANARY_5c72"
+    context = {
+        "kind": "avault-agent-operation", "digestAlgorithm": "avault-operation-hash-v1",
+        "canonicalPreimage": f"avault-agent-operation:v1\n{value}", "digest": "00" * 32,
+    }
+    if failure == "field":
+        context[field] = value
+        literal_error = f"signing_context contains unsupported fields: {field}"
+    else:
+        context = {
+            "kind": "eip-712-typed-data", "digestAlgorithm": "eip712", "digest": "00" * 32,
+            "typedData": {field: [1.5], "description": value},
+        }
+        literal_error = f"signing_context.typedData.{field}[0] does not allow floating-point values"
+    raw = json.dumps(context)
+    path = tmp_path / "FILE_PATH_CANARY_6d83.json"
+    path.write_text(raw, encoding="utf-8")
+    engine = Mock(side_effect=AssertionError("invalid context must not open storage"))
+    monkeypatch.setattr(cli, "_open_vault_engine", engine)
+    args = cli.build_parser().parse_args([
+        "vault", "sign", "PUBLIC_TEST_BTC", "--scheme", "ecdsa-secp256k1-recoverable", "--digest", context["digest"],
+        *(["--signing-context-file", str(path)] if source == "file" else ["--signing-context-json", raw]),
+    ])
+
+    assert cli.cmd_vault_sign(args) == 1
+    engine.assert_not_called()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["code"] == ("invalid_signing_context" if source == "file" else "invalid_request")
+    if source == "file":
+        assert error["error"] == "signing context file failed validation"
+        for private in (field, value, str(path), path.name, raw, literal_error):
+            assert private not in captured.err
+    else:
+        assert error["error"] == literal_error
 
 
 @pytest.mark.parametrize("raw", [

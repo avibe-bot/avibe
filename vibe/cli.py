@@ -9544,7 +9544,9 @@ def _vault_cli_signing_context(args, *, digest: str | None, message_hex: str | N
         )
     except api.VaultApiError as exc:
         code = "invalid_signing_context" if path is not None or vault_bitcoin.needs_ecdsa_preflight(context) else exc.code
-        raise TaskCliError(str(exc), code=code, help_command=help_command) from exc
+        # Downstream diagnostics may include caller-defined fields/JSON paths.
+        message = "signing context file failed validation" if path is not None else str(exc)
+        raise TaskCliError(message, code=code, help_command=help_command) from exc
 
 
 def _publish_cli_vaults_updated(
