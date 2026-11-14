@@ -25,9 +25,12 @@ private final class SheetFixtureRootViewController: UIViewController {
     private var hasStarted = false
     private var documentReady = false
     private var fetchCount = 0
+    private var runtimeWebView: WKWebView?
+    private var runtimeRouteTask: Task<Void, Never>?
     private var documentReadinessTask: Task<Void, Never>?
     // These controls exist only in the simulator fixture app, never Avibe.
     private let captureState = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_CAPTURE_STATE"]
+    private let captureTheme = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_CAPTURE_THEME"]
     private lazy var coordinator: MobileSessionCoordinator = {
         let defaults = UserDefaults(suiteName: "avibe.ios.sheet-fixture")!
         defaults.removePersistentDomain(forName: "avibe.ios.sheet-fixture")
@@ -99,8 +102,8 @@ private final class SheetFixtureRootViewController: UIViewController {
         guard !hasStarted else { return }
         hasStarted = true
         if let captureState {
-            precondition(["default", "offline-open", "open-failed", "stale", "account", "first-run"].contains(captureState))
-            overrideUserInterfaceStyle = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_CAPTURE_THEME"] == "dark" ? .dark : .light
+            precondition(["default", "offline-open", "open-failed", "stale", "account", "first-run", "instances-named", "account-root"].contains(captureState))
+            overrideUserInterfaceStyle = captureTheme == "dark" ? .dark : .light
             Task { @MainActor in
                 do {
                     coordinator.activateAccountSurface()
@@ -108,7 +111,11 @@ private final class SheetFixtureRootViewController: UIViewController {
                     if captureState != "first-run" {
                         _ = try coordinator.selectInstance(id: "current")
                     }
-                    presentBundledPage(realBundle: true)
+                    if captureState == "instances-named" || captureState == "account-root" {
+                        self.presentRuntimeFixture()
+                    } else {
+                        self.presentBundledPage(realBundle: true)
+                    }
                 } catch {
                     preconditionFailure("Capture fixture bootstrap failed: \(error)")
                 }
@@ -118,7 +125,10 @@ private final class SheetFixtureRootViewController: UIViewController {
         }
     }
 
-    private func presentBundledPage(realBundle: Bool) {
+    private func presentBundledPage(
+        realBundle: Bool,
+        startScreen: MobileOnboardingStartScreen? = nil
+    ) {
         let resourceURL = Bundle.main.url(
             forResource: "mobile",
             withExtension: "html",
@@ -126,7 +136,7 @@ private final class SheetFixtureRootViewController: UIViewController {
         )!
         let controller = MobileOnboardingViewController(
             coordinator: coordinator,
-            startScreen: captureState == "first-run" ? .instances : .sheet,
+            startScreen: startScreen ?? (captureState == "first-run" ? .instances : .sheet),
             resourceURL: resourceURL,
             returnToRuntime: { [weak self] in
                 self?.dismissFixtureSheet() ?? false
@@ -182,6 +192,63 @@ private final class SheetFixtureRootViewController: UIViewController {
         }
     }
 
+    /// The B capture states start from a fixture runtime document with the
+    /// production `avibeNative` configuration. Its native callbacks present
+    /// the same MobileOnboardingViewController sheet owner used by Runtime;
+    /// the bundled page is never asked to open its own route.
+    private func presentRuntimeFixture() {
+        let origin = WebOrigin(scheme: "https", host: "current.example.invalid", port: nil)
+        let runtime = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: origin,
+                metadata: NativeShellMetadata(bundle: .main),
+                setOuterScrollLocked: { _, _ in true },
+                showAccountRoot: { [weak self] in
+                    self?.presentBundledPage(realBundle: true, startScreen: .sheetAccount)
+                },
+                showInstances: { [weak self] in
+                    self?.presentBundledPage(realBundle: true, startScreen: .sheetInstances)
+                },
+                instanceName: { "Studio" }
+            )
+        )
+        runtime.isHidden = true
+        view.addSubview(runtime)
+        runtimeWebView = runtime
+        let html = """
+        <!doctype html><html><head><meta name="viewport" content="width=device-width"></head>
+        <body><main id="runtime-document">Runtime fixture</main></body></html>
+        """
+        runtime.loadHTMLString(html, baseURL: URL(string: "https://current.example.invalid/runtime.html")!)
+        runtimeRouteTask = Task { @MainActor [weak self, weak runtime] in
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(30))
+            while clock.now < deadline {
+                guard let self, let runtime, self.runtimeWebView === runtime,
+                      !Task.isCancelled else { return }
+                let invoked = (try? await runtime.evaluateJavaScript(
+                    """
+                    (() => {
+                      if (document.readyState !== "complete" || typeof window.avibeNative?.call !== "function") return false;
+                      let method = \(self.captureState == "account-root" ? String(reflecting: "app.showAccount") : String(reflecting: "app.showInstances"));
+                      window.avibeNative.call(
+                        method,
+                        \(self.captureState == "account-root" ? #"{"start":"account"}"# : "{}")
+                      );
+                      return true;
+                    })()
+                    """
+                ) as? Bool) == true
+                if invoked { return }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    /// The B capture states exercise the real capable-shell bridge routes. They
+    /// intentionally do not set a URL hash or replace the production page.
+    /// The fixture-only invocation happens after the real bundled document is ready.
     private func publishReadiness() {
         sheetController?.view.accessibilityValue =
             "\(documentReady ? "document-ready" : "document-loading");fetch-\(fetchCount)"
@@ -189,6 +256,9 @@ private final class SheetFixtureRootViewController: UIViewController {
 
     @discardableResult
     private func dismissFixtureSheet() -> Bool {
+        runtimeRouteTask?.cancel()
+        runtimeWebView?.removeFromSuperview()
+        runtimeWebView = nil
         guard let controller = sheetController else { return false }
         controller.dismiss(animated: true) { [weak self] in
             self?.documentReadinessTask?.cancel()

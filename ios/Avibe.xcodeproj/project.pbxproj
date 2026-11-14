@@ -87,7 +87,10 @@
 		910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
 		910000000000000000000007 /* WebOrigin.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
 		910000000000000000000008 /* FixtureMobile in Resources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000003 /* FixtureMobile */; };
+		91000000000000000000000D /* NativeBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
+		91000000000000000000000F /* NativeBadge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
 		91000000000000000000000A /* MobileApp in Fixture Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
+		91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000006 /* FixtureNativeBridgeSupport.swift */; };
 		91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000003 /* RealBundleCaptureUITests.swift */; };
 		910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000001 /* InstanceSheetGestureUITests.swift */; };
 /* End PBXBuildFile section */
@@ -192,6 +195,7 @@
 		200000000000000000000019 /* Avibe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Avibe.entitlements; sourceTree = "<group>"; };
 		2000000000000000000000B0 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Avibe/NotificationService.swift; sourceTree = "<group>"; };
 		2000000000000000000000B1 /* PushNotificationProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Avibe/PushNotificationProcessor.swift; sourceTree = "<group>"; };
+		920000000000000000000006 /* FixtureNativeBridgeSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureNativeBridgeSupport.swift; sourceTree = "<group>"; };
 		2000000000000000000000B2 /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = Localizable.strings; sourceTree = "<group>"; };
 		2000000000000000000000B3 /* PushNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000B4 /* relay-apns-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = relay-apns-envelope.json; sourceTree = "<group>"; };
@@ -402,6 +406,7 @@
 			children = (
 				920000000000000000000001 /* SheetFixtureApp.swift */,
 				920000000000000000000002 /* FixtureKeyboardViewport.swift */,
+				920000000000000000000006 /* FixtureNativeBridgeSupport.swift */,
 				920000000000000000000003 /* FixtureMobile */,
 				920000000000000000000005 /* Info.plist */,
 			);
@@ -843,6 +848,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				910000000000000000000001 /* SheetFixtureApp.swift in Sources */,
+				91000000000000000000000D /* NativeBridge.swift in Fixture Sources */,
+				91000000000000000000000F /* NativeBadge.swift in Fixture Sources */,
+				91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */,
 				910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */,
 				910000000000000000000003 /* MobileAccount.swift in Fixture Sources */,
 				910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */,
