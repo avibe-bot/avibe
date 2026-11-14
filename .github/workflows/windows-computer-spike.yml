@@ -1,0 +1,60 @@
+name: Windows Computer Use spike
+
+# Disposable investigation only. Never merges or publishes.
+on:
+  pull_request:
+    types: [labeled]
+    branches: [master]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-computer-use-spike
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ACCEPTANCE_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  windows:
+    if: >-
+      github.repository == 'avibe-bot/avibe' &&
+      github.event.label.name == 'computer-use-spike' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.ACCEPTANCE_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Refuse an active stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python desktop/scripts/windows-computer-spike-admission.py
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - name: Install observation and Runtime import dependencies
+        run: python -m pip install --disable-pip-version-check pywinauto==0.6.9 psutil==7.2.2 pillow==12.0.0 httpx==0.28.1 pydantic==2.12.5
+      - name: Recheck stable exclusion before GUI work
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python desktop/scripts/windows-computer-spike-admission.py
+      - name: Exercise pinned and comparison drivers in the hosted interactive desktop
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Windows PowerShell required' }
+          Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+          python desktop/scripts/windows-computer-spike.py
+      - name: Upload allowlisted fixture evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: windows-computer-spike-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/computer-use-spike/evidence/
+          if-no-files-found: error
+          retention-days: 7
