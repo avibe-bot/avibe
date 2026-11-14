@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import importlib.util
 from pathlib import Path
+import re
 
 import pytest
 
@@ -14,6 +16,19 @@ def _manifest_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_ios_project_object_ids_are_unique():
+    """Duplicate IDs silently redirect app sources into XCTest-only files."""
+    project = Path(__file__).resolve().parents[1] / "ios/Avibe.xcodeproj/project.pbxproj"
+    identities = re.findall(
+        r"^\s*([0-9A-Fa-f]{24})(?: /\*.*?\*/)? = \{\s*isa =",
+        project.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert identities
+    duplicates = [identity for identity, count in Counter(identities).items() if count > 1]
+    assert not duplicates, f"Duplicate PBX object definitions: {duplicates}"
 
 
 def test_capture_manifest_binds_exact_bytes_and_all_24_named_states(tmp_path: Path):

@@ -88,7 +88,7 @@
 		910000000000000000000007 /* WebOrigin.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
 		910000000000000000000008 /* FixtureMobile in Resources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000003 /* FixtureMobile */; };
 		91000000000000000000000A /* MobileApp in Fixture Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
-		91000000000000000000000B /* RealBundleCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000003 /* RealBundleCaptureUITests.swift */; };
+		91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000003 /* RealBundleCaptureUITests.swift */; };
 		910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000001 /* InstanceSheetGestureUITests.swift */; };
 /* End PBXBuildFile section */
 
@@ -858,7 +858,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */,
-				91000000000000000000000B /* RealBundleCaptureUITests.swift in Sources */,
+				91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
