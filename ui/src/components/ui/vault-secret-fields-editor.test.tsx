@@ -148,6 +148,20 @@ it('can undo a staged removal before saving, with the field’s draft intact', a
   expect(batch()[1]).toMatchObject({ values: [{ field: 'username', record: 'LOGIN.username', blind_box: box }], remove: [] });
 });
 
+it('lets a staged removal free a place for an addition at the field limit', async () => {
+  const full = { ...secret, fields: ['password', ...Array.from({ length: 31 }, (_, i) => `f${i}`)] };
+  renderEditor(full);
+  expect((screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Remove f0' }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+  expect((screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  change('New field name', 'replacement');
+  change('New field value', 'seed');
+  expect(await save()).toBe(true);
+  expect(batch()[1]).toMatchObject({ values: [{ field: 'replacement' }], remove: ['f0'] });
+});
+
 it('does not send a staged-removed field’s draft', async () => {
   renderEditor();
   change('Value for username', 'dropped-draft');

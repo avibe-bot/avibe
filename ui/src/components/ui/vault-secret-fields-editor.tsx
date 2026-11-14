@@ -373,6 +373,8 @@ export function VaultSecretFieldsEditor({
   const focusedIssue = focusedName === 'default' ? labelIssue : focusedName === 'new' ? newIssue : null;
   const showNameRule = focusedName !== null && focusedIssue !== 'nameInvalid' && focusedIssue !== 'nameTaken';
   const renaming = defaultLabel !== defaultField;
+  // Staged removals free their places for an addition in the same Save.
+  const keptCount = fields.filter((field) => !removed.includes(field)).length;
   const hasValues = [...drafts].some(([field, value]) => Boolean(value) && !removed.includes(field));
   const dirty = hasValues || renaming || removed.length > 0 || (newField !== null && (Boolean(newValue) || Boolean(newField)));
   // Corrupt field metadata blocks field changes, not the dialog: with nothing drafted here its
@@ -394,7 +396,7 @@ export function VaultSecretFieldsEditor({
       // Enter in a field input doesn't submit the dialog; its Save button does.
       if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.preventDefault();
     }}>
-      <VaultFieldsHeader count={fields.length + (newField === null ? 0 : 1)} note={t('vaults.fields.editHelp')} />
+      <VaultFieldsHeader count={keptCount + (newField === null ? 0 : 1)} note={t('vaults.fields.editHelp')} />
       {draftNotice && (
         <p role="status" className="text-xs text-muted">{draftNotice}</p>
       )}
@@ -403,7 +405,7 @@ export function VaultSecretFieldsEditor({
       )}
       <VaultFieldList
         onAdd={() => setNewField('')}
-        addDisabled={fieldMutationLocked || newField !== null || fields.length >= MAX_VAULT_FIELDS}
+        addDisabled={fieldMutationLocked || newField !== null || keptCount >= MAX_VAULT_FIELDS}
       >
         {fields.filter((field) => !removed.includes(field)).map((field) => {
           const isDefault = field === defaultField;
