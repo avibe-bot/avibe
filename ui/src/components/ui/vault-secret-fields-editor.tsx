@@ -31,6 +31,8 @@ type DraftReconciliation = {
   generated: Set<string>;
   recipes: Map<string, GenerateRecipe>;
   removed: string[];
+  /** Where a field's draft went: its label under the new truth, or null when its record is gone. */
+  rekey: (name: string) => string | null;
 };
 
 function reconcileDrafts(
@@ -64,7 +66,7 @@ function reconcileDrafts(
     const key = rekey(name);
     if (key !== null) settings.set(key, recipe);
   }
-  return { drafts: reconciled, generated: marks, recipes: settings, removed };
+  return { drafts: reconciled, generated: marks, recipes: settings, removed, rekey };
 }
 
 /** The same final-layout constraints apply to rendered drafts and every pre-seal attempt.
@@ -194,8 +196,9 @@ export function VaultSecretFieldsEditor({
     updateDrafts(reconciled.drafts);
     updateGenerated(reconciled.generated);
     updateRecipes(reconciled.recipes);
-    // A popup whose field is gone, or is now a different record, closes.
-    setGeneratorOpen((open) => (open === null || open === NEW_FIELD || nextNames.includes(open) ? open : null));
+    // An open popup stays with its record, as the draft does (a renamed default moves it; a label
+    // that now names a different record must not inherit it), and closes when the record is gone.
+    setGeneratorOpen((open) => (open === null || open === NEW_FIELD ? open : reconciled.rekey(open)));
     if (reconciled.removed.length > 0) {
       setDraftNotice(t('vaults.fields.draftsDropped', { fields: reconciled.removed.join(', ') }));
     } else {

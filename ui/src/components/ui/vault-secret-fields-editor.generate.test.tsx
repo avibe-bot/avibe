@@ -185,6 +185,21 @@ it('moves a generated draft and its mark with the default field when another wri
   expect(screen.getByText(en.vaults.generate.generated)).toBeTruthy();
 });
 
+it('keeps an open generator on its record when another write gives its old label to a new field', async () => {
+  const { rerender } = renderEditor();
+  fireEvent.click(rowGenerator(0));
+  const generated = valueOf('Value for password');
+  // Another writer renamed the default to credential and added a new extra field called password.
+  const moved = { ...secret, default_field: 'credential', fields: ['credential', 'username', 'password'], updated_at: 'version-2' };
+  api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [moved] });
+  rerender(editor(moved));
+  await waitFor(() => expect(valueOf('Value for credential')).toBe(generated));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.generate.regenerate }));
+  expect(valueOf('Value for credential')).toHaveLength(24);
+  expect(valueOf('Value for credential')).not.toBe(generated);
+  expect(valueOf('Value for password')).toBe('');
+});
+
 it('drops a generated draft and its mark when another write removes the field', async () => {
   api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [{ ...secret, fields: ['password'], updated_at: 'version-2' }] });
   renderEditor();
