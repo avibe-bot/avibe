@@ -194,6 +194,9 @@ kernel, SDK, saved flows, and safety rules above are the same.
   A path handle only launches. Each `launch` starts a new process and returns
   an ordinary app handle for it, which you use as usual. The path handle never
   finds or reuses an app that is already open; use a `name` handle for that.
+  If the launch returns an error instead of an app (the new process exited at
+  once, as a stub that hands off does), do not retry: ask the owner to open
+  the app, as below.
   Do not combine `path` with `name` or `bundleId`. On macOS `path` is refused:
   keep using `bundleId` or `name` there.
 - Store apps, stubs that hand off to another process (such as the files in
