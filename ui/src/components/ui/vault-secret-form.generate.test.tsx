@@ -30,7 +30,7 @@ const vault = vi.hoisted(() => ({ status: 'unlocked', refresh: vi.fn(), afterCre
 vi.mock('@/context/ApiContext', async (original) => ({
   ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api,
 }));
-vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
+vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, useProtectedHdSupported: () => null, useVaultSandboxWarm: () => true }));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
 vi.mock('@/lib/vaultCrypto', async (original) => ({
   ...await original<typeof import('@/lib/vaultCrypto')>(), sealBlindBox,
