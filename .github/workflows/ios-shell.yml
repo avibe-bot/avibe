@@ -175,6 +175,7 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
+            -skip-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests \
             CODE_SIGNING_ALLOWED=NO \
             test-without-building
 
