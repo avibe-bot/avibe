@@ -397,7 +397,7 @@
       "add": "Add an instance",
       "addBody": "Install Avibe on a computer or server",
       "accountBody": "Sign out, open-source licenses",
-      "firstRunSubtitle": "Pick an instance to open. Later, the avatar at the top switches.",
+      "firstRunSubtitle": "Pick an instance to open. You can switch later from the top of the screen.",
       "pullToRefresh": "Pull to refresh",
       "releaseToRefresh": "Release to refresh",
       "loadFailed": "Couldn’t load your instances",

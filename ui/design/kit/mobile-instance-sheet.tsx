@@ -348,7 +348,7 @@ export function FirstRunPage({ state, instances, email }: { state: FirstRunState
       <div className={cn('min-h-0 flex-1 overflow-y-auto px-5 pb-[calc(env(safe-area-inset-bottom)+1.5rem)]', state === 'pulling' && 'translate-y-4')}>
         <div className="pt-6 pb-6">
           <h1 className="text-3xl font-semibold leading-tight tracking-tight">{t('想从哪里开始？', 'Where shall we begin?')}</h1>
-          <p className="mt-3 text-sm leading-6 text-muted">{t('选一个实例打开。以后点右上角的头像就能切换。', 'Pick an instance to open. Later, the avatar at the top switches.')}</p>
+          <p className="mt-3 text-sm leading-6 text-muted">{t('选一个实例打开。以后在屏幕顶部就能切换。', 'Pick an instance to open. You can switch later from the top of the screen.')}</p>
         </div>
         {state === 'error' ? (
           <div role="alert" className={cn(group, 'px-5 py-7 text-center')}>
