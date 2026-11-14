@@ -9012,9 +9012,24 @@ class _FailingWebSocketSession:
         return self.handshake
 
 
-def test_websocket_transport_failure_invalidates_runtime_until_http_readmission(monkeypatch, tmp_path):
+def test_websocket_transport_failure_keeps_healthy_runtime_snapshot(monkeypatch, tmp_path):
     manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
     set_show_runtime_manager_for_tests(manager)
+    handshake = _FailingWebSocketHandshake(ClientConnectionError("stale tab handshake timed out"))
+    monkeypatch.setattr(ui_server, "ClientSession", lambda: _FailingWebSocketSession(handshake))
+    websocket = SimpleNamespace(url=SimpleNamespace(query=""))
+    base_url = manager._base_url
+
+    with pytest.raises(ClientConnectionError):
+        asyncio.run(ui_server._proxy_show_runtime_websocket(websocket, "ses123"))
+
+    assert manager._base_url == base_url
+
+
+def test_websocket_transport_failure_invalidates_unhealthy_runtime(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    set_show_runtime_manager_for_tests(manager)
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=False))
     handshake = _FailingWebSocketHandshake(ClientConnectionError("runtime connection refused"))
     monkeypatch.setattr(ui_server, "ClientSession", lambda: _FailingWebSocketSession(handshake))
     websocket = SimpleNamespace(url=SimpleNamespace(query=""))
@@ -9024,37 +9039,24 @@ def test_websocket_transport_failure_invalidates_runtime_until_http_readmission(
 
     assert manager._base_url is None
 
-    admissions = []
-    replacement_process = SimpleNamespace(pid=654, poll=lambda: None)
 
-    async def admit(*, automatic=True):
-        admissions.append((automatic, manager._base_url))
-        manager._process = replacement_process
-        manager._base_url = "http://127.0.0.1:49322"
-        return manager._publish_runtime_availability(
-            ShowRuntimeServingState.SERVING,
-            manager._base_url,
-        )
-
-    monkeypatch.setattr(manager, "ensure", admit)
-
-    with pytest.raises(ShowRuntimeUnavailableError):
-        asyncio.run(manager.websocket_target(
-            "/show/ses123/__vite_hmr",
-            envelope=ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE),
-        ))
-    assert admissions == []
-    # Navigation/prewarm, rather than an old tab's socket, owns readmission.
-    asyncio.run(manager.ensure())
-    target = asyncio.run(
-        manager.websocket_target(
-            "/show/ses123/__vite_hmr",
-            envelope=ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE),
-        )
+def test_dead_runtime_process_invalidates_without_health_probe(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    process = SimpleNamespace(pid=321, poll=lambda: 15)
+    manager._process = process
+    healthy = AsyncMock(side_effect=AssertionError("dead process must not need a health probe"))
+    monkeypatch.setattr(manager, "_healthy", healthy)
+    target = ShowRuntimeWebSocketTarget(
+        url="ws://127.0.0.1:49321/show/ses123/__vite_hmr",
+        headers={},
+        _base_url=manager._base_url,
+        _process=process,
     )
 
-    assert admissions == [(True, None)]
-    assert target.url == "ws://127.0.0.1:49322/show/ses123/__vite_hmr"
+    asyncio.run(manager.invalidate_websocket_target(target))
+
+    assert manager._base_url is None
+    healthy.assert_not_awaited()
 
 
 def test_delayed_websocket_failure_does_not_invalidate_replacement_process(monkeypatch, tmp_path):

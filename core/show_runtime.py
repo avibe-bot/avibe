@@ -1431,7 +1431,17 @@ class ShowRuntimeManager:
     async def invalidate_websocket_target(self, target: ShowRuntimeWebSocketTarget) -> None:
         if target._base_url is None:
             return
-        await self._invalidate_runtime_snapshot(target._base_url, target._process)
+        process = target._process
+        if process is not None and process.poll() is not None:
+            await self._invalidate_runtime_snapshot(target._base_url, process)
+            return
+        # A browser HMR handshake can time out while the shared Runtime is still
+        # healthy (for example, a cold or stale session taking Vite past the
+        # proxy's handshake deadline). Do not let that one tab retire the
+        # process used by every other Show Page.
+        if await self._healthy(target._base_url):
+            return
+        await self._invalidate_runtime_snapshot(target._base_url, process)
 
     async def _invalidate_runtime_snapshot(
         self,
