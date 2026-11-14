@@ -1,53 +1,56 @@
-"""Report an event loop that stops turning, with the stack that stopped it.
+"""Report controller-loop stalls with bounded, metadata-only loop attribution.
 
-A synchronous call on the service's loop -- a lock wait, a subprocess, a large
-file rewrite -- stops every coroutine with it, and nothing on that loop can say
-so while it happens: its own timers fire late, afterwards, with no trace of what
-held them. A thread outside the loop can. It asks the loop to answer once a
-second and, when the loop has not answered for ``STALL_SECONDS``, logs one
-WARNING with the stack of every thread, so the blocking call is named in the
-log while it is still blocking. When the loop answers again it logs how long
-the stall lasted.
+The watchdog asks the loop to answer every second. After STALL_SECONDS without
+an answer it emits one structured warning per independent stall (not every
+poll of a prolonged stall), then logs recovery. Only the loop thread's innermost
+30 Python frames are inspected, and only fixed code-identity labels are emitted:
+no source, locals, arguments, absolute paths or arbitrary names. Unknown code is
+explicitly redacted. The JSON event is limited to 8 KiB. C calls themselves and
+unlisted or dynamically generated Python code are deliberate blind spots.
 
-While running, it also times process-wide garbage collections. Collections
-longer than 200 ms are queued for this thread to report, with their end time,
-generation, collected/uncollectable counts (not a heap census), and collector
-thread id. The callback never walks the heap, logs, or changes GC policy. The
-queue retains the newest 64 slow collections if reporting falls behind; this
-is a diagnostic, not a lossless GC trace. End times, rather than the delayed
-log timestamps, can be correlated with loop stalls; overlap is not causality.
+GC-active at sampling and watchdog wake lateness are signals, not causality.
+Wake lateness measures only the timed wait, before any reporting work; it cannot
+distinguish OS scheduling, GIL contention or GC. Process-wide GC timing retains
+the newest 64 collections longer than 200 ms, without heap census or GC policy
+changes. Collection end times, not delayed log timestamps, support correlation.
+
+For later, explicitly authorized offline observation, pass already-selected
+application log lines to core.loop_watchdog_events.parse_watchdog_event. It
+preserves safe structured attribution; old numeric-only parsers do not. No
+capture, log discovery or automatic observation is enabled here.
 """
 
 from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import logging
 import sys
 import threading
 import time
-import traceback
 from collections import deque
 from collections.abc import Callable
+from types import CodeType, FunctionType, ModuleType
+
+from core.loop_watchdog_events import (
+    EVENT_MARKER,
+    MAX_EVENT_BYTES,
+    MAX_STACK_FRAMES,
+    REDACTED_LABEL,
+    _CODE_TARGETS,
+)
 
 logger = logging.getLogger(__name__)
 
 STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
-# At most one stack report per this long; a loop that keeps stalling still gets
-# its recovery lines, which carry each stall's length.
-REPORT_INTERVAL_SECONDS = 300.0
-# Innermost frames kept per thread, and the report's overall size.
-_FRAMES_PER_THREAD = 30
-_MAX_REPORT_CHARS = 64 * 1024
-# Observe collections without walking the heap or changing GC policy. Reports
-# are emitted by the watchdog thread, never by the thread doing the collection.
 GC_SLOW_SECONDS = 0.2
 _MAX_GC_REPORTS = 64
 
 
 class EventLoopWatchdog:
-    """A daemon thread that logs the stacks of a loop that has not answered for ``stall_seconds``."""
+    """A daemon thread reporting each independently detected loop stall once."""
 
     def __init__(
         self,
@@ -55,21 +58,22 @@ class EventLoopWatchdog:
         *,
         stall_seconds: float = STALL_SECONDS,
         poll_seconds: float = POLL_SECONDS,
-        report_interval_seconds: float = REPORT_INTERVAL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._loop = loop
         self._stall_seconds = stall_seconds
         self._poll_seconds = poll_seconds
-        self._report_interval_seconds = report_interval_seconds
         self._monotonic = monotonic
         self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
         self._answered_at = monotonic()
         self._asking = False
         self._loop_thread_id: int | None = None
-        self._last_report_at: float | None = None
         self._stall_reported = False
+        # Index by id, NOT CodeType equality: replaced/dynamic code can compare
+        # equal to static code. Retain code objects (never frames) to prevent id reuse.
+        self._code_labels: dict[int, tuple[CodeType, tuple[str, str]]] = {}
+        self._unresolved_targets = [(module, attribute) for module, attrs in _CODE_TARGETS for attribute in attrs]
         self._gc_started_at: float | None = None
         self._gc_reports: deque[tuple[float, float, int, int, int, int]] = deque(maxlen=_MAX_GC_REPORTS)
         self._gc_callback = self._observe_gc
@@ -83,8 +87,6 @@ class EventLoopWatchdog:
                 return
             duration = self._monotonic() - started_at
             if duration > GC_SLOW_SECONDS:
-                # Bounded even if the reporter cannot run. Under severe pressure
-                # the oldest pending reports are discarded, not heap-retained.
                 self._gc_reports.append((
                     time.time(), duration, info["generation"], info["collected"],
                     info["uncollectable"], threading.get_ident(),
@@ -104,6 +106,7 @@ class EventLoopWatchdog:
             return
         self._stopped.clear()
         self._answered_at = self._monotonic()
+        self._refresh_code_labels()
         gc.callbacks.append(self._gc_callback)
         self._thread = threading.Thread(target=self._run, name="event-loop-watchdog", daemon=True)
         self._thread.start()
@@ -118,54 +121,116 @@ class EventLoopWatchdog:
             thread.join(timeout=self._poll_seconds * 2)
 
     def _answer(self) -> None:
-        # Runs on the loop: the only work it adds there is two assignments.
+        # No stack work on the loop, just scalar heartbeat state.
         self._loop_thread_id = threading.get_ident()
         self._answered_at = self._monotonic()
         self._asking = False
 
     def _run(self) -> None:
         silent_since = self._answered_at
-        while not self._stopped.wait(self._poll_seconds):
-            self._report_gc()
+        while True:
+            # Start the deadline AFTER the previous report, not at its wake.
+            wake_due = self._monotonic() + self._poll_seconds
+            if self._stopped.wait(self._poll_seconds):
+                break
+            now = self._monotonic()
+            wake_lateness = max(0.0, now - wake_due)
             answered_at = self._answered_at
-            if self._stall_reported and answered_at > silent_since:
-                logger.info("Event loop answered again after a %.1fs stall", answered_at - silent_since)
+            recovered = self._stall_reported and answered_at > silent_since
+            if recovered:
                 self._stall_reported = False
-            silent_since = answered_at
+            previous_silent_since, silent_since = silent_since, answered_at
             if not self._asking:
                 self._asking = True
                 try:
                     self._loop.call_soon_threadsafe(self._answer)
                 except RuntimeError:
                     return  # the loop is closed
-            now = self._monotonic()
-            if self._stall_reported or now - answered_at < self._stall_seconds:
-                continue
-            self._stall_reported = True
-            if self._last_report_at is not None and now - self._last_report_at < self._report_interval_seconds:
-                continue
-            self._last_report_at = now
-            logger.warning(
-                "Event loop has not answered for %.1fs; thread stacks follow.\n%s",
-                now - answered_at,
-                self._thread_stacks(),
-            )
-        self._report_gc()
+            try:
+                if not self._stall_reported and now - answered_at >= self._stall_seconds:
+                    self._stall_reported = True
+                    self._report_stall(now - answered_at, wake_lateness)
+                if recovered:
+                    logger.info("Event loop answered again after a %.1fs stall", answered_at - previous_silent_since)
+                self._report_gc()
+            except Exception:
+                # Diagnostics must not end the watchdog or echo exception text,
+                # which can contain private filenames or values.
+                pass
+        try:
+            self._report_gc()
+        except Exception:
+            pass
 
-    def _thread_stacks(self) -> str:
-        names = {thread.ident: thread.name for thread in threading.enumerate()}
-        frames = sys._current_frames()
-        # A loop that blocks before its first answer is still named: asyncio records its running thread.
+    def _refresh_code_labels(self) -> None:
+        unresolved = []
+        for module, attribute in self._unresolved_targets:
+            owner = sys.modules.get(module)
+            for part in attribute.split("."):
+                # No getattr, descriptors, imports, module scan or source I/O.
+                if type(owner) is ModuleType:
+                    owner = ModuleType.__getattribute__(owner, "__dict__").get(part)
+                elif isinstance(owner, type):
+                    owner = type.__getattribute__(owner, "__dict__").get(part)
+                else:
+                    owner = None
+                    break
+            if type(owner) in (staticmethod, classmethod):
+                owner = owner.__func__
+            if type(owner) is FunctionType:
+                code = owner.__code__
+                label = (module.replace(".", "/") + ".py", attribute)
+                self._code_labels[id(code)] = (code, label)
+            else:
+                unresolved.append((module, attribute))
+        self._unresolved_targets = unresolved
+
+    def _loop_stack(self, loop_thread: int | None) -> tuple[list[dict], str, bool]:
+        frame = all_frames = code = None
+        try:
+            self._refresh_code_labels()  # fixed unresolved entries only; no healthy-tick work
+            if loop_thread is None:
+                return [], "missing", False
+            # CPython exposes only an all-thread snapshot. Drop every other
+            # reference immediately; never enumerate threads or walk their stacks.
+            all_frames = sys._current_frames()
+            frame = all_frames.get(loop_thread)
+            all_frames.clear()
+            all_frames = None
+            if frame is None:
+                return [], "missing", False
+            result = []
+            for _ in range(MAX_STACK_FRAMES):
+                code = frame.f_code
+                known = self._code_labels.get(id(code))
+                file, function = known[1] if known is not None and known[0] is code else REDACTED_LABEL
+                result.append({"file": file, "function": function, "line": min(max(frame.f_lineno, 0), 2**31 - 1)})
+                frame = frame.f_back
+                if frame is None:
+                    break
+            return result, "ok", frame is not None
+        except Exception:
+            return [], "error", False
+        finally:
+            if all_frames is not None:
+                all_frames.clear()
+            frame = all_frames = code = None
+
+    def _report_stall(self, lag: float, wake_lateness: float) -> None:
+        gc_active = self._gc_started_at is not None
         loop_thread = self._loop_thread_id or getattr(self._loop, "_thread_id", None)
-        order = sorted(frames, key=lambda ident: (ident != loop_thread, names.get(ident, "")))
-        sections = []
-        for ident in order:
-            if ident == threading.get_ident():
-                continue
-            label = "event loop" if ident == loop_thread else names.get(ident, "unnamed")
-            stack = "".join(traceback.format_stack(frames[ident])[-_FRAMES_PER_THREAD:])
-            sections.append(f"--- thread {ident} ({label}) ---\n{stack}")
-        report = "".join(sections)
-        if len(report) > _MAX_REPORT_CHARS:
-            report = report[:_MAX_REPORT_CHARS] + "\n... (truncated)"
-        return report
+        frames, status, truncated = self._loop_stack(loop_thread)
+        event = {
+            "version": 1, "kind": "loop_stall", "loop_id": id(self._loop),
+            "loop_thread_id": loop_thread, "watchdog_thread_id": threading.get_ident(),
+            "lag_ms": round(lag * 1000, 3), "gc_active": gc_active,
+            "watchdog_wake_lateness_ms": round(wake_lateness * 1000, 3),
+            "sample_status": status, "frames": frames, "truncated": truncated,
+        }
+        payload = json.dumps(event, ensure_ascii=True, separators=(",", ":"))
+        while len(payload.encode("utf-8")) > MAX_EVENT_BYTES and frames:
+            frames.pop()
+            event["truncated"] = True
+            payload = json.dumps(event, ensure_ascii=True, separators=(",", ":"))
+        # Preserve the numeric-only warning prefix for existing offline parsers.
+        logger.warning("Event loop has not answered for %.1fs%s%s", lag, EVENT_MARKER, payload)
