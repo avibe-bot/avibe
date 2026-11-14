@@ -141,8 +141,9 @@ guidance never appear there. The page also states that:
   Avibe never raises its own rights. This differs from Avibe itself running
   as administrator, which keeps Computer Use unavailable until Avibe is
   reopened normally.
-- The Agent cannot open every app itself in the Preview. When a launch is
-  refused, it asks the user to open the app, then continues in that window.
+- The Agent starts desktop apps from the absolute path of their `.exe`, as
+  Windows lists it. Store apps, links, and files that open in their default
+  app are opened by the user; the Agent asks, then continues in that window.
 - Turning Computer Use off, quitting Avibe, or Avibe closing unexpectedly
   stops the driver and ends any action in progress.
 

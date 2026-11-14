@@ -779,7 +779,7 @@
         "previewDetail": "Computer Use on Windows is in Preview. Display scaling, multiple monitors, and input methods are still being verified.",
         "apps": "Agents can operate ordinary apps running under your Windows account. No Accessibility or Screen Recording setting is needed.",
         "elevated": "App windows running as administrator are refused. Avibe never raises its own rights; the Agent tells you it cannot control that window. To let it help, reopen the app without “Run as administrator”.",
-        "launch": "In this Preview the Agent cannot open every app itself. When it cannot, it asks you to open the app, then continues in that window.",
+        "launch": "The Agent starts desktop apps from the program file Windows lists for them. Store apps, links, and files that open in their default app need you to open them first: the Agent asks, then continues in that window.",
         "stop": "Turning Computer Use off, quitting Avibe, or Avibe closing unexpectedly stops the driver and ends any action in progress.",
         "enableDetail": "Turns on Computer Use for this PC. It stays off until you turn it on.",
         "actionFailed": "The desktop app did not respond. Try again, or quit and reopen Avibe.",
