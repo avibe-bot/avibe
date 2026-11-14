@@ -5447,6 +5447,7 @@ def test_public_show_transport_failure_remains_manually_retryable(
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=False))
     set_show_runtime_manager_for_tests(manager)
     try:
         first = app.test_client().get(
