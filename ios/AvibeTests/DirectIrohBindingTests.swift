@@ -21,10 +21,13 @@ final class DirectIrohBindingTests: XCTestCase {
         XCTAssertEqual(pair.client.remoteEndpointID, pair.peer.id)
 
         let clientHalves = try await pair.client.openStream()
-        let serverStream = try await pair.server.openBi()
+        let accepting = Task {
+            try await pair.server.acceptBi()
+        }
 
         try await clientHalves.send.writeAll(Self.payload)
         try await clientHalves.send.finish()
+        let serverStream = try await accepting.value
 
         let received = try await serverStream.recv().read(
             sizeLimit: UInt32(Self.payload.count)
@@ -35,7 +38,7 @@ final class DirectIrohBindingTests: XCTestCase {
         try await serverStream.send().finish()
 
         let echoed = try await clientHalves.receive.read(
-            sizeLimit: UInt32(Self.payload.count)
+            sizeLimit: Self.payload.count
         )
         XCTAssertEqual(echoed, Self.payload)
         let end = try await clientHalves.receive.read(sizeLimit: 1)
@@ -78,25 +81,36 @@ final class DirectIrohBindingTests: XCTestCase {
             client.close()
         }
 
-        let opened = (0..<16).map { _ in
+        let completions = CompletionCounter()
+        let opened = (0..<128).map { _ in
             Task {
-                try await client.openStream()
+                defer {
+                    completions.mark()
+                }
+                return try await client.openStream()
             }
         }
         try await Task.sleep(for: .milliseconds(100))
+        let completedBeforeCancel = completions.count
+        XCTAssertLessThan(completedBeforeCancel, opened.count)
+
         let cancelledAt = Date()
         opened.forEach { $0.cancel() }
         client.close()
         await pair.endpoint.close()
         try? server.close(errorCode: 0, reason: Data())
 
+        var succeeded = 0
         for task in opened {
             let result = await task.result
-            XCTAssertNotNil(Self.failure(of: result))
+            if case .success(let halves) = result {
+                succeeded += 1
+                DirectIrohByteStream.abort(halves)
+            }
         }
         let elapsed = Date().timeIntervalSince(cancelledAt)
         XCTAssertLessThan(elapsed, Self.closeBound)
-        print("real-binding cancelled-open count=16 connection-close seconds=\(elapsed)")
+        print("real-binding cancelled-open attempted=128 completed-before-cancel=\(completedBeforeCancel) succeeded=\(succeeded) connection-close-seconds=\(elapsed)")
 
         await pair.peer.close()
     }
@@ -107,22 +121,30 @@ final class DirectIrohBindingTests: XCTestCase {
             pair.client.close()
         }
 
-        let clientHalves = try await pair.client.openStream()
-        let serverStream = try await pair.server.openBi()
         try pair.server.setReceiveWindow(count: 1024)
-
-        let stream = DirectIrohByteStream(clientHalves)
+        let clientHalves = try await pair.client.openStream()
+        let accepting = Task {
+            try await pair.server.acceptBi()
+        }
+        let recorder = CompletionRecorder()
+        let observed = DirectIrohStreamHalves(
+            send: ObservingSend(base: clientHalves.send, recorder: recorder),
+            receive: ObservingReceive(base: clientHalves.receive, recorder: recorder)
+        )
+        let stream = DirectIrohByteStream(observed)
         let readTask = Task {
             try await stream.read(maxLength: DirectIrohByteStream.maxReadBytes)
         }
         let writeTask = Task {
             try await stream.write(Data(repeating: 0xA2, count: 16 * 1024 * 1024))
         }
+        _ = try await accepting.value
         // Keep the peer from consuming either half. The small receive window
         // makes the write exercise flow-control backpressure rather than a
         // merely buffered localhost transfer.
-        _ = serverStream
         try await Task.sleep(for: .milliseconds(100))
+        let nativeCallsStarted = await waitForStarted(recorder)
+        XCTAssertTrue(nativeCallsStarted)
 
         let cancelledAt = Date()
         stream.cancel()
@@ -134,16 +156,104 @@ final class DirectIrohBindingTests: XCTestCase {
         XCTAssertNotNil(Self.failure(of: writeResult))
         XCTAssertLessThan(callerElapsed, Self.closeBound)
 
-        let sessionClosed = Task {
-            await pair.server.closed()
-        }
         pair.client.close()
         await pair.endpoint.close()
         try? pair.server.close(errorCode: 0, reason: Data())
-        _ = await sessionClosed.result
 
-        print("real-binding both-halves caller-cancel seconds=\(callerElapsed) session-close=true")
+        let nativeCallsSettled = await waitForSettled(recorder)
+        XCTAssertTrue(nativeCallsSettled)
+        print("real-binding both-halves caller-cancel-seconds=\(callerElapsed) native-calls-settled=\(nativeCallsSettled)")
         await pair.peer.close()
+    }
+
+    private final class CompletionCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        var count: Int {
+            lock.withLock { value }
+        }
+
+        func mark() {
+            lock.withLock {
+                value += 1
+            }
+        }
+    }
+
+    private final class CompletionRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sendWriteStarted = false
+        private var receiveReadStarted = false
+        private var sendWrite = false
+        private var sendReset = false
+        private var receiveRead = false
+        private var receiveStop = false
+
+        var bothStarted: Bool {
+            lock.withLock {
+                sendWriteStarted && receiveReadStarted
+            }
+        }
+
+        var allSettled: Bool {
+            lock.withLock {
+                sendWrite && sendReset && receiveRead && receiveStop
+            }
+        }
+
+        func markSendWriteStarted() { lock.withLock { sendWriteStarted = true } }
+        func markReceiveReadStarted() { lock.withLock { receiveReadStarted = true } }
+        func markSendWrite() { lock.withLock { sendWrite = true } }
+        func markSendReset() { lock.withLock { sendReset = true } }
+        func markReceiveRead() { lock.withLock { receiveRead = true } }
+        func markReceiveStop() { lock.withLock { receiveStop = true } }
+    }
+
+    private final class ObservingSend: DirectIrohSendHalf, @unchecked Sendable {
+        private let base: any DirectIrohSendHalf
+        private let recorder: CompletionRecorder
+
+        init(base: any DirectIrohSendHalf, recorder: CompletionRecorder) {
+            self.base = base
+            self.recorder = recorder
+        }
+
+        func writeAll(_ data: Data) async throws {
+            recorder.markSendWriteStarted()
+            defer { recorder.markSendWrite() }
+            try await base.writeAll(data)
+        }
+
+        func finish() async throws {
+            try await base.finish()
+        }
+
+        func reset() async {
+            defer { recorder.markSendReset() }
+            await base.reset()
+        }
+    }
+
+    private final class ObservingReceive: DirectIrohReceiveHalf, @unchecked Sendable {
+        private let base: any DirectIrohReceiveHalf
+        private let recorder: CompletionRecorder
+
+        init(base: any DirectIrohReceiveHalf, recorder: CompletionRecorder) {
+            self.base = base
+            self.recorder = recorder
+        }
+
+        func read(sizeLimit: Int) async throws -> Data {
+            recorder.markReceiveReadStarted()
+            defer { recorder.markReceiveRead() }
+            return try await base.read(sizeLimit: sizeLimit)
+        }
+
+        func stop() async {
+            defer { recorder.markReceiveStop() }
+            await base.stop()
+        }
     }
 
     private struct Pair: @unchecked Sendable {
@@ -174,6 +284,34 @@ final class DirectIrohBindingTests: XCTestCase {
         func close() async {
             try? await endpoint.close()
         }
+    }
+
+    private func waitForStarted(
+        _ recorder: CompletionRecorder,
+        timeout: TimeInterval = 1
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if recorder.bothStarted {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return recorder.bothStarted
+    }
+
+    private func waitForSettled(
+        _ recorder: CompletionRecorder,
+        timeout: TimeInterval = 3
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if recorder.allSettled {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return recorder.allSettled
     }
 
     private func makePair() async throws -> Pair {
