@@ -279,7 +279,7 @@ export function VaultSecretFieldsEditor({
   const commitAll = async (): Promise<boolean> => {
     if (fieldsCorrupt) return false;
     const captured = new Map<string, string>();
-    for (const [field, value] of draftsRef.current) if (value) captured.set(field, value);
+    for (const [field, value] of draftsRef.current) if (value && !removed.includes(field)) captured.set(field, value);
     const adding = newField !== null && newValue ? { field: newField, value: newValue } : null;
     // The default field as the user saw it: its draft follows the default, any other draft must
     // stay an extra field (if another write made it the default meanwhile, that is a conflict).
@@ -356,10 +356,8 @@ export function VaultSecretFieldsEditor({
 
   const removeSavedField = (field: string) => {
     if (fieldsCorrupt) return;
+    // The field's draft is kept, so Undo brings it back as it was; Save skips it while staged.
     setRemoved((current) => (current.includes(field) ? current : [...current, field]));
-    const next = new Map(draftsRef.current);
-    next.delete(field);
-    updateDrafts(next);
   };
   const discardNewField = () => {
     setNewField(null);
@@ -375,7 +373,7 @@ export function VaultSecretFieldsEditor({
   const focusedIssue = focusedName === 'default' ? labelIssue : focusedName === 'new' ? newIssue : null;
   const showNameRule = focusedName !== null && focusedIssue !== 'nameInvalid' && focusedIssue !== 'nameTaken';
   const renaming = defaultLabel !== defaultField;
-  const hasValues = [...drafts.values()].some(Boolean);
+  const hasValues = [...drafts].some(([field, value]) => Boolean(value) && !removed.includes(field));
   const dirty = hasValues || renaming || removed.length > 0 || (newField !== null && (Boolean(newValue) || Boolean(newField)));
   // Corrupt field metadata blocks field changes, not the dialog: with nothing drafted here its
   // Save still saves description, tags and policy.

@@ -136,14 +136,25 @@ it('commits a rename, values, an added field and a removal in one atomic request
   expect(lastState().dirty).toBe(false);
 });
 
-it('can undo a staged removal before saving', () => {
+it('can undo a staged removal before saving, with the field’s draft intact', async () => {
   renderEditor();
+  change('Value for username', 'kept-draft');
   fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
   fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
   expect(screen.queryByLabelText('Value for username')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.undoRemove }));
-  expect(screen.getByLabelText('Value for username')).toBeTruthy();
-  expect(lastState().dirty).toBe(false);
+  expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('kept-draft');
+  expect(await save()).toBe(true);
+  expect(batch()[1]).toMatchObject({ values: [{ field: 'username', record: 'LOGIN.username', blind_box: box }], remove: [] });
+});
+
+it('does not send a staged-removed field’s draft', async () => {
+  renderEditor();
+  change('Value for username', 'dropped-draft');
+  fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+  expect(await save()).toBe(true);
+  expect(batch()[1]).toMatchObject({ values: [], remove: ['username'] });
 });
 
 it('is not valid while the default rename collides or a new field is incomplete', () => {
