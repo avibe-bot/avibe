@@ -75,7 +75,7 @@ class Runtime:
         self.targets.append((path, envelope.headers()))
         return ShowRuntimeWebSocketTarget(url=self.url + path, headers=envelope.headers())
 
-    async def invalidate_websocket_target(self, target):
+    async def invalidate_websocket_target(self, target, **_kwargs):
         self.invalidations.append(target)
 
     def stop(self):

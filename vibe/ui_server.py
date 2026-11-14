@@ -4853,8 +4853,11 @@ async def _proxy_show_runtime_websocket(
                 ),
                 timeout=5.0,
             )
-        except (asyncio.TimeoutError, ClientConnectionError):
-            await manager.invalidate_websocket_target(target)
+        except asyncio.TimeoutError:
+            await manager.invalidate_websocket_target(target, reason="hmr_timeout")
+            raise
+        except ClientConnectionError:
+            await manager.invalidate_websocket_target(target, reason="hmr_connection_error")
             raise
         async with upstream:
             # Refuse absent/evicted contexts and upstream errors before Upgrade.
