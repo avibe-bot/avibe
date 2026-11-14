@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, ClipboardEvent } from 'react';
 import { X } from 'lucide-react';
 
@@ -88,6 +88,58 @@ export const TagInput: React.FC<TagInputProps> = ({
   // key, and the list dismisses on blur / selection instead.
   const listOpen = focused && matches.length > 0;
 
+  // A blur commits the draft at once (the form submits what it holds), but while the pointer press
+  // that moved focus is still going on, the chip waits to appear: the draft stays where it is, as
+  // typed, until that press's click has been handled. A new chip can wrap onto a new line, and that
+  // reflow mid-press moved the button being pressed (the dialog's Save) out from under the release,
+  // so its click was lost. A press runs from pointerdown to its click (on a touch screen the click
+  // comes after pointerup), or to pointercancel; a press with no click ends a moment after release.
+  const [held, setHeld] = useState<string | null>(null);
+  const heldRef = useRef<string | null>(null);
+  const pressing = useRef(false);
+  const afterPress = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    let timer: number | undefined;
+    const finish = (delay: number) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        pressing.current = false;
+        const run = afterPress.current;
+        afterPress.current = null;
+        run?.();
+      }, delay);
+    };
+    const down = () => {
+      window.clearTimeout(timer);
+      pressing.current = true;
+    };
+    const click = () => finish(0);
+    const up = () => finish(600);
+    window.addEventListener('pointerdown', down, true);
+    window.addEventListener('click', click, true);
+    window.addEventListener('pointercancel', click, true);
+    window.addEventListener('pointerup', up, true);
+    return () => {
+      window.clearTimeout(timer);
+      afterPress.current = null;
+      window.removeEventListener('pointerdown', down, true);
+      window.removeEventListener('click', click, true);
+      window.removeEventListener('pointercancel', click, true);
+      window.removeEventListener('pointerup', up, true);
+    };
+  }, []);
+
+  // The held value appears as a chip and leaves the input. Only once: the deferred call does
+  // nothing after an earlier settle (re-entering the input), so it can never clear a later draft.
+  const settleHeld = () => {
+    afterPress.current = null;
+    if (heldRef.current === null) return;
+    heldRef.current = null;
+    setHeld(null);
+    setDraft('');
+    setHighlight(-1);
+  };
+
   const add = (value: string) => {
     if (!values.includes(value)) onChange([...values, value]);
     setDraft('');
@@ -145,7 +197,7 @@ export const TagInput: React.FC<TagInputProps> = ({
           className,
         )}
       >
-        {values.map((value, index) => (
+        {values.map((value, index) => (value === held ? null : (
           <span
             key={value}
             className="flex items-center gap-1 rounded bg-surface-2 px-1.5 py-0.5 font-mono text-xs text-foreground"
@@ -160,16 +212,30 @@ export const TagInput: React.FC<TagInputProps> = ({
               <X className="size-3" />
             </button>
           </span>
-        ))}
+        )))}
         <input
           value={draft}
           onChange={(event) => setDraftSafe(event.target.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          onFocus={() => setFocused(true)}
+          onFocus={() => {
+            // Back in the input before the press finished: the held value is a chip now, and
+            // what the user types next is a new draft that nothing deferred may clear.
+            settleHeld();
+            setFocused(true);
+          }}
           onBlur={() => {
             setFocused(false);
-            commit(draft);
+            const cleaned = normalize(draft);
+            if (!cleaned || !pressing.current || values.includes(cleaned)) {
+              commit(draft);
+              return;
+            }
+            onChange([...values, cleaned]);
+            onPendingChange?.(false);
+            heldRef.current = cleaned;
+            setHeld(cleaned);
+            afterPress.current = settleHeld;
           }}
           placeholder={values.length ? undefined : placeholder}
           aria-label={ariaLabel}
