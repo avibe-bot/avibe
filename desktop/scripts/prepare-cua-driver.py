@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the pinned and explicitly patched macOS Cua Driver helper."""
+"""Build the pinned and explicitly patched macOS or Windows x64 Cua Driver helper."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
+from runpy import run_path
 import shutil
 import subprocess
 import tarfile
@@ -24,10 +25,13 @@ SOURCES = ROOT / "cua-driver" / "sources.json"
 TARGET_ARCH = {
     "aarch64-apple-darwin": "arm64",
     "x86_64-apple-darwin": "x86_64",
+    "x86_64-pc-windows-msvc": "x86_64",
 }
+WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 POLICY = ROOT / "cua-driver" / "policy.yaml"
 TOOL_SNAPSHOT = ROOT / "cua-driver" / "tools-v0.31.0.json"
+WINDOWS_TOOL_SNAPSHOT = ROOT / "cua-driver" / "tools-windows-v0.31.0.json"
 
 
 def digest(path: Path) -> str:
@@ -98,7 +102,38 @@ def load_manifest(path: Path = SOURCES) -> dict:
     if "perception" in json.dumps(payload).lower():
         raise ValueError("Cua perception assets must not enter the Phase 1 package")
     verify_managed_policy_surface()
+    load_windows_snapshot(payload)
     return payload
+
+
+def load_windows_snapshot(manifest: dict) -> dict:
+    driver = manifest["driver"]
+    windows = driver.get("windows")
+    if (
+        not isinstance(windows, dict)
+        or windows.get("target") != WINDOWS_TARGET
+        or windows.get("tool_snapshot") != WINDOWS_TOOL_SNAPSHOT.name
+        or SHA256.fullmatch(str(windows.get("tool_snapshot_sha256"))) is None
+    ):
+        raise ValueError("invalid pinned Windows Cua Driver source manifest")
+    try:
+        snapshot = json.loads(WINDOWS_TOOL_SNAPSHOT.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("pinned Windows Cua Driver tool snapshot is unreadable") from exc
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("schema_version") != 1
+        or snapshot.get("target") != WINDOWS_TARGET
+        or snapshot.get("driver_version") != driver["version"]
+        or snapshot.get("source_tag") != driver["tag"]
+        or snapshot.get("source_commit") != driver["source_commit"]
+        or snapshot.get("source_variant") != driver["patch"]["variant"]
+        or snapshot.get("patch_sha256") != driver["patch"]["sha256"]
+        or digest(WINDOWS_TOOL_SNAPSHOT) != windows["tool_snapshot_sha256"]
+    ):
+        raise ValueError("pinned Windows Cua Driver tool snapshot hash or source mismatch")
+    verify_managed_policy_surface(snapshot_path=WINDOWS_TOOL_SNAPSHOT)
+    return snapshot
 
 
 def verify_managed_policy_surface(
@@ -228,7 +263,7 @@ def build_driver(manifest: dict, source_root: Path, target: str) -> Path:
         env=environment,
         check=True,
     )
-    built = target_dir / target / "release" / "cua-driver"
+    built = target_dir / target / "release" / ("cua-driver.exe" if target == WINDOWS_TARGET else "cua-driver")
     if not built.is_file():
         raise ValueError("patched Cua Driver build did not produce the expected binary")
     verify_architecture(built, target)
@@ -236,6 +271,10 @@ def build_driver(manifest: dict, source_root: Path, target: str) -> Path:
 
 
 def verify_architecture(binary: Path, target: str) -> None:
+    if target == WINDOWS_TARGET:
+        release = run_path(str(ROOT.parent / "scripts" / "desktop_release.py"))
+        release["verify_windows_driver_pe"](binary)
+        return
     info = run(["lipo", "-info", str(binary)])
     arch = TARGET_ARCH[target]
     if arch not in info or "Non-fat file" not in info:
@@ -255,6 +294,21 @@ def verify_built_contract(binary: Path) -> None:
         raise ValueError("patched Cua Driver does not expose click.click_mode") from exc
     if click_mode.get("enum") != ["auto", "raw"]:
         raise ValueError("patched Cua Driver click.click_mode contract is unexpected")
+
+
+def verify_windows_built_contract(binary: Path) -> None:
+    """Windows inputs differ from macOS; check the captured, policy-filtered schemas."""
+    if run([str(binary), "--version"]).strip() != "cua-driver 0.31.0":
+        raise ValueError("patched Windows Cua Driver reports an unexpected version")
+    try:
+        docs = json.loads(run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False))
+        actual = {tool["name"]: tool["input_schema"] for tool in docs["tools"]}
+        snapshot = json.loads(WINDOWS_TOOL_SNAPSHOT.read_text(encoding="utf-8"))
+        expected = {tool["name"]: tool["inputSchema"] for tool in snapshot["tools"]}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError("patched Windows Cua Driver tool schemas are unreadable") from exc
+    if any(actual.get(name) != schema for name, schema in expected.items()):
+        raise ValueError("patched Windows Cua Driver does not match the pinned tool snapshot")
 
 
 def sign_adhoc(binary: Path) -> None:
@@ -289,7 +343,7 @@ def provenance_record(
         "patch_file": driver["patch"]["file"],
         "patch_sha256": patch_sha256,
         "patch_contract": driver["patch"]["contract"],
-        "tool_snapshot_sha256": digest(TOOL_SNAPSHOT),
+        "tool_snapshot_sha256": digest(WINDOWS_TOOL_SNAPSHOT if target == WINDOWS_TARGET else TOOL_SNAPSHOT),
         "prepared_binary_sha256": binary_sha256,
         "build_origin": "repository_patch_built",
     }
@@ -300,8 +354,8 @@ def reuse_verified(manifest: dict, target: str, output: Path) -> bool:
 
     The helper and its provenance must describe exactly the pinned source, patch,
     snapshot, and target, and the binary must hash to the recorded value. It then
-    passes the same architecture, code-signature, and tool-contract checks as a
-    helper built here. Anything else is rebuilt from source.
+    passes the same architecture and tool-contract checks as a helper built here,
+    plus code-signature verification on macOS. Anything else is rebuilt from source.
     """
     provenance_path = output.with_name(f"{output.name}.provenance.json")
     if any(path.is_symlink() or not path.is_file() for path in (output, provenance_path)):
@@ -321,8 +375,11 @@ def reuse_verified(manifest: dict, target: str, output: Path) -> bool:
         return False
     try:
         verify_architecture(output, target)
-        verify_code_signature(output)
-        verify_built_contract(output)
+        if target == WINDOWS_TARGET:
+            verify_windows_built_contract(output)
+        else:
+            verify_code_signature(output)
+            verify_built_contract(output)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"::warning::Rebuilding the Cua Driver; the prepared helper failed verification: {exc}")
         return False
@@ -337,11 +394,13 @@ def prepare(
     output_dir: Path | None = None,
     reuse: bool = False,
 ) -> Path:
+    if target not in TARGET_ARCH:
+        raise ValueError("unsupported Cua Driver target")
     manifest = load_manifest()
     driver = manifest["driver"]
     destination = (output_dir or ROOT / "src-tauri" / "binaries").resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    output = destination / f"cua-driver-{target}"
+    output = destination / f"cua-driver-{target}{'.exe' if target == WINDOWS_TARGET else ''}"
     if reuse and reuse_verified(manifest, target, output):
         return output
 
@@ -353,8 +412,11 @@ def prepare(
         source_root = extract_driver_source(manifest, resolved_archive, work / "source")
         patch = apply_driver_patch(manifest, source_root)
         prepared = build_driver(manifest, source_root, target)
-        sign_adhoc(prepared)
-        verify_built_contract(prepared)
+        if target == WINDOWS_TARGET:
+            verify_windows_built_contract(prepared)
+        else:
+            sign_adhoc(prepared)
+            verify_built_contract(prepared)
         temporary_output = destination / f".{output.name}.{os.getpid()}.tmp"
         shutil.copyfile(prepared, temporary_output)
         temporary_output.chmod(0o755)

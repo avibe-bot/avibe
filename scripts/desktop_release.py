@@ -21,6 +21,9 @@ _github = run_path(str(Path(__file__).with_name("github_release.py")))
 # Schema 3 marks records whose macOS artifacts are Developer ID signed and
 # notarized. Schema 1 and 2 records were published with ad-hoc macOS apps.
 DESKTOP_SOURCE_SCHEMA_VERSION = 3
+# Windows schema 4 adds the pinned, source-built Computer Use helper. Older
+# Windows records remain verifiable; macOS records and packaging stay schema 3.
+WINDOWS_DRIVER_SOURCE_SCHEMA_VERSION = 4
 CUA_DRIVER_SOURCES = Path(__file__).resolve().parents[1] / "desktop" / "cua-driver" / "sources.json"
 TARGETS = {
     "aarch64-apple-darwin": ("macos", "aarch64", ".dmg"),
@@ -259,6 +262,17 @@ def prepare(
                     f"binaries/cua-driver-{target}.provenance.json": "computer-use/driver-provenance.json",
                 }
             )
+        elif target == "x86_64-pc-windows-msvc":
+            override.setdefault("bundle", {}).setdefault("resources", {}).update(
+                {
+                    f"binaries/cua-driver-{target}.exe": "computer-use/cua-driver.exe",
+                    "../cua-driver/policy.yaml": "computer-use/policy.yaml",
+                    "../cua-driver/tools-windows-v0.31.0.json": "computer-use/tools-windows-v0.31.0.json",
+                    "../cua-driver/LICENSE.md": "computer-use/LICENSE.md",
+                    "../cua-driver/sources.json": "computer-use/sources.json",
+                    f"binaries/cua-driver-{target}.exe.provenance.json": "computer-use/driver-provenance.json",
+                }
+            )
     config.write_text(json.dumps(override) + "\n", encoding="utf-8")
 
 
@@ -293,7 +307,7 @@ def asset_names(version: str, target: str) -> list[str]:
             prefix + ".SOURCE.json", prefix + ".SIGNATURE", prefix + ".SHA256SUMS"]
 
 
-def pinned_driver_source() -> dict:
+def pinned_driver_source(target: str | None = None) -> dict:
     source = json.loads(CUA_DRIVER_SOURCES.read_text(encoding="utf-8"))["driver"]
     return {
         "version": source["version"],
@@ -308,8 +322,42 @@ def pinned_driver_source() -> dict:
         "patch_file": source["patch"]["file"],
         "patch_sha256": source["patch"]["sha256"],
         "patch_contract": source["patch"]["contract"],
-        "tool_snapshot_sha256": source["tool_snapshot_sha256"],
+        "tool_snapshot_sha256": (
+            source["windows"]["tool_snapshot_sha256"]
+            if target == "x86_64-pc-windows-msvc" else source["tool_snapshot_sha256"]
+        ),
     }
+
+
+def verify_windows_driver_pe(binary: Path) -> None:
+    """Reject non-PE, 32-bit, ARM64, DLL and truncated images without executing them."""
+    if binary.is_symlink() or not binary.is_file():
+        raise ValueError("Invalid Windows Cua Driver file")
+    size = binary.stat().st_size
+    with binary.open("rb") as stream:
+        dos = stream.read(64)
+        if len(dos) != 64 or dos[:2] != b"MZ":
+            raise ValueError("Windows Cua Driver is not a PE executable")
+        offset = int.from_bytes(dos[60:64], "little")
+        if offset < 64 or offset + 24 > size:
+            raise ValueError("Windows Cua Driver has a truncated PE header")
+        stream.seek(offset)
+        header = stream.read(24)
+        machine = int.from_bytes(header[4:6], "little")
+        sections = int.from_bytes(header[6:8], "little")
+        optional_size = int.from_bytes(header[20:22], "little")
+        flags = int.from_bytes(header[22:24], "little")
+        if (
+            header[:4] != b"PE\x00\x00"
+            or machine != 0x8664
+            or not sections
+            or optional_size < 112
+            or offset + 24 + optional_size + sections * 40 > size
+            or not flags & 0x0002
+            or flags & 0x2000
+            or stream.read(2) != b"\x0b\x02"
+        ):
+            raise ValueError("Windows Cua Driver must be an AMD64 PE32+ executable")
 
 
 def validate_manifest(manifest: dict, target: str, tag: str) -> None:
@@ -334,8 +382,11 @@ def driver_provenance(
     packaged_driver: Path | None = None,
     packaged_cdhash: str | None = None,
 ) -> dict:
-    if TARGETS[target][0] != "macos":
-        raise ValueError("Cua Driver provenance is macOS-only")
+    windows = target == "x86_64-pc-windows-msvc"
+    if windows:
+        if packaged_cdhash is not None:
+            raise ValueError("Windows Cua Driver must not carry a macOS code signature")
+        verify_windows_driver_pe(prepared_driver)
     if prepared_driver.is_symlink() or not prepared_driver.is_file():
         raise ValueError("Invalid prepared Cua Driver provenance")
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
@@ -345,7 +396,7 @@ def driver_provenance(
         "tool_snapshot_sha256",
         "prepared_binary_sha256",
     )
-    pinned = pinned_driver_source()
+    pinned = pinned_driver_source(target)
     patched_fields = (
         "version",
         "tag",
@@ -370,6 +421,11 @@ def driver_provenance(
         raise ValueError("Invalid prepared Cua Driver provenance")
     if packaged_driver is None and packaged_cdhash is None:
         return provenance
+    if windows:
+        verify_windows_driver_pe(packaged_driver)
+        if digest(packaged_driver) != provenance["prepared_binary_sha256"]:
+            raise ValueError("Windows Cua Driver changed after preparation")
+        return {**provenance, "packaged_sha256": digest(packaged_driver)}
     if (
         packaged_driver is None
         or packaged_driver.is_symlink()
@@ -413,7 +469,7 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
     shutil.copyfile(installer, output / names[0])
     shutil.copyfile(manifest_path, output / names[1])
     source = {
-        "schema_version": DESKTOP_SOURCE_SCHEMA_VERSION,
+        "schema_version": WINDOWS_DRIVER_SOURCE_SCHEMA_VERSION if TARGETS[target][0] == "windows" else DESKTOP_SOURCE_SCHEMA_VERSION,
         "tag": tag, "source_sha": source_sha,
         "version": version, "target": target,
         "package_version": manifest["runtime_version"],
@@ -429,8 +485,13 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
             packaged_driver=driver,
             packaged_cdhash=driver_cdhash,
         )
-    elif any(value is not None for value in driver_values):
-        raise ValueError("Windows desktop artifacts cannot carry macOS Cua Driver provenance")
+    else:
+        if prepared_driver is None or driver is None or driver_provenance_path is None:
+            raise ValueError("Windows desktop artifacts require Cua Driver provenance")
+        source["computer_use_driver"] = driver_provenance(
+            target, prepared_driver, driver_provenance_path,
+            packaged_driver=driver, packaged_cdhash=driver_cdhash,
+        )
     (output / names[2]).write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (output / names[3]).write_text(signature_text, encoding="utf-8")
     (output / names[4]).write_text(
@@ -468,7 +529,10 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
             raise ValueError("Desktop asset hash mismatch")
         source = json.loads((directory / names[2]).read_text(encoding="utf-8"))
         schema_version = source.get("schema_version")
-        if schema_version not in {1, 2, DESKTOP_SOURCE_SCHEMA_VERSION}:
+        supported_schemas = {1, 2, DESKTOP_SOURCE_SCHEMA_VERSION}
+        if TARGETS[target][0] == "windows":
+            supported_schemas.add(WINDOWS_DRIVER_SOURCE_SCHEMA_VERSION)
+        if schema_version not in supported_schemas:
             raise ValueError("Desktop source provenance schema mismatch")
         expected_source = {"schema_version": schema_version, "tag": tag, "source_sha": source_sha,
                            "version": version, "target": target,
@@ -553,13 +617,31 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
                     raise ValueError("Desktop Cua Driver provenance mismatch")
             else:
                 raise ValueError("Desktop Cua Driver provenance mismatch")
+        elif schema_version == WINDOWS_DRIVER_SOURCE_SCHEMA_VERSION:
+            pinned = pinned_driver_source(target)
+            fields = (
+                "version", "tag", "source_commit", "source_archive", "source_archive_sha256",
+                "patch_variant", "patch_file", "patch_sha256", "patch_contract", "tool_snapshot_sha256",
+            )
+            if (
+                not isinstance(driver, dict)
+                or driver.get("schema_version") != 2
+                or any(driver.get(field) != pinned[field] for field in fields)
+                or driver.get("target") != target
+                or driver.get("arch") != "x86_64"
+                or driver.get("build_origin") != "repository_patch_built"
+                or re.fullmatch(r"[0-9a-f]{64}", str(driver.get("prepared_binary_sha256"))) is None
+                or driver.get("packaged_sha256") != driver.get("prepared_binary_sha256")
+                or "packaged_cdhash" in driver
+            ):
+                raise ValueError("Desktop Windows Cua Driver provenance mismatch")
         elif driver is not None:
-            raise ValueError("Windows desktop source unexpectedly carries Cua Driver provenance")
+            raise ValueError("Legacy Windows desktop source unexpectedly carries Cua Driver provenance")
         if source != expected_source:
             raise ValueError("Desktop source provenance mismatch")
         expected_signature = (
             release_signature(target, tag)
-            if schema_version == DESKTOP_SOURCE_SCHEMA_VERSION
+            if schema_version in {DESKTOP_SOURCE_SCHEMA_VERSION, WINDOWS_DRIVER_SOURCE_SCHEMA_VERSION}
             else LEGACY_SIGNATURE[TARGETS[target][0]]
         )
         if (directory / names[3]).read_text(encoding="utf-8") != expected_signature:
