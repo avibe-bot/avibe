@@ -11,10 +11,13 @@ from core.computer_use import (
     COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS,
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
     COMPUTER_USE_TOOL_NAMES,
+    ComputerUseStateError,
     SnapshotVerifier,
     desktop_computer_use_dir,
     desktop_computer_use_shell_is_live,
     effective_computer_use_status,
+    parse_computer_use_state,
+    _is_windows_named_pipe,
 )
 
 
@@ -90,6 +93,33 @@ def test_tool_snapshot_digest_matches_core_and_manifest_pins() -> None:
     mutated = bytearray(snapshot_bytes)
     mutated[0] ^= 1
     assert hashlib.sha256(mutated).hexdigest() != COMPUTER_USE_TOOL_SNAPSHOT_SHA256
+
+
+def test_windows_named_pipe_endpoint_is_valid_schema_v1_state(tmp_path: Path) -> None:
+    assert _is_windows_named_pipe(r"\\.\pipe\avibe-cua-shell-a-4")
+    assert not _is_windows_named_pipe("\\\\.\\pipe\\")
+    assert not _is_windows_named_pipe(r"\\.\pipe\avibe\\foreign")
+
+    payload = {
+        "schema_version": 1,
+        "enabled": True,
+        "state": "ready",
+        "reason": None,
+        "shell_pid": 123,
+        "instance_id": "shell-a",
+        "generation": 4,
+        "driver_version": "0.31.0",
+        "tool_snapshot": {"path": str(tmp_path / "tools.json"), "sha256": "0" * 64},
+        "socket_path": r"\\.\pipe\avibe-cua-shell-a-4",
+        "proxy_executable": str(tmp_path / "cua-driver.exe"),
+        "host_bundle_id": "bot.avibe.desktop",
+    }
+    state = parse_computer_use_state(payload)
+    assert state.socket_path == r"\\.\pipe\avibe-cua-shell-a-4"
+
+    payload["socket_path"] = r"\\.\pipe\avibe\\foreign"
+    with pytest.raises(ComputerUseStateError, match="socket_path"):
+        parse_computer_use_state(payload)
 
 
 def test_desktop_state_path_ignores_avibe_home(tmp_path: Path) -> None:

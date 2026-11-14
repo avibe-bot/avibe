@@ -13,7 +13,10 @@ export function clientState(): DesktopClientState {
       { id: 'team', name: '共享团队', host: 'team-app.avibe.bot', url: 'https://team-app.avibe.bot', relationship: 'shared', owner_email: '周@example.test', available: false },
     ] },
     local: { name: '小麦的 Mac', remote_access: 'off' },
-    desktop: { version: '3.2.6rc9', update: { phase: 'available', latest: '3.2.7', channel: 'test', skippedVersion: null, interactive: false } },
+    desktop: { version: '3.2.6rc9', update: {
+      phase: 'available', latest: '3.2.7', channel: 'test', prereleases: true, autoUpdate: false, checkedAt: '2026-11-13T07:00:00Z',
+      hostActions: ['check', 'prereleases', 'auto_update'], skippedVersion: null, interactive: false,
+    } },
     consent: null, remote_auxiliary: 'local',
   };
 }

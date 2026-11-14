@@ -46,7 +46,7 @@ launcher is still running. Repeating the same command does not fix its identity
 check. From a separate PowerShell terminal, rerun the official installer:
 
 ```powershell
-irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1 | iex
+irm https://avibe.bot/install.ps1 | iex
 ```
 
 This preserves Avibe's user data and configuration. Alternatively, use the

@@ -588,6 +588,7 @@ def test_signs_only_selected_account_and_records_original_session(custody, chain
         pending = api.vault_sign(payload)
         assert pending["code"] == "approval_required"
         request = pending["request"]
+        assert ("solana_lifetime_hint" in request) == (chain == "solana")
         assert request["delivery"]["derivation"] == {"chain": chain, "account": account}
         assert request["card"]["account"]["account"] == account
         assert request["delivery"]["operation_context"]["release"]["derivation"] == {"chain": chain, "account": account}
@@ -736,7 +737,9 @@ def test_cli_default_account_list_and_plain_keypair_option_refusal(custody, capf
     assert cli.cmd_vault_list(parser.parse_args(["vault", "list"])) == 0
     listed = json.loads(capfd.readouterr().out)["secrets"][0]
     assert listed["signer_kind"] == "hd-seed"
-    assert set(listed["accounts"][0]) == {"account", "name", "eth", "btc_taproot", "solana", "paths", "bitcoin_address_types"}
+    assert set(listed["accounts"][0]) == {"account", "name", "eth", "btc_taproot", "solana", "paths", "bitcoin_address_types", "always_ask"}
+    assert listed["accounts"][0]["always_ask"] is False
+    assert "durable nonce" in listed["solana_signing_note"]
     assert listed["accounts"][0]["bitcoin_address_types"] == ["p2tr"]
     with api._vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PLAIN", kind="keypair", sealed=Sealed("ct", "nonce", "meta"))
@@ -747,7 +750,8 @@ def test_cli_default_account_list_and_plain_keypair_option_refusal(custody, capf
     assert len(custody.calls) == before
 
 
-def test_cli_reports_the_approval_when_account_policy_changes_after_its_preflight(custody, monkeypatch, capfd):
+@pytest.mark.parametrize("chain", ["evm", "solana"])
+def test_cli_reports_the_approval_when_account_policy_changes_after_its_preflight(custody, monkeypatch, capfd, chain):
     """The API owns the final policy check; a racing toggle cannot become null-signature success."""
     create(custody)
     original = api.vault_sign
@@ -758,13 +762,15 @@ def test_cli_reports_the_approval_when_account_policy_changes_after_its_prefligh
 
     monkeypatch.setattr(api, "vault_sign", toggle_then_sign)
     args = cli.build_parser().parse_args([
-        "vault", "sign", "HD_TEST_WALLET", "--chain", "evm", "--digest", DIGEST,
+        "vault", "sign", "HD_TEST_WALLET", "--chain", chain,
+        *(["--message-hex", MESSAGE] if chain == "solana" else ["--digest", DIGEST]),
         "--session-id", "original-session", "--command", "verify and sign", "--no-callback",
     ])
     assert cli.cmd_vault_sign(args) == 0
     result = json.loads(capfd.readouterr().out)
     assert result["kind"] == "vault_sign_request"
     assert result["request"]["status"] == "pending"
+    assert ("solana_lifetime_hint" in result["request"]) == (chain == "solana")
     assert "signature" not in result
     request, = rows(vault_requests)
     requester = json.loads(request["requester"])

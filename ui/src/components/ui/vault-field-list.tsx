@@ -70,6 +70,10 @@ type FieldNameSpec =
 
 type FieldValueSpec = {
   value: string;
+  /** Show the value in clear regardless of the eye (the generator's popup is open). */
+  forceReveal?: boolean;
+  /** The value was generated in this dialog and not saved yet: the mint tint. */
+  generated?: boolean;
   label: string;
   placeholder: string;
   onChange: (value: string) => void;
@@ -87,7 +91,7 @@ type FieldRemoveSpec = {
 };
 
 export function VaultFieldRow({
-  field, name, isDefault, value, action, onSetDefault, remove, issue, disabled,
+  field, name, isDefault, value, action, note, wrapValue, onSetDefault, remove, issue, disabled,
 }: {
   /** The row's current name, used in labels and the phone menu's title. */
   field: string;
@@ -96,6 +100,10 @@ export function VaultFieldRow({
   value: FieldValueSpec;
   /** Trailing control beside the value, such as a row's Save button. */
   action?: ReactNode;
+  /** A line under the row, e.g. the generated mark. */
+  note?: ReactNode;
+  /** Wraps the value input, e.g. to anchor the generator's popup to it. */
+  wrapValue?: (input: ReactNode) => ReactNode;
   onSetDefault?: () => void;
   remove?: FieldRemoveSpec;
   /** What keeps this row from saving; the parent decides when a blank one is worth showing. */
@@ -228,8 +236,10 @@ export function VaultFieldRow({
           ) : null}
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <VaultFieldValueInput field={field} {...value} disabled={disabled} invalid={valueInvalid}
-            describedBy={valueInvalid ? errorId : undefined} />
+          {(wrapValue ?? ((input: ReactNode) => input))(
+            <VaultFieldValueInput field={field} {...value} disabled={disabled} invalid={valueInvalid}
+              describedBy={valueInvalid ? errorId : undefined} />,
+          )}
           {action}
           {remove ? (
             <Button
@@ -256,17 +266,18 @@ export function VaultFieldRow({
         </div>
       </div>
       {error ? <p id={errorId} className="mt-1 px-2 text-xs text-destructive-ink wrap-anywhere">{error}</p> : null}
+      {note ? <div className="mt-1.5 px-2">{note}</div> : null}
     </div>
   );
 }
 
 function VaultFieldValueInput({
-  field, value, label, placeholder, onChange, onBlur, autoFocus, disabled, invalid, describedBy,
+  field, value, label, placeholder, onChange, onBlur, autoFocus, disabled, invalid, describedBy, forceReveal, generated,
 }: FieldValueSpec & { field: string; disabled?: boolean; invalid?: boolean; describedBy?: string }) {
   const { t } = useTranslation();
   // Unset until the user toggles, so a row renamed to `username` follows its new name.
   const [reveal, setReveal] = useState<boolean | null>(null);
-  const revealed = reveal ?? REVEALED_BY_DEFAULT.has(field);
+  const revealed = forceReveal || (reveal ?? REVEALED_BY_DEFAULT.has(field));
   return (
     <div className="relative min-w-0 flex-1">
       <Input
@@ -282,7 +293,7 @@ function VaultFieldValueInput({
         autoComplete="off"
         spellCheck={false}
         disabled={disabled}
-        className={cn('pr-9', invalid && 'border-destructive/50')}
+        className={cn('pr-9', generated && 'border-mint/40 bg-mint-soft/40 font-mono text-xs', invalid && 'border-destructive/50')}
       />
       <Button
         type="button"

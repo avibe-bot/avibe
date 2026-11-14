@@ -184,6 +184,7 @@ def test_standard_signing_sends_the_exact_message_and_delivers_only_a_verified_s
     if approval:
         pending = api.vault_sign(payload)
         assert pending["code"] == "approval_required"
+        assert "solana_lifetime_hint" in pending["request"]
         request = pending["request"]
         assert request["delivery"]["message_hex"] == vector["message"]
         assert "digest" not in request["delivery"]
@@ -198,6 +199,7 @@ def test_standard_signing_sends_the_exact_message_and_delivers_only_a_verified_s
         assert result["signature"] == {"signature": vector["signature"], "recovery_id": None}
         if approval:
             assert result["request"]["status"] == "approved"
+            assert "solana_lifetime_hint" not in result["request"]
     else:
         with pytest.raises(api.VaultApiError, match="ed25519 signature"):
             api.vault_sign(payload)
@@ -916,3 +918,69 @@ def test_cli_signs_a_solana_message_and_lists_how_to_sign(avault, capfd):
     assert row["signing_addresses"] == {"solana": vault_solana.address(TWO_BYTES["public_key"])}
     assert "--scheme ed25519 --message-hex" in row["solana_signing_note"]
     assert "bitcoin_signing_warning" not in row
+    assert "durable nonce" in row["solana_signing_note"]
+
+
+@pytest.mark.parametrize("protection", ["standard", "protected"])
+@pytest.mark.parametrize("entrypoint", ["sign-api", "request-api", "cli"])
+@pytest.mark.parametrize("message", [
+    TRANSFER["message"],
+    json.loads((FIXTURES / "solana-durable-nonce.json").read_text())["messageHex"],
+    "00",
+], ids=["recent-blockhash", "durable-nonce", "opaque"])
+def test_pending_lifetime_advice_is_conditional_and_outside_signed_bytes(avault, capfd, protection, entrypoint, message):
+    create_key(solana_key(TRANSFER["public_key"]), protection=protection, always_ask=True)
+    context = solana_context(message)
+    payload = {"name": "KEY", "scheme": "ed25519", "message_hex": message, "signing_context": context}
+    if entrypoint == "cli":
+        args = cli.build_parser().parse_args([
+            "vault", "sign", "KEY", "--scheme", "ed25519", "--message-hex", message,
+            "--signing-context-json", json.dumps(context), "--no-callback",
+        ])
+        assert cli.cmd_vault_sign(args) == 0
+        pending = json.loads(capfd.readouterr().out)
+    else:
+        pending = (api.vault_sign if entrypoint == "sign-api" else api.request_vault_sign)(payload)
+    request = pending["request"]
+    expected = (
+        "If this message uses a recent blockhash, it may expire while awaiting approval. "
+        "Use a durable nonce for delayed submission."
+    )
+    assert request["solana_lifetime_hint"] == expected
+    release = request["delivery"]["operation_context"]["release"]
+    assert release["messageHex"] == message
+    assert release["signingContext"] == context
+    assert "solana_lifetime_hint" not in json.dumps(request_rows())
+    assert "solana_lifetime_hint" not in json.dumps(release)
+    assert avault.calls == []
+    # Read projections (including explicit no-callback polling) carry the same hint.
+    assert api.get_vault_request(request["id"])["request"]["solana_lifetime_hint"] == expected
+    args = cli.build_parser().parse_args(["vault", "await", request["id"]])
+    assert cli.cmd_vault_await(args) == 0
+    assert json.loads(capfd.readouterr().out)["request"]["solana_lifetime_hint"] == expected
+    with api._vault_engine().begin() as conn:
+        listed = vault_service.list_requests(conn)
+        assert next(item for item in listed if item["id"] == request["id"])["solana_lifetime_hint"] == expected
+        denied = vault_service.deny_request(conn, request["id"])
+        assert "solana_lifetime_hint" not in denied
+
+
+@pytest.mark.parametrize("status", ["pending", "signing", "approved", "denied", "expired", "failed", "fulfilled"])
+@pytest.mark.parametrize("request_type,scheme", [("sign", "ed25519"), ("sign", "ecdsa-secp256k1-recoverable"), ("access", "ed25519"), ("delete", "ed25519")])
+def test_lifetime_advice_projection_has_no_semantic_or_policy_effect(status, request_type, scheme):
+    row = {"id": "test", "request_type": request_type, "status": status,
+           "delivery": json.dumps({"scheme": scheme, "message_hex": ""})}
+    original = copy.deepcopy(row)
+    result = vault_service._request_row_payload(row, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    assert ("solana_lifetime_hint" in result) == (status == "pending" and request_type == "sign" and scheme == "ed25519")
+    assert row == original
+
+
+def test_sign_help_guides_nonce_building_without_claiming_standard_always_signs_inline(capfd):
+    with pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["vault", "sign", "--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capfd.readouterr().out.split())
+    assert "use a durable nonce" in help_text
+    assert "caller creates and funds the nonce account" in help_text
+    assert "standard signs inline" not in help_text
