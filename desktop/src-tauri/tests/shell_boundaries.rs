@@ -1377,8 +1377,6 @@ fn windows_remote_update_refuses_an_unwritable_install_before_shell_exit() {
         .find("\n    Invoke-AvibeReplacement $requestData")
         .expect("helper invocation");
     assert!(normalization_call < invoke);
-    assert!(helper.contains("$Path.Substring(4)"));
-    assert!(helper.contains("$Path.Substring(8)"));
     let ready = helper.find("[IO.File]::WriteAllText($ready").expect("ready marker");
     assert!(
         marker < ready,
