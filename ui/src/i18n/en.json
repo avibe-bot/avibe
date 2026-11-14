@@ -6656,12 +6656,12 @@
         "set": "Set"
       },
       "protected": {
-        "generateHint": "The secure window makes 12 words, you write them down and tap 3 to check; a passphrase is set there too (optional).",
-        "importHint": "Paste the words and passphrase (if any) in the secure window, compare account #0, then save.",
+        "generateHint": "Next, the secure window makes 12 words; write them down, then tap 3 of them to check. An optional passphrase is set there too.",
+        "importHint": "Paste the words in the secure window: each word is checked, and account #0’s addresses show so you can compare before saving. A passphrase, if any, goes there too.",
         "info": "The words and passphrase are handled only in this separate secure window; they are never handed to the main Avibe page or an Agent. Saving is confirmed with your Passkey.",
         "tierNote": "Protected: every signature by every account is approved in the secure window with your Passkey.",
-        "launchCreate": "Create in secure window",
-        "launchImport": "Import in secure window",
+        "launchCreate": "Generate the words in the secure window",
+        "launchImport": "Import wallet in the secure window",
         "waitingCta": "Waiting for the secure window…",
         "savingCta": "Saving…",
         "checkingCta": "Checking…",
@@ -6682,12 +6682,11 @@
           "mismatch": "Can’t confirm that the {{name}} saved in Avibe is the wallet the secure window just made. Don’t send funds to its addresses. Keep your written words."
         },
         "done": {
-          "title": "{{name}} is ready (Protected)",
-          "body": "Account #0’s addresses are below. Every signature is approved in the secure window.",
           "recovery": "If the Passkey is lost, the words plus the original passphrase (if any) still recover the wallet. But anyone with them can move the funds outside Avibe. A database backup alone cannot restore signing."
         },
         "approveEvery": "Approve every signature",
-        "blocked": "Not confirmed as the wallet that was just created: don’t send funds to it."
+        "blocked": "Not confirmed as the wallet that was just created: don’t send funds to it.",
+        "verified": "Checked: the wallet Avibe saved matches the one the secure window made."
       }
     }
   },

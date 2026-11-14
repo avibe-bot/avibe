@@ -126,8 +126,11 @@ it('creates: opens the window from the click, saves the opaque result, and offer
     name: NAME, kind: 'keypair', signer_kind: 'hd-seed', protection: 'protected',
     sealed: wallet.envelope, accounts: wallet.accounts, expected_account0: wallet.expected_account0,
   });
-  expect(await screen.findByText(fill(p.done.title, { name: NAME }))).toBeTruthy();
+  expect(await screen.findByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeTruthy();
   expect(screen.getByText(p.done.recovery)).toBeTruthy();
+  // The standard done screen: the same check line (protected wording), and how an Agent uses it.
+  expect(screen.getByText(p.verified)).toBeTruthy();
+  expect(screen.getByText(en.vaults.hd.done.howTitle)).toBeTruthy();
   expect(screen.getByText(wallet.expected_account0.eth)).toBeTruthy();
   expect(vault.afterCreated).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole('button', { name: en.vaults.hd.done.finish }));
@@ -139,7 +142,7 @@ it('imports with the same flow', async () => {
   api.createVaultSecret.mockResolvedValue({ ok: true, reconciliation: snapshot() });
   await launch('import');
   expect(vault.sealHdWallet).toHaveBeenCalledWith(NAME, 'import', 'window-1');
-  expect(await screen.findByText(fill(p.done.title, { name: NAME }))).toBeTruthy();
+  expect(await screen.findByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeTruthy();
 });
 
 it('sends the setup registration with the first protected secret', async () => {
@@ -182,7 +185,7 @@ it('a lost save reply is checked, never retried: unconfirmed until the exact wal
   // Check again: the wallet that was saved is exactly this one, so it is offered.
   api.getVaultHdReconciliation.mockResolvedValueOnce({ ok: true, reconciliation: snapshot() });
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: p.checkAgain })); });
-  expect(await screen.findByText(fill(p.done.title, { name: NAME }))).toBeTruthy();
+  expect(await screen.findByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeTruthy();
   expect(api.createVaultSecret).toHaveBeenCalledOnce();
   expect(vault.sealHdWallet).toHaveBeenCalledOnce();
 });
@@ -196,7 +199,7 @@ it('a refusal is shown, but the wallet stays unconfirmed and blocked: never "not
   expect(await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }))).toBeTruthy();
   expect(screen.getByText(fill(p.notice.refusal, { message: 'A secret with this name already exists' }))).toBeTruthy();
   expect(screen.queryByText(/nothing was saved/i)).toBeNull();
-  expect(screen.queryByText(fill(p.done.title, { name: NAME }))).toBeNull();
+  expect(screen.queryByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeNull();
   expect(vault.sealHdWallet).toHaveBeenCalledOnce();
 });
 
@@ -205,7 +208,7 @@ it('a saved wallet that differs from the window result is not offered', async ()
   api.createVaultSecret.mockResolvedValue({ ok: true, reconciliation: snapshot({ envelope_sha256: wallet.reordered_envelope_sha256 }) });
   await launch();
   expect(await screen.findByText(fill(p.notice.mismatch, { name: NAME }))).toBeTruthy();
-  expect(screen.queryByText(fill(p.done.title, { name: NAME }))).toBeNull();
+  expect(screen.queryByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeNull();
   expect(screen.queryByRole('button', { name: p.checkAgain })).toBeNull();
 });
 
@@ -219,7 +222,7 @@ it('an unreadable save answer is checked by name, and only a complete match is o
   await launch();
   expect(await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }))).toBeTruthy();
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: p.checkAgain })); });
-  expect(await screen.findByText(fill(p.done.title, { name: NAME }))).toBeTruthy();
+  expect(await screen.findByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeTruthy();
 });
 
 it('shows the vault setup first when there is no protected vault yet', async () => {
@@ -252,7 +255,7 @@ it('keeps an unconfirmed or mismatched wallet blocked outside the dialog, but no
   // A later exact match lifts it.
   api.getVaultHdReconciliation.mockResolvedValueOnce({ ok: true, reconciliation: snapshot() });
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: p.checkAgain })); });
-  await screen.findByText(fill(p.done.title, { name: NAME }));
+  await screen.findByText(fill(en.vaults.hd.done.title, { name: NAME }));
   expect(isHdWalletBlocked(NAME)).toBe(false);
   cleanup();
 

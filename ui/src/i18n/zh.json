@@ -6656,12 +6656,12 @@
         "set": "已设置"
       },
       "protected": {
-        "generateHint": "在安全窗口里生成 12 个词，抄下来后点 3 个词核对；Passphrase 也在那里设置（可选）。",
-        "importHint": "在安全窗口里粘贴助记词和 Passphrase（如有），核对账户 #0 后保存。",
+        "generateHint": "下一步在安全窗口里生成 12 个词，抄下来后点 3 个词核对。Passphrase（可选）也在那里设置。",
+        "importHint": "在安全窗口里粘贴助记词：逐词检查，并显示账户 #0 的地址，可以先核对再保存。Passphrase（如有）也在那里填。",
         "info": "助记词和 Passphrase 只在这个独立的安全窗口里处理，不会交给 Avibe 主页面或 Agent。保存时用 Passkey 确认。",
         "tierNote": "保护档：每个账户的每次签名，都要你在安全窗口里用 Passkey 批准。",
-        "launchCreate": "在安全窗口中创建",
-        "launchImport": "在安全窗口中导入",
+        "launchCreate": "在安全窗口中生成助记词",
+        "launchImport": "在安全窗口中导入钱包",
         "waitingCta": "等安全窗口完成…",
         "savingCta": "正在保存…",
         "checkingCta": "正在核对…",
@@ -6682,12 +6682,11 @@
           "mismatch": "无法确认 Avibe 里保存的 {{name}} 就是安全窗口刚生成的钱包。不要往它的地址转账，请保留抄好的助记词。"
         },
         "done": {
-          "title": "{{name}} 已创建（保护档）",
-          "body": "账户 #0 的地址如下。每次签名都要你在安全窗口里批准。",
           "recovery": "Passkey 丢了，靠这些词和原来的 Passphrase（如有）仍能找回钱包。但有词和 Passphrase 的人，可以在 Avibe 之外直接动用资金。只靠数据库备份无法恢复签名。"
         },
         "approveEvery": "每次签名都批准",
-        "blocked": "未能确认这就是刚创建的钱包：不要往里转账。"
+        "blocked": "未能确认这就是刚创建的钱包：不要往里转账。",
+        "verified": "已核对：Avibe 保存的钱包和安全窗口生成的一致。"
       }
     }
   },

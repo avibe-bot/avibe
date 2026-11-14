@@ -227,11 +227,15 @@ export function HdAccountAddressList({ account, types, hint = true }: {
 }
 
 /** Done: account #0 is ready and checked, and the user learns how to point an Agent at it. */
-export function HdDoneStep({ name, account, withPassphrase = false }: {
+export function HdDoneStep({ name, account, withPassphrase = false, protectedTier = false }: {
   name: string;
   account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'>;
   /** The wallet was made with a passphrase: recovery names both, not "if one was set". */
   withPassphrase?: boolean;
+  /** A protected wallet (made in the sandbox window). The same screen, with three differences its
+   *  custody forces: Bitcoin is Taproot only (plain label), the check is the daemon's snapshot against
+   *  the window's result, and recovery also covers a lost Passkey. */
+  protectedTier?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -248,13 +252,15 @@ export function HdDoneStep({ name, account, withPassphrase = false }: {
           <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">{t('vaults.hd.accountIndex', { account: 0 })}</span>
           {t('vaults.hd.mainAccount')}
         </span>
-        <HdAccountAddressList account={account} />
+        {protectedTier ? <HdAccountAddressList account={account} types={['p2tr']} hint={false} /> : <HdAccountAddressList account={account} />}
         <span className="flex items-center gap-1.5 text-[11.5px] text-mint-ink">
           <CircleCheck className="size-3.5 shrink-0" />
-          {t('vaults.hd.done.verified')}
+          {t(protectedTier ? 'vaults.hd.protected.verified' : 'vaults.hd.done.verified')}
         </span>
       </div>
-      {withPassphrase ? (
+      {protectedTier ? (
+        <HdNotice tone="warning" icon={AlertTriangle}>{t('vaults.hd.protected.done.recovery')}</HdNotice>
+      ) : withPassphrase ? (
         <HdNotice tone="warning" icon={AlertTriangle}>{t('vaults.hd.passphrase.recovery')}</HdNotice>
       ) : (
         <span className="text-[12px] text-muted">{t('vaults.hd.done.recovery')}</span>

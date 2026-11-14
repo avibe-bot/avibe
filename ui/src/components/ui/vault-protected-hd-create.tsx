@@ -8,7 +8,7 @@ import type { ProtectedHdPhase } from '@/lib/useProtectedHdCreate';
 import type { ProtectedHdAccount0 } from '@/lib/vaultProtectedHd';
 
 import { Button } from './button';
-import { HdAccountAddressList, HdNotice } from './vault-hd-wallet-steps';
+import { HdDoneStep, HdNotice } from './vault-hd-wallet-steps';
 
 /** Instead of "Ask before account #0 signs": on this tier every signature is approved. */
 export function ProtectedHdTierNote() {
@@ -73,25 +73,12 @@ export function ProtectedHdLaunchButton({ phase, mode, disabled, onCheckAgain }:
   );
 }
 
-/** Back on the page once the saved wallet matched: #0's addresses and what recovers it. */
+/** Back on the page once the saved wallet matched: the standard done screen, protected variant. */
 export function ProtectedHdDone({ name, account0, onFinish }: { name: string; account0: ProtectedHdAccount0; onFinish: () => void }) {
   const { t } = useTranslation();
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <div className="flex flex-col items-center gap-2 pt-2 text-center">
-        <span className="flex size-12 items-center justify-center rounded-2xl bg-mint-soft text-mint-ink"><ShieldCheck className="size-6" /></span>
-        <span className="text-[16px] font-semibold text-foreground">{t('vaults.hd.protected.done.title', { name })}</span>
-        <span className="max-w-sm text-[12.5px] leading-snug text-muted">{t('vaults.hd.protected.done.body')}</span>
-      </div>
-      <div className="flex flex-col gap-2 rounded-[10px] border border-edge bg-surface-2 p-3">
-        <span className="flex items-center gap-2 text-[12.5px] font-semibold text-foreground">
-          <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">{t('vaults.hd.accountIndex', { account: 0 })}</span>
-          {t('vaults.hd.mainAccount')}
-        </span>
-        {/* A protected wallet signs Bitcoin from Taproot only, so its label is plain. */}
-        <HdAccountAddressList account={account0} types={['p2tr']} hint={false} />
-      </div>
-      <HdNotice tone="warning" icon={TriangleAlert}>{t('vaults.hd.protected.done.recovery')}</HdNotice>
+      <HdDoneStep name={name} account={account0} protectedTier />
       <div className="mt-1 flex justify-end">
         <Button type="button" onClick={onFinish}>{t('vaults.hd.done.finish')}</Button>
       </div>
