@@ -39,7 +39,7 @@ jobs:
           ruff check ios/scripts/direct_interop_host.py ios/scripts/run_direct_interop.py tests/test_ios_direct_interop_*.py
 
   interop:
-    if: github.event_name == 'workflow_dispatch' && inputs.run_interop
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.run_interop
     needs: host-contract
     runs-on: macos-26
     timeout-minutes: 35

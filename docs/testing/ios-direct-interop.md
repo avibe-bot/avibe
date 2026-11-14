@@ -12,19 +12,30 @@ The `ios-direct-interop` workflow runs source-only Python contract tests on
 relevant pull requests. Those tests include real loopback TCP and a deliberately
 non-native subprocess protocol fixture; they are **not** Apple/iroh evidence.
 
-The native job is opt-in through `workflow_dispatch` with `run_interop: true`.
-It fails closed unless the Apple pin, sidecar pin, App adapter, interoperability
-XCTest source and Xcode graph match the freshly fetched merged default branch.
+The native job is opt-in through `workflow_dispatch` on **master** with
+`run_interop: true`. It requires the exact freshly fetched merged master commit
+and a clean index/working copy with no untracked source inputs. This binds the
+entire consuming source tree, including every App/runtime file and build helper,
+rather than trusting a partial filename list. The Apple pin, sidecar pin, App
+adapter, interoperability XCTest source and Xcode graph are additional named
+readiness checks, not the limit of that source fence.
 A pending sidecar pin or missing App test source is a dependency failure, not a
 successful or skipped interoperability run. There is no candidate-pin or binary
 path override.
 
-Actual release assets are downloaded and verified in `RUNNER_TEMP`. Only the
-verified Apple build input is copied to the App graph's staging directory. The
+Actual release assets are downloaded and verified in `RUNNER_TEMP`. The sidecar
+validator checks the complete five-platform published pin, version/tag/source URL,
+archive names/paths/sizes/checksums and qualification provenance, then verifies
+the selected archive's binary identity, source, version and qualification.
+Only the verified Apple build input is copied to the App graph's staging directory. The
 sidecar is executed from the temporary workspace, never from an installed
 runtime. The host records the child PIDs and each per-case fixture, drains both
 sidecar pipes, closes listeners/connections, and reaps its children on completion,
-control failure, timeout or cancellation. It does not install anything, enable
+control failure, timeout or cancellation. Cleanup is idempotent and independently
+owned: cancellation of a serving task or repeated cancellation of `close()` cannot
+abandon its bounded stop/TERM/KILL/reap sequence. The caller joins that cleanup
+before propagating cancellation; shielding without joining is not sufficient.
+It does not install anything, enable
 transport, modify pairing, use the owner's live runtime, provision certificates,
 perform public DNS/backend calls, or authorize device/TestFlight qualification.
 

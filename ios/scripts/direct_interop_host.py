@@ -87,6 +87,24 @@ async def close_writer(writer: asyncio.StreamWriter) -> None:
             await writer.wait_closed()
 
 
+async def finish_cleanup(task: asyncio.Task) -> None:
+    """Join one owned cleanup even if its caller is cancelled repeatedly.
+
+    Shielding alone is insufficient: it detaches cleanup when the caller exits.
+    Keep joining the same strongly owned task, then propagate cancellation only
+    after its bounded socket/TERM/KILL/reap sequence has actually completed.
+    """
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 class Journal:
     """Host monotonic order only; no comparison to the App's clock."""
 
@@ -116,6 +134,7 @@ class Sidecar:
         self.errors: list[str] = []
         self.stop_requested = False
         self.exit_event: dict | None = None
+        self._close_task: asyncio.Task | None = None
 
     async def start(self, port: int, token: str) -> dict:
         self.process = await asyncio.create_subprocess_exec(
@@ -204,6 +223,11 @@ class Sidecar:
         await self.command({"type": "stop"})
 
     async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await finish_cleanup(self._close_task)
+
+    async def _close(self) -> None:
         process = self.process
         if process is None:
             return
@@ -224,7 +248,8 @@ class Sidecar:
                 except TimeoutError:
                     with contextlib.suppress(ProcessLookupError):
                         process.kill()
-                    await process.wait()
+                    async with asyncio.timeout(3):
+                        await process.wait()
         if process.stdin:
             await close_writer(process.stdin)
         # Readers finish on EOF; do not cancel away malformed trailing output.
@@ -253,6 +278,7 @@ class Ingress:
         self.writers: set[asyncio.StreamWriter] = set()
         self.streams: list[dict] = []
         self.errors: list[str] = []
+        self._close_task: asyncio.Task | None = None
 
     async def start(self) -> int:
         self.server = await asyncio.start_server(self._accept, "127.0.0.1", 0, limit=LINE_LIMIT)
@@ -343,6 +369,11 @@ class Ingress:
         self.journal.record("setup_done", streams=len(self.streams))
 
     async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await finish_cleanup(self._close_task)
+
+    async def _close(self) -> None:
         self.closing = True
         if self.server:
             self.server.close()
@@ -393,6 +424,7 @@ class Case:
         self.armed: dict | None = None
         self.offer: dict = {}
         self.app_result: dict | None = None
+        self._close_task: asyncio.Task | None = None
 
     async def start(self, tier: str) -> dict:
         port = await self.ingress.start()
@@ -548,6 +580,11 @@ class Case:
         return observed
 
     async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await finish_cleanup(self._close_task)
+
+    async def _close(self) -> None:
         # Stop sidecar first so active forwarding is retired, then listeners.
         try:
             await self.sidecar.close()
@@ -571,6 +608,7 @@ class Host:
         self.closing = False
         self.owns_directory = False
         self.complete = asyncio.Event()
+        self._close_task: asyncio.Task | None = None
 
     async def start(self) -> Path:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -690,6 +728,11 @@ class Host:
         write_json(self.directory / "host.json", document)
 
     async def close(self) -> None:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await finish_cleanup(self._close_task)
+
+    async def _close(self) -> None:
         self.closing = True
         if self.server:
             self.server.close()

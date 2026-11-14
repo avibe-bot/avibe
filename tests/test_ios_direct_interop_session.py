@@ -7,8 +7,10 @@ state machine, separate tier handling, artifact join and recorded-PID cleanup.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 import sys
 from types import SimpleNamespace
 
@@ -114,3 +116,72 @@ for line in sys.stdin:
         pid = json.loads((directory / "engine" / name / "pid.json").read_text())["pid"]
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
+
+
+@pytest.mark.asyncio
+async def test_host_cancellation_cannot_abandon_ignoring_stop_child(tmp_path, monkeypatch):
+    child = tmp_path / "ignoring-stop-fixture"
+    child.write_text(f"#!{sys.executable}\n" + '''
+import json, pathlib, signal, sys
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+json.loads(sys.stdin.readline())
+print(json.dumps({"type":"ready", "protocol":1, "endpoint_id":"d"*64, "addresses":["127.0.0.1:1234"]}), flush=True)
+for line in sys.stdin:
+    if json.loads(line)["type"] == "stop":
+        pathlib.Path("stop-seen").touch()
+''')
+    child.chmod(0o700)
+    cases = []
+    original_case = host.Case
+
+    def track_case(*args, **kwargs):
+        case = original_case(*args, **kwargs)
+        cases.append(case)
+        return case
+
+    monkeypatch.setattr(host, "Case", track_case)
+    supervisor = host.Host(child, tmp_path / "results")
+    fixture = json.loads((await supervisor.start()).read_text())
+    reader, writer = await asyncio.open_connection("127.0.0.1", int(fixture["control"].split(":")[1]))
+    closing = None
+    try:
+        await host.send_message(writer, {"type": "hello", "schema": 2, "tier": "engine"})
+        await host.send_message(writer, {"type": "next", "client_endpoint_id": "a" * 64})
+        assert (await host.read_message(reader, 5))["name"] == "admitted"
+        await host.send_message(writer, {"type": "result", "schema": 2, "name": "admitted",
+                                         "outcome": "failed", "observed": {}, "detail": "fixture failure"})
+        marker = tmp_path / "results/engine/admitted/stop-seen"
+        async with asyncio.timeout(2):
+            while not marker.exists():
+                await asyncio.sleep(0.01)
+        # The serving task is already in Case.close -> Sidecar.close. Closing
+        # the host cancels that task; also cancel Host.close itself twice.
+        closing = asyncio.create_task(supervisor.close())
+        await asyncio.sleep(0.01)
+        closing.cancel()
+        await asyncio.sleep(0.01)
+        closing.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(closing), 12)
+        process = cases[0].sidecar.process
+        assert process.returncode is not None, "recorded sidecar PID survived cancelled cleanup"
+        assert process.returncode == -signal.SIGKILL
+        assert all(task.done() for task in cases[0].sidecar.tasks)
+        assert not cases[0].ingress.tasks
+        with pytest.raises(ProcessLookupError):
+            os.kill(process.pid, 0)
+    finally:
+        # Also reap on a regression failure; a failing source test must never
+        # leak its own deliberately uncooperative child onto this desktop.
+        if cases and cases[0].sidecar.process:
+            process = cases[0].sidecar.process
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            await asyncio.gather(*cases[0].sidecar.tasks, return_exceptions=True)
+            await cases[0].ingress.close()
+        await host.close_writer(writer)
+        if closing is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await closing
+        await supervisor.close()

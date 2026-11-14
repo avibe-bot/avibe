@@ -9,6 +9,7 @@ import copy
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tarfile
 
@@ -162,11 +163,19 @@ def test_final_reconciliation_fails_closed(tmp_path, mutation):
         runner.reconcile(tmp_path, code)
 
 
-def sidecar_archive(*, unsafe=False):
+def sidecar_archive(*, unsafe=False, manifest_changes=None):
     binary = b"deliberately-not-a-native-binary"
-    manifest = {"binary_sha256": hashlib.sha256(binary).hexdigest(), "binary_bytes": len(binary),
-                "target": "aarch64-apple-darwin", "source_sha": "a" * 40,
-                "workflow_run_id": "123", "workflow_run_attempt": 1}
+    manifest = {"name": "avibe-direct-transport", "version": "0.1.0", "binary": "avibe-direct-transport",
+                "binary_sha256": hashlib.sha256(binary).hexdigest(), "binary_bytes": len(binary),
+                "target": "aarch64-apple-darwin", "source_sha": "a" * 40, "pull_request_head_sha": "a" * 40,
+                "workflow_run_id": "123", "workflow_run_attempt": 1,
+                "distribution": "qualified-workflow-artifact", "patched_dependencies": False,
+                "transport_liveness": {"idle_timeout_ms": 6000, "keep_alive_ms": 1500},
+                "qualification": {"native_contract_tests": "passed", "resolved_feature_graph": "passed",
+                                  "linux_static": "not-applicable", "linux_idle_and_outage_tolerance": "not-applicable",
+                                  "linux_traffic_and_address_changes": "not-applicable",
+                                  "private_apple_datapath": "passed-with-positive-control"}}
+    manifest.update(manifest_changes or {})
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         for name, data in {"avibe-direct-transport": binary, "manifest.json": json.dumps(manifest).encode()}.items():
@@ -180,13 +189,22 @@ def sidecar_archive(*, unsafe=False):
             archive.addfile(info)
     data = output.getvalue()
     tag = "direct-transport-v0.1.0-1"
-    name = "avibe-direct-transport-aarch64-apple-darwin.tar.gz"
-    pin = {"release_state": "published", "source": "avibe-bot/avibe", "release_tag": tag,
-           "provenance": {"source_sha": "a" * 40, "qualification_run_id": "123", "qualification_attempt": 1},
-           "archives": {"darwin-arm64": {"name": name, "format": "tar.gz", "bin_path": "avibe-direct-transport",
-                                        "url": f"https://github.com/avibe-bot/avibe/releases/download/{tag}/{name}",
-                                        "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
-                                        "binary_sha256": hashlib.sha256(binary).hexdigest()}}}
+    targets = {"darwin-arm64": "aarch64-apple-darwin", "darwin-x64": "x86_64-apple-darwin",
+               "linux-arm64": "aarch64-unknown-linux-musl", "linux-x64": "x86_64-unknown-linux-musl",
+               "win32-x64": "x86_64-pc-windows-msvc"}
+    archives = {}
+    for key, target in targets.items():
+        name = f"avibe-direct-transport-{target}.tar.gz"
+        archives[key] = {"name": name, "format": "tar.gz",
+                         "bin_path": "avibe-direct-transport.exe" if key == "win32-x64" else "avibe-direct-transport",
+                         "url": f"https://github.com/avibe-bot/avibe/releases/download/{tag}/{name}",
+                         "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                         "binary_sha256": hashlib.sha256(binary).hexdigest()}
+    pin = {"schema_version": 1, "direct_transport_version": "0.1.0",
+           "release_state": "published", "source": "avibe-bot/avibe", "release_tag": tag,
+           "source_url": f"https://github.com/avibe-bot/avibe/releases/tag/{tag}",
+           "provenance": {"source_sha": "a" * 40, "qualification_run_id": "123", "qualification_attempt": 1,
+                          "release_record_sha256": "b" * 64}, "archives": archives}
     return data, pin
 
 
@@ -214,4 +232,128 @@ def test_staging_rejects_unpublished_or_mismatched_sidecar_inputs(tmp_path, muta
 def test_native_entry_point_refuses_the_live_desktop(monkeypatch):
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     with pytest.raises(runner.host.HostFault, match="hosted macOS"):
+        runner.hosted_root()
+
+
+@pytest.mark.parametrize("mutation", [
+    "schema_bool", "version_tag", "source_url", "missing_platform", "extra_platform",
+    "other_hash", "other_binary", "other_size_bool", "missing_source", "run_id_type",
+    "attempt_bool", "release_record",
+])
+def test_entire_published_pin_is_validated_not_only_the_host_archive(tmp_path, mutation):
+    data, pin = sidecar_archive()
+    # Positive control is essential: the old incomplete fixture shape must not
+    # make every negative pass merely because a newly required field is absent.
+    assert runner.unpack_sidecar(data, pin, "arm64", tmp_path / "valid")["source_sha"] == "a" * 40
+    if mutation == "schema_bool":
+        pin["schema_version"] = True
+    elif mutation == "version_tag":
+        pin["direct_transport_version"] = "9.9.9"
+    elif mutation == "source_url":
+        pin["source_url"] = "https://example.invalid/candidate"
+    elif mutation == "missing_platform":
+        del pin["archives"]["linux-x64"]
+    elif mutation == "extra_platform":
+        pin["archives"]["unsupported"] = dict(pin["archives"]["darwin-arm64"])
+    elif mutation == "other_hash":
+        pin["archives"]["linux-x64"]["sha256"] = "not-a-checksum"
+    elif mutation == "other_binary":
+        pin["archives"]["win32-x64"]["bin_path"] = "avibe-direct-transport"
+    elif mutation == "other_size_bool":
+        pin["archives"]["linux-x64"]["size"] = True
+    elif mutation == "missing_source":
+        del pin["provenance"]["source_sha"]
+    elif mutation == "run_id_type":
+        pin["provenance"]["qualification_run_id"] = 123
+    elif mutation == "attempt_bool":
+        pin["provenance"]["qualification_attempt"] = True
+    else:
+        pin["provenance"]["release_record_sha256"] = "bad"
+    with pytest.raises(runner.host.HostFault):
+        runner.unpack_sidecar(data, pin, "arm64", tmp_path / "invalid")
+    assert not (tmp_path / "invalid").exists()
+
+
+@pytest.mark.parametrize("changes", [
+    {"name": "other-binary"}, {"version": "9.9.9"}, {"binary": "other-binary"},
+    {"pull_request_head_sha": "c" * 40}, {"workflow_run_attempt": True},
+    {"qualification": {}}, {"distribution": "candidate"}, {"patched_dependencies": True},
+    {"transport_liveness": {"idle_timeout_ms": 9999, "keep_alive_ms": 1500}},
+])
+def test_archive_identity_and_qualification_are_checked_even_with_matching_hashes(tmp_path, changes):
+    data, pin = sidecar_archive(manifest_changes=changes)
+    with pytest.raises(runner.host.HostFault, match="identity mismatch"):
+        runner.unpack_sidecar(data, pin, "arm64", tmp_path / "stage")
+    assert not (tmp_path / "stage").exists()
+
+
+@pytest.fixture
+def merged_repository(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "no-global-config"))
+    for name in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{name}_NAME", "Interop Fixture")
+        monkeypatch.setenv(f"GIT_{name}_EMAIL", "fixture@example.invalid")
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repository), "-c", "commit.gpgsign=false", *args], stderr=subprocess.PIPE)
+
+    git("init", "-b", "master")
+    git("commit", "--allow-empty", "-m", "source fixture")
+    source = git("rev-parse", "HEAD").decode().strip()
+    _, pin = sidecar_archive()
+    pin["provenance"]["source_sha"] = source
+    for name in (*runner.DEPENDENCIES, "ios/Avibe/DirectIrohEngine.swift", "ios/Avibe/DirectIrohTransport.swift",
+                 "ios/Avibe/DirectIrohByteStream.swift", "ios/Avibe/DirectRendezvous.swift",
+                 "ios/scripts/prepare_iroh_app.py"):
+        path = repository / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(pin) if name == runner.SIDECAR_PIN else "merged fixture input\n")
+    git("add", ".")
+    git("commit", "-m", "merged fixture dependencies")
+    git("update-ref", "refs/remotes/origin/master", "HEAD")
+    monkeypatch.setattr(runner, "ROOT", repository)
+    # Apple pin semantics have their own owner tests. This fixture targets the
+    # entire-source fence; do not read a real release or download any artifact.
+    monkeypatch.setattr(runner.apple, "load_pin", lambda: {})
+    return repository, git
+
+
+@pytest.mark.parametrize("name,change", [
+    ("ios/Avibe/DirectIrohEngine.swift", "working"),
+    ("ios/Avibe/DirectIrohTransport.swift", "working"),
+    ("ios/Avibe/DirectIrohByteStream.swift", "working"),
+    ("ios/Avibe/DirectRendezvous.swift", "working"),
+    ("ios/scripts/prepare_iroh_app.py", "index"),
+    ("ios/scripts/prepare_iroh_app.py", "index_only"),
+    ("ios/Avibe/DirectIrohEngine.swift", "candidate"),
+    ("ios/Avibe/NewConsumer.swift", "untracked"),
+])
+def test_merged_fence_rejects_every_consuming_tree_change(merged_repository, name, change):
+    repository, git = merged_repository
+    snapshot = runner.merged_dependencies()
+    assert snapshot["head"] == snapshot["merged_base"]
+    if change == "candidate":
+        git("checkout", "-b", "candidate")
+    (repository / name).write_text("candidate input\n")
+    if change in {"index", "index_only", "candidate"}:
+        git("add", name)
+    if change == "index_only":
+        (repository / name).write_text("merged fixture input\n")
+    if change == "candidate":
+        git("commit", "-m", "unmerged consumer change")
+    with pytest.raises((runner.host.HostFault, subprocess.CalledProcessError)):
+        runner.merged_dependencies()
+
+
+def test_native_dispatch_ref_must_be_master(monkeypatch):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_OS", "macOS")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/candidate")
+    with pytest.raises(runner.host.HostFault, match="dispatch must use master"):
         runner.hosted_root()
