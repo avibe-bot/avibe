@@ -1398,6 +1398,19 @@ jobs:
       - name: Verify the Windows service lock keeps its record readable
         run: python -m pytest tests/test_service_lock_record.py -q
 
+      - name: Verify inactive Windows Computer Use admission foundation
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          python -m pytest tests/test_computer_use_windows.py -q -ra -k test_windows_native_ --junitxml=ci-junit/computer-use-native.xml
+          if ($LASTEXITCODE -ne 0) { throw "Native Computer Use foundation tests failed" }
+          [xml]$report = Get-Content ci-junit/computer-use-native.xml -Raw
+          $cases = @($report.SelectNodes('//testcase') | Where-Object { $_.name -like 'test_windows_native_*' })
+          if ($cases.Count -ne 7) { throw "Expected all seven native Computer Use cases, got $($cases.Count)" }
+          if (@($cases | Where-Object { $_.SelectSingleNode('skipped') }).Count -ne 0) {
+            throw "Native Computer Use cases must execute, not skip"
+          }
+
       # `vibe stop` walks every process on the machine before it signals
       # anything. On Linux a process whose command line psutil cannot read
       # costs a /proc read; on Windows it cost a `powershell` launch, and a
