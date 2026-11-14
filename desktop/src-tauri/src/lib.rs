@@ -36,6 +36,12 @@ pub mod updater;
 
 #[cfg(target_os = "macos")]
 mod computer_use;
+// Process ownership only: Windows Computer Use stays unavailable until its
+// resource, admission, private-pipe and health contracts are integrated.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+#[allow(dead_code)]
+#[path = "computer_use/windows_process.rs"]
+mod computer_use_process;
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
 #[cfg(target_os = "macos")]

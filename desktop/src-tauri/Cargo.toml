@@ -66,6 +66,11 @@ dirs = "7"
 windows-sys = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
+  # Computer Use's inactive Windows x64 process-ownership foundation.
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]
