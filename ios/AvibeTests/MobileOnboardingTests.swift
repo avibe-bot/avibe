@@ -1691,6 +1691,271 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
+    /// A reset may supersede refresh AFTER discovery while native push cleanup
+    /// is suspended. Existing fetch-held tests cover only the earlier await.
+    func testRefreshPushCleanupCannotOverwriteLogoutOrANewerAccount() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        let discoveries: [(String, MobileSessionDiscovery?)] = [
+            ("removed origin", .signedIn(snapshot(accountID: "account-1", instances: []))),
+            ("second factor", .secondFactorRequired(requirement)),
+            ("signed out", nil),
+            ("other account", .signedIn(snapshot(accountID: "account-2"))),
+        ]
+        for (kind, discovery) in discoveries {
+            for order in ["during logout", "after logout", "after account B login"] {
+                let name = "\(kind), \(order)"
+                let first = FakeMobileAuthTransport()
+                first.session = snapshot(accountID: "account-1")
+                let refreshTransport = FakeMobileAuthTransport()
+                refreshTransport.fetchSessionHandler = { discovery }
+                let replacement = FakeMobileAuthTransport()
+                let accountB = snapshot(accountID: "account-3")
+                replacement.session = accountB
+                let cleanupStarted = expectation(description: "push cleanup: \(name)")
+                let allowCleanup = expectation(description: "release push cleanup: \(name)")
+                let logoutStarted = expectation(description: "logout: \(name)")
+                let allowLogout = expectation(description: "release logout: \(name)")
+                refreshTransport.logoutHandler = {
+                    logoutStarted.fulfill()
+                    await self.fulfillment(of: [allowLogout], timeout: 30)
+                }
+                var opened: MobileRuntimeContext?
+                var created = 0
+                let coordinator = makeCoordinator(
+                    defaults: makeDefaults(),
+                    transports: [first, refreshTransport, replacement]
+                        + (0..<4).map { _ in FakeMobileAuthTransport() },
+                    onCreateTransport: { created += 1 },
+                    onOpen: { opened = $0 },
+                    onPreparePushLogout: {
+                        cleanupStarted.fulfill()
+                        await self.fulfillment(of: [allowCleanup], timeout: 30)
+                    }
+                )
+                coordinator.activateAccountSurface()
+                _ = try await coordinator.bootstrap()
+                _ = try coordinator.selectInstance(id: instance.id)
+                coordinator.activateAccountSurface()
+                let refresh = Task { try await coordinator.refresh() }
+                await fulfillment(of: [cleanupStarted], timeout: 30)
+                let logout = Task { try await coordinator.logout() }
+                await fulfillment(of: [logoutStarted], timeout: 30)
+
+                let result: Result<MobileSessionState, Error>
+                if order == "during logout" {
+                    allowCleanup.fulfill()
+                    result = await refresh.result
+                    allowLogout.fulfill()
+                    _ = try await logout.value
+                } else {
+                    allowLogout.fulfill()
+                    _ = try await logout.value
+                    if order == "after account B login" {
+                        _ = try await coordinator.verifyOTP(
+                            email: "account-3@example.com", code: "123456"
+                        )
+                        _ = try coordinator.selectInstance(id: instance.id)
+                    }
+                    allowCleanup.fulfill()
+                    result = await refresh.result
+                }
+                switch result {
+                case .success:
+                    XCTFail("Superseded refresh must be stale: \(name)")
+                case .failure(let error):
+                    XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session", name)
+                }
+                let state = try await coordinator.bootstrap()
+                if order == "after account B login" {
+                    XCTAssertEqual(coordinator.currentAccount, accountB.account, name)
+                    XCTAssertEqual(state, .signedIn(snapshot: accountB, selectedInstanceID: instance.id), name)
+                    XCTAssertTrue(coordinator.isCurrentRuntime(try XCTUnwrap(opened)), name)
+                } else {
+                    XCTAssertNil(coordinator.currentAccount, name)
+                    XCTAssertEqual(state, .signedOut, name)
+                    XCTAssertFalse(replacement.invalidated, name)
+                }
+                XCTAssertEqual(created, 3, name)
+            }
+        }
+    }
+
+    /// Reopening during push cleanup is later than the existing fetch-held
+    /// cases, but earlier than their post-transition/store-rotation bootstrap.
+    func testReplacementBootstrapReadsTheAuthoritativeResultDuringPushCleanup() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        let reduced = snapshot(accountID: "account-1", instances: [])
+        let rows: [(String, MobileSessionDiscovery?, MobileSessionState)] = [
+            ("signed out", nil, .signedOut),
+            ("other account", .signedIn(snapshot(accountID: "account-2")), .signedOut),
+            ("removed origin", .signedIn(reduced), .signedIn(snapshot: reduced, selectedInstanceID: nil)),
+            ("second factor", .secondFactorRequired(requirement), .twoFactorRequired(requirement)),
+        ]
+        for (name, discovery, expected) in rows {
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1")
+            let refreshTransport = FakeMobileAuthTransport()
+            let fetchStarted = expectation(description: "fetch: \(name)")
+            let allowFetch = expectation(description: "release fetch: \(name)")
+            let cleanupStarted = expectation(description: "cleanup: \(name)")
+            let allowCleanup = expectation(description: "release cleanup: \(name)")
+            refreshTransport.fetchSessionHandler = {
+                fetchStarted.fulfill()
+                await self.fulfillment(of: [allowFetch], timeout: 30)
+                return discovery
+            }
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [first, refreshTransport, FakeMobileAuthTransport()],
+                onPreparePushLogout: {
+                    cleanupStarted.fulfill()
+                    await self.fulfillment(of: [allowCleanup], timeout: 30)
+                }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: instance.id)
+            coordinator.activateAccountSurface()
+            let refresh = Task { try await coordinator.refresh() }
+            await fulfillment(of: [fetchStarted], timeout: 30)
+            coordinator.leaveAccountSurface()
+            allowFetch.fulfill()
+            await fulfillment(of: [cleanupStarted], timeout: 30)
+            coordinator.activateAccountSurface()
+            let replacement: Result<MobileSessionState, Error>
+            do {
+                replacement = .success(try await coordinator.bootstrap())
+            } catch {
+                replacement = .failure(error)
+            }
+            allowCleanup.fulfill()
+            let final = try await refresh.value
+            XCTAssertEqual(try replacement.get(), expected, name)
+            XCTAssertEqual(final, expected, name)
+            XCTAssertTrue(coordinator.isAccountSurfaceActive, name)
+            if expected != .signedOut {
+                XCTAssertFalse(refreshTransport.invalidated, name)
+            }
+        }
+    }
+
+    func testPushCleanupForBootstrapSecondFactorAndLogoutRejectsSupersededResults() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        for operation in ["bootstrap", "second factor", "logout"] {
+            let original = FakeMobileAuthTransport()
+            if operation == "second factor" {
+                original.secondFactor = requirement
+                original.verifySecondFactorHandler = { _ in throw MobileAccountError.signedOut }
+            } else if operation == "logout" {
+                original.session = snapshot(accountID: "account-1")
+            }
+            let replacement = FakeMobileAuthTransport()
+            replacement.session = snapshot(accountID: "account-2")
+            let started = expectation(description: "cleanup \(operation)")
+            let release = expectation(description: "release cleanup \(operation)")
+            var created = 0
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [original, replacement, FakeMobileAuthTransport()],
+                onCreateTransport: { created += 1 },
+                onPreparePushLogout: {
+                    started.fulfill()
+                    await self.fulfillment(of: [release], timeout: 30)
+                }
+            )
+            coordinator.activateAccountSurface()
+            if operation != "bootstrap" { _ = try await coordinator.bootstrap() }
+            let pending = Task {
+                switch operation {
+                case "bootstrap": return try await coordinator.bootstrap()
+                case "second factor": return try await coordinator.verifySecondFactor(method: .totp, code: "123456")
+                default: return try await coordinator.logout()
+                }
+            }
+            await fulfillment(of: [started], timeout: 30)
+            let signedOut = try await coordinator.logout()
+            XCTAssertEqual(signedOut, .signedOut, operation)
+            _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
+            release.fulfill()
+            switch await pending.result {
+            case .success: XCTFail("Superseded \(operation) must be stale")
+            case .failure(let error):
+                XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session", operation)
+            }
+            XCTAssertEqual(coordinator.currentAccount?.id, "account-2", operation)
+            XCTAssertFalse(replacement.invalidated, operation)
+            XCTAssertEqual(created, 2, operation)
+        }
+    }
+
+    func testStoreRotationRejectsSupersededAuthOperationsBeforeTheyUseTheNewTransport() async throws {
+        for operation in ["bootstrap", "password", "OTP request"] {
+            let defaults = makeDefaults()
+            let registry = FakeNamedDataStoreRegistry()
+            let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+            let rotating = expectation(description: "old rotation \(operation)")
+            let releaseRotation = expectation(description: "release old rotation \(operation)")
+            var lists = 0
+            registry.listIdentifiersHandler = {
+                lists += 1
+                if lists == 1 {
+                    rotating.fulfill()
+                    await self.fulfillment(of: [releaseRotation], timeout: 30)
+                }
+            }
+            let original = FakeMobileAuthTransport()
+            original.signInWithPasswordHandler = { _, _ in throw MobileAccountError.signedOut }
+            let resetting = FakeMobileAuthTransport()
+            let replacement = FakeMobileAuthTransport()
+            let accountB = snapshot(accountID: "account-2")
+            replacement.session = accountB
+            let transports = [original, resetting, replacement]
+                + (0..<3).map { _ in FakeMobileAuthTransport() }
+            var otpRequests = 0
+            for transport in transports {
+                transport.requestOTPHandler = { _ in otpRequests += 1; return 60 }
+            }
+            var created = 0
+            var opened: MobileRuntimeContext?
+            let coordinator = makeCoordinator(
+                defaults: defaults, websiteDataStore: store, transports: transports,
+                onCreateTransport: { created += 1 }, onOpen: { opened = $0 }
+            )
+            coordinator.activateAccountSurface()
+            let pending = Task {
+                switch operation {
+                case "bootstrap": _ = try await coordinator.bootstrap()
+                case "password":
+                    _ = try await coordinator.signInWithPassword(email: "old@example.com", password: "fixture")
+                default: _ = try await coordinator.requestOTP(email: "old@example.com")
+                }
+            }
+            await fulfillment(of: [rotating], timeout: 30)
+            _ = try await coordinator.logout()
+            _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
+            _ = try coordinator.selectInstance(id: instance.id)
+            let runtime = try XCTUnwrap(opened)
+            releaseRotation.fulfill()
+            switch await pending.result {
+            case .success: XCTFail("Old \(operation) must be stale after store rotation")
+            case .failure(let error):
+                XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session", operation)
+            }
+            let state = try await coordinator.bootstrap()
+            XCTAssertEqual(state, .signedIn(snapshot: accountB, selectedInstanceID: instance.id), operation)
+            XCTAssertEqual(otpRequests, 0, operation)
+            XCTAssertEqual(created, 3, operation)
+            XCTAssertTrue(coordinator.isCurrentRuntime(runtime), operation)
+            XCTAssertFalse(coordinator.isAccountSurfaceActive, operation)
+        }
+    }
+
     func testRefreshPushLogoutKeepsTheOuterTransportOwner() async throws {
         let requirement = MobileSecondFactorRequirement(
             email: "account-1@example.com",
@@ -3198,6 +3463,7 @@ private final class FakeNamedDataStoreRegistry {
     var returningIdentifiers = Set<UUID>()
     var removalAttempts: [UUID] = []
     var beforeRemoval: ((UUID) -> Void)?
+    var listIdentifiersHandler: (() async -> Void)?
 
     var operations: AccountWebsiteDataStoreOperations {
         AccountWebsiteDataStoreOperations(
@@ -3220,7 +3486,8 @@ private final class FakeNamedDataStoreRegistry {
                 return nil
             },
             listIdentifiers: { [self] in
-                identifiers
+                await listIdentifiersHandler?()
+                return identifiers
             }
         )
     }

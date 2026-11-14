@@ -832,6 +832,72 @@ final class DirectPathAppTests: XCTestCase {
         withExtendedLifetime(controller) {}
     }
 
+    /// Exercise the real AppModel -> NativePushCoordinator cleanup callback,
+    /// not just the coordinator hook: opening Account in this early window
+    /// must bootstrap signed out rather than leave the new page on bootError.
+    @MainActor
+    func testAccountReopenedDuringRefreshPushCleanupBootstrapsSignedOut() async throws {
+        let session = SessionAnswerOverride()
+        let keychain = InMemoryPushKeychainStore()
+        let marker = InMemoryPushInstallationMarkerStore()
+        let center = HeldCleanupNotificationCenter()
+        let app = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { session.response },
+            pushKeychain: keychain,
+            pushInstallationMarker: marker,
+            pushNotificationCenter: center
+        )
+        let runtime = try await select("instance-1", in: app)
+        let installationID = UUID()
+        marker.installationID = installationID
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 12, count: 32),
+            accountID: "account-1", bindGeneration: 1,
+            providerGeneration: 0, provider: nil,
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        // A retired key is enough for notification cleanup, without enabling
+        // APNs registration, prompting permissions, or recovery networking.
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "fixture-retired-key", instanceOrigin: "https://instance-one.example",
+            accountID: "account-1", accountGeneration: 1, bindGeneration: 1,
+            privateKey: Data(), authSecret: Data(), vapidKeyHash: "fixture",
+            state: .retiring, pendingRevoke: false, replacementRegistrationIDs: [],
+            retirementDeadline: .distantFuture
+        ))
+        let fetched = FixtureEvent(description: "refresh fetch held before 401")
+        let releaseFetch = DispatchSemaphore(value: 0)
+        defer { releaseFetch.signal() }
+        session.holdSignedOut(started: fetched, release: releaseFetch)
+        app.showAccount()
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let refresh = Task { try await app.mobileSessionCoordinator.refresh() }
+        await fulfillment(of: [fetched.expectation], timeout: 30)
+        XCTAssertTrue(app.returnToRuntime())
+        XCTAssertEqual(app.route, .browser(runtime))
+        releaseFetch.signal()
+        await fulfillment(of: [center.cleanupStarted], timeout: 30)
+
+        app.showAccount()
+        XCTAssertEqual(app.route, .onboarding(.account))
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let replacement: Result<MobileSessionState, Error>
+        do {
+            replacement = .success(try await app.mobileSessionCoordinator.bootstrap())
+        } catch {
+            replacement = .failure(error)
+        }
+        center.releaseCleanup()
+        let final = try await refresh.value
+        trackStore(of: app)
+        XCTAssertEqual(try replacement.get(), .signedOut)
+        XCTAssertEqual(final, .signedOut)
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        XCTAssertEqual(app.route, .onboarding(.account))
+    }
+
     // MARK: A runtime abandoned when its WebView registers
 
     @MainActor
@@ -1698,6 +1764,10 @@ final class DirectPathAppTests: XCTestCase {
         directTransport: DirectTransporting?,
         directFaultMarker: DirectFaultMarkerStoring? = nil,
         pushHolds: [PushHold] = [],
+        sessionResponse: (@Sendable () -> LocalHTTPResponse?)? = nil,
+        pushKeychain: InMemoryPushKeychainStore? = nil,
+        pushInstallationMarker: InMemoryPushInstallationMarkerStore? = nil,
+        pushNotificationCenter: PushNotificationCentering? = nil,
         beforeTheAppExists: () throws -> Void = {}
     ) async throws -> AppModel {
         let server = try LocalHTTPServer { request in
@@ -1710,6 +1780,9 @@ final class DirectPathAppTests: XCTestCase {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
+                if let response = sessionResponse?() {
+                    return response
+                }
                 return .json(
                     """
                     {
@@ -1765,10 +1838,10 @@ final class DirectPathAppTests: XCTestCase {
                 controlPlane: controlPlane,
                 directTransport: directTransport,
                 directFaultMarker: directFaultMarker,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         } else if let directTransport {
@@ -1776,20 +1849,20 @@ final class DirectPathAppTests: XCTestCase {
                 defaults: defaults,
                 controlPlane: controlPlane,
                 directTransport: directTransport,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         } else {
             app = AppModel(
                 defaults: defaults,
                 controlPlane: controlPlane,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         }
@@ -2433,6 +2506,57 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
         loadingWebView = nil
         pending?.resume(with: result)
     }
+}
+
+/// Only the loopback server reads this from outside the main actor.
+private final class SessionAnswerOverride: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResponse: LocalHTTPResponse?
+    private var heldFetch: (FixtureEvent, DispatchSemaphore)?
+    var response: LocalHTTPResponse? {
+        lock.lock()
+        let response = storedResponse
+        let held = heldFetch
+        heldFetch = nil
+        lock.unlock()
+        // A 401 is consumed at headers, so hold BEFORE responding instead of
+        // holding its body (which would not actually suspend fetchSession).
+        if let (started, release) = held {
+            started.signal()
+            release.wait()
+        }
+        return response
+    }
+
+    func holdSignedOut(started: FixtureEvent, release: DispatchSemaphore) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedResponse = .status(401)
+        heldFetch = (started, release)
+    }
+}
+
+@MainActor
+private final class HeldCleanupNotificationCenter: PushNotificationCentering {
+    let cleanupStarted = XCTestExpectation(description: "native push notification cleanup suspended")
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func deliveredNotifications() async -> [PushNotificationCenterEntry] {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            cleanupStarted.fulfill()
+        }
+        return []
+    }
+
+    func releaseCleanup() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry] { [] }
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
 }
 
 @MainActor

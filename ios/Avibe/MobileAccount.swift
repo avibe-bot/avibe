@@ -535,7 +535,10 @@ final class MobileSessionCoordinator {
     /// selection and transport ownership have different invariants.
     private var transportOperationToken: UUID?
     private var signedOutStoreIsFresh = false
-    private var authoritativeSignedOutTransitionInProgress = false
+    /// A replacement page must read the known result even while push/store
+    /// cleanup suspends. The publication ID prevents an older continuation
+    /// from clearing a newer transition's result.
+    private var authoritativeTransition: (id: UUID, state: MobileSessionState)?
     private var pendingStoreReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
     ] = []
@@ -625,6 +628,9 @@ final class MobileSessionCoordinator {
     }
 
     func bootstrap() async throws -> MobileSessionState {
+        if let authoritativeTransition {
+            return authoritativeTransition.state
+        }
         if let snapshot {
             guard keepsSelection else {
                 throw MobileAccountError.busy
@@ -632,9 +638,6 @@ final class MobileSessionCoordinator {
             return state(for: snapshot)
         }
         if signedOutStoreIsFresh {
-            return .signedOut
-        }
-        if authoritativeSignedOutTransitionInProgress {
             return .signedOut
         }
         if case .resetting = phase, snapshot == nil {
@@ -648,17 +651,19 @@ final class MobileSessionCoordinator {
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
-                await self.preparePushLogout()
-                self.authoritativeSignedOutTransitionInProgress = true
-                self.beginAccountTransition(clearSelection: true)
-                await self.replaceWithFreshSignedOutStore()
+                try await self.preparePushLogout(
+                    publishing: .signedOut, generation: requestGeneration
+                )
+                let transitionGeneration = self.beginAccountTransition(clearSelection: true)
+                try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
                 return .signedOut
             }
             if self.belongsToAnotherAccount(discovery) {
-                await self.preparePushLogout()
-                self.authoritativeSignedOutTransitionInProgress = true
-                self.beginAccountTransition(clearSelection: true)
-                await self.replaceWithFreshSignedOutStore()
+                try await self.preparePushLogout(
+                    publishing: .signedOut, generation: requestGeneration
+                )
+                let transitionGeneration = self.beginAccountTransition(clearSelection: true)
+                try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
                 return .signedOut
             }
             self.signedOutStoreIsFresh = false
@@ -679,8 +684,9 @@ final class MobileSessionCoordinator {
                 clearSelection: true
             )
             if !self.signedOutStoreIsFresh {
-                await self.replaceWithFreshSignedOutStore()
+                try await self.replaceWithFreshSignedOutStore(generation: requestGeneration)
             }
+            try self.requireCurrentGeneration(requestGeneration)
             let cooldown = try await self.requireTransport().requestOTP(email: normalized)
             try self.requireCurrentGeneration(requestGeneration)
             return cooldown
@@ -708,7 +714,7 @@ final class MobileSessionCoordinator {
                 return self.state(for: discovery)
             } catch {
                 if self.generation == loginGeneration {
-                    await self.replaceWithFreshSignedOutStore()
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
                 }
                 throw error
             }
@@ -748,7 +754,7 @@ final class MobileSessionCoordinator {
                 guard self.generation == loginGeneration else {
                     throw error
                 }
-                await self.replaceWithFreshSignedOutStore()
+                try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
                 if (error as? MobileAccountError)?.code
                     == MobileAccountError.signedOut.code
                 {
@@ -774,10 +780,11 @@ final class MobileSessionCoordinator {
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
-                await self.preparePushLogout()
-                self.authoritativeSignedOutTransitionInProgress = true
-                self.beginAccountTransition(clearSelection: true)
-                await self.replaceWithFreshSignedOutStore()
+                try await self.preparePushLogout(
+                    publishing: .signedOut, generation: requestGeneration
+                )
+                let transitionGeneration = self.beginAccountTransition(clearSelection: true)
+                try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
                 return .signedOut
             }
             switch discovery {
@@ -786,20 +793,32 @@ final class MobileSessionCoordinator {
                     let previousAccountID,
                     previousAccountID != fresh.account.id
                 {
-                    await self.preparePushLogout()
-                    self.authoritativeSignedOutTransitionInProgress = true
-                    self.beginAccountTransition(clearSelection: true)
-                    await self.replaceWithFreshSignedOutStore()
+                    try await self.preparePushLogout(
+                        publishing: .signedOut, generation: requestGeneration
+                    )
+                    let transitionGeneration = self.beginAccountTransition(clearSelection: true)
+                    try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
                     return .signedOut
                 }
                 if self.selectedRuntimeOriginIsMissing(in: fresh) {
-                    await self.preparePushLogout()
+                    try await self.preparePushLogout(
+                        publishing: .signedIn(
+                            snapshot: self.orderedByUse(fresh, current: nil),
+                            selectedInstanceID: nil
+                        ),
+                        generation: requestGeneration
+                    )
                     self.beginRuntimeInvalidation(with: fresh)
                 }
                 self.signedOutStoreIsFresh = false
                 return self.state(for: fresh)
-            case .secondFactorRequired:
-                await self.preparePushLogout()
+            case .secondFactorRequired(let requirement):
+                try await self.preparePushLogout(
+                    publishing: .twoFactorRequired(
+                        requirement.withEmail(fallback: self.secondFactorEmail)
+                    ),
+                    generation: requestGeneration
+                )
                 if previousAccountID != nil {
                     // A live account lost its authorization. A cold launch
                     // that already owes a second factor has no runtime to
@@ -917,19 +936,21 @@ final class MobileSessionCoordinator {
     }
 
     func logout() async throws -> MobileSessionState {
-        await preparePushLogout()
+        try await preparePushLogout(publishing: .signedOut, generation: generation)
         let resetToken = try beginReset()
         defer { finishReset(resetToken) }
-        beginAccountTransition(clearSelection: true)
+        let resetGeneration = beginAccountTransition(clearSelection: true)
         secondFactorEmail = nil
 
         if let oldTransport = transport {
             await oldTransport.cancelAll()
+            try requireCurrentGeneration(resetGeneration)
             try? await oldTransport.logout()
+            try requireCurrentGeneration(resetGeneration)
         }
         releaseTransportPreservingSurfaceLease()
 
-        await rotateWebsiteDataStore()
+        try await rotateWebsiteDataStore(generation: resetGeneration)
         signedOutStoreIsFresh = true
         ensureTransport()
         return .signedOut
@@ -983,11 +1004,29 @@ final class MobileSessionCoordinator {
             // The first-factor session ended while it owed the second factor:
             // an explicit signed-out answer, like a session read's `401`.
             try requireCurrentGeneration(requestGeneration)
-            await preparePushLogout()
-            beginAccountTransition(clearSelection: true)
-            await replaceWithFreshSignedOutStore()
+            try await preparePushLogout(publishing: .signedOut, generation: requestGeneration)
+            let transitionGeneration = beginAccountTransition(clearSelection: true)
+            try await replaceWithFreshSignedOutStore(generation: transitionGeneration)
             return .signedOut
         }
+    }
+
+    private func preparePushLogout(
+        publishing state: MobileSessionState,
+        generation requestGeneration: Int
+    ) async throws {
+        try requireCurrentGeneration(requestGeneration)
+        let publicationID = UUID()
+        authoritativeTransition = (publicationID, state)
+        defer {
+            if authoritativeTransition?.id == publicationID {
+                authoritativeTransition = nil
+            }
+        }
+        await preparePushLogout()
+        // Push cleanup can be superseded by logout and even a new login.
+        // Transport ownership alone does not authorize the old state write.
+        try requireCurrentGeneration(requestGeneration)
     }
 
     private func preparePushLogout() async {
@@ -1000,9 +1039,10 @@ final class MobileSessionCoordinator {
         case .resetting, .pushLogout:
             return
         }
+        let requestGeneration = generation
         phase = .pushLogout(resumePhase)
         await onPreparePushLogout()
-        guard phase == .pushLogout(resumePhase) else {
+        guard generation == requestGeneration, phase == .pushLogout(resumePhase) else {
             return
         }
         if let resumePhase {
@@ -1246,6 +1286,7 @@ final class MobileSessionCoordinator {
         clearSelection: Bool
     ) -> Int {
         generation += 1
+        authoritativeTransition = nil
         snapshot = nil
         if clearSelection {
             clearStoredSelection()
@@ -1314,14 +1355,22 @@ final class MobileSessionCoordinator {
         defaults.removeObject(forKey: Self.selectionKey)
     }
 
-    private func replaceWithFreshSignedOutStore() async {
-        authoritativeSignedOutTransitionInProgress = true
-        defer { authoritativeSignedOutTransitionInProgress = false }
+    private func replaceWithFreshSignedOutStore(
+        generation requestGeneration: Int
+    ) async throws {
+        try requireCurrentGeneration(requestGeneration)
+        let publicationID = UUID()
+        authoritativeTransition = (publicationID, .signedOut)
+        defer {
+            if authoritativeTransition?.id == publicationID {
+                authoritativeTransition = nil
+            }
+        }
         releaseTransportPreservingSurfaceLease()
         snapshot = nil
         secondFactorEmail = nil
         clearStoredSelection()
-        await rotateWebsiteDataStore()
+        try await rotateWebsiteDataStore(generation: requestGeneration)
         signedOutStoreIsFresh = true
         ensureTransport()
     }
@@ -1335,14 +1384,19 @@ final class MobileSessionCoordinator {
         pendingStoreReleaseBarriers.append(barrier)
     }
 
-    private func rotateWebsiteDataStore() async {
-        let unreleased = await WebsiteDataStoreReleaseBarrier.waitForRelease(
-            of: pendingStoreReleaseBarriers
-        )
-        pendingStoreReleaseBarriers = unreleased
+    private func rotateWebsiteDataStore(generation requestGeneration: Int) async throws {
+        // New releases can be recorded while this wait is suspended. Consume
+        // only this batch, then retain both its unreleased views and any new
+        // barriers, even if a reset has superseded this operation meanwhile.
+        let barriers = pendingStoreReleaseBarriers
+        pendingStoreReleaseBarriers = []
+        let unreleased = await WebsiteDataStoreReleaseBarrier.waitForRelease(of: barriers)
+        pendingStoreReleaseBarriers.append(contentsOf: unreleased)
+        try requireCurrentGeneration(requestGeneration)
         await websiteDataStore.rotate(
-            sweepOwnedStores: unreleased.isEmpty
+            sweepOwnedStores: pendingStoreReleaseBarriers.isEmpty
         )
+        try requireCurrentGeneration(requestGeneration)
     }
 
     private static func isValidEmail(_ email: String) -> Bool {
