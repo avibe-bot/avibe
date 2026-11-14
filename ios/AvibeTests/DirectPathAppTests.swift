@@ -2157,12 +2157,12 @@ private final class RuntimePage {
     }
 }
 
-/// These callback-level tests do not request real document loads.
-/// Integration tests above exercise real document loads; they cannot reliably
-/// arrange a process death or a late callback from a superseded navigation.
+/// Script terminal callbacks independently of WebContent timing. Navigation
+/// tokens still come from WebKit: bare WKNavigation() instances lack the native
+/// storage their deallocator requires. Token creation uses only local HTML.
 final class PageLoaderTests: XCTestCase {
     @MainActor
-    func testUnrelatedCallbacksCannotSettleTheRequestedDocument() async {
+    func testUnrelatedCallbacksCannotSettleTheRequestedDocument() async throws {
         enum Callback: CaseIterable {
             case staleFinish, staleFailure, staleProvisionalFailure
             case nilFinish, nilFailure, nilProvisionalFailure
@@ -2172,12 +2172,12 @@ final class PageLoaderTests: XCTestCase {
         let view = makeWebView()
         let otherView = makeWebView()
         let loader = PageLoader()
-        let staleNavigation = WKNavigation()
+        let staleNavigation = try view.makeNavigation()
         let expected = NSError(domain: "PageLoaderTests", code: 123)
         let unrelated = NSError(domain: "PageLoaderTests", code: 456)
 
         for callback in Callback.allCases {
-            let navigation = WKNavigation()
+            let navigation = try view.makeNavigation()
             view.nextNavigation = navigation
             view.onLoad = {
                 switch callback {
@@ -2216,12 +2216,12 @@ final class PageLoaderTests: XCTestCase {
     }
 
     @MainActor
-    func testMatchingFailuresIncludingCancellationAreNotIgnored() async {
+    func testMatchingFailuresIncludingCancellationAreNotIgnored() async throws {
         let view = makeWebView()
         let loader = PageLoader()
         for provisional in [false, true] {
             for code in [NSURLErrorCancelled, NSURLErrorCannotFindHost] {
-                let navigation = WKNavigation()
+                let navigation = try view.makeNavigation()
                 let expected = NSError(domain: NSURLErrorDomain, code: code)
                 view.nextNavigation = navigation
                 view.onLoad = {
@@ -2246,7 +2246,7 @@ final class PageLoaderTests: XCTestCase {
     func testProcessTerminationFailsOnceAndLoaderCanBeReused() async throws {
         let view = makeWebView()
         let loader = PageLoader()
-        let terminatedNavigation = WKNavigation()
+        let terminatedNavigation = try view.makeNavigation()
         view.nextNavigation = terminatedNavigation
         view.onLoad = {
             loader.webViewWebContentProcessDidTerminate(view)
@@ -2260,7 +2260,7 @@ final class PageLoaderTests: XCTestCase {
             XCTAssertEqual(error as? PageLoader.LoadError, .webContentProcessTerminated)
         }
 
-        let nextNavigation = WKNavigation()
+        let nextNavigation = try view.makeNavigation()
         view.nextNavigation = nextNavigation
         view.onLoad = {
             loader.webView(
@@ -2287,7 +2287,7 @@ final class PageLoaderTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? PageLoader.LoadError, .navigationNotCreated)
         }
-        let navigation = WKNavigation()
+        let navigation = try view.makeNavigation()
         view.nextNavigation = navigation
         view.onLoad = { loader.webView(view, didFinish: navigation) }
         try await loader.loadHTML("next fixture", baseURL: baseURL, in: view)
@@ -2307,6 +2307,15 @@ final class PageLoaderTests: XCTestCase {
 private final class ScriptedPageLoaderWebView: WKWebView {
     var nextNavigation: WKNavigation?
     var onLoad: (() -> Void)?
+
+    func makeNavigation() throws -> WKNavigation {
+        // Bypass the scripted override to obtain a fully initialized token.
+        // No navigationDelegate is installed, so WebKit cannot deliver these
+        // real load callbacks to PageLoader; only onLoad does that.
+        let navigation = try XCTUnwrap(super.loadHTMLString("<!doctype html>", baseURL: nil))
+        stopLoading()
+        return navigation
+    }
 
     override func loadHTMLString(_ string: String, baseURL: URL?) -> WKNavigation? {
         let callback = onLoad
