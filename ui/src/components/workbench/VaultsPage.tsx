@@ -40,6 +40,7 @@ import { KeyAddressList } from '../ui/btc-address-row';
 import { VaultApprovalDialog } from '../ui/vault-approval-dialog';
 import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
 import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
+import { VaultGeneratedOriginBadge } from '../ui/vault-generated-origin';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault, useVaultSandboxWarm } from '../../lib/useProtectedVault';
@@ -145,6 +146,7 @@ const SecretRow: React.FC<{
               {t('vaults.signing')}
             </Badge>
           ) : null}
+          <VaultGeneratedOriginBadge secret={s} />
         </div>
         <span className="truncate text-xs text-muted">
           {s.description ? <><SearchHighlight text={s.description} terms={terms} /> · </> : null}

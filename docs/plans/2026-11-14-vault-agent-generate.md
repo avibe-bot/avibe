@@ -66,6 +66,15 @@ row's array with a second incompatible shape. Successful operations audit
 `generated` with that value-free summary, plus the existing audit access
 snapshot; rejected operations store neither a record nor a generated event.
 
+Web consumer (W2b): the Vaults list marks a secret with generated fields (Agent
+or CLI; the Session title it had then for a one-field secret, else the fields),
+and the edit dialog lists each generated field with its time and format. It
+links the Session only when `GET /api/sessions/<id>` still returns it, showing
+its current title; otherwise it shows the recorded title, or no Session at all,
+never the ID. A value the user generates in the browser is the user's own: it
+is a draft marked "generated · not saved" until Save, and the saved row carries
+no provenance for it.
+
 ## Validation and integration gates
 
 - Storage: new-name/new-field/default alias/kind/tier guards, actual concurrent
