@@ -132,7 +132,10 @@ class AvibeMCP(MCP):
 
     def request(self, method, params):
         self.number += 1
-        return asyncio.run_coroutine_threadsafe(self.upstream.request(method, params), self.loop).result(65)
+        reply = asyncio.run_coroutine_threadsafe(self.upstream.request(method, params), self.loop).result(65)
+        if "error" in reply:
+            raise RuntimeError(json.dumps(reply["error"]))
+        return reply.get("result", {})
 
     def close(self):
         asyncio.run_coroutine_threadsafe(self.upstream.close(), self.loop).result(10)
@@ -186,20 +189,25 @@ def run_version(version, digest):
     from pywinauto import Application
     directory = ROOT / version
     directory.mkdir(parents=True, exist_ok=True)
-    asset = f"cua-driver-rs-{version}-windows-x86_64-binary.zip"
-    url = f"https://github.com/trycua/cua/releases/download/cua-driver-rs-v{version}/{asset}"
-    archive = directory / asset
-    urllib.request.urlretrieve(url, archive)
-    actual = hashlib.sha256(archive.read_bytes()).hexdigest()
-    if actual != digest:
-        raise RuntimeError("Driver archive hash mismatch")
-    with zipfile.ZipFile(archive) as zipped:
-        zipped.extractall(directory)
-    exe = next(directory.rglob("cua-driver.exe"))
+    if digest == "from-source":
+        exe = Path((ROOT / "patched-executable.txt").read_text(encoding="utf-8"))
+        url, actual, variant = "manifest-pinned-source-plus-patch", None, "avibe-patched-debug"
+    else:
+        asset = f"cua-driver-rs-{version}-windows-x86_64-binary.zip"
+        url = f"https://github.com/trycua/cua/releases/download/cua-driver-rs-v{version}/{asset}"
+        archive = directory / asset
+        urllib.request.urlretrieve(url, archive)
+        actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if actual != digest:
+            raise RuntimeError("Driver archive hash mismatch")
+        with zipfile.ZipFile(archive) as zipped:
+            zipped.extractall(directory)
+        exe = next(directory.rglob("cua-driver.exe"))
+        variant = "upstream-release-unpatched"
     save(f"{version}/binary.json", {"url": url, "archive_sha256": actual,
         "binary_sha256": hashlib.sha256(exe.read_bytes()).hexdigest(),
         "version": subprocess.check_output([str(exe), "--version"], text=True).strip(),
-        "variant": "upstream-release-unpatched"})
+        "variant": variant})
     pipe = rf"\\.\pipe\avibe-spike-{os.getpid()}-{version}"
     env = os.environ.copy()
     env.update(CUA_DRIVER_EMBEDDED="1", CUA_DRIVER_RS_TELEMETRY_ENABLED="0", CUA_DRIVER_RS_UPDATE_CHECK="0")
@@ -320,15 +328,20 @@ def main():
     if session_id.value == 0:
         raise RuntimeError("Runner is in Session 0; no usable interactive desktop")
     runtime_probe()
+    patched = "--patched" in sys.argv
+    if patched and not (ROOT / "patched-executable.txt").exists():
+        print("Patched binary unavailable; build evidence records why.")
+        return
+    versions = {"0.31.0-avibe-patched": "from-source"} if patched else VERSIONS
     outcomes = {}
-    for version, digest in VERSIONS.items():
+    for version, digest in versions.items():
         try:
             run_version(version, digest)
             outcomes[version] = "completed"
         except Exception as error:
             outcomes[version] = repr(error)
             save(f"{version}/failure.json", {"error": repr(error), "traceback": traceback.format_exc()})
-    save("summary.json", outcomes)
+    save("patched-summary.json" if patched else "summary.json", outcomes)
     print(json.dumps(outcomes))
 
 

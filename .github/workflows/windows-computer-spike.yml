@@ -50,6 +50,12 @@ jobs:
           if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Windows PowerShell required' }
           Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
           python desktop/scripts/windows-computer-spike.py
+      - name: Build exact pinned source with Avibe patch (bounded, unsigned)
+        shell: powershell
+        run: python desktop/scripts/windows-computer-spike-build.py
+      - name: Exercise the patched binary if it built
+        shell: powershell
+        run: python desktop/scripts/windows-computer-spike.py --patched
       - name: Upload allowlisted fixture evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
