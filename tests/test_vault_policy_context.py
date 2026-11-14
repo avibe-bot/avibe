@@ -59,6 +59,12 @@ def _source_row(vector):
 @pytest.mark.parametrize("vector", VECTORS, ids=lambda v: v["id"])
 def test_storage_identity_projection_matches_frozen_public_vector(vector):
     row = _source_row(vector)
+    if vector["id"] == "ordinary-secp-protected":
+        # The old wire remains readable, but the packaged Taproot-only cohort
+        # cannot issue a misleading all-three policy target on the new server.
+        with pytest.raises(vault_policy.PolicyContextError, match="all-three"):
+            vault_policy.target_state(row, None)
+        return
     target, current, revision = vault_policy.target_state(row, vector["context"]["target"]["account"])
     assert target == vector["context"]["target"]
     assert current is True and revision == vector["context"]["change"]["revision"]

@@ -198,6 +198,7 @@ def target_state(row: dict, account: int | None) -> tuple[dict, bool, str]:
     signer = "local" if row.get("signer_kind") is None else row["signer_kind"]
     addresses = dict.fromkeys(sorted(ADDRESS_FIELDS))
     name = None
+    sandbox_cohort = None
     if signer == vault_hd.SIGNER_KIND:
         if row.get("protection") != "standard" or bool(policy.get("always_ask")):
             raise PolicyContextError("unsupported HD tier or row-wide confirmation override")
@@ -226,6 +227,13 @@ def target_state(row: dict, account: int | None) -> tuple[dict, bool, str]:
                 public = key["public_key"].lower()
                 addresses.update(vault_addresses.derive_addresses(public))
                 keys = {"signing": {"curve": "secp256k1", "publicKey": public}}
+                if row["protection"] == "protected":
+                    from vibe import vault_sandbox_release
+
+                    support = vault_sandbox_release.current_support()
+                    if support is None or support.ordinary_input_types != ("p2pkh", "p2wpkh", "p2tr"):
+                        raise PolicyContextError("protected secp policy requires an all-three capable sandbox pin")
+                    sandbox_cohort = {"buildHash": support.build_hash, "manifestHash": support.manifest_hash}
             else:
                 raise ValueError("policy requires a valid compressed public signing key")
         except ValueError as exc:
@@ -237,6 +245,9 @@ def target_state(row: dict, account: int | None) -> tuple[dict, bool, str]:
     if not all(isinstance(value, str) and value for value in envelope.values()):
         raise PolicyContextError("policy requires a complete stored envelope identity")
     snapshot = {"v": 1, "kind": "keypair", "protection": row["protection"], "signerKind": signer, "envelope": envelope, "keys": keys}
+    if sandbox_cohort is not None:
+        # Internal preimage only: the public context/domain/storage stay v1.
+        snapshot.update(v=2, sandboxCohort=sandbox_cohort)
     target = {"secretId": row["id"], "name": row["name"], "protection": row["protection"], "signerKind": signer,
               "account": account, "accountName": name, "addresses": addresses, "identitySha256": identity_hash(snapshot)}
     return target, current, revision
