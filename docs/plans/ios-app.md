@@ -294,8 +294,56 @@ These are the only operations the **sheet** may invoke. Its handler rejects
 email/password/second-factor method set. Refresh/sign-out errors use the
 existing `{code, message, retry_after_seconds?}` rejection shape. No new
 runtime bridge method, capability, event or server endpoint is introduced in
-A; `instancePresentation`, `app.showInstances` and the instance name in
-`app.info` belong to separate variant B work.
+A; variant B adds only the native-owned presentation contract below.
+
+### Variant B: named instance entry (`instancePresentation: 1`)
+
+The runtime bridge advertises `capabilities.instancePresentation = 1`.
+`app.info()` adds `instance: {name}` alongside its existing fields. The name
+comes from the native selected account catalog, never from web-supplied
+parameters; it carries no instance ID, URL or credentials. A missing, empty or
+whitespace-only name falls back to `Avibe`. The Runtime reads this metadata
+when its document loads; no rename event or polling is introduced. A rename
+while the document remains open is displayed after its next load.
+
+`app.showInstances()` is a compiled runtime bridge method with **no
+parameters**, resolving to `null`. It uses the existing runtime-preserving
+native sheet at `avibe-app://bundle/mobile.html#sheet-instances`. The bundled
+page recognizes this entry and omits the Account row; `app.showAccount()`
+continues to open A's `#sheet`, including Account.
+
+Under `instancePresentation: 1`, `app.showAccount({"start":"account"})` opens
+`#sheet-account`: Account is the panel root, with a Close (×) control calling
+`app.dismiss`, no Back control and no `[data-mobile-back]`. A native left-edge
+swipe therefore does nothing at that root; licenses still push and return to
+Account. The argument object must contain exactly the one key `start` with the
+string value `"account"`; unsupported keys/values reject `invalid_argument`
+before presentation. The parameterized form is unavailable without the
+`instancePresentation` capability; the no-parameter form remains unchanged.
+This extends the existing `app.showAccount` method, not the method inventory.
+
+All three modes share one native owner for dismissal, large-detent/document
+scrolling and sheet `auth.*` restrictions. If any panel is already presented,
+any valid presentation request is a quiet no-op resolving `null`: it does not
+replace or navigate the existing document or change its mode. Nonempty
+`app.showInstances` parameters reject `invalid_argument` before presentation.
+
+Native support and both bundled B page modes must be present before B ships
+or the App advertises `instancePresentation: 1` in a shipped build. The bundled
+page/Runtime B change lands first; Product then reviews the B Account-root
+frames and gives a new go on the native PR's exact head before it lands. The
+native side of master remains A while the owner tests A's TestFlight feel.
+After the native merge, a separate test-only capture change covers both B
+routes before Product capture review and the B TestFlight build. B is not part
+of the A-only build.
+Unknown hashes in older bundled pages fall back to the full-screen-style list:
+there is no crash or auth bypass, but Close/current-row return and document
+scrolling are wrong and Account may remain visible. This is not an acceptable
+B compatibility fallback.
+
+Runtime 3.2.7 consumes this capability; older Runtime pages retain their existing
+title/avatar and A entry. The native-only change introduces no runtime
+transport, account mutation or feature-enablement step.
 
 **Scroll and navigation ownership:** the sheet's bundled page scrolls its
 **document** (not an inner `overflow-y-auto`/fixed-height root). The native host
@@ -305,11 +353,13 @@ only at the document top does the downward gesture dismiss. There is no
 pull-to-refresh in the sheet; it is reserved for full-screen first use. Web
 content draws the title and Close button, labelled `关闭，回到 {name}` / `Close
 and return to {name}`; native marks the presentation modal and handles the
-VoiceOver two-finger scrub through the same dismissal owner. Account,
-licenses and Add are in-page pushes inside this one sheet: a visible
-`[data-mobile-back]` button owns Back, and the existing native left-edge swipe
-presses that same button. Back on Account returns to the instances list,
-never to a second sheet or a runtime reload. A fallback full-screen
+VoiceOver two-finger scrub through the same dismissal owner. In the
+instances-first modes, Account, licenses and Add are in-page pushes inside
+this one sheet: a visible `[data-mobile-back]` button owns Back, and the
+existing native left-edge swipe presses that same button. Back on pushed
+Account returns to the instances list, never to a second sheet or a runtime
+reload. The B Account-root mode instead starts without Back; its licenses
+page still pushes and returns to Account. A fallback full-screen
 presentation with Close and edge-swipe dismissal is kept behind one native
 presentation switch until real-device acceptance; it changes no bridge call
 or page design.

@@ -53,7 +53,7 @@ struct RootView: View {
         ) {
             MobileOnboardingContainer(
                 coordinator: appModel.mobileSessionCoordinator,
-                startScreen: .sheet,
+                startScreen: appModel.accountSheetStartScreen,
                 returnToRuntime: appModel.returnToRuntime
             )
             .ignoresSafeArea(.container, edges: .all)
@@ -109,6 +109,9 @@ private struct BrowserScreen: View {
                         websiteDataStore: appModel.runtimeWebsiteDataStore,
                         pushCoordinator: appModel.pushCoordinator,
                         showAccount: appModel.showAccount,
+                        showAccountRoot: appModel.showAccountRoot,
+                        showInstances: appModel.showInstances,
+                        instanceName: appModel.selectedInstanceName,
                         directStatus: appModel.directStatusProvider,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,

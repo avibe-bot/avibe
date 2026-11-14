@@ -594,6 +594,62 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.route, .browser(runtime))
     }
 
+    /// The named entry and avatar share one presentation owner: repeated
+    /// requests cannot change its mode, reload the runtime or mutate selection.
+    @MainActor
+    func testNamedInstanceEntryKeepsOneSheetAndReadsTheCurrentCatalogName() async throws {
+        for initialMode in [MobileOnboardingStartScreen.sheet, .sheetInstances, .sheetAccount] {
+            let session = SessionAnswerOverride()
+            let app = try await makeApp(directTransport: nil, sessionResponse: { session.response })
+            XCTAssertNil(app.selectedInstanceName())
+            let runtime = try await select("instance-1", in: app)
+            let identity = app.runtimeIdentity
+            XCTAssertEqual(app.selectedInstanceName(), "One")
+
+            let presentations: [(MobileOnboardingStartScreen, () -> Void)] = [
+                (.sheet, app.showAccount), (.sheetInstances, app.showInstances),
+                (.sheetAccount, app.showAccountRoot),
+            ]
+            let initial = try XCTUnwrap(presentations.first { $0.0 == initialMode })
+            initial.1()
+            for (_, present) in presentations { present() }
+            XCTAssertEqual(app.accountSheetStartScreen, initialMode)
+            XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+            XCTAssertEqual(app.runtimeIdentity, identity)
+            XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+
+            session.replace(with: .json(
+                """
+                {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+                  {"id":"instance-1","name":"Renamed One","host":"instance-one.example",
+                   "url":"https://instance-one.example","relationship":"owner","available":true},
+                  {"id":"instance-2","name":"Two","host":"instance-two.example",
+                   "url":"https://instance-two.example","relationship":"owner","available":true}
+                ]}
+                """
+            ))
+            _ = try await app.mobileSessionCoordinator.refresh()
+            XCTAssertEqual(app.selectedInstanceName(), "Renamed One")
+            XCTAssertEqual(runtime.instance.name, "One")
+            XCTAssertEqual(app.runtimeIdentity, identity)
+            XCTAssertTrue(app.returnToRuntime())
+            XCTAssertEqual(app.route, .browser(runtime))
+            XCTAssertFalse(app.returnToRuntime())
+
+            // After dismissal, every entry can choose its own mode; all
+            // other valid entry requests stay quiet while it is presented.
+            for (mode, present) in presentations {
+                present()
+                for (_, duplicate) in presentations { duplicate() }
+                XCTAssertEqual(app.accountSheetStartScreen, mode)
+                XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+                XCTAssertEqual(app.runtimeIdentity, identity)
+                XCTAssertTrue(app.returnToRuntime())
+                XCTAssertEqual(app.route, .browser(runtime))
+            }
+        }
+    }
+
     /// the App is in the background with a route, open again once the
     /// listener serves.
     @MainActor
@@ -2526,6 +2582,12 @@ private final class SessionAnswerOverride: @unchecked Sendable {
             release.wait()
         }
         return response
+    }
+
+    func replace(with response: LocalHTTPResponse) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedResponse = response
     }
 
     func holdSignedOut(started: FixtureEvent, release: DispatchSemaphore) {
