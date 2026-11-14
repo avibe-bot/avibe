@@ -374,6 +374,38 @@ for (const [label, edit, saved] of [
   await expectSingleDocumentJourney(page, observed, url, [...saved]);
 });
 
+// A long chip draft (Tags, or Allowed hosts under Advanced) still focused when Save is pressed: the
+// blur commits it, and the chip it becomes may wrap onto a new line. The press must still save, with
+// the committed value.
+const longTag = 'release-candidate-verification-tag-that-is-long-enough-to-wrap-the-row';
+const longHost = 'a-long-subdomain-that-wraps-the-row.vault-integrity-fixture.example.com';
+for (const [label, field] of [['Tags', 'tags'], ['Allowed hosts', 'hosts']] as const) test(`a Save press that starts on a long ${label} draft still saves it`, async ({ context, page }) => {
+  const origin = 'http://192.0.2.1:5123';
+  const observed = await harness(context, page, origin);
+  const timeline = await installTimeline(context, page, observed.writes);
+  const url = `${origin}${fixturePath}?reveal=${secret.name}`;
+  await page.goto(url);
+  page.setDefaultTimeout(8_000);
+  await page.getByRole('menuitem', { name: en.vaults.editSecret }).click();
+  const dialog = page.getByRole('dialog');
+  if (field === 'hosts') await dialog.getByRole('button', { name: en.vaults.dialog.advanced }).click();
+  // Tags is a combobox when it has suggestions to offer; this fixture has none, so both are text boxes.
+  const input = dialog.getByRole('textbox', { name: field === 'tags' ? en.vaults.dialog.tags : en.vaults.dialog.allowHosts, exact: true });
+  await input.fill(field === 'tags' ? longTag : longHost);
+  await expect(input).toBeFocused();
+  const saved = [`PATCH /api/vault/secrets/${secret.name}`];
+  const patch = page.waitForRequest((request) => request.method() === 'PATCH' && new URL(request.url()).pathname === `/api/vault/secrets/${secret.name}`);
+  timeline.mark('save-press-start');
+  await pressSaveFromFocusedName(page, dialog, input);
+  timeline.observeAfterClick();
+  const body = (await patch).postDataJSON() as { tags?: string[]; policy?: { allowed_hosts?: string[] } };
+  if (field === 'tags') expect(body.tags).toContain(longTag);
+  else expect(body.policy?.allowed_hosts).toContain(longHost);
+  await expect.poll(() => observed.writes).toEqual(saved);
+  await expect(dialog).toHaveCount(0);
+  await expectSingleDocumentJourney(page, observed, url, saved);
+});
+
 test('unsupported create preserves Settings return, draft clearing, Standard and cancel', async ({ context, page }) => {
   const origin = 'http://192.0.2.1:5123';
   const observed = await harness(context, page, origin);
