@@ -148,15 +148,19 @@ enum SheetFixtureReadiness {
     static func waitForText(
         _ text: String, in app: XCUIApplication, timeout: TimeInterval = 10
     ) -> Bool {
+        let matches: () -> Bool = {
+            // Re-resolve on each snapshot, and match the label rather
+            // than relying on app-wide identifier resolution into a
+            // different WebContent process.
+            app.webViews.firstMatch.staticTexts.matching(
+                NSPredicate(format: "label == %@", text)
+            ).firstMatch.exists
+        }
+        // Evaluate once even when a short negative-check budget expires
+        // before XCTNSPredicateExpectation schedules its first poll.
+        if matches() { return true }
         let visible = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                // Re-resolve on each snapshot, and match the label rather
-                // than relying on app-wide identifier resolution into a
-                // different WebContent process.
-                app.webViews.firstMatch.staticTexts.matching(
-                    NSPredicate(format: "label == %@", text)
-                ).firstMatch.exists
-            }, object: nil
+            predicate: NSPredicate { _, _ in matches() }, object: nil
         )
         return XCTWaiter.wait(for: [visible], timeout: timeout) == .completed
     }
