@@ -24,20 +24,19 @@ $helperPath = Join-Path $artifactRoot 'prepare-windows-source.py'
 New-Item -ItemType Directory -Force -Path $artifactRoot, $logs, $sourceWork, $fixtureRoot, $bin, $temp, $testLogs | Out-Null
 
 $tests = @(
-    # Keep this list explicit and reviewable. Each entry is checked against the
-    # patched source before execution; keep this list synchronized with the
-    # final reviewed native source selector set.
-    @{ Package = 'cua-driver-core'; ArtifactKey = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::missing_wrong_nonprocess_or_exited_evidence_never_registers'; Source = 'libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs'; Function = 'missing_wrong_nonprocess_or_exited_evidence_never_registers' },
-    @{ Package = 'cua-driver-core'; ArtifactKey = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::failed_or_incomplete_attestation_never_registers'; Source = 'libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs'; Function = 'failed_or_incomplete_attestation_never_registers' },
-    @{ Package = 'cua-driver-core'; ArtifactKey = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::original_handle_lives_across_attestation_and_later_reuse_is_refused'; Source = 'libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs'; Function = 'original_handle_lives_across_attestation_and_later_reuse_is_refused' },
-    @{ Package = 'cua-driver-core'; ArtifactKey = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::retained_exited_process_is_not_registered_as_running'; Source = 'libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs'; Function = 'retained_exited_process_is_not_registered_as_running' },
-    @{ Package = 'cua-driver-core'; ArtifactKey = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::original_handle_evidence_never_serializes'; Source = 'libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs'; Function = 'original_handle_evidence_never_serializes' },
-    @{ Package = 'cua-driver-core'; ArtifactKey = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::registration_future_is_send'; Source = 'libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs'; Function = 'registration_future_is_send' },
-    @{ Package = 'platform-windows'; ArtifactKey = 'platform-windows'; Selector = 'literal_launch::native::tests::literal_native_canonicalizes_existing_regular_executable'; Source = 'libs/cua-driver/rust/crates/platform-windows/src/literal_launch_native_tests.rs'; Function = 'literal_native_canonicalizes_existing_regular_executable' },
-    @{ Package = 'platform-windows'; ArtifactKey = 'platform-windows'; Selector = 'literal_launch::native::tests::literal_native_profile_environment_and_job_survival'; Source = 'libs/cua-driver/rust/crates/platform-windows/src/literal_launch_native_tests.rs'; Function = 'literal_native_profile_environment_and_job_survival' },
-    @{ Package = 'platform-windows'; ArtifactKey = 'platform-windows'; Selector = 'tools::impl_::literal_launch_callsite_tests::unsupported_routes_refuse_at_actual_launch_tool_before_native_effects'; Source = 'libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs'; Function = 'unsupported_routes_refuse_at_actual_launch_tool_before_native_effects' },
-    @{ Package = 'platform-windows'; ArtifactKey = 'platform-windows'; Selector = 'tools::impl_::literal_launch_callsite_tests::literal_creation_is_not_advertised_as_idempotent'; Source = 'libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs'; Function = 'literal_creation_is_not_advertised_as_idempotent' },
-    @{ Package = 'platform-windows'; ArtifactKey = 'platform-windows'; Selector = 'tools::impl_::literal_launch_callsite_tests::owner_only_termination_matches_creation_time'; Source = 'libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs'; Function = 'owner_only_termination_matches_creation_time' }
+    # Each selector must actually execute exactly one passing, unignored test.
+    # Source spelling is not attestation; runtime output and JUnit are the gate.
+    @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::missing_wrong_nonprocess_or_exited_evidence_never_registers' },
+    @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::failed_or_incomplete_attestation_never_registers' },
+    @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::original_handle_lives_across_attestation_and_later_reuse_is_refused' },
+    @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::retained_exited_process_is_not_registered_as_running' },
+    @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::original_handle_evidence_never_serializes' },
+    @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::registration_future_is_send' },
+    @{ Package = 'platform-windows'; Selector = 'literal_launch::native::tests::literal_native_canonicalizes_existing_regular_executable' },
+    @{ Package = 'platform-windows'; Selector = 'literal_launch::native::tests::literal_native_profile_environment_and_job_survival' },
+    @{ Package = 'platform-windows'; Selector = 'tools::impl_::literal_launch_callsite_tests::unsupported_routes_refuse_at_actual_launch_tool_before_native_effects' },
+    @{ Package = 'platform-windows'; Selector = 'tools::impl_::literal_launch_callsite_tests::literal_creation_is_not_advertised_as_idempotent' },
+    @{ Package = 'platform-windows'; Selector = 'tools::impl_::literal_launch_callsite_tests::owner_only_termination_matches_creation_time' }
 )
 
 $results = [System.Collections.Generic.List[object]]::new()
@@ -194,23 +193,6 @@ function Invoke-CargoJson([string] $Workspace, [string[]] $Arguments, [string] $
     }
 }
 
-function Verify-TestSource([string] $SourceRoot) {
-    foreach ($test in $tests) {
-        $source = Join-Path $SourceRoot ($test.Source -replace '/', '\')
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Expected test source is missing: $($test.Source)" }
-        $lines = @(Get-Content -LiteralPath $source)
-        $functionLine = $lines | Select-String -SimpleMatch ("fn " + $test.Function + '(') | Select-Object -First 1
-        if (-not $functionLine) { throw "Expected test function is missing: $($test.Selector)" }
-        $prior = ($lines[0..([Math]::Max(0, $functionLine.LineNumber - 2))] | Select-Object -Last 4) -join "`n"
-        if ($prior -match '#\[ignore') { throw "Selected test is ignored in source: $($test.Selector)" }
-    }
-    $coreSource = Join-Path $SourceRoot 'libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs'
-    $coreText = Get-Content -LiteralPath $coreSource -Raw
-    if ($coreText -notmatch 'GetProcessId' -or $coreText -notmatch 'GetProcessTimes') {
-        throw 'The current HANDLE attestation test source must retain both GetProcessId and GetProcessTimes validation.'
-    }
-}
-
 $pythonHelper = @'
 from __future__ import annotations
 import copy, hashlib, json, runpy, sys
@@ -268,7 +250,6 @@ try {
     $provenance.source_archive = 'cua-driver-source.tar.gz'
     $provenance.source_archive_sha256 = [string]$prepRecord.source_archive_sha256
     $provenance | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
-    Verify-TestSource ([string]$prepRecord.source_root)
 
     $workspace = Join-Path ([string]$prepRecord.source_root) 'libs\cua-driver\rust'
     $targetDir = Join-Path $sourceWork 'target'

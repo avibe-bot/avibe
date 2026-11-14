@@ -98,9 +98,13 @@ association, name, AUMID, or derived-token fallback.
 
 A single ordinary file open resolves the final OS path spelling, checks disk,
 non-directory, `.exe`, and fixed-drive properties, then closes the file. The
-exact final spelling is launched. Same-user executable replacement is not a
-security boundary: there are no file-ID locks, ancestor handles, reparse bans,
-lowercase identity transforms, or case-sensitive-directory restrictions.
+exact final spelling is launched. An OS-final component ending in an ASCII
+period or space is refused rather than stripping its verbatim prefix and
+potentially launching a different existing path. This is a check of the final
+string only, not an input dot/dotdot restriction or ancestor walk. Same-user
+executable replacement is not a security boundary: there are no file-ID locks,
+ancestor handles, reparse bans, lowercase identity transforms, or
+case-sensitive-directory restrictions.
 
 The target receives `CreateEnvironmentBlock` for the ordinary token with caller
 inheritance disabled, an executable-parent cwd, no inherited handles, and

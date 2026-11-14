@@ -44,7 +44,7 @@ index b2cc243..cd58788 100644
    portals, which prompt per-session at capture time and cannot be
    pre-granted by the host. X11 has no portal gate.
 diff --git a/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md b/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
-index 57133eb..8057930 100644
+index 57133eb..22db5d5 100644
 --- a/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
 +++ b/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
 @@ -120,14 +120,14 @@ same trick that powers `send_key_synthesized`). Returns
@@ -132,7 +132,7 @@ index 57133eb..8057930 100644
 
  - **Win+key shortcuts owned by the shell** — `Win+E` (Explorer),
    `Win+R` (Run), `Win+S` / `Win+Q` (Search), `Win+number` (taskbar
-@@ -234,29 +226,39 @@ via `cua-driver get_window_state` — none of these change focus.
+@@ -234,29 +226,42 @@ via `cua-driver get_window_state` — none of these change focus.
  search, type query, press Enter" patterns to launch apps. They (a)
  foreground the Search UI, (b) leave the Search UI populated with the
  agent's typed text, (c) trigger the new app via the Start Menu's own
@@ -164,8 +164,11 @@ index 57133eb..8057930 100644
 +
 +The path must be an absolute drive-letter path to an existing regular `.exe`
 +on a local fixed drive. Windows opens the file and supplies its final path;
-+that exact spelling is used for launch, without blind case folding. UNC/device
-+paths, alternate data streams and NUL are refused. This canonicalization does
++that exact spelling is used for launch, without blind case folding. If any
++component of the OS-final path ends in an ASCII period or space, launch is
++refused: removing the verbatim prefix could otherwise select a different
++existing path. This check does not restrict dot/dotdot in the original input.
++UNC/device paths, alternate data streams and NUL are refused. This canonicalization does
 +not freeze the executable or its ancestors against changes by the same user.
 +The app receives the OS-built
 +standard-user environment for the driver's ordinary token, without inheriting
@@ -189,7 +192,7 @@ index 57133eb..8057930 100644
  best-effort: `SetForegroundWindow` from non-UIAccess processes is subject
  to Windows' foreground-lock and may silently no-op — failures are logged
  at `tracing::trace!` and not surfaced as errors.
-@@ -301,10 +303,10 @@ Windows-relevant notes:
+@@ -301,10 +306,10 @@ Windows-relevant notes:
    rect / z-order diagnostics for triaging the click chain). It is
    deliberately not part of the cross-platform surface — there is no macOS
    or Linux counterpart.
@@ -204,7 +207,7 @@ index 57133eb..8057930 100644
 
  **Chromium pixel-click foreground polling restore.** `click({pid, x, y})`
  on a Chromium target falls through to `send_click_synthesized`
-@@ -339,9 +341,9 @@ gone wrong — re-read "The no-foreground contract" above.
+@@ -339,9 +344,9 @@ gone wrong — re-read "The no-foreground contract" above.
 
  | Intent                             | Use                                                                                             | Don't use                                                                            |
  | ---------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
@@ -217,7 +220,7 @@ index 57133eb..8057930 100644
  | Find a pid                         | `list_apps` or `launch_app`'s return                                                            | `Get-Process`, `tasklist`, Win+S typing                                              |
  | Enumerate an app's windows         | `list_windows({pid})` — or read the `windows` array `launch_app` already returns                | `Get-Process \| Where-Object { $_.MainWindowHandle }`                                |
  | Move or resize one exact window    | `set_window_frame({pid, window_id, x, y, width, height})`                                       | PowerShell Add-Type wrappers, Win+Arrow, or title-bar dragging                       |
-@@ -349,7 +351,7 @@ gone wrong — re-read "The no-foreground contract" above.
+@@ -349,7 +354,7 @@ gone wrong — re-read "The no-foreground contract" above.
  | Drag / drag-and-drop               | `drag({pid, from_x, from_y, to_x, to_y})`                                                       | `SendInput` with `MOUSEEVENTF_MOVE`, mouse_event                                     |
  | Screenshot                         | `get_window_state` (window) or authorized `get_desktop_state` (desktop)                         | `[System.Windows.Forms.Screen]::CopyFromScreen`, `nircmd savescreenshot`             |
  | Quit an app                        | ask the user first, then `hotkey({pid, keys:["alt","f4"]})`                                     | `taskkill /F`, `Stop-Process -Force`, `Get-Process \| Stop-Process`                  |
@@ -226,7 +229,7 @@ index 57133eb..8057930 100644
 
  ### The narrow carve-out
 
-@@ -467,11 +469,12 @@ your prior tool calls earned.
+@@ -467,11 +472,12 @@ your prior tool calls earned.
     tool-calling.
  4. **Permissions** — Windows has no TCC equivalent. cua-driver-rs
     needs:
@@ -244,7 +247,7 @@ index 57133eb..8057930 100644
     - SmartScreen: on a fresh install, Windows Defender SmartScreen
       may flag the unsigned binary on first run. Click "More info →
       Run anyway" once.
-@@ -641,6 +644,10 @@ UWP element.
+@@ -641,6 +647,10 @@ UWP element.
 
  ## UWP / packaged apps — the AUMID layer
 
@@ -255,7 +258,7 @@ index 57133eb..8057930 100644
  Modern Win11 apps (Calculator, Notepad, Settings, Photos, Edge UI
  chrome, Microsoft Store) are **packaged apps** with an `App User
  Model ID` (AUMID) rather than a plain `.exe` path. The AUMID looks
-@@ -655,10 +662,10 @@ Windows architectural quirks that matter:
+@@ -655,10 +665,10 @@ Windows architectural quirks that matter:
     `Microsoft.WindowsNotepad` AppX package. `Start-Process notepad`
     spawns the stub, which exits, which redirects through the AppX
     broker, which spawns the real process with a different pid. You
@@ -270,7 +273,7 @@ index 57133eb..8057930 100644
  2. **UWP windows are hosted by `ApplicationFrameHost.exe`.** The
     outer top-level HWND (the one with the title bar, the one
     `EnumWindows` enumerates) is owned by `ApplicationFrameHost.exe`,
-@@ -668,14 +675,10 @@ Windows architectural quirks that matter:
+@@ -668,14 +678,10 @@ Windows architectural quirks that matter:
     `GetWindowRect`, `PostMessage`, `BitBlt` all target. UIA
     transparently crosses the boundary into the inner process when
     you walk the tree.
@@ -288,7 +291,7 @@ index 57133eb..8057930 100644
 
  ```
  Microsoft.WindowsCalculator_8wekyb3d8bbwe!App
-@@ -769,20 +772,19 @@ typed browser tools yet.
+@@ -769,20 +775,19 @@ typed browser tools yet.
      accelerator). **But** foreground needs the swap to actually land — if the
      daemon lacks UIAccess and `bring_to_front` returns `landed_on_target:false`
      (or it reverts before the next call), you can't drive it by input at all:
@@ -1693,10 +1696,10 @@ index 4e56ef6..b9a107f 100644
 
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/literal_launch.rs b/libs/cua-driver/rust/crates/platform-windows/src/literal_launch.rs
 new file mode 100644
-index 0000000..f4af746
+index 0000000..5a5f28d
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/literal_launch.rs
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,375 @@
 +//! Restricted Windows user-app launch. Apps are not driver helpers: observing
 +//! their process never gives this module kill-on-close ownership.
 +
@@ -1759,6 +1762,24 @@ index 0000000..f4af746
 +        return Err(PREVIEW_REFUSAL.into());
 +    }
 +    Ok(path)
++}
++
++/// Convert only the OS-produced final DOS spelling. Dropping the verbatim
++/// prefix is lossless only for representable components; otherwise a later
++/// Win32 open could select a different, already-existing executable.
++fn resolved_conventional_path(path: &str) -> Result<String, String> {
++    let path = path
++        .strip_prefix("\\\\?\\")
++        .ok_or_else(|| PREVIEW_REFUSAL.to_owned())?;
++    if path
++        .split('\\')
++        .any(|component| component.ends_with('.') || component.ends_with(' '))
++    {
++        return Err(format!(
++            "{PREVIEW_REFUSAL} The resolved executable cannot be represented as a conventional Windows path."
++        ));
++    }
++    conventional_path(path)
 +}
 +
 +#[cfg(target_os = "windows")]
@@ -1828,11 +1849,7 @@ index 0000000..f4af746
 +            return Err(PREVIEW_REFUSAL.into());
 +        }
 +        let path = String::from_utf16(&buffer[..length]).map_err(|_| PREVIEW_REFUSAL.to_owned())?;
-+        // This is an OS-produced namespace, not acceptance of caller device paths.
-+        let path = path
-+            .strip_prefix("\\\\?\\")
-+            .ok_or_else(|| PREVIEW_REFUSAL.to_owned())?;
-+        conventional_path(path)
++        resolved_conventional_path(&path)
 +    }
 +
 +    pub(crate) fn prepare(path: &str) -> Result<LiteralLaunch, String> {
@@ -1952,11 +1969,7 @@ index 0000000..f4af746
 +                    &mut process,
 +                )
 +            }
-+            .map_err(|_error| {
-+                #[cfg(test)]
-+                eprintln!("literal launch stage=CreateProcessW error={_error:?}");
-+                PREVIEW_REFUSAL.to_owned()
-+            })?;
++            .map_err(|_| PREVIEW_REFUSAL.to_owned())?;
 +            drop(unsafe { OwnedHandle::from_raw_handle(process.hThread.0) });
 +            Ok(CreatedApp {
 +                pid: process.dwProcessId,
@@ -2016,6 +2029,25 @@ index 0000000..f4af746
 +            "start_minimized":true,"session":"s","_session_id":"s",
 +            "_transport_session_id":"t","_public_session_label":"p","_session_idle_ttl_ms":10});
 +        assert_eq!(request_path(&request), Ok(path));
++    }
++
++    #[test]
++    fn os_final_spelling_must_survive_removing_the_verbatim_prefix() {
++        assert_eq!(
++            resolved_conventional_path(r"\\?\C:\Apps\App.EXE").unwrap(),
++            r"C:\Apps\App.EXE"
++        );
++        for path in [
++            r"\\?\C:\Apps.\app.exe",
++            r"\\?\C:\Apps \app.exe",
++            r"\\?\C:\Parent\nested.\app.exe",
++            r"\\?\C:\Parent\nested \app.exe",
++        ] {
++            assert!(resolved_conventional_path(path).is_err(), "{path}");
++        }
++        // This restriction applies to the final OS result, not lexical input:
++        // ordinary dot/dotdot input remains available for Windows to resolve.
++        assert!(conventional_path(r"C:\Apps\..\app.exe").is_ok());
 +    }
 +
 +    #[test]
@@ -2829,7 +2861,7 @@ index e4989de..b37b52b 100644
  //! tools could not close or automate the app, and it would behave differently
  //! from the same app started from Explorer. An elevated Driver instead
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
-index c3101d1..a7496e2 100644
+index c3101d1..e25cd37 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 @@ -673,7 +673,7 @@ impl Tool for ListAppsTool {
@@ -3307,7 +3339,9 @@ index c3101d1..a7496e2 100644
 -                    ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS,
 -                    SHELLEXECUTEINFOW,
 -                };
--
++        let created_app = std::sync::Arc::new(created_app);
++        let pid = created_app.pid;
+
 -                fn to_wide(s: &str) -> Vec<u16> {
 -                    s.encode_utf16().chain(std::iter::once(0)).collect()
 -                }
@@ -3446,9 +3480,7 @@ index c3101d1..a7496e2 100644
 -            // unblocks if/when the modal is dismissed) and return an error so
 -            // the daemon stays responsive instead of wedging on the request.
 -            let result = tokio::time::timeout(std::time::Duration::from_secs(15), launch).await;
-+        let created_app = std::sync::Arc::new(created_app);
-+        let pid = created_app.pid;
-
+-
 -            match result {
 -                Ok(Ok(Ok(p))) => p,
 -                Ok(Ok(Err(e))) if name_lookup_missed => {
@@ -3794,7 +3826,7 @@ index c3101d1..a7496e2 100644
          if !windows_json.is_empty() {
              summary.push_str("\n\nWindows:");
              for w in &windows_json {
-@@ -3044,28 +2351,197 @@ impl Tool for LaunchAppTool {
+@@ -3044,28 +2351,269 @@ impl Tool for LaunchAppTool {
                  "\n→ Call get_window_state(pid: {pid}, window_id) to inspect."
              ));
          }
@@ -3845,37 +3877,42 @@ index c3101d1..a7496e2 100644
 +
 +    #[tokio::test]
 +    async fn unsupported_routes_refuse_at_actual_launch_tool_before_native_effects() {
-+        // Diagnose the hosted process's immediate Job without modifying it.
-+        // The positive control must still succeed; an environmental refusal is
-+        // a test failure, not permission to weaken the launch policy or oracle.
-+        use std::os::windows::io::AsRawHandle;
++        // Supply the real driver's breakaway-enabled immediate Job without
++        // changing the hosted runner's outer Job. No KILL_ON_JOB_CLOSE here:
++        // it would kill this test itself; the child-driver fixture tests that.
++        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++        use windows::core::PCWSTR;
 +        use windows::Win32::Foundation::HANDLE;
 +        use windows::Win32::System::JobObjects::{
-+            JobObjectExtendedLimitInformation, QueryInformationJobObject,
-+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
++            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
++            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
++            JOB_OBJECT_LIMIT_BREAKAWAY_OK,
 +        };
-+        let mut inherited = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-+        let inherited_query = unsafe {
-+            QueryInformationJobObject(
-+                HANDLE::default(),
++        use windows::Win32::System::Threading::GetCurrentProcess;
++        let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.unwrap();
++        let job = unsafe { OwnedHandle::from_raw_handle(job.0) };
++        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
++        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
++        unsafe {
++            SetInformationJobObject(
++                HANDLE(job.as_raw_handle()),
 +                JobObjectExtendedLimitInformation,
-+                &mut inherited as *mut _ as *mut _,
-+                std::mem::size_of_val(&inherited) as u32,
-+                None,
++                &limits as *const _ as *const _,
++                std::mem::size_of_val(&limits) as u32,
 +            )
-+        };
-+        eprintln!(
-+            "inherited Job flags={:#x}, query={inherited_query:?}",
-+            inherited.BasicLimitInformation.LimitFlags.0
-+        );
++            .unwrap();
++            AssignProcessToJobObject(HANDLE(job.as_raw_handle()), GetCurrentProcess()).unwrap();
++        }
 +        // A launchable, test-owned executable is essential: a missing path
 +        // would make these negatives pass even if request_path were bypassed.
 +        let directory = tempfile::tempdir().unwrap();
-+        let executable = directory.path().join("launch-probe.exe");
++        let ordinary = directory.path().join("Apps");
++        std::fs::create_dir(&ordinary).unwrap();
++        let executable = ordinary.join("launch-probe.exe");
 +        let system_cmd =
 +            std::path::Path::new(&std::env::var("SystemRoot").unwrap()).join("System32\\cmd.exe");
-+        std::fs::copy(system_cmd, &executable).unwrap();
-+        let marker = directory.path().join("launch-marker.txt");
++        std::fs::copy(&system_cmd, &executable).unwrap();
++        let marker = ordinary.join("launch-marker.txt");
 +        let valid = json!({
 +            "path": executable.to_str().unwrap(),
 +            "additional_arguments": ["/d", "/c", "echo created>launch-marker.txt"],
@@ -3883,7 +3920,6 @@ index c3101d1..a7496e2 100644
 +        crate::literal_launch::request_path(&valid).expect("positive request must be admitted");
 +        crate::literal_launch::prepare(executable.to_str().unwrap())
 +            .expect("positive executable must canonicalize before creation");
-+        eprintln!("positive control: request and executable preflight passed");
 +        let positive = LaunchAppTool.invoke(valid.clone()).await;
 +        assert_ne!(
 +            positive.is_error,
@@ -3945,6 +3981,74 @@ index c3101d1..a7496e2 100644
 +            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 +            assert!(!marker.exists(), "{key}: executed despite refusal");
 +        }
++
++        // Both destinations contain a real executable. Prefix removal must
++        // never silently select the ordinary, already-existing sibling.
++        for (index, suffix) in [".", " "].iter().enumerate() {
++            let special_name = format!("Apps{suffix}");
++            let special = std::path::PathBuf::from(format!(
++                "\\\\?\\{}\\{special_name}",
++                directory.path().display()
++            ));
++            std::fs::create_dir(&special).unwrap();
++            let special_executable = special.join("launch-probe.exe");
++            std::fs::copy(&executable, &special_executable).unwrap();
++            let junction = directory.path().join(format!("junction-{index}"));
++            let output = std::process::Command::new(&system_cmd)
++                .args(["/d", "/c", "mklink", "/J"])
++                .arg(&junction)
++                .arg(&special)
++                .output()
++                .unwrap();
++            assert!(output.status.success(), "junction setup: {output:?}");
++            let public_path = junction.join("launch-probe.exe");
++            let resolved = std::fs::canonicalize(&public_path).unwrap();
++            assert_eq!(
++                resolved,
++                std::fs::canonicalize(&special_executable).unwrap()
++            );
++            assert_eq!(
++                resolved.parent().unwrap().file_name().unwrap(),
++                special_name.as_str()
++            );
++            assert_ne!(resolved, std::fs::canonicalize(&executable).unwrap());
++            let mut args = valid.clone();
++            args["path"] = json!(public_path.to_str().unwrap());
++            let result = LaunchAppTool.invoke(args).await;
++            if let Some(process) = result.windows_created_process.as_ref() {
++                let handle = HANDLE(process.as_raw_handle());
++                unsafe {
++                    let _ = windows::Win32::System::Threading::TerminateProcess(handle, 99);
++                    let _ = windows::Win32::System::Threading::WaitForSingleObject(handle, 5000);
++                }
++            }
++            assert_eq!(result.is_error, Some(true), "{special_name}: {result:?}");
++            let wire = serde_json::to_value(&result).unwrap();
++            assert!(
++                wire["content"][0]["text"]
++                    .as_str()
++                    .unwrap()
++                    .contains("cannot be represented as a conventional Windows path"),
++                "must refuse lossy representation, not fail for an unrelated reason: {wire}"
++            );
++            assert!(result.windows_created_process.is_none());
++            assert!(result
++                .structured_content
++                .as_ref()
++                .and_then(|value| value.get("pid"))
++                .is_none());
++            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
++            assert!(
++                !marker.exists(),
++                "launched ordinary sibling instead of refusing"
++            );
++            assert!(
++                !special.join("launch-marker.txt").exists(),
++                "launched nonrepresentable path"
++            );
++            std::fs::remove_dir(&junction).unwrap();
++            std::fs::remove_dir_all(&special).unwrap();
++        }
 +    }
 +
 +    #[tokio::test]
@@ -4004,7 +4108,7 @@ index c3101d1..a7496e2 100644
  fn posted_pixel_click_result(pid: u32, click_word: &str) -> ToolResult {
      ToolResult::text(format!("✅ Posted {click_word} to pid {pid}.")).with_structured(json!({
          "path": "post_message",
-@@ -5514,9 +4990,10 @@ impl Tool for HotkeyTool {
+@@ -5514,9 +5062,10 @@ impl Tool for HotkeyTool {
                  accelerators via `TranslateAccelerator` (LibreOffice, FAR, classic Notepad, etc.) \
                  never see the combo as a real accelerator on the PostMessage-only path. \
                  Trade-off: brief foreground swap (mitigated by restoring the previous foreground \
@@ -4018,7 +4122,7 @@ index c3101d1..a7496e2 100644
                  - **Legacy Win32 targets without modifiers** (plain `enter`, `tab`, `f5`, etc.) \
                  route through `PostMessage(WM_KEYDOWN/UP)` — no focus steal, no need to update \
                  modifier state.\n\n\
-@@ -7896,6 +7373,7 @@ impl Tool for GetDesktopStateTool {
+@@ -7896,6 +7445,7 @@ impl Tool for GetDesktopStateTool {
              is_error: None,
              structured_content: Some(structured),
              action_record: None,
@@ -4026,7 +4130,7 @@ index c3101d1..a7496e2 100644
          }
      }
  }
-@@ -8875,6 +8353,7 @@ impl Tool for ZoomTool {
+@@ -8875,6 +8425,7 @@ impl Tool for ZoomTool {
                          "mime_type": "image/jpeg"
                      })),
                      action_record: None,
@@ -4034,7 +4138,7 @@ index c3101d1..a7496e2 100644
                  }
              }
              Ok(Err(e)) => ToolResult::error(format!("Zoom failed: {e}")),
-@@ -9641,21 +9120,40 @@ impl Tool for KillAppTool {
+@@ -9641,21 +9192,40 @@ impl Tool for KillAppTool {
              }
          };
 
@@ -4082,7 +4186,7 @@ index c3101d1..a7496e2 100644
                  .map_err(|e| {
                  format!(
                      "OpenProcess(pid={pid_v}, PROCESS_TERMINATE|PROCESS_SYNCHRONIZE) failed: {e}. \
-@@ -9664,6 +9162,13 @@ impl Tool for KillAppTool {
+@@ -9664,6 +9234,13 @@ impl Tool for KillAppTool {
                  )
              })?;
 
@@ -4096,7 +4200,7 @@ index c3101d1..a7496e2 100644
              let term_result = unsafe { TerminateProcess(h, 1) };
 
              // WaitForSingleObject so the caller can assume the process is
-@@ -9673,7 +9178,7 @@ impl Tool for KillAppTool {
+@@ -9673,7 +9250,7 @@ impl Tool for KillAppTool {
              // success (the kill request landed; the process may take a
              // little longer to disappear from list_apps).
              let wait_status = unsafe { WaitForSingleObject(h, 2000) };
