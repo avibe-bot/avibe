@@ -215,6 +215,14 @@ pub fn run() {
     CONFIG.set(config.clone()).ok().expect("one fixture instance");
     let data = config.root.join("native-state");
     std::fs::create_dir_all(&data).unwrap();
+    let env_text = |name: &str| std::env::var_os(name).map(|value| value.to_string_lossy().into_owned());
+    let path_probe = json!({
+        "current_exe": native_executable,
+        "temp_dir": std::env::temp_dir(),
+        "TMP": env_text("TMP"),
+        "TEMP": env_text("TEMP"),
+        "RUNNER_TEMP": env_text("RUNNER_TEMP"),
+    });
     let mut context = tauri::generate_context!();
     context.config_mut().build.dev_url = None;
     context.config_mut().app.app_directories_override = Some(AppDirectoriesOverride::Root(data.clone()));
@@ -285,7 +293,8 @@ pub fn run() {
             // only queues navigation and cannot make a hidden WebView visible.
             super::focus_or_restore_main_window(app.handle());
             emit(json!({"event":"native_ready", "version":app.package_info().version.to_string(),
-                "executable":executable, "data":data, "source_sha":env!("AVIBE_ACCEPTANCE_SOURCE_SHA")}));
+                "executable":executable, "data":data, "source_sha":env!("AVIBE_ACCEPTANCE_SOURCE_SHA"),
+                "path_probe":path_probe}));
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut seen = 0;
