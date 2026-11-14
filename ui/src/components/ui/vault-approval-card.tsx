@@ -125,6 +125,21 @@ const hdBitcoinSigningAddress = (account: HdApprovalAccount): SigningAddresses =
   return type === 'p2wpkh' ? { btc_segwit: address } : type === 'p2pkh' ? { btc_legacy: address } : { btc_taproot: address };
 };
 
+/** Whether a protected request's persisted derivation and its signed release name the same account:
+ *  both absent (an ordinary key), or the same chain, account and (Bitcoin only) type. */
+function sameProtectedDerivation(
+  persisted: { chain: string; account: number; address_type?: string } | undefined,
+  released: unknown,
+): boolean {
+  if (!persisted) return released === undefined;
+  if (typeof released !== 'object' || released === null) return false;
+  const signed = released as Record<string, unknown>;
+  const keys = persisted.address_type === undefined ? ['account', 'chain'] : ['account', 'address_type', 'chain'];
+  return Object.keys(signed).sort().join() === keys.join()
+    && signed.chain === persisted.chain && signed.account === persisted.account
+    && (persisted.address_type === undefined || signed.address_type === persisted.address_type);
+}
+
 function addressesForScheme(
   scheme: string | undefined,
   addresses: SigningAddresses | null,
@@ -544,6 +559,11 @@ export const VaultApprovalCard: React.FC<{
         const operationContext =
           delivery.operation_context ?? (card as { operation_context?: VaultSignedOperationContext } | null)?.operation_context;
         if (!operationContext) throw new Error(t('vaults.approval.errors.missingMaterial'));
+        // The sandbox signs with the account the signed release names; that must be the account this
+        // request was persisted with, and a wallet request must carry one (contract rev0.7 §5).
+        if (!sameProtectedDerivation(delivery.derivation, operationContext.release?.derivation)) {
+          throw new Error(t('vaults.approval.errors.failed'));
+        }
         // Open the sandbox authorization window from this click, before any await (see approveAccess).
         const authorizationWindow = openVaultAuthorizationWindow();
         let sig: SignatureResult;
@@ -554,11 +574,16 @@ export const VaultApprovalCard: React.FC<{
         }
         const signature: Record<string, unknown> = { signature: sig.signature };
         if (sig.recovery_id != null) signature.recovery_id = sig.recovery_id;
+        // A protected wallet account (contract rev0.7 §5): the completion repeats the persisted chain,
+        // account and Bitcoin type and the signing context exactly; the daemon refuses anything else.
+        const derivation = delivery.derivation;
         // An exact-message completion is bound to the context it was requested with: the daemon
         // compares it with the stored request and refuses a completion that leaves it out.
         failIfNotOk(await api.signVaultDigest({
           name, request_id: request.id, ...signed, scheme, signature,
-          ...(signsMessage ? { signing_context: signingContext } : {}),
+          ...(derivation ? { chain: derivation.chain, account: derivation.account } : {}),
+          ...(derivation?.address_type ? { address_type: derivation.address_type } : {}),
+          ...(signsMessage || derivation ? { signing_context: signingContext } : {}),
         }));
       } else {
         // Standard keypair: avault signs; we only relay the approved request.

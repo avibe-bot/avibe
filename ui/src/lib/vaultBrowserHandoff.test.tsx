@@ -56,6 +56,7 @@ vi.mock('@/lib/useProtectedVault', () => ({
   useProtectedVault: () => vault,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
   useVaultSandboxWarm,
+  useProtectedHdSupported: () => null,
 }));
 // Workbench navigation, not part of the Vaults step (and it scrolls, which jsdom lacks).
 vi.mock('@/components/workbench/CapabilityTabs', () => ({ CapabilityTabs: () => null }));

@@ -296,6 +296,59 @@ describe('VaultApprovalCard protected signing completion', () => {
   });
 });
 
+// A protected seed-phrase wallet account (contract rev0.7 §5): the sandbox signs with the account
+// the signed release names, which must be the persisted one; the completion repeats it exactly.
+describe('VaultApprovalCard protected wallet account signing', () => {
+  const material = { name: 'COLD_WALLET', kind: 'keypair', envelope };
+  const derivation = { chain: 'bitcoin', account: 1, address_type: 'p2tr' };
+  const btcContext = { kind: 'bitcoin-taproot-keypath-v1', network: 'bitcoin', digest: '11'.repeat(32) };
+  const walletSign = (released: unknown): VaultRequest => ({
+    ...protectedAccess,
+    id: 'vrq_wallet_sign',
+    request_type: 'sign',
+    secret_name: 'COLD_WALLET',
+    delivery: {
+      scheme: 'schnorr-secp256k1-bip341-keypath', digest: '11'.repeat(32), signing_context: btcContext, derivation,
+      operation_context: { v: 2, purpose: 'sign', requestId: 'vrq_wallet_sign', release: { name: 'COLD_WALLET', derivation: released } },
+    },
+    card: { request_type: 'sign', secret_name: 'COLD_WALLET', kind: 'keypair', protection: 'protected', secret_unlock_material: material },
+  });
+  const approve = async (request: VaultRequest) => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    vault.signProtectedRequest.mockResolvedValue({ scheme: 'schnorr-secp256k1-bip341-keypath', signature: 'ef'.repeat(64), recovery_id: null });
+    openWindow();
+    const onResolved = vi.fn();
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={onResolved} onCancel={vi.fn()} /></I18nextProvider>);
+    const sign = screen.getByRole('button', { name: en.vaults.approval.sign }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(sign.disabled).toBe(false));
+    fireEvent.click(sign);
+    return onResolved;
+  };
+
+  it('completes with the persisted chain, account, Taproot type and signing context', async () => {
+    const onResolved = await approve(walletSign(derivation));
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+    expect(api.signVaultDigest).toHaveBeenCalledExactlyOnceWith({
+      name: 'COLD_WALLET', request_id: 'vrq_wallet_sign', digest: '11'.repeat(32), scheme: 'schnorr-secp256k1-bip341-keypath',
+      signature: { signature: 'ef'.repeat(64) }, chain: 'bitcoin', account: 1, address_type: 'p2tr', signing_context: btcContext,
+    });
+  });
+
+  it.each([
+    ['another account', { chain: 'bitcoin', account: 2, address_type: 'p2tr' }],
+    ['no type', { chain: 'bitcoin', account: 1 }],
+    ['no derivation at all', undefined],
+    ['an extra field', { ...derivation, path: "m/86'/0'/0'/0/1" }],
+  ])('refuses a signed release naming %s, before the sandbox is asked', async (_label, released) => {
+    const onResolved = await approve(walletSign(released));
+    await vi.waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    expect(vault.signProtectedRequest).not.toHaveBeenCalled();
+    expect(api.signVaultDigest).not.toHaveBeenCalled();
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+});
+
 describe('VaultApprovalCard protected access approval', () => {
   it.each(['en', 'zh'] as const)('renders the actionable integrity error in %s through the real approval catch', async (language) => {
     await i18n.changeLanguage(language);

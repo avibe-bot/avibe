@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   Asterisk,
@@ -50,7 +50,9 @@ import { blockHdWallet, unblockHdWallet } from '@/lib/vaultHdQuarantine';
 import {
   checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
 } from '@/lib/vaultHdWallet';
-import { useProtectedVault } from '@/lib/useProtectedVault';
+import { useProtectedHdSupported, useProtectedVault, useVaultSandboxWarm } from '@/lib/useProtectedVault';
+import { protectedHdBusy, protectedHdSubmitted, useProtectedHdCreate } from '@/lib/useProtectedHdCreate';
+import { ProtectedHdDesignState } from '@/lib/protectedHdDesign';
 import { useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
@@ -79,6 +81,7 @@ import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import {
   HdAvaultOld, HdBackupStep, HdCheckStep, HdCreatePassphrase, HdDoneStep, HdImportFields, HdMismatchBlock, HdNotice, HdStepFooter, HdStepper,
 } from './vault-hd-wallet-steps';
+import { ProtectedHdDone, ProtectedHdLaunchButton, ProtectedHdLaunchNotice, ProtectedHdTierNote } from './vault-protected-hd-create';
 import { AskTurnOffNote } from './vault-ask-turn-off-note';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
@@ -201,7 +204,8 @@ export const VaultSecretForm: React.FC<{
 }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const [name, setName] = useState(fixedName ?? '');
+  const hdDesignState = useContext(ProtectedHdDesignState);
+  const [name, setName] = useState(fixedName ?? hdDesignState?.name ?? '');
   const [value, setValue] = useState('');
   const [fieldRows, setFieldRows] = useState<FieldDraft[] | null>(null);
   const [defaultFieldIndex, setDefaultFieldIndex] = useState(0);
@@ -339,8 +343,12 @@ export const VaultSecretForm: React.FC<{
 
   const protectedVault = useProtectedVault();
   const entryIssue = vaultEntryIssue();
+  // Protected seed-phrase wallets (contract rev0.7): made in the sandbox window, saved, then confirmed.
+  const protectedHd = useProtectedHdCreate();
+  // A design frame draws a state without the sandbox (lib/protectedHdDesign).
+  const hdDesign = hdDesignState !== null;
   useEffect(() => {
-    if (!editSecret && protection === 'protected' && !entryIssue) void protectedVault.refresh();
+    if (!editSecret && protection === 'protected' && !entryIssue && !hdDesign) void protectedVault.refresh();
     // protectedVault.refresh is stable (useCallback); only re-check when the tier changes.
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [editSecret, protection, entryIssue]);
@@ -407,6 +415,15 @@ export const VaultSecretForm: React.FC<{
   const isSolanaKey = !editSecret && isKeypair && chain === 'solana';
   const isHd = !editSecret && isKeypair && chain === 'mnemonic';
   const hdReady = avaultDep?.status === 'ready' && versionAtLeast(avaultDep.version, AVAULT_HD_MIN_VERSION);
+  const isProtectedHd = isHd && protection === 'protected';
+  // Offered only when the pinned sandbox build lists the operation; until then the tier says so.
+  const pinnedHdSupported = useProtectedHdSupported(isProtectedHd && !entryIssue && !hdDesign);
+  const protectedHdSupported = hdDesign ? true : pinnedHdSupported;
+  const protectedHdWarm = useVaultSandboxWarm(isProtectedHd && !entryIssue && !hdDesign);
+  const protectedVaultStatus = hdDesign ? 'locked' : protectedVault.status;
+  // The window unlocks the vault itself, so a locked vault is enough; one must exist to hold it.
+  const protectedHdReady = isProtectedHd && !entryIssue && protectedHdSupported === true && protectedHdWarm
+    && (protectedVaultStatus === 'locked' || protectedVaultStatus === 'unlocked');
   const hdCheck = useMemo<PhraseCheck>(() => checkPhrase(hdImport), [hdImport]);
   // Account #0 from the pasted words, derived here so it can be compared with the old wallet before
   // anything is saved. The seed is zeroed as soon as the addresses are read.
@@ -494,8 +511,9 @@ export const VaultSecretForm: React.FC<{
       new Set(fieldRows.map((field) => field.name)).size === fieldRows.length
     : staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
   const valueReady = isHd
-    // A passphrase typed twice must match before the words are made.
-    ? (signingSource === 'generate' && hdNewPassphrase === hdNewPassphraseAgain) || (signingSource === 'import' && hdCheck.ok)
+    // Protected: the words are made or typed in the sandbox window, so the page needs nothing here.
+    // Standard: a passphrase typed twice must match before the words are made.
+    ? isProtectedHd || (signingSource === 'generate' && hdNewPassphrase === hdNewPassphraseAgain) || (signingSource === 'import' && hdCheck.ok)
     : isKeypair
     ? // A generated key, on any chain or tier, is made at submit, so it needs nothing here (owner
       // decision 2026-11-12: an address shown before saving could be noted and then lost to a second
@@ -506,13 +524,15 @@ export const VaultSecretForm: React.FC<{
         ? solanaImport.trim().length > 0
         : signingKey != null
     : staticValueReady;
+  // Once the sandbox window is open, and for good once a save may have reached Avibe, nothing on the
+  // form changes: the wallet being saved is the one it describes.
+  const formBusy = submitting || (isProtectedHd && (protectedHdBusy(protectedHd.phase) || protectedHdSubmitted(protectedHd.phase)));
   const canSubmit = isEdit
     ? !submitting && !fieldEditBusy
     : Boolean(secretNameValid && valueReady) &&
       !submitting &&
       (isHd
-        // Standard tier only: protected seed-phrase wallets belong to the sandbox (not yet built).
-        ? protection === 'standard' && hdReady
+        ? (protection === 'standard' && hdReady) || (protectedHdReady && !protectedHdBusy(protectedHd.phase) && !protectedHdSubmitted(protectedHd.phase))
         : (protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   const clearSelectedFile = useCallback(() => {
@@ -770,6 +790,24 @@ export const VaultSecretForm: React.FC<{
     const hostsVisible = advancedOpen && !isHd;
     if (tagsPending || (hostsVisible && hostsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
+      return;
+    }
+    if (isProtectedHd) {
+      // The click opens the sandbox window before anything is awaited (protocol v2 §6.6).
+      const mergedTags = mergeTags(tags, []);
+      const skillLinks = partitionTags(tags).skills;
+      void protectedHd.start({
+        name: secretName,
+        mode: signingSource === 'generate' ? 'create' : 'import',
+        metadata: {
+          description: description.trim() || undefined,
+          tags: mergedTags.length ? mergedTags : undefined,
+          links: skillLinks.length ? { skills: skillLinks } : undefined,
+          provision_request_id: provisionRequestId || undefined,
+        },
+        seal: protectedVault.sealHdWallet,
+        onSaved: protectedVault.afterCreated,
+      });
       return;
     }
     const normalizedFetchAuthName = fetchAuthName.trim();
@@ -1074,7 +1112,7 @@ export const VaultSecretForm: React.FC<{
           <SegmentedRadio<StaticSecretSource>
             value={staticSource}
             onChange={switchStaticSource}
-            disabled={submitting}
+            disabled={formBusy}
             ariaLabel={t('vaults.dialog.valueSource')}
             options={[
               { id: 'text', label: t('vaults.dialog.valueSourceText') },
@@ -1233,7 +1271,7 @@ export const VaultSecretForm: React.FC<{
                 blockedReason: index === defaultFieldIndex ? t('vaults.fields.defaultNotRemovable') : undefined,
               }}
               issue={issue}
-              disabled={submitting}
+              disabled={formBusy}
             />
           );
         })}
@@ -1270,7 +1308,7 @@ export const VaultSecretForm: React.FC<{
         <SegmentedRadio<FetchAuthMode>
           value={fetchAuthMode}
           onChange={setFetchAuthMode}
-          disabled={submitting}
+          disabled={formBusy}
           ariaLabel={t('vaults.dialog.fetchAuth')}
           options={[
             { id: 'bearer', label: t('vaults.dialog.fetchAuthBearer') },
@@ -1284,7 +1322,7 @@ export const VaultSecretForm: React.FC<{
             onChange={(event) => setFetchAuthName(event.target.value)}
             placeholder={t('vaults.dialog.fetchAuthNamePlaceholder')}
             autoComplete="off"
-            disabled={submitting}
+            disabled={formBusy}
           />
         )}
       </div>
@@ -1348,8 +1386,12 @@ export const VaultSecretForm: React.FC<{
               key={key}
               type="button"
               aria-pressed={selected}
+              disabled={formBusy}
               onClick={() => {
                 setProtection(key);
+                // A protected seed-phrase wallet's words are typed only in the sandbox window: drop any
+                // the page holds for a standard one.
+                if (isHd && key === 'protected') resetHd();
                 // Switching tier invalidates a sandbox-sealed protected keypair (sealed under the
                 // protected tier); drop it so a stale envelope can't be submitted as standard.
               }}
@@ -1384,7 +1426,7 @@ export const VaultSecretForm: React.FC<{
         <Switch
           checked={alwaysAsk}
           onCheckedChange={setAlwaysAsk}
-          disabled={submitting}
+          disabled={formBusy}
           label={t('vaults.dialog.alwaysAskSign')}
         />
       </div>
@@ -1487,7 +1529,7 @@ export const VaultSecretForm: React.FC<{
           <Lock className="size-3 shrink-0" />
           {t('vaults.edit.lockedHint')}
         </p>
-        {!isKeypair && <VaultSecretFieldsEditor key={editSecret.name} secret={editSecret} disabled={submitting} onBusyChange={setFieldEditBusy} />}
+        {!isKeypair && <VaultSecretFieldsEditor key={editSecret.name} secret={editSecret} disabled={formBusy} onBusyChange={setFieldEditBusy} />}
 
         <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
@@ -1597,12 +1639,12 @@ export const VaultSecretForm: React.FC<{
 
         <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
           {onDeny ? (
-            <Button type="button" variant="destructive-soft" className="w-full sm:mr-auto sm:w-auto" onClick={onDeny} disabled={submitting}>
+            <Button type="button" variant="destructive-soft" className="w-full sm:mr-auto sm:w-auto" onClick={onDeny} disabled={formBusy}>
               <X className="size-3.5" />
               {denyLabel ?? t('vaults.approval.deny')}
             </Button>
           ) : null}
-          <Button type="button" variant="ghost" className="w-full sm:w-auto" onClick={onCancel} disabled={submitting}>
+          <Button type="button" variant="ghost" className="w-full sm:w-auto" onClick={onCancel} disabled={formBusy}>
             {cancelLabel ?? t('vaults.request.dismiss')}
           </Button>
           <Button type="submit" className="w-full sm:w-auto" disabled={!canSubmit}>
@@ -1615,6 +1657,15 @@ export const VaultSecretForm: React.FC<{
   }
 
   // ---- Seed-phrase wallet steps after setup — ui/design: vault/mnemonic/create/* -------
+  if (isProtectedHd && protectedHd.phase.kind === 'done') {
+    const { name: savedName, account0 } = protectedHd.phase;
+    return (
+      <div className={cn('flex min-w-0 flex-col gap-4', className)}>
+        <ProtectedHdDone name={savedName} account0={account0} onFinish={() => onCreated(savedName, 'created')} />
+      </div>
+    );
+  }
+
   if (isHd && (hdMismatch || hdStep !== 'setup')) {
     const step = hdStep === 'backup' ? 2 : 3;
     return (
@@ -1644,7 +1695,7 @@ export const VaultSecretForm: React.FC<{
                 <Button
                   type="button"
                   variant="secondary"
-                  disabled={submitting}
+                  disabled={formBusy}
                   onClick={() => {
                     setSubmitting(true);
                     void applyHdAsk().finally(() => setSubmitting(false));
@@ -1708,7 +1759,7 @@ export const VaultSecretForm: React.FC<{
             }
             // A sandbox-sealed protected keypair is bound to its kind; switching kind invalidates it.
           }}
-          disabled={submitting}
+          disabled={formBusy}
           ariaLabel={t('vaults.dialog.kindLabel')}
           // Icons make the two kinds read at a glance (owner, 2026-11-12).
           options={[
@@ -1730,7 +1781,7 @@ export const VaultSecretForm: React.FC<{
           }}
           autoFocus
           required
-          disabled={submitting}
+          disabled={formBusy}
           aria-invalid={nameInvalid || undefined}
           className={cn('font-mono', nameInvalid && 'border-destructive/60')}
         />
@@ -1751,7 +1802,7 @@ export const VaultSecretForm: React.FC<{
           <SegmentedRadio<KeyChain>
             value={chain}
             onChange={switchChain}
-            disabled={submitting}
+            disabled={formBusy}
             ariaLabel={t('vaults.dialog.chainLabel')}
             options={[
               { id: 'evm-bitcoin', label: t('vaults.dialog.chainEvmBitcoin') },
@@ -1768,13 +1819,19 @@ export const VaultSecretForm: React.FC<{
         <div className="flex flex-col gap-2.5">
           <KeySourceTabs
             value={signingSource}
-            disabled={submitting}
+            disabled={formBusy}
             onChange={(src) => {
               setSigningSource(src);
               resetHd();
             }}
           />
-          {signingSource === 'generate' ? (
+          {protection === 'protected' ? (
+            // Words, passphrase and the three-word check live only in the sandbox window.
+            <HintLine
+              text={t(signingSource === 'generate' ? 'vaults.hd.protected.generateHint' : 'vaults.hd.protected.importHint')}
+              info={t('vaults.hd.protected.info')}
+            />
+          ) : signingSource === 'generate' ? (
             <>
               <HintLine text={t('vaults.hd.generateHint')} info={t('vaults.hd.generateInfo')} />
               {/* Standard tier: the browser makes the seed. A protected wallet is made in the sandbox. */}
@@ -1784,7 +1841,7 @@ export const VaultSecretForm: React.FC<{
                   confirm={hdNewPassphraseAgain}
                   onChange={setHdNewPassphrase}
                   onConfirmChange={setHdNewPassphraseAgain}
-                  disabled={submitting}
+                  disabled={formBusy}
                 />
               ) : null}
             </>
@@ -1798,7 +1855,7 @@ export const VaultSecretForm: React.FC<{
                 passphrase={hdPassphrase}
                 onPassphraseChange={setHdPassphrase}
                 preview={hdPreview}
-                disabled={submitting}
+                disabled={formBusy}
               />
             </>
           )}
@@ -1819,7 +1876,7 @@ export const VaultSecretForm: React.FC<{
             setSolanaImportFailed(false);
           }}
           importFailed={solanaImportFailed}
-          disabled={submitting}
+          disabled={formBusy}
         />
       )}
 
@@ -1827,7 +1884,7 @@ export const VaultSecretForm: React.FC<{
         <div className="flex flex-col gap-2.5">
           <KeySourceTabs
             value={signingSource}
-            disabled={submitting}
+            disabled={formBusy}
             onChange={(src) => {
               setSigningSource(src);
               setSigningError(null);
@@ -1848,7 +1905,7 @@ export const VaultSecretForm: React.FC<{
                 value={importHex}
                 spellCheck={false}
                 autoComplete="off"
-                disabled={submitting}
+                disabled={formBusy}
                 aria-label={t('vaults.dialog.signingImport')}
                 aria-invalid={Boolean(signingError) || undefined}
                 placeholder={t('vaults.dialog.signingImportPlaceholder')}
@@ -1936,13 +1993,20 @@ export const VaultSecretForm: React.FC<{
             <span className="text-[13px] font-semibold text-foreground">{t('vaults.hd.askAccount0')}</span>
             <InfoHint hover content={t('vaults.hd.askAccount0Info')} label={t('vaults.dialog.moreInfo')} />
           </span>
-          <Switch checked={hdAsk} onCheckedChange={setHdAsk} disabled={submitting} label={t('vaults.hd.askAccount0')} />
+          <Switch checked={hdAsk} onCheckedChange={setHdAsk} disabled={formBusy} label={t('vaults.hd.askAccount0')} />
         </div>
       ) : null}
-      {isHd && protection === 'protected' ? (
+      {isProtectedHd && protectedHdSupported !== false && !entryIssue ? <ProtectedHdTierNote /> : null}
+      {isProtectedHd && protectedHdSupported === false ? (
         <span role="note" className="text-xs text-muted">{t('vaults.hd.protectedUnsupported')}</span>
       ) : null}
-      {isHd && avaultDep && (!hdReady || hdAvaultUpgrade) ? (
+      {isProtectedHd && !protectedHdSubmitted(protectedHd.phase) && (entryIssue
+        || (protectedHdSupported !== false && protectedVaultStatus !== 'locked' && protectedVaultStatus !== 'unlocked')) ? (
+        // No protected vault yet (or still checking): it is set up first, with its Passkey.
+        <VaultProtectedUnlock warnDraftDiscard vault={protectedVault} secretName={secretName || undefined} onContinueInBrowser={continueInBrowser} />
+      ) : null}
+      {isProtectedHd ? <ProtectedHdLaunchNotice phase={protectedHd.phase} name={secretName} /> : null}
+      {isHd && protection === 'standard' && avaultDep && (!hdReady || hdAvaultUpgrade) ? (
         <HdAvaultOld version={AVAULT_HD_MIN_VERSION} installed={avaultDep.version ?? 'unknown'} />
       ) : null}
 
@@ -1954,13 +2018,23 @@ export const VaultSecretForm: React.FC<{
       {isHd && error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
 
       <div className="mt-1 flex justify-end gap-2">
-        <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
+        <Button type="button" variant={isProtectedHd && protectedHd.phase.kind === 'mismatch' ? 'secondary' : 'ghost'} onClick={onCancel}
+          disabled={submitting || (isProtectedHd && protectedHdBusy(protectedHd.phase))}>
           {t('vaults.dialog.cancel')}
         </Button>
-        <Button type="submit" disabled={!canSubmit}>
-          {submitting && <Loader2 className="size-4 animate-spin" />}
-          {isHd ? t(signingSource === 'generate' ? 'vaults.hd.generateCta' : 'vaults.hd.importCta') : t('vaults.dialog.createSecret')}
-        </Button>
+        {isProtectedHd ? (
+          <ProtectedHdLaunchButton
+            phase={protectedHd.phase}
+            mode={signingSource === 'generate' ? 'create' : 'import'}
+            disabled={!canSubmit}
+            onCheckAgain={protectedHd.checkAgain}
+          />
+        ) : (
+          <Button type="submit" disabled={!canSubmit}>
+            {submitting && <Loader2 className="size-4 animate-spin" />}
+            {isHd ? t(signingSource === 'generate' ? 'vaults.hd.generateCta' : 'vaults.hd.importCta') : t('vaults.dialog.createSecret')}
+          </Button>
+        )}
       </div>
     </form>
   );

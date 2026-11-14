@@ -34,7 +34,7 @@ const vault = vi.hoisted(() => ({
 vi.mock('@/context/ApiContext', async (original) => ({
   ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api,
 }));
-vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
+vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, useProtectedHdSupported: () => false, useVaultSandboxWarm: () => true }));
 // The pinned sandbox: whether it can turn ask-before-signing off, and its answer.
 const sandbox = vi.hoisted(() => ({
   canTurnOff: false,

@@ -20,12 +20,12 @@ import { Textarea } from './textarea';
 
 /** A one-line notice in the dialog. */
 export function HdNotice({ tone, icon: Icon, children }: {
-  tone: 'warning' | 'error' | 'violet';
+  tone: 'neutral' | 'warning' | 'error' | 'violet';
   icon: ComponentType<{ className?: string }>;
   children: ReactNode;
 }) {
-  const box = { warning: 'border-gold/40 bg-gold/10', error: 'border-destructive/40 bg-destructive/10', violet: 'border-violet/30 bg-violet-soft' }[tone];
-  const ink = { warning: 'text-gold-ink', error: 'text-destructive-ink', violet: 'text-violet-ink' }[tone];
+  const box = { neutral: 'border-edge bg-surface-2', warning: 'border-gold/40 bg-gold/10', error: 'border-destructive/40 bg-destructive/10', violet: 'border-violet/30 bg-violet-soft' }[tone];
+  const ink = { neutral: 'text-muted', warning: 'text-gold-ink', error: 'text-destructive-ink', violet: 'text-violet-ink' }[tone];
   return (
     <div role={tone === 'error' ? 'alert' : 'note'} className={cn('flex items-start gap-2.5 rounded-[10px] border px-3 py-2.5 text-[12.5px] leading-snug text-foreground', box)}>
       <Icon className={cn('mt-0.5 size-4 shrink-0', ink)} />
@@ -200,13 +200,16 @@ export function HdCheckStep({ quiz, chosen, onChoose }: {
  *  Bitcoin is one row whose label switches between the types the account can sign for; `types`
  *  overrides the account's own list (the pre-save preview offers what the wallet will have). With
  *  Taproot alone, a hint says Phantom and others show SegWit by default. */
-export function HdAccountAddressList({ account, types }: {
+export function HdAccountAddressList({ account, types, hint = true }: {
   account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> & {
     btc_segwit?: string;
     btc_legacy?: string;
     bitcoin_address_types?: BitcoinAddressType[];
   };
   types?: BitcoinAddressType[];
+  /** The ⓘ beside a lone Taproot (other wallets show SegWit by default). A protected wallet, which
+   *  can sign for Taproot only, shows the plain label instead. */
+  hint?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -216,7 +219,7 @@ export function HdAccountAddressList({ account, types }: {
         // An account the server has not prepared lists no types: Taproot only, never inferred.
         types={types ?? account.bitcoin_address_types ?? ['p2tr']}
         addresses={{ p2tr: account.btc_taproot, p2wpkh: account.btc_segwit, p2pkh: account.btc_legacy }}
-        singleHint={<InfoHint hover content={t('vaults.hd.btcTaprootInfo')} label={t('vaults.dialog.moreInfo')} />}
+        singleHint={hint ? <InfoHint hover content={t('vaults.hd.btcTaprootInfo')} label={t('vaults.dialog.moreInfo')} /> : undefined}
       />
       <SigningAddressRow label={t('vaults.addresses.solana')} value={account.solana} labelClassName="sm:w-[104px]" />
     </div>

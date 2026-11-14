@@ -6654,6 +6654,39 @@
         "backupReminder": "This wallet also has a passphrase. Write it down separately from the words: recovering needs both, and the passphrase must be exact.",
         "recovery": "If this computer is lost, only these words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing.",
         "set": "Set"
+      },
+      "protected": {
+        "generateHint": "The secure window makes 12 words, you write them down and tap 3 to check; a passphrase is set there too (optional).",
+        "importHint": "Paste the words and passphrase (if any) in the secure window, compare account #0, then save.",
+        "info": "The words and passphrase are handled only in this separate secure window; they are never handed to the main Avibe page or an Agent. Saving is confirmed with your Passkey.",
+        "tierNote": "Protected: every signature by every account is approved in the secure window with your Passkey.",
+        "launchCreate": "Create in secure window",
+        "launchImport": "Import in secure window",
+        "waitingCta": "Waiting for the secure window…",
+        "savingCta": "Saving…",
+        "checkingCta": "Checking…",
+        "checkAgain": "Check again",
+        "notice": {
+          "waiting": "The secure window is open. When you finish there, the result shows here; nothing is typed on this page.",
+          "blocked": "The browser blocked the secure window. Allow pop-ups for this site and try again.",
+          "cancelled": "Cancelled; nothing was saved. You can try again.",
+          "closed": "The secure window was closed; nothing was saved. You can try again.",
+          "timeout": "The secure window wasn’t finished within 5 minutes; nothing was saved. Trying again starts over.",
+          "reset": "The protected vault was locked or reset meanwhile, so this attempt was dropped; nothing was saved.",
+          "unavailable": "This version of the secure window can’t make protected seed phrase wallets yet; nothing was saved.",
+          "failed": "The secure window couldn’t finish; nothing was saved. Try again.",
+          "saving": "The secure window finished; saving the encrypted wallet. Keep this page open.",
+          "checking": "No confirmed reply to the save yet; checking with Avibe whether this wallet was saved. No new words are made and nothing is saved twice. Keep this page open.",
+          "unconfirmed": "Can’t confirm yet whether it was saved. Keep the words you wrote down, don’t send funds to it, and don’t create another wallet with this name. Check again, or look for {{name}} in the vault’s key list later.",
+          "refusal": "Avibe answered: {{message}}",
+          "mismatch": "Can’t confirm that the {{name}} saved in Avibe is the wallet the secure window just made. Don’t send funds to its addresses. Keep your written words."
+        },
+        "done": {
+          "title": "{{name}} is ready (Protected)",
+          "body": "Account #0’s addresses are below. Every signature is approved in the secure window.",
+          "recovery": "If the Passkey is lost, the words plus the original passphrase (if any) still recover the wallet. But anyone with them can move the funds outside Avibe. A database backup alone cannot restore signing."
+        },
+        "approveEvery": "Approve every signature"
       }
     }
   },
