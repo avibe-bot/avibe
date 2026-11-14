@@ -65,7 +65,7 @@ once it stops changing or the timeout ends.
   background input still has no effect. Foreground input restores the previous
   frontmost window; `activate()` leaves the target frontmost.
 - When no on-screen window matches, call `const launched = await app.launch()`
-  once (on Windows, launch through a path handle as described under Windows),
+  once (on Windows, launch from its `.exe` path as described under Windows),
   then `await launched.app.waitFor({ onScreen: true })`. If no window
   appears, or activation stays unverified, stop and ask the owner. Never loop.
 - Treat driver `status: unverifiable` as unknown, not proof of effect. After
@@ -170,8 +170,9 @@ kernel, SDK, saved flows, and safety rules above are the same.
   Avibe, or work around the refusal.
 - Avibe launches a Windows app only from the absolute path of its `.exe` on a
   local drive. Network, relative, and other paths are refused, and Avibe never
-  launches by name. To open an app the owner named, first check `observe
-  apps`: if it is already running, attach to its window instead of launching.
+  launches by name. To work in an app the owner named, first check `observe
+  apps`: if it is already running, work in it through a `name` handle as
+  usual instead of launching.
 - Otherwise resolve its `.exe` with read-only lookups, without asking the
   owner for a path:
   - its App Paths entry:
@@ -184,19 +185,21 @@ kernel, SDK, saved flows, and safety rules above are the same.
   belongs to the app the owner named, and only one candidate remains. Pass
   arguments as literal strings. Never copy a whole command line, a
   `launch_path`, or a `%VAR%` reference into the path.
-- Then launch it through a path handle:
+- Then launch it from that path:
   ```js
   const excel = await computer.app({ path: "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE" });
   const launched = await excel.launch({ additional_arguments: ["C:\\Reports\\q3.xlsx"] });
   ```
-  A path handle matches only a process whose image is that exact file, never
-  an app with the same name. Do not combine `path` with `name` or `bundleId`;
-  on macOS keep using those.
+  A path handle only launches: each launch starts a new process, and the
+  result names that process. Work in the new window from the result; do not
+  use a path handle to find an app that is already open. Do not combine `path`
+  with `name` or `bundleId`; on macOS keep using those.
 - Store apps, stubs that hand off to another process (such as the files in
   `WindowsApps`), apps with several plausible or no reliable `.exe`, links,
   and files that open in their default app cannot be launched. Tell the owner:
-  "Please open it first, then I can operate it." Then wait for its window
-  with `app.waitFor`, observe, and continue there. Never start it through a
+  "Please open it first, then I can operate it." Then resolve it with a
+  `name` handle, wait for its window with `app.waitFor`, observe, and continue
+  there. Never start it through a
   shell command (such as `Start-Process`) and then attach, try another launch
   route, or elevate, and do not retry the launch. If Avibe refuses a launch
   ("Avibe cannot launch this app in the Windows Preview"), do the same.
