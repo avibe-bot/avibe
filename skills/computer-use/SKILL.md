@@ -2,7 +2,7 @@
 name: computer-use
 slug: computer-use
 description: Use Avibe's local Computer Use CLI for carefully bounded desktop observation and actions.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Computer Use
@@ -65,7 +65,8 @@ once it stops changing or the timeout ends.
   background input still has no effect. Foreground input restores the previous
   frontmost window; `activate()` leaves the target frontmost.
 - When no on-screen window matches, call `const launched = await app.launch()`
-  once, then `await launched.app.waitFor({ onScreen: true })`. If no window
+  once (on Windows, launch from its `.exe` path as described under Windows),
+  then `await launched.app.waitFor({ onScreen: true })`. If no window
   appears, or activation stays unverified, stop and ask the owner. Never loop.
 - Treat driver `status: unverifiable` as unknown, not proof of effect. After
   input, compare a second observation against a stable signature (title,
@@ -148,10 +149,73 @@ name. Save a flow as a reusable Skill only after the owner approves.
 - `force-quit` sends SIGKILL and can lose unsaved work; close cooperatively first.
 
 Report these states and stop or wait instead of retrying: `off`,
-`needs_permission` (Accessibility or Screen Recording), `needs_runtime` (the
+`needs_permission` (Accessibility or Screen Recording on macOS), `needs_runtime` (the
 owner must restart the service), `starting`, `error`, `unavailable`,
 `target_busy` (another call holds the target), and `observe_first` (observe it
 in this Session first).
+
+## Windows (Preview)
+
+On Windows x64 the Avibe desktop app hosts Computer Use as a Preview. The
+kernel, SDK, saved flows, and safety rules above are the same.
+
+- Windows apps have no bundle IDs: select them by `name` or `nameContains`,
+  using the names that `observe apps` reports.
+- Windows asks for no Accessibility or Screen Recording grant. Never tell the
+  owner to open System Settings; report the state you received instead.
+- App windows that run as administrator (elevated) are refused. When an
+  action is refused because its target window is elevated, tell the owner that
+  Avibe cannot control that window and that reopening the app without "Run as
+  administrator" lets you continue. Never retry it, ask the owner to elevate
+  Avibe, or work around the refusal.
+- Avibe launches a Windows app only from the absolute path of its `.exe` on a
+  local drive. Network, relative, and other paths are refused, and Avibe never
+  launches by name. To work in an app the owner named, first check `observe
+  apps`: if it is already running, work in it through a `name` handle as
+  usual instead of launching.
+- Otherwise resolve its `.exe` with read-only lookups, without asking the
+  owner for a path:
+  - its App Paths entry:
+    `(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\excel.exe').'(default)'`
+    (also try `HKCU:`);
+  - the target of its Start menu shortcut:
+    `(New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath`;
+  - a program on `PATH`: `(Get-Command excel.exe -CommandType Application).Source`.
+  Use a path only if it is an existing `.exe` on a local drive, it clearly
+  belongs to the app the owner named, and only one candidate remains. Pass
+  arguments as literal strings. Never copy a whole command line, a
+  `launch_path`, or a `%VAR%` reference into the path.
+- Then launch it from that path:
+  ```js
+  const excel = await computer.app({ path: "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE" });
+  const launched = await excel.launch({ additional_arguments: ["C:\\Reports\\q3.xlsx"] });
+  const win = await launched.app.waitFor({ onScreen: true });
+  ```
+  A path handle only launches. Each `launch` starts a new process and returns
+  an ordinary app handle for it, which you use as usual. The path handle never
+  finds or reuses an app that is already open; use a `name` handle for that.
+  If the launch returns an error instead of an app (the new process exited at
+  once, as a stub that hands off does), do not retry: ask the owner to open
+  the app, as below. Do not combine `path` with `name` or `bundleId`. On macOS
+  `path` is refused: keep using `bundleId` or `name` there.
+- Store apps, stubs that hand off to another process (such as the app
+  aliases in `%LOCALAPPDATA%\Microsoft\WindowsApps`), apps with several
+  plausible or no reliable `.exe`, links, and files that open in their default
+  app cannot be launched. Tell the owner: "Please open it first, then I can
+  operate it." Then resolve it with a `name` handle, wait for its window with
+  `app.waitFor`, observe, and continue there. Never start it through a shell
+  command (such as `Start-Process`) and then attach, try another launch route,
+  or elevate, and do not retry the launch. If Avibe refuses a launch
+  ("Avibe cannot launch this app in the Windows Preview"), do the same.
+- To open a menu, `await win.activate()` and observe that this exact window is
+  focused before the click: foreground delivery restores the previous window,
+  which closes the menu again.
+- An elevated target is different from Avibe itself running as administrator:
+  then Computer Use reports `unavailable` (`elevated_runtime`) and the owner
+  must reopen Avibe normally.
+- Turning Computer Use off, quitting Avibe, or Avibe exiting stops the driver
+  and ends Computer Use. A later call reports `off` or `unavailable`: report it
+  and stop.
 
 ## Appendix: single-shot commands for fallback and debugging
 

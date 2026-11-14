@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,7 +9,9 @@ import zh from '../../i18n/zh.json';
 import {
   COMPUTER_USE_GUIDE_STEPS,
   computerUseGuideProgress,
+  readComputerUseStatus,
 } from '../workbench/computerUseStatus';
+import { computerUseStatusCopy } from '../workbench/computerUseStatusCopy';
 import { SettingsComputerUsePage } from './SettingsComputerUsePage';
 
 const apiFetch = vi.hoisted(() => vi.fn());
@@ -32,6 +34,19 @@ const enterActionableShell = (invoke = vi.fn(async (_command: string, _args?: Re
   return invoke;
 };
 
+// The browser's own OS, which must never decide the host the page describes.
+const browserOn = (os: 'windows' | 'mac') => {
+  Object.defineProperty(window.navigator, 'platform', { value: os === 'windows' ? 'Win32' : 'MacIntel', configurable: true });
+  Object.defineProperty(window.navigator, 'userAgent', {
+    value: os === 'windows'
+      ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/131.0'
+      : 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15',
+    configurable: true,
+  });
+};
+
+const windowsHost = { supported: true, host_platform: 'windows' };
+
 const setVisibility = (state: DocumentVisibilityState) => {
   Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
   document.dispatchEvent(new Event('visibilitychange'));
@@ -44,7 +59,7 @@ const statusSequence = (...bodies: Record<string, unknown>[]) => {
 };
 
 const stepStates = () => Object.fromEntries(
-  screen.getAllByRole('listitem').map((item) => [
+  within(screen.getByTestId('computer-use-steps')).getAllByRole('listitem').map((item) => [
     item.getAttribute('data-step'),
     item.getAttribute('data-step-state'),
   ]),
@@ -58,6 +73,8 @@ afterEach(() => {
   Reflect.deleteProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE__');
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
   Reflect.deleteProperty(document, 'visibilityState');
+  Reflect.deleteProperty(window.navigator, 'platform');
+  Reflect.deleteProperty(window.navigator, 'userAgent');
 });
 
 describe('computerUseGuideProgress', () => {
@@ -442,5 +459,184 @@ describe('SettingsComputerUsePage', () => {
     expect(zh.settings.computerUse.remoteNotice).toContain('请在这台 Mac 上的 Avibe 桌面应用中操作');
     expect(zh.settings.computerUse.relaunchNotice).toContain('Avibe 将重新打开，完成后本页会自动继续');
     expect(zh.settings.computerUse.actions).toEqual({ enable: '开启', openSettings: '去设置' });
+  });
+});
+
+describe('computerUseStatusCopy on a Windows host', () => {
+  const copy = (status: string, reason: string | null, host?: 'macos' | 'windows') =>
+    computerUseStatusCopy({ status, reason }, (key) => key, host);
+
+  it('never sends a Windows user to macOS privacy settings', () => {
+    for (const reason of ['accessibility', 'screen_recording', null]) {
+      expect(copy('needs_permission', reason, 'windows').detail).toBe('workbench.home.computerUse.errorDetail');
+    }
+    for (const reason of ['ax_capability', 'capture_failed', 'socket_path_too_long']) {
+      expect(copy('error', reason, 'windows').detail).toBe('workbench.home.computerUse.errorDetail');
+    }
+    // Platform-neutral reasons keep their specific detail on Windows.
+    expect(copy('error', 'spawn_failed', 'windows').detail).toBe('workbench.home.computerUse.spawnFailedDetail');
+  });
+
+  it('explains each Windows admission refusal, keeping a Runtime running elevated apart from elevated targets', () => {
+    const details = {
+      unsupported_architecture: 'unsupportedArchitectureDetail',
+      elevated_runtime: 'elevatedRuntimeDetail',
+      session_unavailable: 'sessionUnavailableDetail',
+      session_locked: 'sessionLockedDetail',
+      session_mismatch: 'sessionMismatchDetail',
+      pipe_unverified: 'pipeUnverifiedDetail',
+      state_unverified: 'stateUnverifiedDetail',
+      lock_unverified: 'lockUnverifiedDetail',
+      shell_not_running: 'shellNotRunningDetail',
+      daemon_unreachable: 'daemonUnreachableDetail',
+    };
+    for (const [reason, key] of Object.entries(details)) {
+      expect(copy('unavailable', reason, 'windows').detail).toBe(`workbench.home.computerUse.${key}`);
+      expect(en.workbench.home.computerUse[key as keyof typeof en.workbench.home.computerUse]).toBeTruthy();
+      expect(zh.workbench.home.computerUse[key as keyof typeof zh.workbench.home.computerUse]).toBeTruthy();
+    }
+    expect(en.workbench.home.computerUse.elevatedRuntimeDetail).toContain('Avibe service is running as administrator');
+    expect(en.settings.computerUse.windows.elevated).toContain('App windows running as administrator are refused');
+    // A reason this build does not know still reads as the generic notice.
+    expect(copy('unavailable', 'future_reason', 'windows').detail).toBe('workbench.home.computerUse.unavailableDetail');
+  });
+
+  it('keeps the macOS copy unchanged by default', () => {
+    expect(copy('needs_permission', 'accessibility').detail).toBe('workbench.home.computerUse.accessibilityDetail');
+    expect(copy('needs_permission', 'screen_recording', 'macos').detail)
+      .toBe('workbench.home.computerUse.screenRecordingDetail');
+    expect(copy('error', 'ax_capability').detail).toBe('workbench.home.computerUse.axCapabilityDetail');
+  });
+});
+
+describe('readComputerUseStatus host', () => {
+  it('takes the host from the server, reading a missing field as an older macOS server', async () => {
+    const read = async (body: Record<string, unknown>) => {
+      apiFetch.mockResolvedValueOnce(statusResponse(body));
+      return readComputerUseStatus();
+    };
+    expect(await read({ supported: true, status: 'off', reason: null })).toMatchObject({ host: 'macos' });
+    expect(await read({ ...windowsHost, status: 'off', reason: null })).toMatchObject({ host: 'windows' });
+    expect(await read({ supported: false, host_platform: 'windows' })).toEqual({ kind: 'unsupported', host: 'windows' });
+    expect(await read({ supported: false, host_platform: 'linux' })).toEqual({ kind: 'unsupported', host: 'linux' });
+    expect(await read({ supported: false })).toEqual({ kind: 'unsupported', host: 'macos' });
+    expect(await read({ supported: true, host_platform: 'beos', status: 'off' })).toMatchObject({ host: 'unknown' });
+  });
+});
+
+describe('SettingsComputerUsePage on a Windows host', () => {
+  it('labels the feature Preview and offers only the switch, without macOS permission steps', async () => {
+    const invoke = enterActionableShell();
+    statusSequence({ ...windowsHost, status: 'off', reason: 'never_enabled' });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+
+    await waitFor(() => expect(stepStates()).toEqual({ enable: 'current' }));
+    expect(screen.getByTestId('computer-use-preview-badge').textContent)
+      .toBe('settings.computerUse.windows.previewBadge');
+    expect(screen.getByText('settings.computerUse.windows.subtitle')).toBeTruthy();
+    expect(screen.getByText('settings.computerUse.windows.enableDetail')).toBeTruthy();
+    for (const note of ['apps', 'elevated', 'launch', 'stop']) {
+      expect(screen.getByTestId(`computer-use-windows-${note}`).textContent)
+        .toBe(`settings.computerUse.windows.${note}`);
+    }
+    expect(screen.queryByText(/steps\.(accessibility|screenRecording)/)).toBeNull();
+    expect(screen.queryByText('settings.computerUse.steps.enable.detail')).toBeNull();
+
+    await user.click(screen.getByTestId('computer-use-action-enable'));
+    expect(invoke).toHaveBeenLastCalledWith('computer_use_enable');
+    expect(invoke.mock.calls.some(([command]) => command === 'computer_use_open_permission')).toBe(false);
+  });
+
+  it('describes a Windows runtime to a browser on a Mac, read-only', async () => {
+    browserOn('mac');
+    statusSequence({ ...windowsHost, status: 'unavailable', reason: 'session_locked' });
+
+    render(<SettingsComputerUsePage />);
+
+    await waitFor(() => expect(stepStates()).toEqual({ enable: 'pending' }));
+    expect(screen.getByTestId('computer-use-preview-badge')).toBeTruthy();
+    expect(screen.getByTestId('computer-use-remote-notice').textContent)
+      .toBe('settings.computerUse.windows.remoteNotice');
+    expect(screen.getByText('workbench.home.computerUse.sessionLockedDetail')).toBeTruthy();
+    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
+  });
+
+  it('describes a macOS runtime to a browser on Windows with the macOS guide', async () => {
+    browserOn('windows');
+    statusSequence({ supported: true, host_platform: 'macos', status: 'needs_permission', reason: 'accessibility' });
+
+    render(<SettingsComputerUsePage />);
+
+    await waitFor(() => expect(stepStates().accessibility).toBe('current'));
+    expect(Object.keys(stepStates())).toEqual([...COMPUTER_USE_GUIDE_STEPS]);
+    expect(screen.queryByTestId('computer-use-preview-badge')).toBeNull();
+    expect(screen.getByTestId('computer-use-remote-notice').textContent)
+      .toBe('settings.computerUse.remoteNotice');
+  });
+
+  it('keeps the macOS guide for an older server without host_platform, even in a Windows shell', async () => {
+    browserOn('windows');
+    enterActionableShell();
+    statusSequence({ supported: true, status: 'needs_permission', reason: 'screen_recording' });
+
+    render(<SettingsComputerUsePage />);
+
+    await waitFor(() => expect(stepStates().screenRecording).toBe('current'));
+    expect(screen.queryByTestId('computer-use-preview-badge')).toBeNull();
+    expect(screen.getByTestId('computer-use-action-screenRecording')).toBeTruthy();
+  });
+
+  it('marks the switch done once the host reports any state past off', async () => {
+    enterActionableShell();
+    statusSequence({ ...windowsHost, status: 'needs_permission', reason: 'accessibility' });
+
+    render(<SettingsComputerUsePage />);
+
+    await waitFor(() => expect(stepStates()).toEqual({ enable: 'complete' }));
+    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
+    expect(screen.getByText('workbench.home.computerUse.errorDetail')).toBeTruthy();
+  });
+
+  it('reports a failed switch with Windows recovery, not the macOS menu bar', async () => {
+    enterActionableShell(vi.fn(async () => { throw new Error('denied'); }));
+    statusSequence({ ...windowsHost, status: 'off', reason: 'never_enabled' });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    await user.click(await screen.findByTestId('computer-use-action-enable'));
+
+    expect((await screen.findByTestId('computer-use-action-failed')).textContent)
+      .toBe('settings.computerUse.windows.actionFailed');
+  });
+
+  it('keeps the unsupported notice for an unsupported Windows host, in Windows terms and in Preview', async () => {
+    enterActionableShell();
+    statusSequence({ supported: false, host_platform: 'windows', status: 'unavailable', reason: 'unsupported_host' });
+
+    render(<SettingsComputerUsePage />);
+
+    const notice = await screen.findByTestId('computer-use-unsupported');
+    expect(notice.textContent).toContain('settings.computerUse.windows.unsupportedDetail');
+    expect(notice.textContent).not.toContain('settings.computerUse.unsupportedDetail');
+    expect(screen.getByTestId('computer-use-preview-badge')).toBeTruthy();
+    expect(screen.queryByTestId('computer-use-steps')).toBeNull();
+  });
+
+  it('ships the Windows copy in both locales without macOS permission guidance', () => {
+    expect(en.settings.computerUse.windows.previewBadge).toBe('Preview');
+    expect(zh.settings.computerUse.windows.previewBadge).toBe('预览');
+    for (const locale of [en, zh]) {
+      const copy = locale.settings.computerUse.windows;
+      for (const text of [...Object.values(copy), ...Object.values(locale.workbench.home.setup.computer_use_windows)]) {
+        expect(text).toBeTruthy();
+        expect(text).not.toMatch(/\bMac\b|System Settings|系统设置|菜单栏|menu bar/);
+      }
+    }
+    expect(en.workbench.home.setup.computer_use_windows.title).toContain('Preview');
+    expect(zh.workbench.home.setup.computer_use_windows.title).toContain('预览');
+    expect(en.settings.computerUse.windows.elevated).toContain('administrator');
+    expect(zh.settings.computerUse.windows.elevated).toContain('管理员');
   });
 });
