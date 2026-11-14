@@ -56,6 +56,7 @@ struct RootView: View {
                 startScreen: .sheet,
                 returnToRuntime: appModel.returnToRuntime
             )
+            .ignoresSafeArea(.container, edges: .all)
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
