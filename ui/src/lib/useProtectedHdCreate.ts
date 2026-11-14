@@ -74,6 +74,12 @@ function launchFailure(error: unknown): ProtectedHdLaunchFailure {
   return 'failed';
 }
 
+// Refusals the daemon gives before writing anything (contract rev0.7: definite received refusals).
+// `vault_already_initialized` is ambiguous about establishment and is not one of them.
+const definiteRefusal = (result: { ok?: unknown; code?: unknown } | null | undefined): boolean =>
+  result?.ok === false && typeof result.code === 'string'
+  && (result.code === 'secret_exists' || result.code === 'secret_name_case_conflict' || /^invalid_[a-z_]+$/.test(result.code));
+
 const refusalOf = (result: { code?: string; message?: string } | null | undefined): ProtectedHdRefusal | null => {
   const code = result?.code?.trim() || null;
   const text = result?.message?.trim() || code;
@@ -86,6 +92,8 @@ export function useProtectedHdCreate() {
   // The completed operation stays here, in memory, until the save is confirmed or the dialog closes.
   const operation = useRef<ProtectedHdOperation | null>(null);
   const knownId = useRef<string | null>(null);
+  // Whether this operation keeps its wallet blocked: until an exact match, or a definite refusal.
+  const holdsBlock = useRef(false);
   const onSavedRef = useRef<() => void>(() => undefined);
   // Closing the dialog while the window is open closes the window too, and a result that arrives
   // after that is dropped before anything is sent: nothing is saved behind a closed dialog.
@@ -124,7 +132,7 @@ export function useProtectedHdCreate() {
     }
     // Not confirmed: keep (or restore) the block, now as an ordinary one. A list that starts after
     // this point and does not show the name proves no such wallet exists, so it may then be pruned.
-    if (refusal === null) blockHdWallet(op.name);
+    if (holdsBlock.current) blockHdWallet(op.name);
     setPhase({ kind: 'unconfirmed', refusal });
   }, [api, confirmWith]);
 
@@ -137,6 +145,7 @@ export function useProtectedHdCreate() {
     }
     operation.current = null;
     knownId.current = null;
+    holdsBlock.current = false;
     onSavedRef.current = input.onSaved;
     openWindow.current = authorization;
     setPhase({ kind: 'waiting' });
@@ -160,6 +169,7 @@ export function useProtectedHdCreate() {
       // never shows a wallet that is not confirmed. A definite refusal lifts only this block.
       const blockedBefore = isHdWalletBlocked(input.name);
       blockHdWallet(input.name, Date.now(), true);
+      holdsBlock.current = true;
       const payload: VaultCreatePayload = {
         name: input.name,
         kind: 'keypair',
@@ -191,8 +201,10 @@ export function useProtectedHdCreate() {
         await check(null);
         return;
       }
-      // Refused: this request created nothing, and the name belongs to another record (not ours to block).
-      if (created) {
+      // A definite refusal: this request created nothing, and the name is another record's (not ours
+      // to block). Anything else, an empty or unreadable answer included, stays blocked while checked.
+      if (definiteRefusal(created)) {
+        holdsBlock.current = false;
         if (blockedBefore) blockHdWallet(input.name);
         else unblockHdWallet(input.name);
       }

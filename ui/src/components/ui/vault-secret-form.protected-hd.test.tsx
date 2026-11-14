@@ -317,3 +317,25 @@ it('blocks the wallet from before the save leaves, so a dialog closed mid-save n
   await act(async () => { answer({ ok: true, reconciliation: snapshot() }); });
   expect(isHdWalletBlocked(NAME)).toBe(false);
 });
+
+it('an empty or unreadable save answer is not a refusal: the wallet stays blocked while it is checked', async () => {
+  await openProtected();
+  // What the API wrapper hands back for an empty or non-JSON body.
+  api.createVaultSecret.mockResolvedValue({});
+  let read: (value: unknown) => void = () => undefined;
+  api.getVaultHdReconciliation.mockImplementation(() => new Promise((resolve) => { read = resolve; }));
+  await launch();
+  expect(screen.getByText(fill(p.notice.checking, { name: NAME }))).toBeTruthy();
+  expect(isHdWalletBlocked(NAME)).toBe(true);
+  await act(async () => { read({ ok: false, code: 'secret_not_found' }); });
+  expect(isHdWalletBlocked(NAME)).toBe(true);
+  // An ambiguous establishment answer is not definite either.
+  cleanup();
+  unblockHdWallet(NAME);
+  await openProtected();
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'vault_already_initialized', message: 'x' });
+  api.getVaultHdReconciliation.mockResolvedValue({ ok: false, code: 'secret_not_found' });
+  await launch();
+  await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }));
+  expect(isHdWalletBlocked(NAME)).toBe(true);
+});
