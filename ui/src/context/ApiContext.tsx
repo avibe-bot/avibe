@@ -538,6 +538,16 @@ export type VaultFieldValuePayload = {
   expected_updated_at?: string;
 };
 
+/** One atomic commit of an edit dialog's field changes (POST /api/vault/secrets/{name}/fields).
+ *  `values` use the final labels, after the optional default-field rename; nothing is stored
+ *  unless all of it is. */
+export type VaultFieldsBatchPayload = {
+  expected_updated_at: string;
+  default_field?: string;
+  values?: Array<{ field: string; record: string; blind_box?: VaultBlindBox; sealed?: VaultSealedEnvelope }>;
+  remove?: string[];
+};
+
 export type VaultCreateFieldPayload = {
   name: string;
   /** Canonical record name bound into this extra field's envelope. */
@@ -1086,6 +1096,7 @@ export type ApiContextType = {
   prepareVaultBitcoinAddressTypes: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecretField: (name: string, field: string, payload: { expected_updated_at: string }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  updateVaultSecretFields: (name: string, payload: VaultFieldsBatchPayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (
     name: string,
@@ -4810,6 +4821,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;
       const { payloadJson } = await requestJson(path, {
         method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }, path, opts);
+      return payloadJson;
+    },
+    updateVaultSecretFields: async (name, payload, opts) => {
+      const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields`;
+      const { payloadJson } = await requestJson(path, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       }, path, opts);
