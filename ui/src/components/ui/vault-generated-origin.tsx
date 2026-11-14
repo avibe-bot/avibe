@@ -4,7 +4,7 @@
 // user replaces or removes that value.
 import * as React from 'react';
 import { Bot, ChevronRight, Terminal } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 
 import { useApi, type VaultGeneratedField, type VaultSecret } from '@/context/ApiContext';
@@ -90,7 +90,12 @@ function OriginLine({ entry, showField, now }: { entry: VaultGeneratedField; sho
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <span className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-foreground">
         {showField ? <span className="mr-1.5 font-mono text-violet-ink">{entry.field}</span> : null}
-        {t('vaults.generatedBy.line', { who, when: formatRelativeTime(entry.at, t, now, { alwaysRelative: true }), recipe: recipe(entry) })}
+        <Trans
+          i18nKey="vaults.generatedBy.line"
+          values={{ who, when: formatRelativeTime(entry.at, t, now, { alwaysRelative: true }), recipe: recipe(entry) }}
+          // The format ("Hex 32 字节") reads as one token: it never breaks inside.
+          components={{ recipe: <span className="whitespace-nowrap" /> }}
+        />
         {entry.by === 'agent' ? <span className="block text-[12px] text-muted">{t('vaults.generatedBy.agentNote')}</span> : null}
       </span>
       {session.status === 'found' && entry.session_id ? (

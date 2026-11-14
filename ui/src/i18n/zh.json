@@ -6648,7 +6648,7 @@
       "base64": "Base64 {{count}} 字节",
       "agentNote": "它没见过这个值，和其他标准档密钥一样可以使用它。",
       "badge": "{{who}} · {{detail}}",
-      "line": "{{who}} · {{when}} · {{recipe}}",
+      "line": "{{who}} · {{when}} · <recipe>{{recipe}}</recipe>",
       "openSession": "打开会话"
     }
   },
