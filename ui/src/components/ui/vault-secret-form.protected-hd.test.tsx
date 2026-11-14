@@ -276,3 +276,18 @@ it('keeps an unconfirmed or mismatched wallet blocked outside the dialog, but no
   await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }));
   expect(isHdWalletBlocked(NAME)).toBe(false);
 });
+
+it('an id named in an unreadable save answer is held: a same-name copy under another id is not confirmed', async () => {
+  await openProtected();
+  // The save answer names vlt_public_1 but carries an extra field; the read finds a full copy under vlt_copy.
+  api.createVaultSecret.mockResolvedValue({ ok: true, reconciliation: { ...snapshot(), extra: true } });
+  api.getVaultHdReconciliation
+    .mockResolvedValueOnce({ ok: true, reconciliation: snapshot({ secret_id: 'vlt_copy' }) })
+    .mockResolvedValueOnce({ ok: true, reconciliation: snapshot() });
+  await launch();
+  expect(await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }))).toBeTruthy();
+  expect(screen.queryByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeNull();
+  // The record it named, complete and matching: confirmed.
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: p.checkAgain })); });
+  expect(await screen.findByText(fill(en.vaults.hd.done.title, { name: NAME }))).toBeTruthy();
+});

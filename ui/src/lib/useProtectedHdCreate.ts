@@ -165,8 +165,11 @@ export function useProtectedHdCreate() {
       // A thrown request (dropped connection, timeout) is a lost answer: null, then checked by name.
       const created = await api.createVaultSecret(payload, { handleError: false }).catch(() => null);
       if (created?.ok) {
-        const parsed = parseProtectedHdReconciliation(created.reconciliation);
-        if (parsed) knownId.current = parsed.secret_id;
+        // An id the save answer named is observed even when the rest of its snapshot is unreadable:
+        // a later read must then be that same record (rev0.7: only an answer lost before any id was
+        // seen may learn one, and only after a complete match). Nothing else in it is trusted.
+        const seenId = (created.reconciliation as { secret_id?: unknown } | null | undefined)?.secret_id;
+        if (typeof seenId === 'string' && seenId) knownId.current = seenId;
         const outcome = confirmWith(created.reconciliation);
         if (outcome === 'match') return;
         if (outcome === 'mismatch') {
