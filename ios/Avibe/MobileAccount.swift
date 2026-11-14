@@ -915,7 +915,7 @@ final class MobileSessionCoordinator {
             await oldTransport.cancelAll()
             try? await oldTransport.logout()
         }
-        deactivateAccountSurface()
+        releaseTransportPreservingSurfaceLease()
 
         await rotateWebsiteDataStore()
         signedOutStoreIsFresh = true
