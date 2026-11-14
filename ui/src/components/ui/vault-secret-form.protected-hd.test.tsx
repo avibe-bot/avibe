@@ -16,7 +16,7 @@ import en from '@/i18n/en.json';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { VaultSandboxError } from '@/lib/vaultSandboxClient';
-import { isHdWalletBlocked, unblockHdWallet } from '@/lib/vaultHdQuarantine';
+import { isHdWalletBlocked, pruneHdWalletBlocks, unblockHdWallet } from '@/lib/vaultHdQuarantine';
 
 import { VaultSecretForm } from './vault-secret-form';
 
@@ -308,6 +308,9 @@ it('blocks the wallet from before the save leaves, so a dialog closed mid-save n
   await openProtected();
   await launch();
   expect(screen.getByText(p.notice.saving)).toBeTruthy();
+  expect(isHdWalletBlocked(NAME)).toBe(true);
+  // The list refreshes while the save is pending and does not show the wallet yet: still blocked.
+  pruneHdWalletBlocks([], Date.now() + 60_000);
   expect(isHdWalletBlocked(NAME)).toBe(true);
   cleanup();
   // The dialog is gone; the answer arrives later and matches: the block lifts.

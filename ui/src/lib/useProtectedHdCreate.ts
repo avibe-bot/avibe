@@ -122,6 +122,9 @@ export function useProtectedHdCreate() {
     } catch {
       // Unreachable, timed out or not JSON: still unconfirmed.
     }
+    // Not confirmed: keep (or restore) the block, now as an ordinary one. A list that starts after
+    // this point and does not show the name proves no such wallet exists, so it may then be pruned.
+    if (refusal === null) blockHdWallet(op.name);
     setPhase({ kind: 'unconfirmed', refusal });
   }, [api, confirmWith]);
 
@@ -156,7 +159,7 @@ export function useProtectedHdCreate() {
       // before the request leaves until an exact match, so closing the dialog while it is pending
       // never shows a wallet that is not confirmed. A definite refusal lifts only this block.
       const blockedBefore = isHdWalletBlocked(input.name);
-      blockHdWallet(input.name);
+      blockHdWallet(input.name, Date.now(), true);
       const payload: VaultCreatePayload = {
         name: input.name,
         kind: 'keypair',
@@ -189,7 +192,10 @@ export function useProtectedHdCreate() {
         return;
       }
       // Refused: this request created nothing, and the name belongs to another record (not ours to block).
-      if (created && !blockedBefore) unblockHdWallet(input.name);
+      if (created) {
+        if (blockedBefore) blockHdWallet(input.name);
+        else unblockHdWallet(input.name);
+      }
       await check(created ? refusalOf(created) : null);
     })();
   }, [api, check, confirmWith]);
