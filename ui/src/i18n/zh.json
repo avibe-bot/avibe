@@ -6460,7 +6460,8 @@
       },
       "account": "账户",
       "path": "派生路径 {{path}}",
-      "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。"
+      "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。",
+      "solanaBlockhashHint": "Solana 交易通常只在一两分钟内有效。批准晚了，这笔交易可能已经过期，需要重新发起；使用持久 nonce 的交易不受此限。"
     },
     "request": {
       "provide": "填写",

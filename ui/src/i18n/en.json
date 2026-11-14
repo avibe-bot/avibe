@@ -6460,7 +6460,8 @@
       },
       "account": "Account",
       "path": "Derivation path {{path}}",
-      "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise."
+      "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise.",
+      "solanaBlockhashHint": "Solana transactions are usually valid for only a minute or two. If you approve later, this one may have expired and will need to be requested again. Transactions that use a durable nonce are not affected."
     },
     "request": {
       "provide": "provide",
