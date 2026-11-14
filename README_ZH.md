@@ -108,7 +108,7 @@ irm https://avibe.bot/install.ps1 | iex
 
 ## 走到哪都找得到它
 
-<img src="assets/screenshots/v6/workbench-mobile-zh.png" alt="手机上和歪比的同一个对话" width="250" align="right" />
+<img src="assets/screenshots/v6/workbench-mobile-zh.png" alt="手机上和歪比的同一个对话" width="200" align="right" />
 
 - **iPhone。** [iPhone App](#iphone) 里是同样的对话，活儿干完或者需要你决定时会通知你。
 - **任意浏览器。** 登录之后，你的 Avibe 在 avibe.bot 上有一个专属地址。只有你允许的人能登录，默认只有你自己。
@@ -129,7 +129,7 @@ irm https://avibe.bot/install.ps1 | iex
 
 用 Claude 或 ChatGPT 订阅登录，或者添加 API Key，所有伙伴和 Agent 都能用。可以多接几个排好顺序，一个用到上限，下一个自动顶上。每份订阅用了多少，Model Hub 里也看得到。
 
-### Vault：只报名字，不给密钥值
+### Vault（保险库）：只报名字，不给密钥值
 
 密码、API Key、签名密钥，存一次就行。Agent 用的时候只报名字，Avibe 不会把值给它看，而是直接交给需要它的那条命令或请求。签名密钥始终不离开 Vault，返回的只有签名结果。任何一条密钥都可以设成每次使用前先问你。
 

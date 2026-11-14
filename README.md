@@ -108,7 +108,7 @@ On long work, Vibey keeps hold of what you asked for and why. In our own benchma
 
 ## With you wherever you are
 
-<img src="assets/screenshots/v6/workbench-mobile-en.png" alt="The same conversation with Vibey on a phone" width="250" align="right" />
+<img src="assets/screenshots/v6/workbench-mobile-en.png" alt="The same conversation with Vibey on a phone" width="200" align="right" />
 
 - **iPhone.** The [iPhone app](#iphone) opens the same conversations and notifies you when a job finishes or needs a decision.
 - **Any browser.** Once you sign in, your Avibe gets its own address at avibe.bot. Only the people you allow can sign in; by default, that is you.
