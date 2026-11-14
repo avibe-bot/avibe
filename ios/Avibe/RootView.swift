@@ -109,6 +109,7 @@ private struct BrowserScreen: View {
                         websiteDataStore: appModel.runtimeWebsiteDataStore,
                         pushCoordinator: appModel.pushCoordinator,
                         showAccount: appModel.showAccount,
+                        showAccountRoot: appModel.showAccountRoot,
                         showInstances: appModel.showInstances,
                         instanceName: appModel.selectedInstanceName,
                         directStatus: appModel.directStatusProvider,

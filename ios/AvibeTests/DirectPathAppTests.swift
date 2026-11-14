@@ -598,7 +598,7 @@ final class DirectPathAppTests: XCTestCase {
     /// requests cannot change its mode, reload the runtime or mutate selection.
     @MainActor
     func testNamedInstanceEntryKeepsOneSheetAndReadsTheCurrentCatalogName() async throws {
-        for namedFirst in [false, true] {
+        for initialMode in [MobileOnboardingStartScreen.sheet, .sheetInstances, .sheetAccount] {
             let session = SessionAnswerOverride()
             let app = try await makeApp(directTransport: nil, sessionResponse: { session.response })
             XCTAssertNil(app.selectedInstanceName())
@@ -606,12 +606,14 @@ final class DirectPathAppTests: XCTestCase {
             let identity = app.runtimeIdentity
             XCTAssertEqual(app.selectedInstanceName(), "One")
 
-            if namedFirst { app.showInstances() } else { app.showAccount() }
-            XCTAssertEqual(app.accountSheetStartScreen, namedFirst ? .sheetInstances : .sheet)
-            app.showInstances()
-            app.showInstances()
-            app.showAccount()
-            XCTAssertEqual(app.accountSheetStartScreen, namedFirst ? .sheetInstances : .sheet)
+            let presentations: [(MobileOnboardingStartScreen, () -> Void)] = [
+                (.sheet, app.showAccount), (.sheetInstances, app.showInstances),
+                (.sheetAccount, app.showAccountRoot),
+            ]
+            let initial = try XCTUnwrap(presentations.first { $0.0 == initialMode })
+            initial.1()
+            for (_, present) in presentations { present() }
+            XCTAssertEqual(app.accountSheetStartScreen, initialMode)
             XCTAssertEqual(app.route, .accountOverBrowser(runtime))
             XCTAssertEqual(app.runtimeIdentity, identity)
             XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
@@ -634,10 +636,17 @@ final class DirectPathAppTests: XCTestCase {
             XCTAssertEqual(app.route, .browser(runtime))
             XCTAssertFalse(app.returnToRuntime())
 
-            // A later presentation can choose the other mode after dismissal.
-            if namedFirst { app.showAccount() } else { app.showInstances() }
-            XCTAssertEqual(app.accountSheetStartScreen, namedFirst ? .sheet : .sheetInstances)
-            XCTAssertTrue(app.returnToRuntime())
+            // After dismissal, every entry can choose its own mode; all
+            // other valid entry requests stay quiet while it is presented.
+            for (mode, present) in presentations {
+                present()
+                for (_, duplicate) in presentations { duplicate() }
+                XCTAssertEqual(app.accountSheetStartScreen, mode)
+                XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+                XCTAssertEqual(app.runtimeIdentity, identity)
+                XCTAssertTrue(app.returnToRuntime())
+                XCTAssertEqual(app.route, .browser(runtime))
+            }
         }
     }
 

@@ -114,6 +114,24 @@ enum NativeBridgeMethod: String, CaseIterable {
     case voicePermission = "voice.permission"
 }
 
+/// The parameterized Account root belongs to instancePresentation v1;
+/// an empty object keeps the legacy instances-first Account entry.
+enum NativeAccountPresentation: Equatable {
+    case instances
+    case account
+
+    static func parse(
+        _ params: [String: Any], instancePresentation: Int?
+    ) -> NativeAccountPresentation? {
+        if params.isEmpty { return .instances }
+        guard (instancePresentation ?? 0) >= 1,
+              params.count == 1, params["start"] as? String == "account" else {
+            return nil
+        }
+        return .account
+    }
+}
+
 struct NativeBridgeRequest {
     let method: NativeBridgeMethod
     let params: [String: Any]
@@ -231,6 +249,7 @@ enum NativeBridgeConfiguration {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
@@ -285,6 +304,7 @@ enum NativeBridgeConfiguration {
             historyDidChange: historyDidChange,
             colorSchemeDidChange: colorSchemeDidChange,
             showAccount: showAccount,
+            showAccountRoot: showAccountRoot,
             showInstances: showInstances,
             instanceName: instanceName,
             directStatus: directStatus,
@@ -550,6 +570,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
     private let directStatus: DirectStatusProvider?
@@ -586,6 +607,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         historyDidChange: @escaping (WKWebView) -> Bool,
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool,
         showAccount: @escaping () -> Void,
+        showAccountRoot: @escaping () -> Void,
         showInstances: @escaping () -> Void,
         instanceName: @escaping () -> String?,
         directStatus: DirectStatusProvider?,
@@ -621,6 +643,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
         self.instanceName = instanceName
         self.directStatus = directStatus
@@ -880,10 +903,18 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             }
             reply(replyHandler, result: NSNull())
         case .appShowAccount:
-            reply(replyHandler, result: NSNull())
-            DispatchQueue.main.async { [showAccount] in
-                showAccount()
+            guard let presentation = NativeAccountPresentation.parse(
+                request.params,
+                instancePresentation: metadata.capabilities["instancePresentation"]
+            ) else {
+                reply(replyHandler, error: .invalidArgument(
+                    "app.showAccount accepts no parameters or exactly {start: account} with instancePresentation."
+                ))
+                return
             }
+            let present = presentation == .account ? showAccountRoot : showAccount
+            reply(replyHandler, result: NSNull())
+            DispatchQueue.main.async { present() }
         case .appShowInstances:
             guard request.params.isEmpty else {
                 reply(replyHandler, error: .invalidArgument(

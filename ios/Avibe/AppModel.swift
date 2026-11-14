@@ -285,6 +285,10 @@ final class AppModel: ObservableObject {
         showRuntimeSheet(startScreen: .sheet, fallback: .account)
     }
 
+    func showAccountRoot() {
+        showRuntimeSheet(startScreen: .sheetAccount, fallback: .account)
+    }
+
     func showInstances() {
         showRuntimeSheet(startScreen: .sheetInstances, fallback: .instances)
     }

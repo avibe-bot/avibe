@@ -445,6 +445,27 @@ final class NavigationPolicyTests: XCTestCase {
         )
     }
 
+    func testAccountRootArgumentsRequireTheDeclaredCapabilityAndExactShape() {
+        for capability in [nil, 0, 1] as [Int?] {
+            XCTAssertEqual(
+                NativeAccountPresentation.parse([:], instancePresentation: capability), .instances
+            )
+            XCTAssertEqual(
+                NativeAccountPresentation.parse(["start": "account"], instancePresentation: capability),
+                capability == 1 ? .account : nil
+            )
+        }
+        let invalid: [[String: Any]] = [
+            ["start": "instances"], ["start": "Account"], ["start": ""],
+            ["start": NSNull()], ["start": true], ["start": 1],
+            ["start": ["account"]], ["start": ["page": "account"]],
+            ["page": "account"], ["start": "account", "extra": true],
+        ]
+        for params in invalid {
+            XCTAssertNil(NativeAccountPresentation.parse(params, instancePresentation: 1))
+        }
+    }
+
     func testNativeExternalURLRequiresAnAbsoluteSupportedTarget() {
         XCTAssertEqual(
             NativeExternalURL.parse(" https://example.com/path?q=1 ")?.absoluteString,
@@ -1989,6 +2010,36 @@ final class NavigationPolicyTests: XCTestCase {
             hostingController.presentedViewController == nil
                 && hostingController.childForStatusBarStyle === runtimeController
         }
+        // Consume the parameterized call through RootView's real Runtime
+        // bridge wiring, including factory/container callbacks.
+        let runtimePage = try XCTUnwrap(runtimeController.livePrimaryWebView)
+        let rootProbe = WebViewLoadProbe()
+        runtimePage.navigationDelegate = rootProbe
+        try await rootProbe.loadHTML(
+            "<!doctype html><title>Selected runtime</title>",
+            baseURL: URL(string: "https://status-bar.invalid")!, in: runtimePage
+        )
+        runtimePage.navigationDelegate = runtimeController
+        let accountRootResult = try await runtimePage.callAsyncJavaScript(
+            "return JSON.stringify(await window.avibeNative.call('app.showAccount', {start: 'account'}));",
+            arguments: [:], in: nil, contentWorld: .page
+        )
+        XCTAssertEqual(accountRootResult as? String, "null")
+        var accountRoot: MobileOnboardingViewController?
+        try await waitUntil {
+            accountRoot = self.mobileOnboardingController(in: hostingController)
+            let page = accountRoot?.viewIfLoaded?.subviews.compactMap { $0 as? WKWebView }.first
+            return page?.url?.fragment == "sheet-account"
+        }
+        appModel.showAccount()
+        appModel.showInstances()
+        appModel.showAccountRoot()
+        XCTAssertTrue(self.mobileOnboardingController(in: hostingController) === accountRoot)
+        XCTAssertTrue(appModel.returnToRuntime())
+        try await waitUntil {
+            hostingController.presentedViewController == nil
+                && hostingController.childForStatusBarStyle === runtimeController
+        }
     }
 
     @MainActor
@@ -2003,6 +2054,8 @@ final class NavigationPolicyTests: XCTestCase {
         weak var primaryWebView: WKWebView?
         let accountShown = expectation(description: "runtime bridge opens account surface")
         let instancesShown = expectation(description: "runtime bridge opens named instances surface")
+        let accountRootShown = expectation(description: "runtime bridge opens Account root")
+        var accountRootRequestCount = 0
         var nativeName: String? = "Studio"
         let webView = WKWebView(
             frame: .zero,
@@ -2029,6 +2082,10 @@ final class NavigationPolicyTests: XCTestCase {
                 },
                 showAccount: {
                     accountShown.fulfill()
+                },
+                showAccountRoot: {
+                    accountRootRequestCount += 1
+                    accountRootShown.fulfill()
                 },
                 showInstances: {
                     instancesShown.fulfill()
@@ -2070,7 +2127,22 @@ final class NavigationPolicyTests: XCTestCase {
             } catch (error) {
               invalidHistory = error.code;
             }
-            await window.avibeNative.call("app.showAccount");
+            const legacyAccountResult = await window.avibeNative.call("app.showAccount");
+            const invalidAccountArguments = [];
+            for (const params of [
+              {start: "instances"}, {start: "Account"}, {start: ""},
+              {start: null}, {start: true}, {start: 1},
+              {start: ["account"]}, {start: {page: "account"}},
+              {page: "account"}, {start: "account", extra: true}
+            ]) {
+              try {
+                await window.avibeNative.call("app.showAccount", params);
+                invalidAccountArguments.push("accepted");
+              } catch (error) {
+                invalidAccountArguments.push(error.code);
+              }
+            }
+            const accountRootResult = await window.avibeNative.call("app.showAccount", {start: "account"});
             let invalidInstances = null;
             try {
               await window.avibeNative.call("app.showInstances", {url: "https://example.com"});
@@ -2092,6 +2164,9 @@ final class NavigationPolicyTests: XCTestCase {
               accountPresentationCapability: info.capabilities.accountPresentation,
               instancePresentationCapability: info.capabilities.instancePresentation,
               instanceInfo: info.instance,
+              legacyAccountResult,
+              accountRootResult,
+              invalidAccountArguments,
               instancesResult,
               invalidInstances,
               appCapability: info.capabilities.app,
@@ -2119,6 +2194,10 @@ final class NavigationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(instancePayload["instancePresentationCapability"] as? Int, 1)
         XCTAssertEqual(instancePayload["instanceInfo"] as? [String: String], ["name": "Studio"])
+        XCTAssertTrue(instancePayload["legacyAccountResult"] is NSNull)
+        XCTAssertTrue(instancePayload["accountRootResult"] is NSNull)
+        XCTAssertEqual(instancePayload["invalidAccountArguments"] as? [String],
+                       Array(repeating: "invalid_argument", count: 10))
         XCTAssertTrue(instancePayload["instancesResult"] is NSNull)
         XCTAssertEqual(instancePayload["invalidInstances"] as? String, "invalid_argument")
         XCTAssertEqual(instancePayload["appCapability"] as? Int, 1)
@@ -2131,7 +2210,8 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["invalidHistory"] as? String, "invalid_argument")
         XCTAssertEqual(instancePayload["unsupported"] as? String, "unsupported")
         assertForbiddenReply(instancePayload["subframeTransport"])
-        await fulfillment(of: [accountShown, instancesShown], timeout: 2)
+        await fulfillment(of: [accountShown, accountRootShown, instancesShown], timeout: 2)
+        XCTAssertEqual(accountRootRequestCount, 1)
 
         // The Runtime reads app.info on document load; no rename event or
         // caller-supplied identity is involved. Empty/missing names are safe.
@@ -2371,13 +2451,17 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     func testAccountBridgeTransitionDoesNotRecreateReleasedRuntimeWebView() async throws {
-        for method in ["app.showAccount", "app.showInstances"] {
-            try await exerciseReleasedRuntimeSurfaceCallback(method)
+        for (method, params) in [
+            ("app.showAccount", "{}"),
+            ("app.showAccount", #"{"start":"account"}"#),
+            ("app.showInstances", "{}"),
+        ] {
+            try await exerciseReleasedRuntimeSurfaceCallback(method, params: params)
         }
     }
 
     @MainActor
-    private func exerciseReleasedRuntimeSurfaceCallback(_ method: String) async throws {
+    private func exerciseReleasedRuntimeSurfaceCallback(_ method: String, params: String) async throws {
         let accountShown = expectation(description: "runtime surface bridge requested")
         var accountRequestCount = 0
         var loadingStarted = 0
@@ -2393,6 +2477,7 @@ final class NavigationPolicyTests: XCTestCase {
             instanceOrigin: instance,
             websiteDataStore: .nonPersistent(),
             showAccount: showSurface,
+            showAccountRoot: showSurface,
             showInstances: showSurface,
             didStartLoading: {
                 loadingStarted += 1
@@ -2416,9 +2501,12 @@ final class NavigationPolicyTests: XCTestCase {
         try await probe.loadHTML(
             """
             <!doctype html>
-            <button id="account" onclick="window.avibeNative.call('\(method)')">
-              Account
-            </button>
+            <button id="account">Account</button>
+            <script>
+              document.querySelector('#account').addEventListener('click', () => {
+                window.avibeNative.call('\(method)', \(params));
+              });
+            </script>
             """,
             baseURL: instance.url,
             in: webView
@@ -2435,7 +2523,7 @@ final class NavigationPolicyTests: XCTestCase {
         let lateBridgeResult = try await webView.callAsyncJavaScript(
             """
             const result = {};
-            await window.avibeNative.call("\(method)");
+            await window.avibeNative.call("\(method)", \(params));
             try {
               await window.avibeNative.call(
                 "app.setAccountActionAvailable",

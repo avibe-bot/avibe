@@ -556,6 +556,7 @@ final class MobileOnboardingTests: XCTestCase {
     func testNativeSheetUsesOneLargeDetentAndTheDocumentScrollView() async throws {
         let modes: [(MobileOnboardingStartScreen, String)] = [
             (.sheet, "#sheet"), (.sheetInstances, "#sheet-instances"),
+            (.sheetAccount, "#sheet-account"),
         ]
         for (mode, hash) in modes {
             try await exerciseNativeSheet(mode, expectedHash: hash)
@@ -617,7 +618,7 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     func testAppDismissIsStrictAndReturnsNullFromTheSheet() async throws {
-        for mode in [MobileOnboardingStartScreen.sheet, .sheetInstances] {
+        for mode in [MobileOnboardingStartScreen.sheet, .sheetInstances, .sheetAccount] {
             try await exerciseSheetDismissal(mode)
         }
     }
@@ -673,7 +674,7 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     func testSheetRejectsAuthMethodsWithoutMutatingTheRuntime() async throws {
-        for mode in [MobileOnboardingStartScreen.sheet, .sheetInstances] {
+        for mode in [MobileOnboardingStartScreen.sheet, .sheetInstances, .sheetAccount] {
             try await exerciseSheetAuthRestriction(mode)
         }
     }

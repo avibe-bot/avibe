@@ -353,11 +353,13 @@ only at the document top does the downward gesture dismiss. There is no
 pull-to-refresh in the sheet; it is reserved for full-screen first use. Web
 content draws the title and Close button, labelled `关闭，回到 {name}` / `Close
 and return to {name}`; native marks the presentation modal and handles the
-VoiceOver two-finger scrub through the same dismissal owner. Account,
-licenses and Add are in-page pushes inside this one sheet: a visible
-`[data-mobile-back]` button owns Back, and the existing native left-edge swipe
-presses that same button. Back on Account returns to the instances list,
-never to a second sheet or a runtime reload. A fallback full-screen
+VoiceOver two-finger scrub through the same dismissal owner. In the
+instances-first modes, Account, licenses and Add are in-page pushes inside
+this one sheet: a visible `[data-mobile-back]` button owns Back, and the
+existing native left-edge swipe presses that same button. Back on pushed
+Account returns to the instances list, never to a second sheet or a runtime
+reload. The B Account-root mode instead starts without Back; its licenses
+page still pushes and returns to Account. A fallback full-screen
 presentation with Close and edge-swipe dismissal is kept behind one native
 presentation switch until real-device acceptance; it changes no bridge call
 or page design.

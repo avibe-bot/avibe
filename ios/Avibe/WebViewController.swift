@@ -328,6 +328,7 @@ final class WebViewFactory {
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
     private let directStatus: DirectStatusProvider?
@@ -351,6 +352,7 @@ final class WebViewFactory {
         historyDidChange: historyDidChange,
         colorSchemeDidChange: colorSchemeDidChange,
         showAccount: showAccount,
+        showAccountRoot: showAccountRoot,
         showInstances: showInstances,
         instanceName: instanceName,
         directStatus: directStatus,
@@ -399,6 +401,7 @@ final class WebViewFactory {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
@@ -413,6 +416,7 @@ final class WebViewFactory {
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
         self.instanceName = instanceName
         self.directStatus = directStatus
@@ -570,6 +574,7 @@ final class WebViewController: UIViewController {
     private(set) var pageColorScheme: PageColorScheme?
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
+    private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
     private let directStatus: DirectStatusProvider?
@@ -630,6 +635,9 @@ final class WebViewController: UIViewController {
             showAccount: { [weak self] in
                 self?.showAccountIfActive()
             },
+            showAccountRoot: { [weak self] in
+                self?.showAccountRootIfActive()
+            },
             showInstances: { [weak self] in
                 self?.showInstancesIfActive()
             },
@@ -669,6 +677,7 @@ final class WebViewController: UIViewController {
         pushCoordinator: NativePushCoordinator? = nil,
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
+        showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
@@ -686,6 +695,7 @@ final class WebViewController: UIViewController {
         self.websiteDataStore = websiteDataStore
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
+        self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
         self.instanceName = instanceName
         self.directStatus = directStatus
@@ -909,6 +919,13 @@ final class WebViewController: UIViewController {
             return
         }
         showAccount()
+    }
+
+    private func showAccountRootIfActive() {
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
+        showAccountRoot()
     }
 
     private func showInstancesIfActive() {
