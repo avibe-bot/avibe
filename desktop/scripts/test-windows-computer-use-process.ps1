@@ -9,6 +9,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required.' }
 
 $tests = @(
     'ordinary_user_token_evidence',
+    'explicit_parent_attribute_inherits_parent_job_not_driver_job',
     'suspended_child_never_executes_and_drop_terminates_it',
     'failed_start_and_suspended_stop_leave_no_running_child',
     'stop_is_graceful_for_eof_and_forceful_for_remaining_descendants',
@@ -121,7 +122,7 @@ try {
             }
         }
     }
-    if ($completed -ne 6) { throw 'Token evidence and all five lifecycle tests must execute.' }
+    if ($completed -ne 7) { throw 'Token evidence, parent-attribute proof, and all five lifecycle tests must execute.' }
 } catch {
     $failure = $_
 } finally {
@@ -177,4 +178,4 @@ try {
 }
 if ($cleanupFailures.Count) { throw ($cleanupFailures -join '; ') }
 if ($failure) { throw $failure }
-Write-Output 'Ordinary-user token evidence and five process-lifecycle tests executed; disposable account/profile/artifacts removed.'
+Write-Output 'Ordinary-user token evidence, parent-attribute Job proof, and five process-lifecycle tests executed; disposable account/profile/artifacts removed.'

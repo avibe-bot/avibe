@@ -4,9 +4,19 @@
 // native lifecycle pass. All fixtures write only below their parent's TempDir.
 use super::*;
 use std::io::Read;
+use std::mem::{size_of, zeroed};
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use windows_sys::Win32::Security::{EqualSid, GetTokenInformation, TokenSessionId, TokenUser, TOKEN_QUERY, TOKEN_USER};
+use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+use windows_sys::Win32::System::Threading::{
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, InitializeProcThreadAttributeList, OpenProcess,
+    OpenProcessToken, TerminateProcess, UpdateProcThreadAttribute, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATE_PROCESS, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
+    STARTUPINFOEXW,
+};
 
 const CHILD_TEST: &str = "computer_use_process::tests::fixture_child";
 const HOST_TEST: &str = "computer_use_process::tests::fixture_host";
@@ -30,10 +40,21 @@ fn fixture_args() -> Vec<OsString> {
 }
 
 fn suspended(mode: &str, directory: &Path) -> OwnedDriver {
+    suspended_with_env(mode, directory, fixture_env(mode, directory))
+}
+
+fn suspended_with_env(mode: &str, directory: &Path, environment: Vec<(OsString, OsString)>) -> OwnedDriver {
+    debug_assert_eq!(
+        environment
+            .iter()
+            .find(|(key, _)| key == "AVIBE_OWNED_DRIVER_TEST")
+            .map(|(_, value)| value),
+        Some(&OsString::from(mode))
+    );
     OwnedDriver::spawn_suspended(
         &std::env::current_exe().unwrap(),
         &fixture_args(),
-        &fixture_env(mode, directory),
+        &environment,
         directory,
     )
     .expect("run process-lifecycle acceptance as a non-elevated Windows x64 user")
@@ -54,6 +75,43 @@ fn wait_for_file(path: &Path) -> String {
 
 fn process_handle(pid: u32) -> OwnedHandle {
     unsafe { owned(OpenProcess(PROCESS_SYNCHRONIZE, 0, pid)).unwrap() }
+}
+
+fn query_process_handle(pid: u32) -> OwnedHandle {
+    unsafe {
+        owned(OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+            0,
+            pid,
+        ))
+        .unwrap()
+    }
+}
+
+fn assert_same_user_and_session(process: &OwnedHandle) {
+    fn token_information(token: HANDLE, class: windows_sys::Win32::Security::TOKEN_INFORMATION_CLASS) -> Vec<usize> {
+        let mut bytes = 0u32;
+        unsafe { GetTokenInformation(token, class, std::ptr::null_mut(), 0, &mut bytes) };
+        assert!(bytes > 0);
+        let mut buffer = vec![0usize; (bytes as usize).div_ceil(size_of::<usize>())];
+        check(unsafe { GetTokenInformation(token, class, buffer.as_mut_ptr().cast(), bytes, &mut bytes) }).unwrap();
+        buffer
+    }
+
+    let mut current_token = std::ptr::null_mut();
+    check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut current_token) }).unwrap();
+    let current_token = unsafe { OwnedHandle::from_raw_handle(current_token) };
+    let mut target_token = std::ptr::null_mut();
+    check(unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut target_token) }).unwrap();
+    let target_token = unsafe { OwnedHandle::from_raw_handle(target_token) };
+    let current_user = token_information(current_token.as_raw_handle(), TokenUser);
+    let target_user = token_information(target_token.as_raw_handle(), TokenUser);
+    let current_user = unsafe { &*current_user.as_ptr().cast::<TOKEN_USER>() };
+    let target_user = unsafe { &*target_user.as_ptr().cast::<TOKEN_USER>() };
+    assert_ne!(unsafe { EqualSid(current_user.User.Sid, target_user.User.Sid) }, 0);
+    let current_session = token_information(current_token.as_raw_handle(), TokenSessionId);
+    let target_session = token_information(target_token.as_raw_handle(), TokenSessionId);
+    assert_eq!(current_session[0], target_session[0]);
 }
 
 fn assert_exits(handle: &OwnedHandle) {
@@ -97,6 +155,70 @@ fn fixture_child() {
         }
         "hold" => {
             std::fs::write(directory.join("started"), "yes").unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+        }
+        "attribute_launcher" => {
+            let parent_pid: u32 = std::env::var("AVIBE_PARENT_PID").unwrap().parse().unwrap();
+            let parent = unsafe {
+                owned(OpenProcess(
+                    PROCESS_CREATE_PROCESS | PROCESS_QUERY_LIMITED_INFORMATION,
+                    0,
+                    parent_pid,
+                ))
+            }
+            .unwrap();
+            let executable = std::env::current_exe().unwrap();
+            let application = wide(executable.as_os_str()).unwrap();
+            let mut command = command_line(executable.as_os_str(), &fixture_args()).unwrap();
+            let environment = environment_block(&fixture_env("hold", &directory)).unwrap();
+            let working_directory = wide(directory.as_os_str()).unwrap();
+            let parent_handle = parent.as_raw_handle();
+            let mut attribute_bytes = 0usize;
+            unsafe {
+                InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attribute_bytes);
+            }
+            assert!(attribute_bytes > 0);
+            let mut attribute_storage = vec![0usize; attribute_bytes.div_ceil(size_of::<usize>())];
+            let attributes: LPPROC_THREAD_ATTRIBUTE_LIST = attribute_storage.as_mut_ptr().cast();
+            check(unsafe { InitializeProcThreadAttributeList(attributes, 1, 0, &mut attribute_bytes) }).unwrap();
+            check(unsafe {
+                UpdateProcThreadAttribute(
+                    attributes,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+                    (&parent_handle as *const windows_sys::Win32::Foundation::HANDLE).cast(),
+                    size_of::<windows_sys::Win32::Foundation::HANDLE>(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            })
+            .unwrap();
+            let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
+            startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+            startup.lpAttributeList = attributes;
+            let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
+            let created = unsafe {
+                CreateProcessW(
+                    application.as_ptr(),
+                    command.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                    environment.as_ptr().cast(),
+                    working_directory.as_ptr(),
+                    &startup.StartupInfo,
+                    &mut process,
+                )
+            };
+            unsafe { DeleteProcThreadAttributeList(attributes) };
+            check(created).unwrap();
+            let target_pid = process.dwProcessId;
+            unsafe {
+                CloseHandle(process.hThread);
+                CloseHandle(process.hProcess);
+            }
+            std::fs::write(directory.join("target-pid"), target_pid.to_string()).unwrap();
             std::thread::sleep(Duration::from_secs(60));
         }
         _ => panic!("unknown fixture mode"),
@@ -226,6 +348,69 @@ fn killed_shell_cleans_suspended_and_running_children_without_destructors() {
     }
 }
 
+#[tokio::test]
+#[ignore = "acceptance: disposable standard-user CI account only"]
+async fn explicit_parent_attribute_inherits_parent_job_not_driver_job() {
+    let anchor_directory = tempfile::tempdir().unwrap();
+    let target_directory = tempfile::tempdir().unwrap();
+    let mut anchor = Command::new(std::env::current_exe().unwrap())
+        .args(fixture_args())
+        .env_clear()
+        .envs(fixture_env("hold", anchor_directory.path()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_file(&anchor_directory.path().join("started"));
+    let anchor_handle = process_handle(anchor.id());
+
+    let mut launcher_env = fixture_env("attribute_launcher", target_directory.path());
+    launcher_env.push(("AVIBE_PARENT_PID".into(), anchor.id().to_string().into()));
+    let launcher = suspended_with_env("attribute_launcher", target_directory.path(), launcher_env);
+    let launcher = launcher.resume().unwrap();
+    let mut anchor_in_driver_job = 0;
+    check(unsafe {
+        IsProcessInJob(
+            anchor_handle.as_raw_handle(),
+            launcher.job.as_raw_handle(),
+            &mut anchor_in_driver_job,
+        )
+    })
+    .unwrap();
+    assert_eq!(anchor_in_driver_job, 0, "synthetic parent must be outside driver Job");
+    let target_pid = wait_for_file(&target_directory.path().join("target-pid"))
+        .parse::<u32>()
+        .unwrap();
+    let target = query_process_handle(target_pid);
+    wait_for_file(&target_directory.path().join("started"));
+
+    let mut target_in_driver_job = 0;
+    check(unsafe {
+        IsProcessInJob(
+            target.as_raw_handle(),
+            launcher.job.as_raw_handle(),
+            &mut target_in_driver_job,
+        )
+    })
+    .unwrap();
+    assert_eq!(
+        target_in_driver_job, 0,
+        "explicit parent must keep target outside driver Job"
+    );
+    assert_same_user_and_session(&target);
+
+    let launcher_pid = launcher.id();
+    launcher.stop(Duration::from_secs(1)).await.unwrap();
+    assert_exits(&process_handle(launcher_pid));
+    assert_ne!(unsafe { WaitForSingleObject(target.as_raw_handle(), 0) }, WAIT_OBJECT_0,);
+
+    unsafe { TerminateProcess(target.as_raw_handle(), 1) };
+    assert_exits(&target);
+    anchor.kill().unwrap();
+    anchor.wait().unwrap();
+    drop(anchor_handle);
+}
 #[test]
 #[ignore = "acceptance: run as an elevated Windows x64 user"]
 fn elevated_shell_is_refused_before_process_creation() {
