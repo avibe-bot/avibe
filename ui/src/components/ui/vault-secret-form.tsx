@@ -69,6 +69,7 @@ import { TagInput } from './tag-input';
 import { Textarea } from './textarea';
 import {
   VaultFieldList,
+  VaultFieldNameRule,
   VaultFieldReferences,
   VaultFieldRemoveConfirm,
   VaultFieldRow,
@@ -1336,7 +1337,7 @@ export const VaultSecretForm: React.FC<{
           );
         })}
       </VaultFieldList>
-      {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
+      <VaultFieldNameRule shown={showNameRule} />
       <VaultFieldReferences
         secretName={secretName}
         fields={fieldNames.filter((_, index) => fieldNameIssues[index] === null)}

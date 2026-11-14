@@ -315,6 +315,65 @@ test('unsupported reveal/edit stops before preparation, but metadata and cancel 
   await expectSingleDocumentJourney(page, observed, url, saved);
 });
 
+// A press on Save that starts while a field name still has focus. The press moves focus off the
+// name; nothing above Save may move between the press and its release, or the release lands beside
+// Save and the click is lost. Save is scrolled just into view, as a pointer click scrolls it (its
+// bottom at the scroller's edge, so the dialog's padding stays below and a shorter body cannot pull
+// the scroll back), the dialog's entrance has finished, and the press and release are split with the
+// blur rendered between them, so the check does not depend on runner timing.
+async function pressSaveFromFocusedName(page: Page, dialog: ReturnType<Page['getByRole']>, name: ReturnType<Page['getByRole']>) {
+  const saveButton = dialog.getByRole('button', { name: en.vaults.dialog.save, exact: true });
+  await expect(saveButton).toBeEnabled();
+  await saveButton.evaluate((element) => element.scrollIntoView({ block: 'end' }));
+  await dialog.evaluate(async (element) => { await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined))); });
+  await expect(name).toBeFocused();
+  const center = async () => {
+    const box = await saveButton.boundingBox();
+    if (!box) throw new Error('Save has no box');
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  };
+  const pressed = await center();
+  await page.mouse.move(pressed.x, pressed.y);
+  await page.mouse.down();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(name).not.toBeFocused();
+  // Save stays where the press began (its pressed look scales it about its centre).
+  expect(Math.abs((await center()).y - pressed.y)).toBeLessThan(1);
+  await page.mouse.up();
+}
+
+for (const [label, edit, saved] of [
+  ['an edited default field name', 'rename', [`POST /api/vault/secrets/${secret.name}/fields`, `PATCH /api/vault/secrets/${secret.name}`]],
+  ['an empty new field', 'add', [`PATCH /api/vault/secrets/${secret.name}`]],
+] as const) test(`a Save press that starts on ${label} still saves`, async ({ context, page }) => {
+  const origin = 'http://192.0.2.1:5123';
+  const observed = await harness(context, page, origin);
+  const timeline = await installTimeline(context, page, observed.writes);
+  const url = `${origin}${fixturePath}?reveal=${secret.name}`;
+  await page.goto(url);
+  page.setDefaultTimeout(8_000);
+  await page.getByRole('menuitem', { name: en.vaults.editSecret }).click();
+  const dialog = page.getByRole('dialog');
+  let name = dialog.getByRole('textbox', { name: 'Default field name', exact: true });
+  if (edit === 'rename') {
+    await name.fill('password');
+  } else {
+    // A new field row left empty is not saved and does not block Save.
+    await dialog.getByRole('button', { name: en.vaults.fields.add }).click();
+    name = dialog.getByRole('textbox', { name: en.vaults.fields.newName, exact: true });
+  }
+  await expect(name).toBeFocused();
+  await expect(dialog.getByText(en.vaults.fields.nameRule)).toBeVisible();
+  const writes = saved.map((write) => page.waitForResponse((response) => `${response.request().method()} ${new URL(response.url()).pathname}` === write));
+  timeline.mark('save-press-start');
+  await pressSaveFromFocusedName(page, dialog, name);
+  timeline.observeAfterClick();
+  await Promise.all(writes);
+  expect(observed.writes).toEqual(saved);
+  await expect(dialog).toHaveCount(0);
+  await expectSingleDocumentJourney(page, observed, url, [...saved]);
+});
+
 test('unsupported create preserves Settings return, draft clearing, Standard and cancel', async ({ context, page }) => {
   const origin = 'http://192.0.2.1:5123';
   const observed = await harness(context, page, origin);

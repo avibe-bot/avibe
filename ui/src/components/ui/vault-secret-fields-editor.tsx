@@ -13,6 +13,7 @@ import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Button } from './button';
 import {
   VaultFieldList,
+  VaultFieldNameRule,
   VaultFieldReferences,
   VaultFieldRemoveConfirm,
   VaultFieldRow,
@@ -101,7 +102,6 @@ export function VaultSecretFieldsEditor({
   const defaultLabelDirtyRef = useRef(false);
   const [newField, setNewField] = useState<string | null>(null);
   const [newValue, setNewValue] = useState('');
-  const [newNameTouched, setNewNameTouched] = useState(false);
   // Saved extra fields the user removed in this dialog; they go with the Save.
   const [removed, setRemoved] = useState<string[]>([]);
   const [focusedName, setFocusedName] = useState<'default' | 'new' | null>(null);
@@ -357,7 +357,6 @@ export function VaultSecretFieldsEditor({
         if (result.ok && result.secret) {
           clearAll();
           setNewField(null);
-          setNewNameTouched(false);
           setRemoved([]);
         }
         return result;
@@ -375,7 +374,6 @@ export function VaultSecretFieldsEditor({
   const discardNewField = () => {
     setNewField(null);
     setNewValue('');
-    setNewNameTouched(false);
   };
 
   // Names are checked against the names the secret will have after Save: the default's new label,
@@ -469,10 +467,7 @@ export function VaultSecretFieldsEditor({
               label: t('vaults.fields.newName'),
               onChange: setNewField,
               onFocus: () => setFocusedName('new'),
-              onBlur: () => {
-                setFocusedName(null);
-                setNewNameTouched(true);
-              },
+              onBlur: () => setFocusedName(null),
               autoFocus: true,
             }}
             value={{
@@ -482,7 +477,10 @@ export function VaultSecretFieldsEditor({
               onChange: setNewValue,
             }}
             remove={{ label: t('vaults.fields.discardNew'), onRemove: discardNewField }}
-            issue={newIssue === 'nameRequired' && !newNameTouched && !newValue ? null : newIssue}
+            // An empty new row is skipped by Save only while nothing else changed; then its blank
+            // name is no error, and leaving it says nothing (and moves nothing). Once it blocks Save
+            // (it has a value, or other changes make it count), the error shows at once, not on blur.
+            issue={newIssue === 'nameRequired' && !newValue && !dirty ? null : newIssue}
             disabled={fieldMutationLocked}
           />
         )}
@@ -495,7 +493,7 @@ export function VaultSecretFieldsEditor({
           </Button>
         </p>
       ) : null}
-      {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
+      <VaultFieldNameRule shown={showNameRule} />
       <VaultFieldReferences secretName={current.name} fields={fields} defaultField={defaultField} />
       {isProtected && <VaultProtectedUnlock warnDraftDiscard vault={vault} secretName={current.name}
         onContinueInBrowser={() => openVaultsInBrowser({ kind: 'edit', secretName: current.name })} />}

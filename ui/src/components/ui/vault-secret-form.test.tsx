@@ -321,10 +321,16 @@ it('reports field problems on the offending row', () => {
   fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
   const added = screen.getByLabelText('Field 3 name');
   fireEvent.focus(added);
-  expect(screen.getByText(en.vaults.fields.nameRule)).toBeTruthy();
+  const rule = screen.getByText(en.vaults.fields.nameRule);
+  expect(rule.getAttribute('aria-hidden')).toBeNull();
+  expect(rule.classList.contains('invisible')).toBe(false);
   expect(screen.queryByText(en.vaults.fields.nameRequired)).toBeNull();
+  // Leaving the name hides the rule in place: the same element keeps its room, so nothing below it
+  // (the dialog's Save) moves while focus leaves for a click on it.
   fireEvent.blur(added);
-  expect(screen.queryByText(en.vaults.fields.nameRule)).toBeNull();
+  expect(screen.getByText(en.vaults.fields.nameRule)).toBe(rule);
+  expect(rule.getAttribute('aria-hidden')).toBe('true');
+  expect(rule.classList.contains('invisible')).toBe(true);
   expect(screen.getByText(en.vaults.fields.nameRequired).id).toBe(added.getAttribute('aria-describedby'));
   change('Field 3 name', 'TOTP');
   expect(screen.getByText(en.vaults.fields.nameInvalid)).toBeTruthy();

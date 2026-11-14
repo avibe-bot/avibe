@@ -310,6 +310,21 @@ function VaultFieldValueInput({
   );
 }
 
+/**
+ * The field-name rule under a field list, shown while a field name has focus. It keeps its place
+ * when hidden (invisible, so not announced either): unmounting it as focus left a name moved
+ * everything below it, the dialog's Save included, up by its height in the middle of a click, so a
+ * press that started on Save could end beside it and the click was lost.
+ */
+export function VaultFieldNameRule({ shown }: { shown: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <span aria-hidden={shown ? undefined : true} className={cn('text-[11px] text-muted', !shown && 'invisible')}>
+      {t('vaults.fields.nameRule')}
+    </span>
+  );
+}
+
 /** How an agent names each field, so the default field's bare-name shorthand is visible. */
 export function VaultFieldReferences({ secretName, fields, defaultField }: {
   secretName: string;
