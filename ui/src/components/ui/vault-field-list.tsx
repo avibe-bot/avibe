@@ -277,6 +277,13 @@ function VaultFieldValueInput({
   const { t } = useTranslation();
   // Unset until the user toggles, so a row renamed to `username` follows its new name.
   const [reveal, setReveal] = useState<boolean | null>(null);
+  // When the generator's settings close, the value is masked again, whatever the eye showed before
+  // (a username row is shown by default; a generated value there is a secret). The eye still works.
+  const [wasForced, setWasForced] = useState(Boolean(forceReveal));
+  if (wasForced !== Boolean(forceReveal)) {
+    setWasForced(Boolean(forceReveal));
+    if (!forceReveal) setReveal(false);
+  }
   const revealed = forceReveal || (reveal ?? REVEALED_BY_DEFAULT.has(field));
   return (
     <div className="relative min-w-0 flex-1">

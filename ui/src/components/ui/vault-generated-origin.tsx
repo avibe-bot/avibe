@@ -22,22 +22,28 @@ function useOriginText() {
   };
 }
 
-/** The Vaults list's marker: who generated the secret's values, and which fields when it has several. */
+/** The Vaults list's markers: one per origin (an Agent, the CLI), each with the fields it generated
+ *  when the secret has several, or the Session it was made in (its title then) when it has one. */
 export function VaultGeneratedOriginBadge({ secret, className }: { secret: VaultSecret; className?: string }) {
   const { t } = useTranslation();
   const entries = secret.generated ?? [];
   if (entries.length === 0) return null;
-  const byAgent = entries.some((entry) => entry.by === 'agent');
-  const fields = vaultFieldNames(secret);
-  // One field: the Session it was made in (its title then), when known. Several: which fields.
-  const only = fields.length === 1 ? entries[0] : null;
-  const detail = only ? only.session_title?.trim() || null : entries.map((entry) => entry.field).join(', ');
-  const label = byAgent ? t('vaults.generatedBy.agent') : t('vaults.generatedBy.cli');
+  const single = vaultFieldNames(secret).length === 1;
   return (
-    <Badge variant="outline" className={cn('max-w-full border-violet/40 bg-violet-soft text-violet-ink', className)}>
-      {byAgent ? <Bot className="size-3 shrink-0" /> : <Terminal className="size-3 shrink-0" />}
-      <span className="truncate">{detail ? t('vaults.generatedBy.badge', { who: label, detail }) : label}</span>
-    </Badge>
+    <>
+      {(['agent', 'cli'] as const).map((by) => {
+        const group = entries.filter((entry) => entry.by === by);
+        if (group.length === 0) return null;
+        const detail = single ? group[0].session_title?.trim() || null : group.map((entry) => entry.field).join(', ');
+        const label = by === 'agent' ? t('vaults.generatedBy.agent') : t('vaults.generatedBy.cli');
+        return (
+          <Badge key={by} variant="outline" className={cn('max-w-full border-violet/40 bg-violet-soft text-violet-ink', className)}>
+            {by === 'agent' ? <Bot className="size-3 shrink-0" /> : <Terminal className="size-3 shrink-0" />}
+            <span className="truncate">{detail ? t('vaults.generatedBy.badge', { who: label, detail }) : label}</span>
+          </Badge>
+        );
+      })}
+    </>
   );
 }
 
