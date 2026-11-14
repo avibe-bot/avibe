@@ -82,7 +82,7 @@ final class RealBundleCaptureUITests: XCTestCase {
     }
 
     private func requireText(_ text: String, in app: XCUIApplication) {
-        XCTAssertTrue(app.staticTexts[text].firstMatch.waitForExistence(timeout: 10), text)
+        XCTAssertTrue(app.staticTexts[text].waitForExistence(timeout: 10), text)
     }
 
     private func tapRow(containing name: String, in app: XCUIApplication) {
