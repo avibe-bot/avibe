@@ -524,13 +524,16 @@ final class MobileSessionCoordinator {
     private var secondFactorEmail: String?
     private var generation = 0
     private var phase = Phase.ready
-    /// The exclusive operation now running that keeps the account, its store
-    /// and the selection as they are (a push-management request). The selected
-    /// runtime stays current through it.
+    /// The account page that currently owns the hidden account transport.
+    /// Reopening creates a new lease; an old operation may not release it.
+    private var accountSurfaceLeaseID: UUID?
+    /// Operation that is allowed to preserve the selected runtime while the
+    /// account page refreshes or performs a push-management request.
     private var selectionKeepingOperation: UUID?
-    /// The account page closed while that operation used the transport; it
-    /// is released when the operation ends rather than under it.
-    private var releasesSurfaceAfterOperation = false
+    /// The operation that currently retains the transport after its surface
+    /// closes. This token is separate from `selectionKeepingOperation`:
+    /// selection and transport ownership have different invariants.
+    private var transportOperationToken: UUID?
     private var signedOutStoreIsFresh = false
     private var authoritativeSignedOutTransitionInProgress = false
     private var pendingStoreReleaseBarriers: [
@@ -583,27 +586,34 @@ final class MobileSessionCoordinator {
     }
 
     func activateAccountSurface() {
-        releasesSurfaceAfterOperation = false
-        guard transport == nil else {
-            return
+        if accountSurfaceLeaseID == nil {
+            accountSurfaceLeaseID = UUID()
         }
-        transport = transportFactory(controlPlane.baseURL, websiteDataStore.dataStore)
+        ensureTransport()
     }
 
     func deactivateAccountSurface() {
+        accountSurfaceLeaseID = nil
+        transportOperationToken = nil
         recordReleaseBarrier(transport?.invalidate())
         transport = nil
     }
 
-    /// The account page over the runtime is closing. Its transport is
-    /// released now, or, while a push-management request runs on it, once
-    /// that request ends.
+    /// The account page is closing. An operation that owns the transport may
+    /// finish it; a newly opened page gets a new lease and cancels that release.
     func leaveAccountSurface() {
-        guard selectionKeepingOperation == nil else {
-            releasesSurfaceAfterOperation = true
+        accountSurfaceLeaseID = nil
+        guard transportOperationToken != nil else {
+            deactivateAccountSurface()
             return
         }
-        deactivateAccountSurface()
+    }
+
+    private func ensureTransport() {
+        guard transport == nil else {
+            return
+        }
+        transport = transportFactory(controlPlane.baseURL, websiteDataStore.dataStore)
     }
 
     func bootstrap() async throws -> MobileSessionState {
@@ -903,7 +913,7 @@ final class MobileSessionCoordinator {
 
         await rotateWebsiteDataStore()
         signedOutStoreIsFresh = true
-        activateAccountSurface()
+        ensureTransport()
         return .signedOut
     }
 
@@ -912,29 +922,19 @@ final class MobileSessionCoordinator {
     ) async throws -> PushManagementResponse {
         if case .pushLogout = phase {
             let requestGeneration = generation
-            let wasActive = transport != nil
-            activateAccountSurface()
-            defer {
-                if !wasActive {
-                    deactivateAccountSurface()
-                }
-            }
+            let operationToken = UUID()
+            ensureTransport()
+            transportOperationToken = operationToken
+            defer { finishTransportOperation(operationToken) }
             let response = try await requireTransport().pushManagementRequest(
                 request
             )
             try requireCurrentGeneration(requestGeneration)
             return response
         }
-        let wasActive = transport != nil
         return try await runExclusive(keepingSelection: true) {
             let requestGeneration = self.generation
-            self.activateAccountSurface()
-            defer {
-                if !wasActive || self.releasesSurfaceAfterOperation {
-                    self.deactivateAccountSurface()
-                }
-                self.releasesSurfaceAfterOperation = false
-            }
+            self.ensureTransport()
             let response = try await self.requireTransport().pushManagementRequest(
                 request
             )
@@ -1008,7 +1008,7 @@ final class MobileSessionCoordinator {
         pendingStoreReleaseBarriers.append(
             contentsOf: onPrepareAccountTransition()
         )
-        activateAccountSurface()
+        ensureTransport()
     }
 
     private func selectedRuntimeOriginIsMissing(
@@ -1161,6 +1161,16 @@ final class MobileSessionCoordinator {
         return true
     }
 
+    private func finishTransportOperation(_ token: UUID) {
+        guard transportOperationToken == token else {
+            return
+        }
+        transportOperationToken = nil
+        if accountSurfaceLeaseID == nil {
+            deactivateAccountSurface()
+        }
+    }
+
     private func runExclusive<T>(
         keepingSelection: Bool = false,
         _ operation: () async throws -> T
@@ -1173,18 +1183,18 @@ final class MobileSessionCoordinator {
         if keepingSelection {
             selectionKeepingOperation = token
         }
+        if keepingSelection || transport != nil {
+            transportOperationToken = token
+        }
         defer {
             if selectionKeepingOperation == token {
                 selectionKeepingOperation = nil
             }
+            if transportOperationToken == token {
+                finishTransportOperation(token)
+            }
             if phase == .operation(token) {
                 phase = .ready
-            }
-            if releasesSurfaceAfterOperation,
-               selectionKeepingOperation == nil
-            {
-                deactivateAccountSurface()
-                releasesSurfaceAfterOperation = false
             }
         }
         return try await operation()
@@ -1220,7 +1230,7 @@ final class MobileSessionCoordinator {
         )
         // An account page over a live runtime starts no transport; the
         // runtime is released by now, so the transition's requests can run.
-        activateAccountSurface()
+        ensureTransport()
         return generation
     }
 
@@ -1285,7 +1295,7 @@ final class MobileSessionCoordinator {
         clearStoredSelection()
         await rotateWebsiteDataStore()
         signedOutStoreIsFresh = true
-        activateAccountSurface()
+        ensureTransport()
     }
 
     private func recordReleaseBarrier(

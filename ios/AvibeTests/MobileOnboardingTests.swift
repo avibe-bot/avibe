@@ -1499,6 +1499,100 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(transitions, 0)
     }
 
+    func testSurfaceRefreshInterleavingsUseOneTransportOwner() async throws {
+        enum ResultKind {
+            case sameAccount
+            case networkFailure
+        }
+        struct Row {
+            let name: String
+            let result: ResultKind
+            let reopenBeforeCompletion: Bool
+            let expectsRuntime: Bool
+            let expectsSurface: Bool
+        }
+        let rows = [
+            Row(
+                name: "dismiss during same-account refresh",
+                result: .sameAccount,
+                reopenBeforeCompletion: false,
+                expectsRuntime: true,
+                expectsSurface: false
+            ),
+            Row(
+                name: "dismiss then reopen before same-account refresh completes",
+                result: .sameAccount,
+                reopenBeforeCompletion: true,
+                expectsRuntime: true,
+                expectsSurface: true
+            ),
+            Row(
+                name: "dismiss during failed refresh",
+                result: .networkFailure,
+                reopenBeforeCompletion: false,
+                expectsRuntime: true,
+                expectsSurface: false
+            ),
+        ]
+
+        for row in rows {
+            let defaults = makeDefaults()
+            let firstTransport = FakeMobileAuthTransport()
+            firstTransport.session = snapshot(accountID: "account-1")
+            let refreshTransport = FakeMobileAuthTransport()
+            let refreshStarted = expectation(description: "refresh started: \(row.name)")
+            let allowRefresh = expectation(description: "refresh may finish: \(row.name)")
+            refreshTransport.fetchSessionHandler = {
+                refreshStarted.fulfill()
+                await self.fulfillment(of: [allowRefresh], timeout: 30)
+                switch row.result {
+                case .sameAccount:
+                    return .signedIn(snapshot(self.snapshot(accountID: "account-1")))
+                case .networkFailure:
+                    throw MobileAccountError.network
+                }
+            }
+            var runtime: MobileRuntimeContext?
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                transports: [firstTransport, refreshTransport],
+                onOpen: { runtime = $0 }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: instance.id)
+            let selected = try XCTUnwrap(runtime, row.name)
+            coordinator.activateAccountSurface()
+
+            let refresh = Task { try await coordinator.refresh() }
+            await fulfillment(of: [refreshStarted], timeout: 30)
+            coordinator.leaveAccountSurface()
+            if row.reopenBeforeCompletion {
+                coordinator.activateAccountSurface()
+            }
+            allowRefresh.fulfill()
+            do {
+                _ = try await refresh.value
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error, .network, row.name)
+            }
+
+            XCTAssertEqual(
+                coordinator.isCurrentRuntime(selected),
+                row.expectsRuntime,
+                row.name
+            )
+            XCTAssertEqual(
+                coordinator.isAccountSurfaceActive,
+                row.expectsSurface,
+                row.name
+            )
+            if row.reopenBeforeCompletion {
+                coordinator.leaveAccountSurface()
+            }
+        }
+    }
+
     func testRefreshRemovingSelectedOriginReleasesRuntimeButKeepsAccount()
         async throws
     {
