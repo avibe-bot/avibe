@@ -1,0 +1,472 @@
+name: native README capture (draft only)
+
+# Capture-only lane for the README refresh. It lives on a draft PR that is never
+# merged. pull_request-only, contents: read, no secrets, no checkout, no release
+# workflow involvement. It downloads the released 3.2.6 Desktop App, verifies
+# its SHA-256, and photographs real native windows on hosted runners.
+#
+# Runners and honesty notes:
+# - macOS: macos-26 (Apple silicon), the aarch64 DMG.
+# - Windows: windows-11-arm, chosen by Product. The installer is x64 and runs
+#   under Windows on Arm x64 emulation. Hosted runners sign in as an
+#   administrator with UAC disabled, so the run cannot show a UAC prompt and
+#   cannot stand in for a normal user's Windows 11 PC. The manifest records the
+#   runner's actual UAC and SmartScreen settings.
+# - iPhone: deferred. Nothing here substitutes design frames for native shots.
+#
+# Artifacts:
+# - native-readme-<os>-*: candidate images of Avibe's own windows.
+# - native-readme-<os>-*-review: full-screen context and every system prompt.
+#   Prompts can show the signing certificate's publisher, so this artifact is
+#   for internal review only and is deleted after download.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/native-readme-captures.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-readme-capture-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_VERSION: v3.2.6
+  MAC_ASSET: Avibe_3.2.6_aarch64-apple-darwin.dmg
+  MAC_SUMS: Avibe_3.2.6_aarch64-apple-darwin.SHA256SUMS
+  WINDOWS_ASSET: Avibe_3.2.6_x86_64-pc-windows-msvc.exe
+  WINDOWS_SUMS: Avibe_3.2.6_x86_64-pc-windows-msvc.SHA256SUMS
+  RELEASE_BASE: https://dl.avibe.bot/releases/v3.2.6
+
+jobs:
+  mac-capture:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'vibe/20261114-native-readme-capture-draft' &&
+      github.event.pull_request.base.ref == 'master'
+    runs-on: macos-26
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [en, zh]
+    env:
+      LANG_CODE: ${{ matrix.lang }}
+    steps:
+      - name: Prepare a clean, neutral machine identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$LANG_CODE" = zh ]; then name="工作室 Mac"; else name="Studio Mac"; fi
+          sudo scutil --set ComputerName "$name"
+          sudo scutil --set LocalHostName Studio-Mac
+          sudo scutil --set HostName Studio-Mac
+          defaults delete -g AppleInterfaceStyle 2>/dev/null || true
+          if [ "$LANG_CODE" = zh ]; then
+            defaults write bot.avibe.desktop AppleLanguages -array zh-Hans
+            defaults write bot.avibe.desktop AppleLocale zh_CN
+          fi
+          sw_vers
+          echo "ComputerName=$(scutil --get ComputerName) HostName=$(scutil --get HostName)"
+
+      - name: Download and verify the released 3.2.6 DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/native-capture"
+          mkdir -p "$W/images" "$W/review"
+          cd "$W"
+          curl --fail --location --retry 3 --output "$MAC_ASSET" "$RELEASE_BASE/$MAC_ASSET"
+          curl --fail --location --retry 3 --output SHA256SUMS "$RELEASE_BASE/$MAC_SUMS"
+          grep "  $MAC_ASSET\$" SHA256SUMS | shasum -a 256 -c -
+
+      - name: Build the window capture helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/native-capture"
+          cat > "$W/capwin.swift" <<'SWIFT'
+          import CoreGraphics
+          import Foundation
+
+          // capwin <outdir|-> <prefix> <owner,owner|*> [minWidth] [minHeight]
+          // Captures every on-screen window of the named owners (title bar and
+          // shadow included) or, with outdir "-", only lists them.
+          let args = CommandLine.arguments
+          let outDir = args[1]
+          let prefix = args[2]
+          let owners = Set(args[3].split(separator: ",").map(String.init))
+          let minW = args.count > 4 ? Double(args[4]) ?? 200 : 200
+          let minH = args.count > 5 ? Double(args[5]) ?? 120 : 120
+          let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+          var count = 0
+          for window in windows {
+            let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+            guard owners.contains("*") || owners.contains(owner) else { continue }
+            let bounds = window[kCGWindowBounds as String] as? [String: Double] ?? [:]
+            let width = bounds["Width"] ?? 0
+            let height = bounds["Height"] ?? 0
+            guard width >= minW, height >= minH, let id = window[kCGWindowNumber as String] as? Int else { continue }
+            let layer = window[kCGWindowLayer as String] as? Int ?? 0
+            let title = window[kCGWindowName as String] as? String ?? ""
+            count += 1
+            var line = "owner=\(owner)\tlayer=\(layer)\tsize=\(Int(width))x\(Int(height))\ttitle=\(title)"
+            if outDir != "-" {
+              let file = "\(outDir)/\(prefix)-\(count).png"
+              let capture = Process()
+              capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+              capture.arguments = ["-x", "-l", String(id), file]
+              try? capture.run()
+              capture.waitUntilExit()
+              line = "\(file)\t" + line
+            }
+            print(line)
+          }
+          if count == 0 { print("no matching windows for \(owners.sorted())") }
+          SWIFT
+          swiftc -O -o "$W/capwin" "$W/capwin.swift"
+
+      - name: Open the DMG as a user would and capture its window
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/native-capture"
+          cd "$W"
+          # A browser download carries a quarantine mark; give the DMG the same.
+          xattr -w com.apple.quarantine "0081;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" "$MAC_ASSET"
+          mount="$(hdiutil attach "$MAC_ASSET" | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)"
+          test -d "$mount"
+          echo "MOUNT=$mount" >> "$GITHUB_ENV"
+          open "$mount"
+          sleep 6
+          "$W/capwin" "$W/images" "mac-dmg-window-$LANG_CODE" Finder 300 200 | tee -a "$W/review/windows-$LANG_CODE.log"
+          screencapture -x "$W/review/mac-dmg-fullscreen-$LANG_CODE.png"
+
+      - name: First open with the download quarantine (Gatekeeper prompt)
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/native-capture"
+          app="$(find "$MOUNT" -maxdepth 1 -name '*.app' -print | head -1)"
+          test -n "$app"
+          ditto "$app" /Applications/Avibe.app
+          hdiutil detach "$MOUNT" -quiet || true
+          # Copying out of a downloaded DMG keeps the quarantine mark.
+          xattr -w com.apple.quarantine "0081;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" /Applications/Avibe.app
+          open /Applications/Avibe.app || true
+          sleep 10
+          echo "--- gatekeeper phase ---" >> "$W/review/windows-$LANG_CODE.log"
+          "$W/capwin" - x '*' 1 1 >> "$W/review/windows-$LANG_CODE.log"
+          "$W/capwin" "$W/images" "mac-first-open-prompt-$LANG_CODE" CoreServicesUIAgent 200 100 | tee -a "$W/review/windows-$LANG_CODE.log"
+          screencapture -x "$W/review/mac-first-open-fullscreen-$LANG_CODE.png"
+          # Dismiss without approving, then clear the mark for the app phase.
+          killall CoreServicesUIAgent 2>/dev/null || true
+          pkill -x Avibe 2>/dev/null || true
+          sleep 2
+          xattr -dr com.apple.quarantine /Applications/Avibe.app
+
+      - name: Launch the app and capture its first window
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/native-capture"
+          open /Applications/Avibe.app
+          elapsed=0
+          for at in 10 40 90; do
+            sleep $((at - elapsed)); elapsed=$at
+            echo "--- app t=${at}s ---" >> "$W/review/windows-$LANG_CODE.log"
+            "$W/capwin" - x '*' 1 1 >> "$W/review/windows-$LANG_CODE.log"
+            "$W/capwin" "$W/images" "mac-first-window-$LANG_CODE-t${at}s" "Avibe,avibe-desktop" 200 120 | tee -a "$W/review/windows-$LANG_CODE.log"
+            screencapture -x "$W/review/mac-fullscreen-$LANG_CODE-t${at}s.png"
+          done
+
+      - name: Write the manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/native-capture"
+          mkdir -p "$W/images" "$W/review"
+          {
+            echo "Avibe native README captures, macOS ($LANG_CODE)"
+            echo "Build: released $RELEASE_VERSION, $MAC_ASSET, SHA-256 verified against $MAC_SUMS"
+            echo "Runner: macos-26 hosted, $(sw_vers -productName) $(sw_vers -productVersion), $(uname -m)"
+            echo "Computer name set to: $(scutil --get ComputerName)"
+            echo "App language: $([ "$LANG_CODE" = zh ] && echo 'zh-Hans (per-app AppleLanguages)' || echo 'system default, English')"
+            echo
+            echo "mac-dmg-window-*: the Finder window of the mounted DMG, opened as a user would."
+            echo "mac-first-open-prompt-*: what macOS shows on the first open of a downloaded app (quarantine mark set as a browser would). Dismissed, not approved."
+            echo "mac-first-window-*-t<N>s: every Avibe window, N seconds after launch. Fresh install, no account, no sample data."
+            echo "Not taken here: mac-workbench with the Lumen Studio sample story, mac-setup-ready, mac-mini (need fixtures the native shell cannot load yet)."
+            echo
+            echo "No clipboard API was used. No account was signed in and no address or hostname was typed. Review every image before publication."
+            echo
+            echo "Files:"
+            ls -1 "$W/images"
+          } > "$W/images/MANIFEST.txt"
+          cp "$W/images/MANIFEST.txt" "$W/review/MANIFEST.txt"
+          cat "$W/images/MANIFEST.txt"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: native-readme-mac-${{ matrix.lang }}
+          path: ${{ runner.temp }}/native-capture/images/
+          retention-days: 3
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: native-readme-mac-${{ matrix.lang }}-review
+          path: ${{ runner.temp }}/native-capture/review/
+          retention-days: 1
+          if-no-files-found: warn
+
+  windows-capture:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'vibe/20261114-native-readme-capture-draft' &&
+      github.event.pull_request.base.ref == 'master'
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Download and verify the released 3.2.6 installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $W = Join-Path $env:RUNNER_TEMP 'native-capture'
+          New-Item -ItemType Directory -Force (Join-Path $W 'images'), (Join-Path $W 'review') | Out-Null
+          $installer = Join-Path $W $env:WINDOWS_ASSET
+          Invoke-WebRequest -UseBasicParsing -Uri "$env:RELEASE_BASE/$env:WINDOWS_ASSET" -OutFile $installer
+          $sums = Join-Path $W 'SHA256SUMS'
+          Invoke-WebRequest -UseBasicParsing -Uri "$env:RELEASE_BASE/$env:WINDOWS_SUMS" -OutFile $sums
+          $line = Select-String -Path $sums -Pattern ([regex]::Escape($env:WINDOWS_ASSET)) | Select-Object -First 1
+          $expected = ($line.Line -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "3.2.6 installer digest mismatch" }
+          "W=$W" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "INSTALLER=$installer" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Write the window capture helper
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          Add-Type -ReferencedAssemblies System.Drawing, System.Windows.Forms -TypeDefinition @"
+          using System;
+          using System.Collections.Generic;
+          using System.Diagnostics;
+          using System.Drawing;
+          using System.Drawing.Imaging;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class Cap {
+            public delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+            [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
+            [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int s);
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
+            public class Win { public IntPtr H; public string Title; public string Proc; public int Pid; public RECT Rc; }
+            public static List<Win> List() {
+              SetProcessDPIAware();
+              List<Win> list = new List<Win>();
+              EnumWindows(delegate(IntPtr h, IntPtr l) {
+                if (!IsWindowVisible(h)) return true;
+                RECT r;
+                if (DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT))) != 0) GetWindowRect(h, out r);
+                if (r.R - r.L < 120 || r.B - r.T < 80) return true;
+                StringBuilder sb = new StringBuilder(512);
+                GetWindowText(h, sb, 512);
+                uint pid; GetWindowThreadProcessId(h, out pid);
+                string name = "";
+                try { name = Process.GetProcessById((int)pid).ProcessName; } catch { }
+                Win w = new Win(); w.H = h; w.Title = sb.ToString(); w.Proc = name; w.Pid = (int)pid; w.Rc = r;
+                list.Add(w);
+                return true;
+              }, IntPtr.Zero);
+              return list;
+            }
+            public static void Shot(Win w, string path) {
+              SetProcessDPIAware();
+              SetWindowPos(w.H, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+              System.Threading.Thread.Sleep(500);
+              RECT r = w.Rc;
+              using (Bitmap b = new Bitmap(r.R - r.L, r.B - r.T))
+              using (Graphics g = Graphics.FromImage(b)) { g.CopyFromScreen(r.L, r.T, 0, 0, b.Size); b.Save(path, ImageFormat.Png); }
+              SetWindowPos(w.H, new IntPtr(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+            }
+            public static void Full(string path) {
+              SetProcessDPIAware();
+              Rectangle s = System.Windows.Forms.Screen.PrimaryScreen.Bounds;
+              using (Bitmap b = new Bitmap(s.Width, s.Height))
+              using (Graphics g = Graphics.FromImage(b)) { g.CopyFromScreen(s.X, s.Y, 0, 0, b.Size); b.Save(path, ImageFormat.Png); }
+            }
+          }
+          "@
+          function Write-Windows([string]$label) {
+            Add-Content (Join-Path $env:W 'review\windows.log') "--- $label ---"
+            foreach ($w in [Cap]::List()) {
+              Add-Content (Join-Path $env:W 'review\windows.log') ("{0}`t{1}`t{2}x{3}`t{4}" -f $w.Proc, $w.Pid, ($w.Rc.R - $w.Rc.L), ($w.Rc.B - $w.Rc.T), $w.Title)
+            }
+          }
+          '@ | Set-Content -Encoding utf8 (Join-Path $env:W 'capture.ps1')
+
+      - name: Record what this runner enforces
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Reg($path, $name) { try { (Get-ItemProperty -Path $path -Name $name -ErrorAction Stop).$name } catch { '<unset>' } }
+          $os = Get-CimInstance Win32_OperatingSystem
+          $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          @(
+            "OS: $($os.Caption) $($os.Version) build $($os.BuildNumber), $env:PROCESSOR_ARCHITECTURE",
+            "Signed in as administrator: $admin",
+            "UAC EnableLUA: $(Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLUA')",
+            "UAC ConsentPromptBehaviorAdmin: $(Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'ConsentPromptBehaviorAdmin')",
+            "SmartScreen policy EnableSmartScreen: $(Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableSmartScreen')",
+            "SmartScreen Explorer SmartScreenEnabled: $(Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' 'SmartScreenEnabled')",
+            "Attachment policy SaveZoneInformation: $(Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Attachments' 'SaveZoneInformation')"
+          ) | Set-Content -Encoding utf8 (Join-Path $env:W 'review\runner-facts.txt')
+          Get-Content (Join-Path $env:W 'review\runner-facts.txt')
+
+      - name: First run of a downloaded installer (system prompt, if any)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:W 'capture.ps1')
+          $downloads = Join-Path $env:USERPROFILE 'Downloads'
+          New-Item -ItemType Directory -Force $downloads | Out-Null
+          $copy = Join-Path $downloads $env:WINDOWS_ASSET
+          Copy-Item $env:INSTALLER $copy -Force
+          # Mark the file the way a browser download is marked (Mark of the Web).
+          Set-Content -Path $copy -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3`r`nReferrerUrl=https://avibe.bot/`r`nHostUrl=$env:RELEASE_BASE/$env:WINDOWS_ASSET"
+          $before = @{}; foreach ($w in [Cap]::List()) { $before[[string]$w.H] = $true }
+          Write-Windows 'before first run'
+          $p = Start-Process -FilePath $copy -PassThru
+          $seen = @{}; $n = 0
+          for ($t = 1; $t -le 25; $t++) {
+            Start-Sleep -Seconds 1
+            foreach ($w in [Cap]::List()) {
+              $key = [string]$w.H
+              if ($before.ContainsKey($key) -or $seen.ContainsKey($key)) { continue }
+              $seen[$key] = $true; $n++
+              $file = Join-Path $env:W ("review\windows-first-run-prompt-{0}-{1}.png" -f $n, $w.Proc)
+              [Cap]::Shot($w, $file)
+              Add-Content (Join-Path $env:W 'review\first-run.log') ("t={0}s`t{1}`t{2}`t{3}" -f $t, $w.Proc, $w.Title, $file)
+            }
+            if ($t -eq 5 -or $t -eq 20) { [Cap]::Full((Join-Path $env:W "review\windows-first-run-fullscreen-t$($t)s.png")) }
+          }
+          Write-Windows 'first run, after 25s'
+          if ($n -eq 0) { Add-Content (Join-Path $env:W 'review\first-run.log') 'no new window appeared within 25 seconds' }
+          Get-Content (Join-Path $env:W 'review\first-run.log')
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Get-Process smartscreen, consent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process | Where-Object { $_.ProcessName -like 'Avibe_3.2.6*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+      - name: Capture the installer's first screen
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:W 'capture.ps1')
+          $p = Start-Process -FilePath $env:INSTALLER -PassThru
+          $shot = $false
+          for ($t = 1; $t -le 60 -and -not $shot; $t++) {
+            Start-Sleep -Seconds 1
+            foreach ($w in [Cap]::List()) {
+              if ($w.Proc -like 'Avibe_3.2.6*' -and $w.Title) {
+                Start-Sleep -Seconds 2
+                [Cap]::Shot($w, (Join-Path $env:W 'images\windows-installer-first-screen.png'))
+                [Cap]::Full((Join-Path $env:W 'review\windows-installer-fullscreen.png'))
+                Add-Content (Join-Path $env:W 'review\first-run.log') ("installer first screen at t={0}s: {1}" -f $t, $w.Title)
+                $shot = $true; break
+              }
+            }
+          }
+          Write-Windows 'installer first screen'
+          if (-not $shot) { Add-Content (Join-Path $env:W 'review\first-run.log') 'installer window not found within 60 seconds' }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Get-Process | Where-Object { $_.ProcessName -like 'Avibe_3.2.6*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+      - name: Install, launch, and capture the app's first window
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . (Join-Path $env:W 'capture.ps1')
+          $install = Start-Process -FilePath $env:INSTALLER -ArgumentList '/S' -PassThru
+          if (-not $install.WaitForExit(360000)) { throw 'silent install did not finish within 6 minutes' }
+          $exe = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Avibe'), (Join-Path $env:LOCALAPPDATA 'Programs\Avibe'), (Join-Path $env:ProgramFiles 'Avibe') -Include 'Avibe.exe', 'avibe-desktop.exe' -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw 'installed Avibe executable not found' }
+          Add-Content (Join-Path $env:W 'review\first-run.log') "installed: $($exe.FullName)"
+          $running = Get-Process | Where-Object { $_.Path -eq $exe.FullName }
+          if (-not $running) { Start-Process -FilePath $exe.FullName | Out-Null }
+          $procName = [IO.Path]::GetFileNameWithoutExtension($exe.Name)
+          $elapsed = 0
+          foreach ($at in 15, 45, 120) {
+            Start-Sleep -Seconds ($at - $elapsed); $elapsed = $at
+            Write-Windows "app t=$($at)s"
+            $n = 0
+            foreach ($w in [Cap]::List()) {
+              if ($w.Proc -eq $procName) {
+                $n++
+                [Cap]::Shot($w, (Join-Path $env:W ("images\windows-first-window-t{0}s-{1}.png" -f $at, $n)))
+              } elseif ($w.Proc -notin @('explorer', 'TextInputHost', 'ShellExperienceHost', 'SearchHost', 'StartMenuExperienceHost')) {
+                $n++
+                [Cap]::Shot($w, (Join-Path $env:W ("review\windows-other-window-t{0}s-{1}-{2}.png" -f $at, $n, $w.Proc)))
+              }
+            }
+            [Cap]::Full((Join-Path $env:W "review\windows-app-fullscreen-t$($at)s.png"))
+          }
+
+      - name: Write the manifest
+        if: always()
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force (Join-Path $env:W 'images'), (Join-Path $env:W 'review') | Out-Null
+          $facts = Get-Content (Join-Path $env:W 'review\runner-facts.txt') -ErrorAction SilentlyContinue
+          $log = Get-Content (Join-Path $env:W 'review\first-run.log') -ErrorAction SilentlyContinue
+          $lines = @(
+            'Avibe native README captures, Windows',
+            "Build: released $env:RELEASE_VERSION, $env:WINDOWS_ASSET, SHA-256 verified against $env:WINDOWS_SUMS",
+            'Runner: GitHub-hosted windows-11-arm. The installer and the app are x64 and ran under Windows on Arm x64 emulation.',
+            'This is not a normal user''s Windows 11 PC: hosted runners sign in as an administrator, and their UAC and SmartScreen settings are below. A missing prompt here does not prove a user sees none.',
+            ''
+          ) + $facts + @(
+            '',
+            'First run: the installer was copied into Downloads with a browser-style Mark of the Web and started. Every new window in the first 25 seconds is in the review artifact only (a prompt can show the certificate publisher).'
+          ) + $log + @(
+            '',
+            'windows-installer-first-screen.png: the installer''s first screen (second start, without the mark).',
+            'windows-first-window-t<N>s-*: every Avibe window N seconds after launch, after a silent per-user install. Fresh install, no account, no sample data.',
+            'The runner''s computer name cannot be changed without a reboot; check any image that shows a computer name before publication.',
+            'Not taken here: windows-workbench with the Lumen Studio sample story (needs fixtures the native shell cannot load yet); Chinese Windows (the runner''s UI language is English).',
+            '',
+            'No clipboard API was used. No account was signed in and no address was typed. Review every image before publication.',
+            '',
+            'Files:'
+          ) + (Get-ChildItem (Join-Path $env:W 'images') -Name)
+          $lines | Set-Content -Encoding utf8 (Join-Path $env:W 'images\MANIFEST.txt')
+          Copy-Item (Join-Path $env:W 'images\MANIFEST.txt') (Join-Path $env:W 'review\MANIFEST.txt') -Force
+          Get-Content (Join-Path $env:W 'images\MANIFEST.txt')
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: native-readme-windows
+          path: ${{ runner.temp }}/native-capture/images/
+          retention-days: 3
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: native-readme-windows-review
+          path: ${{ runner.temp }}/native-capture/review/
+          retention-days: 1
+          if-no-files-found: warn
