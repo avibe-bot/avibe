@@ -265,7 +265,13 @@ def _pipe_fixture(monkeypatch, api, peers, *, pending=False):
     monkeypatch.setattr(private_fs, "WindowsSecurity", Security)
     monkeypatch.setitem(sys.modules, "asyncio.windows_utils", SimpleNamespace(PipeHandle=Handle))
     monkeypatch.setattr(asyncio, "ProactorEventLoop", type(loop), raising=False)
-    monkeypatch.setattr(loop, "_proactor", SimpleNamespace(accept_pipe=accept), raising=False)
+    proactor = getattr(loop, "_proactor", None)
+    if proactor is None:
+        monkeypatch.setattr(loop, "_proactor", SimpleNamespace(accept_pipe=accept), raising=False)
+    else:
+        # asyncio.run closes the real IOCP before pytest restores patches.
+        # Keep its owner intact; only fake the single operation under test.
+        monkeypatch.setattr(proactor, "accept_pipe", accept)
     monkeypatch.setattr(loop, "_make_duplex_pipe_transport", transport, raising=False)
     return state
 
