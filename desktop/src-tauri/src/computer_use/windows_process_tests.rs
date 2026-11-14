@@ -363,7 +363,7 @@ async fn explicit_parent_attribute_inherits_parent_job_not_driver_job() {
         .spawn()
         .unwrap();
     wait_for_file(&anchor_directory.path().join("started"));
-    let anchor_handle = process_handle(anchor.id());
+    let anchor_handle = query_process_handle(anchor.id());
 
     let mut launcher_env = fixture_env("attribute_launcher", target_directory.path());
     launcher_env.push(("AVIBE_PARENT_PID".into(), anchor.id().to_string().into()));
