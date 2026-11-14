@@ -1,10 +1,10 @@
 # iOS App: account and instance pages, redesign
 
-Status: **proposed** — map and diagnosis (1), structure and frames (2), desktop consistency and build notes (3). Frames: `ui/design/frames/mobile-app/switcher.design.tsx`, kit `ui/design/kit/mobile-instance-sheet.tsx`.
+Status: **approved** by the owner on 2026-11-14 at 13:23 Asia/Shanghai: variant A now, variant B with Runtime 3.2.7. Contents: map and diagnosis (1–2), structure and frames (3), desktop consistency (4), building it (5). Frames: `ui/design/frames/mobile-app/switcher.design.tsx`, kit `ui/design/kit/mobile-instance-sheet.tsx`.
 Date: 2026-11-13. Base: Avibe `d8187b453`. Design only: no product code changes here.
 
 The owner: 「现在这两个页面的逻辑都有点怪，一个是实例列表页，一个是切换实例页，感觉有点复杂，让用户不好理解。重新设计一下吧，然后交互也看一下。」
-From his report: order by recent use; Back returns to the current instance's Home; swipe back is missing; "can't reach avibe.bot" followed by Retry leaves navigation confused. Track A (Session `seskr2s3f78dm`) fixes those bugs inside today's structure; this document redesigns the structure.
+From his report: order by recent use; Back returns to the current instance's Home; swipe back is missing; "can't reach avibe.bot" followed by Retry leaves navigation confused. #3692 fixed those bugs inside today's structure (the account page keeps the runtime underneath during push work, instances are ordered by use on this device, and swipe back works); this document redesigns the structure.
 
 ## 1. Today's map
 
@@ -96,7 +96,7 @@ Four taps and four screens to look at the list and come back without switching. 
 | C14 | Recovery card | Title always 「暂时无法加载实例」 | Also shown for a failed sign-out. |
 | C15 | Gestures | No edge swipe anywhere in the bundled page | Every ← is a button only; the instance pages have swipe back (#3301). |
 
-## 3. Structure (proposed)
+## 3. Structure
 
 **One sentence:** tap the avatar and a sheet shows where you are, the other instances you can open, and your account; drag it down to return.
 
@@ -110,9 +110,9 @@ Four taps and four screens to look at the list and come back without switching. 
 Rules:
 
 1. **One list, one row.** The sheet and the first-run page use the same row (icon, name, one line: host / 「xx 共享 · host」 / 「离线 · host」, chevron). No badges; 「当前」 only on the current block. Long names and emails wrap, never truncate.
-2. **Order:** the current instance first (its own block), then the others by last opened on this device (Track A records it per account). First run has no history: online first, then by name.
+2. **Order:** the current instance first (its own block), then the others by last opened on this device (recorded per account on the device since #3692). First run has no history: online first, then by name.
 3. **Open from what is known.** The sheet draws at once from the native session snapshot; a background refresh updates it (「正在更新…」 by the section label). No skeleton and no first-run title on the way to Account (fixes C2).
-4. **Errors stay where they happen, and say what happened.** A failed refresh is a one-line banner above an intact, usable list. A failed switch is reported on that row while you stay where you were. Nothing replaces the page, and the current instance is always one tap away. Real errors are rare (Track A: C3 was the account coordinator being busy, reported as "can't reach avibe.bot"), so the copy states the fact without guessing a cause.
+4. **Errors stay where they happen, and say what happened.** A failed refresh is a one-line banner above an intact, usable list. A failed switch is reported on that row while you stay where you were. Nothing replaces the page, and the current instance is always one tap away. Real errors are rare (C3 was the account coordinator being busy during push work, reported as "can't reach avibe.bot"; #3692), so the copy states the fact without guessing a cause.
 5. **Switching:** tap a row → it shows 「正在打开…」, the others wait, ✕ still works. When the new instance starts loading, the sheet closes over it.
 6. **Gestures:** sheet drag-down = back (native). Account page: swipe from the left edge = back. **Pull to refresh only on the full first-run page**: in a sheet, pulling down at the top dismisses; the sheet refreshes when it opens instead.
 7. **First run** (nothing selected yet) is a full page, not a sheet: same rows, 「想从哪里开始？」 kept from the approved A flow, the avatar for Account, pull to refresh. Signed out and no-instances keep their approved pages.
@@ -128,9 +128,9 @@ Rules:
 | Answers "where am I" on Home | no (one tap away) | yes (C1) |
 | Ships with | the next TestFlight build only (bundled page + Swift) | TestFlight **and** a Runtime release: the instance's own header changes. Gated by a new capability (`instancePresentation: 1`, `app.showInstances`, the current instance's name in `app.info`). Older instances keep 「Avibe」 + avatar, and their avatar opens the A sheet, so both kinds work side by side. |
 
-Recommendation: **A now, B next.** A removes every confusion except C1 with no Runtime dependency; B is additive on top of A and can follow the next Runtime release.
+Decision (owner, 2026-11-14 13:23): **A now, B with 3.2.7.** A removes every confusion except C1 with no Runtime dependency; B is additive on top of A.
 
-### Frame inventory (`mobile-app/switcher/<state>-<zh|en>`, light and dark, status `proposed`)
+### Frame inventory (`mobile-app/switcher/<state>-<zh|en>`, light and dark, status `approved`)
 
 | States | Shows |
 | --- | --- |
@@ -159,7 +159,7 @@ Desktop (#3651/#3653/#3661, `docs/plans/2026-11-11-desktop-instance-switch.md`, 
 | Unreachable instance | Named recovery screen with a way out | Desktop: 「暂时连不上 Studio」 + Back to this Mac. iOS: 「暂时连不上 {name}」 + 重试 + 其他实例 (no local fallback). Same title wording proposed. |
 | Words | 切换实例 / 添加实例 / 退出账号 | iOS sheet title is 「实例」 because it also holds the account; its rows and actions use desktop's words. Native 「更换实例」/「账号」 are retired. |
 
-**Recency.** Track A records last opened per account **on the device**; desktop shows server order (pins, newest) and has no last-used field. Proposal: desktop follows the same **per-device** rule, stored with its profile (`connection.json` already holds the last selection), and no server field. "Recently used" means "on this device": a phone that reorders because the Mac switched would surprise, and a shared field would add a backend write on every switch for no visible gain. The server order stays the first-run order on both.
+**Recency.** Both apps order by last opened **on this device**: iOS since #3692 (per account), Desktop since #3701. No server field: a phone that reordered because the Mac switched would surprise, and a shared field would add a backend write on every switch for no visible gain. The server order stays the first-run order on both.
 
 ## 5. Building it: feasibility and the files it touches
 
@@ -173,7 +173,7 @@ Desktop (#3651/#3653/#3661, `docs/plans/2026-11-11-desktop-instance-switch.md`, 
 - **Dynamic Type:** the bundled page sets `-webkit-text-size-adjust: none` and does not follow Dynamic Type today; the native chrome adds no text. Rows have no fixed heights and wrap, so text scaling (if adopted later through `-apple-system-body`) needs no layout change. Verify at the largest accessibility size on device.
 - **Account inside the sheet:** an in-page push with `history.pushState`, and `allowsBackForwardNavigationGestures` on the bundled WebView so the left-edge swipe goes back; or a native navigation controller with two WebView pages. The first is smaller.
 
-**Files a build touches** (Max's area; Track A is changing some of them now, so the redesign builds on top of its merge):
+**Files a build touches** (the iOS shell and the bundled page; it builds on #3692):
 
 | File | Change |
 | --- | --- |
@@ -181,7 +181,7 @@ Desktop (#3651/#3653/#3661, `docs/plans/2026-11-11-desktop-instance-switch.md`, 
 | `ios/Avibe/AppModel.swift` | `accountOverBrowser` becomes an instances sheet over the runtime; `showAccount` opens it; `showInstancePicker` from the failure screen opens it **without** `stopRuntime`; a selection opens the new runtime, then dismisses |
 | `ios/Avibe/RootView.swift` | Failure screen copy and actions (重试 · 其他实例); drop the full-screen onboarding layer for the runtime case; legacy toolbar menu wording |
 | `ios/Avibe/MobileOnboardingBridge.swift` | New start screen (`sheet`), a close/dismiss call, document scrolling and back-forward gestures for the account push |
-| `ios/Avibe/MobileAccount.swift` | Serve the snapshot on open without network; recency (both from Track A) |
+| `ios/Avibe/MobileAccount.swift` | Serve the snapshot on open without network; recency (both since #3692) |
 | `ios/Avibe/Resources/Localizable.xcstrings` | `browser.*` copy in the shared vocabulary |
 | `ios/Avibe/NativeBridge.swift`, `WebViewController.swift` | Variant B only: `instancePresentation` capability, `app.showInstances`, the instance name in `app.info` |
 | `ui/src/mobile/MobileOnboarding.tsx`, `bridge.ts`, `ui/src/i18n` | Sheet screen, pushed Account, first-run rows, banners; locale copy |

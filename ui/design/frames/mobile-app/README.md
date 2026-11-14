@@ -359,11 +359,12 @@ copyright lines are two groups, both titled MIT, each keeping its components,
 versions and attribution), and reflowing never merges a heading underline
 (`----`, `====`) into the text or alters license terms or copyright lines.
 
-## Instance sheet — proposed
+## Instance sheet — approved
 
-Status: **proposed** (Track B, 2026-11-13); not approved. It replaces, once
-approved, the switching use of `instances/current` and the instance half of
-`account/*`. The avatar on an instance's header opens a native sheet over the
+Status: **approved** by the owner on 2026-11-14 at 13:23 Asia/Shanghai: variant
+A now, variant B with Runtime 3.2.7. It replaces the switching use of
+`instances/current` and the instance half of `account/*`; those frames are
+removed when the sheet ships. The avatar on an instance's header opens a native sheet over the
 live instance: where you are, the other instances by recent use, Add, and the
 account as its last row (a page pushed inside the sheet). Drag down, ✕ or the
 current instance return. First use keeps a full page with the same rows. Plan,

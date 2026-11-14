@@ -1,4 +1,4 @@
-// Proposal (Track B, 2026-11-13): the iOS App's account and instance pages as one sheet.
+// Approved 2026-11-14 (owner): the iOS App's account and instance pages as one sheet, drafted here until it ships.
 // The avatar on an instance's header opens a native sheet (UISheetPresentationController) that
 // holds the bundled page over the live instance: where you are, where else you can go, and a drag
 // down (or Close) back to where you were. The account is one row at its bottom, opening a page

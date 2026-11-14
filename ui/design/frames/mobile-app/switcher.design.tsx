@@ -1,4 +1,6 @@
-// Track B (2026-11-13), proposed: the iOS App's account and instance pages as one sheet.
+// Approved by the owner on 2026-11-14 13:23 (Asia/Shanghai): the iOS App's account and instance pages as one
+// sheet. Variant A (the avatar opens it) ships first; variant B (the instance name in Home's header opens it)
+// ships with Runtime 3.2.7.
 // Plan and decisions: docs/plans/2026-11-13-ios-instance-pages.md. Kit: kit/mobile-instance-sheet.tsx.
 // Every state in Chinese and English, light and dark, on the owner's iPhone 17 Pro (402×874, safe
 // area 62/34); the long-text states on a 375×667 phone.
@@ -48,7 +50,7 @@ function both(name: string, title: string, render: () => ReactNode, options: { s
     name: `${name}-${lang}`,
     title: `${title} · ${lang === 'zh' ? '中文' : 'English'}`,
     ...size,
-    status: 'proposed',
+    status: 'approved',
     themes: ['light', 'dark'],
     route: '/',
     fixtures: nativeFixtures(lang, options.email),
