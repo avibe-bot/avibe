@@ -166,7 +166,7 @@ export function InstanceListRow({
             variant="link"
             size="sm"
             disabled={disabled}
-            className="mt-1 h-auto px-0 text-xs text-foreground"
+            className="mt-1 h-auto gap-1 px-0 text-xs text-foreground"
             onClick={onRefresh}
           >
             <RotateCw className="size-3" />

@@ -2105,7 +2105,10 @@ describe('mobile instance sheet', () => {
     await screen.findByRole('heading', { name: 'mobileApp.account.title' });
     // The list already names the current instance; Account does not repeat it.
     expect(screen.queryByText('mobileApp.account.current')).toBeNull();
-    const back = screen.getByRole('button', { name: 'common.back' });
+    // Back names the list it returns to, not the App (ui/design: mobile-app/switcher/account).
+    expect(screen.queryByText('mobileApp.brand.name')).toBeNull();
+    expect(screen.queryByText('mobileApp.brand.agentOs')).toBeNull();
+    const back = screen.getByRole('button', { name: 'mobileApp.sheet.title' });
     expect(back.hasAttribute('data-mobile-back')).toBe(true);
     fireEvent.click(back);
     await screen.findByRole('heading', { name: 'mobileApp.sheet.title' });
