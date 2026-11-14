@@ -397,7 +397,7 @@
       "add": "添加实例",
       "addBody": "在电脑或服务器上安装 Avibe",
       "accountBody": "退出登录、开源许可",
-      "firstRunSubtitle": "选一个实例打开。以后点右上角的头像就能切换。",
+      "firstRunSubtitle": "选一个实例打开。以后在屏幕顶部就能切换。",
       "pullToRefresh": "下拉刷新",
       "releaseToRefresh": "松开即可刷新",
       "loadFailed": "没能载入实例列表",
