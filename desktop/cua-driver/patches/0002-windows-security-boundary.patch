@@ -44,10 +44,10 @@ index b2cc243..cd58788 100644
    portals, which prompt per-session at capture time and cannot be
    pre-granted by the host. X11 has no portal gate.
 diff --git a/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md b/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
-index 57133eb..ea32a65 100644
+index 57133eb..8057930 100644
 --- a/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
 +++ b/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
-@@ -120,10 +120,11 @@ same trick that powers `send_key_synthesized`). Returns
+@@ -120,14 +120,14 @@ same trick that powers `send_key_synthesized`). Returns
  reject the swap (and a subsequent `delivery_mode:"foreground"` call will
  bail with the "Foreground swap … was rejected by Windows" diagnostic
  rather than landing input on the wrong window). When that happens the
@@ -55,15 +55,178 @@ index 57133eb..ea32a65 100644
 -use an interactively launched High-IL daemon. The reserved `cua-driver-uia`
 -worker is a daemon-internal, default-off service boundary and public clients
 -must never connect to its pipe directly. Alternatively, for tasks
+-that produce a file — generate the document and `launch_app` it instead of
+-driving the GUI (e.g. building a spreadsheet and opening it in LibreOffice
+-Calc rather than typing into the grid, which is dropped on the VCL
+-background path).
 +target cannot currently be driven by SendInput/keystrokes in this session.
 +Computer Use does not run as administrator; start Avibe normally. Do not
 +switch to a High-IL daemon or a UIAccess worker to bypass this refusal.
 +The standalone `cua-driver-uia` helper is not part of the Avibe package.
-+For tasks
- that produce a file — generate the document and `launch_app` it instead of
- driving the GUI (e.g. building a spreadsheet and opening it in LibreOffice
- Calc rather than typing into the grid, which is dropped on the VCL
-@@ -467,11 +468,12 @@ your prior tool calls earned.
++For tasks that produce a file, generate the document rather than typing into
++the GUI. Open it with `launch_app({path: "<absolute app .exe>",
++additional_arguments: ["<file>"]})`, or ask the owner to open it. The Windows
++Preview does not launch a document through its file association.
+
+ Before running any shell command, ask: **"does this raise, activate,
+ foreground, or steal focus from any app?"** If yes, don't run it.
+@@ -142,11 +142,10 @@ frontmost state:
+   helps but does not block activation for apps that call
+   `SetForegroundWindow` themselves on startup (Edge, most browsers,
+   Office, most installers). **Never use `Start-Process` to launch a
+-  visible app.** Use `launch_app` — it goes through
+-  `SW_SHOWNOACTIVATE` and wraps an internal `VK_NONAME keybd_event`
+-  trick that the OS treats as "user activity from another window," so
+-  the target's own `SetForegroundWindow` call is denied per Windows
+-  focus-stealing prevention rules.
++  visible app.** Use `launch_app({path})` with the absolute local `.exe`
++  path. It requests `SW_SHOWNOACTIVATE`; applications may still choose their
++  own focus behavior. The minimized route additionally requires the driver
++  to acquire its foreground lock before creating the process.
+ - **`& "C:\path\to\app.exe"` from PowerShell** — same as
+   `Start-Process` on activation. PowerShell's `&` invocation operator
+   spawns the process with foreground intent.
+@@ -159,10 +158,9 @@ frontmost state:
+ - **`explorer.exe shell:AppsFolder\<AUMID>` / `explorer.exe ms-edge:
+ <url>`** — these are the Windows-shell equivalents of `open -a` /
+   `open <url>` on macOS. They go through `IApplicationActivationManager`
+-  with the wrong activation kind and foreground the target. Use
+-  `launch_app({aumid})` or `launch_app({urls})` instead — those route
+-  through `IApplicationActivationManager::ActivateApplication` with
+-  the correct flag combination that respects `SW_SHOWNOACTIVATE`.
++  with the wrong activation kind and foreground the target. The Windows
++  Preview also refuses AUMID and URL launch routes: ask the owner to open
++  the app or page, then attach to its window.
+ - **`SetForegroundWindow(hwnd)` / `BringWindowToTop(hwnd)` /
+   `SwitchToThisWindow(hwnd, fAltTab)` / `ShowWindow(hwnd, SW_SHOW)` /
+   `SetActiveWindow(hwnd)`** — all foreground the named window by
+@@ -190,11 +188,9 @@ frontmost state:
+   interprets "user wants to type here" as activation intent and
+   raises its window to be key. Even when delivered to a backgrounded
+   pid via `hotkey`, the downstream app pulls focus. **For omnibox
+-  navigation specifically**, the correct path is `launch_app({path:
+-"...msedge.exe", urls: ["https://…"]})` (or `{aumid:
+-"Microsoft.MicrosoftEdge.Stable_…!App", urls: [...]}`) — no
+-  omnibox dance, no `Ctrl+L`, no focus-steal. The browser opens the
+-  URL in a new window without activating it.
++  navigation specifically**, the Windows Preview has no URL launch route.
++  Ask the owner to open the page, then attach to that window. Use the narrow
++  carve-out below only when the user explicitly asks for foreground state.
+ - **Tab-switching shortcuts in browsers (`Ctrl+1..9`, `Ctrl+Tab`,
+   `Ctrl+Shift+Tab`, `Ctrl+PageUp/Down`)** are visibly disruptive
+   even when delivered to a backgrounded pid. The app's key handler
+@@ -205,13 +201,9 @@ frontmost state:
+   inspecting a background tab requires activating it, which is the
+   visible flip.
+
+-  **Prefer the windows-over-tabs pattern**: for each URL you need to
+-  drive backgrounded, use `launch_app({urls: [url]})` — Chromium-
+-  family browsers open each URL in a new **window**. Each window has
+-  its own `window_id`, its own UIA tree, and can be inspected /
+-  interacted with via `element_token` without activating or switching
+-  anything. Tabs are a UX grouping for humans; cua-driver-rs
+-  workflows should default to windows.
++  **Prefer separate windows over switching the user's tabs.** Ask the owner
++  to open the required pages in separate windows, then attach to each
++  `window_id`. URL launching is not supported by the Windows Preview.
+
+ - **Win+key shortcuts owned by the shell** — `Win+E` (Explorer),
+   `Win+R` (Run), `Win+S` / `Win+Q` (Search), `Win+number` (taskbar
+@@ -234,29 +226,39 @@ via `cua-driver get_window_state` — none of these change focus.
+ search, type query, press Enter" patterns to launch apps. They (a)
+ foreground the Search UI, (b) leave the Search UI populated with the
+ agent's typed text, (c) trigger the new app via the Start Menu's own
+-activation path which `SW_SHOWNORMAL`s it. Use `launch_app({name})` /
+-`{aumid}` / `{path}` instead.
+-
+-**"Open \<app\>" in user speech means launch, not activate.**
+-`cua-driver launch_app` is the one correct path for process startup —
+-it's idempotent (no-op on a running app), returns the pid, and
+-internally uses `SW_SHOWNOACTIVATE` plus the AppX-broker activation
+-flow for packaged apps so the target's window comes up without
+-becoming foreground. The macOS `FocusRestoreGuard` is replaced on
+-Windows by the activation-deny dance: the launcher pumps a
+-`VK_NONAME` keystroke before activating, which Windows interprets as
+-"another app just had user activity" and rejects the target's own
+-`SetForegroundWindow` call per [Windows focus-stealing prevention
+-rules](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow).
++activation path which `SW_SHOWNORMAL`s it. Use `launch_app({path})` with
++an absolute local `.exe` path, or ask the owner to open the app.
++
++**"Open \<app\>" means find its existing window or start its literal executable.**
++Use an observed process/window to work in an app already open. In the Windows
++Preview, `launch_app` accepts only `path` plus optional `additional_arguments`
++and `start_minimized`. Each successful launch creates a process: it is **not
++idempotent**. Do not retry an uncertain launch. Applications may themselves
++hand off to another process, but the driver never substitutes a same-name,
++existing-instance, descendant, or packaged-host PID for the created PID.
++An exited created process is reported with `running:false` and no windows.
++
++The path must be an absolute drive-letter path to an existing regular `.exe`
++on a local fixed drive. Windows opens the file and supplies its final path;
++that exact spelling is used for launch, without blind case folding. UNC/device
++paths, alternate data streams and NUL are refused. This canonicalization does
++not freeze the executable or its ancestors against changes by the same user.
++The app receives the OS-built
++standard-user environment for the driver's ordinary token, without inheriting
++the daemon environment, and its executable parent as cwd. No handles are
++inherited. User apps are outside the driver/helper cleanup Job.
++
++Names, AUMIDs, `bundle_id`, `launch_path`, `urls` (even empty), reuse flags,
++and caller environment/cwd overrides are refused before launch. Ask the owner
++to open unsupported apps, then attach. Never replace a refusal with
++`Start-Process`, `cmd /c start`, `explorer.exe`, or Start-menu typing.
+
+ **`launch_app` foreground-restore behaviour (Windows).** In addition to
+ `SW_SHOWNOACTIVATE`, `launch_app` captures `GetForegroundWindow()` before
+ the spawn and schedules a post-spawn polling restore (every 100 ms for up
+ to 3 s) that flips the foreground back to the prior window once the
+ spawned app has actually activated. This mirrors the macOS
+-`FocusRestoreGuard`. For `urls`-only invocations (open these links in the
+-default browser, no app-identifying field) the restore is **skipped**,
+-because the user explicitly asked for the page to come up. The restore is
++`FocusRestoreGuard`. The restore is
+ best-effort: `SetForegroundWindow` from non-UIAccess processes is subject
+ to Windows' foreground-lock and may silently no-op — failures are logged
+ at `tracing::trace!` and not surfaced as errors.
+@@ -301,10 +303,10 @@ Windows-relevant notes:
+   rect / z-order diagnostics for triaging the click chain). It is
+   deliberately not part of the cross-platform surface — there is no macOS
+   or Linux counterpart.
+-- **`launch_app` identifiers are platform-specific.** Windows takes
+-  `aumid` / `launch_path` / `path` / `start_minimized` (plus `bundle_id`
+-  overloaded for AUMIDs); macOS takes `bundle_id` / `urls`. `name` is the
+-  portable fallback. See the AUMID section below.
++- **`launch_app` identifiers are platform-specific.** The Windows Preview
++  accepts only a literal `path`, optional `additional_arguments`, and
++  `start_minimized`. macOS bundle/name/URL behavior is unchanged; those
++  identifiers are not portable Windows launch inputs.
+
+ **Chromium pixel-click foreground polling restore.** `click({pid, x, y})`
+ on a Chromium target falls through to `send_click_synthesized`
+@@ -339,9 +341,9 @@ gone wrong — re-read "The no-foreground contract" above.
+
+ | Intent                             | Use                                                                                             | Don't use                                                                            |
+ | ---------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+-| Open / launch a Win32 app          | `launch_app({path: "C:\\Program Files\\…\\foo.exe"})` or `{name: "foo"}`                        | `Start-Process`, `cmd /c start`, `& "C:\\path\\foo.exe"`                             |
+-| Open / launch a UWP / packaged app | `launch_app({aumid: "Microsoft.Foo_8wekyb3d8bbwe!App"})`                                        | `explorer.exe shell:AppsFolder\\<AUMID>`, Start Menu typing                          |
+-| Open a URL in the default browser  | `launch_app({urls: ["https://example.com"]})`                                                   | `Start-Process "https://…"`, `explorer.exe ms-edge:…`, `cmd /c start "" "https://…"` |
++| Open / launch a Win32 app          | `launch_app({path: "C:\\Program Files\\…\\foo.exe"})`                        | `Start-Process`, `cmd /c start`, `& "C:\\path\\foo.exe"`                             |
++| Open / launch a UWP / packaged app | Ask the owner to open it, then attach to its observed window                                        | `explorer.exe shell:AppsFolder\\<AUMID>`, Start Menu typing                          |
++| Open a URL in the default browser  | Ask the owner to open the page, then attach to its window                                                   | `Start-Process "https://…"`, `explorer.exe ms-edge:…`, `cmd /c start "" "https://…"` |
+ | Find a pid                         | `list_apps` or `launch_app`'s return                                                            | `Get-Process`, `tasklist`, Win+S typing                                              |
+ | Enumerate an app's windows         | `list_windows({pid})` — or read the `windows` array `launch_app` already returns                | `Get-Process \| Where-Object { $_.MainWindowHandle }`                                |
+ | Move or resize one exact window    | `set_window_frame({pid, window_id, x, y, width, height})`                                       | PowerShell Add-Type wrappers, Win+Arrow, or title-bar dragging                       |
+@@ -349,7 +351,7 @@ gone wrong — re-read "The no-foreground contract" above.
+ | Drag / drag-and-drop               | `drag({pid, from_x, from_y, to_x, to_y})`                                                       | `SendInput` with `MOUSEEVENTF_MOVE`, mouse_event                                     |
+ | Screenshot                         | `get_window_state` (window) or authorized `get_desktop_state` (desktop)                         | `[System.Windows.Forms.Screen]::CopyFromScreen`, `nircmd savescreenshot`             |
+ | Quit an app                        | ask the user first, then `hotkey({pid, keys:["alt","f4"]})`                                     | `taskkill /F`, `Stop-Process -Force`, `Get-Process \| Stop-Process`                  |
+-| Hand a file/URL to an app          | `launch_app({urls:[<path>]})` (default app) or `{path: "...exe", args:[<file>]}` (specific app) | `& "app.exe" "file"`, `Invoke-Item`, shell associations                              |
++| Hand a file/URL to an app          | `launch_app({path: "...exe", additional_arguments:[<file>]})`, or ask the owner | `& "app.exe" "file"`, `Invoke-Item`, shell associations                              |
+
+ ### The narrow carve-out
+
+@@ -467,11 +469,12 @@ your prior tool calls earned.
     tool-calling.
  4. **Permissions** — Windows has no TCC equivalent. cua-driver-rs
     needs:
@@ -81,6 +244,493 @@ index 57133eb..ea32a65 100644
     - SmartScreen: on a fresh install, Windows Defender SmartScreen
       may flag the unsigned binary on first run. Click "More info →
       Run anyway" once.
+@@ -641,6 +644,10 @@ UWP element.
+
+ ## UWP / packaged apps — the AUMID layer
+
++The Windows Preview refuses packaged-app launch routes. Ask the owner to
++open the app, then attach. The following notes describe discovery, not a
++fallback for `launch_app`.
++
+ Modern Win11 apps (Calculator, Notepad, Settings, Photos, Edge UI
+ chrome, Microsoft Store) are **packaged apps** with an `App User
+ Model ID` (AUMID) rather than a plain `.exe` path. The AUMID looks
+@@ -655,10 +662,10 @@ Windows architectural quirks that matter:
+    `Microsoft.WindowsNotepad` AppX package. `Start-Process notepad`
+    spawns the stub, which exits, which redirects through the AppX
+    broker, which spawns the real process with a different pid. You
+-   end up holding a pid that's already gone. `launch_app` handles
+-   this transparently — it detects AUMID-looking strings and routes
+-   through `IApplicationActivationManager::ActivateApplication`,
+-   which returns the **real** packaged-process pid.
++   end up holding a pid that's already gone. A literal launch reports only
++   that created process; it does not follow the broker or adopt another PID.
++   Ask the owner to open the packaged app instead. Launch-survival acceptance
++   must use a real Win32 executable, not a redirecting stub.
+ 2. **UWP windows are hosted by `ApplicationFrameHost.exe`.** The
+    outer top-level HWND (the one with the title bar, the one
+    `EnumWindows` enumerates) is owned by `ApplicationFrameHost.exe`,
+@@ -668,14 +675,10 @@ Windows architectural quirks that matter:
+    `GetWindowRect`, `PostMessage`, `BitBlt` all target. UIA
+    transparently crosses the boundary into the inner process when
+    you walk the tree.
+-3. **AUMID resolution by name** — `launch_app({name: "calc"})` will
+-   first try a `shell:AppsFolder` lookup, matching against
+-   installed-package display names. On a hit it goes through the
+-   packaged-app path (real pid). Otherwise it falls back to
+-   `ShellExecuteEx`'s PATH search (which hits the stub `.exe`).
+-   **Prefer explicit `aumid` when you know it.**
++3. **Name/AUMID launch is refused.** `list_apps.launch_path` is registration
++   metadata, not proof of a running process's executable image.
+
+-### Known AUMIDs for common Win11 apps
++### AUMID identification examples (not launch inputs)
+
+ ```
+ Microsoft.WindowsCalculator_8wekyb3d8bbwe!App
+@@ -769,20 +772,19 @@ typed browser tools yet.
+     accelerator). **But** foreground needs the swap to actually land — if the
+     daemon lacks UIAccess and `bring_to_front` returns `landed_on_target:false`
+     (or it reverts before the next call), you can't drive it by input at all:
+-    produce the artifact and `launch_app` it (build the `.xlsx` / `.docx` and
+-    open it) rather than typing into the GUI.
++    produce the artifact and open it with the app's literal `.exe` path and
++    `additional_arguments:[file]`, or ask the owner to open it.
+ - **Edge / Chrome shows tab switching even though I used pid-scoped
+   hotkey** — `Ctrl+Tab` / `Ctrl+1..9` aren't pid-scopable; the
+   receiver activates. Use the windows-per-URL pattern.
+ - **`Get-StartApps` returns no AUMID for an app I see in Start
+   Menu** — the app might be a Win32 desktop app, not a packaged
+-  app. Use `{path: "..."}` instead of `{aumid}`. (Win11 Calculator
+-  IS packaged; Win10 classic Notepad was not.)
+-- **`launch_app` returns pid N but `list_windows({pid: N})` returns
+-  empty** — UWP cold-launch race: the AppFrame HWND hasn't
+-  materialized yet. Re-call `list_windows({pid: N})` after 500ms;
+-  for chronic cases, key off the app name in `list_windows({})`
+-  output.
++  app. Use its absolute local `.exe` path. Packaged apps must be opened
++  by the owner.
++- **`launch_app` returns pid N but no windows** — the created process may
++  still be starting; re-observe that PID. If `running:false`, it exited or
++  handed off. No other PID was adopted; do not retry the launch or infer
++  ownership from a matching name.
+ - **Need a screenshot file** — use `get_window_state` with
+   `screenshot_out_file`; the result is PNG. The removed standalone screenshot
+   compatibility inputs (`format` and `quality`) are rejected by the live tool
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
+index d7e7da8..de6cc03 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
+@@ -306,6 +306,42 @@ pub struct ToolResult {
+     /// the MCP result envelope or its legacy structured payload.
+     #[serde(skip)]
+     pub action_record: Option<crate::action_record::ActionExecutionRecord>,
++    /// Windows-only in-process proof from the original CreateProcessW result.
++    /// Never serialized, accepted from JSON, or replaced by a PID/name hint.
++    /// Registry ownership registration retains it through OS attestation and
++    /// ledger insertion so the process ID cannot name a recycled process.
++    #[cfg(target_os = "windows")]
++    #[serde(skip)]
++    pub windows_created_process: Option<std::sync::Arc<std::os::windows::io::OwnedHandle>>,
++}
++
++/// Read the PID and native FILETIME creation ticks from one retained Windows
++/// process object. Used at launch registration and again on the termination
++/// handle; never infer creation identity from a PID or executable name alone.
++#[cfg(target_os = "windows")]
++pub fn windows_process_identity_from_handle(
++    process: &std::os::windows::io::OwnedHandle,
++) -> Result<(u32, u64), String> {
++    use std::os::windows::io::AsRawHandle;
++    use windows::Win32::Foundation::{FILETIME, HANDLE};
++    use windows::Win32::System::Threading::{GetProcessId, GetProcessTimes};
++    let handle = HANDLE(process.as_raw_handle());
++    let pid = unsafe { GetProcessId(handle) };
++    if pid == 0 {
++        return Err("Cannot verify the original Windows process identity.".into());
++    }
++    let (mut created, mut exited, mut kernel, mut user) = (
++        FILETIME::default(),
++        FILETIME::default(),
++        FILETIME::default(),
++        FILETIME::default(),
++    );
++    unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }
++        .map_err(|_| "Cannot verify the Windows process creation time.".to_owned())?;
++    Ok((
++        pid,
++        (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
++    ))
+ }
+
+ impl ToolResult {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+index 5a6207c..8fee662 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+@@ -665,6 +665,75 @@ pub struct ToolRegistry {
+     protected_resource_ownership: Arc<crate::consent::ProtectedResourceOwnershipStore>,
+ }
+
++#[cfg(all(test, target_os = "windows"))]
++#[path = "windows_launch_ownership_tests.rs"]
++mod windows_launch_ownership_tests;
++
++#[cfg(target_os = "windows")]
++async fn record_windows_launch_ownership<F, Fut>(
++    result: &mut ToolResult,
++    before: Option<&std::collections::BTreeSet<i64>>,
++    ownership: &crate::consent::ProtectedResourceOwnershipStore,
++    owner: &str,
++    attest: F,
++) where
++    F: FnOnce(i64) -> Fut,
++    Fut: std::future::Future<Output = Option<crate::browser::ProcessFingerprint>>,
++{
++    use std::os::windows::io::AsRawHandle;
++    use windows::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
++    use windows::Win32::System::Threading::WaitForSingleObject;
++
++    // Consume only trusted in-process evidence, never structured JSON fields.
++    // This owned Arc stays live across the await and through ledger insertion.
++    let Some(process) = result.windows_created_process.take() else {
++        return;
++    };
++    let Some(structured) = result.structured_content.as_ref() else {
++        return;
++    };
++    let Some(pid) = structured.get("pid").and_then(Value::as_i64) else {
++        return;
++    };
++    let Some(before) = before else {
++        return;
++    };
++    if result.is_error == Some(true)
++        || structured.get("running").and_then(Value::as_bool) != Some(true)
++        || pid <= 0
++        || before.contains(&pid)
++    {
++        return;
++    }
++    let Ok((actual_pid, original_start_time)) =
++        crate::protocol::windows_process_identity_from_handle(&process)
++    else {
++        return;
++    };
++    if i64::from(actual_pid) != pid
++        || unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle()), 0) } != WAIT_TIMEOUT
++    {
++        return;
++    }
++    let Some(fingerprint) = attest(pid).await else {
++        return;
++    };
++    if fingerprint.pid != pid
++        || fingerprint.start_time != Some(original_start_time)
++        || fingerprint
++            .executable
++            .as_ref()
++            .is_none_or(|path| path.is_empty())
++        || unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle()), 0) } != WAIT_TIMEOUT
++    {
++        return;
++    }
++    ownership.mark_driver_owned_process(owner, fingerprint);
++    // Explicitly after mark: source shutdown/exit cannot recycle this PID
++    // anywhere in the attestation-to-registration interval.
++    drop(process);
++}
++
+ impl ToolRegistry {
+     pub fn new() -> Self {
+         Self::new_with_protected_consent_provider(None)
+@@ -1722,6 +1791,19 @@ impl ToolRegistry {
+                 );
+             }
+         }
++        #[cfg(target_os = "windows")]
++        if resolved_name == "launch_app" {
++            record_windows_launch_ownership(
++                &mut result,
++                launch_snapshot.as_ref(),
++                &self.protected_resource_ownership,
++                &process_ownership_key,
++                |pid| self.attest_process_fingerprint(pid),
++            )
++            .await;
++        }
++        // Preserve the existing non-Windows ownership contract unchanged.
++        #[cfg(not(target_os = "windows"))]
+         if resolved_name == "launch_app" && result.is_error != Some(true) {
+             if let (Some(before), Some(pid)) = (
+                 launch_snapshot.as_ref(),
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs
+new file mode 100644
+index 0000000..ed27245
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/windows_launch_ownership_tests.rs
+@@ -0,0 +1,261 @@
++//! Windows-native ownership tests. These exercise the actual registration
++//! helper with controlled attestation results, not process-ID recycling load.
++use super::*;
++use std::collections::BTreeSet;
++use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::Arc;
++use windows::core::PCWSTR;
++use windows::Win32::Foundation::{FILETIME, HANDLE};
++use windows::Win32::System::Threading::{
++    CreateEventW, GetCurrentProcess, GetProcessId, GetProcessTimes, OpenProcess,
++    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
++};
++
++fn process_handle(pid: u32) -> Arc<OwnedHandle> {
++    let handle = unsafe {
++        OpenProcess(
++            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
++            false,
++            pid,
++        )
++    }
++    .unwrap();
++    Arc::new(unsafe { OwnedHandle::from_raw_handle(handle.0) })
++}
++fn result() -> ToolResult {
++    let mut result = ToolResult::text("created").with_structured(serde_json::json!({
++        "pid": std::process::id(), "running": true,
++    }));
++    result.windows_created_process = Some(process_handle(std::process::id()));
++    result
++}
++fn fingerprint(pid: i64) -> crate::browser::ProcessFingerprint {
++    // OS creation time in the existing Windows fingerprint's FILETIME units.
++    let (mut created, mut exited, mut kernel, mut user) = (
++        FILETIME::default(),
++        FILETIME::default(),
++        FILETIME::default(),
++        FILETIME::default(),
++    );
++    unsafe {
++        GetProcessTimes(
++            GetCurrentProcess(),
++            &mut created,
++            &mut exited,
++            &mut kernel,
++            &mut user,
++        )
++    }
++    .unwrap();
++    crate::browser::ProcessFingerprint {
++        pid,
++        start_time: Some(
++            (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime),
++        ),
++        executable: Some("test-owned-process.exe".into()),
++    }
++}
++
++#[tokio::test]
++async fn missing_wrong_nonprocess_or_exited_evidence_never_registers() {
++    for case in [
++        "missing",
++        "wrong-pid",
++        "event-handle",
++        "running-false",
++        "running-unknown",
++        "error",
++        "preexisting",
++    ] {
++        let mut result = result();
++        let mut before = BTreeSet::new();
++        match case {
++            "missing" => {
++                result.windows_created_process = None;
++                // A JSON hint cannot substitute for internal HANDLE evidence.
++                result.structured_content.as_mut().unwrap()["windows_created_process"] =
++                    serde_json::json!(std::process::id());
++            }
++            "wrong-pid" => {
++                result.structured_content.as_mut().unwrap()["pid"] =
++                    serde_json::json!(u64::from(std::process::id()) + 1)
++            }
++            "event-handle" => {
++                let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.unwrap();
++                result.windows_created_process =
++                    Some(Arc::new(unsafe { OwnedHandle::from_raw_handle(event.0) }));
++            }
++            "running-false" => {
++                result.structured_content.as_mut().unwrap()["running"] = serde_json::json!(false)
++            }
++            "running-unknown" => {
++                result
++                    .structured_content
++                    .as_mut()
++                    .unwrap()
++                    .as_object_mut()
++                    .unwrap()
++                    .remove("running");
++            }
++            "error" => result.is_error = Some(true),
++            "preexisting" => {
++                before.insert(i64::from(std::process::id()));
++            }
++            _ => unreachable!(),
++        }
++        let called = AtomicBool::new(false);
++        let store = crate::consent::ProtectedResourceOwnershipStore::default();
++        let called_ref = &called;
++        record_windows_launch_ownership(
++            &mut result,
++            Some(&before),
++            &store,
++            "test",
++            |pid| async move {
++                called_ref.store(true, Ordering::SeqCst);
++                Some(fingerprint(pid))
++            },
++        )
++        .await;
++        assert!(!called.load(Ordering::SeqCst), "{case}");
++        assert!(
++            !store.is_driver_owned_pid("test", i64::from(std::process::id())),
++            "{case}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn failed_or_incomplete_attestation_never_registers() {
++    for case in [
++        "failure",
++        "wrong-pid",
++        "wrong-start-time",
++        "no-start-time",
++        "no-image",
++    ] {
++        let mut result = result();
++        let store = crate::consent::ProtectedResourceOwnershipStore::default();
++        record_windows_launch_ownership(
++            &mut result,
++            Some(&BTreeSet::new()),
++            &store,
++            "test",
++            |pid| async move {
++                let mut evidence = fingerprint(pid);
++                match case {
++                    "failure" => return None,
++                    "wrong-pid" => evidence.pid += 1,
++                    "wrong-start-time" => {
++                        evidence.start_time = evidence.start_time.map(|time| time + 1)
++                    }
++                    "no-start-time" => evidence.start_time = None,
++                    "no-image" => evidence.executable = None,
++                    _ => unreachable!(),
++                }
++                Some(evidence)
++            },
++        )
++        .await;
++        assert!(
++            !store.is_driver_owned_pid("test", i64::from(std::process::id())),
++            "{case}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn original_handle_lives_across_attestation_and_later_reuse_is_refused() {
++    let mut result = result();
++    let weak = Arc::downgrade(result.windows_created_process.as_ref().unwrap());
++    let store = crate::consent::ProtectedResourceOwnershipStore::default();
++    let weak_ref = &weak;
++    record_windows_launch_ownership(
++        &mut result,
++        Some(&BTreeSet::new()),
++        &store,
++        "test",
++        |pid| async move {
++            tokio::task::yield_now().await;
++            let original = weak_ref
++                .upgrade()
++                .expect("registration must retain original handle across await");
++            assert_eq!(
++                unsafe { GetProcessId(HANDLE(original.as_raw_handle())) } as i64,
++                pid
++            );
++            Some(fingerprint(pid))
++        },
++    )
++    .await;
++    assert!(
++        weak.upgrade().is_none(),
++        "guard released only after registration completes"
++    );
++    let pid = i64::from(std::process::id());
++    assert!(store.reprove_driver_owned_process("test", &fingerprint(pid)));
++    let mut reused = fingerprint(pid);
++    reused.start_time = reused.start_time.map(|time| time + 1);
++    assert!(!store.reprove_driver_owned_process("test", &reused));
++    assert!(!store.is_driver_owned_pid("test", pid));
++}
++
++#[tokio::test]
++async fn retained_exited_process_is_not_registered_as_running() {
++    let mut child = std::process::Command::new("cmd.exe")
++        .args(["/d", "/c", "exit", "0"])
++        .spawn()
++        .unwrap();
++    let pid = child.id();
++    let original = process_handle(pid);
++    child.wait().unwrap();
++    drop(child);
++    assert_eq!(
++        unsafe { GetProcessId(HANDLE(original.as_raw_handle())) },
++        pid
++    );
++    let mut result =
++        ToolResult::text("exited").with_structured(serde_json::json!({"pid":pid,"running":true}));
++    result.windows_created_process = Some(original);
++    let store = crate::consent::ProtectedResourceOwnershipStore::default();
++    record_windows_launch_ownership(
++        &mut result,
++        Some(&BTreeSet::new()),
++        &store,
++        "test",
++        |_| async {
++            panic!(
++                "stale running=true cannot override the original process handle's signaled state"
++            );
++        },
++    )
++    .await;
++    assert!(!store.is_driver_owned_pid("test", i64::from(pid)));
++}
++
++#[test]
++fn original_handle_evidence_never_serializes() {
++    let result = result();
++    let wire = serde_json::to_value(&result).unwrap();
++    assert!(wire.get("windows_created_process").is_none());
++    assert_eq!(
++        wire["structuredContent"],
++        serde_json::json!({"pid":std::process::id(),"running":true})
++    );
++}
++
++#[test]
++fn registration_future_is_send() {
++    fn assert_send<T: Send>(_: T) {}
++    let mut result = result();
++    let before = BTreeSet::new();
++    let store = crate::consent::ProtectedResourceOwnershipStore::default();
++    assert_send(record_windows_launch_ownership(
++        &mut result,
++        Some(&before),
++        &store,
++        "test",
++        |pid| async move { Some(fingerprint(pid)) },
++    ));
++}
 diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
 index 440edd9..42c0a51 100644
 --- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
@@ -716,6 +1366,19 @@ index 0000000..738f5cd
 +        );
 +    }
 +}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/Cargo.toml b/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
+index 1d2a2ae..6cdc1a8 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
++++ b/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
+@@ -33,6 +33,8 @@ windows = { version = "0.58", features = [
+     "Win32_UI_Accessibility",
+     "Win32_UI_WindowsAndMessaging",
+     "Win32_System_Threading",
++    "Win32_System_Environment",
++    "Win32_System_JobObjects",
+     # CreatePipe: the result pipe of the standard-user shell launch helper.
+     "Win32_System_Pipes",
+     "Win32_System_SystemInformation",
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs b/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs
 index 6de2266..0d3741c 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs
@@ -1012,19 +1675,833 @@ index 42d7c5b..4683463 100644
      target: u64,
      sx: i32,
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/lib.rs b/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
-index 4e56ef6..2055476 100644
+index 4e56ef6..b9a107f 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
-@@ -49,6 +49,9 @@ pub mod win32;
+@@ -49,6 +49,12 @@ pub mod win32;
  #[cfg(target_os = "windows")]
  pub mod history;
 
 +#[cfg(any(target_os = "windows", test))]
 +pub mod security;
 +
++#[cfg(any(target_os = "windows", test))]
++mod literal_launch;
++
  #[cfg(target_os = "windows")]
  pub mod browser_platform;
 
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/literal_launch.rs b/libs/cua-driver/rust/crates/platform-windows/src/literal_launch.rs
+new file mode 100644
+index 0000000..1448cf1
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/literal_launch.rs
+@@ -0,0 +1,342 @@
++//! Restricted Windows user-app launch. Apps are not driver helpers: observing
++//! their process never gives this module kill-on-close ownership.
++
++use serde_json::Value;
++
++pub(crate) const PREVIEW_REFUSAL: &str = "Avibe cannot launch this app in the Windows Preview. Ask the owner to open it, then attach to its window.";
++
++/// Public launch options plus the registry's existing session envelope only.
++/// No names, associations, URLs, reuse flags or caller environment/cwd.
++pub(crate) fn request_path(args: &Value) -> Result<&str, &'static str> {
++    let object = args.as_object().ok_or(PREVIEW_REFUSAL)?;
++    if object.keys().any(|key| {
++        !matches!(
++            key.as_str(),
++            "path"
++                | "additional_arguments"
++                | "start_minimized"
++                | "session"
++                | "_session_id"
++                | "_transport_session_id"
++                | "_public_session_label"
++                | "_session_idle_ttl_ms"
++        )
++    }) {
++        return Err(PREVIEW_REFUSAL);
++    }
++    if object.get("additional_arguments").is_some_and(|value| {
++        !value.as_array().is_some_and(|args| {
++            args.iter()
++                .all(|arg| arg.as_str().is_some_and(|arg| !arg.contains('\0')))
++        })
++    }) || object
++        .get("start_minimized")
++        .is_some_and(|value| !value.is_boolean())
++    {
++        return Err(PREVIEW_REFUSAL);
++    }
++    let path = object
++        .get("path")
++        .and_then(Value::as_str)
++        .ok_or(PREVIEW_REFUSAL)?;
++    conventional_path(path).map_err(|_| PREVIEW_REFUSAL)?;
++    Ok(path)
++}
++
++/// Accept a conventional absolute drive-letter executable spelling. Windows
++/// resolves dot components, short names and reparses when opening the file;
++/// only its final spelling is used for creation, without blind case folding.
++fn conventional_path(path: &str) -> Result<String, String> {
++    let path = path.replace('/', "\\");
++    let bytes = path.as_bytes();
++    if bytes.len() < 4
++        || !bytes[0].is_ascii_alphabetic()
++        || bytes[1] != b':'
++        || bytes[2] != b'\\'
++        || path.contains('\0')
++        || path[3..].contains(':')
++        || !path.to_ascii_lowercase().ends_with(".exe")
++    {
++        return Err(PREVIEW_REFUSAL.into());
++    }
++    Ok(path)
++}
++
++#[cfg(target_os = "windows")]
++mod native {
++    use super::*;
++    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++    use windows::core::{PCWSTR, PWSTR};
++    use windows::Win32::Foundation::HANDLE;
++    use windows::Win32::Security::{TOKEN_DUPLICATE, TOKEN_QUERY};
++    use windows::Win32::Storage::FileSystem::{
++        CreateFileW, GetDriveTypeW, GetFileInformationByHandle, GetFileType,
++        GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
++        FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
++        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, OPEN_EXISTING,
++    };
++    use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
++    use windows::Win32::System::Threading::{
++        CreateProcessW, GetCurrentProcess, OpenProcessToken, WaitForSingleObject,
++        CREATE_BREAKAWAY_FROM_JOB, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
++        STARTF_USESHOWWINDOW, STARTUPINFOW,
++    };
++
++    pub(crate) struct LiteralLaunch {
++        executable: String,
++        directory: String,
++    }
++
++    /// Drop closes observation only. Keeping the handle also prevents PID reuse
++    /// while launch_app resolves/minimizes windows of this exact created process.
++    pub(crate) struct CreatedApp {
++        pub(crate) pid: u32,
++        process: std::sync::Arc<OwnedHandle>,
++    }
++
++    impl CreatedApp {
++        pub(crate) fn ownership_handle(&self) -> std::sync::Arc<OwnedHandle> {
++            std::sync::Arc::clone(&self.process)
++        }
++
++        pub(crate) fn running(&self) -> bool {
++            (unsafe { WaitForSingleObject(HANDLE(self.process.as_raw_handle()), 0) })
++                == windows::Win32::Foundation::WAIT_TIMEOUT
++        }
++    }
++
++    fn wide(value: &str) -> Vec<u16> {
++        value.encode_utf16().chain(Some(0)).collect()
++    }
++
++    fn info(handle: &OwnedHandle) -> Result<BY_HANDLE_FILE_INFORMATION, String> {
++        let mut info = BY_HANDLE_FILE_INFORMATION::default();
++        unsafe { GetFileInformationByHandle(HANDLE(handle.as_raw_handle()), &mut info) }
++            .map_err(|_| PREVIEW_REFUSAL.to_owned())?;
++        Ok(info)
++    }
++
++    fn final_path(handle: &OwnedHandle) -> Result<String, String> {
++        let mut buffer = vec![0; 32768];
++        let length = unsafe {
++            GetFinalPathNameByHandleW(
++                HANDLE(handle.as_raw_handle()),
++                &mut buffer,
++                FILE_NAME_NORMALIZED,
++            )
++        } as usize;
++        if length == 0 || length >= buffer.len() {
++            return Err(PREVIEW_REFUSAL.into());
++        }
++        let path = String::from_utf16(&buffer[..length]).map_err(|_| PREVIEW_REFUSAL.to_owned())?;
++        // This is an OS-produced namespace, not acceptance of caller device paths.
++        let path = path
++            .strip_prefix("\\\\?\\")
++            .ok_or_else(|| PREVIEW_REFUSAL.to_owned())?;
++        conventional_path(path)
++    }
++
++    pub(crate) fn prepare(path: &str) -> Result<LiteralLaunch, String> {
++        let path = conventional_path(path)?;
++        let name = wide(&path);
++        // One ordinary open, following OS path resolution. This is not a
++        // same-user file-freeze boundary; do not retain file/ancestor handles.
++        let raw = unsafe {
++            CreateFileW(
++                PCWSTR(name.as_ptr()),
++                FILE_READ_ATTRIBUTES.0,
++                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                None,
++                OPEN_EXISTING,
++                FILE_FLAG_BACKUP_SEMANTICS,
++                None,
++            )
++        }
++        .map_err(|_| PREVIEW_REFUSAL.to_owned())?;
++        let handle = unsafe { OwnedHandle::from_raw_handle(raw.0) };
++        if unsafe { GetFileType(HANDLE(handle.as_raw_handle())) } != FILE_TYPE_DISK
++            || info(&handle)?.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0
++        {
++            return Err(PREVIEW_REFUSAL.into());
++        }
++        let executable = final_path(&handle)?;
++        let root = wide(&executable[..3]);
++        // DRIVE_FIXED only: refuse removable, remote, unknown and other drives.
++        if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != 3 {
++            return Err(PREVIEW_REFUSAL.into());
++        }
++        drop(handle);
++        let separator = executable
++            .rfind('\\')
++            .ok_or_else(|| PREVIEW_REFUSAL.to_owned())?;
++        let directory = executable[..if separator == 2 { 3 } else { separator }].to_owned();
++        Ok(LiteralLaunch {
++            executable,
++            directory,
++        })
++    }
++
++    /// This allocation stays inside synchronous spawn and is freed on every
++    /// success/error path. The OS copies it before CreateProcessW returns.
++    struct UserEnvironment(*mut std::ffi::c_void);
++
++    impl Drop for UserEnvironment {
++        fn drop(&mut self) {
++            let _ = unsafe { DestroyEnvironmentBlock(self.0) };
++        }
++    }
++
++    fn user_environment() -> Result<UserEnvironment, String> {
++        let refusal = || {
++            "Windows could not create the standard-user environment; no app was started.".to_owned()
++        };
++        let mut token = HANDLE::default();
++        unsafe {
++            OpenProcessToken(
++                GetCurrentProcess(),
++                TOKEN_QUERY | TOKEN_DUPLICATE,
++                &mut token,
++            )
++        }
++        .map_err(|_| refusal())?;
++        let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
++        let mut block = std::ptr::null_mut();
++        unsafe { CreateEnvironmentBlock(&mut block, HANDLE(token.as_raw_handle()), false) }
++            .map_err(|_| refusal())?;
++        if block.is_null() {
++            return Err(refusal());
++        }
++        Ok(UserEnvironment(block))
++    }
++
++    impl LiteralLaunch {
++        /// No shell/association/derived-token fallback. The current ordinary
++        /// primary token is both the environment subject and CreateProcess user.
++        pub(crate) fn spawn(
++            &self,
++            arguments: &[String],
++            n_show: i32,
++        ) -> Result<CreatedApp, String> {
++            crate::security::ensure_driver_token_allowed()?;
++            if arguments.iter().any(|argument| argument.contains('\0')) {
++                return Err(PREVIEW_REFUSAL.into());
++            }
++            let environment = user_environment()?;
++            let executable: Vec<u16> = self.executable.encode_utf16().collect();
++            let arguments: Vec<Vec<u16>> = arguments
++                .iter()
++                .map(|arg| arg.encode_utf16().collect())
++                .collect();
++            let mut command_line =
++                crate::browser_launch_token::windows_command_line(&executable, &arguments)?;
++            command_line.push(0);
++            let application = wide(&self.executable);
++            let directory = wide(&self.directory);
++            let startup = STARTUPINFOW {
++                cb: std::mem::size_of::<STARTUPINFOW>() as u32,
++                dwFlags: STARTF_USESHOWWINDOW,
++                wShowWindow: n_show as u16,
++                ..Default::default()
++            };
++            let mut process = PROCESS_INFORMATION::default();
++            unsafe {
++                CreateProcessW(
++                    PCWSTR(application.as_ptr()),
++                    PWSTR(command_line.as_mut_ptr()),
++                    None,
++                    None,
++                    false,
++                    CREATE_BREAKAWAY_FROM_JOB | CREATE_UNICODE_ENVIRONMENT,
++                    Some(environment.0.cast_const()),
++                    PCWSTR(directory.as_ptr()),
++                    &startup,
++                    &mut process,
++                )
++            }
++            .map_err(|_| PREVIEW_REFUSAL.to_owned())?;
++            drop(unsafe { OwnedHandle::from_raw_handle(process.hThread.0) });
++            Ok(CreatedApp {
++                pid: process.dwProcessId,
++                process: std::sync::Arc::new(unsafe {
++                    OwnedHandle::from_raw_handle(process.hProcess.0)
++                }),
++            })
++        }
++    }
++
++    #[cfg(test)]
++    mod tests {
++        include!("literal_launch_native_tests.rs");
++    }
++}
++
++#[cfg(target_os = "windows")]
++pub(crate) use native::prepare;
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn only_literal_argv_and_minimized_are_launch_options() {
++        let path = "C:\\Apps\\example.exe";
++        for key in [
++            "name",
++            "bundle_id",
++            "aumid",
++            "launch_path",
++            "urls",
++            "creates_new_application_instance",
++            "env",
++            "cwd",
++            "command",
++            "_unknown",
++        ] {
++            let mut request = json!({"path":path});
++            request[key] = Value::Null;
++            assert_eq!(request_path(&request), Err(PREVIEW_REFUSAL), "{key}");
++        }
++        for request in [
++            json!({}),
++            json!(null),
++            json!({"path":path,"urls":[]}),
++            json!({"path":path,"creates_new_application_instance":true}),
++            json!({"path":path,"additional_arguments":"--flag"}),
++            json!({"path":path,"additional_arguments":[1]}),
++            json!({"path":path,"additional_arguments":["bad\u{0000}"]}),
++            json!({"path":path,"start_minimized":"true"}),
++        ] {
++            assert_eq!(request_path(&request), Err(PREVIEW_REFUSAL), "{request}");
++        }
++        let request = json!({"path":path,"additional_arguments":["a b", "", "&not-a-shell"],
++            "start_minimized":true,"session":"s","_session_id":"s",
++            "_transport_session_id":"t","_public_session_label":"p","_session_idle_ttl_ms":10});
++        assert_eq!(request_path(&request), Ok(path));
++    }
++
++    #[test]
++    fn only_drive_absolute_executable_namespace_is_admitted() {
++        for path in [
++            "app.exe",
++            "C:app.exe",
++            "\\app.exe",
++            "\\\\server\\share\\app.exe",
++            "\\\\?\\C:\\app.exe",
++            "\\\\.\\C:\\app.exe",
++            "C:\\app.exe:stream",
++            "C:\\a\0.exe",
++            "C:\\app.txt",
++        ] {
++            assert!(conventional_path(path).is_err(), "{path:?}");
++        }
++        assert_eq!(
++            conventional_path("c:/Program Files/App.EXE").unwrap(),
++            "c:\\Program Files\\App.EXE"
++        );
++        assert!(conventional_path("C:\\app.exe").is_ok());
++        // Let the OS resolve existing-file spellings; no bespoke ancestor policy.
++        assert!(conventional_path("C:\\apps\\..\\App.EXE").is_ok());
++        assert!(conventional_path("C:\\PROGRA~1\\App.EXE").is_ok());
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/literal_launch_native_tests.rs b/libs/cua-driver/rust/crates/platform-windows/src/literal_launch_native_tests.rs
+new file mode 100644
+index 0000000..c356518
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/literal_launch_native_tests.rs
+@@ -0,0 +1,457 @@
++// Native acceptance: run these tests as a disposable ordinary Windows user
++// with its profile loaded. No early-return/skip on missing APIs or profile.
++use super::*;
++use std::path::{Path, PathBuf};
++use std::time::{Duration, Instant};
++use windows::Win32::Foundation::{BOOL, WAIT_OBJECT_0};
++use windows::Win32::Security::{
++    EqualSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenElevation,
++    TokenIntegrityLevel, TokenUIAccess, TokenUser, TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL,
++    TOKEN_USER,
++};
++use windows::Win32::System::JobObjects::{
++    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectExtendedLimitInformation,
++    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
++    JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
++};
++use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
++use windows::Win32::System::Threading::{
++    OpenProcess, ResumeThread, TerminateProcess, CREATE_SUSPENDED,
++    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
++};
++
++const FIXTURE_TEST: &str = "literal_launch::native::tests::literal_driver_fixture";
++const SENTINELS: [&str; 4] = [
++    "AVIBE_LITERAL_SENTINEL",
++    "CUA_LITERAL_SENTINEL",
++    "AVAULT_LITERAL_SENTINEL",
++    "CI_LITERAL_SENTINEL",
++];
++
++fn powershell() -> String {
++    let mut buffer = vec![0u16; 32768];
++    let count = unsafe {
++        windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW(Some(&mut buffer))
++    } as usize;
++    assert!(count > 0 && count < buffer.len());
++    format!(
++        "{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
++        String::from_utf16(&buffer[..count]).unwrap()
++    )
++}
++
++fn wait_file(path: &Path) -> String {
++    let deadline = Instant::now() + Duration::from_secs(30);
++    loop {
++        if let Ok(text) = std::fs::read_to_string(path) {
++            if !text.is_empty() {
++                return text;
++            }
++        }
++        assert!(
++            Instant::now() < deadline,
++            "timed out waiting for {}",
++            path.display()
++        );
++        std::thread::sleep(Duration::from_millis(50));
++    }
++}
++
++struct TestProcess(OwnedHandle);
++impl Drop for TestProcess {
++    fn drop(&mut self) {
++        // Test-owned PID captured from creation, never a name/process sweep.
++        unsafe {
++            let _ = TerminateProcess(HANDLE(self.0.as_raw_handle()), 99);
++            let _ = WaitForSingleObject(HANDLE(self.0.as_raw_handle()), 5000);
++        }
++    }
++}
++fn test_process(pid: u32) -> TestProcess {
++    let handle = unsafe {
++        OpenProcess(
++            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
++            false,
++            pid,
++        )
++    }
++    .unwrap();
++    TestProcess(unsafe { OwnedHandle::from_raw_handle(handle.0) })
++}
++fn in_job(process: HANDLE, job: HANDLE) -> bool {
++    let mut result = BOOL::default();
++    unsafe { IsProcessInJob(process, job, &mut result) }.unwrap();
++    result.as_bool()
++}
++fn token(process: HANDLE) -> OwnedHandle {
++    let mut token = HANDLE::default();
++    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.unwrap();
++    unsafe { OwnedHandle::from_raw_handle(token.0) }
++}
++fn token_data(
++    token: &OwnedHandle,
++    class: windows::Win32::Security::TOKEN_INFORMATION_CLASS,
++) -> Vec<usize> {
++    let mut required = 0;
++    let _ = unsafe {
++        GetTokenInformation(HANDLE(token.as_raw_handle()), class, None, 0, &mut required)
++    };
++    assert!(required > 0);
++    let mut data = vec![0usize; (required as usize).div_ceil(std::mem::size_of::<usize>())];
++    unsafe {
++        GetTokenInformation(
++            HANDLE(token.as_raw_handle()),
++            class,
++            Some(data.as_mut_ptr().cast()),
++            required,
++            &mut required,
++        )
++    }
++    .unwrap();
++    data
++}
++fn assert_ordinary_same_user_session(target: &TestProcess, pid: u32) {
++    let own = token(unsafe { GetCurrentProcess() });
++    let target_token = token(HANDLE(target.0.as_raw_handle()));
++    let own_user = token_data(&own, TokenUser);
++    let target_user = token_data(&target_token, TokenUser);
++    unsafe {
++        EqualSid(
++            (*(own_user.as_ptr().cast::<TOKEN_USER>())).User.Sid,
++            (*(target_user.as_ptr().cast::<TOKEN_USER>())).User.Sid,
++        )
++        .unwrap();
++    }
++    let elevation = token_data(&target_token, TokenElevation);
++    assert_eq!(
++        unsafe { (*(elevation.as_ptr().cast::<TOKEN_ELEVATION>())).TokenIsElevated },
++        0
++    );
++    let uiaccess = token_data(&target_token, TokenUIAccess);
++    assert_eq!(unsafe { *uiaccess.as_ptr().cast::<u32>() }, 0);
++    let integrity = token_data(&target_token, TokenIntegrityLevel);
++    let sid = unsafe {
++        (*(integrity.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()))
++            .Label
++            .Sid
++    };
++    let rid = unsafe { *GetSidSubAuthority(sid, (*GetSidSubAuthorityCount(sid) - 1) as u32) };
++    assert!(rid <= 0x2000);
++    let (mut own_session, mut target_session) = (0, 0);
++    unsafe {
++        ProcessIdToSessionId(std::process::id(), &mut own_session).unwrap();
++        ProcessIdToSessionId(pid, &mut target_session).unwrap();
++    }
++    assert_eq!(own_session, target_session);
++}
++
++#[test]
++fn literal_native_canonicalizes_existing_regular_executable() {
++    let directory = tempfile::tempdir().unwrap();
++    let real = directory.path().join("real");
++    std::fs::create_dir(&real).unwrap();
++    let executable = real.join("probe.exe");
++    std::fs::write(&executable, b"test-owned file, not executed").unwrap();
++    let prepared = prepare(executable.to_str().unwrap()).unwrap();
++    assert_eq!(
++        prepare(real.join("..\\real\\probe.exe").to_str().unwrap())
++            .unwrap()
++            .executable,
++        prepared.executable
++    );
++    // Canonicalization closes its file handle; same-user mutation is not frozen.
++    assert!(std::fs::OpenOptions::new()
++        .write(true)
++        .open(&executable)
++        .is_ok());
++    let junction = directory.path().join("junction");
++    let output = std::process::Command::new("cmd.exe")
++        .args(["/d", "/c", "mklink", "/J"])
++        .arg(&junction)
++        .arg(&real)
++        .output()
++        .unwrap();
++    assert!(
++        output.status.success(),
++        "test-owned junction creation failed"
++    );
++    assert_eq!(
++        prepare(junction.join("probe.exe").to_str().unwrap())
++            .unwrap()
++            .executable,
++        prepared.executable
++    );
++    std::fs::remove_dir(&junction).unwrap();
++    assert!(prepare(real.join("missing.exe").to_str().unwrap()).is_err());
++    let not_file = real.join("directory.exe");
++    std::fs::create_dir(&not_file).unwrap();
++    assert!(prepare(not_file.to_str().unwrap()).is_err());
++}
++
++#[test]
++fn literal_native_profile_environment_and_job_survival() {
++    crate::security::ensure_driver_token_allowed()
++        .expect("run as ordinary profile-loaded test user");
++    let directory = tempfile::tempdir().unwrap();
++    // This ordinary Windows PowerShell application depends on the token user's
++    // real profile directories and TEMP. It creates/reads/removes only unique
++    // test-owned files, not the user's existing profile content.
++    let script = r#"
++param([string]$Report, [long]$ForbiddenHandle, [string]$ForbiddenPath)
++$ErrorActionPreference = 'Stop'
++Add-Type -TypeDefinition @'
++using System;
++using System.Text;
++using System.Runtime.InteropServices;
++public static class LiteralHandleProbe {
++    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
++    public static extern uint GetFinalPathNameByHandle(IntPtr handle, StringBuilder path, uint length, uint flags);
++}
++'@
++$handlePath = New-Object Text.StringBuilder 32768
++$handleLength = [LiteralHandleProbe]::GetFinalPathNameByHandle([IntPtr]$ForbiddenHandle, $handlePath, 32768, 0)
++if ($handleLength -gt 0 -and $handlePath.ToString() -ieq $ForbiddenPath) { throw 'caller file handle inherited' }
++foreach ($name in @('AVIBE_LITERAL_SENTINEL','CUA_LITERAL_SENTINEL','AVAULT_LITERAL_SENTINEL','CI_LITERAL_SENTINEL')) {
++    if ([Environment]::GetEnvironmentVariable($name, 'Process')) { throw 'caller sentinel inherited' }
++}
++foreach ($name in @('USERPROFILE','APPDATA','LOCALAPPDATA','SystemRoot','TEMP','TMP','PATH')) {
++    if (-not [Environment]::GetEnvironmentVariable($name, 'Process')) { throw "missing profile variable: $name" }
++}
++if ($env:USERPROFILE -ine [Environment]::GetFolderPath('UserProfile')) { throw 'wrong user profile' }
++if ($env:APPDATA -ine [Environment]::GetFolderPath('ApplicationData')) { throw 'wrong AppData' }
++if ($env:LOCALAPPDATA -ine [Environment]::GetFolderPath('LocalApplicationData')) { throw 'wrong LocalAppData' }
++$leaf = 'avibe-literal-test-' + [guid]::NewGuid().ToString('N')
++$profileFile = Join-Path $env:LOCALAPPDATA $leaf
++$tempFile = Join-Path $env:TEMP $leaf
++try {
++    [IO.File]::WriteAllText($profileFile, 'profile-dependent-app')
++    [IO.File]::WriteAllText($tempFile, [IO.File]::ReadAllText($profileFile))
++    if ([IO.File]::ReadAllText($tempFile) -ne 'profile-dependent-app') { throw 'profile roundtrip failed' }
++} finally {
++    Remove-Item -LiteralPath $profileFile,$tempFile -Force -ErrorAction SilentlyContinue
++}
++@{pid=$PID; cwd=[Environment]::CurrentDirectory; profile=$env:USERPROFILE; profileRoundtrip=$true} |
++    ConvertTo-Json -Compress | Set-Content -LiteralPath $Report -Encoding UTF8
++Start-Sleep -Seconds 60
++"#;
++    std::fs::write(directory.path().join("profile.ps1"), script).unwrap();
++    let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.unwrap();
++    let job = unsafe { OwnedHandle::from_raw_handle(job.0) };
++    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
++    limits.BasicLimitInformation.LimitFlags =
++        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
++    unsafe {
++        SetInformationJobObject(
++            HANDLE(job.as_raw_handle()),
++            JobObjectExtendedLimitInformation,
++            &limits as *const _ as *const _,
++            std::mem::size_of_val(&limits) as u32,
++        )
++    }
++    .unwrap();
++
++    // Only test fixture startup builds this synthetic driver environment. The
++    // target still goes through the production user_environment()/spawn().
++    let baseline = user_environment().unwrap();
++    let mut entries = Vec::new();
++    let mut offset = 0usize;
++    loop {
++        let start = offset;
++        while unsafe { *baseline.0.cast::<u16>().add(offset) } != 0 {
++            offset += 1;
++            assert!(offset < 1_048_576);
++        }
++        if offset == start {
++            break;
++        }
++        entries.push(
++            String::from_utf16(unsafe {
++                std::slice::from_raw_parts(baseline.0.cast::<u16>().add(start), offset - start)
++            })
++            .unwrap(),
++        );
++        offset += 1;
++    }
++    for (key, value) in
++        std::iter::once(("AVIBE_LITERAL_TEST_DIR", directory.path().to_str().unwrap())).chain(
++            SENTINELS
++                .iter()
++                .map(|key| (*key, "synthetic-not-a-credential")),
++        )
++    {
++        entries.push(format!("{key}={value}"));
++    }
++    entries.sort_by_key(|entry| entry.to_uppercase());
++    let mut environment: Vec<u16> = entries
++        .iter()
++        .flat_map(|entry| entry.encode_utf16().chain(Some(0)))
++        .collect();
++    environment.push(0);
++    let executable = std::env::current_exe().unwrap();
++    let application = wide(executable.to_str().unwrap());
++    let argv = ["--exact", FIXTURE_TEST, "--ignored", "--nocapture"]
++        .iter()
++        .map(|arg| arg.encode_utf16().collect())
++        .collect::<Vec<Vec<u16>>>();
++    let mut command = crate::browser_launch_token::windows_command_line(
++        &application[..application.len() - 1],
++        &argv,
++    )
++    .unwrap();
++    command.push(0);
++    let startup = STARTUPINFOW {
++        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
++        ..Default::default()
++    };
++    let mut child = PROCESS_INFORMATION::default();
++    unsafe {
++        CreateProcessW(
++            PCWSTR(application.as_ptr()),
++            PWSTR(command.as_mut_ptr()),
++            None,
++            None,
++            false,
++            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
++            Some(environment.as_ptr().cast()),
++            PCWSTR::null(),
++            &startup,
++            &mut child,
++        )
++    }
++    .unwrap();
++    let driver = TestProcess(unsafe { OwnedHandle::from_raw_handle(child.hProcess.0) });
++    let thread = unsafe { OwnedHandle::from_raw_handle(child.hThread.0) };
++    unsafe {
++        AssignProcessToJobObject(
++            HANDLE(job.as_raw_handle()),
++            HANDLE(driver.0.as_raw_handle()),
++        )
++        .unwrap();
++        assert_ne!(ResumeThread(HANDLE(thread.as_raw_handle())), u32::MAX);
++    }
++    let target_pid: u32 = wait_file(&directory.path().join("target-pid"))
++        .trim()
++        .parse()
++        .unwrap();
++    let target = test_process(target_pid);
++    let helper_pid: u32 = wait_file(&directory.path().join("helper-pid"))
++        .trim()
++        .parse()
++        .unwrap();
++    let helper = test_process(helper_pid);
++    let report = wait_file(&directory.path().join("report.json"));
++    let report: Value = serde_json::from_str(report.trim_start_matches('\u{feff}')).unwrap();
++    assert_eq!(report["pid"], target_pid);
++    assert_eq!(report["profileRoundtrip"], true);
++    let prepared = prepare(&powershell()).unwrap();
++    assert!(report["cwd"]
++        .as_str()
++        .unwrap()
++        .eq_ignore_ascii_case(&prepared.directory));
++    assert_ordinary_same_user_session(&target, target_pid);
++    assert!(in_job(
++        HANDLE(driver.0.as_raw_handle()),
++        HANDLE(job.as_raw_handle())
++    ));
++    assert!(in_job(
++        HANDLE(helper.0.as_raw_handle()),
++        HANDLE(job.as_raw_handle())
++    ));
++    assert!(!in_job(
++        HANDLE(target.0.as_raw_handle()),
++        HANDLE(job.as_raw_handle())
++    ));
++    unsafe {
++        TerminateJobObject(HANDLE(job.as_raw_handle()), 77).unwrap();
++        assert_eq!(
++            WaitForSingleObject(HANDLE(driver.0.as_raw_handle()), 5000),
++            WAIT_OBJECT_0
++        );
++        assert_eq!(
++            WaitForSingleObject(HANDLE(helper.0.as_raw_handle()), 5000),
++            WAIT_OBJECT_0
++        );
++        assert_eq!(
++            WaitForSingleObject(HANDLE(target.0.as_raw_handle()), 300),
++            windows::Win32::Foundation::WAIT_TIMEOUT
++        );
++    }
++}
++
++#[test]
++#[ignore = "child fixture; explicitly executed by literal_native_profile_environment_and_job_survival"]
++fn literal_driver_fixture() {
++    crate::security::ensure_driver_token_allowed().unwrap();
++    for sentinel in SENTINELS {
++        assert_eq!(
++            std::env::var(sentinel).unwrap(),
++            "synthetic-not-a-credential"
++        );
++    }
++    let directory = PathBuf::from(std::env::var_os("AVIBE_LITERAL_TEST_DIR").unwrap());
++    let executable = powershell();
++    let handle_file = directory.join("inheritable-handle-probe");
++    std::fs::write(&handle_file, "test-owned handle marker").unwrap();
++    let handle_name = wide(handle_file.to_str().unwrap());
++    let attributes = windows::Win32::Security::SECURITY_ATTRIBUTES {
++        nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
++        bInheritHandle: BOOL(1),
++        ..Default::default()
++    };
++    let inherited_probe = unsafe {
++        CreateFileW(
++            PCWSTR(handle_name.as_ptr()),
++            FILE_READ_ATTRIBUTES.0,
++            FILE_SHARE_READ,
++            Some(&attributes),
++            OPEN_EXISTING,
++            FILE_FLAG_BACKUP_SEMANTICS,
++            None,
++        )
++    }
++    .unwrap();
++    let inherited_probe = unsafe { OwnedHandle::from_raw_handle(inherited_probe.0) };
++    let mut final_name = vec![0; 32768];
++    let length = unsafe {
++        GetFinalPathNameByHandleW(
++            HANDLE(inherited_probe.as_raw_handle()),
++            &mut final_name,
++            FILE_NAME_NORMALIZED,
++        )
++    } as usize;
++    assert!(length > 0 && length < final_name.len());
++    let final_name = String::from_utf16(&final_name[..length]).unwrap();
++    // Normal helper inherits driver Job, unlike the one production app target.
++    let helper = std::process::Command::new(&executable)
++        .args([
++            "-NoLogo",
++            "-NoProfile",
++            "-NonInteractive",
++            "-Command",
++            "Start-Sleep -Seconds 60",
++        ])
++        .spawn()
++        .unwrap();
++    std::fs::write(directory.join("helper-pid"), helper.id().to_string()).unwrap();
++    let target = prepare(&executable)
++        .unwrap()
++        .spawn(
++            &[
++                "-NoLogo".into(),
++                "-NoProfile".into(),
++                "-NonInteractive".into(),
++                "-ExecutionPolicy".into(),
++                "Bypass".into(),
++                "-File".into(),
++                directory.join("profile.ps1").to_str().unwrap().into(),
++                directory.join("report.json").to_str().unwrap().into(),
++                (inherited_probe.as_raw_handle() as usize).to_string(),
++                final_name,
++            ],
++            0,
++        )
++        .unwrap();
++    std::fs::write(directory.join("target-pid"), target.pid.to_string()).unwrap();
++    assert!(target.running());
++    std::thread::sleep(Duration::from_secs(60));
++}
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/security.rs b/libs/cua-driver/rust/crates/platform-windows/src/security.rs
 new file mode 100644
 index 0000000..b8102bd
@@ -1348,10 +2825,1094 @@ index e4989de..b37b52b 100644
  //! tools could not close or automate the app, and it would behave differently
  //! from the same app started from Explorer. An elevated Driver instead
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
-index c3101d1..f27073f 100644
+index c3101d1..8c32cb0 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
-@@ -5514,9 +5514,10 @@ impl Tool for HotkeyTool {
+@@ -673,7 +673,7 @@ impl Tool for ListAppsTool {
+                 - active: is it the system-frontmost app? (implies running)\n\
+                 - kind: `\"desktop\"` for `.exe`-backed apps (resolved from Start-Menu \
+                 shortcuts) or `\"uwp\"` for packaged store apps.\n\
+-                - launch_path: what `launch_app` would consume.\n\
++                - launch_path: registration metadata, not an executable identity; the Windows Preview refuses this launch input.\n\
+                     * desktop: full `.exe` commandline (path + any arguments preserved from \
+                       the source `.lnk`; the exe is quoted when it contains whitespace).\n\
+                     * uwp: `shell:appsFolder\\{PackageFamilyName}!{AppId}` where `{AppId}` \
+@@ -689,8 +689,9 @@ impl Tool for ListAppsTool {
+                 single entry with `running: true`.\n\n\
+                 Use this for \"is X installed?\" as well as \"is X running?\". For per-window \
+                 state — on-screen, minimized, window titles — call list_windows instead. \
+-                For just opening an app — running or not — call launch_app({path: ...}) \
+-                directly; list_apps is not a prerequisite."
++                To start a desktop process, call launch_app with its absolute local .exe path. \
++                For a running app, attach to its verified process/window instead. Packaged \
++                apps must be opened by the owner; registration metadata is not process-image evidence."
+                     .into(),
+             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+             read_only: true,
+@@ -1728,6 +1729,7 @@ impl Tool for GetWindowStateTool {
+                     is_error: None,
+                     structured_content: Some(structured),
+                     action_record: None,
++                    windows_created_process: None,
+                 }
+             }
+             Err(e) => ToolResult::error(format!("Error: {e}")),
+@@ -2095,147 +2097,66 @@ impl Tool for LaunchAppTool {
+     fn def(&self) -> &ToolDef {
+         LAUNCH_DEF.get_or_init(|| ToolDef {
+             name: "launch_app".into(),
+-            // Description ported from Swift `LaunchAppTool.swift` with
+-            // Windows-specific notes. `bundle_id` is accepted as an alias
+-            // for `name` on Windows, with one extra behavior: if the
+-            // string looks like an AUMID (App User Model ID — contains
+-            // `!`, e.g. `Microsoft.WindowsNotepad_8wekyb3d8bbwe!App`) we
+-            // route through `IApplicationActivationManager` so packaged
+-            // (Microsoft Store / UWP / MSIX) apps return the real
+-            // process pid instead of a stub-redirect pid.
+-            description: "Launch a Windows app hidden — the driver never brings the target to \
+-                the foreground, the target's window is launched with SW_SHOWNOACTIVATE so it \
+-                does not steal focus from whatever is currently frontmost.\n\n\
+-                Provide either `bundle_id` / `name` / `aumid` (resolved as below) or `path` \
+-                (full path to an executable). If both `name` and `path` are given, `path` wins. \
+-                `urls` opens each URL in the default browser without activating it.\n\n\
+-                Routing order: explicit `aumid` (or a `bundle_id` containing `!`) activates the \
+-                packaged app via `IApplicationActivationManager::ActivateApplication`, returning \
+-                the real packaged-process pid — required on Win11 for built-in apps like \
+-                Notepad, Calculator, and Paint, which now ship as Microsoft Store packages \
+-                where the legacy .exe in System32 is a ~7 KB stub that exits immediately. A \
+-                plain `name` first attempts a `shell:AppsFolder` lookup; packaged matches use \
+-                the activation manager while desktop registrations are launched through their \
+-                shell parsing path. A miss falls back to ShellExecuteEx's PATH search.\n\n\
+-                Returns the launched app's pid, name, active flag, AND a `windows` array — \
+-                same per-window shape `list_windows` returns. When the launch settles but no \
+-                window has materialized yet (transient; rare), `windows` comes back empty — \
+-                call `list_windows(pid)` explicitly a moment later. `bundle_id` in the \
+-                response is set to the AUMID actually used for packaged-app launches and \
+-                `null` for ShellExecuteEx launches.\n\n\
+-                Windows-only field: `path` (Swift uses `bundle_id` since macOS apps resolve via \
+-                LaunchServices; Windows has no LaunchServices, so `path` is the canonical form). \
+-                The macOS-specific `webkit_inspector_port`, \
+-                `creates_new_application_instance`, and `additional_arguments` fields are \
+-                accepted; `additional_arguments` is honored (forwarded as ShellExecuteEx \
+-                parameters or as the AUMID activation arguments string). \
+-                The remaining macOS-only fields currently no-op on Windows.".into(),
++            description: "Start a Windows desktop process from `path`: an absolute existing \
++                regular .exe on a local drive. The Windows Preview accepts only this literal \
++                route, optional `additional_arguments` (literal argv), and `start_minimized`. \
++                It requests background startup; applications can still choose their own focus behavior.\n\n\
++                Names, bundle_id, AUMID, launch_path, URLs, reuse flags, shell commands, caller \
++                environment/cwd, network/device paths, and alternate data streams \
++                are refused before launch. Ask the owner to open unsupported apps, then attach \
++                to their windows. There is no shell or privileged fallback.\n\n\
++                Returns only the created process PID and its windows, never a same-name or \
++                existing-instance replacement. The executable may itself hand off and exit; \
++                in that case running is false and no other process is adopted. An empty \
++                windows array can also mean the created process has not opened a window yet. \
++                Each successful call creates a process, so do not retry an uncertain launch. \
++                User apps are not driver helpers and are not killed by driver cleanup.".into(),
+             input_schema: json!({"type":"object","properties":{
+-                "bundle_id":{"type":"string","description":"App User Model ID (AUMID) for a packaged app — pattern `{PackageFamilyName}!{ApplicationId}`, e.g. `Microsoft.WindowsNotepad_8wekyb3d8bbwe!App`. Falls back to a `name` alias if no `!` is present. Either bundle_id, name, aumid, path, or launch_path must be provided."},
+-                "aumid":{"type":"string","description":"Explicit AUMID for a packaged app. Cleaner alternative to overloading `bundle_id`. Takes precedence over `bundle_id` / `name` when present."},
+-                "name":{"type":"string","description":"App display name. Tried against the `shell:AppsFolder` index first for packaged-app lookup; on a miss, passed to ShellExecuteEx's PATH search."},
+-                "path":{"type":"string","description":"Full path to executable. Windows-only; takes precedence over name/bundle_id/aumid (but not over `launch_path`)."},
+-                "launch_path":{"type":"string","description":"Round-trip the `launch_path` returned by `list_apps`. Highest precedence — when set, this exact string is handed to ShellExecuteEx unchanged. For Windows desktop apps it's the full `.exe` commandline (path + arguments preserved from the source shortcut); for UWP apps it's `shell:appsFolder\\{PackageFamilyName}!{AppId}`. For precise UWP pid capture, prefer `aumid` over `launch_path`."},
+-                "urls":{"type":"array","items":{"type":"string"},"description":"URLs to open in the default browser via ShellExecuteEx (no activation)."},
+-                "additional_arguments":{"type":"array","items":{"type":"string"},"description":"Extra command-line arguments passed to the launched process (or activation arguments for packaged apps)."},
+-                "webkit_inspector_port":{"type":"integer","description":"Accepted for cross-platform parity; no-op on Windows."},
+-                "creates_new_application_instance":{"type":"boolean","description":"Accepted for parity; no-op on Windows (ShellExecuteEx always creates a new process)."},
+-                "start_minimized":{"type":"boolean","description":"When true, launch the app's window minimized to the taskbar instead of restored-but-not-activated. Use this when the agent wants to drive the app entirely in the background — the user's previously-frontmost window (e.g. terminal) stays visually on top. Desktop launches hold the foreground lock through startup and use SW_SHOWMINNOACTIVE; packaged-app activation remains broker-controlled and receives a best-effort SW_SHOWMINNOACTIVE post-pass. UIA / background dispatch still work on a minimized window; only `screenshot` and `delivery_mode:\"foreground\"` need it restored."}
++                "bundle_id":{"type":"string","description":"Not supported in the Windows Preview; refused before launch."},
++                "aumid":{"type":"string","description":"Not supported in the Windows Preview; refused before launch."},
++                "name":{"type":"string","description":"Not supported in the Windows Preview; refused before launch."},
++                "path":{"type":"string","description":"Absolute drive-letter path to an existing regular .exe on a local fixed drive. Windows resolves the file and supplies its final path; that exact spelling is used without case folding. UNC/device paths, alternate data streams and NUL are refused."},
++                "launch_path":{"type":"string","description":"Informational list_apps registration, not a literal executable identity; refused before launch."},
++                "urls":{"type":"array","items":{"type":"string"},"description":"Not supported in the Windows Preview; refused even when empty."},
++                "additional_arguments":{"type":"array","items":{"type":"string"},"description":"Literal argv strings for the executable; no shell parsing or expansion. NUL is refused."},
++                "webkit_inspector_port":{"type":"integer","description":"Not supported in the Windows Preview; refused before launch."},
++                "creates_new_application_instance":{"type":"boolean","description":"Not supported in the Windows Preview; refused for either value. Each successful literal launch creates a process, but the application may itself hand off."},
++                "start_minimized":{"type":"boolean","description":"Request minimized background startup with SW_SHOWMINNOACTIVE; refuse before creation if the foreground lock cannot be acquired. Only the created process windows are minimized; no descendant/name-based fallback."}
+             },"additionalProperties":false}),
+-            read_only: false, destructive: false, idempotent: true, open_world: true,
++            read_only: false, destructive: false, idempotent: false, open_world: true,
+         })
+     }
+
+     async fn invoke(&self, args: Value) -> ToolResult {
+-        let launch_path_opt = args
+-            .get("launch_path")
+-            .and_then(|v| v.as_str())
+-            .map(str::to_owned);
+-        let path_opt = args.get("path").and_then(|v| v.as_str()).map(str::to_owned);
+-        let name_opt = args.get("name").and_then(|v| v.as_str()).map(str::to_owned);
+-        let bundle_id_opt = args
+-            .get("bundle_id")
+-            .and_then(|v| v.as_str())
+-            .map(str::to_owned);
+-        let aumid_opt = args
+-            .get("aumid")
+-            .and_then(|v| v.as_str())
+-            .map(str::to_owned);
+-        let urls: Vec<String> = args
+-            .get("urls")
+-            .and_then(|v| v.as_array())
+-            .map(|a| {
+-                a.iter()
+-                    .filter_map(|v| v.as_str().map(str::to_owned))
+-                    .collect()
+-            })
+-            .unwrap_or_default();
++        // Admission is before AppsFolder lookup, foreground locks, or launch.
++        // The Preview has no name/association/URL/packaged-app fallback.
++        let literal_path = match crate::literal_launch::request_path(&args) {
++            Ok(path) => path,
++            Err(message) => return ToolResult::error(message),
++        };
++        let prepared_launch = match crate::literal_launch::prepare(literal_path) {
++            Ok(prepared) => prepared,
++            Err(message) => return ToolResult::error(message),
++        };
++        if let Err(message) = crate::security::ensure_driver_token_allowed() {
++            return ToolResult::error(message);
++        }
+         let start_minimized = args
+             .get("start_minimized")
+             .and_then(|v| v.as_bool())
+             .unwrap_or(false);
+-        // `nShow` for the ShellExecuteEx-based launches. SW_SHOWNOACTIVATE
+-        // keeps the new window from grabbing focus but still renders it on
+-        // top of the previous frontmost window. SW_SHOWMINNOACTIVE both
+-        // skips activation AND drops the window to the taskbar, which is
+-        // what an agent doing background work wants — the user's terminal
+-        // stays visually on top. UIA / PostMessage / set_value all keep
+-        // working against a minimized window; only screenshot and
+-        // delivery_mode:"foreground" pay a cost.
++        // CreateProcess startup hint; existing minimized foreground discipline
++        // remains below, scoped strictly to the created PID.
+         let n_show: i32 = if start_minimized {
+             windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE.0
+         } else {
+             windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE.0
+         };
+-        // Snapshot the set of currently-running pids BEFORE we launch. The
+-        // detached start_minimized polling task uses this to detect "any
+-        // process that came into existence as a result of our launch", so
+-        // it can minimize their windows too — covers the launcher-stub
+-        // case (LibreOffice swriter.exe → soffice.bin, GIMP gimp-3.exe →
+-        // gimp-3.2.exe, etc.) where the launched pid exits and a child
+-        // process with a different name owns the actual window. Captured
+-        // here (before the launch) so the new soffice.bin pid won't be
+-        // in the snapshot.
+-        let pre_launch_pids: std::sync::Arc<std::collections::HashSet<u32>> = if start_minimized {
+-            let pids: std::collections::HashSet<u32> = crate::win32::list_processes()
+-                .into_iter()
+-                .map(|p| p.pid)
+-                .collect();
+-            std::sync::Arc::new(pids)
+-        } else {
+-            std::sync::Arc::new(std::collections::HashSet::new())
+-        };
+-
+-        // Capture the foreground window BEFORE any launch path runs so the
+-        // post-spawn polling restore (below) has a target HWND to flip back
+-        // to. Mirrors the macOS `FocusRestoreGuard` behavior. Best-effort —
+-        // see `restore_foreground_polling_best_effort` for the actual
+-        // restoration semantics.
+-        //
+-        // The UWP/AUMID path already restores foreground synchronously
+-        // (see `launch_uwp::restore_foreground_best_effort`), so this only
+-        // gates the legacy ShellExecuteExW path. We capture early so the
+-        // value is consistent regardless of which sub-path runs.
+-        //
+-        // Stored as `usize` (not `HWND`) so this `invoke` future stays
+-        // `Send` — `HWND` wraps `*mut c_void` and would taint the future
+-        // for the multi-threaded tokio runtime if held across `.await`.
++        // Store HWND as usize to keep the invoke future Send.
+         let foreground_before_addr: usize =
+             unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize };
+
+-        // Pure-function decision on whether to fire the post-launch
+-        // restore. Shape mirrors the resolved params — see
+-        // `should_restore_foreground_after_launch` for the rule.
+-        let launch_shape = LaunchTargetShape {
+-            has_aumid: aumid_opt.is_some(),
+-            has_bundle_id: bundle_id_opt.is_some(),
+-            has_name: name_opt.is_some(),
+-            has_path: path_opt.is_some(),
+-            has_launch_path: launch_path_opt.is_some(),
+-            has_urls: !urls.is_empty(),
+-        };
+-        let restore_foreground = should_restore_foreground_after_launch(launch_shape);
+-        let mut extra_args: Vec<String> = args
++        let extra_args: Vec<String> = args
+             .get("additional_arguments")
+             .and_then(|v| v.as_array())
+             .map(|a| {
+@@ -2244,16 +2165,7 @@ impl Tool for LaunchAppTool {
+                     .collect()
+             })
+             .unwrap_or_default();
+-        if args.get("cdp_debugging_port").is_some() {
+-            return ToolResult::error(
+-                "cdp_debugging_port moved to browser_prepare so DevTools is never enabled on an unproven user profile",
+-            );
+-        }
+-        if launch_path_opt
+-            .as_deref()
+-            .into_iter()
+-            .chain(path_opt.as_deref())
+-            .chain(name_opt.as_deref())
++        if std::iter::once(literal_path)
+             .chain(extra_args.iter().map(String::as_str))
+             .any(cua_driver_core::launch_guard::contains_remote_debugging_flag)
+         {
+@@ -2262,161 +2174,8 @@ impl Tool for LaunchAppTool {
+             );
+         }
+
+-        // Resolve target — launch_path > path > aumid > name > bundle_id
+-        // (alias of name on Windows). launch_path is highest precedence for
+-        // round-trip with list_apps; the value is handed to ShellExecuteEx
+-        // unchanged (UWP routing below is bypassed when launch_path is set).
+-        let target = launch_path_opt
+-            .clone()
+-            .or(path_opt.clone())
+-            .or(aumid_opt.clone())
+-            .or(name_opt.clone())
+-            .or(bundle_id_opt.clone());
+-
+-        // #1620: auto-inject Chromium anti-throttling flags when the resolved
+-        // target names a Chromium-based browser (Edge / Chrome / Brave /
+-        // Vivaldi / Opera / Chromium / Arc / Thorium / Iridium / Yandex).
+-        // launch_app hides the window via SW_SHOWNOACTIVATE; Chromium's
+-        // occlusion logic suspends the renderer in that case, leaving the
+-        // UIA tree empty and PrintWindow capturing a blank body. The three
+-        // flags below defeat that for the lifetime of the launched process
+-        // without affecting normal interactive use.
+-        //
+-        // Skipped when `aumid` or `bundle_id` route through the UWP path
+-        // (packaged Edge is the exception; the desktop Edge channel is what
+-        // ships now and that goes through the ShellExecuteEx path below).
+-        if launch_path_opt.is_some() || path_opt.is_some() || name_opt.is_some() {
+-            if let Some(t) = target.as_deref() {
+-                if is_chromium_browser_target(t) {
+-                    inject_chromium_anti_throttling_flags(&mut extra_args);
+-                }
+-            }
+-        }
+-
+-        if target.is_none() && urls.is_empty() {
+-            // Error message lists every field the resolver actually accepts.
+-            // The Swift-original "bundle_id or name" message predated the Windows
+-            // additions (aumid, path, launch_path, urls) and made #1635 look like
+-            // an aumid-specific bug. The actual cause of #1635 was the upstream
+-            // PS argv quote-stripping bug fixed in #1637; this message just stops
+-            // misleading anyone who hits the error for unrelated reasons.
+-            return ToolResult::error(
+-                "Provide one of: bundle_id, name, aumid, path, launch_path, or urls to identify the app to launch.",
+-            );
+-        }
+-
+-        // ── Packaged-app (UWP / MSIX) routing decision ──────────────────────
+-        //
+-        // Routing precedence — most explicit signal wins:
+-        //   1. `launch_path` set: skip UWP routing entirely — round-trip
+-        //      semantics demand the value be handed to ShellExecuteEx
+-        //      unchanged. Callers wanting precise UWP pid capture should
+-        //      pass `aumid` instead.
+-        //   2. `aumid` parameter (any value): packaged path, AUMID = value.
+-        //   3. `bundle_id` containing `!`: packaged path, AUMID = value
+-        //      (Win32 PATH lookups never produce a `!` in the executable
+-        //      name, so this is a safe marker of caller intent).
+-        //   4. `name` with no `path`: try `shell:AppsFolder` lookup. A
+-        //      packaged hit uses the resolved AUMID; a desktop registration
+-        //      uses `shell:AppsFolder\<AppUserModelID>` via ShellExecuteExW.
+-        //      On miss, fall through to the existing Win32 path.
+-        //   5. Anything else: existing ShellExecuteExW path.
+-        //
+-        // `path` is intentionally excluded from packaged routing — when
+-        // the caller has a concrete executable in mind they want
+-        // CreateProcess semantics, not Start Menu activation.
+-        let mut name_lookup_missed = false;
+-        let mut shell_target_from_name: Option<String> = None;
+-        let aumid_for_uwp: Option<String> = if launch_path_opt.is_some() || path_opt.is_some() {
+-            None
+-        } else if let Some(a) = aumid_opt.clone() {
+-            Some(a)
+-        } else if let Some(b) = bundle_id_opt
+-            .clone()
+-            .filter(|s| crate::launch_uwp::is_aumid(s))
+-        {
+-            Some(b)
+-        } else if let Some(n) = name_opt.clone() {
+-            // The cold AppsFolder COM walk can stop making progress when its
+-            // interactive shell broker is unhealthy. Bound it before the
+-            // separate ShellExecuteEx deadline below; the resolver keeps a
+-            // timed-out worker single-flight until COM really returns.
+-            match crate::launch_uwp::resolve_apps_folder_target_by_name_bounded(n.clone()).await {
+-                Ok(Some(crate::launch_uwp::AppsFolderLaunchTarget::PackagedAumid(aumid))) => {
+-                    Some(aumid)
+-                }
+-                Ok(Some(crate::launch_uwp::AppsFolderLaunchTarget::ShellLaunchPath(
+-                    launch_path,
+-                ))) => {
+-                    shell_target_from_name = Some(launch_path);
+-                    None
+-                }
+-                Ok(None) => {
+-                    name_lookup_missed = true;
+-                    None
+-                }
+-                Err(crate::launch_uwp::AppsFolderLookupError::Timeout) => {
+-                    return ToolResult::error(format!(
+-                        "App name lookup for {n:?} is temporarily unavailable: Windows did not respond to the shell:AppsFolder query within 4s. No app was launched; retry after the shell recovers, or pass an explicit path or aumid."
+-                    ))
+-                }
+-                Err(crate::launch_uwp::AppsFolderLookupError::Busy) => {
+-                    return ToolResult::error(format!(
+-                        "App name lookup for {n:?} is temporarily unavailable because a prior Windows shell lookup is still running or cooling down. No app was launched; retry later, or pass an explicit path or aumid."
+-                    ))
+-                }
+-                Err(crate::launch_uwp::AppsFolderLookupError::Unavailable) => {
+-                    return ToolResult::error(format!(
+-                        "App name lookup for {n:?} is unavailable because the Windows shell lookup worker failed. No app was launched; pass an explicit path or aumid."
+-                    ))
+-                }
+-            }
+-        } else {
+-            None
+-        };
+-        let resolved_target = shell_target_from_name.or(target);
+-
+-        // Single launch path. `display` is the human-readable identifier
+-        // we report in the success header; for the packaged path it's
+-        // the AUMID, which is more informative than the display name.
+-        let display = aumid_for_uwp
+-            .clone()
+-            .or_else(|| resolved_target.clone())
+-            .unwrap_or_else(|| urls.join(", "));
+-
+-        // When the resolved target came from `launch_path` it may carry
+-        // shortcut arguments (e.g. `"C:\Path\chrome.exe" --profile-directory="Profile 2"`).
+-        // Split it into a file token + arguments tail so ShellExecuteEx
+-        // sees them separately — passing the whole string as lpFile would
+-        // fail because the shell only resolves a single filesystem path
+-        // there. No-op for AUMID tokens / plain paths without args / UWP
+-        // `shell:appsFolder\..!..` tokens.
+-        let (target_file_opt, extra_joined) = {
+-            let base_extra = extra_args.join(" ");
+-            if launch_path_opt.is_some() {
+-                if let Some(t) = resolved_target.as_deref() {
+-                    let (file, args_tail) = split_launchable_target(t);
+-                    let combined = if args_tail.is_empty() {
+-                        base_extra
+-                    } else if base_extra.is_empty() {
+-                        args_tail
+-                    } else {
+-                        format!("{args_tail} {base_extra}")
+-                    };
+-                    let file_opt = if file.is_empty() { None } else { Some(file) };
+-                    (file_opt, combined)
+-                } else {
+-                    (None, base_extra)
+-                }
+-            } else {
+-                (resolved_target.clone(), base_extra)
+-            }
+-        };
+-
+-        // Strict no-activation is available only for the desktop launch path.
+-        // UWP activation is broker-controlled and retains its existing
+-        // restore-after-activation behavior.
+-        let mut foreground_lock = if start_minimized && aumid_for_uwp.is_none() {
++        let display = literal_path.to_owned();
++        let mut foreground_lock = if start_minimized {
+             Some(crate::input::ForegroundLockGuard::acquire())
+         } else {
+             None
+@@ -2438,246 +2197,28 @@ impl Tool for LaunchAppTool {
+             }));
+         }
+
+-        // Branch: AUMID activation if we resolved one; else legacy
+-        // ShellExecuteExW. Both branches still need to handle `urls`
+-        // (additional URLs always go through ShellExecuteExW since the
+-        // Start Menu doesn't activate by URL).
+-        let pid = if let Some(aumid) = aumid_for_uwp.clone() {
+-            let aumid_clone = aumid.clone();
+-            let args_clone = extra_joined.clone();
+-            let activation = tokio::task::spawn_blocking(move || {
+-                crate::launch_uwp::launch_uwp(&aumid_clone, &args_clone)
+-            })
+-            .await;
+-            match activation {
+-                Ok(Ok(p)) => p,
+-                Ok(Err(e)) => {
+-                    return ToolResult::error(format!(
+-                        "Failed to activate packaged app {aumid:?}: {e}"
+-                    ))
+-                }
+-                Err(e) => return ToolResult::error(format!("Task error: {e}")),
+-            }
+-        } else {
+-            // Legacy ShellExecuteExW path for plain Win32 apps and for
+-            // callers passing an explicit `path` / `launch_path`. An elevated
+-            // Driver runs these launches with its standard-user token so the
+-            // app does not inherit administrator rights (#3607).
+-            let launch_token = match crate::standard_user_launch::app_launch_token() {
+-                Ok(token) => token,
+-                Err(message) => return ToolResult::error(message),
++        // The only admitted route creates a process directly. Keep its handle
++        // through all observation below: do not adopt another PID or let this
++        // PID be recycled while resolving/minimizing its windows.
++        let created_app =
++            match tokio::task::spawn_blocking(move || prepared_launch.spawn(&extra_args, n_show))
++                .await
++            {
++                Ok(Ok(app)) => app,
++                Ok(Err(message)) => return ToolResult::error(message),
++                Err(error) => return ToolResult::error(format!("Launch task failed: {error}")),
+             };
+-            let urls_clone = urls.clone();
+-            let target_for_shell = target_file_opt.clone();
+-            let extra_for_shell = extra_joined.clone();
+-            let n_show_for_shell = n_show;
+-            let direct_minimized_exe = start_minimized
+-                && target_for_shell.as_deref().is_some_and(|target| {
+-                    std::path::Path::new(target).is_file()
+-                        && std::path::Path::new(target)
+-                            .extension()
+-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+-                });
+-            // Bound the shell launch with a timeout. An unregistered protocol
+-            // or file association makes `ShellExecuteExW` block on a modal shell
+-            // dialog ("you'll need a new app to open this …") on the *session*
+-            // desktop — which a Session-0/headless daemon can neither see nor
+-            // dismiss — wedging the launch (and that request) indefinitely.
+-            // `SEE_MASK_FLAG_NO_UI` (below) suppresses the no-association error
+-            // UI so that case fails fast with an error code; the timeout is the
+-            // backstop for any *other* blocking broker dialog (SmartScreen, an
+-            // elevation/consent surface) so a bad target can't hang the daemon.
+-            let launch = tokio::task::spawn_blocking(move || -> anyhow::Result<u32> {
+-                use windows::core::{PCWSTR, PWSTR};
+-                use windows::Win32::Foundation::CloseHandle;
+-                use windows::Win32::System::Threading::{
+-                    CreateProcessW, GetProcessId, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+-                    STARTF_USESHOWWINDOW, STARTUPINFOW,
+-                };
+-                use windows::Win32::UI::Shell::{
+-                    ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS,
+-                    SHELLEXECUTEINFOW,
+-                };
++        let created_app = std::sync::Arc::new(created_app);
++        let pid = created_app.pid;
+
+-                fn to_wide(s: &str) -> Vec<u16> {
+-                    s.encode_utf16().chain(std::iter::once(0)).collect()
+-                }
+-                let op_w = to_wide("open");
+-                let file_w = to_wide(if let Some(t) = target_for_shell.as_deref() {
+-                    t
+-                } else {
+-                    urls_clone.first().map(|s| s.as_str()).unwrap_or("")
+-                });
+-                let args_w = to_wide(&extra_for_shell);
+-
+-                use crate::standard_user_launch::AppLaunchToken;
+-                let pid = if direct_minimized_exe {
+-                    let target = target_for_shell
+-                        .as_deref()
+-                        .expect("checked executable path");
+-                    let command_line_text = if extra_for_shell.is_empty() {
+-                        format!(r#""{target}""#)
+-                    } else {
+-                        format!(r#""{target}" {extra_for_shell}"#)
+-                    };
+-                    if let AppLaunchToken::StandardUser(token) = &launch_token {
+-                        crate::standard_user_launch::create_process(
+-                            token,
+-                            target,
+-                            &command_line_text,
+-                            n_show_for_shell,
+-                        )
+-                        .map_err(anyhow::Error::msg)?
+-                    } else {
+-                        let mut command_line = to_wide(&command_line_text);
+-                        let startup = STARTUPINFOW {
+-                            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+-                            dwFlags: STARTF_USESHOWWINDOW,
+-                            wShowWindow: n_show_for_shell as u16,
+-                            ..Default::default()
+-                        };
+-                        let mut process = PROCESS_INFORMATION::default();
+-                        unsafe {
+-                            CreateProcessW(
+-                                PCWSTR(file_w.as_ptr()),
+-                                PWSTR(command_line.as_mut_ptr()),
+-                                None,
+-                                None,
+-                                false,
+-                                PROCESS_CREATION_FLAGS(0),
+-                                None,
+-                                PCWSTR::null(),
+-                                &startup,
+-                                &mut process,
+-                            )?;
+-                            let _ = CloseHandle(process.hThread);
+-                            let _ = CloseHandle(process.hProcess);
+-                        }
+-                        process.dwProcessId
+-                    }
+-                } else if let AppLaunchToken::StandardUser(token) = &launch_token {
+-                    let file = target_for_shell
+-                        .as_deref()
+-                        .or_else(|| urls_clone.first().map(String::as_str))
+-                        .unwrap_or("");
+-                    crate::standard_user_launch::shell_execute(
+-                        token,
+-                        file,
+-                        &extra_for_shell,
+-                        n_show_for_shell,
+-                        STANDARD_USER_SHELL_LAUNCH_TIMEOUT,
+-                    )
+-                    .map_err(anyhow::Error::msg)?
+-                } else {
+-                    let mut info = SHELLEXECUTEINFOW {
+-                        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+-                        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI,
+-                        lpVerb: PCWSTR(op_w.as_ptr()),
+-                        lpFile: PCWSTR(file_w.as_ptr()),
+-                        lpParameters: if extra_for_shell.is_empty() {
+-                            PCWSTR::null()
+-                        } else {
+-                            PCWSTR(args_w.as_ptr())
+-                        },
+-                        nShow: n_show_for_shell,
+-                        ..Default::default()
+-                    };
+-                    unsafe {
+-                        ShellExecuteExW(&mut info)?;
+-                    }
+-                    if !info.hProcess.is_invalid() {
+-                        let p = unsafe { GetProcessId(info.hProcess) };
+-                        unsafe {
+-                            let _ = CloseHandle(info.hProcess);
+-                        }
+-                        p
+-                    } else {
+-                        0
+-                    }
+-                };
+-
+-                // Open any additional URLs in the default browser (no focus
+-                // steal, no pid capture for these — Swift's NSWorkspace flow
+-                // behaves the same way for secondary URLs).
+-                // When an app target was launched above, none of the URLs has
+-                // been consumed yet. URLs-only launches use the first URL as
+-                // `lpFile`, so only their remaining URLs belong here.
+-                let first_unopened_url = first_unopened_shell_url_index(target_for_shell.is_some());
+-                for url in &urls_clone[first_unopened_url.min(urls_clone.len())..] {
+-                    if let AppLaunchToken::StandardUser(token) = &launch_token {
+-                        let _ = crate::standard_user_launch::shell_execute(
+-                            token,
+-                            url,
+-                            "",
+-                            n_show_for_shell,
+-                            STANDARD_USER_SHELL_LAUNCH_TIMEOUT,
+-                        );
+-                        continue;
+-                    }
+-                    let file = to_wide(url);
+-                    let mut url_info = SHELLEXECUTEINFOW {
+-                        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+-                        fMask: SEE_MASK_FLAG_NO_UI,
+-                        lpVerb: PCWSTR(op_w.as_ptr()),
+-                        lpFile: PCWSTR(file.as_ptr()),
+-                        nShow: n_show_for_shell,
+-                        ..Default::default()
+-                    };
+-                    unsafe {
+-                        let _ = ShellExecuteExW(&mut url_info);
+-                    }
+-                }
+-
+-                Ok(pid)
+-            });
+-            // 15s is generous: ShellExecuteExW returns once activation starts
+-            // (process created), not when the window appears, so a healthy
+-            // launch resolves in well under a second. On timeout we abandon the
+-            // blocking task (a spawn_blocking thread can't be cancelled — it
+-            // unblocks if/when the modal is dismissed) and return an error so
+-            // the daemon stays responsive instead of wedging on the request.
+-            let result = tokio::time::timeout(std::time::Duration::from_secs(15), launch).await;
+-
+-            match result {
+-                Ok(Ok(Ok(p))) => p,
+-                Ok(Ok(Err(e))) if name_lookup_missed => {
+-                    return ToolResult::error(format!(
+-                        "App {:?} was not found in shell:AppsFolder or by Windows PATH/association lookup: {e}",
+-                        name_opt.as_deref().unwrap_or("")
+-                    ))
+-                }
+-                Ok(Ok(Err(e))) => return ToolResult::error(format!("Failed to launch: {e}")),
+-                Ok(Err(e)) => return ToolResult::error(format!("Task error: {e}")),
+-                Err(_elapsed) => {
+-                    return ToolResult::error(format!(
+-                        "Launch of {:?} timed out after 15s — the target likely has no \
+-                     registered handler and a blocking shell dialog appeared on the \
+-                     session desktop; aborted to keep the daemon responsive.",
+-                        target_file_opt
+-                            .as_deref()
+-                            .or_else(|| urls.first().map(|s| s.as_str()))
+-                            .unwrap_or("")
+-                    ))
+-                }
+-            }
+-        };
+-
+-        // Best-effort foreground-restore for the legacy ShellExecuteExW
+-        // path. The UWP/AUMID branch already restores foreground
+-        // synchronously inside `launch_uwp::launch_uwp`, so we only spawn
+-        // the polling task when we went through the ShellExecuteExW
+-        // branch. URLs-only invocations are excluded via `restore_foreground`
+-        // (see `should_restore_foreground_after_launch`).
+-        //
+-        // `HWND` wraps a raw `*mut c_void` which is `!Send`, so we marshal
+-        // the foreground handle across the spawn boundary as a `usize` and
+-        // reconstruct the `HWND` only inside the synchronous probes (see
+-        // `restore_foreground_polling_best_effort`). Mirrors how
+-        // `launch_uwp.rs` carries its restore target.
+-        if aumid_for_uwp.is_none() && restore_foreground {
++        // Restore the prior foreground best-effort, scoped to the created PID.
++        // HWND crosses the async boundary as usize so the future remains Send.
++        {
+             let spawned_pid_for_restore = pid;
+             let target_foreground_addr = foreground_before_addr;
++            let observed_app = std::sync::Arc::clone(&created_app);
+             tokio::spawn(async move {
++                let _observed_app = observed_app;
+                 restore_foreground_polling_best_effort(
+                     target_foreground_addr,
+                     spawned_pid_for_restore,
+@@ -2686,86 +2227,9 @@ impl Tool for LaunchAppTool {
+             });
+         }
+
+-        // When the packaged path was taken we still need to fan out any
+-        // extra URLs to the default browser (ShellExecuteEx — no pid
+-        // capture, mirroring Swift's NSWorkspace secondary-URL flow).
+-        if aumid_for_uwp.is_some() && !urls.is_empty() {
+-            let urls_clone = urls.clone();
+-            let n_show_for_urls = n_show;
+-            let _ = tokio::task::spawn_blocking(move || {
+-                use windows::core::PCWSTR;
+-                use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+-                fn to_wide(s: &str) -> Vec<u16> {
+-                    s.encode_utf16().chain(std::iter::once(0)).collect()
+-                }
+-                let op_w = to_wide("open");
+-                for url in &urls_clone {
+-                    let file = to_wide(url);
+-                    let mut url_info = SHELLEXECUTEINFOW {
+-                        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+-                        lpVerb: PCWSTR(op_w.as_ptr()),
+-                        lpFile: PCWSTR(file.as_ptr()),
+-                        nShow: n_show_for_urls,
+-                        ..Default::default()
+-                    };
+-                    unsafe {
+-                        let _ = ShellExecuteExW(&mut url_info);
+-                    }
+-                }
+-            })
+-            .await;
+-        }
+-
+-        // Resolve the pid's windows so the caller can skip a list_windows
+-        // round-trip — same approach as Swift's `resolveWindows`. Retry
+-        // 5×200ms; Win32 window registration can lag the launch.
+-        //
+-        // Launcher-stub fallback: when the launched binary is a wrapper that
+-        // re-execs and exits (GIMP's `gimp-3.exe` → `gimp-3.2.exe`; LO's
+-        // `swriter.exe` → `soffice.bin`), the launched pid never gets a
+-        // window — list_windows(Some(pid)) stays empty forever. After the
+-        // primary retry budget we fall back to scanning the launched pid's
+-        // descendant + name-related processes and pick the first one with a
+-        // window. The resolved pid is reflected in the response's `pid` field
+-        // so callers can target it with subsequent calls. See #1615.
++        // Resolve only windows owned by the created process; never substitute
++        // a launcher descendant, similarly named process, or packaged-app host.
+         let mut windows_json: Vec<serde_json::Value> = Vec::new();
+-        let mut resolved_pid: u32 = pid;
+-
+-        // UWP / packaged-app host-window resolution. `launch_uwp` returns the
+-        // real packaged-app pid (e.g. CalculatorApp.exe), but a UWP app's
+-        // top-level window — the HWND a caller must actually drive — is owned
+-        // by `ApplicationFrameHost.exe`, not by that process. The app process
+-        // only owns a `CoreWindow` reparented as a child of the AFH frame, so
+-        // `list_windows(Some(app_pid))` is empty and the generic retry loop
+-        // below would either spin out to a stub-fallback miss or return no
+-        // windows at all (the original "launch_app of a UWP app returns empty
+-        // windows[] / a pid you can't drive" bug). Map app_pid → its AFH host
+-        // frame and report `(frame_hwnd, afh_pid)` so the returned handles
+-        // resolve in `get_window_state` and element actions land. Retry: the
+-        // frame can lag the activation by a few hundred ms.
+-        if aumid_for_uwp.is_some() {
+-            for _ in 0..10 {
+-                let host =
+-                    tokio::task::spawn_blocking(move || crate::win32::resolve_uwp_host_window(pid))
+-                        .await
+-                        .unwrap_or(None);
+-                if let Some(w) = host {
+-                    windows_json = vec![json!({
+-                        "window_id": w.hwnd, "title": w.title,
+-                        "bounds": { "x": w.x, "y": w.y, "width": w.width, "height": w.height },
+-                        "layer": 0,
+-                        "z_index": 0,
+-                        "is_on_screen": true,
+-                    })];
+-                    // Report the AFH pid: that's the pid that owns the frame
+-                    // HWND, so `get_window_state(resolved_pid, window_id)`
+-                    // validates and `list_windows(Some(resolved_pid))` lists it.
+-                    resolved_pid = w.pid;
+-                    break;
+-                }
+-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+-            }
+-        }
+
+         for _ in 0..5 {
+             if !windows_json.is_empty() {
+@@ -2787,114 +2251,8 @@ impl Tool for LaunchAppTool {
+             }
+             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+         }
+-        if windows_json.is_empty() {
+-            // Launcher-stub fallback. Compute the exe basename from the
+-            // launchable target so name-based matching has something to work
+-            // with (e.g. "gimp-3.exe" → prefix "gimp" matches "gimp-3.2.exe").
+-            let basename_for_match = target_file_opt
+-                .as_deref()
+-                .and_then(|t| t.rsplit(|c: char| c == '\\' || c == '/').next())
+-                .unwrap_or("")
+-                .to_owned();
+-            // Known-slow launchers get an extended retry budget. GIMP 3.x in
+-            // particular spends 10-20s on its first launch (font cache rebuild,
+-            // plugin scan, etc.) before the main window registers. We don't
+-            // want to wait 20s for every launcher — gate on basename prefix
+-            // matching known-slow apps. Add to this list as encountered.
+-            let bn_lower = basename_for_match.to_ascii_lowercase();
+-            let is_slow_launcher = bn_lower.starts_with("gimp")
+-                || bn_lower.starts_with("blender")          // OpenGL init can stall
+-                || bn_lower.starts_with("inkscape")         // similar GTK pattern
+-                || bn_lower.starts_with("krita")
+-                || bn_lower.starts_with("freecad");
+-            let max_candidate_attempts: usize = if is_slow_launcher { 30 } else { 3 };
+-
+-            let basename_clone = basename_for_match.clone();
+-            let candidates_initial = tokio::task::spawn_blocking(move || {
+-                crate::win32::related_processes(pid, &basename_clone)
+-            })
+-            .await
+-            .unwrap_or_default();
+-
+-            // For slow launchers we may also need to RE-SCAN candidates over
+-            // time, because the wrapper may not have spawned its child yet
+-            // when we first scanned. Cap total wait at ~12s (slow) / 0.6s (fast).
+-            let mut tried: std::collections::HashSet<u32> = std::collections::HashSet::new();
+-            tried.insert(pid); // already tried in the primary loop
+-            let mut candidate_queue: Vec<u32> = candidates_initial
+-                .into_iter()
+-                .filter(|p| tried.insert(*p))
+-                .collect();
+-            let mut total_attempts: usize = 0;
+-            'outer: loop {
+-                while let Some(candidate_pid) = candidate_queue.pop() {
+-                    for _ in 0..max_candidate_attempts {
+-                        total_attempts += 1;
+-                        let wins = tokio::task::spawn_blocking(move || {
+-                            crate::win32::list_windows(Some(candidate_pid))
+-                        })
+-                        .await
+-                        .unwrap_or_default();
+-                        if !wins.is_empty() {
+-                            let window_count = wins.len();
+-                            windows_json = wins.iter().enumerate().map(|(position, w)| json!({
+-                                "window_id": w.hwnd, "title": w.title,
+-                                "bounds": { "x": w.x, "y": w.y, "width": w.width, "height": w.height },
+-                                "layer": 0,
+-                                "z_index": z_index_from_front_to_back(window_count, position),
+-                                "is_on_screen": w.is_on_screen,
+-                            })).collect();
+-                            resolved_pid = candidate_pid;
+-                            break 'outer;
+-                        }
+-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+-                    }
+-                }
+-                // For slow launchers, keep re-scanning descendants — the
+-                // wrapper may not have spawned its child yet. Cap total
+-                // wait at ~12s (60 × 200ms) for the slow path.
+-                if !is_slow_launcher || total_attempts > 60 {
+-                    break;
+-                }
+-                // Give the wrapper a moment to spawn before re-scanning.
+-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+-                total_attempts += 3; // count the 500ms wait as 3 attempts
+-                let basename_rescan = basename_for_match.clone();
+-                let fresh = tokio::task::spawn_blocking(move || {
+-                    crate::win32::related_processes(pid, &basename_rescan)
+-                })
+-                .await
+-                .unwrap_or_default();
+-                let new_ones: Vec<u32> = fresh.into_iter().filter(|p| tried.insert(*p)).collect();
+-                candidate_queue = new_ones;
+-                // Continue the outer loop regardless — even with empty
+-                // new_ones we want another iteration that hits the
+-                // total_attempts cap. The loop body handles the empty queue
+-                // by falling through to the re-scan again.
+-            }
+-        }
+-        let pid = resolved_pid;
+-
+-        // start_minimized post-pass: drop every resolved window to the
+-        // taskbar. The desktop ShellExecuteEx path already minimizes via
+-        // nShow=SW_SHOWMINNOACTIVE, but three cases still need this
+-        // fallback:
+-        //   1. AUMID / UWP activations come up un-minimized —
+-        //      ActivateApplication has no nShow.
+-        //   2. Apps that ignore the nShow hint and decide their own geometry
+-        //      (notable offenders: LibreOffice, some Electron apps).
+-        //   3. Launcher-stub flows (LO swriter.exe → soffice.bin, GIMP, etc.)
+-        //      where the launched pid exits before the real window appears,
+-        //      so `windows_json` is empty at this point.
+-        //
+-        // To cover (3) we spawn a background polling task that keeps
+-        // looking for windows under the launched pid family for up to 5 s
+-        // and minimizes anything that materializes. The task runs detached
+-        // so the launch_app response isn't held up by it.
+-        //
+-        // SW_SHOWMINNOACTIVE preserves the foreground while minimizing. Using
+-        // SW_MINIMIZE here would itself activate the next z-order window and
+-        // force a visible restore-after-steal cycle.
++        // Some apps ignore the startup show hint. Minimize only windows of
++        // the created process; never search its family or same-name apps.
+         if start_minimized {
+             // First, minimize anything already resolved (covers the common
+             // single-process path where windows_json was populated).
+@@ -2902,18 +2260,7 @@ impl Tool for LaunchAppTool {
+                 .iter()
+                 .filter_map(|w| w["window_id"].as_u64())
+                 .collect();
+-            // Capture pid + basename for the post-launch polling task to
+-            // pick up launcher-stub child processes.
+-            let stub_basename = target_file_opt
+-                .as_deref()
+-                .and_then(|t| t.rsplit(|c: char| c == '\\' || c == '/').next())
+-                .unwrap_or("")
+-                .to_owned();
+-            // parent_pid is the launched pid family root — used below to
+-            // constrain the post-launch minimize sweep to descendants /
+-            // name-relatives of the launched app, so we don't accidentally
+-            // minimize a user's unrelated app that started during the 5 s
+-            // poll window.
++            // Poll only windows of the process actually created.
+             let parent_pid = pid;
+             let immediate_hwnds_for_poll = immediate_hwnds.clone();
+             let _ = tokio::task::spawn_blocking(move || {
+@@ -2926,28 +2273,8 @@ impl Tool for LaunchAppTool {
+                 }
+             })
+             .await;
+-            // Poll launcher-stub late-window cases before returning. The
+-            // start_minimized contract is observable at response time; a
+-            // detached task allowed callers to see a transient restored
+-            // window immediately after a successful launch.
+-            // Strategy: every 200 ms for 5 s, find pids that
+-            //   (a) weren't in the pre-launch snapshot, AND
+-            //   (b) are part of the launched app's family — either a
+-            //       descendant of the launched root pid, OR a process
+-            //       sharing the launched binary's name prefix (covers
+-            //       renamed-binary chains like swriter.exe → soffice.bin
+-            //       where the child's name doesn't match but it's a
+-            //       direct descendant).
+-            // Minimize THEIR visible windows only. Without the family
+-            // constraint, anything the user opens during the 5 s window
+-            // (Chrome, terminal, IDE) would also get minimized — that's
+-            // the regression CodeRabbit flagged.
+-            //
+-            // Loop ends early once we've minimized the first set of
+-            // windows AND they remain minimized for three ticks — the typical
+-            // app has its main window up within ~2 s of launch.
+-            let pre_pids = pre_launch_pids.clone();
+-            let basename_for_poll = stub_basename.clone();
++            // Poll late windows of this exact created PID before returning.
++            // Stop after three stable ticks once a window has been minimized.
+             let launch_foreground_lock = foreground_lock.take();
+             (async move {
+                 use std::collections::HashSet;
+@@ -2960,27 +2287,8 @@ impl Tool for LaunchAppTool {
+                 let mut idle_ticks_after_any_hit: u8 = 0;
+                 let mut hit_count_total = minimized.len();
+                 for _ in 0..25 {
+-                    let pre_pids_clone = pre_pids.clone();
+-                    let basename_clone = basename_for_poll.clone();
+-                    // Build the family pid set fresh each tick — both
+-                    // descendant graph and name-relatives can grow as
+-                    // launcher-stub chains spawn deeper children.
+-                    let family_new_pids: Vec<u32> = tokio::task::spawn_blocking(move || {
+-                        let related: std::collections::HashSet<u32> =
+-                            crate::win32::related_processes(parent_pid, &basename_clone)
+-                                .into_iter()
+-                                .chain(std::iter::once(parent_pid))
+-                                .collect();
+-                        crate::win32::list_processes()
+-                            .into_iter()
+-                            .filter(|p| {
+-                                !pre_pids_clone.contains(&p.pid) && related.contains(&p.pid)
+-                            })
+-                            .map(|p| p.pid)
+-                            .collect()
+-                    })
+-                    .await
+-                    .unwrap_or_default();
++                    // Only the created process; no name-related or existing app.
++                    let family_new_pids = [parent_pid];
+                     let mut tick_hits: usize = 0;
+                     for cpid in family_new_pids {
+                         let wins = tokio::task::spawn_blocking(move || {
+@@ -3026,8 +2334,7 @@ impl Tool for LaunchAppTool {
+             .await;
+         }
+
+-        // Match Swift text format 1:1.
+-        let mut summary = format!("✅ Launched {display} (pid {pid}) in background.");
++        let mut summary = format!("Created {display} (pid {pid}); background startup requested.");
+         if !windows_json.is_empty() {
+             summary.push_str("\n\nWindows:");
+             for w in &windows_json {
+@@ -3044,28 +2351,109 @@ impl Tool for LaunchAppTool {
+                 "\n→ Call get_window_state(pid: {pid}, window_id) to inspect."
+             ));
+         }
+-        // `bundle_id` is the AUMID when we went through the packaged-app
+-        // path (so the caller can round-trip the same value to relaunch),
+-        // and `null` for plain Win32 launches (which truly have no bundle
+-        // identifier concept on Windows).
+-        let bundle_id_response = match aumid_for_uwp.as_ref() {
+-            Some(a) => serde_json::Value::String(a.clone()),
+-            None => serde_json::Value::Null,
+-        };
++        let running = created_app.running();
++        if !running {
++            windows_json.clear();
++            summary = format!("Created {display} (pid {pid}), but that process has exited. No other process was adopted.");
++        }
++        let mut foreground_pid = 0;
++        unsafe {
++            let foreground = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
++            windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
++                foreground,
++                Some(&mut foreground_pid),
++            );
++        }
+         let structured = json!({
+             "pid":       pid,
+-            "bundle_id": bundle_id_response,
++            "bundle_id": null,
+             "name":      display,
+-            "running":   true,
+-            "active":    false,  // SW_SHOWNOACTIVATE — Swift's background-launch invariant
++            "running":   running,
++            "active":    running && foreground_pid == pid,
+             "windows":   windows_json,
+         });
+-        ToolResult::text(summary).with_structured(structured)
++        let mut result = ToolResult::text(summary).with_structured(structured);
++        result.windows_created_process = Some(created_app.ownership_handle());
++        result
+     }
+ }
+
+ // ── click ─────────────────────────────────────────────────────────────────────
+
++#[cfg(test)]
++mod literal_launch_callsite_tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn unsupported_routes_refuse_at_actual_launch_tool_before_native_effects() {
++        for args in [
++            json!({"name":"notepad"}),
++            json!({"path":"C:\\not-present.exe","name":"notepad"}),
++            json!({"path":"C:\\not-present.exe","urls":[]}),
++            json!({"path":"C:\\not-present.exe","creates_new_application_instance":true}),
++            json!({"path":"C:\\not-present.exe","additional_arguments":"cmd /c anything"}),
++            json!({"path":"C:\\not-present.exe","start_minimized":"true"}),
++            json!({"path":"\\\\?\\C:\\not-present.exe"}),
++        ] {
++            let result = LaunchAppTool.invoke(args).await;
++            assert_eq!(result.is_error, Some(true));
++        }
++    }
++
++    #[tokio::test]
++    async fn owner_only_termination_matches_creation_time() {
++        struct TestChild(std::process::Child);
++        impl Drop for TestChild {
++            fn drop(&mut self) {
++                let _ = self.0.kill();
++                let _ = self.0.wait();
++            }
++        }
++        let executable = std::path::Path::new(&std::env::var("SystemRoot").unwrap())
++            .join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
++        let mut child = TestChild(
++            std::process::Command::new(executable)
++                .args([
++                    "-NoLogo",
++                    "-NoProfile",
++                    "-NonInteractive",
++                    "-Command",
++                    "Start-Sleep -Seconds 30",
++                ])
++                .spawn()
++                .unwrap(),
++        );
++        let pid = child.0.id();
++        let scope = KillAppTool
++            .protected_resource_scope("process_control", &json!({"pid":pid}))
++            .await
++            .unwrap()
++            .unwrap();
++        let expected = scope["fingerprint"].clone();
++        let mut wrong = expected.clone();
++        wrong["start_time"] = json!(wrong["start_time"].as_u64().unwrap() + 1);
++        let refusal = KillAppTool
++            .invoke(json!({"pid":pid,"_protected_process_fingerprint":wrong}))
++            .await;
++        assert_eq!(refusal.is_error, Some(true));
++        assert!(child.0.try_wait().unwrap().is_none());
++        let killed = KillAppTool
++            .invoke(json!({"pid":pid,"_protected_process_fingerprint":expected}))
++            .await;
++        assert_ne!(killed.is_error, Some(true));
++        child.0.wait().unwrap();
++    }
++
++    #[test]
++    fn literal_creation_is_not_advertised_as_idempotent() {
++        assert!(!LaunchAppTool.def().idempotent);
++        assert!(LaunchAppTool
++            .def()
++            .description
++            .contains("only the created process PID"));
++    }
++}
++
+ fn posted_pixel_click_result(pid: u32, click_word: &str) -> ToolResult {
+     ToolResult::text(format!("✅ Posted {click_word} to pid {pid}.")).with_structured(json!({
+         "path": "post_message",
+@@ -5514,9 +4902,10 @@ impl Tool for HotkeyTool {
                  accelerators via `TranslateAccelerator` (LibreOffice, FAR, classic Notepad, etc.) \
                  never see the combo as a real accelerator on the PostMessage-only path. \
                  Trade-off: brief foreground swap (mitigated by restoring the previous foreground \
@@ -1365,6 +3926,93 @@ index c3101d1..f27073f 100644
                  - **Legacy Win32 targets without modifiers** (plain `enter`, `tab`, `f5`, etc.) \
                  route through `PostMessage(WM_KEYDOWN/UP)` — no focus steal, no need to update \
                  modifier state.\n\n\
+@@ -7896,6 +7285,7 @@ impl Tool for GetDesktopStateTool {
+             is_error: None,
+             structured_content: Some(structured),
+             action_record: None,
++            windows_created_process: None,
+         }
+     }
+ }
+@@ -8875,6 +8265,7 @@ impl Tool for ZoomTool {
+                         "mime_type": "image/jpeg"
+                     })),
+                     action_record: None,
++                    windows_created_process: None,
+                 }
+             }
+             Ok(Err(e)) => ToolResult::error(format!("Zoom failed: {e}")),
+@@ -9641,21 +9032,40 @@ impl Tool for KillAppTool {
+             }
+         };
+
++        let expected_identity = match args.get("_protected_process_fingerprint") {
++            Some(expected) => match (
++                expected
++                    .get("pid")
++                    .and_then(Value::as_u64)
++                    .and_then(|pid| u32::try_from(pid).ok()),
++                expected.get("start_time").and_then(Value::as_u64),
++            ) {
++                (Some(pid), Some(started)) if pid == pid_v => Some((pid, started)),
++                _ => {
++                    return kill_app_stale_process_refusal(
++                        "Cannot verify the authorized process creation identity.".into(),
++                    )
++                }
++            },
++            None => None,
++        };
++
+         // Run the syscalls on a blocking thread — TerminateProcess + the
+         // WaitForSingleObject confirmation are both blocking, and we don't
+         // want to stall the tokio reactor.
+         let outcome = tokio::task::spawn_blocking(move || -> Result<(), String> {
+-            use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
++            use std::os::windows::io::{FromRawHandle, OwnedHandle};
++            use windows::Win32::Foundation::WAIT_OBJECT_0;
+             use windows::Win32::System::Threading::{
+                 OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+-                PROCESS_TERMINATE,
++                PROCESS_TERMINATE, PROCESS_QUERY_LIMITED_INFORMATION,
+             };
+
+-            // SAFETY: OpenProcess returns a Result<HANDLE> in windows-rs;
+-            // PROCESS_TERMINATE | PROCESS_SYNCHRONIZE lets us both kill the
+-            // target AND wait for the OS to fully reap it (so the caller's
+-            // follow-up list_apps reflects the change immediately).
+-            let h = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid_v) }
++            // An owner-only authorization is rechecked on the very HANDLE
++            // used to terminate, not on an earlier PID lookup across an await.
++            let mut rights = PROCESS_TERMINATE | PROCESS_SYNCHRONIZE;
++            if expected_identity.is_some() { rights |= PROCESS_QUERY_LIMITED_INFORMATION; }
++            let h = unsafe { OpenProcess(rights, false, pid_v) }
+                 .map_err(|e| {
+                 format!(
+                     "OpenProcess(pid={pid_v}, PROCESS_TERMINATE|PROCESS_SYNCHRONIZE) failed: {e}. \
+@@ -9664,6 +9074,13 @@ impl Tool for KillAppTool {
+                 )
+             })?;
+
++            let process = unsafe { OwnedHandle::from_raw_handle(h.0) };
++            if let Some(expected) = expected_identity {
++                let current = cua_driver_core::protocol::windows_process_identity_from_handle(&process)?;
++                if current != expected {
++                    return Err("Refused termination: the authorized PID/creation time no longer matches this process.".into());
++                }
++            }
+             let term_result = unsafe { TerminateProcess(h, 1) };
+
+             // WaitForSingleObject so the caller can assume the process is
+@@ -9673,7 +9090,7 @@ impl Tool for KillAppTool {
+             // success (the kill request landed; the process may take a
+             // little longer to disappear from list_apps).
+             let wait_status = unsafe { WaitForSingleObject(h, 2000) };
+-            let _ = unsafe { CloseHandle(h) };
++            drop(process);
+
+             match (term_result, wait_status) {
+                 (Ok(()), s) if s == WAIT_OBJECT_0 => Ok(()),
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/page_bookmark.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/page_bookmark.rs
 index 2ab67a2..c069b51 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/page_bookmark.rs
