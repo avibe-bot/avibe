@@ -20120,15 +20120,14 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message (protected and ask-first standard keys need approval)",
         description=(
-            "Sign with a keypair or HD wallet (--chain required). Solana uses exact --message-hex, "
-            "not a hash; secp256k1 uses --digest. Protected/ask-first signing needs approval. "
-            "For Solana approvals, use a durable nonce (use-avibe-vault Skill recipe); "
-            "the caller creates and funds the nonce account. Protected Solana also needs "
-            "--signing-context-json "
-            '{"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex.'
+            "HD needs --chain. secp256k1 uses --digest; Solana uses exact --message-hex, not a hash. "
+            "Protected/ask-first keys need approval. For Solana, use a durable nonce "
+            "(use-avibe-vault recipe); the caller creates and funds the nonce account. "
+            'Protected Solana context: {"kind":"solana-transaction-v1","messageHex":"HEX"} '
+            "matching --message-hex."
         ),
         epilog=(
-            "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
+            "Example ($MESSAGE_HEX: full serialized message, without signatures):\n"
             '  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -20155,18 +20154,18 @@ def build_parser():
         ],
         help="Ordinary key scheme; HD chain/type fixes it",
     )
-    vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
+    vault_sign_parser.add_argument("--session-id", help="Session ID (Agent default: AVIBE_SESSION_ID)")
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
     vault_sign_parser.add_argument("--command", dest="operation_command", help="Operation shown to the user")
     vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
     vault_signing_context_input = vault_sign_parser.add_mutually_exclusive_group()
     vault_signing_context_input.add_argument(
-        "--signing-context-json",
-        help="Verifiable signing context JSON required for protected keypairs",
+        "--signing-context-json", metavar="JSON",
+        help="Protected signing context JSON",
     )
     vault_signing_context_input.add_argument(
         "--signing-context-file", metavar="PATH",
-        help="Read the same signing-context JSON from a regular UTF-8 file (at most 2,162,688 bytes)",
+        help="Same context: regular UTF-8 file, max 2,162,688 bytes",
     )
     vault_sign_parser.add_argument(
         "--no-callback",
