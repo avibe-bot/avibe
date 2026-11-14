@@ -1321,7 +1321,12 @@ class ShowRuntimeManager:
                         f"Show Runtime request exceeded {total_timeout_seconds:g} seconds"
                     ) from exc
         except (ShowRuntimeRequestTimeoutError, httpx.RequestError) as exc:
-            await self._invalidate_runtime_snapshot(base_url, process)
+            await self._invalidate_runtime_snapshot_if_unhealthy(
+                base_url,
+                process,
+                reason="request_timeout" if isinstance(exc, ShowRuntimeRequestTimeoutError) else "request_error",
+                caller="ShowRuntimeManager._request_runtime_transport",
+            )
             if isinstance(exc, ShowRuntimeRequestTimeoutError):
                 raise
             evidence = ShowRuntimeFailureEvidence(
@@ -1428,26 +1433,60 @@ class ShowRuntimeManager:
             _process=process,
         )
 
-    async def invalidate_websocket_target(self, target: ShowRuntimeWebSocketTarget) -> None:
+    async def invalidate_websocket_target(
+        self,
+        target: ShowRuntimeWebSocketTarget,
+        *,
+        reason: str = "hmr_transport_failure",
+    ) -> None:
         if target._base_url is None:
             return
-        process = target._process
+        await self._invalidate_runtime_snapshot_if_unhealthy(
+            target._base_url,
+            target._process,
+            reason=reason,
+            caller="ui_server._proxy_show_runtime_websocket",
+        )
+
+    async def _invalidate_runtime_snapshot_if_unhealthy(
+        self,
+        base_url: str,
+        process: subprocess.Popen[str] | None,
+        *,
+        reason: str,
+        caller: str,
+    ) -> None:
         if process is not None and process.poll() is not None:
-            await self._invalidate_runtime_snapshot(target._base_url, process)
+            await self._invalidate_runtime_snapshot(
+                base_url,
+                process,
+                reason="process_exit",
+                caller=f"{caller}:{reason}",
+            )
             return
-        # A browser HMR handshake can time out while the shared Runtime is still
-        # healthy (for example, a cold or stale session taking Vite past the
-        # proxy's handshake deadline). Do not let that one tab retire the
-        # process used by every other Show Page.
-        if await self._healthy(target._base_url):
+        if await self._healthy(base_url):
+            logger.info(
+                "Show Runtime snapshot retained after failure reason=%s caller=%s health=ok",
+                reason,
+                caller,
+            )
             return
-        await self._invalidate_runtime_snapshot(target._base_url, process)
+        await self._invalidate_runtime_snapshot(base_url, process, reason=reason, caller=caller)
 
     async def _invalidate_runtime_snapshot(
         self,
         base_url: str,
         process: subprocess.Popen[str] | None,
+        *,
+        reason: str,
+        caller: str,
     ) -> None:
+        logger.info(
+            "Show Runtime snapshot invalidation reason=%s caller=%s pid=%s",
+            reason,
+            caller,
+            getattr(process, "pid", None),
+        )
         async with self._lock:
             if self._base_url == base_url and self._process is process:
                 self._base_url = None

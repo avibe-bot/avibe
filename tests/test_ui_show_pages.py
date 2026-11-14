@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import io
 import json
+import logging
 import os
 import re
 import shlex
@@ -225,7 +226,7 @@ class _FakeShowRuntimeManager:
         self.websocket_headers.append(headers)
         return ShowRuntimeWebSocketTarget(url=f"ws://127.0.0.1:1{path}", headers=headers)
 
-    async def invalidate_websocket_target(self, target):
+    async def invalidate_websocket_target(self, target, **_kwargs):
         pass
 
     def stop(self):
@@ -8910,6 +8911,7 @@ def test_runtime_request_transport_boundary_publishes_recovery_evidence(
     entrypoint,
 ):
     manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=False))
 
     async def request_runtime():
         if entrypoint == "request":
@@ -8942,6 +8944,28 @@ def test_runtime_request_transport_boundary_publishes_recovery_evidence(
     monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.request", successful_request)
     assert asyncio.run(request_runtime()).status_code == 200
     assert admissions == [True]
+
+
+def test_runtime_request_timeout_keeps_healthy_runtime_snapshot(monkeypatch, tmp_path):
+    manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
+    base_url = manager._base_url
+
+    async def timeout(_client, _method, _url, **_kwargs):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("core.show_runtime.httpx.AsyncClient.request", timeout)
+
+    with pytest.raises(ShowRuntimeRequestTimeoutError):
+        asyncio.run(
+            manager.request(
+                "GET",
+                "/sessions/ses123/app/api/slow",
+                envelope=ShowRuntimeProtocolEnvelope(ShowRuntimeContext.PRIVATE),
+                timeout_seconds=0.01,
+            )
+        )
+
+    assert manager._base_url == base_url
 
 
 def test_runtime_transport_response_does_not_invalidate_base_url(monkeypatch, tmp_path):
@@ -9026,9 +9050,10 @@ def test_websocket_transport_failure_keeps_healthy_runtime_snapshot(monkeypatch,
     assert manager._base_url == base_url
 
 
-def test_websocket_transport_failure_invalidates_unhealthy_runtime(monkeypatch, tmp_path):
+def test_websocket_transport_failure_invalidates_unhealthy_runtime(monkeypatch, tmp_path, caplog):
     manager = _runtime_manager_with_failing_transport(monkeypatch, tmp_path)
     set_show_runtime_manager_for_tests(manager)
+    caplog.set_level(logging.INFO, logger="core.show_runtime")
     monkeypatch.setattr(manager, "_healthy", lambda _base_url: asyncio.sleep(0, result=False))
     handshake = _FailingWebSocketHandshake(ClientConnectionError("runtime connection refused"))
     monkeypatch.setattr(ui_server, "ClientSession", lambda: _FailingWebSocketSession(handshake))
@@ -9038,6 +9063,8 @@ def test_websocket_transport_failure_invalidates_unhealthy_runtime(monkeypatch, 
         asyncio.run(ui_server._proxy_show_runtime_websocket(websocket, "ses123"))
 
     assert manager._base_url is None
+    assert "reason=hmr_connection_error" in caplog.text
+    assert "caller=ui_server._proxy_show_runtime_websocket" in caplog.text
 
 
 def test_dead_runtime_process_invalidates_without_health_probe(monkeypatch, tmp_path):
