@@ -771,6 +771,17 @@
           "title": "允许屏幕与系统音频录制",
           "detail": "在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中授权正在运行的 Avibe 桌面应用：点击 +，或将 Avibe 拖入列表，然后启用它。"
         }
+      },
+      "windows": {
+        "subtitle": "让 Avibe Agent 查看并操作这台 Windows 电脑。在下方开启即可，Windows 无需额外授权。",
+        "title": "Windows 上的电脑操作",
+        "previewBadge": "预览",
+        "previewDetail": "Windows 上的电脑操作目前为预览版，显示缩放、多显示器和输入法仍在验证中。",
+        "apps": "Agent 可以操作以你的 Windows 账户运行的普通应用，无需设置辅助功能或屏幕录制。",
+        "elevated": "以管理员身份运行的窗口会被拒绝。Avibe 不会自行提升权限，Agent 会告诉你它无法操作该窗口。如需让它协助，请不要使用“以管理员身份运行”，重新打开该应用。",
+        "stop": "关闭电脑操作、退出 Avibe，或 Avibe 意外退出时，驱动会停止，正在进行的操作也会结束。",
+        "enableDetail": "为这台电脑开启电脑操作。在你开启之前，它会保持关闭。",
+        "actionFailed": "桌面应用没有响应。请重试，或退出并重新打开 Avibe。"
       }
     },
     "diagnosticsTab": "诊断",
@@ -3744,7 +3755,13 @@
         "shellNotRunningDetail": "请打开或重新打开 Avibe 桌面应用，以使用电脑操作。",
         "daemonUnreachableDetail": "桌面驱动当前无法连接。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
         "controllerUnavailableDetail": "当前无法连接 Avibe Controller。请等待服务恢复后再使用电脑操作 CLI。",
-        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。"
+        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。",
+        "unsupportedArchitectureDetail": "Windows 上的电脑操作需要 x64 电脑，预览版暂不支持此设备。",
+        "elevatedRuntimeDetail": "Avibe 服务正以管理员身份运行，因此电脑操作不可用。请退出 Avibe，然后不要使用“以管理员身份运行”，正常重新打开。",
+        "sessionUnavailableDetail": "电脑操作需要已登录的 Windows 桌面。请登录这台电脑的桌面，然后重新打开 Avibe。",
+        "sessionLockedDetail": "这台电脑已锁定，或远程会话已断开。请解锁或重新连接后再检查。",
+        "sessionMismatchDetail": "Avibe 服务和桌面应用运行在不同的 Windows 会话中。请退出 Avibe，然后在你正在使用的桌面上重新打开。",
+        "pipeUnverifiedDetail": "Avibe 无法验证与电脑操作驱动的连接，因此拒绝了它。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。"
       }
     },
     "openControlPanel": "进入控制面板",

@@ -2,7 +2,7 @@
 name: computer-use
 slug: computer-use
 description: Use Avibe's local Computer Use CLI for carefully bounded desktop observation and actions.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Computer Use
@@ -148,10 +148,34 @@ name. Save a flow as a reusable Skill only after the owner approves.
 - `force-quit` sends SIGKILL and can lose unsaved work; close cooperatively first.
 
 Report these states and stop or wait instead of retrying: `off`,
-`needs_permission` (Accessibility or Screen Recording), `needs_runtime` (the
+`needs_permission` (Accessibility or Screen Recording on macOS), `needs_runtime` (the
 owner must restart the service), `starting`, `error`, `unavailable`,
 `target_busy` (another call holds the target), and `observe_first` (observe it
 in this Session first).
+
+## Windows (Preview)
+
+On Windows x64 the Avibe desktop app hosts Computer Use as a Preview. The
+kernel, SDK, saved flows, and safety rules above are the same.
+
+- Windows apps have no bundle IDs: select them by `name` or `nameContains`,
+  using the names that `observe apps` reports.
+- Windows asks for no Accessibility or Screen Recording grant. Never tell the
+  owner to open System Settings; report the state you received instead.
+- App windows that run as administrator (elevated) are refused. When an
+  action is refused because its target window is elevated, tell the owner that
+  Avibe cannot control that window and that reopening the app without "Run as
+  administrator" lets you continue. Never retry it, ask the owner to elevate
+  Avibe, or work around the refusal.
+- To open a menu, `await win.activate()` and observe that this exact window is
+  focused before the click: foreground delivery restores the previous window,
+  which closes the menu again.
+- An elevated target is different from Avibe itself running as administrator:
+  then Computer Use reports `unavailable` (`elevated_runtime`) and the owner
+  must reopen Avibe normally.
+- Turning Computer Use off, quitting Avibe, or Avibe exiting stops the driver
+  and ends Computer Use. A later call reports `off` or `unavailable`: report it
+  and stop.
 
 ## Appendix: single-shot commands for fallback and debugging
 

@@ -129,6 +129,27 @@ expose internal reason codes, turn the feature on, or issue permission changes. 
 desktop-managed macOS Runtime; a terminal-installed Avibe Runtime does not show
 a native desktop control it cannot own.
 
+## Windows (Preview)
+
+On Windows x64, once the desktop app reports Computer Use as supported, the
+same Settings page is labelled **Preview** and shows one step: **Turn on**.
+Windows has no Accessibility or Screen Recording grants, so the macOS
+permission steps, **Open Settings** actions, and Quit & Reopen guidance never
+appear there. The page also states that:
+
+- Agents operate ordinary apps running under the user's Windows account.
+- App windows running as administrator are refused, and the Agent says so;
+  Avibe never raises its own rights. This differs from Avibe itself running
+  as administrator, which keeps Computer Use unavailable until Avibe is
+  reopened normally.
+- Turning Computer Use off, quitting Avibe, or Avibe closing unexpectedly
+  stops the driver and ends any action in progress.
+
+The page recognizes Windows only inside the desktop app, whose window runs on
+the host. A browser elsewhere keeps the macOS guide. A host that reports
+Computer Use unsupported, including every older Windows build, keeps the
+unsupported notice.
+
 ## Agent CLI and Skill
 
 Agents use Computer Use through the Controller-owned CLI and the built-in
