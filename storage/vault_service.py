@@ -1555,6 +1555,15 @@ def _request_row_payload(
         "expires_at": row.get("expires_at"),
         "card": card if isinstance(card, dict) else None,
     }
+    # Advisory only: do not parse, mutate or add to the signed operation context.
+    # The same conditional copy applies to nonce, blockhash and opaque messages.
+    if (
+        row.get("request_type") == "sign"
+        and row.get("status") == "pending"
+        and isinstance(delivery, dict)
+        and delivery.get("scheme") == vault_solana.SCHEME
+    ):
+        payload["solana_lifetime_hint"] = vault_solana.APPROVAL_LIFETIME_HINT
     if policy.audience == REQUEST_AUDIENCE_UI and conn is not None:
         payload["session"] = _request_session_summary(conn, _request_session_id(row))
     return payload

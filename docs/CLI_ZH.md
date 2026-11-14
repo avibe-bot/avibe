@@ -491,6 +491,42 @@ CLI 是常驻 Avibe 服务的轻客户端，不打开 SQLite 连接。调用进�
 Show 的 `api/*.ts` handler 可使用 `use-show-pages` Skill 介绍的 Node 服务端
 适配器，避免每次请求都启动 CLI 进程。已有页面不会自动改写。
 
+### `vibe vault sign`：Solana 批准等待与有效期
+
+Solana 交易需要批准时（标准密钥的 `always_ask`、所选 HD 账户的 `always_ask`，
+或受保护密钥），请在请求签名前用**持久 nonce**构建交易。近期区块哈希可能在用户
+决定期间过期。未开启逐次确认的标准密钥仍可直接签名。
+
+Agent 使用调用方的工具和经授权的资金创建、初始化并资助 nonce 账户；Avibe 不持有
+SOL、不创建账户，也不广播交易。将账户中存储的 nonce 填入 `recent_blockhash`，
+把精确的 System `AdvanceNonceAccount` 放在第 **0** 条指令，位于转账及计算预算
+指令之前。所有必要签名者签署同一消息。首次创建账户本身也需要批准并及时提交：
+安排用户及时批准，或使用用户预先配置的账户，不能关闭批准策略来绕过。
+参见[已测试的构建示例与操作步骤（英文）](../skills/use-avibe-vault/references/solana-durable-nonce.md)。
+
+```bash
+vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"
+# 受保护密钥：添加完全匹配的 --signing-context-json
+# '{"kind":"solana-transaction-v1","messageHex":"<完整的 MESSAGE_HEX>"}'
+# 标准 HD：用 --chain solana --account N 替代 --scheme。
+```
+
+`MESSAGE_HEX` 是完整的序列化消息，不是哈希或带签名的交易包。待批准的 Solana
+请求对象带有英文 `solana_lifetime_hint`：
+“If this transaction uses a recent blockhash, it may expire while awaiting approval.
+Use a durable nonce for delayed submission.”
+其含义是：“如果此交易使用近期区块哈希，可能会在等待批准期间过期。需要延后提交时，
+请使用持久 nonce。”这是给所有待批准 Ed25519 签名请求的条件性建议（包括持久 nonce
+和原始消息），并未解析交易，也不判断是否过期或有效。已结束的请求和其他签名方案
+不带此字段。
+
+等待现有回调，读取其签名结果并提交保存的原始字节；使用 `--no-callback` 时自行
+读取 `vibe vault await REQUEST_ID`。不要重跑待批准的 `sign`，也不要在旧批准下
+刷新区块哈希。同一 nonce 账户的交易应串行处理，提交前重新检查 nonce 和授权地址。
+广播结果不明时，先核对签名状态与 nonce 状态，再决定是否准备另一笔付款。执行失败
+也可能消耗 nonce 和费用。消息字节改变后必须重新批准；持久 nonce 不延长 Avibe
+请求的有效期，也不保证交易执行成功。
+
 ### `vibe vault key authorize`
 
 授权 avault 一次，让它读取这台 Mac 钥匙串中的 Vault 密钥。
