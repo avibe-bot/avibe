@@ -91,7 +91,7 @@ def main():
     from pywinauto import Application, Desktop
     import psutil
 
-    if any(p.name().lower() == "avibe.exe" for p in psutil.process_iter()):
+    if any(p.name().lower() in {"avibe.exe", "avibe-desktop.exe"} for p in psutil.process_iter()):
         raise RuntimeError("Runner already has Avibe; refusing to touch existing installation")
     installer = ROOT / ASSET
     urllib.request.urlretrieve(RELEASE + ASSET, installer)
@@ -125,15 +125,25 @@ def main():
     collector.start()
     try:
         ps("Start-Process -FilePath $env:ACCEPTANCE_INSTALLED_SHORTCUT")
-        def app_process():
+        observed_processes = {}
+
+        def app_processes():
+            matches = []
             for proc in psutil.process_iter(["pid", "exe"]):
                 try:
                     if proc.info["exe"] and os.path.samefile(proc.info["exe"], executable):
-                        return proc
+                        preparing = "--prepare-runtime" in proc.cmdline()
+                        observed_processes.setdefault(proc.pid, {
+                            "pid": proc.pid, "executable": proc.info["exe"],
+                            "created_at": proc.create_time(), "preparing_runtime": preparing,
+                        })
+                        matches.append((proc, preparing))
                 except (OSError, psutil.Error):
                     pass
-            return None
-        original = wait_for(app_process, 180, "Installed application did not launch")
+            save("observed-app-processes.json", list(observed_processes.values()))
+            return matches
+
+        original = wait_for(lambda: next((proc for proc, preparing in app_processes() if not preparing), None), 180, "Installed application did not launch")
         app = Application(backend="win32").connect(process=original.pid)
         def menu_window():
             return next((window for window in app.windows() if window.menu()), None)
@@ -182,12 +192,29 @@ def main():
         dialog.capture_as_image().save(str(EVIDENCE / "update-offer.png"))
         button.click_input()
         def replacement():
-            current = app_process()
-            return current if current and current.pid != original.pid and version() == NEW else None
-        relaunched = wait_for(replacement, 600, "RC19 replacement and relaunch not observed")
-        new_app = Application(backend="win32").connect(process=relaunched.pid)
-        new_window = wait_for(lambda: next((item for item in new_app.windows() if item.is_visible()), None), 90, "Relaunched app did not show its window")
+            # NSIS runs the new executable with --prepare-runtime before the
+            # helper relaunches its GUI. Never bind permanently to that first
+            # transient PID; rescan the owned executable on every observation.
+            for current, preparing in app_processes():
+                if preparing or current.pid == original.pid:
+                    continue
+                try:
+                    candidate = Application(backend="win32").connect(process=current.pid)
+                    windows = [item for item in candidate.windows() if item.is_visible() and item.menu()]
+                    observed_processes[current.pid]["visible_main_windows"] = len(windows)
+                    save("observed-app-processes.json", list(observed_processes.values()))
+                    if windows and version() == NEW:
+                        return current, windows[0]
+                except Exception as error:
+                    # Process turnover is expected during installation. Keep
+                    # diagnostic type only, never arbitrary command arguments.
+                    observed_processes[current.pid]["observation_error"] = type(error).__name__
+                    save("observed-app-processes.json", list(observed_processes.values()))
+            return None
+        relaunched, new_window = wait_for(replacement, 600, "RC19 replacement and visible GUI relaunch not observed")
         new_window.capture_as_image().save(str(EVIDENCE / "relaunched-window.png"))
+        save("relaunch.json", {"old_pid": original.pid, "new_pid": relaunched.pid,
+                              "new_version": version(), "visible_main_window": True})
         stop.set()
         collector.join(timeout=10)
         if collector.is_alive():
