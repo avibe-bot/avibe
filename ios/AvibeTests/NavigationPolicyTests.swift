@@ -1955,17 +1955,22 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertNil(runtimeController.pageColorScheme)
         XCTAssertEqual(runtimeController.preferredStatusBarStyle, .default)
 
-        // Account covers the runtime and takes the status bar, then hands it
-        // back to the same runtime.
+        // Account covers the runtime in a native sheet and takes the status
+        // bar, then hands it back to the same runtime.
         appModel.showAccount()
+        var coveredOnboarding: MobileOnboardingViewController?
         try await waitUntil {
-            hostingController.childForStatusBarStyle
-                is MobileOnboardingViewController
+            coveredOnboarding = self.mobileOnboardingController(
+                in: hostingController
+            )
+            return coveredOnboarding != nil
         }
+        XCTAssertEqual(coveredOnboarding?.preferredStatusBarStyle, .default)
         XCTAssertTrue(appModel.route.coversRuntime)
         XCTAssertTrue(appModel.returnToRuntime())
         try await waitUntil {
-            hostingController.childForStatusBarStyle === runtimeController
+            hostingController.presentedViewController == nil
+                && hostingController.childForStatusBarStyle === runtimeController
         }
     }
 
@@ -3290,6 +3295,24 @@ final class NavigationPolicyTests: XCTestCase {
         )
     }
 
+    @MainActor
+    private func mobileOnboardingController(
+        in controller: UIViewController
+    ) -> MobileOnboardingViewController? {
+        if let onboarding = controller as? MobileOnboardingViewController {
+            return onboarding
+        }
+        if let presented = controller.presentedViewController,
+           let onboarding = mobileOnboardingController(in: presented) {
+            return onboarding
+        }
+        for child in controller.children {
+            if let onboarding = mobileOnboardingController(in: child) {
+                return onboarding
+            }
+        }
+        return nil
+    }
     @MainActor
     private func host(_ controller: UIViewController) -> UIWindow {
         let window = UIWindow(

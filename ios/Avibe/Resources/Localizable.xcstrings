@@ -28,7 +28,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "账号"
+            "value" : "账户"
           }
         }
       }
@@ -54,13 +54,45 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Change Instance"
+            "value" : "Switch Instance"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "更换实例"
+            "value" : "切换实例"
+          }
+        }
+      }
+    },
+    "browser.error.title.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Can't reach %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暂时连不上 %@"
+          }
+        }
+      }
+    },
+    "browser.other_instances" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Other Instances"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其他实例"
           }
         }
       }
