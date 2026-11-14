@@ -920,6 +920,7 @@ const NON_KEY_LITERALS = [
   'app.returnToInstance',
   'app.setAccountActionAvailable',
   'app.showAccount',
+  'app.showInstances',
   'auth.requestOtp',
   'auth.signInWithPassword',
   'auth.verifyOtp',

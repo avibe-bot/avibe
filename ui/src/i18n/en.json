@@ -3622,6 +3622,7 @@
     "versionLabel": "Version",
     "accountMenuLabel": "Account ({{email}})",
     "signedInAs": "Signed in as",
+    "switchInstanceLabel": "{{name}}, current instance. Switch instance",
     "openMobileAccount": "Account and Avibes",
     "signOut": "Sign out",
     "signingOut": "Signing out…",
