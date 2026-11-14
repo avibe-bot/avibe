@@ -278,17 +278,42 @@ async def run(simulator: str) -> None:
     host.write_json(root / "verdict.json", reconcile(root / "results", code))
 
 
+def group_exists(group: int) -> bool:
+    """Probe only the recorded fresh-session group, not the leader's status."""
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Darwin may briefly report EPERM while a killed orphan is reaped.
+        # Unknown is not empty: keep waiting (and fail closed if it persists).
+        return True
+    return True
+
+
+async def wait_group_empty(group: int, seconds: float) -> None:
+    async with asyncio.timeout(seconds):
+        while group_exists(group):
+            await asyncio.sleep(0.05)
+
+
 async def close_run(process: asyncio.subprocess.Process | None, fixture_host: host.Host) -> None:
     try:
-        if process and process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
+        if process is not None:
+            # start_new_session=True makes the recorded PID the owned PGID.
+            # A leader exiting on TERM (or before cleanup begins) says nothing
+            # about its descendants. Escalate based on the group's liveness.
+            group = process.pid
             try:
-                async with asyncio.timeout(5):
-                    await process.wait()
-            except TimeoutError:
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
+                    os.killpg(group, signal.SIGTERM)
+                try:
+                    await wait_group_empty(group, 5)
+                except TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(group, signal.SIGKILL)
+                    await wait_group_empty(group, 3)
+            finally:
                 async with asyncio.timeout(3):
                     await process.wait()
     finally:

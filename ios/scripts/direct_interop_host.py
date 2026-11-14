@@ -285,9 +285,6 @@ class Ingress:
         return self.server.sockets[0].getsockname()[1]
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if self.closing:
-            writer.close()
-            return
         if len(self.streams) >= 64:
             self.errors.append("ingress stream bound exceeded")
             writer.close()
@@ -296,9 +293,14 @@ class Ingress:
         # ingress connections, not merely zero successfully authenticated ones.
         stream = {"index": len(self.streams), "phase": self.phase, "authenticated": False, "kind": None,
                   "received": 0, "sent": 0, "eof": False, "reset": False, "closed": False}
-        self.writers.add(writer)
         self.streams.append(stream)
         self.journal.record("ingress_accept", stream=len(self.streams) - 1, phase=self.phase)
+        if self.closing:
+            self.errors.append("ingress connection arrived during cleanup")
+            stream["closed"] = True
+            writer.close()
+            return
+        self.writers.add(writer)
         task = asyncio.create_task(self._serve(reader, writer, stream))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -651,12 +653,12 @@ class Host:
                 directory.mkdir(parents=True)
                 case = Case(name, client_id, self.binary, directory)
                 failure = None
-                observed = None
                 skip = False
                 try:
                     offer = await case.start(tier)
                     await send_message(writer, offer)
-                    skip = tier == "transport" and not offer["admissible_addresses"]
+                    empty_transport = tier == "transport" and not offer["admissible_addresses"]
+                    skip = empty_transport and name == "admitted" and not records
                     async with asyncio.timeout(20 if name in NEGATIVE_CASES or skip else 10) as deadline:
                         while True:
                             message = await read_message(reader, 20 if case.ingress.phase == "case" or skip else 10)
@@ -669,12 +671,14 @@ class Host:
                                 await case.arm(writer)
                             elif kind == "result":
                                 case.app_result = message
+                                require(not empty_transport or skip,
+                                        "transport addresses disappeared after coverage began")
                                 if skip:
                                     require(message.get("outcome") == "not_covered" and not case.ingress.streams,
                                             "empty-address transport tier did not visibly skip")
                                 else:
                                     await case.finish_io()
-                                    observed = case.confirm(message)
+                                    case.confirm(message)
                                 break
                             else:
                                 raise HostFault("unexpected case message")
@@ -684,8 +688,20 @@ class Host:
                     await case.close()
                 if case.sidecar.errors or case.ingress.errors:
                     failure = failure or "; ".join(case.sidecar.errors + case.ingress.errors)
+                # The initial proof must hold before cleanup, so stopping the
+                # fixture cannot manufacture closure evidence. Recheck after
+                # cleanup too: late ingress must not disappear from a cached
+                # verdict while the sidecar is still able to reach the listener.
+                if failure is None:
+                    try:
+                        if skip:
+                            require(not case.ingress.streams, "transport skip reached ingress during cleanup")
+                        else:
+                            case.confirm(case.app_result)
+                    except HostFault as error:
+                        failure = str(error)
                 record = {"name": name, "host": "contradicted" if failure else "confirmed",
-                          "observed": observed if observed is not None else case.host_observed(), "detail": failure}
+                          "observed": case.host_observed(), "detail": failure}
                 if case.app_result:
                     app_record = {k: v for k, v in case.app_result.items() if k not in {"type", "schema"}}
                     record["app_result_sha256"] = hashlib.sha256(

@@ -21,10 +21,11 @@ from tests.test_ios_direct_interop_host import connect_ingress, host, probe
 
 
 @pytest.mark.asyncio
-async def test_six_case_session_and_transport_skip_reconcile(tmp_path):
+@pytest.mark.parametrize("late_case", [None, "admitted", "not_admitted"])
+async def test_six_case_session_and_transport_skip_reconcile(tmp_path, late_case):
     child = tmp_path / "protocol-fixture"
     child.write_text(f"#!{sys.executable}\n" + '''
-import json, pathlib, sys
+import json, pathlib, socket, sys
 start = json.loads(sys.stdin.readline())
 pathlib.Path("fixture-start.json").write_text(json.dumps(start))
 print(json.dumps({"type":"ready", "protocol":1, "endpoint_id":"d"*64, "addresses":["127.0.0.1:1234"]}), flush=True)
@@ -35,8 +36,15 @@ for line in sys.stdin:
     if command["type"] == "admission" and command["ttl_seconds"] == 0:
         print(json.dumps({"type":"peer_closed", "endpoint_id":command["endpoint_id"], "reason":"admission_ended"}), flush=True)
     if command["type"] == "stop":
+        if pathlib.Path.cwd().name == LATE_CASE and pathlib.Path.cwd().parent.name == "engine":
+            client = 1 if LATE_CASE == "admitted" else 2
+            address, port = start["stream_addr"].split(":")
+            with socket.create_connection((address, int(port)), timeout=2) as stream:
+                stream.sendall((f'AVDT1 {start["token"]} {client:064x}\\n' +
+                                'CONNECT interop.invalid:443 HTTP/1.1\\r\\nHost: interop.invalid:443\\r\\n\\r\\n').encode())
+                assert stream.recv(4096).startswith(b"HTTP/1.1 200 ")
         break
-''')
+'''.replace("LATE_CASE", repr(late_case)))
     child.chmod(0o700)
     directory = tmp_path / "results"
     supervisor = host.Host(child, directory)
@@ -90,7 +98,10 @@ for line in sys.stdin:
             result = {"name": name, "outcome": "passed", "observed": observed, "detail": None}
             await host.send_message(writer, {"type": "result", "schema": 2, **result})
             verdict = await host.read_message(reader, 10)
-            assert verdict == {"type": "verdict", "schema": 2, "name": name, "host": "confirmed", "detail": None}
+            if name == late_case:
+                assert verdict["host"] == "contradicted", "shutdown ingress was omitted from final verdict"
+            else:
+                assert verdict == {"type": "verdict", "schema": 2, "name": name, "host": "confirmed", "detail": None}
             app_cases.append(result)
         assert await host.read_message(reader, 2) == {"type": "done", "schema": 2}
         host.write_json(directory / "engine.json", {"schema": 2, "tier": "engine", "status": "passed", "cases": app_cases})
@@ -108,7 +119,13 @@ for line in sys.stdin:
     finally:
         await host.close_writer(writer)
         await supervisor.close()
-    assert runner.reconcile(directory, 0) == {"status": "passed", "engine": "passed", "transport": "not_covered"}
+    if late_case is None:
+        assert runner.reconcile(directory, 0) == {"status": "passed", "engine": "passed", "transport": "not_covered"}
+    else:
+        with pytest.raises(runner.host.HostFault, match="engine did not pass"):
+            runner.reconcile(directory, 0)
+        record = next(c for c in json.loads((directory / "host.json").read_text())["cases"] if c["name"] == late_case)
+        assert record["observed"]["case_streams"] == (3 if late_case == "admitted" else 1)
     for name in names:
         commands = [json.loads(line) for line in (directory / "engine" / name / "fixture-commands.jsonl").read_text().splitlines()]
         admissions = [c for c in commands if c["type"] == "admission"]
@@ -185,3 +202,121 @@ for line in sys.stdin:
             with contextlib.suppress(asyncio.CancelledError):
                 await closing
         await supervisor.close()
+
+
+@pytest.mark.asyncio
+async def test_transport_address_loss_cannot_erase_completed_coverage(tmp_path):
+    child = tmp_path / "changing-address-fixture"
+    child.write_text(f"#!{sys.executable}\n" + '''
+import json, pathlib, sys
+start = json.loads(sys.stdin.readline())
+pathlib.Path("fixture-start.json").write_text(json.dumps(start))
+addresses = ["10.0.0.1:1234"] if pathlib.Path.cwd().name == "admitted" else ["127.0.0.1:1234"]
+print(json.dumps({"type":"ready", "protocol":1, "endpoint_id":"d"*64, "addresses":addresses}), flush=True)
+for line in sys.stdin:
+    if json.loads(line)["type"] == "stop":
+        break
+''')
+    child.chmod(0o700)
+    directory = tmp_path / "results"
+    supervisor = host.Host(child, directory)
+    fixture = json.loads((await supervisor.start()).read_text())
+    reader, writer = await asyncio.open_connection("127.0.0.1", int(fixture["control"].split(":")[1]))
+    try:
+        await host.send_message(writer, {"type": "hello", "schema": 2, "tier": "transport"})
+        await host.send_message(writer, {"type": "next", "client_endpoint_id": "1" * 64})
+        assert (await host.read_message(reader, 5))["admissible_addresses"] == ["10.0.0.1:1234"]
+        start = json.loads((directory / "transport/admitted/fixture-start.json").read_text())
+        ingress = SimpleNamespace(token=start["token"], client_id="1" * 64)
+        port = int(start["stream_addr"].split(":")[1])
+        await probe(ingress, port)
+        barrier = {"type": "setup_done", "schema": 2, "name": "admitted"}
+        await host.send_message(writer, barrier)
+        assert await host.read_message(reader, 3) == barrier
+        await probe(ingress, port)
+        payload_reader, payload_writer = await connect_ingress(ingress, port)
+        payload_writer.write(b"avibe-direct-interop-v2\n")
+        await payload_writer.drain()
+        assert await payload_reader.readexactly(24) == b"avibe-direct-interop-v2\n"
+        payload_writer.write_eof()
+        assert await payload_reader.read() == b""
+        await host.close_writer(payload_writer)
+        await host.send_message(writer, {"type": "result", "schema": 2, "name": "admitted", "outcome": "passed", "detail": None,
+            "observed": {"control_tcp": True, "setup_attempts": 1, "setup_probe": {"status": 200, "streams": 1},
+                         "case_probe": {"status": 200}, "dial": "established", "remote_identity": "matched",
+                         "payload": {"sent_bytes": 24, "received_bytes": 24, "sent_fin": True, "received_fin": True}}})
+        assert (await host.read_message(reader, 5))["host"] == "confirmed"
+        await host.send_message(writer, {"type": "next", "client_endpoint_id": "2" * 64})
+        offer = await host.read_message(reader, 5)
+        assert offer["name"] == "not_admitted" and offer["admissible_addresses"] == []
+        await host.send_message(writer, {"type": "result", "schema": 2, "name": "not_admitted",
+                                         "outcome": "not_covered", "observed": {}, "detail": None})
+        verdict = await host.read_message(reader, 5)
+        assert verdict["host"] == "contradicted", "a later empty offer erased already completed coverage"
+        await host.close_writer(writer)
+        await asyncio.wait_for(asyncio.gather(*tuple(supervisor.tasks)), 3)
+        evidence = json.loads((directory / "host.json").read_text())["transport"]
+        assert evidence["status"] == "failed"
+        assert [case["name"] for case in evidence["cases"]] == ["admitted", "not_admitted"]
+        assert evidence["cases"][0]["host"] == "confirmed"
+    finally:
+        await host.close_writer(writer)
+        await supervisor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leader_state", ["exits_on_term", "already_exited"])
+async def test_runner_reaps_residual_group_after_leader_exit(tmp_path, leader_state):
+    ready = tmp_path / "descendant-ready"
+    published = tmp_path / "descendant-pid"
+    child_code = (
+        "import os,pathlib,signal,sys,time; "
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
+    )
+    leader_code = f'''
+import pathlib, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(ready)!r}])
+while not pathlib.Path({str(ready)!r}).exists():
+    time.sleep(0.01)
+pathlib.Path({str(published)!r}).write_text(str(child.pid))
+if {leader_state!r} == "already_exited":
+    sys.exit(0)
+time.sleep(60)
+'''
+    fixture_host = host.Host(tmp_path / "unused", tmp_path / "results")
+    await fixture_host.start()
+    process = await asyncio.create_subprocess_exec(sys.executable, "-c", leader_code,
+                                                   start_new_session=True,
+                                                   stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        async with asyncio.timeout(3):
+            while not published.exists():
+                await asyncio.sleep(0.01)
+        descendant = int(published.read_text())
+        if leader_state == "already_exited":
+            await asyncio.wait_for(process.wait(), 3)
+            assert process.returncode == 0
+        await asyncio.wait_for(runner.close_run(process, fixture_host), 12)
+        assert process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(descendant, 0)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(process.pid, 0)
+    finally:
+        # A failing regression still terminates only its recorded fresh-session
+        # group; never pattern-kill or touch any existing desktop process.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(3):
+                while True:
+                    try:
+                        os.killpg(process.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    except PermissionError:
+                        pass
+                    await asyncio.sleep(0.01)
+        await fixture_host.close()

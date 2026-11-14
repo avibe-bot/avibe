@@ -162,3 +162,39 @@ for line in sys.stdin:
     assert (tmp_path / "sidecar.stderr").read_text() == "fixture diagnostic\n"
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.asyncio
+async def test_pending_accept_during_cleanup_is_counted_and_contradicts_zero_ingress():
+    ingress = host.Ingress("a" * 64, "b" * 64, host.Journal())
+    ingress.phase = "case"
+    accepted = asyncio.Event()
+    release = asyncio.Event()
+    callbacks = []
+
+    async def delayed(reader, writer):
+        accepted.set()
+        await release.wait()
+        ingress._accept(reader, writer)
+
+    def accept(reader, writer):
+        callbacks.append(asyncio.create_task(delayed(reader, writer)))
+
+    ingress.server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    reader, writer = await asyncio.open_connection("127.0.0.1", ingress.server.sockets[0].getsockname()[1])
+    await asyncio.wait_for(accepted.wait(), 1)
+    closing = asyncio.create_task(ingress.close())
+    try:
+        async with asyncio.timeout(1):
+            while not ingress.closing:
+                await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(closing, 3)
+        assert await asyncio.wait_for(reader.read(), 1) == b""
+        assert len(ingress.streams) == 1
+        assert ingress.errors == ["ingress connection arrived during cleanup"]
+    finally:
+        release.set()
+        await asyncio.gather(*callbacks)
+        await ingress.close()
+        await host.close_writer(writer)

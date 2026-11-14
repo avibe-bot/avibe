@@ -35,6 +35,10 @@ control failure, timeout or cancellation. Cleanup is idempotent and independentl
 owned: cancellation of a serving task or repeated cancellation of `close()` cannot
 abandon its bounded stop/TERM/KILL/reap sequence. The caller joins that cleanup
 before propagating cancellation; shielding without joining is not sufficient.
+The runner also tracks its recorded fresh-session process group's liveness
+independently of the xcodebuild leader. Even an already-exited leader does not
+skip group cleanup: surviving members receive bounded TERM/KILL escalation, and
+success requires the group to be gone and the owned leader to be reaped.
 It does not install anything, enable
 transport, modify pairing, use the owner's live runtime, provision certificates,
 perform public DNS/backend calls, or authorize device/TestFlight qualification.
@@ -137,7 +141,11 @@ nullable `detail`. The host independently answers exactly:
 A failure uses `host: contradicted`. No setup count is sent in the verdict: the
 App counts its own setup streams and the host counts its own accepted ingress
 streams. They must agree. The host never accepts an App `passed` as sufficient
-evidence for its own `confirmed`.
+evidence for its own `confirmed`. Case assertions must hold before cleanup, so
+cleanup cannot manufacture their initial proof, and must still hold after the
+sidecar and ingress fixture have fully closed. The final artifact records that
+terminal snapshot: a valid late shutdown probe cannot disappear behind an
+earlier zero-ingress verdict.
 
 `engine.json` and `transport.json` belong to the App. `host.json` has the six
 engine cases at the top level and conditional transport evidence under
@@ -154,6 +162,8 @@ advertised by the sidecar. If none exist, the host's first `admitted` offer has
 confirmed verdict and `done`, and writes `transport.json` with
 `status: not_covered` and `cases: []`. This is the sole allowed coverage skip.
 An offered address that fails validation or dial is a failure, not a skip.
+If a later offer loses its admissible addresses after coverage has begun, the
+tier fails and retains its earlier case records; it cannot become `not_covered`.
 
 Success requires xcodebuild exit 0, host exit 0, and both independent artifacts
 agreeing on all six engine cases as passed/confirmed. Missing files, early
