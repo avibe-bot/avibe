@@ -301,3 +301,16 @@ it('an unknown refusal is shown in Avibe’s own words', async () => {
   await launch();
   expect(await screen.findByText(fill(p.notice.refusal, { message: 'Something new went wrong' }))).toBeTruthy();
 });
+
+it('blocks the wallet from before the save leaves, so a dialog closed mid-save never shows it', async () => {
+  let answer: (value: unknown) => void = () => undefined;
+  api.createVaultSecret.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+  await openProtected();
+  await launch();
+  expect(screen.getByText(p.notice.saving)).toBeTruthy();
+  expect(isHdWalletBlocked(NAME)).toBe(true);
+  cleanup();
+  // The dialog is gone; the answer arrives later and matches: the block lifts.
+  await act(async () => { answer({ ok: true, reconciliation: snapshot() }); });
+  expect(isHdWalletBlocked(NAME)).toBe(false);
+});

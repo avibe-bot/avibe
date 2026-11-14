@@ -11,7 +11,7 @@ import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useApi, type VaultCreatePayload, type VaultWebAuthnRegistrationPayload } from '@/context/ApiContext';
 
 import { ProtectedHdDesignState } from './protectedHdDesign';
-import { blockHdWallet, unblockHdWallet } from './vaultHdQuarantine';
+import { blockHdWallet, isHdWalletBlocked, unblockHdWallet } from './vaultHdQuarantine';
 import { openVaultAuthorizationWindow, VaultSandboxError } from './vaultSandboxClient';
 import {
   parseProtectedHdReconciliation,
@@ -122,10 +122,6 @@ export function useProtectedHdCreate() {
     } catch {
       // Unreachable, timed out or not JSON: still unconfirmed.
     }
-    // A wallet under this name may now be in Avibe without being confirmed as this one: this browser
-    // keeps it blocked from funding (no addresses, no accounts) after the dialog closes. A refusal
-    // means the name belongs to another record, which is not blocked.
-    if (refusal === null) blockHdWallet(op.name);
     setPhase({ kind: 'unconfirmed', refusal });
   }, [api, confirmWith]);
 
@@ -156,6 +152,11 @@ export function useProtectedHdCreate() {
       // From here on Avibe may have saved it: never "not saved", never a retry or a new seed.
       operation.current = protectedHdOperation(input.name, sealed);
       setPhase({ kind: 'saving' });
+      // Blocked from funding in this browser (no addresses, no accounts, approvals refused) from
+      // before the request leaves until an exact match, so closing the dialog while it is pending
+      // never shows a wallet that is not confirmed. A definite refusal lifts only this block.
+      const blockedBefore = isHdWalletBlocked(input.name);
+      blockHdWallet(input.name);
       const payload: VaultCreatePayload = {
         name: input.name,
         kind: 'keypair',
@@ -187,6 +188,8 @@ export function useProtectedHdCreate() {
         await check(null);
         return;
       }
+      // Refused: this request created nothing, and the name belongs to another record (not ours to block).
+      if (created && !blockedBefore) unblockHdWallet(input.name);
       await check(created ? refusalOf(created) : null);
     })();
   }, [api, check, confirmWith]);
