@@ -6,6 +6,7 @@ pub fn install_with_before_exit(
     _app: &AppHandle,
     bytes: &[u8],
     version: &str,
+    before_install: impl FnOnce() -> Result<(), String>,
     before_exit: impl FnOnce(),
 ) -> Result<(), String> {
     use std::{fs, io::Cursor, process::Command};
@@ -53,7 +54,7 @@ pub fn install_with_before_exit(
         return Err("replacement app seal is invalid".into());
     }
     let backup = staging.path().join("previous.app");
-    match replace_with_rollback(current, &replacement, &backup, |a, b| fs::rename(a, b)) {
+    match replace_with_rollback(current, &replacement, &backup, before_install, |a, b| fs::rename(a, b)) {
         Ok(()) => {
             before_exit();
             Ok(())
@@ -121,8 +122,12 @@ fn replace_with_rollback(
     current: &std::path::Path,
     replacement: &std::path::Path,
     backup: &std::path::Path,
+    before_install: impl FnOnce() -> Result<(), String>,
     mut rename: impl FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
+    // Extraction and platform verification may be slow. Revalidate immediately
+    // before touching the running app, not merely before entering this module.
+    before_install()?;
     rename(current, backup).map_err(|e| format!("application retained: {e}"))?;
     if let Err(error) = rename(replacement, current) {
         rename(backup, current).map_err(|restore| {
@@ -141,6 +146,7 @@ pub fn install_with_before_exit(
     app: &AppHandle,
     bytes: &[u8],
     version: &str,
+    before_install: impl FnOnce() -> Result<(), String>,
     before_exit: impl FnOnce(),
 ) -> Result<(), String> {
     use std::{
@@ -201,6 +207,17 @@ pub fn install_with_before_exit(
         let _ = child.wait();
         return Err("requires_host".into());
     }
+    // The helper can spend minutes preparing its backup. A busy Runtime or a
+    // superseded install request at this final boundary leaves the app running.
+    if let Err(error) = before_install() {
+        child
+            .kill()
+            .map_err(|failure| format!("installer cancellation failed: {failure}"))?;
+        child
+            .wait()
+            .map_err(|failure| format!("installer cancellation wait failed: {failure}"))?;
+        return Err(error);
+    }
     before_exit();
     // The helper has copied the previous install and now waits for this PID.
     // Ownership transfers to it; it reports failures and relaunches the old app.
@@ -214,8 +231,10 @@ pub fn install_with_before_exit(
     _app: &AppHandle,
     _bytes: &[u8],
     _version: &str,
+    before_install: impl FnOnce() -> Result<(), String>,
     before_exit: impl FnOnce(),
 ) -> Result<(), String> {
+    drop(before_install);
     drop(before_exit);
     Err("unsupported update platform".into())
 }
@@ -232,17 +251,50 @@ mod tests {
         std::fs::write(&current, b"current runnable application").unwrap();
         std::fs::write(&next, b"new application").unwrap();
         let mut calls = 0;
-        let result = replace_with_rollback(&current, &next, &backup, |a, b| {
-            calls += 1;
-            if calls == 2 {
-                return Err(std::io::Error::other("injected disk failure"));
-            }
-            std::fs::rename(a, b)
-        });
+        let result = replace_with_rollback(
+            &current,
+            &next,
+            &backup,
+            || Ok(()),
+            |a, b| {
+                calls += 1;
+                if calls == 2 {
+                    return Err(std::io::Error::other("injected disk failure"));
+                }
+                std::fs::rename(a, b)
+            },
+        );
         assert!(result.is_err());
         assert_eq!(std::fs::read(&current).unwrap(), b"current runnable application");
         assert!(!backup.exists());
     }
+    #[test]
+    fn activity_during_preparation_cancels_before_any_application_byte_moves() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("Avibe.app");
+        let next = root.path().join("next.app");
+        let backup = root.path().join("old.app");
+        std::fs::write(&current, b"current runnable application").unwrap();
+        std::fs::write(&next, b"new application").unwrap();
+        for code in [
+            "runtime_not_idle",
+            "auto_update_disabled",
+            "stale_desktop_generation",
+            "remote_request_gate:expired",
+        ] {
+            let result = replace_with_rollback(
+                &current,
+                &next,
+                &backup,
+                || Err(code.to_owned()),
+                |_, _| panic!("a denied handoff must not rename any application bytes"),
+            );
+            assert_eq!(result, Err(code.to_owned()));
+            assert_eq!(std::fs::read(&current).unwrap(), b"current runnable application");
+            assert!(!backup.exists());
+        }
+    }
+
     #[test]
     fn failed_restore_keeps_the_backup_for_recovery() {
         let root = tempfile::tempdir().unwrap();
@@ -250,13 +302,19 @@ mod tests {
         let next = root.path().join("next");
         let backup = root.path().join("backup");
         std::fs::write(&current, b"old").unwrap();
-        let result = replace_with_rollback(&current, &next, &backup, |a, b| {
-            if a == current {
-                std::fs::rename(a, b)
-            } else {
-                Err(std::io::Error::other("disk unavailable"))
-            }
-        });
+        let result = replace_with_rollback(
+            &current,
+            &next,
+            &backup,
+            || Ok(()),
+            |a, b| {
+                if a == current {
+                    std::fs::rename(a, b)
+                } else {
+                    Err(std::io::Error::other("disk unavailable"))
+                }
+            },
+        );
         assert!(result.is_err());
         assert_eq!(std::fs::read(&backup).unwrap(), b"old");
     }

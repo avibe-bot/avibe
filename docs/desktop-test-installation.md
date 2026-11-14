@@ -17,8 +17,9 @@ records the embedded archive and toolchain hashes. On macOS, the source record
 also identifies the pinned Cua Driver source and its archive, extracted,
 thinned, packaged, and code-signing hashes. `SIGNATURE` is descriptive
 metadata naming the signed layers, **not a cryptographic signature file**.
-Hashes detect changed downloads; on macOS, Apple's signature and notarization
-establish the developer identity.
+Hashes detect changed downloads; Apple's signature and notarization on macOS,
+and the installer's Authenticode signature on Windows, establish the developer
+identity.
 
 On macOS, the DMG, the app inside it, and every program bundled with the app are
 signed with Avibe's Developer ID (Team `68B2SQ6YK3`) and notarized by Apple,
@@ -35,10 +36,11 @@ Accessibility and Screen Recording permissions, and Keychain access you allowed,
 across updates. Earlier ad-hoc builds changed identity with every build: after
 moving from one of them to a signed build, grant those permissions once more.
 
-The Windows NSIS installer is unsigned and may show SmartScreen or an unknown
-publisher prompt. After checking the download, use More info → Run anyway only
-if your machine's policy permits it. Keep Gatekeeper, SmartScreen, and antivirus
-enabled; managed machines may require administrator approval.
+The Windows NSIS installer carries a timestamped Authenticode signature.
+Windows may still ask you to confirm the first time you run it. If a prompt
+reports an unknown publisher, do not continue: delete the download and fetch it
+again. Keep Gatekeeper, SmartScreen, and antivirus enabled; managed machines may
+require administrator approval.
 
 Python, Avibe, Node, and npm are bundled; no separate installation is required.
 Agent backends are detected or installed when selected in Avibe.

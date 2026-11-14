@@ -1,0 +1,1402 @@
+diff --git a/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md b/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
+index 166c268..a19d428 100644
+--- a/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
++++ b/libs/cua-driver/rust/Skills/cua-driver/BROWSER.md
+@@ -136,13 +136,12 @@ root-owned, non-group/world-writable package payloads in this order: Google
+ Chrome, Chromium, then Microsoft Edge. User application directories, `PATH`
+ entries, redirected paths, and unsigned or mismatched products fail closed.
+ On Windows, the installation must also be unmodifiable by the token that runs
+-the browser. A non-elevated Driver runs the browser with its own token. An
+-elevated Driver, including the built-in Administrator and administrators with
+-UAC off, runs it with a derived standard-user token (administrator rights
+-removed, Medium integrity) and proves the installation protected from that
+-token. If that token cannot be derived and verified, or can still modify the
+-installation, the refusal says so; the browser is not missing or unsigned, and
+-Driver never falls back to an elevated browser.
++the browser. Avibe Computer Use runs only with an ordinary-user token and
++launches the browser with that token. Elevated, UIAccess, above-Medium, or
++unverifiable daemon tokens are refused: start Avibe normally, not as
++administrator. If the ordinary token can modify the browser installation,
++the browser launch is refused; this does not mean the browser is missing or
++unsigned. There is no elevated-daemon fallback.
+ Supply a Chromium-family browser pid when the isolated launch must use that
+ process's exact executable, including Chromium on macOS or Windows. The pid
+ remains required for existing-profile attachment.
+diff --git a/libs/cua-driver/rust/Skills/cua-driver/EMBEDDING.md b/libs/cua-driver/rust/Skills/cua-driver/EMBEDDING.md
+index b2cc243..cd58788 100644
+--- a/libs/cua-driver/rust/Skills/cua-driver/EMBEDDING.md
++++ b/libs/cua-driver/rust/Skills/cua-driver/EMBEDDING.md
+@@ -625,11 +625,11 @@ responsibility chain.
+
+ Two known exceptions:
+
+-- **Windows, elevated / UWP targets**: pixel or SendInput delivery into a
+-  higher-integrity target requires an interactively launched High-IL daemon
+-  (the installed autostart task uses `RunLevel=Highest`). The
+-  `cua-driver-uia` pipe is a reserved, default-off daemon-internal boundary;
+-  embedding hosts and other public clients must not launch or connect to it.
++- **Windows, administrator targets**: unsupported. Computer Use does not run
++  as administrator; start Avibe normally. The daemon rejects elevated,
++  UIAccess, above-Medium, or unverifiable process tokens. Open the target app
++  normally instead; neither an elevated daemon nor the unshipped standalone
++  `cua-driver-uia` helper is an Avibe fallback.
+ - **Linux Wayland** (compositor-specific): capture goes through XDG desktop
+   portals, which prompt per-session at capture time and cannot be
+   pre-granted by the host. X11 has no portal gate.
+diff --git a/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md b/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
+index 57133eb..ea32a65 100644
+--- a/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
++++ b/libs/cua-driver/rust/Skills/cua-driver/WINDOWS.md
+@@ -120,10 +120,11 @@ same trick that powers `send_key_synthesized`). Returns
+ reject the swap (and a subsequent `delivery_mode:"foreground"` call will
+ bail with the "Foreground swap … was rejected by Windows" diagnostic
+ rather than landing input on the wrong window). When that happens the
+-target genuinely cannot be driven by SendInput/keystrokes in this session:
+-use an interactively launched High-IL daemon. The reserved `cua-driver-uia`
+-worker is a daemon-internal, default-off service boundary and public clients
+-must never connect to its pipe directly. Alternatively, for tasks
++target cannot currently be driven by SendInput/keystrokes in this session.
++Computer Use does not run as administrator; start Avibe normally. Do not
++switch to a High-IL daemon or a UIAccess worker to bypass this refusal.
++The standalone `cua-driver-uia` helper is not part of the Avibe package.
++For tasks
+ that produce a file — generate the document and `launch_app` it instead of
+ driving the GUI (e.g. building a spreadsheet and opening it in LibreOffice
+ Calc rather than typing into the grid, which is dropped on the VCL
+@@ -467,11 +468,12 @@ your prior tool calls earned.
+    tool-calling.
+ 4. **Permissions** — Windows has no TCC equivalent. cua-driver-rs
+    needs:
+-   - No admin elevation for normal use (UIA, PostMessage, UWP
+-     activation all work from a standard user token).
+-   - UAC elevation **only** for `autostart` registration if a
+-     system-wide scheduled task is requested (per-user task is
+-     non-elevated and the default).
++   - Computer Use does not run as administrator; start Avibe normally.
++     The daemon refuses elevated, UIAccess, above-Medium, or unverifiable
++     process tokens. Administrator windows and locked/secure desktops are
++     not supported; do not elevate the daemon as a workaround.
++   - Autostart registers an ordinary-user interactive task. It never requests
++     UAC elevation or registers an administrator daemon.
+    - SmartScreen: on a fresh install, Windows Defender SmartScreen
+      may flag the unsigned binary on first run. Click "More info →
+      Run anyway" once.
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+index 440edd9..42c0a51 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+@@ -174,6 +174,9 @@ struct LifecycleMaintenance {
+ impl DriverRuntime {
+     pub(crate) fn create(options: RuntimeOptions) -> Result<Arc<Self>, RuntimeCreateError> {
+         #[cfg(target_os = "windows")]
++        platform_windows::security::ensure_driver_token_allowed()
++            .map_err(RuntimeCreateError::Unavailable)?;
++        #[cfg(target_os = "windows")]
+         if let Err(reason) = platform_windows::diagnostics::interactive_desktop_check() {
+             return Err(RuntimeCreateError::Unavailable(format!(
+                 "Cua Driver requires an interactive Windows user session: {reason}"
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/autostart.rs b/libs/cua-driver/rust/crates/cua-driver/src/autostart.rs
+index 44bb78b..020903c 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/autostart.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/autostart.rs
+@@ -213,58 +213,6 @@ fn starts_with_drive_letter(path: &str) -> bool {
+     matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
+ }
+
+-// ── Windows self-elevation helper script ──────────────────────────────────
+-
+-/// PowerShell that re-launches this executable elevated (UAC) and forwards the
+-/// elevated child's exit code.
+-///
+-/// **Every failure path must exit non-zero.** The original one-liner was
+-/// `$p = Start-Process ... -Verb RunAs -Wait -PassThru; exit $p.ExitCode`.
+-/// A declined UAC prompt makes `Start-Process` raise a *non-terminating*
+-/// error, so `$p` stayed unset, `$null.ExitCode` was `$null`, and `exit $null`
+-/// exits **0** — a dismissed prompt was reported as a registered autostart
+-/// entry (#3179). Two independent guards now cover that:
+-///
+-/// 1. `-ErrorAction Stop` promotes the declined-UAC error to a terminating one
+-///    so the `catch` runs and exits 1.
+-/// 2. The explicit `$null` check, because `exit $null` silently meaning
+-///    `exit 0` is precisely the trap that produced the bug. It also covers a
+-///    process object that came back without an exit code.
+-///
+-/// `__INNER_COMMAND__` is substituted with the single-quoted PowerShell string
+-/// holding the elevated child's `-Command` argument.
+-#[cfg(any(target_os = "windows", test))]
+-const ELEVATE_PS: &str = r#"
+-$p = $null
+-try {
+-    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-Command',__INNER_COMMAND__) -Verb RunAs -Wait -PassThru -ErrorAction Stop
+-} catch {
+-    [Console]::Error.WriteLine("cua-driver: UAC elevation for autostart registration failed: " + $_.Exception.Message)
+-    exit 1
+-}
+-if ($null -eq $p -or $null -eq $p.ExitCode) {
+-    [Console]::Error.WriteLine("cua-driver: UAC elevation for autostart registration returned no process.")
+-    exit 1
+-}
+-exit $p.ExitCode
+-"#;
+-
+-/// Build the self-elevation script for `exe`.
+-///
+-/// The elevated child runs `<exe> autostart enable` so the registration happens
+-/// inside the elevated process, where the first (direct) attempt succeeds and
+-/// does not re-enter the elevation branch.
+-#[cfg(any(target_os = "windows", test))]
+-fn elevation_script(exe: &str) -> String {
+-    // `& "<exe>" autostart enable` — PowerShell escapes `"` as `` `" `` inside
+-    // a double-quoted string.
+-    let inner = format!("& \"{}\" autostart enable", exe.replace('"', "`\""));
+-    // Embed that as a single-quoted PowerShell string (PS escapes `'` as `''`
+-    // inside `'`-strings).
+-    let inner_quoted = format!("'{}'", inner.replace('\'', "''"));
+-    ELEVATE_PS.replace("__INNER_COMMAND__", &inner_quoted)
+-}
+-
+ // ── Windows impl ──────────────────────────────────────────────────────────
+
+ #[cfg(target_os = "windows")]
+@@ -272,10 +220,8 @@ mod platform {
+     use super::*;
+     use std::process::Command;
+
+-    /// Inline PowerShell that mirrors `install.ps1::Register-CuaDriverAutostart`
+-    /// exactly. Kept as a single one-liner so a quick `gh-blame` diff against
+-    /// install.ps1 surfaces any divergence; the moment install.ps1 changes
+-    /// shape, this script needs the same edit.
++    /// Register only an ordinary-user interactive task. Computer Use never
++    /// starts an elevated daemon or requests elevation to register one.
+     ///
+     /// **Hidden-console launch (issue #1645):** the task action wraps
+     /// `cua-driver.exe serve` in `powershell -WindowStyle Hidden` +
+@@ -286,19 +232,6 @@ mod platform {
+     /// immediately after spawning the child, leaving only `cua-driver.exe`
+     /// in the process tree.
+     ///
+-    /// **RunLevel = Highest** (since 2026-05-21): the daemon is registered to
+-    /// run at the user's elevated/admin token rather than the filtered
+-    /// standard-user token. This is what lets the daemon drive UWP /
+-    /// AppContainer apps (Calculator, modern Settings, Photos, …) — at
+-    /// Medium IL the cross-AppContainer UIA RPC returns a stub (~1 element
+-    /// instead of the full tree, see #1602 / #1601). High IL crosses that
+-    /// boundary cleanly. Trade-off: `Register-ScheduledTask -RunLevel
+-    /// Highest` requires the caller to already be at High IL, so this
+-    /// function emits an actionable error when invoked from a non-elevated
+-    /// shell. Users opt into autostart via the installer's `-AutoStart`
+-    /// flag or `cua-driver autostart enable`, both of which prompt for
+-    /// elevation when needed.
+-    ///
+     /// **Account-name format**: on domain-joined machines USERDOMAIN holds the
+     /// AD domain name (e.g. CORP) and the principal must be `CORP\username`.
+     /// On workgroup machines USERDOMAIN holds either the literal string
+@@ -329,26 +262,28 @@ $action = New-ScheduledTaskAction `
+     -Argument "-NoProfile -WindowStyle Hidden -NonInteractive -Command `"Start-Process -FilePath '$env:CUA_DRIVER_AS_EXE' -ArgumentList 'serve' -WindowStyle Hidden -WorkingDirectory '$env:USERPROFILE'`"" `
+     -WorkingDirectory $env:USERPROFILE
+ $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+-$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
++$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Hours 0)
+ # -Force replaces an existing task in one Task Scheduler call. Never
+ # unregister first: if the new registration then failed (for example as
+ # SYSTEM or without elevation), the machine would be left with no task
+ # (#4090). A failed replacement keeps the existing task.
+-Register-ScheduledTask -Force -TaskName $env:CUA_DRIVER_AS_TASK -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "${env:CUA_DRIVER_AS_CLI}: serve daemon, auto-start at interactive logon, RunLevel=Highest for UWP/AppContainer support" | Out-Null
+-
+-# The uiAccess worker (`cua-driver-uia.exe`) has no public client route and is
+-# not started by this task. The High-IL daemon is the supported path for
+-# elevated/AppContainer pixel input. A future worker path must be forwarded by
+-# the authorized parent daemon rather than exposed to public clients. See #1602.
++Register-ScheduledTask -Force -TaskName $env:CUA_DRIVER_AS_TASK -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "${env:CUA_DRIVER_AS_CLI}: ordinary-user serve daemon, auto-start at interactive logon" | Out-Null
+ "#;
+
++    #[cfg(test)]
++    #[test]
++    fn registration_requests_only_an_ordinary_user_task() {
++        // REGISTER_PS is the actual command payload. These tokens are the
++        // Task Scheduler privilege contract, not Rust implementation names.
++        assert!(REGISTER_PS.contains("-LogonType Interactive -RunLevel Limited"));
++        assert!(!REGISTER_PS.contains("Highest"));
++        assert!(!REGISTER_PS.contains("RunAs"));
++    }
++
+     pub fn enable(exe: &str) -> Result<()> {
+-        // First attempt: register directly. Works when called from an
+-        // already-elevated context (install.ps1's self-elevated child shell,
+-        // or a user running cua-driver autostart enable from an admin
+-        // PowerShell). Pass the binary path via env var so the script
+-        // doesn't need shell-quoting acrobatics for paths with spaces.
++        // Pass the binary path via an environment variable rather than
++        // interpolating it into the registration command.
+         let out = Command::new("powershell")
+             .args(["-NoProfile", "-NonInteractive", "-Command", REGISTER_PS])
+             .env("CUA_DRIVER_AS_EXE", exe)
+@@ -360,58 +295,12 @@ Register-ScheduledTask -Force -TaskName $env:CUA_DRIVER_AS_TASK -Action $action
+             return confirm_registered();
+         }
+
+-        let stderr = String::from_utf8_lossy(&out.stderr);
+-        let stderr_lower = stderr.to_lowercase();
+-        let looks_like_access_denied = stderr_lower.contains("access is denied")
+-            || stderr_lower.contains("0x80070005")
+-            || stderr_lower.contains("permission")
+-            || stderr_lower.contains("requires elevation");
+-
+-        if !looks_like_access_denied {
+-            return Err(anyhow!(
+-                "PowerShell Register-ScheduledTask failed (exit {}): {}",
+-                out.status.code().unwrap_or(-1),
+-                stderr.trim()
+-            ));
+-        }
+-
+-        // Access-denied — caller is at Medium IL but the task wants Highest.
+-        // Self-elevate via ShellExecute "runas" verb, which fires the UAC
+-        // prompt. The elevated child runs the same registration via
+-        // powershell -Command, with the registered binary path injected as
+-        // an env var (durable across the elevation boundary).
+-        eprintln!("cua-driver: registering autostart at RunLevel=Highest needs admin.");
+-        eprintln!("cua-driver: triggering UAC prompt — accept it to register the task.");
+-
+-        let elevated_status = {
+-            use std::os::windows::process::CommandExt;
+-            // CREATE_NO_WINDOW = 0x08000000 — keep the elevated child's
+-            // console out of the foreground; PowerShell already runs hidden
+-            // via Start-Process -Verb RunAs's WindowStyle Hidden.
+-            const CREATE_NO_WINDOW: u32 = 0x08000000;
+-
+-            // Start-Process -Verb RunAs elevates; -Wait so we can capture the
+-            // child's exit code. See `ELEVATE_PS` for why every failure path
+-            // there has to exit non-zero.
+-            let outer = elevation_script(exe);
+-            Command::new("powershell")
+-                .args(["-NoProfile", "-NonInteractive", "-Command", &outer])
+-                .creation_flags(CREATE_NO_WINDOW)
+-                .status()
+-                .map_err(|e| anyhow!("failed to spawn elevation helper: {e}"))?
+-        };
+-
+-        if elevated_status.success() {
+-            confirm_registered()
+-        } else {
+-            Err(anyhow!(
+-                "self-elevation for autostart registration failed (exit {}). The UAC \
+-                 prompt was probably dismissed. Re-run `cua-driver autostart enable` \
+-                 and accept the prompt, or run install.ps1 -AutoStart which has the \
+-                 same self-elevation flow. See https://github.com/trycua/cua/issues/1602.",
+-                elevated_status.code().unwrap_or(-1)
+-            ))
+-        }
++        Err(anyhow!(
++            "Could not register ordinary-user Computer Use autostart (exit {}): {}. \
++             Start Avibe normally; Computer Use will not request administrator access.",
++            out.status.code().unwrap_or(-1),
++            String::from_utf8_lossy(&out.stderr).trim()
++        ))
+     }
+
+     /// Result of one `schtasks /Query` against the autostart task.
+@@ -471,11 +360,9 @@ Register-ScheduledTask -Force -TaskName $env:CUA_DRIVER_AS_TASK -Action $action
+             RegistrationCheck::Confirmed => Ok(()),
+             RegistrationCheck::Missing => Err(anyhow!(
+                 "autostart registration reported success but scheduled task '{}' does not \
+-                 exist. If a UAC prompt appeared, it was dismissed or the elevated \
+-                 registration failed. Re-run `{} autostart enable` from an elevated shell. \
+-                 See https://github.com/trycua/cua/issues/3179.",
+-                task_name(),
+-                crate::bundle::cli_name()
++                 exist. Start Avibe normally; Computer Use will not request \
++                 administrator access.",
++                task_name()
+             )),
+             RegistrationCheck::Unverifiable => {
+                 eprintln!(
+@@ -756,113 +643,6 @@ mod tests {
+         );
+     }
+
+-    // ── Self-elevation exit-code semantics (#3179) ────────────────────────
+-
+-    #[test]
+-    fn elevation_script_guards_every_failure_path() {
+-        let script = elevation_script(r"C:\Cua\cua-driver.exe");
+-
+-        // Promotes the declined-UAC non-terminating error to a terminating one.
+-        assert!(script.contains("-ErrorAction Stop"), "{script}");
+-        assert!(script.contains("catch {"), "{script}");
+-        // Defence in depth: `exit $null` exits 0, which is the trap that made a
+-        // dismissed prompt look like a successful registration.
+-        assert!(
+-            script.contains("if ($null -eq $p -or $null -eq $p.ExitCode)"),
+-            "{script}"
+-        );
+-        assert!(!script.contains("__INNER_COMMAND__"), "{script}");
+-        assert!(
+-            script.contains(r#"'& "C:\Cua\cua-driver.exe" autostart enable'"#),
+-            "{script}"
+-        );
+-    }
+-
+-    #[test]
+-    fn elevation_script_escapes_quotes_in_the_executable_path() {
+-        let script = elevation_script("C:\\o'brien\\a\"b\\cua-driver.exe");
+-
+-        // `'` doubled for the single-quoted PowerShell string, `"` backtick-
+-        // escaped for the double-quoted call operator argument.
+-        assert!(script.contains("o''brien"), "{script}");
+-        assert!(script.contains("a`\"b"), "{script}");
+-    }
+-
+-    /// Run the shipped elevation script against a stubbed `Start-Process`.
+-    ///
+-    /// A PowerShell function shadows the cmdlet of the same name, so the script
+-    /// under test runs verbatim — no real UAC prompt, which is what makes the
+-    /// exit-code contract testable in CI at all.
+-    #[cfg(target_os = "windows")]
+-    fn elevation_script_exit_code(stub_body: &str) -> i32 {
+-        use std::process::Command;
+-
+-        let temp = tempfile::tempdir().unwrap();
+-        let script_path = temp.path().join("elevation-probe.ps1");
+-        let contents = format!(
+-            "function Start-Process {{\n\
+-             [CmdletBinding()]\n\
+-             param([string]$FilePath,[string[]]$ArgumentList,[string]$Verb,\
+-             [switch]$Wait,[switch]$PassThru)\n\
+-             {stub_body}\n\
+-             }}\n{}",
+-            elevation_script(r"C:\Cua\cua-driver.exe")
+-        );
+-        std::fs::write(&script_path, contents).unwrap();
+-
+-        let status = Command::new("powershell")
+-            .args([
+-                "-NoProfile",
+-                "-NonInteractive",
+-                "-ExecutionPolicy",
+-                "Bypass",
+-                "-File",
+-            ])
+-            .arg(&script_path)
+-            .status()
+-            .unwrap();
+-        status.code().expect("powershell reported no exit code")
+-    }
+-
+-    /// The regression itself: declining UAC raises a non-terminating error, so
+-    /// the pre-fix `$p = Start-Process ...; exit $p.ExitCode` exited 0 and
+-    /// `enable()` reported a registered autostart entry (#3179).
+-    #[cfg(target_os = "windows")]
+-    #[test]
+-    fn declined_uac_exits_non_zero() {
+-        let declined = "Write-Error 'This command cannot be run due to the error: \
+-                        The operation was canceled by the user.'";
+-        assert_eq!(elevation_script_exit_code(declined), 1);
+-    }
+-
+-    #[cfg(target_os = "windows")]
+-    #[test]
+-    fn absent_process_object_exits_non_zero() {
+-        assert_eq!(elevation_script_exit_code("return $null"), 1);
+-    }
+-
+-    #[cfg(target_os = "windows")]
+-    #[test]
+-    fn absent_child_exit_code_exits_non_zero() {
+-        assert_eq!(
+-            elevation_script_exit_code("return [pscustomobject]@{ ExitCode = $null }"),
+-            1
+-        );
+-    }
+-
+-    #[cfg(target_os = "windows")]
+-    #[test]
+-    fn accepted_uac_forwards_the_child_exit_code() {
+-        assert_eq!(
+-            elevation_script_exit_code("return [pscustomobject]@{ ExitCode = 0 }"),
+-            0
+-        );
+-        assert_eq!(
+-            elevation_script_exit_code("return [pscustomobject]@{ ExitCode = 3 }"),
+-            3
+-        );
+-    }
+-
+     // ── Post-registration verification ────────────────────────────────────
+
+     #[test]
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/driver_service_http.rs b/libs/cua-driver/rust/crates/cua-driver/src/driver_service_http.rs
+index 5f616ae..5a92633 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/driver_service_http.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/driver_service_http.rs
+@@ -414,6 +414,8 @@ fn configured_session_mode() -> anyhow::Result<cua_driver_sdk::SessionPermission
+ }
+
+ pub async fn start(sdk: Arc<crate::sdk_adapter::SdkAdapter>, port: u16) -> anyhow::Result<Server> {
++    #[cfg(target_os = "windows")]
++    platform_windows::security::ensure_driver_token_allowed().map_err(anyhow::Error::msg)?;
+     let service = Service::for_sdk(sdk)?;
+     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+     let task = tokio::spawn(async move {
+@@ -424,6 +426,11 @@ pub async fn start(sdk: Arc<crate::sdk_adapter::SdkAdapter>, port: u16) -> anyho
+             tokio::select! {
+                 accepted = listener.accept() => {
+                     let Ok((mut stream, _)) = accepted else { break };
++                    #[cfg(target_os = "windows")]
++                    if let Err(error) = platform_windows::security::ensure_driver_token_allowed() {
++                        eprintln!("{error}");
++                        continue;
++                    }
+                     let Ok(permit) = permits.clone().try_acquire_owned() else { continue };
+                     let service = service.clone();
+                     tasks.spawn(async move {
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/mcp_envelope.rs b/libs/cua-driver/rust/crates/cua-driver/src/mcp_envelope.rs
+index fb9d11b..b196a00 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/mcp_envelope.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/mcp_envelope.rs
+@@ -149,6 +149,8 @@ where
+     R: AsyncBufRead + Unpin,
+     W: AsyncWrite + Unpin + Send + 'static,
+ {
++    #[cfg(target_os = "windows")]
++    platform_windows::security::ensure_driver_token_allowed().map_err(anyhow::Error::msg)?;
+     let session = format!("mcp-typed-{}", uuid::Uuid::new_v4());
+     // Declared first so receiver invalidation precedes task abort on every exit,
+     // including cancellation of the enclosing transport future.
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/mcp_http.rs b/libs/cua-driver/rust/crates/cua-driver/src/mcp_http.rs
+index 414b3e2..d957d59 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/mcp_http.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/mcp_http.rs
+@@ -55,6 +55,8 @@ fn configured_port_from(value: Option<std::ffi::OsString>) -> anyhow::Result<Opt
+
+ /// Spawn the HTTP MCP listener bound to `127.0.0.1:port` (loopback only).
+ pub fn spawn(sdk: Arc<crate::sdk_adapter::SdkAdapter>, port: u16) -> anyhow::Result<()> {
++    #[cfg(target_os = "windows")]
++    platform_windows::security::ensure_driver_token_allowed().map_err(anyhow::Error::msg)?;
+     let token = Arc::<str>::from(configured_auth_token().map_err(anyhow::Error::msg)?);
+     tokio::spawn(async move {
+         let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+@@ -93,6 +95,8 @@ async fn serve_conn(
+     sdk: Arc<crate::sdk_adapter::SdkAdapter>,
+     token: Arc<str>,
+ ) -> anyhow::Result<()> {
++    #[cfg(target_os = "windows")]
++    platform_windows::security::ensure_driver_token_allowed().map_err(anyhow::Error::msg)?;
+     let transport_session = format!("http-{}", uuid::Uuid::new_v4());
+     struct TransportCleanup {
+         sdk: Arc<crate::sdk_adapter::SdkAdapter>,
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/proxy.rs b/libs/cua-driver/rust/crates/cua-driver/src/proxy.rs
+index 401a09b..544d21e 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/proxy.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/proxy.rs
+@@ -39,6 +39,8 @@ use crate::serve::{
+ /// session, drains admitted work through `shutdown`, and releases process
+ /// ownership before returning.
+ pub async fn run_direct(driver: Arc<cua_driver_sdk::CuaDriver>) -> anyhow::Result<()> {
++    #[cfg(target_os = "windows")]
++    platform_windows::security::ensure_driver_token_allowed().map_err(anyhow::Error::msg)?;
+     // Direct stdio is an action endpoint just like `serve`; enforce the same
+     // admin lock, bounded-manifest approval/expiry, and legacy-approval
+     // consistency before the first request can be read.
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/serve.rs b/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
+index 3525ac8..bdba587 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
+@@ -330,11 +330,11 @@ pub fn default_socket_path() -> String {
+ }
+
+ /// On Windows, returns the reserved named-pipe path of the uiAccess-elevated
+-/// worker (`cua-driver-uia.exe`). Public CLI, MCP, and SDK clients never connect
+-/// to this endpoint. It remains available only for a future daemon-internal
+-/// forwarding path that authenticates the exact parent process. Until that path
+-/// exists, elevated/AppContainer pixel input uses an interactively launched
+-/// High-IL daemon. See #1602 / the `cua-driver-uia` crate for the worker side.
++/// worker (`cua-driver-uia.exe`). The shipped main has no automatic selection
++/// or launch path for it; explicit socket overrides are not an endpoint-name
++/// denylist. The standalone upstream worker is not included in the
++/// Avibe package and is not an elevation fallback. Computer Use must run with
++/// an ordinary-user token; administrator targets are unsupported.
+ #[cfg(target_os = "windows")]
+ pub fn default_uia_pipe_path() -> String {
+     if crate::bundle::is_local_installation() {
+@@ -1686,6 +1686,7 @@ pub async fn run_serve(
+     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+     use tokio::net::windows::named_pipe::ServerOptions;
+
++    platform_windows::security::ensure_driver_token_allowed().map_err(anyhow::Error::msg)?;
+     cua_driver_core::authorization::validate_startup_authorization()?;
+
+     // Build the current-user descriptor once and reuse it for every pipe
+@@ -1810,6 +1811,14 @@ pub async fn run_serve(
+                     continue;
+                 }
+                 consecutive_failures = 0;
++                // This is the daemon's own process token, not the proxy/host
++                // token. Every new pipe instance (including resume/reconnect)
++                // must be admitted before any request can reach the runtime.
++                if let Err(error) = platform_windows::security::ensure_driver_token_allowed() {
++                    let _ = server.disconnect();
++                    fatal_error = Some(anyhow::Error::msg(error));
++                    break;
++                }
+                 let expected_sid = unsafe { current_user_sid_string() };
+                 let client_process_id =
+                     unsafe { named_pipe_client_process_id(server.as_raw_handle().cast()) };
+diff --git a/libs/cua-driver/rust/crates/cua-driver/tests/windows_security_boundary_test.rs b/libs/cua-driver/rust/crates/cua-driver/tests/windows_security_boundary_test.rs
+new file mode 100644
+index 0000000..738f5cd
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver/tests/windows_security_boundary_test.rs
+@@ -0,0 +1,167 @@
++#![cfg(target_os = "windows")]
++
++//! Native startup regression, without interacting with any desktop or app.
++//! Run explicitly from an elevated Windows test account. This proves refusal
++//! at the real process boundary, not that UIPI blocks a particular GUI action.
++//! Ordinary-vs-elevated Notepad and locked-desktop acceptance are separate.
++
++use std::io::Read;
++use std::process::{Command, Stdio};
++use std::time::{Duration, Instant};
++use windows::Win32::Foundation::{CloseHandle, HANDLE};
++use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
++use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
++
++fn require_elevated_test_account() {
++    let mut token = HANDLE::default();
++    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.unwrap();
++    let mut elevation = TOKEN_ELEVATION::default();
++    let mut returned = 0;
++    let result = unsafe {
++        GetTokenInformation(
++            token,
++            TokenElevation,
++            Some(std::ptr::from_mut(&mut elevation).cast()),
++            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
++            &mut returned,
++        )
++    };
++    unsafe { CloseHandle(token) }.unwrap();
++    result.unwrap();
++    assert_ne!(elevation.TokenIsElevated, 0, "this test requires an elevated Windows test account; it is not a skip/pass on an ordinary account");
++}
++
++fn isolated_command(state: &tempfile::TempDir) -> Command {
++    let mut command = Command::new(env!("CARGO_BIN_EXE_cua-driver"));
++    // Neither metadata inspection nor startup-refusal testing needs host
++    // app discovery. Redirect Windows history/cache as well as driver state.
++    for variable in [
++        "HOME",
++        "USERPROFILE",
++        "APPDATA",
++        "LOCALAPPDATA",
++        "CUA_DRIVER_RS_HOME",
++        "CUA_DRIVER_TELEMETRY_HOME",
++        "XDG_CONFIG_HOME",
++        "XDG_STATE_HOME",
++        "XDG_CACHE_HOME",
++    ] {
++        command.env(variable, state.path());
++    }
++    command
++        .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "false")
++        .env("CUA_DRIVER_RS_UPDATE_CHECK", "false")
++        .env("CUA_DRIVER_PERMISSION_MODE", "standard")
++        .env_remove("CUA_DRIVER_POLICY_FILE")
++        .env_remove("CUA_DRIVER_MANAGED_POLICY_FILE")
++        .env_remove("CUA_DRIVER_CAPABILITY_MANIFEST_FILE")
++        .env_remove("CUA_DRIVER_CAPABILITY_MANIFEST_APPROVED")
++        .env_remove("CUA_DRIVER_SESSION_POLICY_FILE")
++        .env_remove("CUA_DRIVER_SESSION_POLICY_APPROVED")
++        .env_remove("CUA_DRIVER_RS_MCP_HTTP_PORT");
++    command
++}
++
++#[test]
++fn windows_tool_description_does_not_teach_a_privileged_fallback() {
++    let state = tempfile::tempdir().unwrap();
++    let output = isolated_command(&state)
++        .args(["dump-docs", "--type", "mcp"])
++        .stdin(Stdio::null())
++        .output()
++        .unwrap();
++    assert!(
++        output.status.success(),
++        "{}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    let docs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
++    let hotkey = docs["tools"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .find(|tool| tool["name"] == "hotkey")
++        .unwrap();
++    let description = hotkey["description"].as_str().unwrap();
++    assert!(
++        description.contains("Computer Use does not run as administrator; start Avibe normally.")
++    );
++    assert!(!description.contains("auto-prefers"));
++    assert!(!description.contains("cua-driver-uia.exe"));
++}
++
++#[test]
++#[ignore = "requires an explicitly provisioned elevated Windows test account; no GUI actions"]
++fn elevated_process_refuses_service_embedded_and_direct_mcp_before_binding() {
++    require_elevated_test_account();
++    for (mode, embedded, envelopes) in [
++        ("serve", false, false),
++        ("serve", true, false),
++        ("mcp", false, false),
++        ("mcp", false, true),
++    ] {
++        let state = tempfile::tempdir().unwrap();
++        let socket = format!(
++            r"\\.\pipe\avibe-token-refusal-{}-{}",
++            std::process::id(),
++            uuid::Uuid::new_v4()
++        );
++        let pid = state.path().join("driver.pid");
++        let mut command = isolated_command(&state);
++        command.arg(mode);
++        if mode == "serve" {
++            command.args(["--socket", &socket, "--pid-file"]);
++            command.arg(&pid).arg("--no-permissions-gate");
++        } else {
++            command.arg("--direct");
++        }
++        command.arg("--no-overlay");
++        command
++            .env("CUA_DRIVER_EMBEDDED", if embedded { "1" } else { "0" })
++            .env(
++                "CUA_DRIVER_MCP_ENVELOPES",
++                if envelopes { "1" } else { "0" },
++            )
++            .stdin(Stdio::piped())
++            .stdout(Stdio::null())
++            .stderr(Stdio::piped());
++        let mut child = cua_driver_testkit::spawn_in_job(&mut command).unwrap();
++        let stderr = child.stderr.take().unwrap();
++        let diagnostic = std::thread::spawn(move || {
++            let mut bytes = Vec::new();
++            stderr.take(128 * 1024).read_to_end(&mut bytes).unwrap();
++            String::from_utf8_lossy(&bytes).into_owned()
++        });
++        // Keep stdin open so an unpatched daemon cannot pass by observing EOF.
++        let deadline = Instant::now() + Duration::from_secs(15);
++        let status = loop {
++            if let Some(status) = child.try_wait().unwrap() {
++                break status;
++            }
++            if Instant::now() >= deadline {
++                let _ = child.kill();
++                let _ = child.wait();
++                panic!("elevated {mode} embedded={embedded} envelopes={envelopes} did not refuse startup");
++            }
++            std::thread::sleep(Duration::from_millis(25));
++        };
++        drop(child.stdin.take());
++        let stderr = diagnostic.join().unwrap();
++        assert!(
++            !status.success(),
++            "elevated runtime exited successfully: {stderr}"
++        );
++        assert!(
++            stderr.contains("Computer Use does not run as administrator; start Avibe normally."),
++            "wrong refusal for {mode} embedded={embedded} envelopes={envelopes}: {stderr}"
++        );
++        assert!(
++            !stderr.contains("daemon listening"),
++            "bound an action endpoint: {stderr}"
++        );
++        assert!(
++            !pid.exists(),
++            "published a daemon PID before rejecting its token"
++        );
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs b/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs
+index 6de2266..0d3741c 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/diagnostics.rs
+@@ -54,6 +54,16 @@ impl DesktopState {
+             .unwrap_or(false)
+     }
+
++    /// Action admission is stricter than runtime ownership: a daemon may stay
++    /// alive while Windows is locked, but must not inject into a hidden desktop.
++    pub fn action_desktop_is_available(&self) -> bool {
++        matches!(self.session_id, Some(id) if id != 0)
++            && self.has_process_window_station
++            && self.input_desktop_is_default()
++            && self.thread_desktop_name.as_deref()
++                .is_some_and(|name| name.eq_ignore_ascii_case("Default"))
++    }
++
+     pub fn has_foreground_window(&self) -> bool {
+         self.foreground_hwnd.is_some()
+     }
+@@ -280,6 +290,42 @@ pub fn is_non_interactive_error(err: &str) -> bool {
+         || lower.contains("not been initialized")
+ }
+
++#[cfg(test)]
++mod action_desktop_tests {
++    use super::*;
++
++    #[test]
++    fn only_a_verified_normal_input_desktop_admits_actions() {
++        let normal = DesktopState {
++            session_id: Some(1),
++            has_process_window_station: true,
++            process_window_station_error: None,
++            thread_desktop_name: Some("Default".to_owned()),
++            thread_desktop_error: None,
++            input_desktop_name: Some("Default".to_owned()),
++            input_desktop_error: None,
++            foreground_hwnd: None,
++        };
++        assert!(normal.action_desktop_is_available());
++        for name in [None, Some("Winlogon"), Some("Disconnect")] {
++            let mut state = normal.clone();
++            state.input_desktop_name = name.map(str::to_owned);
++            assert!(!state.action_desktop_is_available());
++            let mut state = normal.clone();
++            state.thread_desktop_name = name.map(str::to_owned);
++            assert!(!state.action_desktop_is_available());
++        }
++        for session in [None, Some(0)] {
++            let mut state = normal.clone();
++            state.session_id = session;
++            assert!(!state.action_desktop_is_available());
++        }
++        let mut detached = normal;
++        detached.has_process_window_station = false;
++        assert!(!detached.action_desktop_is_available());
++    }
++}
++
+ #[cfg(all(test, target_os = "windows"))]
+ mod tests {
+     use super::*;
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/delivery.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/delivery.rs
+index 032cf9e..35100d8 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/delivery.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/delivery.rs
+@@ -330,6 +330,11 @@ pub fn background_unavailable_error_with_cause(
+ ) -> cua_driver_core::protocol::ToolResult {
+     let class = read_class_name(hwnd);
+     let cause = cause.into();
++    if let Some(code) = crate::security::refusal_code(&cause) {
++        return cua_driver_core::protocol::ToolResult::error(&cause).with_structured(
++            serde_json::json!({"code": code, "message": cause}),
++        );
++    }
+     let cause_lower = cause.to_ascii_lowercase();
+     let code = if cause_lower.contains("occluded") {
+         "background_occluded"
+@@ -362,6 +367,22 @@ pub fn background_unavailable_error_with_cause(
+ mod tests {
+     use super::*;
+
++    #[test]
++    fn security_refusals_never_suggest_foreground_retry() {
++        for (cause, code) in [
++            ("Cannot verify this window; not acting.", "unverified_window"),
++            ("Computer Use cannot control an administrator window. Open the app normally and try again.", "protected_window"),
++            ("Computer Use cannot act on a locked, secure, or unavailable desktop. Unlock Windows and return to your normal desktop before trying again.", "desktop_unavailable"),
++        ] {
++            let result = background_unavailable_error_with_cause(0, EventKind::MouseClick, cause);
++            assert_eq!(result.is_error, Some(true));
++            let serialized = serde_json::to_value(&result).unwrap();
++            assert_eq!(serialized["content"][0]["text"], cause);
++            assert_eq!(serialized["structuredContent"]["code"], code);
++            assert!(!serialized.to_string().contains("foreground"));
++        }
++    }
++
+     #[test]
+     fn detects_tk_toplevel_classes_without_matching_unrelated_windows() {
+         assert!(is_tk_class_name("TkTopLevel"));
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+index a814511..d1f2a44 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/keyboard.rs
+@@ -477,8 +477,9 @@ pub fn send_key_synthesized_after_focus(
+                 "SendInput inserted only {sent} of {} events. Windows blocked the \
+                  rest: the target runs at a higher integrity level than the \
+                  Driver (UIPI), or the input desktop is locked or showing a \
+-                 secure prompt. To drive an elevated app, run the Driver \
+-                 elevated (the default autostart daemon is).",
++                 secure prompt. Computer Use cannot control administrator windows \
++                 or a locked or secure desktop. Open the app normally and unlock \
++                 Windows before trying again.",
+                 events.len()
+             );
+         }
+@@ -555,8 +556,9 @@ pub fn send_text_synthesized_after_focus(
+                 "SendInput inserted only {sent} of {} key events. Windows blocked \
+                  the rest: the target runs at a higher integrity level than the \
+                  Driver (UIPI), or the input desktop is locked or showing a \
+-                 secure prompt. To drive an elevated app, run the Driver \
+-                 elevated (the default autostart daemon is).",
++                 secure prompt. Computer Use cannot control administrator windows \
++                 or a locked or secure desktop. Open the app normally and unlock \
++                 Windows before trying again.",
+                 events.len()
+             );
+         }
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
+index 970660c..50c2647 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mod.rs
+@@ -30,130 +30,15 @@ pub use mouse::{
+     send_wheel_synthesized,
+ };
+
+-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+-use windows::Win32::Security::{
+-    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+-};
+-use windows::Win32::System::Threading::{
+-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+-};
+-use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+-
+-/// Windows mandatory integrity-level RIDs. Higher = more privileged. See
+-/// https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control
+-#[allow(dead_code)]
+-mod il {
+-    pub const UNTRUSTED: u32 = 0x0000;
+-    pub const LOW: u32 = 0x1000;
+-    pub const MEDIUM: u32 = 0x2000;
+-    pub const MEDIUM_PLUS: u32 = 0x2100;
+-    pub const HIGH: u32 = 0x3000;
+-    pub const SYSTEM: u32 = 0x4000;
+-}
+-
+-fn il_name(rid: u32) -> &'static str {
+-    match rid {
+-        il::UNTRUSTED => "Untrusted",
+-        il::LOW => "Low",
+-        il::MEDIUM => "Medium",
+-        il::MEDIUM_PLUS => "Medium+",
+-        il::HIGH => "High",
+-        il::SYSTEM => "System",
+-        _ => "unknown",
+-    }
+-}
+-
+-/// Read the mandatory integrity level (the last sub-authority of the
+-/// integrity SID) of a process handle. Returns `None` on any API failure.
+-unsafe fn process_integrity_rid(process: HANDLE) -> Option<u32> {
+-    let mut token = HANDLE::default();
+-    if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
+-        return None;
+-    }
+-    let mut needed: u32 = 0;
+-    // First call: probe required buffer size. Returns ERROR_INSUFFICIENT_BUFFER
+-    // and writes `needed`; we don't check the error because we always need a
+-    // second call to actually populate `buf`.
+-    let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut needed);
+-    if needed == 0 {
+-        let _ = CloseHandle(token);
+-        return None;
+-    }
+-    let mut buf = vec![0u8; needed as usize];
+-    let ok = GetTokenInformation(
+-        token,
+-        TokenIntegrityLevel,
+-        Some(buf.as_mut_ptr() as _),
+-        needed,
+-        &mut needed,
+-    )
+-    .is_ok();
+-    let _ = CloseHandle(token);
+-    if !ok {
+-        return None;
+-    }
+-    let tml = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+-    let sid = tml.Label.Sid;
+-    let count_ptr = GetSidSubAuthorityCount(sid);
+-    if count_ptr.is_null() {
+-        return None;
+-    }
+-    let count = *count_ptr;
+-    if count == 0 {
+-        return None;
+-    }
+-    let rid_ptr = GetSidSubAuthority(sid, (count - 1) as u32);
+-    if rid_ptr.is_null() {
+-        return None;
+-    }
+-    Some(*rid_ptr)
+-}
+-
+-/// If posting messages from the current process to `hwnd` would be silently
+-/// blocked by UIPI (User Interface Privilege Isolation), return a diagnostic
+-/// string the caller should surface as an actionable error. Otherwise `None`.
+-///
+-/// UIPI blocks `PostMessage` / `SendMessage` of input-class messages
+-/// (`WM_KEYDOWN`, `WM_KEYUP`, `WM_CHAR`, `WM_LBUTTONDOWN`, etc.) from a
+-/// lower-integrity process to a higher-integrity window. Crucially, the
+-/// `PostMessage` call still returns `TRUE` — the message is queued but the
+-/// elevated target's message pump filters it out before delivery. The lower-
+-/// integrity sender has no way to detect this from the return value, so
+-/// without an explicit check upstream, `type_text` / `hotkey` / `click`
+-/// silently no-op against elevated apps.
+-///
+-/// Returning a diagnostic string before the `PostMessage` call is the
+-/// minimum honest behavior: the caller learns it can't drive this target
+-/// and why. Long-term fix is to route through `SendInput` (system input
+-/// queue, UIPI-permitted) from the UIAccess'd worker — out of scope here.
++/// Refuse a protected or unverifiable target before the existing input paths
++/// attempt delivery. Failure to read a window's owner/token is not permission
++/// to act. Elevating the daemon is never a recovery option.
+ pub fn post_message_blocked_by_uipi(hwnd: u64) -> Option<String> {
+-    let h = HWND(hwnd as *mut _);
+-    let mut pid: u32 = 0;
+-    if unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) } == 0 || pid == 0 {
+-        return None;
++    if let Err(error) = crate::security::ensure_window_target_allowed(hwnd) {
++        return Some(error);
+     }
+-    let own = unsafe { process_integrity_rid(GetCurrentProcess()) }?;
+-    let target_handle =
+-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+-    let target = unsafe { process_integrity_rid(target_handle) };
+-    let _ = unsafe { CloseHandle(target_handle) };
+-    let target = target?;
+-    if target > own {
+-        Some(format!(
+-            "UIPI: target hwnd 0x{hwnd:x} (pid {pid}) is at {} integrity; \
+-             cua-driver is at {} integrity. PostMessage to a higher-integrity \
+-             window is silently dropped by the target's message pump — the \
+-             call would return success but no input would land. Common cause: \
+-             a Win32 app whose application manifest requests \
+-             `requireAdministrator` (most Program-Files installs of Notepad++, \
+-             VS Code system-scope, etc. land at High integrity). Run the \
+-             daemon elevated to drive these, or use a non-elevated copy of \
+-             the target. See https://learn.microsoft.com/en-us/windows/win32/winauto/uipi",
+-            il_name(target),
+-            il_name(own),
+-        ))
+-    } else {
+-        None
++    if !crate::diagnostics::desktop_state().action_desktop_is_available() {
++        return Some(crate::security::DESKTOP_REFUSAL.to_owned());
+     }
++    None
+ }
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+index 42d7c5b..4683463 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+@@ -416,13 +416,9 @@ pub fn has_chromium_descendant(hwnd: u64) -> bool {
+ /// foreground swap + visible cursor jump (mitigated by saving/restoring the
+ /// previous foreground HWND and previous cursor position after the click).
+ ///
+-/// UIAccess constraint: `SetForegroundWindow` is restricted from non-UIAccess
+-/// processes when not driven by user input. The `cua-driver-uia` worker runs
+-/// at UIAccess integrity precisely so this restriction is lifted; outside the
+-/// worker, the foreground swap may silently fail and SendInput land on the
+-/// wrong window. Callers should funnel Chromium coord clicks through the
+-/// uia worker (the MCP proxy already prefers the uia pipe over the regular
+-/// pipe when both are running).
++/// Windows may reject the foreground swap. Callers must preserve that refusal
++/// rather than routing input to an unverified foreground window. Avibe runs
++/// only as an ordinary user and has no privileged UIAccess-worker fallback.
+ pub fn send_click_synthesized(
+     target: u64,
+     sx: i32,
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/lib.rs b/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
+index 4e56ef6..2055476 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/lib.rs
+@@ -49,6 +49,9 @@ pub mod win32;
+ #[cfg(target_os = "windows")]
+ pub mod history;
+
++#[cfg(any(target_os = "windows", test))]
++pub mod security;
++
+ #[cfg(target_os = "windows")]
+ pub mod browser_platform;
+
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/security.rs b/libs/cua-driver/rust/crates/platform-windows/src/security.rs
+new file mode 100644
+index 0000000..b8102bd
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/security.rs
+@@ -0,0 +1,298 @@
++//! Windows Computer Use runs only with the daemon's own ordinary-user token.
++//!
++//! Never infer this from the shell, a named-pipe peer, or a linked/derived token.
++//! Read the process token again at every transport admission; no cached verdict.
++
++pub const ADMINISTRATOR_REFUSAL: &str =
++    "Computer Use does not run as administrator; start Avibe normally.";
++const MEDIUM_INTEGRITY_RID: u32 = 0x2000;
++
++#[derive(Debug, Clone, Copy)]
++struct TokenFacts {
++    elevated: bool,
++    ui_access: bool,
++    integrity_rid: u32,
++}
++
++fn admit_driver(facts: Result<TokenFacts, String>) -> Result<(), String> {
++    let facts = facts.map_err(|reason| {
++        format!("{ADMINISTRATOR_REFUSAL} Cannot verify the Computer Use process token: {reason}")
++    })?;
++    if facts.elevated || facts.ui_access || facts.integrity_rid > MEDIUM_INTEGRITY_RID {
++        return Err(ADMINISTRATOR_REFUSAL.to_owned());
++    }
++    Ok(())
++}
++
++/// Called inside the process that owns the action runtime, not its client.
++#[cfg(target_os = "windows")]
++pub fn ensure_driver_token_allowed() -> Result<(), String> {
++    admit_driver(native::current_process_token())
++}
++
++const UNVERIFIED_WINDOW_REFUSAL: &str = "Cannot verify this window; not acting.";
++const HIGHER_INTEGRITY_WINDOW_REFUSAL: &str =
++    "Windows does not allow Computer Use to control this higher-integrity window.";
++pub(crate) const DESKTOP_REFUSAL: &str =
++    "Computer Use cannot act on a locked, secure, or unavailable desktop. Unlock Windows and return to your normal desktop before trying again.";
++const ELEVATED_WINDOW_REFUSAL: &str =
++    "Computer Use cannot control an administrator window. Open the app normally and try again.";
++
++fn admit_window(own: TokenFacts, target: Result<TokenFacts, String>) -> Result<(), String> {
++    let target = target.map_err(|_| UNVERIFIED_WINDOW_REFUSAL.to_owned())?;
++    if target.elevated || target.integrity_rid > MEDIUM_INTEGRITY_RID {
++        return Err(ELEVATED_WINDOW_REFUSAL.to_owned());
++    }
++    if target.integrity_rid > own.integrity_rid {
++        return Err(HIGHER_INTEGRITY_WINDOW_REFUSAL.to_owned());
++    }
++    Ok(())
++}
++
++/// Diagnostic admission for the existing input paths. Unknown HWND/PID/token
++/// is not permission to act. This is not a claim that every other Windows API
++/// has UIPI enforcement; additional paths need their own evidence and review.
++#[cfg(target_os = "windows")]
++pub fn ensure_window_target_allowed(hwnd: u64) -> Result<(), String> {
++    let own = native::current_process_token();
++    admit_driver(own.clone())?;
++    admit_window(own?, native::window_process_token(hwnd))
++}
++
++/// These refusals are terminal for both background and foreground delivery;
++/// do not wrap them in an automatic foreground-retry recommendation.
++pub(crate) fn refusal_code(message: &str) -> Option<&'static str> {
++    if message.starts_with(ADMINISTRATOR_REFUSAL) {
++        Some("administrator_runtime_refused")
++    } else if message == UNVERIFIED_WINDOW_REFUSAL {
++        Some("unverified_window")
++    } else if message == ELEVATED_WINDOW_REFUSAL || message == HIGHER_INTEGRITY_WINDOW_REFUSAL {
++        Some("protected_window")
++    } else if message == DESKTOP_REFUSAL {
++        Some("desktop_unavailable")
++    } else {
++        None
++    }
++}
++
++#[cfg(target_os = "windows")]
++mod native {
++    use super::TokenFacts;
++    use std::mem::size_of;
++    use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
++    use windows::Win32::Security::{
++        GetTokenInformation, TokenElevation, TokenIntegrityLevel, TokenUIAccess, TOKEN_ELEVATION,
++        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
++    };
++    use windows::Win32::System::Threading::{
++        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
++    };
++    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
++
++    struct OwnedHandle(HANDLE);
++
++    impl Drop for OwnedHandle {
++        fn drop(&mut self) {
++            let _ = unsafe { CloseHandle(self.0) };
++        }
++    }
++
++    pub(super) fn current_process_token() -> Result<TokenFacts, String> {
++        process_token(unsafe { GetCurrentProcess() })
++    }
++
++    pub(super) fn window_process_token(hwnd: u64) -> Result<TokenFacts, String> {
++        let hwnd = HWND(hwnd as *mut _);
++        let mut pid = 0;
++        let thread = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
++        if thread == 0 || pid == 0 {
++            return Err("window has no verified owner".to_owned());
++        }
++        let process = OwnedHandle(
++            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
++                .map_err(|error| format!("OpenProcess failed: {error}"))?,
++        );
++        let facts = process_token(process.0)?;
++        let mut current_pid = 0;
++        let current_thread = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut current_pid)) };
++        if current_pid != pid || current_thread != thread {
++            return Err("window owner changed while verifying it".to_owned());
++        }
++        Ok(facts)
++    }
++
++    fn process_token(process: HANDLE) -> Result<TokenFacts, String> {
++        let mut token = HANDLE::default();
++        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
++            .map_err(|error| format!("OpenProcessToken failed: {error}"))?;
++        let token = OwnedHandle(token);
++        let mut elevation = TOKEN_ELEVATION::default();
++        let mut returned = 0;
++        unsafe {
++            GetTokenInformation(
++                token.0,
++                TokenElevation,
++                Some(std::ptr::from_mut(&mut elevation).cast()),
++                size_of::<TOKEN_ELEVATION>() as u32,
++                &mut returned,
++            )
++        }
++        .map_err(|error| format!("TokenElevation failed: {error}"))?;
++        if returned as usize != size_of::<TOKEN_ELEVATION>() {
++            return Err("TokenElevation returned an invalid length".to_owned());
++        }
++
++        let mut ui_access = 0u32;
++        unsafe {
++            GetTokenInformation(
++                token.0,
++                TokenUIAccess,
++                Some(std::ptr::from_mut(&mut ui_access).cast()),
++                size_of::<u32>() as u32,
++                &mut returned,
++            )
++        }
++        .map_err(|error| format!("TokenUIAccess failed: {error}"))?;
++        if returned as usize != size_of::<u32>() {
++            return Err("TokenUIAccess returned an invalid length".to_owned());
++        }
++
++        // A mandatory label plus the largest Windows SID (68 bytes). Using
++        // usize storage preserves TOKEN_MANDATORY_LABEL's alignment. Fail
++        // closed if Windows ever returns a larger representation.
++        let mut label = [0usize; 32];
++        unsafe {
++            GetTokenInformation(
++                token.0,
++                TokenIntegrityLevel,
++                Some(label.as_mut_ptr().cast()),
++                size_of_val(&label) as u32,
++                &mut returned,
++            )
++        }
++        .map_err(|error| format!("TokenIntegrityLevel failed: {error}"))?;
++        if (returned as usize) < size_of::<TOKEN_MANDATORY_LABEL>()
++            || returned as usize > size_of_val(&label)
++        {
++            return Err("TokenIntegrityLevel returned an invalid length".to_owned());
++        }
++        let mandatory = unsafe { &*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>() };
++        let sid = mandatory.Label.Sid.0 as usize;
++        let start = label.as_ptr() as usize;
++        let offset = sid
++            .checked_sub(start)
++            .filter(|offset| *offset >= size_of::<TOKEN_MANDATORY_LABEL>())
++            .ok_or("TokenIntegrityLevel returned an invalid SID pointer")?;
++        let bytes =
++            unsafe { std::slice::from_raw_parts(label.as_ptr().cast::<u8>(), returned as usize) };
++        let sid = bytes
++            .get(offset..)
++            .ok_or("TokenIntegrityLevel returned an invalid SID pointer")?;
++        // Integrity SIDs are S-1-16-RID. Validate the authority and exactly
++        // one subauthority instead of interpreting arbitrary/truncated data.
++        if sid.len() < 12 || sid[..8] != [1, 1, 0, 0, 0, 0, 0, 16] {
++            return Err("TokenIntegrityLevel returned an invalid integrity SID".to_owned());
++        }
++        let integrity_rid = u32::from_le_bytes(sid[8..12].try_into().unwrap());
++        Ok(TokenFacts {
++            elevated: elevation.TokenIsElevated != 0,
++            ui_access: ui_access != 0,
++            integrity_rid,
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn only_verified_unelevated_tokens_at_or_below_medium_are_admitted() {
++        for (elevated, ui_access) in [(false, false), (false, true), (true, false), (true, true)] {
++            for integrity_rid in [0, 0x1000, 0x2000, 0x2001, 0x2100, 0x3000, 0x4000, u32::MAX] {
++                let result = admit_driver(Ok(TokenFacts {
++                    elevated,
++                    ui_access,
++                    integrity_rid,
++                }));
++                assert_eq!(
++                    result.is_ok(),
++                    !elevated && !ui_access && integrity_rid <= 0x2000
++                );
++                if result.is_err() {
++                    assert_eq!(result.unwrap_err(), ADMINISTRATOR_REFUSAL);
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn unreadable_token_is_refused_not_assumed_medium() {
++        for reason in [
++            "OpenProcessToken",
++            "TokenElevation",
++            "TokenUIAccess",
++            "TokenIntegrityLevel",
++            "invalid SID",
++        ] {
++            let error = admit_driver(Err(reason.to_owned())).unwrap_err();
++            assert!(error.starts_with(ADMINISTRATOR_REFUSAL));
++            assert!(error.contains("Cannot verify the Computer Use process token"));
++        }
++    }
++
++    #[test]
++    fn windows_with_unknown_or_protected_owners_are_refused() {
++        let own = TokenFacts {
++            elevated: false,
++            ui_access: false,
++            integrity_rid: 0x2000,
++        };
++        assert_eq!(
++            admit_window(own, Err("PID unavailable".to_owned())).unwrap_err(),
++            UNVERIFIED_WINDOW_REFUSAL
++        );
++        assert_eq!(
++            admit_window(own, Err("token unavailable".to_owned())).unwrap_err(),
++            UNVERIFIED_WINDOW_REFUSAL
++        );
++        for (elevated, integrity_rid) in [
++            (true, 0x2000),
++            (false, 0x2001),
++            (false, 0x3000),
++            (false, 0x4000),
++        ] {
++            assert_eq!(
++                admit_window(
++                    own,
++                    Ok(TokenFacts {
++                        elevated,
++                        ui_access: false,
++                        integrity_rid
++                    })
++                )
++                .unwrap_err(),
++                ELEVATED_WINDOW_REFUSAL
++            );
++        }
++        assert!(admit_window(own, Ok(own)).is_ok());
++        assert!(admit_window(
++            TokenFacts {
++                integrity_rid: 0x1000,
++                ..own
++            },
++            Ok(own)
++        )
++        .is_err());
++    }
++
++    #[cfg(target_os = "windows")]
++    #[test]
++    fn native_own_token_is_read_without_desktop_or_shell_access() {
++        let facts = native::current_process_token().expect("query test process token");
++        assert_eq!(
++            ensure_driver_token_allowed().is_ok(),
++            !facts.elevated && !facts.ui_access && facts.integrity_rid <= 0x2000
++        );
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/standard_user_launch.rs b/libs/cua-driver/rust/crates/platform-windows/src/standard_user_launch.rs
+index e4989de..b37b52b 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/standard_user_launch.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/standard_user_launch.rs
+@@ -1,7 +1,10 @@
+-//! Standard-user app launches for an elevated Windows Driver (#3607).
++//! Legacy upstream standard-user app launch support (#3607).
+ //!
+-//! A process inherits its creator's primary token. An elevated Driver (the
+-//! default autostart daemon runs at `RunLevel=Highest`) would therefore start
++//! Avibe rejects elevated daemon/runtime tokens before this code is reachable.
++//! The token-derivation implementation is retained for upstream compatibility;
++//! it is not permission to start an elevated Avibe Computer Use daemon.
++//!
++//! A process inherits its creator's primary token. An elevated Driver would start
+ //! every `launch_app` target as an elevated administrator: the user's ordinary
+ //! tools could not close or automate the app, and it would behave differently
+ //! from the same app started from Explorer. An elevated Driver instead
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+index c3101d1..f27073f 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -5514,9 +5514,10 @@ impl Tool for HotkeyTool {
+                 accelerators via `TranslateAccelerator` (LibreOffice, FAR, classic Notepad, etc.) \
+                 never see the combo as a real accelerator on the PostMessage-only path. \
+                 Trade-off: brief foreground swap (mitigated by restoring the previous foreground \
+-                after the keystrokes flush). Requires the daemon to have UIAccess integrity so \
+-                `SetForegroundWindow` is permitted — the MCP proxy auto-prefers the \
+-                `cua-driver-uia.exe` worker pipe when both daemons are running.\n\n\
++                after the keystrokes flush). Windows can refuse the foreground swap; \
++                that refusal is not permission to elevate the daemon. Computer Use does not \
++                run as administrator; start Avibe normally. There is no UIAccess-worker \
++                fallback for administrator windows.\n\n\
+                 - **Legacy Win32 targets without modifiers** (plain `enter`, `tab`, `f5`, etc.) \
+                 route through `PostMessage(WM_KEYDOWN/UP)` — no focus steal, no need to update \
+                 modifier state.\n\n\
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/page_bookmark.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/page_bookmark.rs
+index 2ab67a2..c069b51 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/page_bookmark.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/page_bookmark.rs
+@@ -776,8 +776,8 @@ unsafe fn restore_foreground_after_browser_activation(
+         } else {
+             tracing::trace!(
+                 target: "page.bookmark_exec.focus_restore",
+-                "SetForegroundWindow returned FALSE (foreground-lock denial; need UIAccess) — \
+-                 browser will keep focus until next user action"
++                "SetForegroundWindow returned FALSE (Windows foreground-lock denial) — \
++                 browser will keep focus until next user action; do not elevate Computer Use"
+             );
+         }
+         return;
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs
+index 34e83bd..333b355 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/fg_bypass.rs
+@@ -88,11 +88,10 @@ impl Drop for DisabledHwndGuard {
+ /// ValuePattern.SetValue handler. `Focus()` routes through
+ /// `SetForegroundWindow`, which is NOT gated by EnableWindow. The bypass
+ /// has no effect there, and the daemon WILL transiently steal foreground
+-/// from the user. Restoring foreground from a non-UIAccess process is
+-/// blocked by the foreground-lock, so the only mitigation is to spawn
+-/// cua-driver-uia.exe (UIAccess-manifested worker) and route UIA
+-/// activations through it. See PR #1699 bg-modality tests for the
+-/// regression guards.
++/// from the user. Restoring foreground can be rejected by Windows'
++/// foreground-lock. Avibe does not ship or fall back to a privileged UIAccess
++/// worker; this is a limitation to report, not a reason to elevate the daemon.
++/// See PR #1699 bg-modality tests for the regression guards.
+ pub fn run_with_uwp_bypass<T>(host_hwnd: isize, action: impl FnOnce() -> T) -> T {
+     let _guard = make_guard(host_hwnd);
+     action()

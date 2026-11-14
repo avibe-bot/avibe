@@ -7816,6 +7816,9 @@ def get_version_info() -> dict:
             "latest": str | None,
             "has_update": bool,
             "error": str | None,
+            "prereleases": bool | None,
+            "auto_update": bool | None,
+            "host_actions": list[str],
             "build": {"kind": "package" | "source", ...},
             "managed_by": "desktop" | None
         }
@@ -7839,6 +7842,17 @@ def get_version_info() -> dict:
     result["build"] = build.as_dict()
     if managed_by:
         result["managed_by"] = managed_by
+    else:
+        result["prereleases"] = prerelease_updates_enabled()
+        try:
+            auto_update = bool(V2Config.load().update.auto_update)
+        except FileNotFoundError:
+            # A first-run standalone process has the same default as UpdateConfig.
+            auto_update = True
+        result["auto_update"] = auto_update
+        result["host_actions"] = ["check", "prereleases", "auto_update"]
+        if build.kind == "package":
+            result["host_actions"].append("install")
     return result
 
 
@@ -9718,16 +9732,16 @@ AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION = "0.1.8"
 # Developer ID signed release (identifier bot.avibe.avault, Team 68B2SQ6YK3): a
 # master key an ad-hoc release created needs one "Authorize avault" after the
 # upgrade, and later signed releases read it without asking again.
-AVAULT_VERSION = "0.1.12"
+AVAULT_VERSION = "0.1.13"
 # (sha256, size) of each AVAULT_VERSION archive by target: digests verified against
 # the published manifest.json, sizes checked against the downloaded release assets.
 _AVAULT_ARCHIVES = {
-    "linux-arm64": ("a9f21c5373dd3d08669336f9043b8bd6e290f9a662e057b3a7acd76e0523a541", 3341520),
-    "linux-x64": ("0cd283a248287aafbc15d4e34dc2de5fe4c31202af82602a2b444bca043b9abb", 3677149),
-    "macos-arm64": ("8bb2319621d514b6162f8b2197e3808e081674b4d7c42504c972e64ca246987b", 1588561),
-    "macos-x64": ("751d48ef16a1abc3ed2e515ce2c370e08f398ae216d7a3cf972345ff3b80a445", 1715767),
-    "windows-arm64": ("73e0ec50166ad50d03537a4324ff0c18d122210e2a8581d2d26e52424d8da520", 1396618),
-    "windows-x64": ("e80c525f544540e3fcd0c099db9cb5b05b58c76204580eab078110d263db3473", 1482733),
+    "linux-arm64": ("9009ae1ded3db7f3e21042ca19ed44f2447eaed5011daf81a039a343190acc76", 3351088),
+    "linux-x64": ("93952b9473dd7d2a01340ef058eb15ff78bb0d2593bd1a9622ea1979d5c40133", 3684649),
+    "macos-arm64": ("a573c598676e2e4409c4504df130a2f144e31307e0cec8d7dba0fd61658458d2", 1595277),
+    "macos-x64": ("81dbaae2188eb9432e145d32cbc020f10d3da83aca942a4bc601954a2bdf2666", 1725987),
+    "windows-arm64": ("f0f9f5d12cb8c96e5242e733fd95825fb42cdb1b1d7faf0cf51f7c0766c8e072", 1404416),
+    "windows-x64": ("d21affba004748936899f95279bd06f91a2571daf1844cd14b5dd48b336b85af", 1491895),
 }
 
 
@@ -10694,6 +10708,47 @@ def avault_agent_pubkey() -> dict:
     if not isinstance(public_key, str) or not isinstance(fingerprint, str) or not public_key or not fingerprint:
         raise AvaultError("avault agent pubkey returned malformed output")
     return {"public_key": public_key, "fingerprint": fingerprint}
+
+
+AVAULT_GENERATE_SECRET_MIN_VERSION = "0.1.13"
+
+
+def avault_generate_secret(name: str, recipe: dict):
+    """Generate and seal inside Rust; only the existing Sealed envelope returns.
+
+    The service validates the recipe before this boundary. No plaintext stdin,
+    fallback RNG, delivery, or local dependency installation is involved.
+    """
+    from storage.vault_crypto import Sealed
+
+    _require_avault_min_version(
+        "static secret generation", AVAULT_GENERATE_SECRET_MIN_VERSION,
+        managed_available=_version_at_least(AVAULT_VERSION, AVAULT_GENERATE_SECRET_MIN_VERSION),
+    )
+    args = ["generate-secret", "--name", name, "--type", recipe["type"]]
+    if recipe["type"] == "password":
+        args += ["--length", str(recipe["length"])]
+        if not recipe["digits"]:
+            args.append("--no-digits")
+        if not recipe["symbols"]:
+            args.append("--no-symbols")
+        if recipe["no_lookalikes"]:
+            args.append("--no-lookalikes")
+    else:
+        args += ["--bytes", str(recipe["bytes"])]
+    proc = _run_avault(args)
+    if proc.returncode != 0:
+        # Do not reflect custody process output in exceptions or control JSON.
+        raise AvaultError("avault could not generate and seal a static secret")
+    try:
+        payload = json.loads(proc.stdout)
+        if not isinstance(payload, dict) or set(payload) != {"ciphertext", "nonce", "wrap_meta"}:
+            raise ValueError("invalid envelope fields")
+        if not all(isinstance(value, str) and value for value in payload.values()):
+            raise ValueError("invalid envelope values")
+        return Sealed(**payload)
+    except (ValueError, TypeError):
+        raise AvaultError("avault generation returned a malformed envelope") from None
 
 
 def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):

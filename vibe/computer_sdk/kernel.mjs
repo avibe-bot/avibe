@@ -1,8 +1,8 @@
 // Persistent JavaScript kernel for ``vibe computer js``.
 //
 // The Controller owns this process: it starts it lazily for one Avibe Session,
-// talks to it over the inherited socket named by AVIBE_COMPUTER_KERNEL_FD
-// (stdio is /dev/null), and kills it on timeout, idle, reset, archive, or
+// talks to it over an inherited POSIX socket or owner-only Windows named
+// pipe (stdio is null), and kills it on timeout, idle, reset, archive, or
 // shutdown. Every desktop effect still goes through the Controller's
 // /internal/computer-script routes with the exact-Turn token of the call that
 // is executing; outside an executing call there is no token to use.
@@ -32,11 +32,34 @@ const RESULT_TEXT_MAX_CHARS = 16 * 1024;
 const STACK_MAX_CHARS = 4 * 1024;
 const RETAINED_CALL_DIRECTORIES = 10;
 
-const channel = new net.Socket({
-  fd: Number(process.env.AVIBE_COMPUTER_KERNEL_FD),
-  readable: true,
-  writable: true,
-});
+const pipePath = process.env.AVIBE_COMPUTER_KERNEL_PIPE;
+const fd = process.env.AVIBE_COMPUTER_KERNEL_FD;
+delete process.env.AVIBE_COMPUTER_KERNEL_PIPE;
+delete process.env.AVIBE_COMPUTER_KERNEL_FD;
+const channel = pipePath
+  ? await connectPipe(pipePath)
+  : new net.Socket({ fd: Number(fd), readable: true, writable: true });
+
+async function connectPipe(pipePath) {
+  // An unexpected same-user peer may briefly occupy the single pipe instance
+  // while the parent checks and rejects its PID. Do not fall back to TCP.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await new Promise((resolve, reject) => {
+        const socket = net.createConnection({ path: pipePath });
+        const failed = (error) => { socket.destroy(); reject(error); };
+        socket.once("error", failed);
+        socket.once("connect", () => {
+          socket.off("error", failed);
+          resolve(socket);
+        });
+      });
+    } catch (error) {
+      if (error.code !== "EBUSY" || attempt >= 49) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+}
 const session = new inspector.Session();
 const captureKey = `__avibeKernelCapture_${randomUUID().replaceAll("-", "")}`;
 let captured;

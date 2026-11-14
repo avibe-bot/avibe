@@ -198,6 +198,13 @@ def create_or_reuse_desktop_update_request(
     path = request_path or desktop_update_request_path()
     with _REQUEST_LOCK:
         status = read_desktop_update_status(status_path)
+        # Control intents have a separate mailbox: an older shell can never
+        # interpret a check/channel change as an install. Share the busy gate
+        # before either request has reached the native shell as well.
+        from vibe.desktop_update_control import CONTROL_REQUEST_FILE, control_in_flight
+
+        if control_in_flight(path.with_name(CONTROL_REQUEST_FILE), status, moment):
+            raise DesktopUpdateRequestError("update_in_progress")
         remote = status["remote_request"] if status else None
         existing = read_desktop_update_request(path)
         remote_expired = _remote_request_expired(remote, existing, moment)

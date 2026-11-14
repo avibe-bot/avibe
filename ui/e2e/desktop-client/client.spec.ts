@@ -24,8 +24,9 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.setViewportSize(viewport);
       const denied = await serveProduct(page, lang);
       const state = clientState(); signIn(state);
-      // Exercise the original local updater. Remote presentation-only behavior has
-      // its own footer test and never receives this native updater IPC fixture.
+      // A page this computer serves: the version opens the shared update panel (ui/design: update/panel)
+      // over the desktop IPC. Remote presentation-only behavior has its own footer test and never
+      // receives this native updater IPC fixture.
       await page.route('**/api/version**', (route) => route.fulfill({ json: { current: state.desktop.version, latest: '3.2.7', has_update: true, managed_by: 'desktop' } }));
       state.remote_auxiliary = 'disabled_incomplete';
       const requests = await installBridge(page, state, { projection: true });
@@ -52,7 +53,8 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await expect(popup).toBeVisible();
       const box = await popup.boundingBox();
       expect(box!.x).toBeGreaterThanOrEqual(0); expect(box!.y).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
-      await expect(popup).toContainText('3.2.6rc9'); await expect(popup).not.toContainText('2.4.0');
+      await expect(popup.locator('[data-update-panel]')).toBeVisible();
+      await expect(popup).toContainText('3.2.6rc9'); await expect(popup).toContainText('3.2.7'); await expect(popup).not.toContainText('2.4.0');
       await page.screenshot({ animations: 'disabled', path: info.outputPath('update.png') });
       await page.keyboard.press('Escape');
       await expect(page.locator('[data-version-trigger] button')).toBeFocused();

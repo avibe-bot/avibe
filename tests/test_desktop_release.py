@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from scripts import desktop_release as release
+from tests.test_cua_driver_packaging import windows_pe_bytes
 from tests.test_desktop_runtime_bundle_builder import builder
 
 
@@ -47,7 +48,7 @@ def secret_references(value):
 
 
 def driver_provenance_payload(target, prepared_binary_sha256):
-    pinned_driver = release.pinned_driver_source()
+    pinned_driver = release.pinned_driver_source(target)
     arch = release.TARGETS[target][1]
     return {
         "schema_version": 2,
@@ -114,6 +115,18 @@ def assemble_assets(root, source=SOURCE, *, tag=TAG):
                 "driver": driver,
                 "driver_provenance_path": provenance,
                 "driver_cdhash": "5" * 40,
+            }
+        else:
+            prepared_driver = work / "prepared-cua-driver"
+            prepared_driver.write_bytes(windows_pe_bytes())
+            driver = work / "cua-driver"
+            shutil.copyfile(prepared_driver, driver)
+            provenance = work / "driver-provenance.json"
+            provenance.write_text(json.dumps(driver_provenance_payload(target, release.digest(prepared_driver))))
+            driver_args = {
+                "prepared_driver": prepared_driver,
+                "driver": driver,
+                "driver_provenance_path": provenance,
             }
         release.record(version=version, target=target, tag=tag, source_sha=source,
                        installer=installer, runtime=runtime, output=output,
@@ -244,10 +257,23 @@ def test_manual_prepare_retains_optional_signing_and_native_version(tmp_path):
                 },
             },
         ),
-        ("x86_64-pc-windows-msvc", None),
+        (
+            "x86_64-pc-windows-msvc",
+            {
+                "resources": {
+                    "binaries/cua-driver-x86_64-pc-windows-msvc.exe": "computer-use/cua-driver.exe",
+                    "../cua-driver/policy.yaml": "computer-use/policy.yaml",
+                    "../cua-driver/tools-windows-v0.31.0.json": "computer-use/tools-windows-v0.31.0.json",
+                    "../cua-driver/LICENSE.md": "computer-use/LICENSE.md",
+                    "../cua-driver/sources.json": "computer-use/sources.json",
+                    "binaries/cua-driver-x86_64-pc-windows-msvc.exe.provenance.json":
+                        "computer-use/driver-provenance.json",
+                },
+            },
+        ),
     ],
 )
-def test_prepare_packages_computer_use_assets_only_for_macos(tmp_path, target, expected_bundle):
+def test_prepare_packages_platform_specific_computer_use_assets(tmp_path, target, expected_bundle):
     config, environment = tmp_path / "config.json", tmp_path / "env"
     release.prepare("2.0.0", "", "", config, environment, target)
     override = json.loads(config.read_text())
@@ -265,7 +291,7 @@ def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
         source = json.loads(
             (directory / release.asset_names(VERSION, target)[2]).read_text()
         )
-        assert source["schema_version"] == 3
+        assert source["schema_version"] == (3 if "darwin" in target else 4)
         signature = (directory / release.asset_names(VERSION, target)[3]).read_text()
         if "darwin" in target:
             assert signature == (
@@ -328,7 +354,7 @@ def test_verify_accepts_published_legacy_records_with_their_adhoc_layers(tmp_pat
         names = release.asset_names(VERSION, target)
         source = json.loads((directory / names[2]).read_text(encoding="utf-8"))
         source["schema_version"] = schema
-        if schema == 1:
+        if schema == 1 or system == "windows":
             source.pop("computer_use_driver", None)
         legacy = (
             "app-adhoc\ndmg-unsigned-unnotarized\n"
@@ -336,6 +362,87 @@ def test_verify_accepts_published_legacy_records_with_their_adhoc_layers(tmp_pat
         )
         rewrite_record(directory, target, source=source, signature=legacy)
     assert len(release.verify(directory, TAG, SOURCE)) == 10
+
+
+def test_verify_accepts_published_schema_three_windows_without_a_driver(tmp_path):
+    """Schema 3 Windows installers predate Computer Use but already use Certum."""
+    directory = assemble_assets(tmp_path)
+    target = "x86_64-pc-windows-msvc"
+    source = json.loads((directory / release.asset_names(VERSION, target)[2]).read_text())
+    source["schema_version"] = 3
+    source.pop("computer_use_driver")
+    rewrite_record(directory, target, source=source)
+    assert len(release.verify(directory, TAG, SOURCE)) == 10
+
+
+@pytest.mark.parametrize("mutation", ["missing", "macos-snapshot", "patch", "target", "upstream", "resigned", "cdhash"])
+def test_windows_release_consumer_requires_exact_source_build_provenance(tmp_path, mutation):
+    """Matching release checksums must not conceal wrong-platform or unsigned-contract drift."""
+    directory = assemble_assets(tmp_path)
+    target = "x86_64-pc-windows-msvc"
+    source = json.loads((directory / release.asset_names(VERSION, target)[2]).read_text())
+    driver = source["computer_use_driver"]
+    if mutation == "missing":
+        source.pop("computer_use_driver")
+    elif mutation == "macos-snapshot":
+        driver["tool_snapshot_sha256"] = release.pinned_driver_source()["tool_snapshot_sha256"]
+    else:
+        field, value = {
+            "patch": ("patch_sha256", "0" * 64),
+            "target": ("target", "aarch64-pc-windows-msvc"),
+            "upstream": ("build_origin", "upstream_release"),
+            "resigned": ("packaged_sha256", "0" * 64),
+            "cdhash": ("packaged_cdhash", "0" * 40),
+        }[mutation]
+        driver[field] = value
+    rewrite_record(directory, target, source=source)
+    with pytest.raises(ValueError, match="Windows Cua Driver provenance"):
+        release.verify(directory, TAG, SOURCE)
+
+
+@pytest.mark.parametrize("mutation", [None, "changed-pe", "bad-pe", "cdhash"])
+def test_windows_handoff_binds_unchanged_helper_bytes(tmp_path, mutation):
+    """The Certum handoff may alter the outer installer, never its inner helper."""
+    assemble_assets(tmp_path)
+    target = "x86_64-pc-windows-msvc"
+    work = tmp_path / target
+    driver = work / "cua-driver"
+    if mutation == "changed-pe":
+        driver.write_bytes(driver.read_bytes() + b"changed after preparation")
+    elif mutation == "bad-pe":
+        driver.write_bytes(b"not an executable")
+    kwargs = {
+        "packaged_driver": driver,
+        "packaged_cdhash": "0" * 40 if mutation == "cdhash" else None,
+    }
+    if mutation:
+        with pytest.raises(ValueError, match="Windows Cua Driver"):
+            release.driver_provenance(target, work / "prepared-cua-driver", work / "driver-provenance.json", **kwargs)
+    else:
+        result = release.driver_provenance(target, work / "prepared-cua-driver", work / "driver-provenance.json", **kwargs)
+        assert result["packaged_sha256"] == result["prepared_binary_sha256"]
+        assert "packaged_cdhash" not in result
+
+
+def test_windows_workflow_keeps_helper_provenance_through_outer_signing():
+    """The staged paths are an inter-job artifact contract not exercised by Python calls."""
+    prepare = step("Prepare pinned Windows Cua Driver")
+    assert prepare["if"] == "runner.os == 'Windows'"
+    assert 'prepare-cua-driver.py --target "${{ matrix.target }}"' in prepare["run"]
+    assert "verify-driver-prepared" in prepare["run"]
+    assert "PyYAML==6.0.3" in prepare["run"]
+    steps = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
+    assert steps.index(prepare) < steps.index(step("Build self-contained installer"))
+    staged = step("Stage unsigned Windows installer for Certum")["run"]
+    final = step("Record final signed desktop metadata", "certum-windows-sign", "desktop-release.yml")["run"]
+    assert "windows-signing-input/computer-use/cua-driver.exe" in staged
+    assert "windows-signing-input/computer-use/driver-provenance.json" in staged
+    assert "--prepared-driver windows-input/computer-use/cua-driver.exe" in final
+    assert "--driver windows-input/computer-use/cua-driver.exe" in final
+    assert "--driver-provenance-path windows-input/computer-use/driver-provenance.json" in final
+    assert "--signing certum-authenticode" in final
+    signing = step("Sign installer with Certum SimplySign", "certum-windows-sign", "desktop-release.yml")["run"]
+    assert "computer-use" not in signing and "cua-driver" not in signing
 
 
 def test_verify_requires_signed_macos_layers_on_current_records(tmp_path):
@@ -468,8 +575,7 @@ def test_driver_provenance_rejects_unbound_prepared_digest(
 
 @pytest.mark.parametrize("target", release.release_targets(TAG))
 def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
-    if target == "x86_64-pc-windows-msvc":
-        pytest.skip("Windows metadata is created only after the isolated Certum job")
+    windows = target == "x86_64-pc-windows-msvc"
     directory = assemble_assets(tmp_path)
     work = tmp_path / target
     scripts = work / "scripts"
@@ -485,13 +591,17 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     runtime = work / "desktop/src-tauri/resources/runtime"
     runtime.parent.mkdir(parents=True)
     shutil.copytree(work / "runtime", runtime)
-    installer = work / "desktop/target/release/bundle/dmg/Avibe_fixture.dmg"
+    installer = work / (
+        "desktop/target/release/bundle/nsis/Avibe_fixture-setup.exe"
+        if windows else "desktop/target/release/bundle/dmg/Avibe_fixture.dmg"
+    )
     installer.parent.mkdir(parents=True)
     shutil.copyfile(work / ("native installer" + release.TARGETS[target][2]), installer)
-    if "darwin" in target:
-        prepared_driver = work / f"desktop/src-tauri/binaries/cua-driver-{target}"
-        prepared_driver.parent.mkdir(parents=True)
-        shutil.copyfile(work / "prepared-cua-driver", prepared_driver)
+    prepared_driver = work / f"desktop/src-tauri/binaries/cua-driver-{target}{'.exe' if windows else ''}"
+    prepared_driver.parent.mkdir(parents=True)
+    shutil.copyfile(work / "prepared-cua-driver", prepared_driver)
+    if windows:
+        shutil.copyfile(work / "driver-provenance.json", prepared_driver.with_name(prepared_driver.name + ".provenance.json"))
     binaries = work / "bin"
     binaries.mkdir()
     (binaries / "python").symlink_to(sys.executable)
@@ -500,7 +610,7 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     command = step("Record artifact hashes")["run"].replace("${{ matrix.target }}", target)
     result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=work,
                             env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
-                                 "AVIBE_DESKTOP_VERSION": VERSION, "RELEASE_TAG": TAG, "TARGET": target,
+                                 "AVIBE_DESKTOP_VERSION": VERSION, "RELEASE_TAG": "" if windows else TAG, "TARGET": target,
                                  "RUNNER_OS": "macOS" if "darwin" in target else "Windows",
                                  "apple_signing": "enabled",
                                  "driver_packaged_path": str(work / "cua-driver"),
@@ -508,9 +618,18 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
                                  "driver_packaged_cdhash": "5" * 40},
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    for path in (work / "desktop-package").iterdir():
-        shutil.copyfile(path, directory / path.name)
-    assert len(release.verify(directory, TAG, SOURCE)) == 10
+    if windows:
+        # Non-release builds record locally; tagged builds defer this command to Certum.
+        names = release.asset_names(VERSION, target)
+        output = work / "desktop-package"
+        assert (output / names[3]).read_text() == "installer-unsigned\n"
+        source = json.loads((output / names[2]).read_text())
+        assert source["schema_version"] == 4 and source["tag"] == ""
+        assert source["computer_use_driver"]["packaged_sha256"] == release.digest(prepared_driver)
+    else:
+        for path in (work / "desktop-package").iterdir():
+            shutil.copyfile(path, directory / path.name)
+        assert len(release.verify(directory, TAG, SOURCE)) == 10
 
 
 @pytest.mark.parametrize("mutation", ["missing-target", "extra-file", "installer-bytes", "runtime-version",

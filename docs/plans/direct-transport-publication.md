@@ -82,8 +82,10 @@ never selected or uploaded. The NAT preparation/experiment remains separate.
    source, or old artifacts.
 4. **Publication gate.** Product must give a separate exact source/tag/run go.
    The workflow's publication job uses environment `direct-transport-release`;
-   environment protection must be commissioned/checked by the lead before the
-   first real dispatch (this code does not provision reviewer settings).
+   under the current Product default-off trial policy this environment is plain
+   with no required reviewers. The workflow/helper enforce master-only exact
+   source matching and exact confirmation; no separate owner commissioning step
+   is required. Revisit environment protection before ordinary-user enablement.
    Dispatch with `publish=true` and exact confirmation
    `publish <tag> <source_sha> <run_id>/<attempt>`. The write-capable job rebuilds
    its proof from authenticated, immutable Actions artifacts; it does not trust

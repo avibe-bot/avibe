@@ -1371,6 +1371,14 @@ jobs:
         with:
           node-version: "22.23.4"
 
+      - name: Verify Windows Computer Use process ownership and kernel pipes
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          python -m pytest tests/test_computer_process.py -q -ra --junitxml=ci-junit/computer-process.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "import xml.etree.ElementTree as E; cases=[c for c in E.parse('ci-junit/computer-process.xml').iter('testcase') if c.attrib['name'].startswith('test_windows_')]; assert len(cases) >= 9, 'Missing native Computer Use cases'; assert all(c.find('skipped') is None for c in cases), 'Native Computer Use cases skipped'; print(f'{len(cases)} native Windows Computer Use cases executed')"
+
       - name: Verify Windows Controller control IPC
         run: python -m pytest tests/test_control_ipc.py -q
 
@@ -1397,6 +1405,19 @@ jobs:
       # all, and it needs neither a packaged Runtime nor an installer.
       - name: Verify the Windows service lock keeps its record readable
         run: python -m pytest tests/test_service_lock_record.py -q
+
+      - name: Verify inactive Windows Computer Use admission foundation
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          python -m pytest tests/test_computer_use_windows.py -q -ra -k test_windows_native_ --junitxml=ci-junit/computer-use-native.xml
+          if ($LASTEXITCODE -ne 0) { throw "Native Computer Use foundation tests failed" }
+          [xml]$report = Get-Content ci-junit/computer-use-native.xml -Raw
+          $cases = @($report.SelectNodes('//testcase') | Where-Object { $_.name -like 'test_windows_native_*' })
+          if ($cases.Count -ne 7) { throw "Expected all seven native Computer Use cases, got $($cases.Count)" }
+          if (@($cases | Where-Object { $_.SelectSingleNode('skipped') }).Count -ne 0) {
+            throw "Native Computer Use cases must execute, not skip"
+          }
 
       # `vibe stop` walks every process on the machine before it signals
       # anything. On Linux a process whose command line psutil cannot read

@@ -17,13 +17,17 @@ that the shell can adopt.
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
 from dataclasses import dataclass
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path
+import platform as platform_module
 import socket
+import stat
 import sys
 from typing import Any, Callable, Mapping
 
@@ -104,6 +108,9 @@ _STATE_VALUES = frozenset(
     }
 )
 _SHA256_HEX_LENGTH = 64
+_WINDOWS_NAMED_PIPE_PREFIX = "\\\\.\\pipe\\"
+_WINDOWS_NAMED_PIPE_MAX_CHARS = 256
+_WINDOWS_ERROR_LOCK_VIOLATION = 33
 
 
 class ComputerUseStateError(ValueError):
@@ -275,6 +282,25 @@ def _absolute_path(payload: Mapping[str, Any], key: str) -> str:
     return value
 
 
+def _is_windows_named_pipe(value: str) -> bool:
+    if not value.casefold().startswith(_WINDOWS_NAMED_PIPE_PREFIX.casefold()):
+        return False
+    name = value[len(_WINDOWS_NAMED_PIPE_PREFIX) :]
+    return bool(name) and len(value) <= _WINDOWS_NAMED_PIPE_MAX_CHARS and not any(
+        character in "\x00\\/" for character in name
+    )
+
+
+def _endpoint_path(payload: Mapping[str, Any], key: str) -> str:
+    value = _required_string(payload, key)
+    if value.casefold().startswith(_WINDOWS_NAMED_PIPE_PREFIX.casefold()):
+        if _is_windows_named_pipe(value):
+            return value
+    elif Path(value).is_absolute():
+        return value
+    raise ComputerUseStateError(f"{key} must be an absolute path or Windows named pipe")
+
+
 def parse_computer_use_state(payload: Any) -> ComputerUseState:
     if not isinstance(payload, dict):
         raise ComputerUseStateError("state file must contain a JSON object")
@@ -300,7 +326,7 @@ def parse_computer_use_state(payload: Any) -> ComputerUseState:
     proxy_executable: str | None = None
     host_bundle_id: str | None = None
     if state_name == "ready":
-        socket_path = _absolute_path(payload, "socket_path")
+        socket_path = _endpoint_path(payload, "socket_path")
         proxy_executable = _absolute_path(payload, "proxy_executable")
         host_bundle_id = _required_string(payload, "host_bundle_id")
 
@@ -349,11 +375,127 @@ def _snapshot_valid(state: ComputerUseState, verifier: SnapshotVerifier) -> bool
     return valid
 
 
+def _windows_private_artifact_is_safe(path: Path, *, fd: int | None = None) -> bool:
+    """Require a regular, non-reparse object owned by this user, with user/SYSTEM ACL."""
+
+    try:
+        from core.private_fs import windows_security
+
+        info = path.lstat() if fd is None else os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            return False
+        security = windows_security()
+        reader = (
+            security._named_path_security(path)
+            if fd is None
+            else security._file_descriptor_security(fd, path)
+        )
+        with reader as (owner, dacl, _descriptor), contextlib.ExitStack() as stack:
+            if not owner or not dacl:
+                return False
+            trusted = [
+                security._descriptor_owner(
+                    stack.enter_context(security._descriptor_from_sddl(f"O:{sid}"))
+                )
+                for sid in (security.current_user_sid, "SY")
+            ]
+            if not security.advapi32.EqualSid(owner, trusted[0]):
+                return False
+            for ace_type, _flags, sid in security._aces(dacl):
+                if ace_type == security._ACCESS_DENIED_ACE_TYPE:
+                    continue
+                if ace_type != security._ACCESS_ALLOWED_ACE_TYPE or not any(
+                    security.advapi32.EqualSid(sid, candidate) for candidate in trusted
+                ):
+                    return False
+        return True
+    except (OSError, ImportError, AttributeError, TypeError, ValueError, ctypes.ArgumentError):
+        return False
+
+
+def _windows_lock_probe(lock_path: Path) -> str:
+    """Return ``held``, ``free``, ``missing``, or ``unverified``."""
+
+    try:
+        before = lock_path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unverified"
+    if not _windows_private_artifact_is_safe(lock_path):
+        return "unverified"
+    fd: int | None = None
+    try:
+        from ctypes import wintypes
+        import msvcrt
+
+        fd = os.open(lock_path, os.O_RDWR)
+        opened = os.fstat(fd)
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            return "unverified"
+        if not _windows_private_artifact_is_safe(lock_path, fd=fd):
+            return "unverified"
+
+        class _Overlapped(ctypes.Structure):
+            _fields_ = [
+                ("internal", ctypes.c_size_t),
+                ("internal_high", ctypes.c_size_t),
+                ("offset", wintypes.DWORD),
+                ("offset_high", wintypes.DWORD),
+                ("h_event", wintypes.HANDLE),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LockFileEx.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(_Overlapped),
+        ]
+        kernel32.LockFileEx.restype = wintypes.BOOL
+        kernel32.UnlockFileEx.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(_Overlapped),
+        ]
+        kernel32.UnlockFileEx.restype = wintypes.BOOL
+
+        overlapped = _Overlapped()
+        flags = 0x00000001 | 0x00000002  # FAIL_IMMEDIATELY | EXCLUSIVE
+        if kernel32.LockFileEx(
+            msvcrt.get_osfhandle(fd), flags, 0, 1, 0, ctypes.byref(overlapped)
+        ):
+            if not kernel32.UnlockFileEx(
+                msvcrt.get_osfhandle(fd), 0, 1, 0, ctypes.byref(overlapped)
+            ):
+                return "unverified"
+            return "free"
+        if ctypes.get_last_error() == _WINDOWS_ERROR_LOCK_VIOLATION:
+            return "held"
+        return "unverified"
+    except FileNotFoundError:
+        return "missing"
+    except (OSError, ImportError, AttributeError, TypeError, ValueError, ctypes.ArgumentError):
+        return "unverified"
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _windows_lock_is_held(lock_path: Path) -> bool:
+    return _windows_lock_probe(lock_path) == "held"
+
+
 def _shell_lock_is_held(lock_path: Path) -> bool:
     if os.name == "nt":
-        # Phase 1 is macOS-only. A Windows state file cannot claim a live shell
-        # until the deferred Windows lock implementation is added.
-        return False
+        return _windows_lock_is_held(lock_path)
     import fcntl
 
     try:
@@ -389,6 +531,8 @@ def desktop_computer_use_shell_is_live(
     except ComputerUseStateError:
         state = None
     resolved_lock_path = lock_path or target.with_name(COMPUTER_USE_LOCK_FILE)
+    if os.name == "nt" and target.exists() and not _windows_private_artifact_is_safe(target):
+        return False
     if not shell_lock_held(resolved_lock_path):
         return False
     return state is None or state.state != "stopped"
@@ -408,13 +552,21 @@ def _unix_socket_accepts(path: str, *, timeout: float = 0.1) -> bool:
     return True
 
 
+def _endpoint_accepts(path: str, *, timeout: float = 0.1) -> bool:
+    # A named-pipe connection alone cannot prove the shell-owned generation.
+    # Windows enablement requires the reviewed end-to-end identity contract.
+    if os.name == "nt":
+        return False
+    return _unix_socket_accepts(path, timeout=timeout)
+
+
 def effective_computer_use_status(
     *,
     state_path: Path | None = None,
     lock_path: Path | None = None,
     verifier: SnapshotVerifier | None = None,
     shell_lock_held: Callable[[Path], bool] = _shell_lock_is_held,
-    socket_accepts: Callable[[str], bool] = _unix_socket_accepts,
+    socket_accepts: Callable[[str], bool] | None = None,
 ) -> ComputerUseStatus:
     target = state_path or computer_use_state_path()
     checker = verifier or _snapshot_verifier
@@ -429,11 +581,30 @@ def effective_computer_use_status(
     if not _snapshot_valid(state, checker):
         return ComputerUseStatus("unavailable", "snapshot_invalid", state)
     resolved_lock_path = lock_path or target.with_name(COMPUTER_USE_LOCK_FILE)
-    if not shell_lock_held(resolved_lock_path) or state.state == "stopped":
+    if os.name == "nt" and shell_lock_held is _shell_lock_is_held:
+        if not _windows_private_artifact_is_safe(target):
+            return ComputerUseStatus("unavailable", "state_unverified", state)
+        lock_probe = _windows_lock_probe(resolved_lock_path)
+        if lock_probe == "missing":
+            return ComputerUseStatus("unavailable", "shell_not_running", state)
+        if lock_probe != "held":
+            return ComputerUseStatus("unavailable", "lock_unverified", state)
+    elif not shell_lock_held(resolved_lock_path):
         return ComputerUseStatus("unavailable", "shell_not_running", state)
+    if state.state == "stopped":
+        return ComputerUseStatus("unavailable", "shell_not_running", state)
+    if os.name == "nt" and state.state == "ready":
+        if platform_module.machine().casefold() not in {"amd64", "x86_64"}:
+            return ComputerUseStatus("unavailable", "unsupported_architecture", state)
+        # Foundation only: neither a PID/session probe nor caller-injected
+        # connectivity proves the shell-owned driver generation. Keep *all*
+        # Windows ready records unavailable until that contract and the final
+        # action-time privilege/session guards are integrated and reviewed.
+        return ComputerUseStatus("unavailable", "pipe_unverified", state)
     if state.state != "ready":
         return ComputerUseStatus(state.state, state.reason, state)
     assert state.socket_path is not None
-    if not socket_accepts(state.socket_path):
+    endpoint_checker = socket_accepts or _endpoint_accepts
+    if not endpoint_checker(state.socket_path):
         return ComputerUseStatus("unavailable", "daemon_unreachable", state)
     return ComputerUseStatus("ready", None, state)

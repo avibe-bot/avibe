@@ -152,6 +152,16 @@ def _configure_ui_logging(level: str = "INFO") -> None:
     )
 
 
+def _desktop_host_platform() -> str:
+    if sys.platform == "darwin":
+        return "macos"
+    if os.name == "nt":
+        return "windows"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return "unknown"
+
+
 def _desktop_computer_use_supported() -> bool:
     return desktop_computer_use_shell_is_live()
 
@@ -3694,18 +3704,34 @@ async def desktop_capabilities():
     return response_payload
 
 
+@app.route("/api/desktop/update/idle")
+async def desktop_update_idle():
+    """A fresh local-controller observation, never a cached install grant."""
+    from vibe import internal_client
+
+    try:
+        payload = await internal_client.desktop_update_idle()
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        return jsonify({"idle_seconds": 0}), 503
+    result = jsonify(payload)
+    result.headers["Cache-Control"] = "no-store"
+    return result
+
+
 @app.route("/api/desktop/computer-use/status")
 async def desktop_computer_use_status():
     """Read the shell/daemon status from the shared desktop state contract."""
 
     from vibe import internal_client
 
+    host_platform = _desktop_host_platform()
     if not _desktop_computer_use_supported():
         response_payload = jsonify(
             {
                 "supported": False,
                 "status": "unavailable",
                 "reason": "unsupported_host",
+                "host_platform": host_platform,
             }
         )
         response_payload.headers["Cache-Control"] = "no-store"
@@ -3719,6 +3745,7 @@ async def desktop_computer_use_status():
             "supported": True,
             "status": status.status,
             "reason": status.reason,
+            "host_platform": host_platform,
         }
     )
     response_payload.headers["Cache-Control"] = "no-store"
@@ -7695,6 +7722,79 @@ async def _wait_for_desktop_update_ack(request_id: str):
         await asyncio.sleep(min(_DESKTOP_UPDATE_ACK_POLL_SECONDS, remaining))
 
 
+async def _run_update_control(action: str, enabled: bool | None = None):
+    from vibe import api
+    from vibe.desktop_update_control import (
+        acknowledged_control_request,
+        create_or_reuse_control_request,
+        expire_control_request,
+    )
+    from vibe.desktop_update_request import DesktopUpdateRequestError
+    from vibe.sse_broker import broker
+    from vibe.upgrade import is_desktop_managed_runtime
+
+    if not is_desktop_managed_runtime():
+        if action == "prereleases":
+            from config.v2_config import update_config_fields
+
+            await asyncio.to_thread(update_config_fields, lambda config: setattr(config.update, "prereleases", enabled))
+        elif action == "auto_update":
+            from config.v2_config import update_config_fields
+
+            await asyncio.to_thread(update_config_fields, lambda config: setattr(config.update, "auto_update", enabled))
+        snapshot = await asyncio.to_thread(api.get_version_info)
+        if snapshot.get("error"):
+            return jsonify({"ok": False, "error": "update_check_failed", "snapshot": snapshot}), 502
+        return jsonify({"ok": True, "snapshot": snapshot})
+
+    try:
+        decision = await asyncio.to_thread(create_or_reuse_control_request, action, enabled)
+    except DesktopUpdateRequestError as exc:
+        return jsonify({"ok": False, "error": exc.code}), 409
+    if decision.needs_nudge:
+        # The native local-Runtime transport already polls and handles this
+        # wake-up. The separate control mailbox cannot trigger a legacy install.
+        broker.publish("desktop.update.requested", {"request_id": decision.request["request_id"]})
+    request_id = decision.request["request_id"]
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _DESKTOP_UPDATE_ACK_TIMEOUT_SECONDS
+    while True:
+        receipt = await asyncio.to_thread(acknowledged_control_request, decision.request)
+        if receipt is not None:
+            if receipt["phase"] in {"failed", "expired"}:
+                return jsonify({"ok": False, "request_id": request_id, "error": receipt["error_code"] or "check_failed"}), 409
+            return jsonify({"ok": True, "request_id": request_id})
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            await asyncio.to_thread(expire_control_request, request_id)
+            return jsonify({"ok": False, "request_id": request_id, "error": "desktop_shell_unavailable"}), 503
+        await asyncio.sleep(min(_DESKTOP_UPDATE_ACK_POLL_SECONDS, remaining))
+
+
+@app.route("/api/update/check", methods=["POST"])
+async def update_check():
+    payload = request.json
+    if payload is not None and payload != {}:
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    return await _run_update_control("check")
+
+
+@app.route("/api/update/prereleases", methods=["POST"])
+async def update_prereleases():
+    payload = request.json
+    if not isinstance(payload, dict) or set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    return await _run_update_control("prereleases", payload["enabled"])
+
+
+@app.route("/api/update/auto-update", methods=["POST"])
+async def update_auto_update():
+    payload = request.json
+    if not isinstance(payload, dict) or set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    return await _run_update_control("auto_update", payload["enabled"])
+
+
 @app.route("/api/desktop/update/request", methods=["POST"])
 async def desktop_update_request():
     from vibe import api
@@ -7782,7 +7882,7 @@ async def desktop_update_request():
             "ok": True,
             "request_id": remote["request_id"],
             "delivery": (
-                "install" if status["remote_install_allowed"] else "prompt"
+                "install" if "install" in status.get("host_actions", []) or status["remote_install_allowed"] else "prompt"
             ),
         }
     )
