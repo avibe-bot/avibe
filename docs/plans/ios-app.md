@@ -310,18 +310,32 @@ while the document remains open is displayed after its next load.
 parameters**, resolving to `null`. It uses the existing runtime-preserving
 native sheet at `avibe-app://bundle/mobile.html#sheet-instances`. The bundled
 page recognizes this entry and omits the Account row; `app.showAccount()`
-continues to open A's `#sheet`, including Account. Both modes use the same
-native owner for dismissal, large-detent/document scrolling and sheet
-`auth.*` restrictions. If either sheet is already presented, another
-`app.showInstances()` is a quiet no-op resolving `null`: it does not replace
-or navigate the existing document or change its mode. Nonempty parameters
-reject with `invalid_argument` before presentation.
+continues to open A's `#sheet`, including Account.
 
-Native support and the bundled `#sheet-instances` page mode must both be
-present before B ships or the App advertises `instancePresentation: 1` in a
-shipped build. The native PR is held until the bundled-page B PR is Merge-ready;
-the lead lands bundled B first and native advertisement second, only after the
-A-only TestFlight build has been dispatched. B is not part of that A build.
+Under `instancePresentation: 1`, `app.showAccount({"start":"account"})` opens
+`#sheet-account`: Account is the panel root, with a Close (×) control calling
+`app.dismiss`, no Back control and no `[data-mobile-back]`. A native left-edge
+swipe therefore does nothing at that root; licenses still push and return to
+Account. The argument object must contain exactly the one key `start` with the
+string value `"account"`; unsupported keys/values reject `invalid_argument`
+before presentation. The parameterized form is unavailable without the
+`instancePresentation` capability; the no-parameter form remains unchanged.
+This extends the existing `app.showAccount` method, not the method inventory.
+
+All three modes share one native owner for dismissal, large-detent/document
+scrolling and sheet `auth.*` restrictions. If any panel is already presented,
+any valid presentation request is a quiet no-op resolving `null`: it does not
+replace or navigate the existing document or change its mode. Nonempty
+`app.showInstances` parameters reject `invalid_argument` before presentation.
+
+Native support and both bundled B page modes must be present before B ships
+or the App advertises `instancePresentation: 1` in a shipped build. The bundled
+page/Runtime B change lands first; Product then reviews the B Account-root
+frames and gives a new go on the native PR's exact head before it lands. The
+native side of master remains A while the owner tests A's TestFlight feel.
+After the native merge, a separate test-only capture change covers both B
+routes before Product capture review and the B TestFlight build. B is not part
+of the A-only build.
 Unknown hashes in older bundled pages fall back to the full-screen-style list:
 there is no crash or auth bypass, but Close/current-row return and document
 scrolling are wrong and Account may remain visible. This is not an acceptable
