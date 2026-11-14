@@ -237,17 +237,28 @@ it.each([12, 23, 47, 101, 211, 431, 863, 1723])('keeps final-layout invariants t
       view = renderEditor(payload(store));
     }
     expect(lastState(), evidence).toEqual(state());
+    // Read the DOM once per transition instead of rescanning all labels for every field at
+    // capacity. Keep the same per-identity checks, including unique accessible input labels.
+    const inputs = new Map<string, string>();
+    for (const input of view.container.querySelectorAll<HTMLInputElement>('input[aria-label]')) {
+      const name = input.getAttribute('aria-label')!;
+      if (!name.startsWith('Value for ')) continue;
+      expect(inputs.has(name), evidence).toBe(false);
+      inputs.set(name, input.value);
+    }
+    expect(inputs.size, evidence).toBe(truth.values.size - removals.size);
     for (const id of truth.values.keys()) {
       if (removals.has(id)) continue;
-      const actual = (screen.getByLabelText(`Value for ${fieldName(id, truth)}`) as HTMLInputElement).value;
-      expect(actual === (drafts.get(id) ?? ''), evidence).toBe(true);
+      expect(inputs.get(`Value for ${fieldName(id, truth)}`) === (drafts.get(id) ?? ''), evidence).toBe(true);
     }
     if (action !== 10) {
       expect(api.updateVaultSecretFields.mock.calls.length, evidence).toBe(before);
       expect(sealBlindBox.mock.calls.length, evidence).toBe(beforeSeal);
     }
   }
-});
+// Forty rendered transitions at up to 32 fields are a scenario, not a single interaction.
+// Give shared CI workers a bounded budget without reducing seeds, steps or invariants.
+}, 15_000);
 
 it('saves nothing and reports clean when nothing changed', async () => {
   renderEditor();
