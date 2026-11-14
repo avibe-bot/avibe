@@ -7,17 +7,36 @@ final class InstanceSheetGestureUITests: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
+    }
+
+    /// Runs the formerly failing first matrix cell in ordinary simulator CI.
+    /// A native ready signal must not make absent required web text pass.
+    func testColdRealBundleNeedsItsOwnWebContentAfterNativeReadiness() {
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_STATE"] = "default"
+        app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = "light"
+        launchFixture()
+        XCTAssertTrue(SheetFixtureReadiness.waitForText("You’re in", in: app))
+        XCTAssertTrue(app.webViews.firstMatch.buttons["Close and return to Studio"].waitForExistence(timeout: 10))
+        XCTAssertFalse(SheetFixtureReadiness.waitForText(
+            "This required text does not exist", in: app, timeout: 0.2
+        ))
+    }
+
+    private func launchFixture() {
         app.launch()
+        SheetFixtureReadiness.waitForDocument(in: app)
     }
 
     func testMidListDownwardDragScrollsBeforeTheSheetDismisses() throws {
-        let close = app.buttons["Close"]
+        launchFixture()
+        let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
-        let initialOffset = app.staticTexts["scroll-offset-0"]
+        let initialOffset = app.webViews.firstMatch.staticTexts["scroll-offset-0"]
         XCTAssertTrue(initialOffset.waitForExistence(timeout: 10))
 
         app.swipeUp(velocity: .slow)
-        let scrolled = app.staticTexts.matching(
+        let scrolled = app.webViews.firstMatch.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH 'scroll-offset-' AND label != 'scroll-offset-0'")
         ).firstMatch
         XCTAssertTrue(scrolled.waitForExistence(timeout: 5))
@@ -43,7 +62,8 @@ final class InstanceSheetGestureUITests: XCTestCase {
     }
 
     func testTopDownwardDragDismissesTheSheet() {
-        let close = app.buttons["Close"]
+        launchFixture()
+        let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9))
@@ -52,7 +72,8 @@ final class InstanceSheetGestureUITests: XCTestCase {
     }
 
     func testFastFlickAtTheTopDismissesTheSheet() {
-        let close = app.buttons["Close"]
+        launchFixture()
+        let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
@@ -61,7 +82,8 @@ final class InstanceSheetGestureUITests: XCTestCase {
     }
 
     func testSheetSurvivesCompactHeightRotation() {
-        let close = app.buttons["Close"]
+        launchFixture()
+        let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let document = app.webViews.firstMatch
         XCTAssertTrue(document.waitForExistence(timeout: 5))
@@ -93,10 +115,49 @@ final class InstanceSheetGestureUITests: XCTestCase {
     }
 
     private func scrollOffset() -> Int? {
-        let state = app.staticTexts.matching(
+        let state = app.webViews.firstMatch.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH 'scroll-offset-'")
         ).firstMatch
         guard state.exists else { return nil }
         return Int(state.label.dropFirst("scroll-offset-".count))
+    }
+}
+
+/// Keep WebKit process/document startup separate from the short web-state
+/// assertions. The native marker is fixture-only and leaves the web subtree
+/// exposed; content is still checked through a fresh, scoped AX query.
+enum SheetFixtureReadiness {
+    static func waitForDocument(
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let loaded = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                let surface = app.otherElements["fixture-document-surface"]
+                return surface.exists
+                    && (surface.value as? String)?.hasPrefix("document-ready;") == true
+            }, object: nil
+        )
+        // Same process-launch budget as AvibeTests.WebKitReadiness. The web
+        // content assertions below retain their existing 10-second budget.
+        XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 120), .completed,
+                       "Fixture did not load its bundled document", file: file, line: line)
+    }
+
+    static func waitForText(
+        _ text: String, in app: XCUIApplication, timeout: TimeInterval = 10
+    ) -> Bool {
+        let visible = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                // Re-resolve on each snapshot, and match the label rather
+                // than relying on app-wide identifier resolution into a
+                // different WebContent process.
+                app.webViews.firstMatch.staticTexts.matching(
+                    NSPredicate(format: "label == %@", text)
+                ).firstMatch.exists
+            }, object: nil
+        )
+        return XCTWaiter.wait(for: [visible], timeout: timeout) == .completed
     }
 }

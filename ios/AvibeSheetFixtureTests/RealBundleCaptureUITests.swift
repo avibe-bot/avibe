@@ -22,24 +22,26 @@ final class RealBundleCaptureUITests: XCTestCase {
                         app.launch()
                         defer { app.terminate() }
                         let chinese = language == "zh"
-                        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 15))
+                        SheetFixtureReadiness.waitForDocument(in: app)
+                        if state != "first-run" {
+                            let refreshed = XCTNSPredicateExpectation(
+                                predicate: NSPredicate(format: "value == %@", "document-ready;fetch-2"),
+                                object: app.otherElements["fixture-document-surface"]
+                            )
+                            XCTAssertEqual(XCTWaiter.wait(for: [refreshed], timeout: 10), .completed)
+                        }
                         // Static gesture HTML cannot pass these localized real-page assertions.
                         if state == "first-run" {
                             requireText(chinese ? "想从哪里开始？" : "Where shall we begin?", in: app)
-                            XCTAssertFalse(app.buttons.matching(NSPredicate(
+                            XCTAssertFalse(app.webViews.firstMatch.buttons.matching(NSPredicate(
                                 format: "label CONTAINS %@", chinese ? "关闭，回到" : "Close and return to"
                             )).firstMatch.exists)
                         } else {
                             requireText(chinese ? "正在使用" : "You’re in", in: app)
-                            XCTAssertTrue(app.buttons[chinese ? "关闭，回到 Studio" : "Close and return to Studio"].waitForExistence(timeout: 10))
-                            let refreshed = XCTNSPredicateExpectation(
-                                predicate: NSPredicate(format: "value == %@", "fetch-2"),
-                                object: app.otherElements["real-bundle-capture-surface"]
-                            )
-                            XCTAssertEqual(XCTWaiter.wait(for: [refreshed], timeout: 10), .completed)
+                            XCTAssertTrue(app.webViews.firstMatch.buttons[chinese ? "关闭，回到 Studio" : "Close and return to Studio"].waitForExistence(timeout: 10))
                             let settled = XCTNSPredicateExpectation(
                                 predicate: NSPredicate { _, _ in
-                                    !app.staticTexts[chinese ? "正在更新…" : "Updating…"].exists
+                                    !app.webViews.firstMatch.staticTexts[chinese ? "正在更新…" : "Updating…"].exists
                                 }, object: nil
                             )
                             XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 10), .completed)
@@ -58,13 +60,13 @@ final class RealBundleCaptureUITests: XCTestCase {
                                 ? "没能更新实例列表，下面是上次的结果，在线状态可能已经变了。"
                                 : "Couldn’t update the list. These are the last results; who is online may have changed.", in: app)
                         case "account":
-                            let account = app.buttons.matching(NSPredicate(
+                            let account = app.webViews.firstMatch.buttons.matching(NSPredicate(
                                 format: "label CONTAINS %@", "alex@example.invalid"
                             )).firstMatch
                             XCTAssertTrue(account.waitForExistence(timeout: 10))
                             if !account.isHittable { app.swipeUp(velocity: .slow) }
                             account.tap()
-                            XCTAssertTrue(app.buttons[chinese ? "在此设备退出" : "Sign out on this device"].waitForExistence(timeout: 10))
+                            XCTAssertTrue(app.webViews.firstMatch.buttons[chinese ? "在此设备退出" : "Sign out on this device"].waitForExistence(timeout: 10))
                             requireText("alex@example.invalid", in: app)
                         default:
                             break
@@ -82,11 +84,11 @@ final class RealBundleCaptureUITests: XCTestCase {
     }
 
     private func requireText(_ text: String, in app: XCUIApplication) {
-        XCTAssertTrue(app.staticTexts[text].waitForExistence(timeout: 10), text)
+        XCTAssertTrue(SheetFixtureReadiness.waitForText(text, in: app), text)
     }
 
     private func tapRow(containing name: String, in app: XCUIApplication) {
-        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
+        let row = app.webViews.firstMatch.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         if !row.isHittable { app.swipeUp(velocity: .slow) }
         row.tap()
