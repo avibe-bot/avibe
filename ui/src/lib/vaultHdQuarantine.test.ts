@@ -40,3 +40,11 @@ it('keeps a pending block through pruning until its save resolves, then prunes i
   pruneHdWalletBlocks([], 5_000);
   expect(isHdWalletBlocked('PENDING_WALLET')).toBe(false);
 });
+
+it('treats a pending block left by a closed page as ordinary once no save could still be running', () => {
+  blockHdWallet('LEFT_PENDING', 0, true);
+  pruneHdWalletBlocks(['LEFT_PENDING'], 20 * 60_000);
+  expect(isHdWalletBlocked('LEFT_PENDING')).toBe(true);
+  pruneHdWalletBlocks([], 20 * 60_000);
+  expect(isHdWalletBlocked('LEFT_PENDING')).toBe(false);
+});

@@ -43,6 +43,10 @@ export const blockHdWallet = (name: string, now = Date.now(), pending = false) =
 export const unblockHdWallet = (name: string) => write(read().filter((block) => block.name !== name));
 /** Forget wallets a list no longer shows, but only blocks made before that list was requested: a
  *  list begun earlier says nothing about a wallet created (and blocked) after it started. */
+// A pending block outlives its page only if that page was closed mid-save; after the longest a save
+// can take (the 305 s window plus the request), it is an ordinary block: kept while the wallet is
+// listed, pruned once a later list shows no such wallet.
+const PENDING_MS = 15 * 60_000;
 export const pruneHdWalletBlocks = (listed: readonly string[], requestedAt: number) => write(
-  read().filter((block) => block.pending || listed.includes(block.name) || block.at >= requestedAt),
+  read().filter((block) => (block.pending && requestedAt - block.at < PENDING_MS) || listed.includes(block.name) || block.at >= requestedAt),
 );
