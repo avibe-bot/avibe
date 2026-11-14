@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  ChevronLeft,
   ChevronRight,
   ExternalLink,
   Eye,
@@ -1731,8 +1732,30 @@ function Account({
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id);
   return (
     <CloudScreen>
-      <Brand back disabled={locked} onBack={onBack} />
-      <PageTitle title={t('mobileApp.account.title')} />
+      {inSheet ? (
+        // A page pushed inside the sheet names where Back goes (ui/design: mobile-app/switcher/account).
+        <header className="pb-4">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={locked}
+            // The App's left-edge swipe presses this button (MobileOnboardingBridge).
+            data-mobile-back=""
+            className="-ml-2 gap-1 px-2 text-mint-ink"
+            onClick={onBack}
+          >
+            <ChevronLeft className="size-4" />
+            {t('mobileApp.sheet.title')}
+          </Button>
+          <h1 className="mt-2 text-xl font-semibold">{t('mobileApp.account.title')}</h1>
+        </header>
+      ) : (
+        <>
+          <Brand back disabled={locked} onBack={onBack} />
+          <PageTitle title={t('mobileApp.account.title')} />
+        </>
+      )}
       <section className={cn(raised, 'p-6')}>
         <p className="text-xs text-muted">{t('mobileApp.account.signedInAs')}</p>
         <p className="mt-2 break-all text-base font-semibold leading-6">{session.account.email}</p>

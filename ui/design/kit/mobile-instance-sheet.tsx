@@ -146,7 +146,7 @@ function InstanceListRow({ instance, state = 'idle' }: { instance: SheetInstance
       {state === 'offline-open' && (
         <div role="status" className="mx-4 mb-4 rounded-xl bg-field p-3 text-xs leading-5 text-muted">
           <p>{t(`${instance.name} 现在离线。在那台电脑上打开 Avibe 并联网，它就会出现为在线。`, `${instance.name} is offline. Open Avibe on that computer and connect it to the internet, and it shows as online.`)}</p>
-          <Button variant="link" size="sm" className="mt-1 h-auto px-0 text-xs text-foreground"><RotateCw className="size-3" />{t('刷新列表', 'Refresh the list')}</Button>
+          <Button variant="link" size="sm" className="mt-1 h-auto gap-1 px-0 text-xs text-foreground"><RotateCw className="size-3" />{t('刷新列表', 'Refresh the list')}</Button>
         </div>
       )}
     </div>
