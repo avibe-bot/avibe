@@ -275,8 +275,10 @@ function VaultFieldValueInput({
   field, value, label, placeholder, onChange, onBlur, autoFocus, disabled, invalid, describedBy, forceReveal, generated,
 }: FieldValueSpec & { field: string; disabled?: boolean; invalid?: boolean; describedBy?: string }) {
   const { t } = useTranslation();
-  // Unset until the user toggles, so a row renamed to `username` follows its new name.
-  const [reveal, setReveal] = useState<boolean | null>(null);
+  // Unset until the user toggles, so a row renamed to `username` follows its new name. A row that
+  // mounts holding a generated value (Undo of a staged removal) starts masked, even a username row,
+  // and stays masked if the value is then edited; only the eye reveals it.
+  const [reveal, setReveal] = useState<boolean | null>(() => (generated ? false : null));
   // When the generator's settings close, the value is masked again, whatever the eye showed before
   // (a username row is shown by default; a generated value there is a secret). The eye still works.
   const [wasForced, setWasForced] = useState(Boolean(forceReveal));
@@ -284,9 +286,7 @@ function VaultFieldValueInput({
     setWasForced(Boolean(forceReveal));
     if (!forceReveal) setReveal(false);
   }
-  // A generated value is a secret even in a row shown by default, including when the row mounts
-  // again (Undo of a staged removal); only the eye reveals it.
-  const revealed = forceReveal || (reveal ?? (!generated && REVEALED_BY_DEFAULT.has(field)));
+  const revealed = forceReveal || (reveal ?? REVEALED_BY_DEFAULT.has(field));
   return (
     <div className="relative min-w-0 flex-1">
       <Input
