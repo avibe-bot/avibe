@@ -21,7 +21,7 @@ use windows_sys::Win32::System::Threading::{
     OpenProcessToken, TerminateProcess, UpdateProcThreadAttribute, CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW,
     CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATE_PROCESS,
     PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, STARTUPINFOEXW,
+    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 const CHILD_TEST: &str = "computer_use_process::tests::fixture_child";
@@ -264,6 +264,10 @@ fn fixture_child() {
             let mut command = command_line(executable.as_os_str(), &fixture_args()).unwrap();
             let environment = environment_block(&fixture_env("breakaway_target", &directory)).unwrap();
             let working_directory = wide(directory.as_os_str()).unwrap();
+            let startup = STARTUPINFOW {
+                cb: size_of::<STARTUPINFOW>() as u32,
+                ..Default::default()
+            };
             let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
             let created = unsafe {
                 CreateProcessW(
@@ -275,7 +279,7 @@ fn fixture_child() {
                     CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                     environment.as_ptr().cast(),
                     working_directory.as_ptr(),
-                    std::ptr::null(),
+                    &startup,
                     &mut process,
                 )
             };
