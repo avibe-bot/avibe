@@ -4445,7 +4445,9 @@ def test_signing_key_meta_exposes_addresses_not_public_key(monkeypatch):
     addresses = secret["signing_addresses"]
     assert set(addresses) == {"eth", "btc_legacy", "btc_segwit", "btc_taproot"}
     assert addresses["eth"] == "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
-    assert addresses["btc_segwit"] == "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    # The current exact source registry is Taproot-only for protected inputs.
+    assert secret["bitcoin_address_types"] == ["p2tr"]
+    assert addresses["btc_legacy"] is None and addresses["btc_segwit"] is None
     assert addresses["btc_taproot"].startswith("bc1p")
 
 

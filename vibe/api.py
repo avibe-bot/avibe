@@ -3625,6 +3625,14 @@ def _attach_signed_sign_operation_context(
             signing_context = delivery.get("signing_context")
             if isinstance(signing_context, dict):
                 release["signingContext"] = signing_context
+            new_bitcoin = vault_service._is_new_bitcoin_delivery(delivery)
+            if new_bitcoin:
+                vault_service.validate_sign_request(
+                    conn, request_id, name=persisted_name, scheme=persisted_scheme,
+                    digest=persisted_digest, signing_context=signing_context,
+                )
+                release["signingKey"] = delivery["signing_key"]
+                release["sandboxCohort"] = {key: delivery["bitcoin_cohort"][key] for key in ("buildHash", "manifestHash")}
             if delivery.get("derivation") is not None:
                 vault_service.validate_sign_request(
                     conn, request_id, name=persisted_name, scheme=persisted_scheme,
@@ -3635,7 +3643,9 @@ def _attach_signed_sign_operation_context(
                 release["signingKey"] = delivery["signing_key"]
             if meta.get("protection") == "protected":
                 signing_key = vault_service.get_signing_public_key(conn, persisted_name)
-                if exact_message:
+                if new_bitcoin:
+                    public_key = delivery["signing_key"]["public_key"]
+                elif exact_message:
                     # Check the immutable request key against the current record before
                     # signing the release; caller metadata is never a binding source.
                     vault_service.validate_sign_request(
@@ -3661,6 +3671,13 @@ def _attach_signed_sign_operation_context(
                 "release": release,
                 "expiresAt": _request_context_expires_at(request_payload),
             }
+            if new_bitcoin:
+                from storage import vault_bitcoin
+
+                try:
+                    vault_bitcoin.preflight_ecdsa_operation({"context": context})
+                except vault_bitcoin.BitcoinContextError as exc:
+                    raise vault_service.InvalidSigningContextError(str(exc)) from exc
             signed = _signed_operation_context(context, key)
             return vault_service.set_request_operation_context(
                 conn,
@@ -4745,6 +4762,10 @@ def get_vault_request(
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.InvalidSigningKeyError as exc:
+        raise VaultApiError(str(exc), code=getattr(exc, "code", "invalid_signing_key"), status=409) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     payload = {"ok": True, "request": request}
     if result is not None:
         payload["result"] = result
@@ -4783,8 +4804,15 @@ def _vault_ui_requester_payload(payload: dict) -> dict:
     return out
 
 
-def _vault_delivery_payload(payload: dict) -> dict:
+def _vault_delivery_payload(payload: dict, *, signing_context: dict | None = None) -> dict:
+    from storage import vault_bitcoin
+
     delivery = dict(payload.get("delivery") if isinstance(payload.get("delivery"), dict) else {})
+    if vault_bitcoin.needs_ecdsa_preflight(signing_context):
+        # The API has resolved and validated exactly one alias. Storage receives
+        # that explicit context, not a second caller-supplied copy in delivery.
+        delivery.pop("signing_context", None)
+        delivery.pop("signingContext", None)
     for key in ("session_id", "skill", "command", "egress", "mode"):
         if payload.get(key) is not None:
             delivery[key] = payload[key]
@@ -4870,6 +4898,12 @@ def request_vault_access(payload: dict, *, user_context: Any = None) -> dict:
 
 def _validate_sign_parameters(payload: dict) -> None:
     """Do not silently drop signing options (in particular unsupported trees)."""
+    from storage import vault_bitcoin
+
+    try:
+        vault_bitcoin.preflight_ecdsa_intake(payload)
+    except vault_bitcoin.BitcoinContextError as exc:
+        raise _signing_context_invalid(str(exc)) from exc
     allowed = {
         "name", "digest", "message_hex", "scheme", "request_id", "signature", "requester", "delivery",
         "signing_context", "signingContext", "session_id", "run_id", "skill", "command",
@@ -4890,12 +4924,16 @@ def _validate_sign_parameters(payload: dict) -> None:
         )
 
 
-def _preflight_hd_signing(engine, name: str, derivation: dict | None, scheme: str, *, user_context: Any = None) -> None:
+def _preflight_hd_signing(
+    engine, name: str, derivation: dict | None, scheme: str, *, user_context: Any = None,
+    signing_context: dict | None = None,
+) -> None:
     """Gate HD custody outside write transactions, after validating the selected row."""
     from storage import vault_service
 
     with engine.connect() as conn:
         row = vault_service.require_secret_access(conn, name, user_context=user_context)
+        vault_service.validate_new_bitcoin_selection(row, signing_context, scheme=scheme, derivation=derivation)
         if row.get("signer_kind") != "hd-seed" and derivation is None:
             return
         vault_service.get_signing_public_key(conn, name, derivation=derivation, scheme=scheme, user_context=user_context)
@@ -4918,7 +4956,8 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     try:
-        _preflight_hd_signing(engine, name, derivation, scheme, user_context=user_context)
+        _preflight_hd_signing(engine, name, derivation, scheme, user_context=user_context,
+                              signing_context=_new_bitcoin_context_from_payload(payload))
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name, user_context=user_context)
             if meta.get("kind") != "keypair":
@@ -4945,7 +4984,7 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
                 scheme=scheme,
                 signing_context=signing_context,
                 requester=_vault_ui_requester_payload(payload),
-                delivery=_vault_delivery_payload(payload),
+                delivery=_vault_delivery_payload(payload, signing_context=signing_context),
                 expires_at=_expires_at_from_ttl(payload),
                 user_context=user_context,
                 derivation=derivation,
@@ -5664,6 +5703,23 @@ def _sign_digest_from_payload(value: object) -> str:
     return digest.lower()
 
 
+def _new_bitcoin_context_from_payload(payload: dict) -> dict | None:
+    from storage import vault_bitcoin
+
+    delivery = payload.get("delivery")
+    for source in (payload, delivery if type(delivery) is dict else {}):
+        for key in ("signing_context", "signingContext"):
+            context = source.get(key)
+            if (type(context) is dict and type(context.get("kind")) is str
+                    and context["kind"] in vault_bitcoin.ECDSA_CONTEXT_TYPES):
+                return context
+    return None
+
+
+def _new_bitcoin_pairing_error(message: str) -> VaultApiError:
+    return VaultApiError(message, code="protected_bitcoin_type_mismatch", status=409, message_key="vault.signing.invalidContext")
+
+
 def _sign_derivation_from_payload(payload: dict) -> dict | None:
     from storage import vault_hd
 
@@ -5674,6 +5730,8 @@ def _sign_derivation_from_payload(payload: dict) -> dict | None:
             {"address_type": payload["address_type"]} if "address_type" in payload else {}
         ))
     except ValueError as exc:
+        if _new_bitcoin_context_from_payload(payload) is not None:
+            raise _new_bitcoin_pairing_error(str(exc)) from exc
         raise VaultApiError(str(exc), code="invalid_hd_wallet", status=409) from exc
 
 
@@ -5685,15 +5743,25 @@ def _sign_input_from_payload(payload: dict) -> tuple[str, str | None, str | None
     """
     from storage import vault_hd, vault_service, vault_solana
 
+    new_bitcoin = _new_bitcoin_context_from_payload(payload) is not None
     derivation = _sign_derivation_from_payload(payload)
     scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
     if derivation is not None:
         expected = vault_hd.signing_scheme(derivation)
         if payload.get("scheme") is not None and payload["scheme"] != expected:
+            if new_bitcoin:
+                raise _new_bitcoin_pairing_error("signature scheme does not match the HD Bitcoin context")
             raise VaultApiError("signature scheme does not match the HD chain", code="invalid_hd_wallet", status=409)
         scheme = expected
+    if new_bitcoin and (scheme != "ecdsa-secp256k1-der" or payload.get("message_hex") is not None):
+        raise _new_bitcoin_pairing_error("new Bitcoin contexts require ecdsa-secp256k1-der with a digest")
     if scheme != vault_solana.SCHEME and payload.get("message_hex") is None:
-        digest = _sign_digest_from_payload(payload.get("digest"))
+        try:
+            digest = _sign_digest_from_payload(payload.get("digest"))
+        except VaultApiError as exc:
+            if new_bitcoin:
+                raise _signing_context_invalid(str(exc)) from exc
+            raise
         if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
             raise _unsupported_signature_scheme(scheme)
         return scheme, digest, None
@@ -5759,6 +5827,12 @@ def _validate_signing_context_json(value: Any, *, path: str = "signing_context")
 def _verifiable_signing_context_from_payload(
     payload: dict, *, digest: str | None, required: bool = False, message_hex: str | None = None,
 ) -> dict[str, Any] | None:
+    from storage import vault_bitcoin
+
+    try:
+        new_bitcoin = vault_bitcoin.preflight_ecdsa_intake(payload)
+    except vault_bitcoin.BitcoinContextError as exc:
+        raise _signing_context_invalid(str(exc)) from exc
     context = payload.get("signing_context")
     if context is None:
         context = payload.get("signingContext")
@@ -5772,6 +5846,15 @@ def _verifiable_signing_context_from_payload(
         return None
     if not isinstance(context, dict):
         raise _signing_context_invalid("signing_context must be an object")
+    if new_bitcoin:
+        if message_hex is not None or not isinstance(digest, str):
+            raise _signing_context_invalid("ECDSA Bitcoin context requires a digest, not a message")
+        try:
+            return vault_bitcoin.validate_ecdsa_context_shape(context, expected_digest=digest)
+        except vault_bitcoin.BitcoinTypeMismatchError as exc:
+            raise VaultApiError(str(exc), code=exc.code, status=409, message_key="vault.signing.invalidContext") from exc
+        except vault_bitcoin.BitcoinContextError as exc:
+            raise _signing_context_invalid(str(exc)) from exc
     if message_hex is not None or context.get("kind") == "solana-transaction-v1":
         # An exact-message request is bound by its message, and only by the Solana
         # kind. Its check is bounded, so it runs instead of the generic pass below:
@@ -6227,11 +6310,23 @@ def vault_sign(payload: dict) -> dict:
         raise VaultApiError("payload must be an object", code="invalid_payload")
     _validate_sign_parameters(payload)
     name = str(payload.get("name") or "").strip()
-    scheme, digest, message_hex = _sign_input_from_payload(payload)
-    derivation = _sign_derivation_from_payload(payload)
+    supplied_context = any(key in payload for key in ("signing_context", "signingContext")) or (
+        isinstance(payload.get("delivery"), dict) and any(key in payload["delivery"] for key in ("signing_context", "signingContext"))
+    )
+    resolve_completion = isinstance(payload.get("signature"), dict) and bool(payload.get("request_id")) and not supplied_context
+    input_error = None
+    try:
+        scheme, digest, message_hex = _sign_input_from_payload(payload)
+        derivation = _sign_derivation_from_payload(payload)
+    except VaultApiError as exc:
+        if not resolve_completion:
+            raise
+        input_error = exc
     if not vault_crypto.is_valid_secret_name(name):
+        if input_error is not None:
+            raise input_error
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
-    signing_context = _verifiable_signing_context_from_payload(payload, digest=digest, message_hex=message_hex)
+    signing_context = None if input_error is not None else _verifiable_signing_context_from_payload(payload, digest=digest, message_hex=message_hex)
     ed25519_unavailable: AvaultError | None = None
     engine = _vault_engine()
     protected_response: dict | None = None
@@ -6239,7 +6334,21 @@ def vault_sign(payload: dict) -> dict:
     approval_required_request: dict | None = None
     signing_binding: dict | None = None
     try:
-        _preflight_hd_signing(engine, name, derivation, scheme)
+        if resolve_completion:
+            with engine.begin() as conn:
+                # Named-resource ACL/not-found still precede request identity.
+                vault_service.require_secret_access(conn, name)
+                saved_context = vault_service.resolve_new_bitcoin_completion_context(conn, str(payload["request_id"]))
+            if saved_context is not None:
+                # Reapply NEW pairing/error rules with this exact saved context;
+                # no current-name reconstruction and no legacy rule weakening.
+                resolved_payload = {**payload, "signing_context": saved_context}
+                scheme, digest, message_hex = _sign_input_from_payload(resolved_payload)
+                derivation = _sign_derivation_from_payload(resolved_payload)
+                signing_context = _verifiable_signing_context_from_payload(resolved_payload, digest=digest, message_hex=message_hex)
+            elif input_error is not None:
+                raise input_error
+        _preflight_hd_signing(engine, name, derivation, scheme, signing_context=signing_context)
         if message_hex is not None and derivation is None:
             # Probe only standard custody, outside the request write transaction.
             # Protected requests never call avault, including version discovery.
@@ -6290,7 +6399,7 @@ def vault_sign(payload: dict) -> dict:
                         scheme=scheme,
                         signing_context=signing_context,
                         requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
-                        delivery=payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
+                        delivery=_vault_delivery_payload(payload, signing_context=signing_context),
                     )
                     protected_event = {
                         "scope": "request",
@@ -6323,17 +6432,28 @@ def vault_sign(payload: dict) -> dict:
                             code="missing_signing_context",
                             status=409,
                         )
-                    signature = _normalized_protected_signature(signature)
-                    # `meta` is the masked payload (derived addresses only, no raw key); source
-                    # the pinned public key from storage for server-side verification.
-                    verify_meta = {**meta, "signing_public_key": vault_service.get_signing_public_key(conn, name)}
-                    _verify_protected_browser_signature(
-                        verify_meta,
-                        digest=persisted_digest,
-                        scheme=persisted_scheme,
-                        message_hex=persisted_message_hex,
-                        signature=signature,
-                    )
+                    if vault_service._is_new_bitcoin_delivery(delivery):
+                        from storage import vault_bitcoin
+
+                        try:
+                            reviewed = vault_bitcoin.validate_ecdsa_context(
+                                persisted_context, expected_digest=persisted_digest,
+                                public_key=delivery["signing_key"]["public_key"],
+                            )
+                            signature = vault_bitcoin.verify_ecdsa_result(reviewed, signature).signature
+                        except vault_bitcoin.BitcoinContextError as exc:
+                            raise _protected_sign_invalid(str(exc)) from exc
+                    else:
+                        signature = _normalized_protected_signature(signature)
+                        # The old paths continue to source their public key from storage.
+                        verify_meta = {**meta, "signing_public_key": vault_service.get_signing_public_key(conn, name)}
+                        _verify_protected_browser_signature(
+                            verify_meta,
+                            digest=persisted_digest,
+                            scheme=persisted_scheme,
+                            message_hex=persisted_message_hex,
+                            signature=signature,
+                        )
                     request = vault_service.complete_sign_request(
                         conn,
                         request_id,
@@ -6372,7 +6492,7 @@ def vault_sign(payload: dict) -> dict:
                         scheme=scheme,
                         signing_context=signing_context,
                         requester=_vault_requester_payload(payload),
-                        delivery=_vault_delivery_payload(payload),
+                        delivery=_vault_delivery_payload(payload, signing_context=signing_context),
                         expires_at=_expires_at_from_ttl(payload),
                         derivation=derivation,
                     )

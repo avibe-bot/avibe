@@ -9524,20 +9524,29 @@ def _vault_cli_delivery(args, **fields) -> dict:
 
 def _vault_cli_signing_context(args, *, digest: str | None, message_hex: str | None, help_command: str) -> dict | None:
     from vibe import api
+    from storage import vault_bitcoin, vault_signing_input
 
     raw = getattr(args, "signing_context_json", None)
-    if raw is None:
+    path = getattr(args, "signing_context_file", None)
+    if raw is None and path is None:
         return None
+    if raw is not None and path is not None:
+        # The normal argparse path refuses this even for an empty literal,
+        # before this function or any storage/file access can run.
+        raise TaskCliError("signing-context input flags are mutually exclusive", code="invalid_signing_context", help_command=help_command)
     try:
-        context = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise TaskCliError("signing context must be valid JSON", code="invalid_signing_context", help_command=help_command) from exc
+        context = vault_signing_input.read_context_file(path) if path is not None else vault_signing_input.decode_context_json(raw)
+    except vault_signing_input.SigningInputError as exc:
+        raise TaskCliError(str(exc), code="invalid_signing_context", help_command=help_command) from exc
     try:
         return api._verifiable_signing_context_from_payload(
             {"signing_context": context}, digest=digest, message_hex=message_hex, required=True,
         )
     except api.VaultApiError as exc:
-        raise TaskCliError(str(exc), code=exc.code, help_command=help_command) from exc
+        code = "invalid_signing_context" if path is not None or vault_bitcoin.needs_ecdsa_preflight(context) else exc.code
+        # Downstream diagnostics may include caller-defined fields/JSON paths.
+        message = "signing context file failed validation" if path is not None else str(exc)
+        raise TaskCliError(message, code=code, help_command=help_command) from exc
 
 
 def _publish_cli_vaults_updated(
@@ -11759,7 +11768,7 @@ def cmd_vault_sign(args):
             args, digest=digest, message_hex=message_hex, help_command=help_command,
         )
         engine = _open_vault_engine()
-        api._preflight_hd_signing(engine, name, derivation, scheme)
+        api._preflight_hd_signing(engine, name, derivation, scheme, signing_context=signing_context)
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
             if meta.get("kind") != "keypair":
@@ -11773,7 +11782,7 @@ def cmd_vault_sign(args):
             needs_approval = vault_service.sign_needs_approval(conn, name, derivation=derivation)
             if meta.get("protection") == "protected" and signing_context is None:
                 raise TaskCliError(
-                    "protected signing requires --signing-context-json",
+                    "protected signing requires --signing-context-json or --signing-context-file",
                     code="missing_signing_context",
                     help_command=help_command,
                 )
@@ -20113,15 +20122,14 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message (protected and ask-first standard keys need approval)",
         description=(
-            "Sign with a keypair or HD wallet (--chain required). Solana uses exact --message-hex, "
-            "not a hash; secp256k1 uses --digest. Protected/ask-first signing needs approval. "
-            "For Solana approvals, use a durable nonce (use-avibe-vault Skill recipe); "
-            "the caller creates and funds the nonce account. Protected Solana also needs "
-            "--signing-context-json "
-            '{"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex.'
+            "HD needs --chain. secp256k1 uses --digest; Solana uses exact --message-hex, not a hash. "
+            "Protected/ask-first keys need approval. For Solana, use a durable nonce "
+            "(use-avibe-vault recipe); the caller creates and funds the nonce account. "
+            'Protected Solana context: {"kind":"solana-transaction-v1","messageHex":"HEX"} '
+            "matching --message-hex."
         ),
         epilog=(
-            "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
+            "Example ($MESSAGE_HEX: full serialized message, without signatures):\n"
             '  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -20148,13 +20156,18 @@ def build_parser():
         ],
         help="Ordinary key scheme; HD chain/type fixes it",
     )
-    vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
+    vault_sign_parser.add_argument("--session-id", help="Session ID (Agent default: AVIBE_SESSION_ID)")
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
     vault_sign_parser.add_argument("--command", dest="operation_command", help="Operation shown to the user")
     vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
-    vault_sign_parser.add_argument(
-        "--signing-context-json",
-        help="Verifiable signing context JSON required for protected keypairs",
+    vault_signing_context_input = vault_sign_parser.add_mutually_exclusive_group()
+    vault_signing_context_input.add_argument(
+        "--signing-context-json", metavar="JSON",
+        help="Protected signing context JSON",
+    )
+    vault_signing_context_input.add_argument(
+        "--signing-context-file", metavar="PATH",
+        help="Same context: regular UTF-8 file, max 2,162,688 bytes",
     )
     vault_sign_parser.add_argument(
         "--no-callback",
