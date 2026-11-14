@@ -200,10 +200,10 @@ for (const mode of ['setup', 'authorize'] as const) test(`sandbox-owned ${mode} 
   await expect(button).toBeVisible();
   const popupPromise = context.waitForEvent('page');
   await button.click();
-  const popup = await Promise.race([
-    popupPromise,
-    page.waitForFunction(() => document.querySelector<HTMLOutputElement>('#result')?.dataset.error).then(async (error) => { throw new Error(String(await error.jsonValue())); }),
-  ]);
+  // Await the already-registered popup event directly. Racing it against
+  // waitForFunction leaves the losing browser poll alive through reset/context
+  // teardown, where its late JSHandle can outlive the protocol connection.
+  const popup = await popupPromise;
   await popup.waitForURL(`${documentUrl}#**`, { waitUntil: 'domcontentloaded', timeout: 5000 });
   const url = new URL(popup.url());
   expect(url.search).toBe('');

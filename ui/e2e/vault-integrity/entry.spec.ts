@@ -1,5 +1,6 @@
 // AUTH-SETUP-137: intercepted synthetic addresses, real Vault consumers and entry gate.
-import { test, expect, type BrowserContext, type Page } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
+import { test, expect, type BrowserContext, type Page, type TestInfo } from '@playwright/test';
 import type { VaultRequest, VaultSecret } from '../../src/context/ApiContext';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 import zh from '../../src/i18n/zh.json' with { type: 'json' };
@@ -17,6 +18,139 @@ const sign: VaultRequest = { ...access, id: 'fixture-sign', request_type: 'sign'
   delivery: { digest: '00'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable' },
   card: { request_type: 'sign', secret_name: 'PUBLIC_TEST_KEY', protection: 'protected', kind: 'keypair' } };
 const standardSign = { ...sign, card: { ...sign.card, protection: 'standard' } };
+
+type TimelineEvent = Record<string, unknown>;
+type Timeline = {
+  mark: (event: string) => void;
+  observeAfterClick: () => void;
+  dispose: () => void;
+  attach: (testInfo: TestInfo) => Promise<void>;
+};
+const timelines = new WeakMap<Page, Timeline>();
+const timelinePath = (url: string) => {
+  const pathname = new URL(url).pathname;
+  return pathname.replace(/\/secrets\/[^/]+/g, '/secrets/:name').replace(/\/requests\/[^/]+/g, '/requests/:id');
+};
+
+async function installTimeline(context: BrowserContext, page: Page, writes: string[]) {
+  const startedAt = Date.now();
+  const network: TimelineEvent[] = [];
+  const recordNetwork = (event: TimelineEvent) => {
+    if (network.length < 256) network.push({ source: 'network', at_ms: Date.now() - startedAt, ...event });
+  };
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.startsWith('/api/')) {
+      recordNetwork({ event: 'request', method: request.method(), path: timelinePath(request.url()) });
+    }
+  });
+  page.on('response', (response) => {
+    if (new URL(response.url()).pathname.startsWith('/api/')) {
+      recordNetwork({ event: 'response', method: response.request().method(), path: timelinePath(response.url()), status: response.status() });
+    }
+  });
+  page.on('requestfailed', (request) => {
+    if (new URL(request.url()).pathname.startsWith('/api/')) {
+      recordNetwork({ event: 'requestfailed', method: request.method(), path: timelinePath(request.url()) });
+    }
+  });
+  // Both browser and runner use elapsed wall time from the same origin. No
+  // bodies, headers, values, DOM text or exception messages enter this artifact.
+  await context.addInitScript(({ startedAt }) => {
+    type BrowserEvent = { source: 'browser'; at_ms: number; event: string; target: string | null; default_prevented?: boolean; save: Record<string, unknown> };
+    const key = '__avibeVaultIntegrityTimeline';
+    const events: BrowserEvent[] = [];
+    const push = (event: string, target: EventTarget | null, defaultPrevented = false) => {
+      if (events.length >= 256) return;
+      const elementKind = (value: Element | null): string | null => {
+        if (!value) return null;
+        if (value instanceof HTMLButtonElement) return 'button';
+        if (value instanceof HTMLFormElement) return 'form';
+        if (value instanceof HTMLInputElement) return 'input';
+        return value.tagName.toLowerCase();
+      };
+      const save = Array.from(document.querySelectorAll<HTMLButtonElement>('button[type="submit"]'))
+        .find((button) => button.closest('[role="dialog"]')) ?? null;
+      const rect = save?.getBoundingClientRect();
+      const center = rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+      const hit = center ? document.elementFromPoint(center.x, center.y) : null;
+      events.push({
+        source: 'browser',
+        at_ms: Date.now() - startedAt,
+        event,
+        target: elementKind(target instanceof Element ? target : null),
+        default_prevented: defaultPrevented,
+        save: {
+          present: Boolean(save),
+          disabled: save?.disabled ?? null,
+          focused: document.activeElement === save,
+          display: save ? getComputedStyle(save).display : null,
+          visibility: save ? getComputedStyle(save).visibility : null,
+          pointer_events: save ? getComputedStyle(save).pointerEvents : null,
+          rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,
+          hit: elementKind(hit),
+          hit_is_save: Boolean(save && hit && (hit === save || save.contains(hit))),
+          active_element: elementKind(document.activeElement),
+          form_valid: save?.form ? Array.from(save.form.elements).every((element) => !('validity' in element) || (element as HTMLInputElement).validity.valid) : null,
+        },
+      });
+    };
+    for (const event of ['pointerdown', 'pointerup', 'click', 'focusin', 'focusout', 'submit', 'invalid']) {
+      // Capture survives React propagation guards; bubble submit separately
+      // observes preventDefault, not proof that React passed its own guards.
+      document.addEventListener(event, (value) => {
+        if (value.target instanceof Element && value.target.closest('[role="dialog"]')) {
+          push(`${event}:capture`, value.target, value.defaultPrevented);
+        }
+      }, true);
+    }
+    document.addEventListener('submit', (value) => push('submit:bubble', value.target, value.defaultPrevented));
+    new MutationObserver((mutations) => {
+      if (mutations.some((mutation) => mutation.target instanceof HTMLButtonElement && mutation.attributeName === 'disabled')) {
+        push('save-disabled-change', document.querySelector('button[type="submit"]'));
+      }
+    }).observe(document, { subtree: true, attributes: true, attributeFilter: ['disabled'] });
+    Object.defineProperty(window, key, { configurable: true, value: events });
+  }, { startedAt });
+  let observationTimer: ReturnType<typeof setTimeout> | undefined;
+  const mark = (event: string) => recordNetwork({ event, writes: writes.map((key) => key.replace(secret.name, ':name')) });
+  const timeline: Timeline = {
+    mark,
+    observeAfterClick: () => {
+      mark('save-click-returned');
+      // Preserve the old poll's observation point without reverting #3761's
+      // response waits, sleeping, or changing any assertion/timeout.
+      observationTimer = setTimeout(() => mark('five-seconds-after-click'), 5_000);
+    },
+    dispose: () => clearTimeout(observationTimer),
+    attach: async (testInfo) => {
+      let browser: unknown[];
+      try {
+        browser = await page.evaluate(() => (window as Window & { __avibeVaultIntegrityTimeline?: unknown[] }).__avibeVaultIntegrityTimeline ?? []);
+      } catch {
+        browser = [{ source: 'browser', event: 'timeline-read-failed' }];
+      }
+      // Body-only attachments need a reporter to persist them. Write under
+      // outputDir too so the existing failure-artifact upload always includes it.
+      const path = testInfo.outputPath('vault-integrity-event-timeline.json');
+      await writeFile(path, JSON.stringify({ network, browser }, null, 2));
+      await testInfo.attach('vault-integrity-event-timeline.json', {
+        path,
+        contentType: 'application/json',
+      });
+    },
+  };
+  timelines.set(page, timeline);
+  return timeline;
+}
+
+test.afterEach(async ({ page }, testInfo) => {
+  const timeline = timelines.get(page);
+  timeline?.dispose();
+  if (timeline && testInfo.status !== testInfo.expectedStatus) {
+    timeline.mark('test-failed');
+    await timeline.attach(testInfo);
+  }
+});
 
 async function harness(context: BrowserContext, page: Page, origin: string, request = access) {
   const prohibited: string[] = [];
@@ -65,12 +199,15 @@ async function harness(context: BrowserContext, page: Page, origin: string, requ
         const body = req.postDataJSON() as { default_field?: string; values?: unknown[]; remove?: unknown[] };
         if (!body.values?.length && !body.remove?.length) {
           writes.push(key);
+          timelines.get(page)?.mark('field-write-recorded');
           const label = body.default_field ?? secret.default_field;
           return route.fulfill({ json: { ok: true, secret: { ...secret, default_field: label, fields: [label] } } });
         }
       }
       if (key === `PATCH /api/vault/secrets/${secret.name}`) {
-        writes.push(key); return route.fulfill({ json: { ok: true, secret: { ...secret, ...req.postDataJSON() } } });
+        writes.push(key);
+        timelines.get(page)?.mark('metadata-write-recorded');
+        return route.fulfill({ json: { ok: true, secret: { ...secret, ...req.postDataJSON() } } });
       }
       // Preparation, settings mutation, credentials, grants and protected writes
       // are forbidden. Record before rejecting; a caught failure cannot hide it.
@@ -147,6 +284,7 @@ for (const [origin, language, current] of [
 test('unsupported reveal/edit stops before preparation, but metadata and cancel stay available', async ({ context, page }) => {
   const origin = 'http://192.0.2.1:5123';
   const observed = await harness(context, page, origin);
+  const timeline = await installTimeline(context, page, observed.writes);
   const url = `${origin}${fixturePath}?reveal=${secret.name}`;
   await page.goto(url);
   await expect(page.getByRole('menu').getByText(en.vaults.entry.addressTitle)).toBeVisible();
@@ -168,7 +306,9 @@ test('unsupported reveal/edit stops before preparation, but metadata and cancel 
   const saved = [`POST /api/vault/secrets/${secret.name}/fields`, `PATCH /api/vault/secrets/${secret.name}`];
   const fieldWrite = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/vault/secrets/${secret.name}/fields`);
   const metadataWrite = page.waitForResponse((response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/vault/secrets/${secret.name}`);
+  timeline.mark('save-click-start');
   await saveButton.click();
+  timeline.observeAfterClick();
   await Promise.all([fieldWrite, metadataWrite]);
   expect(observed.writes).toEqual(saved);
   await expect(dialog).toHaveCount(0);
