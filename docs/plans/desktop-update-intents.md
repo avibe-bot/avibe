@@ -257,6 +257,22 @@ editor/viewer or bypasses origin/CSRF protection.
   paths and Python's unprefixed paths. Data-root and target-executable assertions
   now compare filesystem identity, still rejecting absent/different files. The
   hermetic harness tests run on each hosted OS before native compilation.
+- Run `43517466466` at `9f6ff81cc` completed macOS explicit handoff/relaunch
+  and the normal-duration automatic scenario, including final-edge refusal and
+  later replacement. Windows reached the real panel, verified the selected
+  target and invoked the production helper, but failed at `Join-Path` before
+  replacement. The verbatim staging path was injected by the **Rust fixture**:
+  it canonicalizes owned environment directories and sets `TMP`/`TEMP` to those
+  paths. The Python launch paths alone did not reveal this. The production
+  Windows request builder uses `current_exe()` and `tempfile::tempdir()` without
+  canonicalizing them; this fixture failure is not evidence that a normal
+  installed user's updater fails. The helper now normalizes drive/UNC verbatim
+  request paths before PowerShell path operations, with the same narrow change
+  reviewed separately in #3723. Windows replacement/relaunch after that fix is
+  still an open native gate. A separate published-install observation (#3724)
+  uses the unchanged RC17 app, its default per-user installer destination,
+  installed shortcut and default environment, targeting the exact signed latest
+  it normally discovers; it does not substitute for this train's new-panel gate.
 - The hosted fixture workflow is label- or dispatch-triggered only, never on
   push. A same-repository/master-base PR label is the premerge manual trigger;
   `workflow_dispatch` becomes usable after default-branch registration. Checkout

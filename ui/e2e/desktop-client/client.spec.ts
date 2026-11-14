@@ -24,7 +24,10 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.setViewportSize(viewport);
       const denied = await serveProduct(page, lang);
       const state = clientState(); signIn(state);
-      state.connection = { status: 'remote_connected', committed: { kind: 'remote', name: 'Studio', instance_id: 'studio', canonical_origin: 'https://studio-app.avibe.bot' }, pending: null };
+      // A page this computer serves: the version opens the shared update panel (ui/design: update/panel)
+      // over the desktop IPC. Remote presentation-only behavior has its own footer test and never
+      // receives this native updater IPC fixture.
+      await page.route('**/api/version**', (route) => route.fulfill({ json: { current: state.desktop.version, latest: '3.2.7', has_update: true, managed_by: 'desktop' } }));
       state.remote_auxiliary = 'disabled_incomplete';
       const requests = await installBridge(page, state, { projection: true });
       await language(page, lang);
@@ -45,40 +48,25 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       expect(measurements.arrowGap).toBeLessThanOrEqual(6);
       expect(measurements.versionRight).toBe(measurements.footerRight);
       await expect(footer).not.toContainText('max@example.test');
-      // Another computer's page never acts on this computer's updater: the version opens the
-      // trusted update view (ui/design: update/panel/trusted-view), not a popover in this page.
-      const popup = page.locator('[data-update-menu]');
-      await page.locator('[data-version-trigger]').click();
-      await expect(popup).toHaveCount(0);
+      await page.locator('[data-version-trigger] button').click();
+      const popup = page.getByRole('dialog', { name: lang === 'en' ? 'Version & Update' : '版本与更新' });
+      await expect(popup).toBeVisible();
+      const box = await popup.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0); expect(box!.y).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      await expect(popup.locator('[data-update-panel]')).toBeVisible();
+      await expect(popup).toContainText('3.2.6rc9'); await expect(popup).toContainText('3.2.7'); await expect(popup).not.toContainText('2.4.0');
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('update.png') });
+      await page.keyboard.press('Escape');
+      await expect(page.locator('[data-version-trigger] button')).toBeFocused();
       await page.locator('[data-account-trigger]').click();
       await expect(page.locator('[data-instance-menu]')).toContainText('max@example.test');
       await expect(page.locator('[data-instance-menu]')).toContainText(lang === 'en' ? 'Phase 1' : '第一阶段');
       await expect(popup).toHaveCount(0);
+      await expect(page.locator('[data-update-menu]')).toHaveCount(0);
       await expect(page.locator('[data-instance-menu]')).toHaveCSS('opacity', '1');
       await page.screenshot({ animations: 'disabled', path: info.outputPath('account-menu.png') });
       await page.keyboard.press('Escape');
       await expect(page.locator('[data-account-trigger]')).toBeFocused();
-      expect(requests).toEqual([]); expect(denied).toEqual([]);
-    });
-    test(`AUTH-SETUP-178 local update panel ${viewport.width} ${lang} ${theme}`, async ({ page }, info) => {
-      await page.setViewportSize(viewport);
-      const denied = await serveProduct(page, lang);
-      const state = clientState(); signIn(state);
-      const requests = await installBridge(page, state, { projection: true });
-      await language(page, lang);
-      await page.goto(`/?theme=${theme}`);
-      await page.locator('[data-version-trigger]').click();
-      // The same panel as the version popover (ui/design: update/panel), for this computer's desktop app.
-      const popup = page.locator('[data-update-menu]');
-      await expect(popup.locator('[data-update-panel]')).toBeVisible();
-      await expect.poll(async () => (await popup.boundingBox())?.x).toBe(16);
-      const box = await popup.boundingBox();
-      expect(box!.x).toBe(16); expect(box!.y).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
-      expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
-      await expect(popup).toContainText('3.2.6rc9'); await expect(popup).toContainText('3.2.7');
-      await page.screenshot({ animations: 'disabled', path: info.outputPath('update.png') });
-      await page.keyboard.press('Escape');
-      await expect(page.locator('[data-version-trigger]')).toBeFocused();
       expect(requests).toEqual([]); expect(denied).toEqual([]);
     });
     test(`AUTH-SETUP-177 bundled login ${viewport.width} ${lang} ${theme}`, async ({ page }, info) => {

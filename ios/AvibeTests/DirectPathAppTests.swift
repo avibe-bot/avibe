@@ -176,8 +176,15 @@ final class DirectPathAppTests: XCTestCase {
         let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
         XCTAssertFalse(app.directFaultCovers(first))
         var shownWhileMarking: [Bool] = []
-        marker.whileMarking = {
+        // The App owns this spy; its observer must not retain the App back.
+        marker.whileMarking = { [weak app] in
+            guard let app else {
+                return XCTFail("The App was released before the fault was marked")
+            }
             shownWhileMarking.append(app.directListenerFault)
+        }
+        addTeardownBlock { @MainActor [weak app] in
+            XCTAssertNil(app, "The fault-marker observer must not keep the fixture App alive")
         }
 
         // The App's port is taken while it is in the background: the return
@@ -1563,6 +1570,7 @@ final class DirectPathAppTests: XCTestCase {
     // MARK: Fixture
 
     private var storeIdentifiers: Set<UUID> = []
+    private var releaseFixtureApps: [@MainActor () -> Void] = []
     /// What `direct.status()` answers for `origin`, through the provider
     /// the App gives its WebViews. `nil` when it answers later or not at all.
     @MainActor
@@ -1771,12 +1779,19 @@ final class DirectPathAppTests: XCTestCase {
             )
         }
         trackStore(of: app)
-        try await eventually(timeout: .seconds(30)) {
-            if case .onboarding(.instances) = app.route {
-                return true
-            }
-            return false
+        releaseFixtureApps.append { [weak app] in
+            app?.showInstancePicker()
+            app?.mobileSessionCoordinator.deactivateAccountSurface()
         }
+        addTeardownBlock { @MainActor [self] in
+            server.requests.attach(to: self, name: "direct App bootstrap requests")
+        }
+        try await WebKitReadiness.waitForSignedInFixture(
+            app,
+            accountID: "account-1",
+            instanceIDs: ["instance-1", "instance-2"],
+            requests: server.requests
+        )
         return app
     }
 
@@ -1911,9 +1926,17 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     private func removeTrackedStores() async {
+        // Release every App's runtime/account views before removing any
+        // store (some tests create more than one App). RuntimePage owners
+        // close their windows before this cleanup.
+        for release in releaseFixtureApps { release() }
+        releaseFixtureApps.removeAll()
+        print("[iOS fixture] stage=App views invalidated before store removal")
         for identifier in storeIdentifiers {
+            var removed = false
+            var lastError: Error?
             for _ in 0..<50 {
-                _ = await AccountWebsiteDataStoreOperations.live
+                lastError = await AccountWebsiteDataStoreOperations.live
                     .removeIdentifier(identifier)
                 let registered = await withCheckedContinuation { continuation in
                     WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
@@ -1921,10 +1944,13 @@ final class DirectPathAppTests: XCTestCase {
                     }
                 }
                 if !registered.contains(identifier) {
+                    removed = true
                     break
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
+            XCTAssertTrue(removed, "Fixture store still registered: \(identifier); error=\(String(describing: lastError))")
+            print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=\(removed)")
         }
         storeIdentifiers.removeAll()
     }

@@ -1,97 +1,138 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import en from '../i18n/en.json';
 import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
 import { DesktopAccountRow } from './DesktopAccountRow';
 
-const present = vi.hoisted(() => vi.fn());
-const projection = vi.hoisted(() => ({
-  committed: { kind: 'remote', name: 'Studio', instance_id: 'studio' } as Record<string, unknown>,
-  hostActions: ['check', 'prereleases', 'auto_update'] as string[] | undefined,
-  update: {} as Record<string, unknown>,
+const mock = vi.hoisted(() => ({
+  present: vi.fn(), remote: false, phase: 'available', signedIn: true,
+  invoke: vi.fn(), getVersion: vi.fn(),
 }));
+vi.mock('../context/ApiContext', () => ({ useApi: () => ({ getVersion: mock.getVersion }) }));
+vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ capabilities: { can_manage_instance: true } }) }));
+vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
 vi.mock('./useDesktopClient', () => ({
-  usePresentDesktopClient: () => present,
+  usePresentDesktopClient: () => mock.present,
   useDesktopClientProjection: () => ({
-    account: { status: 'signed_in', identity: { id: 'fixture', email: 'max@example.test' } },
-    connection: { status: projection.committed.kind === 'local' ? 'local' : 'remote_connected', committed: projection.committed, pending: null },
+    account: { status: mock.signedIn ? 'signed_in' : 'signed_out', identity: { id: 'fixture', email: 'max@example.test' } },
+    connection: { status: mock.remote ? 'remote_connected' : 'local', committed: { kind: mock.remote ? 'remote' : 'local', name: 'Studio', instance_id: 'studio' }, pending: null },
     local: { name: '小麦的 Mac', remote_access: 'off' },
-    desktop: {
-      version: '3.2.6rc9',
-      update: { phase: 'available', latest: '3.2.7', autoUpdate: false, prereleases: false, hostActions: projection.hostActions, ...projection.update },
-    },
+    desktop: { version: '3.2.6rc12', update: { phase: mock.phase, latest: '3.2.7' } },
     remote_auxiliary: 'disabled_incomplete',
   }),
 }));
-afterEach(() => {
-  cleanup();
-  vi.clearAllMocks();
-  delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
-  delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
-  projection.update = {};
+const i18n = createInstance();
+await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+beforeEach(() => {
+  mock.remote = false; mock.phase = 'available'; mock.signedIn = true;
+  mock.getVersion.mockResolvedValue({ current: '3.2.6rc12', latest: '3.2.7', has_update: true, managed_by: 'desktop' });
+  mock.invoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
+    ? {
+      phase: mock.phase, latest: '3.2.7', channel: 'test', prereleases: true, autoUpdate: false,
+      hostActions: ['check', 'prereleases', 'auto_update', 'install'], skippedVersion: null, interactive: false,
+    }
+    : undefined);
+  vi.stubGlobal('__AVIBE_DESKTOP_SHELL__', true);
+  vi.stubGlobal('__AVIBE_DESKTOP_VERSION__', '3.2.6rc12');
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: mock.invoke });
 });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+function mount() { return render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>); }
+const installed = () => mock.invoke.mock.calls.filter(([command]) => command === 'desktop_update_install');
 
-async function renderRow() {
-  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
-  return { ...render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>), i18n };
-}
-
-it('AUTH-SETUP-178 another computer\'s page opens this computer\'s update in the trusted view', async () => {
-  projection.committed = { kind: 'remote', name: 'Studio', instance_id: 'studio' };
-  await renderRow();
-  const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
-  act(() => { window.dispatchEvent(event); });
-  expect(event.defaultPrevented).toBe(true);
-  expect(window.__AVIBE_DESKTOP_UPDATES_HANDLED__).toBe(true);
-  expect(present).toHaveBeenCalledExactlyOnceWith('updates');
-  expect(screen.queryByText(en.update.status.available)).toBeNull();
-});
-
-it('AUTH-SETUP-178 a page this computer serves shows the same panel and acts over the desktop IPC', async () => {
-  projection.committed = { kind: 'local', name: '小麦的 Mac', instance_id: null };
-  const invoke = vi.fn(async () => undefined);
-  Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-  await renderRow();
-  act(() => { window.dispatchEvent(new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true })); });
-  expect(await screen.findByText(en.update.status.available)).toBeTruthy();
-  expect(screen.getByText('3.2.6rc9')).toBeTruthy();
-  fireEvent.click(screen.getByRole('switch', { name: en.update.setting.autoUpdate }));
-  expect(invoke).toHaveBeenCalledWith('desktop_update_auto_update_set', { enabled: true });
-  fireEvent.click(screen.getByRole('button', { name: en.update.action.update }));
+// Mount the actual VersionBadge through the production footer, so substituting a second, simpler
+// update menu fails. The footer's update is the shared panel (ui/design: update/panel).
+it('AUTH-SETUP-178 opens the shared update panel and acts on this computer over the desktop IPC', async () => {
+  mount();
+  const trigger = await screen.findByTitle('v3.2.6rc12');
+  fireEvent.click(trigger);
+  const dialog = await screen.findByRole('dialog', { name: en.dashboard.versionAndUpdate });
+  // The panel is its own chunk; it arrives just after the dialog opens.
+  await waitFor(() => expect(dialog.querySelector('[data-update-panel]')).toBeTruthy());
+  expect(within(dialog).getByText(en.update.row.current)).toBeTruthy();
+  expect(within(dialog).getByText(en.update.row.offered)).toBeTruthy();
+  expect(within(dialog).getByRole('link', { name: /3.2.7/ })).toBeTruthy();
+  expect(within(dialog).getByRole('switch', { name: en.update.setting.prereleases })).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole('switch', { name: en.update.setting.autoUpdate }));
+  await waitFor(() => expect(mock.invoke).toHaveBeenCalledWith('desktop_update_auto_update_set', { enabled: true }));
+  expect(within(dialog).getByRole('button', { name: en.dashboard.skipUpdate })).toBeTruthy();
+  expect(installed()).toEqual([]);
+  fireEvent.click(within(dialog).getByRole('button', { name: en.update.action.update }));
   // Exactly the version the panel shows.
-  expect(invoke).toHaveBeenCalledWith('desktop_update_install', { targetVersion: '3.2.7' });
-  expect(present).not.toHaveBeenCalled();
+  await waitFor(() => expect(installed()).toEqual([['desktop_update_install', { targetVersion: '3.2.7' }]]));
+  expect(mock.present).not.toHaveBeenCalled();
+  expect(document.querySelector('[data-update-menu]')).toBeNull();
 });
 
-it('AUTH-SETUP-178 an accepted local install failure is not a failed check', async () => {
-  projection.committed = { kind: 'local', name: '小麦的 Mac', instance_id: null };
-  const invoke = vi.fn(async () => undefined);
-  Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-  const rendered = await renderRow();
-  act(() => { window.dispatchEvent(new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true })); });
-  fireEvent.click(await screen.findByRole('button', { name: en.update.action.update }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_update_install', { targetVersion: '3.2.7' }));
-  projection.update = { phase: 'error', latest: null };
-  await act(async () => { rendered.rerender(<I18nextProvider i18n={rendered.i18n}><DesktopAccountRow /></I18nextProvider>); });
-  expect(await screen.findByText(en.update.failure.install.title)).toBeTruthy();
-  expect(screen.queryByText(en.update.status.checkFailed)).toBeNull();
+it('AUTH-SETUP-178 routes the native menu to the same panel and preserves Skip', async () => {
+  mount();
+  await waitFor(() => expect(mock.invoke).toHaveBeenCalledWith('desktop_update_state'));
+  const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
+  await waitFor(() => {
+    fireEvent(window, event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+  const dialog = await screen.findByRole('dialog', { name: en.dashboard.versionAndUpdate });
+  fireEvent.click(await within(dialog).findByRole('button', { name: en.dashboard.skipUpdate }));
+  await waitFor(() => expect(mock.invoke).toHaveBeenCalledWith('desktop_update_skip'));
+  expect(mock.present).not.toHaveBeenCalled();
 });
 
-it('AUTH-SETUP-178 a shell that predates hostActions keeps its pre-release switch in the footer', async () => {
-  projection.committed = { kind: 'local', name: '小麦的 Mac', instance_id: null };
-  projection.hostActions = undefined;
-  const invoke = vi.fn(async () => undefined);
-  Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-  await renderRow();
-  act(() => { window.dispatchEvent(new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true })); });
-  fireEvent.click(await screen.findByRole('switch', { name: en.update.setting.prereleases }));
-  expect(invoke).toHaveBeenCalledWith('desktop_update_prereleases_set', { enabled: true });
-  expect((screen.getByRole('switch', { name: en.update.setting.autoUpdate }) as HTMLButtonElement).disabled).toBe(true);
-  projection.hostActions = ['check', 'prereleases', 'auto_update'];
+it('AUTH-SETUP-178 current version offers no install; the account menu has no updater action', async () => {
+  mock.phase = 'current';
+  mount();
+  fireEvent.click(await screen.findByTitle('v3.2.6rc12'));
+  const dialog = await screen.findByRole('dialog', { name: en.dashboard.versionAndUpdate });
+  expect(await within(dialog).findByText(en.update.status.current)).toBeTruthy();
+  expect(within(dialog).queryByRole('button', { name: en.update.action.update })).toBeNull();
+  expect(document.querySelector('[data-update-menu]')).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: en.common.close }));
+  fireEvent.click(document.querySelector('[data-account-trigger]')!);
+  const menu = document.querySelector('[data-instance-menu]')!;
+  expect(menu.textContent).not.toMatch(/update|upgrade/i);
+});
+
+it('AUTH-SETUP-178 remote Runtime presents the trusted update view without local or remote update IPC', async () => {
+  mock.remote = true;
+  mount();
+  fireEvent.click(screen.getByRole('button', { name: 'Local Desktop version 3.2.6rc12' }));
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
+  expect(mock.invoke).not.toHaveBeenCalled();
+  expect(mock.getVersion).not.toHaveBeenCalled();
+  expect(document.querySelector('[data-update-menu]')).toBeNull();
+  mock.present.mockClear();
+  const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
+  fireEvent(window, event);
+  expect(event.defaultPrevented).toBe(true);
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
+});
+
+// The previous updater-only test never exercised the account trigger: signed-out
+// users received a redundant menu instead of the guarded native account view.
+it('AUTH-SETUP-177 signed-out footer directly presents account without opening a menu', async () => {
+  mock.signedIn = false;
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+  fireEvent.click(screen.getByRole('button', { name: /Sign in \/ sign up/ }));
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith('account');
+  expect(document.querySelector('[data-instance-menu]')).toBeNull();
+});
+
+it('AUTH-SETUP-178 signed-in menu keeps instance actions separate from remote access status', async () => {
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  fireEvent.click(trigger);
+  expect(trigger.getAttribute('aria-expanded')).toBe('true');
+  expect(mock.present).not.toHaveBeenCalled();
+  const status = screen.getByText('Remote access to this Mac');
+  expect(status.closest('button, a, [role="button"]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Switch instance' }));
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith('instances');
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+  expect(mock.present).toHaveBeenLastCalledWith('sign-out');
 });

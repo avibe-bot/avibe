@@ -35,7 +35,20 @@ try {
             const box = element.getBoundingClientRect();
             return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
           };
+          const productRow = document.querySelector('[data-desktop-account-row]');
+          const productFooter = productRow?.closest('[data-sidebar-footer]');
+          const accountTrigger = productRow?.querySelector('[data-account-trigger]');
           return {
+            product: productRow ? {
+              count: document.querySelectorAll('[data-desktop-account-row]').length,
+              inSidebar: Boolean(productFooter?.closest('aside')),
+              toolsHeight: productFooter?.firstElementChild.getBoundingClientRect().height,
+              avatarX: rect(productRow.querySelector('[data-account-avatar]')).left,
+              expanded: accountTrigger?.getAttribute('aria-expanded'),
+              chevron: Boolean(productRow.querySelector('[data-account-chevron]')),
+              menu: Boolean(document.querySelector('[data-instance-menu]')),
+              version: productRow.querySelector('[data-version-trigger] button')?.getAttribute('title'),
+            } : null,
             entries: [...document.querySelectorAll('[data-placement-entry="bottom"]')].map(entry => {
               const indicator = entry.querySelector('[data-status-indicator]');
               const label = entry.querySelector('[data-account-label]');
@@ -68,7 +81,26 @@ try {
           };
         });
         const key = `${frame.id}.${theme}`;
-        assert.equal(actual.entries.length, 1, `${key}: footer must be present`);
+        const productFooter = /^desktop\/instances\/(signed-out|account)-(zh|en)$/.test(frame.id);
+        const productLogin = /^desktop\/instances\/(email|code|code-error)-(zh|en)$/.test(frame.id);
+        if (productFooter) {
+          assert.ok(actual.product, `${key}: canonical footer must render the product row`);
+          assert.equal(frame.status, 'shipped', `${key}: product-backed frame status`);
+          assert.equal(actual.entries.length, 0, `${key}: no old bottom kit entry`);
+          assert.equal(actual.product.count, 1, `${key}: one product row`);
+          assert.equal(actual.product.inSidebar, true, `${key}: real AppShell sidebar footer`);
+          assert.equal(actual.product.toolsHeight, 39, `${key}: real Apps/Settings tools row`);
+          assert.equal(actual.product.avatarX, 16, `${key}: product Apps-container alignment`);
+          assert.equal(actual.product.version, 'v3.2.6rc9', `${key}: product VersionBadge`);
+          const signedIn = frame.id.includes('/account-');
+          assert.equal(actual.product.chevron, signedIn, `${key}: signed-out entry has no menu chevron`);
+          assert.equal(actual.product.menu, signedIn, `${key}: controlled account menu`);
+          assert.equal(actual.product.expanded, signedIn ? 'true' : null, `${key}: account expansion semantics`);
+        } else if (productLogin) {
+          assert.equal(actual.entries.length, 0, `${key}: product login card has no kit footer`);
+        } else {
+          assert.equal(actual.entries.length, 1, `${key}: proposed footer must be present`);
+        }
         for (const entry of actual.entries) {
           assert.ok(['true', 'false'].includes(entry.available), `${key}: explicit boolean fixture`);
           assert.equal(entry.updatePresent, entry.available === 'true', `${key}: update presence follows availability only`);
@@ -84,7 +116,7 @@ try {
         for (const metric of actual.shellMetrics) {
           assert.deepEqual(metric, { paddingTop: '10px', toolsHeight: 39, iconWidth: 18, iconHeight: 18 }, `${key}: spacing utilities preserve mirrored metrics`);
         }
-        assert.ok(actual.layers.every(layer => layer === '60'), `${key}: standard stacking utility preserves layers`);
+        if (!productFooter) assert.ok(actual.layers.every(layer => layer === '60'), `${key}: standard stacking utility preserves layers`);
         assert.ok(actual.footerRows.every(rows => rows === 2), `${key}: two-row Workbench footer`);
         assert.equal(actual.overflow, false, `${key}: no horizontal overflow`);
         assert.deepEqual(actual.unfixtured, [], `${key}: fixture-only API reads`);
