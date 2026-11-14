@@ -645,6 +645,9 @@ def _create_sqlite_migration_backup_locked(
     source_path = db_path.expanduser().resolve()
     created_at = now or datetime.now(timezone.utc)
     target_root = (backups_dir or source_path.parent / "backups").expanduser().resolve()
+    from storage.migration_space import plan_space
+
+    plan_space(source_path, backups_dir=target_root).require()
     target_root.mkdir(parents=True, exist_ok=True)
     # The entry for the window itself has to be on the disk before anything in
     # it counts as durable; a crash that keeps the upgrade but loses this

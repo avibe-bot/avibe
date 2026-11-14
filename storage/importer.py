@@ -223,11 +223,12 @@ def repair_sqlite_state(
     target_state_dir = (state_dir or paths.get_state_dir()).expanduser().resolve()
     ensured_key = (target_db, target_state_dir)
     guard_source_checkout_default_state_migration(target_db)
-    _ensure_sqlite_target_dirs(
-        target_state_dir=target_state_dir,
-        target_db=target_db,
-        use_default_dirs=db_path is None and state_dir is None,
-    )
+    if not target_db.exists() or not target_db.stat().st_size:
+        _ensure_sqlite_target_dirs(
+            target_state_dir=target_state_dir,
+            target_db=target_db,
+            use_default_dirs=db_path is None and state_dir is None,
+        )
     # The same lock `run_migrations` takes, re-entered rather than duplicated,
     # and derived from the database so the two can never resolve differently.
     # Held across the JSON import as well: the import is the other half of
@@ -235,6 +236,13 @@ def repair_sqlite_state(
     # it in between.
     with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
         decision = run_migrations(target_db, prune_backups_after_upgrade=False)
+        # Populated upgrades must pass read-only space admission before even
+        # creating backups/. The migration owner rechecks under this same lock.
+        _ensure_sqlite_target_dirs(
+            target_state_dir=target_state_dir,
+            target_db=target_db,
+            use_default_dirs=db_path is None and state_dir is None,
+        )
         if decision.compatible_open or decision.skip_snapshot:
             # Compatible-open belongs to the newer runtime. A no-copy batch has
             # already proved its importer receipts complete. Neither path may

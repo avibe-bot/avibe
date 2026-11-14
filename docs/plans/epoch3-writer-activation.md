@@ -71,20 +71,32 @@ No owner live database is required or authorized for that exercise.
 
 ## Remaining integration work
 
-1. Finish the low-disk pre-mutation refusal path and its tests, including the
-   importer and backup entry points. Budget and implementation must distinguish
-   conservative admission from measured peak usage; do not assume clone success.
+1. Low-disk admission is implemented at the shared writable preflight,
+   importer, factory and standalone backup boundaries. Read-only admission and
+   a separately budgeted crash-recovery path preserve cold WAL and committed
+   revision semantics. Budgets are conservative policy, never measured minima;
+   clone success, pruning and backup reuse are not credited.
 2. Complete focused consumer/lifecycle coverage and verify historical fixture
    reconstruction refuses real compact data. Production downgrade guards remain
    unchanged; 3.2.6 rollback is compatible-open, never restamping.
-3. Add repeatable growth and large-upgrade measurement tooling for isolated
-   Incus execution. Confirm the backup, resource and workload assumptions.
+3. The phased measurement harness and [procedure](../maintenance/epoch3-measurements.md)
+   are implemented. Execute them only in the approved isolated Incus target;
+   large-upgrade timing, space and per-writer benefit remain unmeasured.
 4. Recheck the migration number against default branch before opening the PR.
    The current draft is `20261114_0089` on `20261112_0088`.
 5. Obtain exact-head code/security review and required CI; run the populated
    Incus acceptance, then Product exact-head go and lead-owned merge.
 
 ## Evidence and remaining acceptance
+
+Low-disk coverage additionally passes 182 focused admission/backup/preflight/
+readiness tests and 172 importer/startup/no-copy consumers. The new cases include
+existing backup/lifecycle preservation, crash-left WAL without a live keeper,
+hot-journal refusal before recovery, read-only callers, and honest diagnostics
+when capacity falls after completed recovery. Nine tiny harness tests exercise
+real store APIs with inline/compact gates, subprocess isolation, desktop refusal
+and a small message-shape fixture. These counts are local focused runs, not a
+full-suite or large-database result.
 
 On November 14 the extended predecessor harness installed the actual published
 `avibe_os-3.2.6-py3-none-any.whl`, SHA256

@@ -25,8 +25,9 @@ unverified or pre-protocol predecessor keep conservative upgrade snapshots.
   on compatible-open, without touching lifecycle receipts, replaying data
   migrations, repairing indexes or adopting a prior backup attempt. Explicit
   stores and engine factories use the same preflight; the factory caches a
-  successful admission per process/path/inode, matching the existing importer
-  process-lifetime contract. File replacement is rechecked. Breaking upgrades
+  successful admission per process/path/inode, except pending copy-backed
+  upgrades whose capacity must be checked again. A read-only open cannot seed
+  writable upgrade admission. File replacement is rechecked. Breaking upgrades
   require **all** controller/Web/CLI writers stopped; this is not a lease.
 - `MigrationPreflight.skip_snapshot` omits the copy, **not** the migration. The
   exact pending revision pair remains present and every migration still runs.
@@ -52,6 +53,59 @@ unverified or pre-protocol predecessor keep conservative upgrade snapshots.
   explicit verified restore with all writers stopped. **Restore discards writes
   since the snapshot.** Prefer forward repair. Already-released binaries cannot
   be retrofitted: users must not invoke their raw SQLite APIs to bypass startup.
+
+## Pre-mutation capacity admission
+
+A pending copy-backed upgrade first uses read-only SQLite admission, before
+opening the source read/write, checkpointing WAL, creating a backup directory,
+or pruning. Import/bootstrap and explicit engine factories share that boundary.
+Standalone migration backups also check their actual destination before mkdir or
+clone. Current-schema, compatible-open and proven no-copy paths do not acquire an
+upgrade-sized normal-use free-space requirement.
+
+`storage/migration_space.py` reports a **conservative reserve**, not a measured
+minimum or a reservation. It never assumes a successful clone, sparse-file
+savings, reusable backups, pruning or purgeable space. For the exact clean
+`0088 → 0089` transition, with page size `P`, main+WAL+journal logical bytes `B`,
+and `N` rows matching the migration's guarded Skill-reference predicate:
+
+- fresh backup allowance: `B`;
+- index allowance `I = 3 × (N + 16) × P`, including fixed roots;
+- additional DB workspace: existing WAL/journal bytes plus `I` and
+  `32 + ceil(I/P) × (P+24)` for index WAL frames;
+- SQLite temporary workspace: `2 × I` if `N > 0`, otherwise zero;
+- margin: the larger of 256 MiB and 10% of all roles combined.
+
+Counting `N` uses the existing Skill trace index; it is a migration-only scan,
+not a per-request query or history rewrite. Other upgrade paths use a looser
+policy of two backup-sized DB workspaces and two backup-sized temporary
+workspaces. Destination paths are resolved without creating directories. Temp
+placement follows the stock SQLite VFS (including its override/environment
+order), not Python's tempfile choice. To avoid double-spending shared APFS/Btrfs
+capacity, the all-role total is compared against every involved filesystem's
+available-space reading, with aliases taking the lowest reading. This may
+conservatively refuse an upgrade that independent volumes could accommodate.
+
+The error identifies the path, observed available bytes, required reserve and
+rounded-up additional GB to free. Early refusal preserves DB/WAL, backup and
+lifecycle bytes. Read-only SQLite can update SHM bookkeeping; lock/log activity
+and a binary switch already performed by an older installer are outside this
+claim. Other processes or quotas can exhaust space after admission; a later
+`SQLITE_FULL` is not described as an unchanged attempt.
+
+A crash-left rollback journal is a distinct phase: SQLite cannot read the
+committed schema until it performs recovery. A writable caller recognizes
+`SQLITE_READONLY_ROLLBACK`, admits a filesystem-only generic reserve under the
+migration lock, then lets SQLite recover before checking the committed revision.
+Python 3.10's fallback requires both the exact read-only error and hot-journal
+header; other errors never authorize a read/write retry. Explicit read-only
+callers never recover. The recovered attempt keeps the generic policy rather
+than switching to a potentially larger coordinated policy; any later low-space
+refusal explicitly says recovery already completed. Thus crash recovery itself
+may require capacity even when the recovered schema is current.
+
+See [the measurement procedure](epoch3-measurements.md) for the populated
+published-binary upgrade, refusal and per-writer growth acceptance.
 
 ## API for later representation changes
 
