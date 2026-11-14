@@ -314,6 +314,11 @@ presentation with Close and edge-swipe dismissal is kept behind one native
 presentation switch until real-device acceptance; it changes no bridge call
 or page design.
 
+Final real-bundle simulator evidence uses the on-demand 24-state capture
+workflow in [the capture runbook](../regression/ios-mobile-captures.md), on the
+exact merged native + bundled-page head. The static gesture fixture remains
+separate and is not final product visual evidence.
+
 ### `direct`: which path new connections prefer
 
 Specified for remote direct paths ([the App side](remote-direct-ios.md)).

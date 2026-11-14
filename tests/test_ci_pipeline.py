@@ -537,6 +537,31 @@ def test_browser_lanes_check_out_exactly_the_paths_the_classifier_treats_as_thei
     assert sources and all(in_browser_checkout(source) for source in sources), sources
 
 
+def test_ios_mobile_captures_are_on_demand_and_bound_to_the_real_merged_bundle() -> None:
+    # The dispatch/asset-path contract is the owning boundary: a static fixture
+    # or an automatic PR trigger would silently mislabel expensive final captures.
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ios-mobile-captures.yml").read_text(encoding="utf-8")
+    )
+    assert set(workflow[True]) == {"workflow_dispatch"}
+    assert workflow[True]["workflow_dispatch"]["inputs"]["source_sha"]["required"] is True
+    steps = workflow["jobs"]["captures"]["steps"]
+    checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "${{ inputs.source_sha }}"
+    commands = "\n".join(step.get("run", "") for step in steps)
+    assert 'git merge-base --is-ancestor "$SOURCE_SHA" origin/master' in commands
+    assert 'git rev-parse HEAD' in commands
+    assert commands.index("npm run build:mobile") < commands.index("build-for-testing")
+    assert "diff -qr ios/Avibe/Resources/MobileApp" in commands
+    assert "AvibeSheetFixture.app/MobileApp" in commands
+    assert "-only-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests" in commands
+    assert "xcresulttool export attachments" in commands
+    assert "CODE_SIGNING_ALLOWED=NO" in commands
+    shell = yaml.safe_load((ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8"))
+    regular_commands = "\n".join(step.get("run", "") for step in shell["jobs"]["simulator"]["steps"])
+    assert "-skip-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests" in regular_commands
+
+
 def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
