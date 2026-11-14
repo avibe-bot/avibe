@@ -237,7 +237,13 @@ vibe mcp        # Call the tools of connected MCP servers
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 ```
 
-Both keep your data in `~/.avibe`. The [install guide](https://docs.avibe.bot/get-started/install#uninstall) covers deleting it too.
+Both keep your data in `~/.avibe`. To delete your data too, add `--purge`. It lists what it will delete and asks first; **deleted data cannot be recovered**:
+
+```bash
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
+```
+
+More in the [install guide](https://docs.avibe.bot/get-started/install#uninstall).
 
 **Read more.** [Quickstart](https://docs.avibe.bot/quickstart) · [What is Avibe](https://docs.avibe.bot/concepts/agent-os) · [Bots](https://docs.avibe.bot/concepts/bots) · [Model Hub](https://docs.avibe.bot/concepts/model-hub) · [Vaults](https://docs.avibe.bot/concepts/vaults) · [Show Pages](https://docs.avibe.bot/concepts/show-pages) · [Skills](https://docs.avibe.bot/concepts/skills) · [Harness](https://docs.avibe.bot/concepts/harness) · [CLI reference](docs/CLI.md) · [Chat commands](docs/COMMANDS.md) · [MCP Hub](docs/MCP_HUB.md) · [Install with an AI agent](docs/INSTALL_FOR_AI.md) · [Security policy](SECURITY.md)
 

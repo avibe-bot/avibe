@@ -237,7 +237,13 @@ vibe mcp        # 调用已接入 MCP 服务的工具
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 ```
 
-两种方式都会保留 `~/.avibe` 里的数据。想连数据一起删除，见[安装指南](https://docs.avibe.bot/zh/get-started/install)。
+两种方式都会保留 `~/.avibe` 里的数据。想连数据一起删除，加上 `--purge`。它会先列出要删除的内容并请你确认；**删除的数据无法恢复**：
+
+```bash
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
+```
+
+更多说明见[安装指南](https://docs.avibe.bot/zh/get-started/install)。
 
 **延伸阅读。** [快速开始](https://docs.avibe.bot/zh/quickstart) · [Avibe 是什么](https://docs.avibe.bot/zh/concepts/agent-os) · [伙伴](https://docs.avibe.bot/zh/concepts/bots) · [Model Hub](https://docs.avibe.bot/zh/concepts/model-hub) · [Vaults](https://docs.avibe.bot/zh/concepts/vaults) · [Show Pages](https://docs.avibe.bot/zh/concepts/show-pages) · [技能](https://docs.avibe.bot/zh/concepts/skills) · [Harness](https://docs.avibe.bot/zh/concepts/harness) · [CLI 参考](docs/CLI_ZH.md) · [聊天命令](docs/COMMANDS_ZH.md) · [MCP Hub](docs/MCP_HUB.md) · [让 AI 帮你安装](docs/INSTALL_FOR_AI_ZH.md) · [安全策略](SECURITY.md)
 
