@@ -159,7 +159,10 @@ it('starts from the Agent’s suggestion, which only presets the options', () =>
 
 it('keeps an older request’s 128-character preset as a 100-character one and says so', () => {
   const spec = { generate: { type: 'password', length: 128, symbols: false } } as unknown as VaultRequestSpec;
-  render(form(<VaultSecretForm fixedName="DB_PASSWORD" requestSpec={spec} onCancel={vi.fn()} onCreated={vi.fn()} />));
+  const props = { fixedName: 'DB_PASSWORD', provisionRequestId: 'request', onCancel: vi.fn(), onCreated: vi.fn() };
+  const { rerender } = render(form(<VaultSecretForm {...props} requestSpec={spec} />));
+  // The pending-request list refreshes: the same request arrives as a new object.
+  rerender(form(<VaultSecretForm {...props} requestSpec={{ ...spec }} />));
   openGenerator();
   expect(valueInput().value).toMatch(/^[A-Za-z0-9]{100}$/);
   expect(screen.getByText(i18n.t('vaults.generate.suggestedAdjusted', { min: 8, max: 100 }))).toBeTruthy();

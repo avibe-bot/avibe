@@ -305,6 +305,8 @@ export const VaultSecretForm: React.FC<{
   const specRecipe = specPreset?.recipe ?? null;
   const specRecipeField = (requestSpec as { generate?: { field?: unknown } } | null | undefined)?.generate?.field;
   const [recipe, setRecipe] = useState<GenerateRecipe>(specRecipe ?? DEFAULT_PASSWORD_RECIPE);
+  // The single value still uses the request's preset as it came (not yet changed by the user).
+  const [recipeChanged, setRecipeChanged] = useState(false);
   const [valueFromGenerator, setValueFromGenerator] = useState(false);
   // Which generator popup is open: the single value ('value') or a field row (its id).
   const [generatorOpen, setGeneratorOpen] = useState<'value' | number | null>(null);
@@ -1121,7 +1123,10 @@ export const VaultSecretForm: React.FC<{
           <div className="flex items-start gap-2">
             <VaultGenerateControl
               recipe={recipe}
-              onRecipeChange={setRecipe}
+              onRecipeChange={(next) => {
+                setRecipe(next);
+                setRecipeChanged(true);
+              }}
               onValue={(next) => {
                 setValueFromGenerator(true);
                 setStaticValue(next);
@@ -1131,7 +1136,7 @@ export const VaultSecretForm: React.FC<{
               labelled
               showLabel={!value}
               suggested={Boolean(specRecipe) && !specRecipeField}
-              suggestionAdjusted={Boolean(specPreset?.adjusted) && recipe === specRecipe}
+              suggestionAdjusted={Boolean(specPreset?.adjusted) && !recipeChanged}
               disabled={submitting}
             >
               {showValue && generatorOpen !== 'value' ? (
