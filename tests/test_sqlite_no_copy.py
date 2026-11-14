@@ -18,7 +18,7 @@ import pytest
 from alembic.script import ScriptDirectory
 
 from storage import backups, importer, migrations
-from storage.compatibility import BRIDGE_REVISION, PRE_BRIDGE_REVISION
+from storage.compatibility import PRE_BRIDGE_REVISION
 from storage.db import dispose_cached_sqlite_engines
 from tests.test_sqlite_compatibility_epoch import bridge_graph  # noqa: F401 -- pin the historical bridge graph
 from tests.test_sqlite_backup_expiry import EXPIRES, _attempt
@@ -134,7 +134,7 @@ def test_marker_created_in_this_upgrade_never_qualifies(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("phase", ["migrated", "validating", "validated", "ready"])
 def test_no_copy_and_restart_never_adopt_an_older_backup_attempt(ready_db, tmp_path, monkeypatch, phase):
-    _attempt(ready_db, phase=phase, revision=BRIDGE_REVISION)
+    _attempt(ready_db, phase=phase, revision=ScriptDirectory.from_config(migrations.alembic_config()).get_current_head())
     _graph(tmp_path, monkeypatch)
     before = _rollback_artifacts(ready_db)
     result = importer.repair_sqlite_state(db_path=ready_db, state_dir=ready_db.parent, include_counts=False)
@@ -151,7 +151,7 @@ def test_no_copy_and_restart_never_adopt_an_older_backup_attempt(ready_db, tmp_p
 
 @pytest.mark.parametrize("phase", ["ready", "migrating", "migrated", "validating", "validated"])
 def test_only_previously_ready_copy_expires_across_additive_successor(ready_db, tmp_path, monkeypatch, phase):
-    copy = _attempt(ready_db, phase=phase, revision=BRIDGE_REVISION)
+    copy = _attempt(ready_db, phase=phase, revision=ScriptDirectory.from_config(migrations.alembic_config()).get_current_head())
     original = json.loads((copy / "manifest.json").read_text())
     _graph(tmp_path, monkeypatch)
     assert migrations.run_migrations(ready_db).skip_snapshot
@@ -163,7 +163,7 @@ def test_only_previously_ready_copy_expires_across_additive_successor(ready_db, 
 
 @pytest.mark.parametrize("damage", ["unknown", "opaque", "epoch", "missing-marker"])
 def test_expiry_does_not_infer_additivity_from_a_supported_epoch(ready_db, tmp_path, monkeypatch, damage):
-    copy = _attempt(ready_db, revision=BRIDGE_REVISION)
+    copy = _attempt(ready_db, revision=ScriptDirectory.from_config(migrations.alembic_config()).get_current_head())
     _graph(tmp_path, monkeypatch, opaque=damage == "opaque")
     # Emulate a successor not owned by this no-copy decision: no new receipt.
     with closing(sqlite3.connect(ready_db)) as conn, conn:

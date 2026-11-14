@@ -25,8 +25,9 @@ unverified or pre-protocol predecessor keep conservative upgrade snapshots.
   on compatible-open, without touching lifecycle receipts, replaying data
   migrations, repairing indexes or adopting a prior backup attempt. Explicit
   stores and engine factories use the same preflight; the factory caches a
-  successful admission per process/path/inode, matching the existing importer
-  process-lifetime contract. File replacement is rechecked. Breaking upgrades
+  successful admission per process/path/inode, except pending copy-backed
+  upgrades whose capacity must be checked again. A read-only open cannot seed
+  writable upgrade admission. File replacement is rechecked. Breaking upgrades
   require **all** controller/Web/CLI writers stopped; this is not a lease.
 - `MigrationPreflight.skip_snapshot` omits the copy, **not** the migration. The
   exact pending revision pair remains present and every migration still runs.
@@ -53,6 +54,59 @@ unverified or pre-protocol predecessor keep conservative upgrade snapshots.
   since the snapshot.** Prefer forward repair. Already-released binaries cannot
   be retrofitted: users must not invoke their raw SQLite APIs to bypass startup.
 
+## Pre-mutation capacity admission
+
+A pending copy-backed upgrade first uses read-only SQLite admission, before
+opening the source read/write, checkpointing WAL, creating a backup directory,
+or pruning. Import/bootstrap and explicit engine factories share that boundary.
+Standalone migration backups also check their actual destination before mkdir or
+clone. Current-schema, compatible-open and proven no-copy paths do not acquire an
+upgrade-sized normal-use free-space requirement.
+
+`storage/migration_space.py` reports a **conservative reserve**, not a measured
+minimum or a reservation. It never assumes a successful clone, sparse-file
+savings, reusable backups, pruning or purgeable space. For the exact clean
+`0088 → 0089` transition, with page size `P`, main+WAL+journal logical bytes `B`,
+and `N` rows matching the migration's guarded Skill-reference predicate:
+
+- fresh backup allowance: `B`;
+- index allowance `I = 3 × (N + 16) × P`, including fixed roots;
+- additional DB workspace: existing WAL/journal bytes plus `I` and
+  `32 + ceil(I/P) × (P+24)` for index WAL frames;
+- SQLite temporary workspace: `2 × I` if `N > 0`, otherwise zero;
+- margin: the larger of 256 MiB and 10% of all roles combined.
+
+Counting `N` uses the existing Skill trace index; it is a migration-only scan,
+not a per-request query or history rewrite. Other upgrade paths use a looser
+policy of two backup-sized DB workspaces and two backup-sized temporary
+workspaces. Destination paths are resolved without creating directories. Temp
+placement follows the stock SQLite VFS (including its override/environment
+order), not Python's tempfile choice. To avoid double-spending shared APFS/Btrfs
+capacity, the all-role total is compared against every involved filesystem's
+available-space reading, with aliases taking the lowest reading. This may
+conservatively refuse an upgrade that independent volumes could accommodate.
+
+The error identifies the path, observed available bytes, required reserve and
+rounded-up additional GB to free. Early refusal preserves DB/WAL, backup and
+lifecycle bytes. Read-only SQLite can update SHM bookkeeping; lock/log activity
+and a binary switch already performed by an older installer are outside this
+claim. Other processes or quotas can exhaust space after admission; a later
+`SQLITE_FULL` is not described as an unchanged attempt.
+
+A crash-left rollback journal is a distinct phase: SQLite cannot read the
+committed schema until it performs recovery. A writable caller recognizes
+`SQLITE_READONLY_ROLLBACK`, admits a filesystem-only generic reserve under the
+migration lock, then lets SQLite recover before checking the committed revision.
+Python 3.10's fallback requires both the exact read-only error and hot-journal
+header; other errors never authorize a read/write retry. Explicit read-only
+callers never recover. The recovered attempt keeps the generic policy rather
+than switching to a potentially larger coordinated policy; any later low-space
+refusal explicitly says recovery already completed. Thus crash recovery itself
+may require capacity even when the recovered schema is current.
+
+See [the measurement procedure](epoch3-measurements.md) for the populated
+published-binary upgrade, refusal and per-writer growth acceptance.
+
 ## API for later representation changes
 
 `storage.compatibility` owns the key, strict parser, supported-reader epoch set,
@@ -67,8 +121,16 @@ C-alt's projection-aware reader shipped in `gh-v3.2.5rc19` with support for
 that admission set to `{1, 2, 3}` only for a full unknown exact future revision
 whose current required schema is present. It does not declare the current graph
 as epoch 3, advance the persisted marker, or authorize any writer suppression.
-The coordinated 3.2.7 boundary owns the epoch-3 breaking revision and must
-activate cache, Vault snapshot, and Skill catalog reference writes together.
+The coordinated 3.2.7 boundary is breaking revision `20261114_0089`: it advances
+marker and stamp together, adds indexed Skill reference cleanup and Session
+cache cleanup triggers, and initializes the durable Vault snapshot ID allocator.
+It activates cache, Vault snapshot and Skill catalog reference writes together
+only when the candidate build also has an epoch-3 published-predecessor proof.
+There is no historical row rewrite, reference backfill, Vault GC or VACUUM.
+Building the Skill reference index is a one-time scan during the migration;
+subsequent cleanup uses indexed digest lookups, including old 3.2.6 deletes.
+The normal breaking upgrade snapshot remains mandatory on populated state.
+See [the coordinated writer plan](../plans/epoch3-writer-activation.md).
 Breaking revision `20261108_0083` activates epoch 2; it always takes the
 conservative upgrade snapshot on populated state, even in an activated build. The epoch/stamp commit together, without
 backfilling or deleting any history. Only exact supported committed Vibey calls
@@ -134,12 +196,15 @@ runs it again immediately before packaging, and `--activate` fills just
 `storage.compatibility.VERIFIED_PREDECESSOR_EPOCH` with the verified epoch.
 `None` disables the capability; pre-protocol or unsupported predecessors leave
 it `None`, with an explicit **not-applicable**, never a passing rollback claim.
-The source literal is now `2` after actual RC19, RC20 and RC21 wheels passed at epoch 2,
-including trace-suppressed canonical tool presentation through Activity and SQL.
-The [representation contract](../plans/vibey-tool-activity-projection.md#released-reader-proof)
-records the wheel digests and RC18 refusal evidence. The no-copy decision still
-requires a proven additive same-epoch path; activation cannot skip the epoch-2
-transition's rollback snapshot.
+The source literal is now `3` after the actual published 3.2.6 wheel passed the
+extended three-representation read/write/cleanup round trip and existing tool
+projection checks. Earlier RC19, RC20 and RC21 wheels established epoch-2 proof.
+The [coordinated writer plan](../plans/epoch3-writer-activation.md) records the
+3.2.6 wheel digest and remaining populated Incus/performance gates. The
+[representation contract](../plans/vibey-tool-activity-projection.md#released-reader-proof)
+records the earlier wheel digests and RC18 refusal evidence. The no-copy decision
+still requires a proven additive same-epoch path; neither epoch transition may
+skip its rollback snapshot.
 CI rechecks an activated literal against the actual published predecessor;
 the publisher independently fills or clears it before packaging.
 A failed applicable reader/writer test stops the build. The literal ships in the

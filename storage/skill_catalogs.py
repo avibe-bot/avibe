@@ -1,9 +1,8 @@
-"""Reader-first support for content-addressed Skill catalog entries.
+"""Content-addressed Skill catalogs with event-owned reference lifetime.
 
-Writers still persist inline entries. The future reference representation is
-accepted only for catalog traces, and never substitutes an empty catalog for a
-missing or damaged snapshot. Raw SQL tables remain physical storage; skill_events
-is the explicit hydrated SQL projection.
+Epoch-3 writers intern entries in the event transaction. The migration's indexed
+GC triggers cover both new and released bridge deletion/update paths. Raw SQL
+tables remain physical storage; skill_events is the explicit hydrated projection.
 """
 
 from __future__ import annotations
@@ -14,9 +13,35 @@ import re
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Connection
 
 from storage.models import agent_events, skill_catalogs
+
+
+def compact_event(conn: Connection, event_id: str, content: dict[str, Any]) -> None:
+    """Only after a unique receipt was inserted, in the same writer transaction.
+
+    Duplicates never allocate snapshots or change event bytes. Daily counters
+    still consume the original validated inline observation.
+    """
+    from storage.compatibility import permits_compact_writes
+
+    if not permits_compact_writes(conn):
+        return
+    entries = json.dumps(content["entries"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(entries.encode("utf-8")).hexdigest()
+    conn.execute(insert(skill_catalogs).values(digest=digest, entries_json=entries).on_conflict_do_nothing(
+        index_elements=["digest"],
+    ))
+    stored = conn.execute(select(skill_catalogs.c.entries_json).where(skill_catalogs.c.digest == digest)).scalar_one()
+    if stored != entries:
+        raise CatalogReferenceError("Skill catalog snapshot content conflict")
+    body = {key: value for key, value in content.items() if key != "entries"}
+    body["entries_ref"] = digest
+    conn.execute(agent_events.update().where(agent_events.c.id == event_id).values(
+        content_json=json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    ))
 
 
 class CatalogReferenceError(ValueError):

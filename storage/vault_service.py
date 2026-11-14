@@ -2771,6 +2771,12 @@ def audit(
     if snapshot is not None and (delivery is None or isinstance(delivery, dict)):
         stored_delivery = dict(delivery or {})
         stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = snapshot
+        if event == "proxied":
+            from storage.compatibility import permits_compact_writes
+            from storage.vault_snapshots import intern
+
+            if permits_compact_writes(conn):
+                stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = {"ref": intern(conn, snapshot)}
     # The audit trail is a non-secret summary, and callers now hand it the same
     # requester payload the request row stores. That payload may carry the
     # internal authorization snapshot, which belongs to the request's deferred

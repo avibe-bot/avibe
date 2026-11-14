@@ -6,7 +6,7 @@ import logging
 import re
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from contextlib import closing
 from importlib import import_module
@@ -80,6 +80,7 @@ class MigrationPreflight:
     compatibility_epoch: int | None = None
     backup_revisions: tuple[set[str], set[str]] | None = None
     skip_snapshot: bool = False
+    recovered_hot_journal: bool = False
 
 
 HEAD_TABLES = INITIAL_TABLES | {
@@ -397,14 +398,21 @@ def _run_migrations_locked(
     prune_backups_after_upgrade: bool,
 ) -> MigrationPreflight:
     cfg = alembic_config(target_db)
-    decision = preflight_database(target_db, cfg=cfg, revision=revision)
+    from storage.migration_space import InsufficientMigrationSpaceError
+
+    decision = preflight_for_write(target_db, cfg=cfg, revision=revision)
     if decision.compatible_open or (decision.compatibility_epoch is not None and decision.backup_revisions is None):
         return decision
     backup_revisions = decision.backup_revisions
     backup_attempt: str | None = None
     if backup_revisions is not None and not decision.skip_snapshot:
         _current_revisions, target_revisions = backup_revisions
-        backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
+        try:
+            backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
+        except InsufficientMigrationSpaceError as exc:
+            if decision.recovered_hot_journal:
+                raise InsufficientMigrationSpaceError(exc.plan, recovered=True) from exc
+            raise
         backup_attempt = begin_sqlite_backup_migration(target_db, backup_path)
         logger.info("Pre-migration SQLite rollback point at %s", backup_path)
     if decision.compatibility_epoch is None:
@@ -420,6 +428,61 @@ def _run_migrations_locked(
     if prune_backups_after_upgrade and not decision.skip_snapshot:
         prune_state_backups(target_db.parent / "backups", json_retention=None)
     return decision
+
+
+def _needs_hot_journal_recovery(exc: sqlite3.OperationalError, db_path: Path) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return code == 776  # SQLITE_READONLY_ROLLBACK; Python 3.10 has no named code.
+    # Python 3.10 lacks extended error attributes. Never treat generic busy,
+    # corrupt or readonly failures as permission to open read/write.
+    if str(exc) != "attempt to write a readonly database":
+        return False
+    try:
+        with db_path.with_name(db_path.name + "-journal").open("rb") as journal:
+            return journal.read(8) == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+    except OSError:
+        return False
+
+
+def preflight_for_write(db_path: Path, *, cfg: Config | None = None, revision: str = "head") -> MigrationPreflight:
+    """RO admission first; recovery is a separately admitted mutation phase."""
+    try:
+        decision = preflight_database(db_path, cfg=cfg, revision=revision, read_only=True)
+    except sqlite3.OperationalError as exc:
+        if not _needs_hot_journal_recovery(exc, db_path):
+            raise
+        from storage.migration_space import plan_space
+
+        with MigrationFileLock(migration_lock_path_for(db_path), timeout_seconds=None):
+            # No committed schema can be read until SQLite rolls the journal
+            # back. Admit that recovery with a filesystem-only generic policy.
+            # It is NOT a bound on every possible later migration's reserve.
+            plan_space(db_path, migration=True).require()
+            # Keep the generic policy for this entire recovery attempt. A
+            # policy switch after recovery could refuse solely due to a larger
+            # coordinated reserve, despite unchanged available capacity.
+            decision = replace(preflight_database(db_path, cfg=cfg, revision=revision), recovered_hot_journal=True)
+    require_upgrade_space(db_path, decision)
+    return decision
+
+
+def require_upgrade_space(db_path: Path, decision: MigrationPreflight):
+    """Admission only for a pending copy-backed migration, before RW opens.
+
+    Rechecked under the migration lock before copying. Compatible/current and
+    proven no-copy opens keep their existing low-space behavior.
+    """
+    if decision.compatible_open or decision.backup_revisions is None or decision.skip_snapshot:
+        return None
+    from storage.migration_space import plan_space
+
+    current, target = decision.backup_revisions
+    plan = plan_space(db_path, migration=True, coordinated=(
+        not decision.recovered_hot_journal and current == {"20261112_0088"} and target == {"20261114_0089"}
+    )).require(recovered=decision.recovered_hot_journal)
+    logger.info("SQLite upgrade space admission: %s", plan.to_dict())
+    return plan
 
 
 def preflight_database(
@@ -561,10 +624,14 @@ def background_tables_ready(db_path: Path | None = None) -> bool:
     if not target_db.exists():
         return False
     try:
-        preflight_database(target_db)
+        preflight_database(target_db, read_only=True)
     except IncompatibleDatabaseRevisionError:
         return False
-    with sqlite3.connect(target_db) as conn:
+    except sqlite3.OperationalError as exc:
+        if _needs_hot_journal_recovery(exc, target_db):
+            return False  # Writable migration admission owns crash recovery.
+        raise
+    with closing(sqlite3.connect(f"{target_db.as_uri()}?mode=ro", uri=True)) as conn:
         tables = _table_names(conn)
         return _head_schema_ready(conn, tables)
 
@@ -587,15 +654,15 @@ def ensure_background_indexes(db_path: Path | None = None) -> None:
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     if not target_db.exists():
         return
-    if preflight_database(target_db).compatibility_epoch is not None:
+    if preflight_database(target_db, read_only=True).compatibility_epoch is not None:
         # Epoch schemas are migration-owned, never repaired by old helpers.
         return
-    with sqlite3.connect(target_db) as conn:
+    with closing(sqlite3.connect(f"{target_db.as_uri()}?mode=ro", uri=True)) as conn:
         tables = _table_names(conn)
         if not {"run_definitions", "agent_runs"}.issubset(tables) or _agent_runs_managed_indexes_ready(conn):
             return
     with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
-        if preflight_database(target_db).compatibility_epoch is not None:
+        if preflight_database(target_db, read_only=True).compatibility_epoch is not None:
             return
         with sqlite3.connect(target_db) as conn:
             conn.execute("BEGIN IMMEDIATE")

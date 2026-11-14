@@ -102,6 +102,7 @@ def test_capture_keeps_identity_envelope_and_acl_in_one_snapshot(delivery_db, mo
         assert captured.metadata["policy"]["allowed_hosts"] == ["example.test"]
 
 
+@pytest.mark.parametrize("proof", [2, 3])
 @pytest.mark.parametrize("mode", ["fetch", "run", "inject"])
 @pytest.mark.parametrize("protection,one_shot,shared", [
     ("standard", False, False),
@@ -110,9 +111,10 @@ def test_capture_keeps_identity_envelope_and_acl_in_one_snapshot(delivery_db, mo
     ("protected", True, False),
 ])
 def test_delivery_keeps_resolved_evidence_after_name_replacement(
-    delivery_db, monkeypatch, tmp_path, capfd, mode, protection, one_shot, shared,
+    delivery_db, monkeypatch, tmp_path, capfd, mode, protection, one_shot, shared, proof,
 ):
-    """B: replace after resolution, before handoff; never relabel the old envelope."""
+    """B: replace after resolution; inline and reference evidence must retain identity."""
+    monkeypatch.setattr("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", proof)
     names = ["KEY", "OTHER"] if shared and mode != "fetch" else ["KEY"]
     refs = [record for name in names for record in (name, f"{name}.username")]
     grant = None
@@ -165,8 +167,13 @@ def test_delivery_keeps_resolved_evidence_after_name_replacement(
             vault_audit.c.event == ("proxied" if mode == "fetch" else "delivered"),
         )).mappings()]
         assert len(events) == len(names)
+        snapshots = vs._load_audit_access_snapshots(conn, events)
         for row in events:
-            resource = json.loads(row["delivery"])["_resource_access_snapshot"]["resources"][0]
+            raw = json.loads(row["delivery"])["_resource_access_snapshot"]
+            assert ("ref" in raw) == (mode == "fetch" and proof == 3)
+            present, snapshot = vs._audit_access_snapshot(row, snapshots=snapshots)
+            assert present and snapshot is not None
+            resource = snapshot["resources"][0]
             assert resource["resource_id"] == resource["policy"]["resource_id"] == original_ids[row["secret_name"]]
             assert resource["policy"]["access_level"] == "private"
         # Replacement visibility must not grant access to the original private event.
