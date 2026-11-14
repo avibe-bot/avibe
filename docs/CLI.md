@@ -629,7 +629,7 @@ vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"
 
 `MESSAGE_HEX` is the complete serialized message, not a hash or signed transaction.
 Pending Solana request objects include `solana_lifetime_hint`:
-“If this transaction uses a recent blockhash, it may expire while awaiting approval.
+“If this message uses a recent blockhash, it may expire while awaiting approval.
 Use a durable nonce for delayed submission.” It is conditional advice for every
 pending Ed25519 sign request, including durable-nonce and raw messages, not parsing
 or a claim of expiry/validity. It is absent on resolved requests and other schemes.

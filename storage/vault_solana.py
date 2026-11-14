@@ -21,7 +21,7 @@ CHAIN = "solana"
 SCHEME = "ed25519"
 CONTEXT_KIND = "solana-transaction-v1"
 APPROVAL_LIFETIME_HINT = (
-    "If this transaction uses a recent blockhash, it may expire while awaiting approval. "
+    "If this message uses a recent blockhash, it may expire while awaiting approval. "
     "Use a durable nonce for delayed submission."
 )
 # avault's bound for one exact message (``MAX_ED25519_MESSAGE_BYTES``).

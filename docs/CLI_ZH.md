@@ -513,9 +513,9 @@ vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"
 
 `MESSAGE_HEX` 是完整的序列化消息，不是哈希或带签名的交易包。待批准的 Solana
 请求对象带有英文 `solana_lifetime_hint`：
-“If this transaction uses a recent blockhash, it may expire while awaiting approval.
+“If this message uses a recent blockhash, it may expire while awaiting approval.
 Use a durable nonce for delayed submission.”
-其含义是：“如果此交易使用近期区块哈希，可能会在等待批准期间过期。需要延后提交时，
+其含义是：“如果此消息使用近期区块哈希，可能会在等待批准期间过期。需要延后提交时，
 请使用持久 nonce。”这是给所有待批准 Ed25519 签名请求的条件性建议（包括持久 nonce
 和原始消息），并未解析交易，也不判断是否过期或有效。已结束的请求和其他签名方案
 不带此字段。

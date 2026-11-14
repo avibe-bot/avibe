@@ -943,7 +943,7 @@ def test_pending_lifetime_advice_is_conditional_and_outside_signed_bytes(avault,
         pending = (api.vault_sign if entrypoint == "sign-api" else api.request_vault_sign)(payload)
     request = pending["request"]
     expected = (
-        "If this transaction uses a recent blockhash, it may expire while awaiting approval. "
+        "If this message uses a recent blockhash, it may expire while awaiting approval. "
         "Use a durable nonce for delayed submission."
     )
     assert request["solana_lifetime_hint"] == expected
