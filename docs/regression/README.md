@@ -125,10 +125,14 @@ and you can configure channels later from the Web UI.
 
 ## Usage
 
-The compatibility entry point now uses Incus by default:
+The compatibility entry point uses Incus by default. Hold the existing master
+before updating it (check `status` first; never replace another owner's hold):
 
 ```bash
-./scripts/run_regression.sh
+python3 scripts/incus_regression.py hold --target master --owner <you> --reason "Regression update"
+./scripts/run_regression.sh --hold-owner <you>
+# Finish verification before releasing the hold.
+python3 scripts/incus_regression.py release --target master
 ```
 
 Normal updates synchronize source incrementally using rsync's size/mtime quick
@@ -180,11 +184,22 @@ and independently cloned repositories do not participate in this shared lock.
 Direct runner commands:
 
 ```bash
-python3 scripts/incus_regression.py up --target master
+python3 scripts/incus_regression.py hold --target master --owner <you> --reason "Regression update"
+python3 scripts/incus_regression.py up --target master --hold-owner <you>
 python3 scripts/incus_regression.py status --target master
+# Finish verification before releasing the hold.
+python3 scripts/incus_regression.py release --target master
 python3 scripts/incus_regression.py logs --target master
 python3 scripts/incus_regression.py shell --target master
-python3 scripts/incus_regression.py down --target master
+```
+
+Stopping master also requires a hold and matching `--hold-owner`; it is not a
+normal update step (master should stay online):
+
+```bash
+python3 scripts/incus_regression.py hold --target master --owner <you> --reason "Authorized maintenance"
+python3 scripts/incus_regression.py down --target master --hold-owner <you>
+python3 scripts/incus_regression.py release --target master
 ```
 
 Temporary worktree environment:
@@ -214,8 +229,28 @@ the owner, reason, and time, including for instances without runner metadata.
 `--yes`; only an explicit `--ignore-hold` overrides it. Deletion previews
 (`--dry-run`) also check the live hold and require a reachable Incus daemon
 unless explicitly overridden. Reconcile never includes that flag in its
-printed commands. Holds do not expire automatically or stop
-`up`/`down`, and old runners or raw Incus commands do not enforce them.
+printed commands.
+
+`up` (including source cleanup and state resets) and `down` require
+`--hold-owner <id>` matching the instance's hold owner. An existing master always
+requires a hold; unheld worktree targets retain their normal behavior. A partial
+hold without an owner refuses mutations until explicitly repaired or released.
+These checks run under the target update lock, before target mutation or an
+`up` metadata reservation; `down` also holds that lock through its stop command.
+Previews (`--dry-run`) perform the same live, read-only hold check, so they need
+a reachable Incus daemon. There is no `--ignore-hold` bypass for `up` or `down`.
+
+The sole bootstrap exception is `up --target master` when a successful live
+listing proves the master instance does not exist: there is nothing to hold yet.
+Once it exists, take a hold before any further update. An unreadable inventory
+never authorizes bootstrap. This does not authorize recreating lost state during
+a routine regression update. Only deploy the verified merged default branch to
+master; use a worktree target for unmerged code. A matching owner is coordination,
+not proof that the source is merged.
+
+Holds do not expire automatically. Old runners, raw Incus commands, and commands
+run inside `shell` do not enforce them. `hold`/`release` retain their explicit
+marker-management semantics; do not replace or release another owner's hold.
 
 Fresh-install worktree environment, for testing the first-run experience:
 
@@ -245,8 +280,8 @@ master environment is always seeded.
 
 Delete worktree environments promptly after the worktree is merged, abandoned,
 or removed. Before updating, restarting, or deleting any regression
-environment, check its hold with `status` or `reconcile`; if held, tell the user
-who holds it and why, and do not proceed or offer a one-click delete.
+environment, check its hold with `status` or `reconcile`; if another owner holds
+it, tell the user who holds it and why, and do not proceed or offer a one-click delete.
 Long-running work must hold its environment for as long as it runs, including
 on `master` (`hold --target master`). The persistent `master` environment
 should stay running and preserve its product state across normal source
@@ -396,8 +431,8 @@ The wrapper maps common legacy flags:
 ./scripts/run_regression.sh --status
 ./scripts/run_regression.sh --logs
 ./scripts/run_regression.sh --worktree
-./scripts/run_regression.sh --reset-config
-./scripts/run_regression.sh --dry-run
+./scripts/run_regression.sh --reset-config --hold-owner <you>
+./scripts/run_regression.sh --dry-run --hold-owner <you>
 ```
 
 ## What You Get

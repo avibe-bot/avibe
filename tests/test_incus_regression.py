@@ -2654,6 +2654,137 @@ def test_hold_then_status_and_release_preserve_unrelated_config(
     assert "HELD:" not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("mode", ["up", "down"])
+def test_compatibility_wrapper_passes_hold_owner(tmp_path, mode):
+    python = tmp_path / "fake-python"
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    python.chmod(0o700)
+    flags = [] if mode == "up" else ["--down"]
+    result = subprocess.run(
+        ["bash", str(SCRIPT_PATH.with_name("run_regression.sh")), "--master", *flags, "--hold-owner", "session-one"],
+        env={"PATH": os.defpath, "HOME": str(tmp_path), "PYTHON_BIN": str(python)},
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.splitlines()[1:] == [mode, "--target", "master", "--hold-owner", "session-one"]
+
+
+@pytest.mark.parametrize("command", ["up", "down"])
+@pytest.mark.parametrize("target", ["master", "worktree"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["apply", "dry-run"])
+@pytest.mark.parametrize(
+    ("held_owner", "supplied_owner"),
+    [(None, None), (None, "session-one"), ("session-one", None),
+     ("session-one", "session-two"), ("session-one", "session-one"), ("", "unknown")],
+    ids=["no-hold", "owner-without-hold", "missing-owner", "different-owner", "matching-owner", "partial-hold"],
+)
+def test_target_mutations_require_the_hold_owner(
+    tmp_path, monkeypatch, capsys, command, target, dry_run, held_owner, supplied_owner
+):
+    config, commands = hold_fixture(tmp_path, monkeypatch, target)
+    if held_owner is not None:
+        config.update({
+            incus_regression.HOLD_CONFIG_KEYS[0]: held_owner,
+            incus_regression.HOLD_CONFIG_KEYS[1]: "Evaluation in progress",
+        })
+    original = dict(config)
+    mutations = []
+
+    def mutate(name):
+        def record(*args, **kwargs):
+            if not dry_run:
+                project = "avr-master" if target == "master" else "avr-wt-eval"
+                assert incus_regression.target_run_in_flight(tmp_path, None, project)
+            mutations.append(name)
+            return set() if name == "update_dependencies_and_build" else None
+        return record
+
+    monkeypatch.setattr(incus_regression, "require_source_sync", lambda: None)
+    monkeypatch.setattr(incus_regression, "should_seed_state", lambda *a, **kw: False)
+    monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda *a: {})
+    monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *a, **kw: {})
+    for name in (
+        "ensure_project_and_instance", "stop_service_for_update", "write_runtime_env",
+        "migrate_legacy_backend_runtimes", "sync_source", "invalidate_fingerprints",
+        "update_dependencies_and_build", "run_prepare_state", "normalize_runtime_config",
+        "write_metadata", "prepare_show_runtime", "restart_and_verify",
+    ):
+        monkeypatch.setattr(incus_regression, name, mutate(name))
+    flags = [command, "--target", target, "--slug", "eval", "--host-port", "15210"]
+    if dry_run:
+        flags.append("--dry-run")
+    if supplied_owner is not None:
+        flags.extend(["--hold-owner", supplied_owner])
+    allowed = (held_owner is None and target == "worktree") or (
+        bool(held_owner) and held_owner == supplied_owner
+    )
+    assert incus_regression.main(flags) == (0 if allowed else 1)
+    captured = capsys.readouterr()
+    assert config == original
+    if not allowed:
+        assert mutations == [] and commands == []
+        assert "+ incus" not in captured.out
+        assert not incus_regression.mapping_path(tmp_path).exists()
+        if held_owner is None:
+            assert "master requires holding it first: hold --target master --owner <you>" in captured.err
+        else:
+            assert f"is held by {held_owner or 'unknown'}" in captured.err
+            assert "Evaluation in progress" in captured.err
+    elif command == "up":
+        assert "sync_source" in mutations and "restart_and_verify" in mutations
+    elif dry_run:
+        assert " stop " in captured.out and commands == []
+    else:
+        assert len(commands) == 1 and "stop" in commands[0]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_up_bootstraps_master_only_when_live_inventory_proves_absence(tmp_path, monkeypatch, dry_run):
+    _, commands = hold_fixture(tmp_path, monkeypatch, "master")
+    reads = []
+
+    def absent(runner, *args):
+        reads.append(runner.dry_run)
+        return None
+
+    def reached_bootstrap(*args, **kwargs):
+        raise RuntimeError("authorized bootstrap")
+
+    monkeypatch.setattr(incus_regression, "instance_record", absent)
+    monkeypatch.setattr(incus_regression, "require_source_sync", lambda: None)
+    monkeypatch.setattr(incus_regression, "require_runtime_seed_env", lambda: None)
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda *args: None)
+    monkeypatch.setattr(incus_regression, "ensure_project_and_instance", reached_bootstrap)
+    flags = ["up", "--target", "master"] + (["--dry-run"] if dry_run else [])
+    with pytest.raises(RuntimeError, match="authorized bootstrap"):
+        incus_regression.main(flags)
+    assert reads == [False]
+    assert commands == []
+
+
+def test_down_cannot_race_an_in_flight_update(tmp_path, monkeypatch):
+    config, commands = hold_fixture(tmp_path, monkeypatch, "master")
+    config[incus_regression.HOLD_CONFIG_KEYS[0]] = "mine"
+    with incus_regression.target_update_lock(tmp_path, None, "avr-master", dry_run=False):
+        args = incus_regression.build_parser().parse_args(["down", "--target", "master", "--hold-owner", "mine"])
+        with pytest.raises(incus_regression.RegressionError, match="Another run holds"):
+            incus_regression.cmd_down(args)
+    assert commands == []
+
+
+@pytest.mark.parametrize("command", ["up", "down"])
+def test_mutation_preview_requires_readable_live_inventory(tmp_path, monkeypatch, capsys, command):
+    hold_fixture(tmp_path, monkeypatch, "master")
+
+    def unavailable(*args, **kwargs):
+        raise incus_regression.RegressionError("Incus inventory unavailable")
+
+    monkeypatch.setattr(incus_regression, "instance_record", unavailable)
+    assert incus_regression.main([command, "--target", "master", "--dry-run", "--hold-owner", "mine"]) == 1
+    captured = capsys.readouterr()
+    assert "Incus inventory unavailable" in captured.err
+    assert "+ incus" not in captured.out
+
+
 @pytest.mark.parametrize("target", ["worktree", "master"])
 @pytest.mark.parametrize("dry_run", [False, True], ids=["apply", "dry-run"])
 def test_delete_held_environment_refuses_before_mutation_unless_explicitly_overridden(
@@ -3868,7 +3999,7 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names, records = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES, config={incus_regression.HOLD_CONFIG_KEYS[0]: "test-owner"})
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -3892,6 +4023,7 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -3928,7 +4060,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names, records = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES, config={incus_regression.HOLD_CONFIG_KEYS[0]: "test-owner"})
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -3962,6 +4094,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4022,6 +4155,7 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4084,6 +4218,7 @@ def test_up_stops_when_the_daemon_cannot_say_whether_the_target_exists(
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4149,6 +4284,7 @@ def test_up_checks_seed_env_before_target_mutation(tmp_path: Path, monkeypatch: 
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4186,7 +4322,7 @@ def test_up_checks_platform_seed_env_before_existing_reset_mutation(tmp_path: Pa
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names, records = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES, config={incus_regression.HOLD_CONFIG_KEYS[0]: "test-owner"})
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="")
@@ -4211,6 +4347,7 @@ def test_up_checks_platform_seed_env_before_existing_reset_mutation(tmp_path: Pa
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4248,7 +4385,7 @@ def test_up_rejects_paired_master_reset_before_instance_mutation(tmp_path: Path,
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names, records = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES, config={incus_regression.HOLD_CONFIG_KEYS[0]: "test-owner"})
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout='{"state": "paired"}')
@@ -4271,6 +4408,7 @@ def test_up_rejects_paired_master_reset_before_instance_mutation(tmp_path: Path,
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4327,6 +4465,7 @@ def test_up_dry_run_does_not_require_seed_env(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
     monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
     monkeypatch.setattr(incus_regression, "Runner", DryRunRunner)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
     monkeypatch.setattr(incus_regression, "ensure_project_and_instance", record("ensure_project_and_instance"))
     monkeypatch.setattr(incus_regression, "stop_service_for_update", record("stop_service_for_update"))
     monkeypatch.setattr(incus_regression, "write_runtime_env", record("write_runtime_env"))
@@ -4344,6 +4483,7 @@ def test_up_dry_run_does_not_require_seed_env(tmp_path: Path, monkeypatch: pytes
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4392,7 +4532,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names, records = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES, config={incus_regression.HOLD_CONFIG_KEYS[0]: "test-owner"})
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -4426,6 +4566,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4473,7 +4614,7 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names, records = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES, config={incus_regression.HOLD_CONFIG_KEYS[0]: "test-owner"})
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -4507,6 +4648,7 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -4545,7 +4687,7 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names, records = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES, config={incus_regression.HOLD_CONFIG_KEYS[0]: "test-owner"})
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -4578,6 +4720,7 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
@@ -5901,7 +6044,7 @@ def test_a_run_that_dies_mid_build_leaves_nothing_licensing_a_skip(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names, records = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES, config={incus_regression.HOLD_CONFIG_KEYS[0]: "test-owner"})
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -5933,6 +6076,7 @@ def test_a_run_that_dies_mid_build_leaves_nothing_licensing_a_skip(
 
     args = argparse.Namespace(
         target="master",
+        hold_owner="test-owner",
         slug=None,
         host_port=None,
         ui_host="127.0.0.1",
