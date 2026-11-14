@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FC, ReactNode } from 'react';
-import { AppWindow, Check, CircleAlert, CircleCheck, CircleStop, ExternalLink, Info, LoaderCircle, Monitor, Power, RotateCw, ShieldAlert, ShieldX } from 'lucide-react';
+import { AppWindow, Check, Hand, CircleAlert, CircleCheck, CircleStop, ExternalLink, Info, LoaderCircle, Monitor, Power, RotateCw, ShieldAlert, ShieldX } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -53,6 +53,7 @@ const WINDOWS_GUIDE_STEPS: readonly ComputerUseGuideStep[] = ['enable'];
 const WINDOWS_NOTES: { testId: string; icon: LucideIcon; text: TranslationKey }[] = [
   { testId: 'computer-use-windows-apps', icon: AppWindow, text: 'settings.computerUse.windows.apps' },
   { testId: 'computer-use-windows-elevated', icon: ShieldX, text: 'settings.computerUse.windows.elevated' },
+  { testId: 'computer-use-windows-launch', icon: Hand, text: 'settings.computerUse.windows.launch' },
   { testId: 'computer-use-windows-stop', icon: CircleStop, text: 'settings.computerUse.windows.stop' },
 ];
 

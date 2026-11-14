@@ -537,7 +537,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
       .toBe('settings.computerUse.windows.previewBadge');
     expect(screen.getByText('settings.computerUse.windows.subtitle')).toBeTruthy();
     expect(screen.getByText('settings.computerUse.windows.enableDetail')).toBeTruthy();
-    for (const note of ['apps', 'elevated', 'stop']) {
+    for (const note of ['apps', 'elevated', 'launch', 'stop']) {
       expect(screen.getByTestId(`computer-use-windows-${note}`).textContent)
         .toBe(`settings.computerUse.windows.${note}`);
     }
