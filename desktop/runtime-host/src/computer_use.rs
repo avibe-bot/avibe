@@ -50,7 +50,15 @@ fn is_windows_named_pipe(path: &Path) -> bool {
 }
 
 fn is_endpoint_path(path: &Path) -> bool {
-    path.is_absolute() || is_windows_named_pipe(path)
+    let value = path.to_string_lossy();
+    if value
+        .get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r#"\\.\pipe\"#))
+    {
+        is_windows_named_pipe(path)
+    } else {
+        path.is_absolute()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

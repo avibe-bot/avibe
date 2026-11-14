@@ -14,6 +14,13 @@
 
 This amendment defines the cross-process boundary before the Windows shell and
 Runtime consumers are wired. It keeps `schema_version: 1` and adds no fields.
+**Inactive foundation:** Windows `ready` records are unconditionally refused by
+Runtime admission (`unavailable / pipe_unverified`, or
+`unsupported_architecture` for non-x64), including when the snapshot is valid,
+the shell lock is held, and an injected connectivity check succeeds. No pipe
+is opened and no PID/session-only result is treated as authenticated readiness.
+The requirements below describe the future integrated contract, not implemented
+Windows readiness. macOS admission remains unchanged.
 
 - `socket_path` remains the endpoint field. On macOS/Linux it is an absolute
   Unix-domain socket path. On Windows it is an absolute named-pipe path of the
@@ -25,15 +32,19 @@ Runtime consumers are wired. It keeps `schema_version: 1` and adds no fields.
   `shell_pid` is diagnostic/liveness and session evidence only.
 - The shell creates `computer-use.lock` beside `computer-use.json` with an
   owner-only DACL (SYSTEM may be allowed when required by the host) and holds
-  an exclusive OS byte-range lock for
-  its entire lifetime. A Runtime probe must use the same non-blocking lock
-  operation. Lock conflict means a live shell; missing, unreadable, ACL-unsafe,
-  access-denied, or any other probe error means **not live**, never “probably
-  live”. State and lock artifacts must also be owner-private.
-- A ready Runtime admission requires: valid state and approved snapshot;
+  an exclusive OS byte-range lock on byte zero for its entire lifetime. A
+  Runtime probe uses non-blocking `LockFileEx` (six ABI arguments) and
+  `UnlockFileEx` (five). Only `ERROR_LOCK_VIOLATION` means held; sharing denial,
+  missing, unreadable, ACL-unsafe, access-denied, or any other probe error never
+  means “probably live”. The probe verifies the opened regular-file identity,
+  current-user owner, and DACL permitting only that user and optionally SYSTEM.
+  State and lock artifacts must both be owner-private; the probe never repairs
+  ACLs, creates a missing lock, or accepts a reparse point.
+- Future ready Runtime admission requires: valid state and approved snapshot;
   enabled/ready state; the shell lock is held; the exact published named pipe
   opens; the pipe server has a live PID in the same nonzero interactive session
-  as the Runtime; and the current Runtime is x64, non-elevated, and not in a
+  as the Runtime, matching current-user SID, and a verified owner-private pipe
+  DACL; and the current Runtime is x64, non-elevated, and not in a
   disconnected/locked session. Unknown security or session evidence fails
   closed with a stable unavailable reason.
 - The shell must retain the owned driver process HANDLE/PID for the daemon
@@ -55,7 +66,8 @@ Runtime consumers are wired. It keeps `schema_version: 1` and adds no fields.
   approve it. Opaque names and `host_bundle_id` are not authentication. A
   missing, dead, wrong-session, ACL-unsafe, or otherwise unverifiable endpoint
   is refused rather than accepted.
-- Interactive-session checks are repeated at ready admission. On the action
+- Future interactive-session checks must repeat at ready admission and prove
+  WTS active connectivity as well as an unlocked input desktop. On the action
   path, the component that owns driver dispatch must recheck lock/disconnect
   state and reject or stop input; shell supervisory cleanup alone is not a
   sufficient action-time guarantee when Runtime requests go directly through
@@ -63,12 +75,24 @@ Runtime consumers are wired. It keeps `schema_version: 1` and adds no fields.
   ordinary target from the shell token. Elevated-target refusal is a
   driver/driver-host action-path rule; this lane does not claim to enforce it
   from `shell_pid` or `host_bundle_id`.
-- Stable Windows refusal reasons are `unsupported_architecture`,
+- Before removing the unconditional Windows admission refusal, implement and
+  independently review: shell-held exact child HANDLE/PID generation binding;
+  Runtime peer SID and connected-handle pipe owner/DACL verification; a reviewed
+  decision on same-user stale/reclaimed endpoint binding; ordinary Runtime and
+  shell token enforcement; WTS/locked-session admission; final driver action-path
+  session and target-privilege guards; and the actual final patched Windows
+  snapshot pin from packaging evidence. These are missing implementation
+  obligations, not merely acceptance tests. Native end-to-end evidence and
+  Product go are also required. This foundation adds no Windows snapshot pin.
+- Stable Windows refusal reasons reserved by the integration contract are `unsupported_architecture`,
   `elevated_runtime`, `session_unavailable`, `session_locked`,
   `session_mismatch`, `shell_not_running`, `state_unverified`,
-  `lock_unverified`, `pipe_unverified`, and `daemon_unreachable`. Older Runtimes that do not understand the Windows
-  endpoint refuse it safely; macOS lock, Unix-socket, and health behavior is
-  unchanged.
+  `lock_unverified`, `pipe_unverified`, and `daemon_unreachable`. Legacy v1
+  parsers alone are not a security gate: on Windows an older path parser may
+  regard a named pipe as absolute. The old POSIX/AF_UNIX admission cannot open
+  that endpoint; shell enablement must still require the integrated Runtime
+  capability rather than infer support from schema v1. macOS lock, Unix-socket,
+  and health behavior is unchanged.
 
 
 Foreground input and window activation are ordinary Computer Use operations.

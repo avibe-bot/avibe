@@ -17,6 +17,8 @@ that the shell can adopt.
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
 from dataclasses import dataclass
 import hashlib
 import json
@@ -25,6 +27,7 @@ import os
 from pathlib import Path
 import platform as platform_module
 import socket
+import stat
 import sys
 from typing import Any, Callable, Mapping
 
@@ -108,11 +111,6 @@ _SHA256_HEX_LENGTH = 64
 _WINDOWS_NAMED_PIPE_PREFIX = "\\\\.\\pipe\\"
 _WINDOWS_NAMED_PIPE_MAX_CHARS = 256
 _WINDOWS_ERROR_LOCK_VIOLATION = 33
-_WINDOWS_ERROR_ACCESS_DENIED = 5
-_WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-_WINDOWS_TOKEN_QUERY = 0x0008
-_WINDOWS_TOKEN_ELEVATION = 20
-_WINDOWS_INVALID_HANDLE = -1
 
 
 class ComputerUseStateError(ValueError):
@@ -295,7 +293,10 @@ def _is_windows_named_pipe(value: str) -> bool:
 
 def _endpoint_path(payload: Mapping[str, Any], key: str) -> str:
     value = _required_string(payload, key)
-    if _is_windows_named_pipe(value) or Path(value).is_absolute():
+    if value.casefold().startswith(_WINDOWS_NAMED_PIPE_PREFIX.casefold()):
+        if _is_windows_named_pipe(value):
+            return value
+    elif Path(value).is_absolute():
         return value
     raise ComputerUseStateError(f"{key} must be an absolute path or Windows named pipe")
 
@@ -374,14 +375,41 @@ def _snapshot_valid(state: ComputerUseState, verifier: SnapshotVerifier) -> bool
     return valid
 
 
-def _windows_private_artifact_is_safe(path: Path) -> bool:
-    if not path.exists() or path.is_symlink():
-        return False
+def _windows_private_artifact_is_safe(path: Path, *, fd: int | None = None) -> bool:
+    """Require a regular, non-reparse object owned by this user, with user/SYSTEM ACL."""
+
     try:
         from core.private_fs import windows_security
 
-        return windows_security().grants_only_self(path, directory=False)
-    except (OSError, PermissionError, ImportError):
+        info = path.lstat() if fd is None else os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            return False
+        security = windows_security()
+        reader = (
+            security._named_path_security(path)
+            if fd is None
+            else security._file_descriptor_security(fd, path)
+        )
+        with reader as (owner, dacl, _descriptor), contextlib.ExitStack() as stack:
+            if not owner or not dacl:
+                return False
+            trusted = [
+                security._descriptor_owner(
+                    stack.enter_context(security._descriptor_from_sddl(f"O:{sid}"))
+                )
+                for sid in (security.current_user_sid, "SY")
+            ]
+            if not security.advapi32.EqualSid(owner, trusted[0]):
+                return False
+            for ace_type, _flags, sid in security._aces(dacl):
+                if ace_type == security._ACCESS_DENIED_ACE_TYPE:
+                    continue
+                if ace_type != security._ACCESS_ALLOWED_ACE_TYPE or not any(
+                    security.advapi32.EqualSid(sid, candidate) for candidate in trusted
+                ):
+                    return False
+        return True
+    except (OSError, ImportError, AttributeError, TypeError, ValueError, ctypes.ArgumentError):
         return False
 
 
@@ -389,285 +417,80 @@ def _windows_lock_probe(lock_path: Path) -> str:
     """Return ``held``, ``free``, ``missing``, or ``unverified``."""
 
     try:
-        lock_path.lstat()
+        before = lock_path.lstat()
     except FileNotFoundError:
         return "missing"
     except OSError:
         return "unverified"
     if not _windows_private_artifact_is_safe(lock_path):
         return "unverified"
+    fd: int | None = None
     try:
-        import ctypes
         from ctypes import wintypes
         import msvcrt
 
         fd = os.open(lock_path, os.O_RDWR)
-    except FileNotFoundError:
-        return "missing"
-    except (OSError, ImportError):
-        return "unverified"
+        opened = os.fstat(fd)
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            return "unverified"
+        if not _windows_private_artifact_is_safe(lock_path, fd=fd):
+            return "unverified"
 
-    class _Overlapped(ctypes.Structure):
-        _fields_ = [
-            ("internal", ctypes.c_size_t),
-            ("internal_high", ctypes.c_size_t),
-            ("offset", wintypes.DWORD),
-            ("offset_high", wintypes.DWORD),
-            ("h_event", wintypes.HANDLE),
+        class _Overlapped(ctypes.Structure):
+            _fields_ = [
+                ("internal", ctypes.c_size_t),
+                ("internal_high", ctypes.c_size_t),
+                ("offset", wintypes.DWORD),
+                ("offset_high", wintypes.DWORD),
+                ("h_event", wintypes.HANDLE),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LockFileEx.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(_Overlapped),
         ]
+        kernel32.LockFileEx.restype = wintypes.BOOL
+        kernel32.UnlockFileEx.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(_Overlapped),
+        ]
+        kernel32.UnlockFileEx.restype = wintypes.BOOL
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.LockFileEx.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.POINTER(_Overlapped),
-    ]
-    kernel32.LockFileEx.restype = wintypes.BOOL
-    kernel32.UnlockFileEx.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.POINTER(_Overlapped),
-    ]
-    kernel32.UnlockFileEx.restype = wintypes.BOOL
-
-    overlapped = _Overlapped()
-    handle = msvcrt.get_osfhandle(fd)
-    try:
+        overlapped = _Overlapped()
         flags = 0x00000001 | 0x00000002  # FAIL_IMMEDIATELY | EXCLUSIVE
-        if kernel32.LockFileEx(handle, flags, 0, 1, 0, ctypes.byref(overlapped)):
-            kernel32.UnlockFileEx(handle, 0, 1, 0, ctypes.byref(overlapped))
+        if kernel32.LockFileEx(
+            msvcrt.get_osfhandle(fd), flags, 0, 1, 0, ctypes.byref(overlapped)
+        ):
+            if not kernel32.UnlockFileEx(
+                msvcrt.get_osfhandle(fd), 0, 1, 0, ctypes.byref(overlapped)
+            ):
+                return "unverified"
             return "free"
         if ctypes.get_last_error() == _WINDOWS_ERROR_LOCK_VIOLATION:
             return "held"
         return "unverified"
+    except FileNotFoundError:
+        return "missing"
+    except (OSError, ImportError, AttributeError, TypeError, ValueError, ctypes.ArgumentError):
+        return "unverified"
     finally:
-        os.close(fd)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _windows_lock_is_held(lock_path: Path) -> bool:
     return _windows_lock_probe(lock_path) == "held"
-
-
-def _windows_named_pipe_probe(path: str, *, timeout: float = 0.1) -> str:
-    """Return ``ready``, ``unreachable``, or ``unverified`` for one pipe."""
-
-    if not _is_windows_named_pipe(path):
-        return "unverified"
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.WaitNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
-        kernel32.WaitNamedPipeW.restype = wintypes.BOOL
-        kernel32.CreateFileW.argtypes = [
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            wintypes.LPVOID,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            wintypes.HANDLE,
-        ]
-        kernel32.CreateFileW.restype = wintypes.HANDLE
-        kernel32.GetNamedPipeServerProcessId.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        kernel32.GetNamedPipeServerProcessId.restype = wintypes.BOOL
-        kernel32.ProcessIdToSessionId.argtypes = [
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
-        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-
-        timeout_ms = max(1, min(int(timeout * 1000), 5000))
-        if not kernel32.WaitNamedPipeW(path, timeout_ms):
-            return (
-                "unverified"
-                if ctypes.get_last_error() == _WINDOWS_ERROR_ACCESS_DENIED
-                else "unreachable"
-            )
-        handle = kernel32.CreateFileW(
-            path,
-            0xC0000000,  # GENERIC_READ | GENERIC_WRITE
-            0x00000003,  # FILE_SHARE_READ | FILE_SHARE_WRITE
-            None,
-            3,  # OPEN_EXISTING
-            0,
-            None,
-        )
-        if handle in (None, _WINDOWS_INVALID_HANDLE):
-            return (
-                "unverified"
-                if ctypes.get_last_error() == _WINDOWS_ERROR_ACCESS_DENIED
-                else "unreachable"
-            )
-        try:
-            server_pid = wintypes.DWORD()
-            server_session = wintypes.DWORD()
-            current_session = wintypes.DWORD()
-            if not kernel32.GetNamedPipeServerProcessId(handle, ctypes.byref(server_pid)):
-                return "unverified"
-            if server_pid.value == 0 or not kernel32.ProcessIdToSessionId(
-                server_pid, ctypes.byref(server_session)
-            ):
-                return "unverified"
-            if not kernel32.ProcessIdToSessionId(
-                kernel32.GetCurrentProcessId(), ctypes.byref(current_session)
-            ):
-                return "unverified"
-            if current_session.value == 0 or server_session.value != current_session.value:
-                return "unverified"
-            return "ready"
-        finally:
-            kernel32.CloseHandle(handle)
-    except (AttributeError, OSError, ImportError):
-        return "unverified"
-
-
-def _windows_named_pipe_accepts(path: str, *, timeout: float = 0.1) -> bool:
-    return _windows_named_pipe_probe(path, timeout=timeout) == "ready"
-
-
-def _windows_session_is_unlocked() -> bool | None:
-    """Return known desktop lock state, or None when Windows cannot prove it."""
-
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        user32.OpenInputDesktop.restype = wintypes.HANDLE
-        user32.GetUserObjectInformationW.argtypes = [
-            wintypes.HANDLE,
-            wintypes.INT,
-            wintypes.LPVOID,
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        user32.GetUserObjectInformationW.restype = wintypes.BOOL
-        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
-        user32.CloseDesktop.restype = wintypes.BOOL
-
-        desktop = user32.OpenInputDesktop(0, False, 0x0001 | 0x0008)
-        if desktop in (None, _WINDOWS_INVALID_HANDLE):
-            return None
-        try:
-            buffer = ctypes.create_unicode_buffer(64)
-            returned = wintypes.DWORD()
-            if not user32.GetUserObjectInformationW(
-                desktop,
-                2,  # UOI_NAME
-                buffer,
-                ctypes.sizeof(buffer),
-                ctypes.byref(returned),
-            ):
-                return None
-            return buffer.value.casefold() == "default"
-        finally:
-            user32.CloseDesktop(desktop)
-    except (AttributeError, OSError, ImportError):
-        return None
-
-
-def _windows_environment_reason(state: ComputerUseState) -> str | None:
-    """Fail closed for unsupported architecture, elevation, or session drift."""
-
-    if os.name != "nt":
-        return None
-    if platform_module.machine().casefold() not in {"amd64", "x86_64"}:
-        return "unsupported_architecture"
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.ProcessIdToSessionId.argtypes = [
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        advapi32.OpenProcessToken.argtypes = [
-            wintypes.HANDLE,
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.HANDLE),
-        ]
-        advapi32.OpenProcessToken.restype = wintypes.BOOL
-        advapi32.GetTokenInformation.argtypes = [
-            wintypes.HANDLE,
-            wintypes.DWORD,
-            wintypes.LPVOID,
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        advapi32.GetTokenInformation.restype = wintypes.BOOL
-
-        token = wintypes.HANDLE()
-        if not advapi32.OpenProcessToken(
-            kernel32.GetCurrentProcess(), _WINDOWS_TOKEN_QUERY, ctypes.byref(token)
-        ):
-            return "session_unavailable"
-        try:
-            elevation = wintypes.DWORD()
-            returned = wintypes.DWORD()
-            if not advapi32.GetTokenInformation(
-                token,
-                _WINDOWS_TOKEN_ELEVATION,
-                ctypes.byref(elevation),
-                ctypes.sizeof(elevation),
-                ctypes.byref(returned),
-            ):
-                return "session_unavailable"
-            if elevation.value:
-                return "elevated_runtime"
-        finally:
-            kernel32.CloseHandle(token)
-
-        current_session = wintypes.DWORD()
-        if not kernel32.ProcessIdToSessionId(
-            kernel32.GetCurrentProcessId(), ctypes.byref(current_session)
-        ) or current_session.value == 0:
-            return "session_unavailable"
-        shell_process = kernel32.OpenProcess(
-            _WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION,
-            False,
-            state.shell_pid,
-        )
-        if shell_process in (None, _WINDOWS_INVALID_HANDLE):
-            return "shell_not_running"
-        try:
-            shell_session = wintypes.DWORD()
-            if not kernel32.ProcessIdToSessionId(state.shell_pid, ctypes.byref(shell_session)):
-                return "session_unavailable"
-            if shell_session.value != current_session.value:
-                return "session_mismatch"
-        finally:
-            kernel32.CloseHandle(shell_process)
-    except (AttributeError, OSError, ImportError):
-        return "session_unavailable"
-
-    unlocked = _windows_session_is_unlocked()
-    if unlocked is False:
-        return "session_locked"
-    if unlocked is None:
-        return "session_unavailable"
-    return None
 
 
 def _shell_lock_is_held(lock_path: Path) -> bool:
@@ -730,8 +553,10 @@ def _unix_socket_accepts(path: str, *, timeout: float = 0.1) -> bool:
 
 
 def _endpoint_accepts(path: str, *, timeout: float = 0.1) -> bool:
+    # A named-pipe connection alone cannot prove the shell-owned generation.
+    # Windows enablement requires the reviewed end-to-end identity contract.
     if os.name == "nt":
-        return _windows_named_pipe_accepts(path, timeout=timeout)
+        return False
     return _unix_socket_accepts(path, timeout=timeout)
 
 
@@ -764,22 +589,22 @@ def effective_computer_use_status(
             return ComputerUseStatus("unavailable", "shell_not_running", state)
         if lock_probe != "held":
             return ComputerUseStatus("unavailable", "lock_unverified", state)
-    if not shell_lock_held(resolved_lock_path) or state.state == "stopped":
+    elif not shell_lock_held(resolved_lock_path):
         return ComputerUseStatus("unavailable", "shell_not_running", state)
-    if os.name == "nt":
-        environment_reason = _windows_environment_reason(state)
-        if environment_reason is not None:
-            return ComputerUseStatus("unavailable", environment_reason, state)
+    if state.state == "stopped":
+        return ComputerUseStatus("unavailable", "shell_not_running", state)
+    if os.name == "nt" and state.state == "ready":
+        if platform_module.machine().casefold() not in {"amd64", "x86_64"}:
+            return ComputerUseStatus("unavailable", "unsupported_architecture", state)
+        # Foundation only: neither a PID/session probe nor caller-injected
+        # connectivity proves the shell-owned driver generation. Keep *all*
+        # Windows ready records unavailable until that contract and the final
+        # action-time privilege/session guards are integrated and reviewed.
+        return ComputerUseStatus("unavailable", "pipe_unverified", state)
     if state.state != "ready":
         return ComputerUseStatus(state.state, state.reason, state)
     assert state.socket_path is not None
     endpoint_checker = socket_accepts or _endpoint_accepts
-    if os.name == "nt" and socket_accepts is None:
-        pipe_result = _windows_named_pipe_probe(state.socket_path)
-        if pipe_result == "unverified":
-            return ComputerUseStatus("unavailable", "pipe_unverified", state)
-        if pipe_result != "ready":
-            return ComputerUseStatus("unavailable", "daemon_unreachable", state)
-    elif not endpoint_checker(state.socket_path):
+    if not endpoint_checker(state.socket_path):
         return ComputerUseStatus("unavailable", "daemon_unreachable", state)
     return ComputerUseStatus("ready", None, state)

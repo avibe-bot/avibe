@@ -95,7 +95,7 @@ def test_tool_snapshot_digest_matches_core_and_manifest_pins() -> None:
     assert hashlib.sha256(mutated).hexdigest() != COMPUTER_USE_TOOL_SNAPSHOT_SHA256
 
 
-def test_windows_named_pipe_endpoint_is_valid_schema_v1_state() -> None:
+def test_windows_named_pipe_endpoint_is_valid_schema_v1_state(tmp_path: Path) -> None:
     assert _is_windows_named_pipe(r"\\.\pipe\avibe-cua-shell-a-4")
     assert not _is_windows_named_pipe("\\\\.\\pipe\\")
     assert not _is_windows_named_pipe(r"\\.\pipe\avibe\\foreign")
@@ -109,9 +109,9 @@ def test_windows_named_pipe_endpoint_is_valid_schema_v1_state() -> None:
         "instance_id": "shell-a",
         "generation": 4,
         "driver_version": "0.31.0",
-        "tool_snapshot": {"path": "/tmp/tools.json", "sha256": "0" * 64},
+        "tool_snapshot": {"path": str(tmp_path / "tools.json"), "sha256": "0" * 64},
         "socket_path": r"\\.\pipe\avibe-cua-shell-a-4",
-        "proxy_executable": "/tmp/cua-driver.exe",
+        "proxy_executable": str(tmp_path / "cua-driver.exe"),
         "host_bundle_id": "bot.avibe.desktop",
     }
     state = parse_computer_use_state(payload)
