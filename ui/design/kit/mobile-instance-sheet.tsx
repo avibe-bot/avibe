@@ -41,17 +41,32 @@ const group = 'overflow-hidden rounded-2xl border border-edge bg-surface';
 const sectionLabel = 'mb-2 px-1 text-xs font-medium text-muted';
 
 /** The instance underneath, shrunk and dimmed the way iOS presents a large sheet. */
-function Underneath({ children, named }: { children?: ReactNode; named?: string }) {
+function Underneath({ children }: { children?: ReactNode }) {
   return (
     <div className="relative h-full overflow-hidden bg-surface-3">
       <div className="h-full origin-top scale-95 overflow-hidden rounded-3xl opacity-80">
-        <div className="relative h-full">
-          {home()}
-          {named && <NamedHeader name={named} />}
-        </div>
+        <div className="relative h-full">{home()}</div>
       </div>
       {children}
     </div>
+  );
+}
+
+/**
+ * The native sheet (UISheetPresentationController, drawn here) over the shipped Home, holding a
+ * shipped page that draws its own header (`InstanceSheetPage`).
+ */
+export function NativeSheet({ children }: { children: ReactNode }) {
+  return (
+    <Underneath>
+      <section
+        aria-modal="true"
+        className="absolute inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+0.75rem)] flex flex-col overflow-hidden rounded-t-3xl border-t border-edge bg-background shadow-elevation-3-up"
+      >
+        <span aria-hidden="true" className="mx-auto mt-2 h-1.5 w-10 shrink-0 rounded-full bg-muted/40" />
+        <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+      </section>
+    </Underneath>
   );
 }
 
@@ -236,8 +251,8 @@ function GestureNote({ children, className }: { children: ReactNode; className?:
 
 export type SheetState = 'default' | 'offline-open' | 'opening' | 'open-failed' | 'stale' | 'refreshing' | 'only-current' | 'dismissing';
 
-/** Variant A: the avatar opens this sheet. Variant B (`named`): the instance name in the header opens it, and the avatar opens Account directly, so the sheet has no account row. */
-export function InstanceSheet({ state, current, others, email, named = false, atEnd = false }: { state: SheetState; current: SheetInstance; others: SheetInstance[]; email: string; named?: boolean; /** Drawn scrolled to the end of the list. */ atEnd?: boolean }) {
+/** Variant A: the avatar opens this sheet. */
+export function InstanceSheet({ state, current, others, email, atEnd = false }: { state: SheetState; current: SheetInstance; others: SheetInstance[]; email: string; /** Drawn scrolled to the end of the list. */ atEnd?: boolean }) {
   const t = useCopy();
   const opening = others.find((each) => each.online && each.id !== current.id);
   const offline = others.find((each) => !each.online);
@@ -246,13 +261,13 @@ export function InstanceSheet({ state, current, others, email, named = false, at
   if (state === 'open-failed' && opening) states[opening.id] = 'failed';
   if (state === 'offline-open' && offline) states[offline.id] = 'offline-open';
   return (
-    <Underneath named={named ? current.name : undefined}>
+    <Underneath>
       <SheetCard header={<SheetHeader current={current.name} />} className={state === 'dismissing' ? 'translate-y-1/4' : undefined} atEnd={atEnd}>
         {state === 'stale' && <StaleBanner />}
         <CurrentInstance instance={current} />
         <OtherInstances instances={state === 'only-current' ? [] : others} states={states} status={state === 'refreshing' ? 'refreshing' : 'sorted'} />
         <AddInstanceRow />
-        {!named && <AccountRow email={email} />}
+        <AccountRow email={email} />
       </SheetCard>
       {state === 'dismissing' && (
         <GestureNote className="top-[calc(env(safe-area-inset-top)+6rem)] left-1/2 -translate-x-1/2">
@@ -370,24 +385,4 @@ export function RuntimeFailed({ instance }: { instance: SheetInstance }) {
   );
 }
 
-/** Variant B: the instance's own header names the instance; its name opens the sheet, the avatar opens Account. Same height as the shipped `MobileBrandHeader`, drawn over it. */
-function NamedHeader({ name }: { name: string }) {
-  const t = useCopy();
-  return (
-    <header className="absolute inset-x-0 top-0 z-50 flex h-[calc(2.75rem+env(safe-area-inset-top))] items-center justify-between gap-2 border-b border-border bg-background px-4 pt-[env(safe-area-inset-top)]">
-      <button type="button" className="flex min-w-0 items-center gap-2 rounded-md" aria-label={t(`当前实例 ${name}，切换实例`, `Current instance ${name}, switch instance`)}>
-        <img src={logo} alt="" className="size-6 shrink-0 rounded-md border border-mint/30 bg-mint/[0.08] object-cover" />
-        <span className="truncate text-sm font-semibold">{name}</span>
-        <ChevronDown className="size-3.5 shrink-0 text-muted" />
-      </button>
-      <span className="inline-flex size-11 shrink-0 items-center justify-center rounded-full">
-        <span className={accountHeaderAvatarClassName} aria-hidden="true">M</span>
-      </span>
-    </header>
-  );
-}
-
-export function NamedHome({ current }: { current: SheetInstance }) {
-  return <div className="relative h-full">{home()}<NamedHeader name={current.name} /></div>;
-}
 

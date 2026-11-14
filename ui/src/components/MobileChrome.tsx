@@ -2,7 +2,7 @@ import React, { type CSSProperties } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { Loader2, Mic } from 'lucide-react';
+import { ChevronDown, Loader2, Mic } from 'lucide-react';
 
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
@@ -10,7 +10,8 @@ import { accountHeaderAvatarClassName, accountInitialFor } from './AccountAvatar
 import { BotFace } from './workbench/bots/BotFace';
 import type { BotAvatar as BotAvatarSpec } from '../lib/bots';
 import { useAuthAccount } from '../lib/useAuthAccount';
-import { nativeShowAccount } from '../lib/native';
+import { nativeShowAccount, nativeShowInstances } from '../lib/native';
+import { useNativeInstanceName } from '../lib/useNativeInstanceName';
 import logoImg from '../assets/logo.png';
 
 // The mobile shell's chrome as views (props only), so AppShell keeps the data and
@@ -240,15 +241,39 @@ const NativeHeaderAccountAction: React.FC = () => {
   );
 };
 
+// In the phone app with `instancePresentation`, the header names the instance it shows; the name
+// opens the shell's instances sheet, and the avatar stays for the account
+// (ui/design: mobile-app/switcher/b-home). Older shells keep "Avibe" and the avatar.
+const NativeInstanceName: React.FC<{ name: string }> = ({ name }) => {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      aria-label={t('appShell.switchInstanceLabel', { name })}
+      onClick={() => void nativeShowInstances()}
+      className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <img
+        src={logoImg}
+        alt=""
+        className="size-6 shrink-0 rounded-md border border-mint/30 bg-mint/[0.08] object-cover"
+      />
+      <span className="truncate text-sm font-semibold">{name}</span>
+      <ChevronDown className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
+    </button>
+  );
+};
+
 export const MobileBrandHeader: React.FC<{
   title?: string | null;
   nativeAccountAction?: boolean;
 }> = ({ title, nativeAccountAction = false }) => {
   const { t } = useTranslation();
+  const instanceName = useNativeInstanceName();
   return (
     <header className="sticky top-0 z-40 flex h-[calc(2.75rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
       {title && <h1 className="sr-only">{title}</h1>}
-      <Link
+      {nativeAccountAction && instanceName ? <NativeInstanceName name={instanceName} /> : <Link
         to="/"
         className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
@@ -258,7 +283,7 @@ export const MobileBrandHeader: React.FC<{
           className="size-6 shrink-0 rounded-md border border-mint/30 bg-mint/[0.08] object-cover"
         />
         <span className="truncate text-[13px] font-semibold">{t('appShell.title')}</span>
-      </Link>
+      </Link>}
       {/* Right side: the Add-to-Home-Screen nudge (renders only on iOS Safari
           when not yet installed; null everywhere else). Version / language /
           theme / account live in the More tab. */}

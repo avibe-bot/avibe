@@ -510,10 +510,9 @@ Acceptance (2026-11-03):
   applies. Manual evaluation measures the active path before replacing it.
 - Consecutive unsuccessful performance attempts retry after 60, 120, then 300
   seconds (cap). Improvement resets the streak; no rolling attempt gate applies.
-- Unavailable routes bypass performance debt and reuse the exited-connector
-  backoff policy (one sample interval, doubling to 120 seconds) for bounded
-  attempts. Explicit stop/disable intent and existing process restart ownership
-  are unchanged.
+- Unavailable routes bypass performance debt and retry after 15, 30, then 60
+  seconds (cap). Exited-connector restart keeps its separate 120-second cap.
+  Explicit stop/disable intent and existing process restart ownership are unchanged.
 - Observed connector identity, effective protocol, or applied bind/IP-family
   changes invalidate old evidence and external replacements reset retry debt.
   Optimizer-owned promotion/rollback does not erase its own failure schedule.
@@ -579,12 +578,28 @@ Additional rules:
   load it while ignoring the additive policy/context fields. Interrupted
   candidates remain owned by startup reconciliation.
 - An unavailable route bypasses performance cooldown. Subsequent outage failures
-  use the same connector-restart backoff policy: 15, 30, 60, then 120 seconds
-  (cap), in the existing recovery state, not a separate scheduler. A route is
+  retry after 15, 30, then 60 seconds (cap), in the existing recovery state, not
+  a separate scheduler. A route is
   unavailable when the connector reports zero ready connections or its
   high-confidence request window has no successful probe. Exited connectors
-  continue to use the existing requested-connector restart owner; stop or disable
-  always wins, and performance cooldown never blocks that restart.
+  continue to use the existing requested-connector restart owner and its
+  120-second cap; stop or disable always wins, and performance cooldown never
+  blocks that restart.
+- A successful accepted public-health probe or runtime-status response clears
+  availability cooldown and its failure streak. These existing in-process
+  signals do not clear performance debt or interrupt evaluation/draining.
+- Monitor public-health windows run off-loop with a 10.5-second monotonic budget
+  covering DNS and all three requests. Unfinished attempts fail at the deadline;
+  completed results retain the existing 2xx success criteria. The monitor polls
+  without waiting. An OS resolver that outlives the budget retains the single
+  worker slot until it exits, preventing worker accumulation; late or
+  connector/protocol/hostname-stale evidence is discarded. The persistent probe
+  session, health target and candidate evaluation policy are unchanged.
+- Recovery start/completion logs identify manual versus automatic intent,
+  trigger, result and cooldown deadline. Startup reconciliation uses `unknown`
+  intent rather than guessing from a persisted trigger. Probe logs include
+  budgeted duration, result and success count; cooldown-clear logs name the
+  signal and previous deadline. No new persisted or hosted fields are added.
 
 ### Local retry presentation
 

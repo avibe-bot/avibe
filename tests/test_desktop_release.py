@@ -428,6 +428,64 @@ def test_windows_handoff_binds_unchanged_helper_bytes(tmp_path, mutation):
         assert "packaged_cdhash" not in result
 
 
+@pytest.mark.parametrize("mutation", [None, "staged-exe", "captured-exe", "capture-record", "native-record", "missing-record"])
+def test_windows_packaging_gate_binds_capture_to_staged_exe(tmp_path, mutation):
+    """A valid source provenance cannot substitute evidence from another EXE.
+
+    Exercise the workflow's CLI boundary: the prior prepared-only verification
+    accepted an unrelated capture, and had no evidence-bound summary.
+    """
+    target = "x86_64-pc-windows-msvc"
+    driver = tmp_path / "staged.exe"
+    driver.write_bytes(windows_pe_bytes())
+    expected = release.digest(driver)
+    provenance = tmp_path / "driver-provenance.json"
+    provenance.write_text(json.dumps(driver_provenance_payload(target, expected)))
+    evidence = tmp_path / "evidence"
+    production = evidence / "production"
+    production.mkdir(parents=True)
+    captured = production / "cua-driver.exe"
+    captured.write_bytes(driver.read_bytes())
+    capture_path = production / "capture.json"
+    capture_path.write_text(json.dumps({"binary_sha256": expected}))
+    native_path = evidence / "provenance.json"
+    # PowerShell's writer may include a UTF-8 BOM.
+    native_path.write_text(json.dumps({"production_binary_sha256": expected}), encoding="utf-8-sig")
+    if mutation == "staged-exe":
+        driver.write_bytes(driver.read_bytes() + b"different staged build")
+    elif mutation == "captured-exe":
+        captured.write_bytes(captured.read_bytes() + b"different captured build")
+    elif mutation == "capture-record":
+        capture_path.write_text(json.dumps({"binary_sha256": "0" * 64}))
+    elif mutation == "native-record":
+        native_path.write_text(json.dumps({"production_binary_sha256": "0" * 64}))
+    elif mutation == "missing-record":
+        capture_path.unlink()
+    summary = tmp_path / "summary.md"
+    summary.write_text("Earlier job summary\n")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/desktop_release.py"), "verify-driver-prepared",
+         "--target", target, "--driver", str(driver), "--provenance-path", str(provenance),
+         "--windows-evidence", str(evidence), "--summary", str(summary)],
+        capture_output=True, text=True,
+    )
+    if mutation:
+        assert result.returncode != 0
+        assert summary.read_text() == "Earlier job summary\n"
+        if mutation in {"captured-exe", "capture-record", "native-record"}:
+            assert "capture does not match the staged installer input" in result.stderr
+        elif mutation == "staged-exe":
+            assert "Invalid prepared Cua Driver provenance" in result.stderr
+        else:
+            assert "capture.json" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert summary.read_text().startswith("Earlier job summary\n")
+        assert f"Packaged candidate SHA-256: `{expected}`" in summary.read_text()
+        assert "separate source-built Rust test executables, not production EXE actions" in summary.read_text()
+        assert json.loads(provenance.read_text())["prepared_binary_sha256"] == expected
+
+
 def test_windows_workflow_keeps_helper_provenance_through_outer_signing():
     """The staged paths are an inter-job artifact contract not exercised by Python calls."""
     prepare = step("Prepare and verify pinned Windows Cua Driver as ordinary user")
@@ -436,6 +494,9 @@ def test_windows_workflow_keeps_helper_provenance_through_outer_signing():
     assert "-ProductionBinaryPath" in prepare["run"]
     assert "-ProductionEvidencePath" in prepare["run"]
     assert "verify-driver-prepared" in prepare["run"]
+    assert "--windows-evidence $evidence" in prepare["run"]
+    assert "--summary $env:GITHUB_STEP_SUMMARY" in prepare["run"]
+    assert prepare["run"].index("generate-windows-cua-snapshot.py") < prepare["run"].index("verify-driver-prepared")
     assert "PyYAML==6.0.3" in prepare["run"]
     steps = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
     assert steps.index(prepare) < steps.index(step("Build self-contained installer"))

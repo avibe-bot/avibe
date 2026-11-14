@@ -55,6 +55,8 @@ export interface WorkbenchFixtures {
   /** The page runs in the Avibe phone app (`window.avibeNative`, `hasNativeCapability()`), with these
    *  capabilities and versions; its calls answer nothing and it sends no events. */
   nativeShell?: Record<string, number>;
+  /** The selected instance's name the phone app's `app.info` gives (`instancePresentation`). */
+  nativeInstanceName?: string;
   /** Web Storage entries the frame starts with (a remembered preference, such as a collapsed section). */
   storage?: Record<string, string>;
   /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches.
