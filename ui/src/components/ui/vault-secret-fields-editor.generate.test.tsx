@@ -145,6 +145,8 @@ it('keeps a generated draft through a staged removal and Undo, and never sends a
   fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
   fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.undoRemove }));
   expect(valueOf('Value for username')).toBe(generated);
+  // The row mounts again: the generated value is still masked, though username rows show by default.
+  expect((screen.getByLabelText('Value for username') as HTMLInputElement).type).toBe('password');
   expect(screen.getByText(en.vaults.generate.generated)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
   fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));

@@ -284,7 +284,9 @@ function VaultFieldValueInput({
     setWasForced(Boolean(forceReveal));
     if (!forceReveal) setReveal(false);
   }
-  const revealed = forceReveal || (reveal ?? REVEALED_BY_DEFAULT.has(field));
+  // A generated value is a secret even in a row shown by default, including when the row mounts
+  // again (Undo of a staged removal); only the eye reveals it.
+  const revealed = forceReveal || (reveal ?? (!generated && REVEALED_BY_DEFAULT.has(field)));
   return (
     <div className="relative min-w-0 flex-1">
       <Input
