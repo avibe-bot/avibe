@@ -73,6 +73,36 @@ def test_native_runner_applies_full_patch_before_supplement(monkeypatch, tmp_pat
     assert events == []
 
 
+def test_production_capture_is_ordinary_profile_and_metadata_only():
+    script = (ROOT / "desktop/scripts/capture-windows-cua-driver.py").read_text()
+    assert "GITHUB_ACTIONS" in script
+    assert 'os.name != "nt"' in script
+    assert '"mcp", "--direct"' in script
+    assert '"dump-docs", "--type", "mcp"' in script
+    assert "desktop_actions" in script
+    assert "snapshot_edited_by_capture" in script
+
+
+def test_production_capture_is_wired_into_the_existing_windows_job():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/desktop-shell.yml").read_text())
+    steps = workflow["jobs"]["shell"]["steps"]
+    source = next(step for step in steps if step.get("name") == "Verify Windows Cua Driver security boundary as ordinary user")
+    assert "-CaptureProductionDriver" in source["run"]
+    upload = next(step for step in steps if step.get("with", {}).get("name", "").startswith("windows-cua-driver-production-"))
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert upload["with"]["path"].strip().endswith("production/**")
+
+
+def test_windows_manifest_records_ordered_final_patch():
+    manifest = json.loads((ROOT / "desktop/cua-driver/sources.json").read_text())
+    windows = manifest["driver"]["windows"]
+    assert windows["patch_order"] == [
+        "patches/0001-macos-raw-single-click.patch",
+        "patches/0002-windows-security-boundary.patch",
+    ]
+    assert windows["patch"]["sha256"] == "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f"
+
+
 def test_native_evidence_upload_is_bounded():
     # Environment/profile, exact selectors and XML validation are exercised by
     # the native job. Do not pretend that finding their implementation spelling
