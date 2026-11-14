@@ -1,12 +1,14 @@
 # Windows 用户：从零开始用 WSL 运行 Avibe
 
+> 在 Windows 上，推荐的方式是桌面 App：到 [avibe.bot](https://avibe.bot/?lang=zh#download) 下载即可。这篇文档写给明确想把 Avibe 放在 WSL 里的人，比如希望代码和编码 Agent 都留在 Linux 环境里。
+
 这篇文档是写给 `完全没有用过 WSL` 的 Windows 用户的。
 
 如果你看到“推荐用 WSL”，但完全不知道它去哪里安装、怎么打开、要在哪个窗口里执行命令，就按这篇文档一步一步做。
 
 ## 先说结论
 
-如果你在 Windows 上使用 Avibe，我更推荐下面这套方式：
+如果你在 WSL 里运行 Avibe，是这样分工的：
 
 - `Windows`：浏览器、Slack、Discord、Telegram、微信、飞书
 - `WSL`：Avibe、Claude Code / Codex / OpenCode、你的代码仓库
@@ -390,13 +392,13 @@ vibe status
 - WSL 基础命令：<https://learn.microsoft.com/windows/wsl/basic-commands>
 - WSL 开发环境说明：<https://learn.microsoft.com/windows/wsl/setup/environment>
 
-## 一句话建议
+## 一句话总结
 
-如果你是 Windows 用户，而且不确定原生 Windows 能不能稳定跑所有 Agent CLI，那么最稳的方式就是：
+在 WSL 里运行 Avibe，从头到尾就是这几步：
 
 - 先在 Windows 里安装 WSL
 - 再打开 Ubuntu
 - 在 Ubuntu 终端里安装并运行 Avibe
 - 在 Windows 浏览器里访问 `http://127.0.0.1:5123`
 
-这样通常最省心。
+如果你并不需要 Linux 环境，直接用桌面 App 就行。
