@@ -51,7 +51,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python desktop/scripts/published-update-admission.py --output "${{ runner.temp }}/published-windows-update/evidence/before-install.json"
       - name: Install published signed RC17 and update to RC19 through its native UI
-        run: python desktop/scripts/test-published-windows-update.py
+        # Match the shipped helper's Windows PowerShell environment; a pwsh
+        # parent exports PS7 module paths that can break powershell.exe autoload.
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Windows PowerShell required' }
+          Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+          python desktop/scripts/test-published-windows-update.py
       - name: Upload allowlisted observation evidence only
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
