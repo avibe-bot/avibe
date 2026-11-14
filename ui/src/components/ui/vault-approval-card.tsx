@@ -620,9 +620,10 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  // A pending Solana signature may wait long enough for a recent blockhash to expire. The card does
-  // not parse the message, so the hint is conditional and shown for every pending `ed25519` request
-  // (ui/design: vault/solana/approval); once this card or the daemon settles the request it is gone.
+  // A pending Solana signature may wait longer than its transaction stays valid (a minute or two,
+  // unless it uses a durable nonce). The card does not parse the message, so the hint is shown for
+  // every pending `ed25519` request (ui/design: vault/solana/approval); once this card or the daemon
+  // settles the request it is gone.
   const showBlockhashHint = isSign && signsMessage && request.status === 'pending' && !resolved;
   // A wallet whose address check failed in this browser is not signed with from here either.
   const walletBlocked = isSign && Boolean(hdDerivation) && Boolean(card?.secret_name) && isHdWalletBlocked(card?.secret_name ?? '');

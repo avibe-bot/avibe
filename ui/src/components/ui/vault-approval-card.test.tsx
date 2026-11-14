@@ -776,11 +776,11 @@ it.each([['p2pkh'], ['p2wpkh'], ['p2tr'], [undefined]] as const)('approving a se
   else expect(body).not.toHaveProperty('address_type');
 });
 
-// Contract: a pending Solana (`ed25519`) sign approval carries one neutral, conditional hint that a
-// recent blockhash may expire while it waits and that a durable nonce suits delayed submission. The
-// card parses nothing, so every pending `ed25519` input gets the same hint, a durable-nonce message
-// included; no other request, and no request this card or the daemon has settled, shows it.
-describe('Solana recent-blockhash hint', () => {
+// Contract: a pending Solana (`ed25519`) sign approval carries one neutral hint that a Solana
+// transaction is usually valid for only a minute or two unless it uses a durable nonce. The card parses
+// nothing, so every pending `ed25519` input gets the same hint, a durable-nonce message included; no
+// other request, and no request this card or the daemon has settled, shows it.
+describe('Solana transaction-lifetime hint', () => {
   const hint = { en: en.vaults.approval.solanaBlockhashHint, zh: zh.vaults.approval.solanaBlockhashHint };
   // A legacy message whose first instruction is System AdvanceNonceAccount: its "recent blockhash"
   // is the nonce value. The card treats it exactly like any other message.
@@ -813,8 +813,8 @@ describe('Solana recent-blockhash hint', () => {
   });
 
   it('ships the approved wording in both languages', () => {
-    expect(hint.en).toBe('If this transaction uses a recent blockhash, it may expire while awaiting approval. Use a durable nonce for delayed submission.');
-    expect(hint.zh).toBe('如果此交易使用近期区块哈希，可能会在等待批准期间过期。需要延后提交时，请使用持久 nonce。');
+    expect(hint.en).toBe('Solana transactions are usually valid for only a minute or two. If you approve later, this one may have expired and will need to be requested again. Transactions that use a durable nonce are not affected.');
+    expect(hint.zh).toBe('Solana 交易通常只在一两分钟内有效。批准晚了，这笔交易可能已经过期，需要重新发起；使用持久 nonce 的交易不受此限。');
   });
 
   it.each([

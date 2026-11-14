@@ -202,7 +202,7 @@ const designFrames = frames([
   },
   {
     name: 'approval-durable-nonce',
-    title: '审批 · 持久 nonce 消息：同一条条件提示（不解析消息）',
+    title: '审批 · 持久 nonce 消息：同一条提示（不解析消息）',
     width: 640,
     height: 560,
     status: 'shipped',
@@ -211,7 +211,7 @@ const designFrames = frames([
   },
   {
     name: 'approval-hd',
-    title: '审批 · 助记词钱包 Solana 账户：同一条条件提示',
+    title: '审批 · 助记词钱包 Solana 账户：同一条提示',
     width: 640,
     height: 640,
     status: 'shipped',

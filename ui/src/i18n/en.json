@@ -6503,7 +6503,7 @@
       "account": "Account",
       "path": "Derivation path {{path}}",
       "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise.",
-      "solanaBlockhashHint": "If this transaction uses a recent blockhash, it may expire while awaiting approval. Use a durable nonce for delayed submission."
+      "solanaBlockhashHint": "Solana transactions are usually valid for only a minute or two. If you approve later, this one may have expired and will need to be requested again. Transactions that use a durable nonce are not affected."
     },
     "request": {
       "provide": "provide",
