@@ -1367,6 +1367,14 @@ fn windows_remote_update_refuses_an_unwritable_install_before_shell_exit() {
         .expect("Windows installer body");
 
     let marker = helper.find("'requires-host'").expect("requires-host marker");
+    let normalization = helper
+        .find("ConvertFrom-AvibeVerbatimPath")
+        .expect("PowerShell must normalize Rust verbatim paths");
+    assert!(normalization < marker);
+    assert!(helper.contains("$requestData.$name = ConvertFrom-AvibeVerbatimPath $requestData.$name"));
+    assert!(helper.contains("$Path.Substring(4)"));
+    assert!(helper.contains("$Path.Substring(8)"));
+
     let ready = helper.find("[IO.File]::WriteAllText($ready").expect("ready marker");
     assert!(
         marker < ready,
