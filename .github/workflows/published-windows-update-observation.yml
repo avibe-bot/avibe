@@ -1,0 +1,62 @@
+name: Published Windows update observation
+
+# Temporary, explicitly activated real-install verification. Never push/release.
+on:
+  pull_request:
+    types: [labeled]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: published-windows-update-observation
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ACCEPTANCE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  ACCEPTANCE_WORKFLOW_SHA: ${{ github.workflow_sha }}
+  ACCEPTANCE_WORKFLOW_REF: ${{ github.workflow_ref }}
+  ACCEPTANCE_EVENT_SHA: ${{ github.sha }}
+
+jobs:
+  windows:
+    if: >-
+      github.repository == 'avibe-bot/avibe' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.label.name == 'native-update-acceptance' &&
+        github.event.pull_request.base.ref == 'master' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.ACCEPTANCE_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Refuse active or unreadable Desktop Stage 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python desktop/scripts/published-update-admission.py --output "${{ runner.temp }}/published-windows-update/evidence/admission.json"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - name: Install observation-only UI automation
+        run: python -m pip install --disable-pip-version-check pywinauto==0.6.9 psutil==7.2.2 pillow==12.0.0
+      - name: Recheck Stage 2 before installing the public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python desktop/scripts/published-update-admission.py --output "${{ runner.temp }}/published-windows-update/evidence/before-install.json"
+      - name: Install published signed RC17 and update to RC19 through its native UI
+        run: python desktop/scripts/test-published-windows-update.py
+      - name: Upload allowlisted observation evidence only
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: published-windows-update-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/published-windows-update/evidence/
+          if-no-files-found: error
+          retention-days: 7
