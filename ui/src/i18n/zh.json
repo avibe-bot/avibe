@@ -3622,6 +3622,7 @@
     "versionLabel": "版本",
     "accountMenuLabel": "账户（{{email}}）",
     "signedInAs": "当前登录账户",
+    "switchInstanceLabel": "{{name}}，当前实例。切换实例",
     "openMobileAccount": "账号与 Avibe",
     "signOut": "退出登录",
     "signingOut": "正在退出…",

@@ -27,11 +27,12 @@ const mobile = vi.hoisted(() => ({
   verifySecondFactor: vi.fn<(method: string, code: string) => Promise<MobileSessionState>>(),
 }));
 
-vi.mock('./bridge', () => ({
+vi.mock('./bridge', async (importOriginal) => ({
+  // The real presentation markers (`#sheet`, `#sheet-instances`); the calls are mocked.
+  ...(await importOriginal<typeof import('./bridge')>()),
   ACCOUNT_SECURITY_URL: 'https://avibe.bot/app/account/security',
   bootstrapMobileSession: mobile.bootstrap,
   dismissMobileSheet: mobile.dismiss,
-  SHEET_HASH: '#sheet',
   logoutMobileSession: mobile.logout,
   openMobileExternal: mobile.openExternal,
   refreshMobileSession: mobile.refresh,
@@ -2012,8 +2013,8 @@ describe('mobile instance sheet', () => {
     const base = signedIn();
     return { ...base, selected_instance_id: 'owned', instances: [base.instances[0], lab, base.instances[1]] };
   };
-  const openSheet = async (state = inSheet()) => {
-    window.history.replaceState({}, '', '/#sheet');
+  const openSheet = async (state = inSheet(), hash = '#sheet') => {
+    window.history.replaceState({}, '', `/${hash}`);
     mobile.bootstrap.mockResolvedValueOnce(state);
     mobile.refresh.mockResolvedValue(state);
     render(<MobileOnboarding />);
@@ -2197,6 +2198,15 @@ describe('mobile instance sheet', () => {
     expect(await screen.findByRole('heading', { name: 'mobileApp.sheet.title' })).toBeTruthy();
     // Still the sheet: Close returns to the instance.
     expect(screen.getByRole('button', { name: 'mobileApp.sheet.close:Personal Avibe' })).toBeTruthy();
+  });
+
+  it('opened from the instance name, lists the instances without the account', async () => {
+    await openSheet(inSheet(), '#sheet-instances');
+    expect(screen.queryByRole('button', { name: /alexander\.with\.a\.very\.long/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /^Lab/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'mobileApp.sheet.close:Personal Avibe' })).toBeTruthy();
+    // It scrolls its document, as the avatar's sheet does.
+    expect(screen.getByRole('main').classList.contains('overflow-y-auto')).toBe(false);
   });
 
   it('pulls to refresh only on the full-screen list', async () => {

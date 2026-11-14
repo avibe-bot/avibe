@@ -60,7 +60,8 @@ import {
   verifyMobileOtp,
   verifyMobilePasskey,
   verifyMobileSecondFactor,
-  SHEET_HASH,
+  isSheetHash,
+  SHEET_INSTANCES_HASH,
 } from './bridge';
 import {
   AccountRow,
@@ -1550,7 +1551,8 @@ function InstanceSheet({
   onClose: () => void;
   onRefresh: () => void;
   onAdd: () => void;
-  onAccount: () => void;
+  /** Absent when the sheet was opened from the instance's name (`#sheet-instances`). */
+  onAccount?: () => void;
 }) {
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id) ?? null;
   const others = session.instances.filter((instance) => instance.id !== current?.id);
@@ -1568,7 +1570,7 @@ function InstanceSheet({
         )}
       </section>
       <AddInstanceRow disabled={locked} onClick={onAdd} />
-      <AccountRow email={session.account.email} disabled={locked} onClick={onAccount} />
+      {onAccount ? <AccountRow email={session.account.email} disabled={locked} onClick={onAccount} /> : null}
     </CloudScreen>
   );
 }
@@ -1881,7 +1883,7 @@ function BootRecovery({
 
 export function MobileOnboarding() {
   // Native opens `#sheet` as a sheet over the selected instance, which scrolls its document.
-  const [sheet] = useState(() => window.location.hash === SHEET_HASH);
+  const [sheet] = useState(() => isSheetHash(window.location.hash));
   return (
     <DocumentScroll.Provider value={sheet}>
       <MobileOnboardingScreens />
@@ -1915,8 +1917,10 @@ function MobileOnboardingScreens() {
   const [resent, setResent] = useState(false);
   // The page native opens as a sheet over the selected instance: a ref for the first read, the
   // state for rendering. Both end only if no instance is behind the sheet any more.
-  const sheetPresentation = useRef(window.location.hash === SHEET_HASH);
-  const [inSheet, setInSheet] = useState(() => window.location.hash === SHEET_HASH);
+  const sheetPresentation = useRef(isSheetHash(window.location.hash));
+  const [inSheet, setInSheet] = useState(() => isSheetHash(window.location.hash));
+  // Opened from the instance's name: the list only, without the account row.
+  const [instancesOnly] = useState(() => window.location.hash === SHEET_INSTANCES_HASH);
   // A second factor owed at launch (not after a sign-in on this page), with the account's email
   // when native knows it: passing it continues into the selection native restored, as a launch
   // without a second factor does.
@@ -2656,7 +2660,7 @@ function MobileOnboardingScreens() {
         onAdd={() => {
           if (!isOperationLocked()) setScreen('empty');
         }}
-        onAccount={() => {
+        onAccount={instancesOnly ? undefined : () => {
           if (!isOperationLocked()) {
             setErrorKey(null);
             setScreen('account');
