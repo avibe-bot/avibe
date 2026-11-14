@@ -128,6 +128,12 @@ jobs:
           computer_use_process::tests::elevated_shell_is_refused_before_process_creation
           -- --exact --ignored
 
+      - name: Verify ordinary-user Computer Use process ownership
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        run: ./scripts/test-windows-computer-use-process.ps1
+
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"

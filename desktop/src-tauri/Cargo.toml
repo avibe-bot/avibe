@@ -75,7 +75,11 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(windows)'.dev-dependencies]
 # Reads a native menu item's text, where muda keeps its accelerator.
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Security_Authorization",
+  "Win32_System_SystemInformation",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Reuse the plugin sender's application-identity setup with the same legacy center.

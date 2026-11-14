@@ -249,6 +249,74 @@ fn elevated_shell_is_refused_before_process_creation() {
 }
 
 #[test]
+#[ignore = "acceptance: disposable standard-user CI account only"]
+fn ordinary_user_token_evidence() {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+    use windows_sys::Win32::Security::{
+        EqualSid, GetSidSubAuthority, GetSidSubAuthorityCount, IsValidSid, IsWellKnownSid, TokenElevationType,
+        TokenElevationTypeDefault, TokenGroups, TokenIntegrityLevel, TokenUIAccess, TokenUser,
+        WinBuiltinAdministratorsSid, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_AMD64;
+    use windows_sys::Win32::System::Threading::IsWow64Process2;
+
+    fn information(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Vec<usize> {
+        let mut bytes = 0;
+        unsafe { GetTokenInformation(token, class, null_mut(), 0, &mut bytes) };
+        assert!(bytes > 0, "token query size failed: {}", io::Error::last_os_error());
+        let mut buffer = vec![0_usize; (bytes as usize).div_ceil(size_of::<usize>())];
+        check(unsafe { GetTokenInformation(token, class, buffer.as_mut_ptr().cast(), bytes, &mut bytes) }).unwrap();
+        buffer
+    }
+
+    let mut raw_token = null_mut();
+    check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) }).unwrap();
+    let token = unsafe { OwnedHandle::from_raw_handle(raw_token) };
+    let raw = token.as_raw_handle();
+    let elevation = information(raw, TokenElevation);
+    assert_eq!(unsafe { *elevation.as_ptr().cast::<u32>() }, 0, "elevated test process");
+    let elevation_type = information(raw, TokenElevationType);
+    assert_eq!(
+        unsafe { *elevation_type.as_ptr().cast::<i32>() },
+        TokenElevationTypeDefault,
+        "a filtered administrator is not a disposable ordinary user"
+    );
+    let ui_access = information(raw, TokenUIAccess);
+    assert_eq!(unsafe { *ui_access.as_ptr().cast::<u32>() }, 0, "UIAccess test process");
+    let integrity = information(raw, TokenIntegrityLevel);
+    let label = unsafe { &*integrity.as_ptr().cast::<TOKEN_MANDATORY_LABEL>() };
+    assert_ne!(unsafe { IsValidSid(label.Label.Sid) }, 0);
+    let count = unsafe { *GetSidSubAuthorityCount(label.Label.Sid) };
+    assert!(count > 0);
+    let rid = unsafe { *GetSidSubAuthority(label.Label.Sid, u32::from(count - 1)) };
+    assert_eq!(rid, 0x2000, "fixture must have ordinary Medium integrity");
+    let groups = information(raw, TokenGroups);
+    let groups = unsafe { &*groups.as_ptr().cast::<TOKEN_GROUPS>() };
+    let groups = unsafe { std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize) };
+    assert!(
+        groups
+            .iter()
+            .all(|group| unsafe { IsWellKnownSid(group.Sid, WinBuiltinAdministratorsSid) } == 0),
+        "Administrators membership, even deny-only, is not this fixture's ordinary account"
+    );
+    let expected = std::env::var("AVIBE_TEST_EXPECTED_SID").expect("CI supplies disposable account SID");
+    let expected_wide = wide(OsStr::new(&expected)).unwrap();
+    let mut expected_sid = null_mut();
+    check(unsafe { ConvertStringSidToSidW(expected_wide.as_ptr(), &mut expected_sid) }).unwrap();
+    let user = information(raw, TokenUser);
+    let user = unsafe { &*user.as_ptr().cast::<TOKEN_USER>() };
+    let same = unsafe { EqualSid(user.User.Sid, expected_sid) };
+    unsafe { LocalFree(expected_sid) };
+    assert_ne!(same, 0, "test process did not use the disposable account");
+    let (mut process_machine, mut native_machine) = (0, 0);
+    check(unsafe { IsWow64Process2(GetCurrentProcess(), &mut process_machine, &mut native_machine) }).unwrap();
+    assert_eq!(process_machine, 0);
+    assert_eq!(native_machine, IMAGE_FILE_MACHINE_AMD64);
+    println!("ordinary-token-evidence: sid={expected} elevation=0 type=default integrity=medium uiaccess=0 administrators=absent machine=x64");
+}
+
+#[test]
 fn launch_encoding_preserves_arguments_and_never_inherits_environment() {
     let arguments = ["", "a b", "trailing\\", "a\\\"b", "中文"].map(OsString::from);
     let line = command_line(OsStr::new(r"C:\Program Files\driver.exe"), &arguments).unwrap();
