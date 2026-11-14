@@ -1410,11 +1410,14 @@ jobs:
         timeout-minutes: 5
         shell: pwsh
         run: |
-          python -m pytest tests/test_computer_use_windows.py -q -ra -k test_windows_native_ --junitxml=ci-junit/computer-use-native.xml
+          python -m pytest tests/test_computer_use_windows.py tests/test_computer_launch_path.py -q -ra -k test_windows_native_ --junitxml=ci-junit/computer-use-native.xml
           if ($LASTEXITCODE -ne 0) { throw "Native Computer Use foundation tests failed" }
           [xml]$report = Get-Content ci-junit/computer-use-native.xml -Raw
           $cases = @($report.SelectNodes('//testcase') | Where-Object { $_.name -like 'test_windows_native_*' })
-          if ($cases.Count -ne 7) { throw "Expected all seven native Computer Use cases, got $($cases.Count)" }
+          $pathCases = @($cases | Where-Object { $_.name -like 'test_windows_native_path_*' })
+          if ($cases.Count -ne 9 -or $pathCases.Count -ne 2) {
+            throw "Expected seven foundation plus two native path cases, got $($cases.Count) total / $($pathCases.Count) path"
+          }
           if (@($cases | Where-Object { $_.SelectSingleNode('skipped') }).Count -ne 0) {
             throw "Native Computer Use cases must execute, not skip"
           }

@@ -59,6 +59,16 @@ async function harness(context: BrowserContext, page: Page, origin: string, requ
       if (key === `POST /api/vault/requests/${request.id}/deny` || key === 'POST /api/vault/sign') {
         writes.push(key); return route.fulfill({ json: { ok: true } });
       }
+      // The edit dialog's one Save commits field changes first; a rename-only commit carries no
+      // envelope, so it is allowed here while value writes are not.
+      if (key === `POST /api/vault/secrets/${secret.name}/fields`) {
+        const body = req.postDataJSON() as { default_field?: string; values?: unknown[]; remove?: unknown[] };
+        if (!body.values?.length && !body.remove?.length) {
+          writes.push(key);
+          const label = body.default_field ?? secret.default_field;
+          return route.fulfill({ json: { ok: true, secret: { ...secret, default_field: label, fields: [label] } } });
+        }
+      }
       if (key === `PATCH /api/vault/secrets/${secret.name}`) {
         writes.push(key); return route.fulfill({ json: { ok: true, secret: { ...secret, ...req.postDataJSON() } } });
       }
@@ -148,11 +158,21 @@ test('unsupported reveal/edit stops before preparation, but metadata and cancel 
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByText(en.vaults.entry.addressTitle)).toBeVisible();
   await dialog.getByLabel('Default field name').fill('password');
-  await dialog.getByRole('button', { name: 'Save value', exact: true }).click();
-  await expect.poll(() => observed.writes).toEqual([`PATCH /api/vault/secrets/${secret.name}`]);
-  await dialog.getByRole('button', { name: en.vaults.dialog.cancel, exact: true }).click();
+  await expect(dialog.getByLabel('Default field name')).toHaveValue('password');
+  await expect(dialog.getByRole('button', { name: en.vaults.dialog.cancel, exact: true })).toBeEnabled();
+  // One Save: the field change (a rename, no envelope) and then the metadata. The editor reports
+  // the rename's validity to the dialog after it renders, so wait for Save to settle enabled.
+  const saveButton = dialog.getByRole('button', { name: en.vaults.dialog.save, exact: true });
+  await expect(saveButton).toBeEnabled();
+  await expect(dialog.getByText(en.vaults.fields.editHelp)).toBeVisible();
+  const saved = [`POST /api/vault/secrets/${secret.name}/fields`, `PATCH /api/vault/secrets/${secret.name}`];
+  const fieldWrite = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/vault/secrets/${secret.name}/fields`);
+  const metadataWrite = page.waitForResponse((response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/vault/secrets/${secret.name}`);
+  await saveButton.click();
+  await Promise.all([fieldWrite, metadataWrite]);
+  expect(observed.writes).toEqual(saved);
   await expect(dialog).toHaveCount(0);
-  await expectSingleDocumentJourney(page, observed, url, [`PATCH /api/vault/secrets/${secret.name}`]);
+  await expectSingleDocumentJourney(page, observed, url, saved);
 });
 
 test('unsupported create preserves Settings return, draft clearing, Standard and cancel', async ({ context, page }) => {

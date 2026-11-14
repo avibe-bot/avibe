@@ -37,9 +37,37 @@ export interface Selector extends BaseSelector {
 }
 
 export interface AppSelector extends BaseSelector {
+  path?: never;
   bundleId?: string;
   name?: string;
   nameContains?: string;
+}
+
+/** Windows-only explicit executable target. No shell expansion or app-name lookup. */
+export interface PathAppSelector {
+  path: string;
+  bundleId?: never;
+  name?: never;
+  nameContains?: never;
+  role?: never;
+  label?: never;
+  labelContains?: never;
+  value?: never;
+  index?: never;
+}
+
+/** Literal argv and startup presentation; the executable is fixed by the handle. */
+export interface PathLaunchOptions {
+  additional_arguments?: string[];
+  start_minimized?: boolean;
+  path?: never;
+  name?: never;
+  bundle_id?: never;
+  launch_path?: never;
+  aumid?: never;
+  urls?: never;
+  reuse?: never;
+  creates_new_application_instance?: never;
 }
 
 export interface WindowSelector extends BaseSelector {
@@ -109,13 +137,24 @@ export interface AppHandle {
   readonly pid: number | null;
   readonly name: string;
   readonly bundleId: string | null;
-  launch(options?: ActionOptions): Promise<LaunchEffect>;
+  launch(options?: ActionOptions & { path?: never }): Promise<LaunchEffect>;
   forceQuit(): Promise<Effect>;
   window(selector?: WindowSelector): Promise<WindowHandle>;
   waitFor(
     selector?: WindowSelector,
     options?: WaitOptions | number,
   ): Promise<WindowHandle>;
+}
+
+/**
+ * Windows launch-only executable target. launch() always creates a new process;
+ * it returns an ordinary app handle only after one existing metadata lookup finds
+ * the original created PID uniquely live. This is not image identity proof or
+ * reuse. Existing applications use the name/bundle surface.
+ */
+export interface PathAppHandle {
+  readonly path: string;
+  launch(options?: PathLaunchOptions): Promise<LaunchEffect>;
 }
 
 export interface LaunchEffect extends Effect {
@@ -127,6 +166,8 @@ export interface Computer {
     read(options?: ActionOptions): Promise<Record<string, unknown>>;
     write(text: string): Promise<Effect>;
   };
+  /** Select a Windows launch target; this does not attach by name or launch hint. */
+  app(selector: PathAppSelector): Promise<PathAppHandle>;
   app(selector?: AppSelector): Promise<AppHandle>;
   waitFor(
     selector?: AppSelector,
