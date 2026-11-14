@@ -773,7 +773,7 @@
         }
       },
       "windows": {
-        "subtitle": "让 Avibe Agent 查看并操作这台 Windows 电脑。在下方开启即可，Windows 无需额外授权。",
+        "subtitle": "让 Avibe Agent 查看并操作这台 Windows 电脑。",
         "title": "Windows 上的电脑操作",
         "previewBadge": "预览",
         "previewDetail": "Windows 上的电脑操作目前为预览版，显示缩放、多显示器和输入法仍在验证中。",
@@ -781,7 +781,9 @@
         "elevated": "以管理员身份运行的窗口会被拒绝。Avibe 不会自行提升权限，Agent 会告诉你它无法操作该窗口。如需让它协助，请不要使用“以管理员身份运行”，重新打开该应用。",
         "stop": "关闭电脑操作、退出 Avibe，或 Avibe 意外退出时，驱动会停止，正在进行的操作也会结束。",
         "enableDetail": "为这台电脑开启电脑操作。在你开启之前，它会保持关闭。",
-        "actionFailed": "桌面应用没有响应。请重试，或退出并重新打开 Avibe。"
+        "actionFailed": "桌面应用没有响应。请重试，或退出并重新打开 Avibe。",
+        "unsupportedDetail": "电脑操作需要在这台 Windows 电脑上的 Avibe 桌面应用中设置。请打开桌面应用继续。",
+        "remoteNotice": "请在这台 Windows 电脑上的 Avibe 桌面应用中操作。本页会同步显示进度。"
       }
     },
     "diagnosticsTab": "诊断",
@@ -3647,6 +3649,11 @@
           "why": "授予辅助功能和屏幕录制权限。",
           "action": "去授权"
         },
+        "computer_use_windows": {
+          "title": "开启电脑操作（预览）",
+          "why": "让 {{name}} 操作这台 Windows 电脑上的普通应用。",
+          "action": "去开启"
+        },
         "chat_apps": {
           "title": "连接聊天应用",
           "why": "在 Slack、飞书、微信里也能找{{name}}。",
@@ -3761,7 +3768,9 @@
         "sessionUnavailableDetail": "电脑操作需要已登录的 Windows 桌面。请登录这台电脑的桌面，然后重新打开 Avibe。",
         "sessionLockedDetail": "这台电脑已锁定，或远程会话已断开。请解锁或重新连接后再检查。",
         "sessionMismatchDetail": "Avibe 服务和桌面应用运行在不同的 Windows 会话中。请退出 Avibe，然后在你正在使用的桌面上重新打开。",
-        "pipeUnverifiedDetail": "Avibe 无法验证与电脑操作驱动的连接，因此拒绝了它。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。"
+        "pipeUnverifiedDetail": "Avibe 无法验证与电脑操作驱动的连接，因此拒绝了它。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "stateUnverifiedDetail": "Avibe 无法验证这台电脑上的电脑操作状态，因此拒绝了它。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "lockUnverifiedDetail": "Avibe 无法确认电脑操作由它的桌面应用持有，因此拒绝了它。请退出并重新打开 Avibe 桌面应用。"
       }
     },
     "openControlPanel": "进入控制面板",

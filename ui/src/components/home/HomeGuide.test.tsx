@@ -153,6 +153,19 @@ describe('Getting started reads what the UI already observes (ui/design: home/ho
     expect(push.enable).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['a Windows host', 'windows', 'Turn on Computer Use (Preview)', 'Turn on'],
+    ['a macOS host', 'macos', 'Allow Computer Use', 'Grant'],
+  ])('names Computer Use setup for %s, as the server reports it', async (_case, host, title, action) => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    computerUse.read.mockResolvedValue({ kind: 'status', host, status: { status: 'off', reason: 'never_enabled' } });
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(items()).toEqual([title]));
+    await user.click(screen.getByRole('button', { name: action }));
+    expect(where()).toBe('/settings/computer-use');
+  });
+
   it('leads with the model alone while there is none, and its one solid button opens Settings · Models', async () => {
     push.state = 'off';
     api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });

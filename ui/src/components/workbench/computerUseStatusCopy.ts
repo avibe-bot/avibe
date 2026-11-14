@@ -45,13 +45,15 @@ export type ComputerUseCopyKey =
   | 'workbench.home.computerUse.sessionLockedDetail'
   | 'workbench.home.computerUse.sessionMismatchDetail'
   | 'workbench.home.computerUse.pipeUnverifiedDetail'
+  | 'workbench.home.computerUse.stateUnverifiedDetail'
+  | 'workbench.home.computerUse.lockUnverifiedDetail'
   | 'workbench.home.computerUse.off'
   | 'workbench.home.computerUse.offDetail';
 
 export type StatusTone = 'muted' | 'mint' | 'gold' | 'destructive';
 
-/** The desktop host the status describes; its setup guidance differs per OS. */
-export type ComputerUseHost = 'macos' | 'windows';
+/** The Runtime host's OS, from the server's `host_platform`; its setup guidance differs per OS. */
+export type ComputerUseHost = 'macos' | 'windows' | 'linux' | 'unknown';
 
 /** Error reasons whose detail names macOS settings or paths. */
 const macosOnlyErrorReasons = new Set(['ax_capability', 'capture_failed', 'socket_path_too_long']);
@@ -86,6 +88,8 @@ const unavailableDetailKeys: Record<string, ComputerUseCopyKey> = {
   session_locked: 'workbench.home.computerUse.sessionLockedDetail',
   session_mismatch: 'workbench.home.computerUse.sessionMismatchDetail',
   pipe_unverified: 'workbench.home.computerUse.pipeUnverifiedDetail',
+  state_unverified: 'workbench.home.computerUse.stateUnverifiedDetail',
+  lock_unverified: 'workbench.home.computerUse.lockUnverifiedDetail',
 };
 
 export const computerUseStatusCopy = (

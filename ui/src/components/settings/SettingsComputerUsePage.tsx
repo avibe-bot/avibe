@@ -19,7 +19,7 @@ import {
   type ComputerUseGuideStepState,
   type ComputerUseStatusRead,
 } from '../workbench/computerUseStatus';
-import { computerUseStatusCopy, type ComputerUseCopyKey, type ComputerUseHost } from '../workbench/computerUseStatusCopy';
+import { computerUseStatusCopy, type ComputerUseCopyKey } from '../workbench/computerUseStatusCopy';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsPanel } from './SettingsPrimitives';
 
@@ -56,16 +56,13 @@ const WINDOWS_NOTES: { testId: string; icon: LucideIcon; text: TranslationKey }[
   { testId: 'computer-use-windows-stop', icon: CircleStop, text: 'settings.computerUse.windows.stop' },
 ];
 
-/**
- * The OS the status describes. Only the desktop shell can tell: its webview
- * runs on the host itself. A browser elsewhere keeps the macOS guide, which is
- * the only host older versions support.
- */
-const computerUseHost = (desktopShell: boolean): ComputerUseHost => {
-  if (!desktopShell || typeof navigator === 'undefined') return 'macos';
-  return /^Win/i.test(navigator.platform || '') || /Windows NT/i.test(navigator.userAgent || '')
-    ? 'windows'
-    : 'macos';
+const PreviewBadge: FC = () => {
+  const { t } = useTranslation();
+  return (
+    <Badge variant="warning" data-testid="computer-use-preview-badge">
+      {t('settings.computerUse.windows.previewBadge')}
+    </Badge>
+  );
 };
 
 const STEP_STATE_LABEL: Record<ComputerUseGuideStepState, TranslationKey> = {
@@ -122,14 +119,12 @@ const GuideNote: FC<{ testId: string; tone?: 'muted' | 'destructive'; children: 
  * whose progress is read from the desktop status endpoint while the page is
  * visible. Inside the desktop shell incomplete permission steps can open their
  * settings even while the driver is unavailable; other hosts follow read-only.
- * A Windows shell whose host reports Computer Use supported shows the Preview
- * notes and the switch alone; an unsupported host keeps the unsupported notice.
+ * A Windows host (the server's `host_platform`, in the shell or any browser)
+ * shows the Preview notes and the switch alone, without macOS permission steps.
  */
 export const SettingsComputerUsePage: FC = () => {
   const { t } = useTranslation();
   const desktopShell = isDesktopShell();
-  const host = useMemo(() => computerUseHost(desktopShell), [desktopShell]);
-  const windows = host === 'windows';
   const actions = useMemo(() => computerUseShellActions(), []);
   const [read, setRead] = useState<ComputerUseStatusRead | null>(null);
   const [checking, setChecking] = useState(false);
@@ -225,22 +220,30 @@ export const SettingsComputerUsePage: FC = () => {
       });
   };
 
+  // The Runtime host's OS, as the server reports it. The desktop shell only
+  // decides whether this page can run the native actions, never the host.
+  const host = read?.host ?? 'macos';
+  const windows = host === 'windows';
+
   if (read?.kind === 'unsupported') {
     return (
       <SettingsPageShell
         activeTab="computer-use"
         title={t('settings.computerUse.title')}
-        subtitle={t('settings.computerUse.subtitle')}
+        subtitle={windows ? t('settings.computerUse.windows.subtitle') : t('settings.computerUse.subtitle')}
       >
         <SettingsPanel variant="preference">
           <div className="flex items-start gap-3" data-testid="computer-use-unsupported">
             <Monitor className="mt-0.5 size-5 shrink-0 text-muted" aria-hidden="true" />
             <div className="flex min-w-0 flex-col gap-1">
-              <p className="text-[14px] font-semibold text-foreground">
+              <p className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
                 {t('settings.computerUse.unsupportedTitle')}
+                {windows && <PreviewBadge />}
               </p>
               <p className="text-[12px] leading-relaxed text-muted">
-                {t('settings.computerUse.unsupportedDetail')}
+                {windows
+                  ? t('settings.computerUse.windows.unsupportedDetail')
+                  : t('settings.computerUse.unsupportedDetail')}
               </p>
             </div>
           </div>
@@ -276,7 +279,9 @@ export const SettingsComputerUsePage: FC = () => {
         <SettingsPanel variant="preference">
           <div className="flex items-start gap-3" data-testid="computer-use-remote-notice">
             <Monitor className="mt-0.5 size-5 shrink-0 text-muted" aria-hidden="true" />
-            <p className="text-[13px] font-medium text-foreground">{t('settings.computerUse.remoteNotice')}</p>
+            <p className="text-[13px] font-medium text-foreground">
+              {windows ? t('settings.computerUse.windows.remoteNotice') : t('settings.computerUse.remoteNotice')}
+            </p>
           </div>
         </SettingsPanel>
       )}
@@ -286,9 +291,7 @@ export const SettingsComputerUsePage: FC = () => {
           title={(
             <span className="flex items-center gap-2">
               {t('settings.computerUse.windows.title')}
-              <Badge variant="warning" data-testid="computer-use-preview-badge">
-                {t('settings.computerUse.windows.previewBadge')}
-              </Badge>
+              <PreviewBadge />
             </span>
           )}
           description={t('settings.computerUse.windows.previewDetail')}

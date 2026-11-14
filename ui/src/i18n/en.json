@@ -773,7 +773,7 @@
         }
       },
       "windows": {
-        "subtitle": "Let Avibe agents see and operate this Windows PC. Turn it on below; Windows asks for no extra permission.",
+        "subtitle": "Let Avibe agents see and operate this Windows PC.",
         "title": "Computer Use on Windows",
         "previewBadge": "Preview",
         "previewDetail": "Computer Use on Windows is in Preview. Display scaling, multiple monitors, and input methods are still being verified.",
@@ -781,7 +781,9 @@
         "elevated": "App windows running as administrator are refused. Avibe never raises its own rights; the Agent tells you it cannot control that window. To let it help, reopen the app without “Run as administrator”.",
         "stop": "Turning Computer Use off, quitting Avibe, or Avibe closing unexpectedly stops the driver and ends any action in progress.",
         "enableDetail": "Turns on Computer Use for this PC. It stays off until you turn it on.",
-        "actionFailed": "The desktop app did not respond. Try again, or quit and reopen Avibe."
+        "actionFailed": "The desktop app did not respond. Try again, or quit and reopen Avibe.",
+        "unsupportedDetail": "Computer Use is set up from the Avibe desktop app on this Windows PC. Open the desktop app to continue.",
+        "remoteNotice": "Complete this step in the Avibe desktop app on the Windows PC. This page shows its progress."
       }
     },
     "diagnosticsTab": "Diagnostics",
@@ -3647,6 +3649,11 @@
           "why": "Grant Accessibility and Screen Recording.",
           "action": "Grant"
         },
+        "computer_use_windows": {
+          "title": "Turn on Computer Use (Preview)",
+          "why": "Let {{name}} operate ordinary apps on this Windows PC.",
+          "action": "Turn on"
+        },
         "chat_apps": {
           "title": "Connect a chat app",
           "why": "Reach {{name}} from Slack, Lark, or WeChat.",
@@ -3761,7 +3768,9 @@
         "sessionUnavailableDetail": "Computer Use needs a signed-in Windows desktop. Sign in to this PC's desktop, then reopen Avibe.",
         "sessionLockedDetail": "This PC is locked or its remote session is disconnected. Unlock it or reconnect, then check again.",
         "sessionMismatchDetail": "The Avibe service and the desktop app are running in different Windows sessions. Quit Avibe, then open it again from the desktop you are using.",
-        "pipeUnverifiedDetail": "Avibe could not verify its connection to the Computer Use driver and refused it. Turn Computer Use off and on; reopen Avibe if it repeats."
+        "pipeUnverifiedDetail": "Avibe could not verify its connection to the Computer Use driver and refused it. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "stateUnverifiedDetail": "Avibe could not verify the Computer Use state on this PC and refused it. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "lockUnverifiedDetail": "Avibe could not confirm that its desktop app owns Computer Use and refused it. Quit and reopen the Avibe desktop app."
       }
     },
     "openControlPanel": "Open Control Panel",

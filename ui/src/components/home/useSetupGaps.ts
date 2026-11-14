@@ -10,21 +10,32 @@ import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import { enableWebPush, readWebPushDeviceState } from '../../lib/webPush';
 import { readComputerUseStatus } from '../workbench/computerUseStatus';
+import type { ComputerUseHost } from '../workbench/computerUseStatusCopy';
 
 /** What the home has observed about each fact; `null` is "not known", never "missing". */
 type Facts = {
   notifications: 'on' | 'off' | 'unavailable' | null;
   computerUseReady: boolean | null;
+  /** The Runtime host's OS from the Computer Use status (`host_platform`); `macos` until read. */
+  computerUseHost: ComputerUseHost;
   chatAppsConnected: boolean | null;
   phonePaired: boolean | null;
 };
 
-const UNKNOWN: Facts = { notifications: null, computerUseReady: null, chatAppsConnected: null, phonePaired: null };
+const UNKNOWN: Facts = {
+  notifications: null,
+  computerUseReady: null,
+  computerUseHost: 'macos',
+  chatAppsConnected: null,
+  phonePaired: null,
+};
 
 export interface SetupGaps {
   /** The setup still missing, in the order Getting started lists it. Only what was observed to be
    *  missing: a fact not read yet, or unreadable, is not a gap. */
   pending: SetupItem[];
+  /** The OS hosting Computer Use, so its item names the right setup (Windows: no permission grants). */
+  computerUseHost: ComputerUseHost;
   /** An IM platform is enabled; `null` until the config has been read. */
   chatAppsConnected: boolean | null;
   /** Turn on this device's notifications in place, then read again. */
@@ -58,7 +69,12 @@ export function useSetupGaps({ owner, noModel }: { owner: boolean; noModel: bool
     if (!owner) return;
     if (isDesktopShell()) {
       void readComputerUseStatus().then((read) => {
-        if (read) learn({ computerUseReady: read.kind === 'status' ? read.status.status === 'ready' : null });
+        if (read) {
+          learn({
+            computerUseReady: read.kind === 'status' ? read.status.status === 'ready' : null,
+            computerUseHost: read.host,
+          });
+        }
       });
     }
     void api.getConfig({ cache: false })
@@ -95,5 +111,10 @@ export function useSetupGaps({ owner, noModel }: { owner: boolean; noModel: bool
   if (owner && facts.computerUseReady === false) pending.push('computer_use');
   if (owner && facts.chatAppsConnected === false) pending.push('chat_apps');
   if (owner && desktop && facts.phonePaired === false) pending.push('phone');
-  return { pending, chatAppsConnected: owner ? facts.chatAppsConnected : null, enableNotifications };
+  return {
+    pending,
+    computerUseHost: facts.computerUseHost,
+    chatAppsConnected: owner ? facts.chatAppsConnected : null,
+    enableNotifications,
+  };
 }

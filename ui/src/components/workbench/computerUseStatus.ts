@@ -1,5 +1,5 @@
 import { apiFetch } from '../../lib/apiFetch';
-import type { ComputerUseStatus, StatusTone } from './computerUseStatusCopy';
+import type { ComputerUseHost, ComputerUseStatus, StatusTone } from './computerUseStatusCopy';
 
 export const COMPUTER_USE_STATUS_PATH = '/api/desktop/computer-use/status';
 /** The setup guide polls faster: a grant should show up as soon as macOS records it. */
@@ -11,20 +11,38 @@ export const COMPUTER_USE_GUIDE_REFRESH_INTERVAL_MS = 1_500;
  * - `unsupported`: the host has no live desktop shell (`supported: false`).
  * - `null`: a transient or malformed response. It is not a Computer Use state,
  *   so callers keep whatever they last observed.
+ *
+ * `host` is the Runtime host's OS as the server reports it (`host_platform`),
+ * never the browser's: a browser may watch a host on another OS. A server
+ * from before the field reports none and could only host Computer Use on
+ * macOS, so a missing field reads as `macos`. It describes copy, never
+ * enablement.
  */
 export type ComputerUseStatusRead =
-  | { kind: 'unsupported' }
-  | { kind: 'status'; status: ComputerUseStatus };
+  | { kind: 'unsupported'; host: ComputerUseHost }
+  | { kind: 'status'; status: ComputerUseStatus; host: ComputerUseHost };
+
+const HOSTS: readonly ComputerUseHost[] = ['macos', 'windows', 'linux', 'unknown'];
+
+const readHost = (value: unknown): ComputerUseHost => {
+  if (value === undefined || value === null) return 'macos';
+  return HOSTS.find((host) => host === value) ?? 'unknown';
+};
 
 export const readComputerUseStatus = async (): Promise<ComputerUseStatusRead | null> => {
   try {
     const response = await apiFetch(COMPUTER_USE_STATUS_PATH, { cache: 'no-store' });
     if (!response.ok) return null;
-    const payload = await response.json() as Partial<ComputerUseStatus> & { supported?: boolean };
-    if (payload.supported === false) return { kind: 'unsupported' };
+    const payload = await response.json() as Partial<ComputerUseStatus> & {
+      supported?: boolean;
+      host_platform?: unknown;
+    };
+    const host = readHost(payload.host_platform);
+    if (payload.supported === false) return { kind: 'unsupported', host };
     if (typeof payload.status !== 'string') return null;
     return {
       kind: 'status',
+      host,
       status: {
         status: payload.status,
         reason: typeof payload.reason === 'string' ? payload.reason : null,
