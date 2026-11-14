@@ -595,6 +595,13 @@ def test_actual_bundled_account_login_registers_through_native_and_r1(native_cha
     assert descriptor["remote_access"]["requested"] is True
 
 
+def consent_ready(consent):
+    # The consent view no longer renders the raw OAuth scope. Only it pairs a heading
+    # naming the instance with the instance host (the list shows hosts, switching names).
+    return ("return (document.querySelector('main h1')?.innerText ?? '').includes(" + json.dumps(consent["instance_name"])
+            + ") && document.body.innerText.includes(" + json.dumps(consent["host"]) + ");")
+
+
 def select_studio(f):
     f["send"](action="present", view="instances")
     f["wait"]("loaded", lambda event: "view=instances" in event["url"])
@@ -603,7 +610,7 @@ def select_studio(f):
     f["js"](selector + ".click(); return true;")
     state = f["state"](lambda state: state["consent"] is not None or state["connection"]["committed"]["kind"] == "remote")
     if state["state"]["consent"] is not None:
-        f["ready"]("return document.body.innerText.includes('openid');")
+        f["ready"](consent_ready(state["state"]["consent"]))
         f["js"]("document.querySelector('main button').click(); return true;")
     return f["state"](lambda state: state["connection"]["committed"]["kind"] == "remote")
 
@@ -692,8 +699,7 @@ def test_recovered_account_window_and_delayed_event_keep_runtime_state_private(n
                   + json.dumps({"version": 1, "request_id": "projection-select", "expected_generation": generation,
                                 "action": {"type": "select_instance", "instance_id": target["id"]}}) + "});")
         if different_instance:
-            f["state"](lambda state: state["consent"] is not None)
-            f["ready"]("return document.body.innerText.includes('openid');")
+            f["ready"](consent_ready(f["state"](lambda state: state["consent"] is not None)["state"]["consent"]))
             f["js"]("document.querySelector('main button').click(); return true;")
         assert f["document"].entered.wait(timeout=15)
         f["send"](action="local_unavailable")
