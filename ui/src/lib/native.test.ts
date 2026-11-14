@@ -133,6 +133,29 @@ describe('native shell bridge', () => {
     await expect(setNativeAccountActionAvailable(true)).resolves.toBe(false);
   });
 
+  it('opens the account sheet on its Account page only where the shell presents instances', async () => {
+    const b = installBridge({ capabilities: { accountPresentation: 2, app: 1, instancePresentation: 1 } });
+    await expect(nativeShowAccount()).resolves.toBe(true);
+    expect(b.mock.calls).toEqual([['app.showAccount', { start: 'account' }]]);
+
+    // An older shell opens its account sheet as before; it would refuse the parameter.
+    const older = installBridge({ capabilities: { accountPresentation: 2, app: 1 } });
+    await expect(nativeShowAccount()).resolves.toBe(true);
+    expect(older.mock.calls).toEqual([['app.showAccount', {}]]);
+
+    const none = installBridge({ capabilities: { app: 1, instancePresentation: 1 } });
+    await expect(nativeShowAccount()).resolves.toBe(false);
+    expect(none).not.toHaveBeenCalled();
+
+    installBridge({
+      capabilities: { accountPresentation: 2, instancePresentation: 1 },
+      call: vi.fn(async () => {
+        throw { code: 'invalid_params', message: 'start' };
+      }),
+    });
+    await expect(nativeShowAccount()).resolves.toBe(false);
+  });
+
   it('sets the App badge to the count it is given, 0 included, and only where the shell has the badge capability', async () => {
     const call = installBridge({ capabilities: { app: 1, badge: 1 } });
 

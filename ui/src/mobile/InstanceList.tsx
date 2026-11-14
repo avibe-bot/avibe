@@ -279,11 +279,12 @@ export function StaleBanner({ disabled, onRetry }: { disabled?: boolean; onRetry
   );
 }
 
-export function SheetHeader({ currentName, disabled, onClose }: { currentName: string | null; disabled?: boolean; onClose: () => void }) {
+/** The sheet's root header: its title and ✕, which returns to the instance under the sheet. */
+export function SheetHeader({ title, currentName, disabled, onClose }: { title?: string; currentName: string | null; disabled?: boolean; onClose: () => void }) {
   const { t } = useTranslation();
   return (
     <header className="flex items-center justify-between gap-3 pb-4">
-      <h1 className="text-xl font-semibold">{t('mobileApp.sheet.title')}</h1>
+      <h1 className="text-xl font-semibold">{title ?? t('mobileApp.sheet.title')}</h1>
       <Button
         type="button"
         variant="ghost"
