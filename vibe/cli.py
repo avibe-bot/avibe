@@ -20043,13 +20043,12 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message (protected and ask-first standard keys need approval)",
         description=(
-            "Sign with a keypair or HD wallet (--chain required). Solana uses exact --message-hex; "
-            "secp256k1 uses --digest. Protected/ask-first keys need browser approval; "
-            "read with 'vibe vault await ID'. Protected Solana also needs --signing-context-json "
-            '{"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex. '
-            "For Solana transactions requiring approval, use a durable nonce; a recent blockhash may expire "
-            "while approval is pending. See the use-avibe-vault Skill's durable-nonce recipe. "
-            "The caller creates and funds the nonce account; Avibe does not provision accounts or hold SOL."
+            "Sign with a keypair or HD wallet (--chain required). Solana uses exact --message-hex, "
+            "not a hash; secp256k1 uses --digest. Protected/ask-first signing needs approval. "
+            "For Solana approvals, use a durable nonce (use-avibe-vault Skill recipe); "
+            "the caller creates and funds the nonce account. Protected Solana also needs "
+            "--signing-context-json "
+            '{"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex.'
         ),
         epilog=(
             "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
