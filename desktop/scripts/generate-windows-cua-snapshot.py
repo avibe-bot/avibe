@@ -88,9 +88,8 @@ def generate(tools_list_path: Path, dump_docs_path: Path, output: Path) -> dict[
     }
     if snapshot["target"] != TARGET:
         raise ValueError("Windows manifest target mismatch")
-    output.write_text(
-        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+    output.write_bytes(
+        (json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     )
     return snapshot
 

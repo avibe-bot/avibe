@@ -227,8 +227,19 @@ def test_windows_preparation_uses_full_patch_without_macos_signing(
     assert provenance["patch_order"] == manifest["driver"]["windows"]["patch_order"]
     assert provenance["patch_chain"] == manifest["driver"]["windows"]["patches"]
     assert "packaged_cdhash" not in provenance
+    deferred = _SCRIPT["prepare"](
+        target,
+        source_archive=tmp_path / "source.tar.gz",
+        output_dir=tmp_path / "deferred",
+        verify_windows_contract=False,
+    )
+    assert deferred.name == "cua-driver-x86_64-pc-windows-msvc.exe"
+    assert events[-3:] == ["full-patch", "full-patch", "build"]
     assert _SCRIPT["prepare"](target, output_dir=output.parent, reuse=True) == output
-    assert events == ["full-patch", "full-patch", "build", "windows-contract", "windows-contract"]
+    assert events == [
+        "full-patch", "full-patch", "build", "windows-contract",
+        "full-patch", "full-patch", "build", "windows-contract",
+    ]
     output.write_bytes(b"wrong executable")
     _SCRIPT["prepare"](target, source_archive=tmp_path / "source.tar.gz", output_dir=output.parent, reuse=True)
     assert events[-3:] == ["full-patch", "build", "windows-contract"]

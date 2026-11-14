@@ -468,8 +468,9 @@ def prepare(
         source_root = extract_driver_source(manifest, resolved_archive, work / "source")
         patches = apply_driver_patches(manifest, source_root, target)
         prepared = build_driver(manifest, source_root, target)
-        if target == WINDOWS_TARGET and verify_windows_contract:
-            verify_windows_built_contract(prepared)
+        if target == WINDOWS_TARGET:
+            if verify_windows_contract:
+                verify_windows_built_contract(prepared)
         else:
             sign_adhoc(prepared)
             verify_built_contract(prepared)
