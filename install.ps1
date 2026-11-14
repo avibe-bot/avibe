@@ -1,7 +1,7 @@
 # Avibe Installation Script for Windows
-# Usage: irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1 | iex
+# Usage: irm https://avibe.bot/install.ps1 | iex
 # Uninstall, keeping your data:
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
+#   & ([scriptblock]::Create((irm https://avibe.bot/install.ps1))) -Uninstall
 # Add -Purge to also delete your data. A session that cannot prompt also needs -Yes.
 # The uninstaller never deletes through a link; anything behind a link is reported for you to remove.
 #
@@ -26,7 +26,7 @@ $NODE_MINIMUM_REQUIREMENT = "20.19+ or 22.12+"
 # GitHub; earlier uv fetches it from GitHub only. Get-UvPythonInstallMirror
 # gives earlier uv the CDN for the install step unless the user chose a source.
 $ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-standalone/releases/download"
-$PUBLIC_INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/$REPO/master/install.ps1"
+$PUBLIC_INSTALL_SCRIPT_URL = "https://avibe.bot/install.ps1"
 # The fixed stable-launcher locations launcher discovery checks beside PATH and
 # uv's configured tool bin. Keep in step with INSTALLER_LAUNCHER_DIRS in
 # vibe/upgrade.py; entries without a drive do not apply on Windows.
