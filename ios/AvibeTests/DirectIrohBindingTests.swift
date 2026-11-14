@@ -11,6 +11,8 @@ final class DirectIrohBindingTests: XCTestCase {
     private static let alpn = Data("avibe-direct/1".utf8)
     private static let payload = Data("avibe-direct-interop-v2\n".utf8)
     private static let closeBound: TimeInterval = 3
+    // Full native endpoint drain is separate from pending-call settlement.
+    private static let endpointDrainBound: Duration = .seconds(5)
 
     func testRealBindingLoopbackEchoAndCleanHalfClose() async throws {
         let pair = try await makePair()
@@ -53,22 +55,40 @@ final class DirectIrohBindingTests: XCTestCase {
         let key = try binding.makeLaunchKey()
         let endpoint = try await binding.bind(secretKey: key.secret)
 
-        let started = Date()
+        let completions = CompletionCounter()
         let connectTask = Task {
-            try await endpoint.connect(
+            defer { completions.mark() }
+            return try await endpoint.connect(
                 to: peer.id,
                 addresses: [peer.address],
                 alpn: Self.alpn
             )
         }
-        try await Task.sleep(for: .milliseconds(100))
-        await endpoint.close()
+        // Receiving, but deliberately not accepting, the incoming handshake
+        // establishes a real pending connect without a timing-only setup sleep.
+        let incoming = await peer.endpoint.acceptNext()
+        defer {
+            withExtendedLifetime(incoming) {}
+        }
+        XCTAssertNotNil(incoming)
+        XCTAssertEqual(completions.count, 0)
 
+        let clock = ContinuousClock()
+        let closeIssuedAt = clock.now
+        let closing = Task {
+            await endpoint.close()
+            return closeIssuedAt.duration(to: clock.now)
+        }
+        // Observe connect independently: Endpoint.close also waits for QUIC
+        // close-frame drain, documented by the pinned core to take about 3s.
         let result = await connectTask.result
-        let elapsed = Date().timeIntervalSince(started)
+        let connectElapsed = closeIssuedAt.duration(to: clock.now)
         XCTAssertNotNil(Self.failure(of: result))
-        XCTAssertLessThan(elapsed, Self.closeBound)
-        print("real-binding pending-connect endpoint-close seconds=\(elapsed)")
+        XCTAssertLessThan(connectElapsed, .seconds(Self.closeBound))
+
+        let drainElapsed = await closing.value
+        XCTAssertLessThan(drainElapsed, Self.endpointDrainBound)
+        print("real-binding pending-connect settlement=\(connectElapsed) endpoint-drain=\(drainElapsed)")
 
         await peer.close()
     }
