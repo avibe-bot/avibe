@@ -91,6 +91,21 @@ private final class SheetFixtureRootViewController: UIViewController {
     }
 }
 
+// Data-only transport shapes keep the fixture independent of the production
+// push coordinator, notification center, and entitlements. Their field shapes
+// match NativePushCoordinator.swift; the fixture never registers for push.
+struct PushManagementRequest {
+    let method: String
+    let path: String
+    let headers: [String: String]
+    let body: Data?
+}
+
+struct PushManagementResponse {
+    let statusCode: Int
+    let body: [String: Any]
+}
+
 @MainActor
 private final class FixtureMobileAuthTransport: MobileAuthTransporting {
     private let session: MobileSessionSnapshot

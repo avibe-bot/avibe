@@ -588,7 +588,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         index for index, step in enumerate(steps)
         if "-project ios/Avibe.xcodeproj" in step.get("run", "")
     ]
-    assert len(app_builds) == 3
+    assert len(app_builds) == 4
     assert all(verify_index < index for index in app_builds)
     simulator_build = steps[app_builds[0]]["run"]
     assert '-derivedDataPath "$RUNNER_TEMP/AvibeDerivedData"' in simulator_build
@@ -622,16 +622,33 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         "retention-days": 7,
     }
 
+    fixture_build_index, fixture_build = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("id") == "sheet-fixture-build"
+    )
+    assert fixture_build_index < steps.index(test_step)
+    assert "-scheme AvibeSheetFixture" in fixture_build["run"]
+    assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in fixture_build["run"]
+    assert '-derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData"' in fixture_build["run"]
+    assert "-parallel-testing-enabled NO" in fixture_build["run"]
+    assert fixture_build["run"].splitlines()[-1].strip() == "build-for-testing"
+
     fixture_index, fixture_step = next(
         (index, step) for index, step in enumerate(steps)
         if step.get("name") == "Run sheet gesture XCUITest fixture"
     )
+    assert fixture_step["if"] == (
+        "${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}"
+    )
+    assert not workflow["jobs"]["simulator"].get("continue-on-error")
+    assert not any(step.get("continue-on-error") for step in [test_step, fixture_build, fixture_step])
     assert fixture_index == app_builds[-1]
     assert "-scheme AvibeSheetFixture" in fixture_step["run"]
     assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in fixture_step["run"]
+    assert '-derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData"' in fixture_step["run"]
     assert "-parallel-testing-enabled NO" in fixture_step["run"]
     assert '-resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult"' in fixture_step["run"]
-    assert fixture_step["run"].splitlines()[-1].strip() == "test"
+    assert fixture_step["run"].splitlines()[-1].strip() == "test-without-building"
     fixture_artifact = steps[fixture_index + 1]
     assert fixture_artifact["if"] == "${{ always() }}"
     assert fixture_artifact["uses"] == artifact["uses"]
@@ -660,7 +677,8 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     )
     boot = steps[selection_index + 1]
     assert boot["run"] == 'xcrun simctl bootstatus "$SIMULATOR_ID" -b'
-    assert steps[selection_index + 2]["name"] == "Run XCTest on iPhone Simulator"
+    assert steps[selection_index + 2]["name"] == "Build the sheet gesture XCUITest fixture"
+    assert steps[selection_index + 3]["name"] == "Run XCTest on iPhone Simulator"
     shell = selection["run"]
     subprocess.run(["bash", "-n"], input=shell, text=True, check=True)
     # Execute the actual workflow selector, not a copied implementation.

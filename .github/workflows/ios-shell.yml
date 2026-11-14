@@ -127,6 +127,20 @@ jobs:
       - name: Boot the pinned simulator
         run: xcrun simctl bootstatus "$SIMULATOR_ID" -b
 
+      - name: Build the sheet gesture XCUITest fixture
+        id: sheet-fixture-build
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme AvibeSheetFixture \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing
+
       - name: Run XCTest on iPhone Simulator
         run: |
           set -euo pipefail
@@ -150,6 +164,7 @@ jobs:
           retention-days: 7
 
       - name: Run sheet gesture XCUITest fixture
+        if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -157,10 +172,11 @@ jobs:
             -scheme AvibeSheetFixture \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
-            test
+            test-without-building
 
       - name: Upload sheet gesture XCUITest result bundle
         if: ${{ always() }}

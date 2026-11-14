@@ -601,7 +601,8 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(sheet.detents.count, 1)
         XCTAssertEqual(sheet.detents.first?.identifier, .large)
         XCTAssertFalse(sheet.prefersScrollingExpandsWhenScrolledToEdge)
-        XCTAssertTrue(controller.contentScrollView(for: .all) === webView.scrollView)
+        XCTAssertTrue(controller.contentScrollView(for: .top) === webView.scrollView)
+        XCTAssertTrue(controller.contentScrollView(for: .bottom) === webView.scrollView)
     }
 
     func testAppDismissIsStrictAndReturnsNullFromTheSheet() async throws {
@@ -1420,6 +1421,71 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(pushLogoutCalls, 1)
     }
 
+    func testRefreshWithoutAnAccountPageReleasesItsTemporaryTransport() async throws {
+        let transport = FakeMobileAuthTransport()
+        let fresh = snapshot(accountID: "account-1")
+        transport.session = fresh
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport]
+        )
+
+        let state = try await coordinator.refresh()
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        XCTAssertTrue(transport.invalidated)
+        XCTAssertFalse(coordinator.isAccountSurfaceActive)
+    }
+
+    func testRefreshSecondFactorRevokesTheLiveSelectionWithoutRotatingTheStore()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let storeIdentifier = store.identifier
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let refreshTransport = FakeMobileAuthTransport()
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com",
+            gate: .challenge,
+            methods: [.totp]
+        )
+        refreshTransport.secondFactor = requirement
+        var runtime: MobileRuntimeContext?
+        var transitions = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [firstTransport, refreshTransport],
+            onOpen: { runtime = $0 },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return []
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let selected = try XCTUnwrap(runtime)
+        coordinator.activateAccountSurface()
+
+        let owed = try await coordinator.refresh()
+        XCTAssertEqual(owed, .twoFactorRequired(requirement))
+        XCTAssertFalse(coordinator.isSelectedRuntime(selected))
+        XCTAssertEqual(transitions, 1)
+        XCTAssertEqual(store.identifier, storeIdentifier)
+
+        refreshTransport.secondFactor = nil
+        refreshTransport.session = snapshot(accountID: "account-1")
+        let proved = try await coordinator.refresh()
+        XCTAssertEqual(
+            proved,
+            .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: nil)
+        )
+        XCTAssertEqual(store.identifier, storeIdentifier)
+    }
+
     func testRefreshNetworkFailureKeepsSelectedRuntimeAndSnapshot() async throws {
         let defaults = makeDefaults()
         let firstTransport = FakeMobileAuthTransport()
@@ -1500,13 +1566,14 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     func testSurfaceRefreshInterleavingsUseOneTransportOwner() async throws {
-        enum ResultKind {
+        enum ResultKind: Equatable {
             case sameAccount
             case networkFailure
         }
         struct Row {
             let name: String
             let result: ResultKind
+            let openBeforeRefresh: Bool
             let reopenBeforeCompletion: Bool
             let expectsRuntime: Bool
             let expectsSurface: Bool
@@ -1515,6 +1582,7 @@ final class MobileOnboardingTests: XCTestCase {
             Row(
                 name: "dismiss during same-account refresh",
                 result: .sameAccount,
+                openBeforeRefresh: true,
                 reopenBeforeCompletion: false,
                 expectsRuntime: true,
                 expectsSurface: false
@@ -1522,6 +1590,7 @@ final class MobileOnboardingTests: XCTestCase {
             Row(
                 name: "dismiss then reopen before same-account refresh completes",
                 result: .sameAccount,
+                openBeforeRefresh: true,
                 reopenBeforeCompletion: true,
                 expectsRuntime: true,
                 expectsSurface: true
@@ -1529,6 +1598,23 @@ final class MobileOnboardingTests: XCTestCase {
             Row(
                 name: "dismiss during failed refresh",
                 result: .networkFailure,
+                openBeforeRefresh: true,
+                reopenBeforeCompletion: false,
+                expectsRuntime: true,
+                expectsSurface: false
+            ),
+            Row(
+                name: "native runtime refresh without an account page",
+                result: .sameAccount,
+                openBeforeRefresh: false,
+                reopenBeforeCompletion: false,
+                expectsRuntime: true,
+                expectsSurface: false
+            ),
+            Row(
+                name: "native runtime refresh fails without an account page",
+                result: .networkFailure,
+                openBeforeRefresh: false,
                 reopenBeforeCompletion: false,
                 expectsRuntime: true,
                 expectsSurface: false
@@ -1562,20 +1648,32 @@ final class MobileOnboardingTests: XCTestCase {
             _ = try await coordinator.bootstrap()
             _ = try coordinator.selectInstance(id: instance.id)
             let selected = try XCTUnwrap(runtime, row.name)
-            coordinator.activateAccountSurface()
+            if row.openBeforeRefresh {
+                coordinator.activateAccountSurface()
+            }
 
             let refresh = Task { try await coordinator.refresh() }
             await fulfillment(of: [refreshStarted], timeout: 30)
-            coordinator.leaveAccountSurface()
+            if row.openBeforeRefresh {
+                coordinator.leaveAccountSurface()
+            }
             if row.reopenBeforeCompletion {
                 coordinator.activateAccountSurface()
             }
             allowRefresh.fulfill()
             do {
-                _ = try await refresh.value
+                let state = try await refresh.value
+                XCTAssertEqual(row.result, .sameAccount, row.name)
+                XCTAssertEqual(
+                    state,
+                    .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: instance.id),
+                    row.name
+                )
             } catch let error as MobileAccountError {
+                XCTAssertEqual(row.result, .networkFailure, row.name)
                 XCTAssertEqual(error, .network, row.name)
             }
+            XCTAssertEqual(refreshTransport.invalidated, !row.expectsSurface, row.name)
 
             XCTAssertEqual(
                 coordinator.isCurrentRuntime(selected),
@@ -1589,6 +1687,86 @@ final class MobileOnboardingTests: XCTestCase {
             )
             if row.reopenBeforeCompletion {
                 coordinator.leaveAccountSurface()
+            }
+        }
+    }
+
+    func testRefreshPushLogoutKeepsTheOuterTransportOwner() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com",
+            gate: .challenge,
+            methods: [.totp]
+        )
+        let removed = snapshot(accountID: "account-1", instances: [])
+        let rows: [(name: String, discovery: MobileSessionDiscovery?, state: MobileSessionState, transports: Int)] = [
+            ("second factor", .secondFactorRequired(requirement), .twoFactorRequired(requirement), 2),
+            ("selected origin removed", .signedIn(removed), .signedIn(snapshot: removed, selectedInstanceID: nil), 2),
+            ("signed out", nil, .signedOut, 3),
+            ("other account", .signedIn(snapshot(accountID: "account-2")), .signedOut, 3),
+        ]
+        for visible in [false, true] {
+            for row in rows {
+                let name = "\(row.name), visible surface: \(visible)"
+                let first = FakeMobileAuthTransport()
+                first.session = snapshot(accountID: "account-1")
+                let refresh = FakeMobileAuthTransport()
+                refresh.fetchSessionHandler = { row.discovery }
+                let replacement = FakeMobileAuthTransport()
+                var runtime: MobileRuntimeContext?
+                var created = 0
+                var pushLogoutCalls = 0
+                weak var callbackCoordinator: MobileSessionCoordinator?
+                let coordinator = makeCoordinator(
+                    defaults: makeDefaults(),
+                    // An unexpected intermediate transport must be observable
+                    // as a failed count assertion, not crash the test host.
+                    transports: [first, refresh, replacement, FakeMobileAuthTransport()],
+                    onCreateTransport: { created += 1 },
+                    onOpen: { runtime = $0 },
+                    onPreparePushLogout: {
+                        pushLogoutCalls += 1
+                        guard let callbackCoordinator else {
+                            return XCTFail("Missing push logout coordinator: \(name)")
+                        }
+                        do {
+                            let response = try await callbackCoordinator.pushManagementRequest(
+                                PushManagementRequest(
+                                    method: "POST",
+                                    path: "/api/push/logout",
+                                    headers: [:],
+                                    body: nil
+                                )
+                            )
+                            XCTAssertEqual(response.statusCode, 200, name)
+                        } catch {
+                            XCTFail("Push logout failed: \(error), \(name)")
+                        }
+                    }
+                )
+                callbackCoordinator = coordinator
+                coordinator.activateAccountSurface()
+                _ = try await coordinator.bootstrap()
+                _ = try coordinator.selectInstance(id: instance.id)
+                let selected = try XCTUnwrap(runtime)
+                if visible {
+                    coordinator.activateAccountSurface()
+                }
+
+                let state = try await coordinator.refresh()
+
+                XCTAssertEqual(state, row.state, name)
+                XCTAssertEqual(pushLogoutCalls, 1, name)
+                XCTAssertEqual(created, row.transports, name)
+                XCTAssertFalse(coordinator.isSelectedRuntime(selected), name)
+                XCTAssertEqual(coordinator.isAccountSurfaceActive, visible, name)
+                if visible {
+                    coordinator.leaveAccountSurface()
+                    XCTAssertFalse(coordinator.isAccountSurfaceActive, name)
+                }
+                XCTAssertTrue(refresh.invalidated, name)
+                if row.transports == 3 {
+                    XCTAssertTrue(replacement.invalidated, name)
+                }
             }
         }
     }
@@ -1712,9 +1890,10 @@ final class MobileOnboardingTests: XCTestCase {
             logoutStarted.fulfill()
             await self.fulfillment(of: [allowLogout], timeout: 30)
         }
+        let replacement = FakeMobileAuthTransport()
         let coordinator = makeCoordinator(
             defaults: defaults,
-            transports: [transport]
+            transports: [transport, replacement]
         )
         coordinator.activateAccountSurface()
         _ = try await coordinator.bootstrap()
@@ -1727,6 +1906,9 @@ final class MobileOnboardingTests: XCTestCase {
         allowLogout.fulfill()
         let logoutState = try await logout.value
         XCTAssertEqual(logoutState, .signedOut)
+        XCTAssertTrue(transport.invalidated)
+        XCTAssertFalse(replacement.invalidated)
+        XCTAssertTrue(coordinator.isAccountSurfaceActive)
     }
 
     func testRefreshAccountChangeStillReleasesSelectedRuntime() async throws {

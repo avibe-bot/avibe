@@ -617,7 +617,9 @@ final class MobileSessionCoordinator {
     }
 
     private func releaseTransportPreservingSurfaceLease() {
-        transportOperationToken = nil
+        // Store replacement belongs to the operation already in flight. Its
+        // owner must follow the replacement transport until that operation
+        // finishes; only a new reset may revoke that ownership.
         recordReleaseBarrier(transport?.invalidate())
         transport = nil
     }
@@ -763,6 +765,10 @@ final class MobileSessionCoordinator {
     func refresh() async throws -> MobileSessionState {
         let keepsRuntime = snapshot != nil
         return try await runExclusive(keepingSelection: keepsRuntime) {
+            // Refresh is also called by native runtime consumers after the
+            // account page has closed. The operation owns this temporary
+            // transport; opening a page is not required to fetch the session.
+            self.ensureTransport()
             let previousAccountID = self.snapshot?.account.id
             let requestGeneration = self.generation
             let discovery = try await self.requireTransport().fetchSession()
@@ -794,7 +800,13 @@ final class MobileSessionCoordinator {
                 return self.state(for: fresh)
             case .secondFactorRequired:
                 await self.preparePushLogout()
-                self.beginAccountTransition(clearSelection: true)
+                if previousAccountID != nil {
+                    // A live account lost its authorization. A cold launch
+                    // that already owes a second factor has no runtime to
+                    // revoke: keep its saved selection until the verified
+                    // account can decide whether it still belongs to it.
+                    self.beginAccountTransition(clearSelection: true)
+                }
                 self.signedOutStoreIsFresh = false
                 return self.state(for: discovery)
             }
@@ -928,10 +940,17 @@ final class MobileSessionCoordinator {
     ) async throws -> PushManagementResponse {
         if case .pushLogout = phase {
             let requestGeneration = generation
-            let operationToken = UUID()
+            let operationToken = transportOperationToken ?? UUID()
+            let ownsTransport = transportOperationToken == nil
             ensureTransport()
-            transportOperationToken = operationToken
-            defer { finishTransportOperation(operationToken) }
+            if ownsTransport {
+                transportOperationToken = operationToken
+            }
+            defer {
+                if ownsTransport {
+                    finishTransportOperation(operationToken)
+                }
+            }
             let response = try await requireTransport().pushManagementRequest(
                 request
             )
@@ -1189,9 +1208,9 @@ final class MobileSessionCoordinator {
         if keepingSelection {
             selectionKeepingOperation = token
         }
-        if keepingSelection || transport != nil {
-            transportOperationToken = token
-        }
+        // Every exclusive operation may lazily acquire or replace transport.
+        // Keep its ownership token even if there was no transport on entry.
+        transportOperationToken = token
         defer {
             if selectionKeepingOperation == token {
                 selectionKeepingOperation = nil
@@ -1246,6 +1265,9 @@ final class MobileSessionCoordinator {
         }
         let token = UUID()
         phase = .resetting(token)
+        // A reset supersedes any older exclusive operation. Its late
+        // completion may not release the replacement account transport.
+        transportOperationToken = nil
         return token
     }
 
