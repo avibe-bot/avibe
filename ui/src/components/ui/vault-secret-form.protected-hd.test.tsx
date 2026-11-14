@@ -16,6 +16,7 @@ import en from '@/i18n/en.json';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { VaultSandboxError } from '@/lib/vaultSandboxClient';
+import { isHdWalletBlocked, unblockHdWallet } from '@/lib/vaultHdQuarantine';
 
 import { VaultSecretForm } from './vault-secret-form';
 
@@ -86,7 +87,7 @@ beforeEach(() => {
   popup.opened = 0;
   vault.sealHdWallet.mockResolvedValue(sealed);
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); unblockHdWallet(NAME); });
 
 const openProtected = async (source: 'generate' | 'import' = 'generate') => {
   const onCreated = vi.fn();
@@ -238,4 +239,37 @@ it('closing the dialog while the window is open closes the window, and a late re
   expect(popup.close).toHaveBeenCalled();
   await act(async () => { finish(sealed); });
   expect(api.createVaultSecret).not.toHaveBeenCalled();
+});
+
+it('keeps an unconfirmed or mismatched wallet blocked outside the dialog, but not a name another record holds', async () => {
+  // Lost answer: whatever is under the name may be unconfirmed, so it stays blocked from funding.
+  await openProtected();
+  api.createVaultSecret.mockRejectedValue(new TypeError('Failed to fetch'));
+  api.getVaultHdReconciliation.mockRejectedValue(new TypeError('Failed to fetch'));
+  await launch();
+  await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }));
+  expect(isHdWalletBlocked(NAME)).toBe(true);
+  // A later exact match lifts it.
+  api.getVaultHdReconciliation.mockResolvedValueOnce({ ok: true, reconciliation: snapshot() });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: p.checkAgain })); });
+  await screen.findByText(fill(p.done.title, { name: NAME }));
+  expect(isHdWalletBlocked(NAME)).toBe(false);
+  cleanup();
+
+  // The saved record differs from the window's result: blocked, never deleted.
+  await openProtected();
+  api.createVaultSecret.mockResolvedValue({ ok: true, reconciliation: snapshot({ envelope_sha256: wallet.reordered_envelope_sha256 }) });
+  await launch();
+  await screen.findByText(fill(p.notice.mismatch, { name: NAME }));
+  expect(isHdWalletBlocked(NAME)).toBe(true);
+  unblockHdWallet(NAME);
+  cleanup();
+
+  // Refused because the name is taken: that other record is not this browser's to block.
+  await openProtected();
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'secret_exists', message: 'exists' });
+  api.getVaultHdReconciliation.mockResolvedValue({ ok: false, code: 'invalid_hd_wallet' });
+  await launch();
+  await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }));
+  expect(isHdWalletBlocked(NAME)).toBe(false);
 });

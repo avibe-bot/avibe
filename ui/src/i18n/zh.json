@@ -6686,7 +6686,8 @@
           "body": "账户 #0 的地址如下。每次签名都要你在安全窗口里批准。",
           "recovery": "Passkey 丢了，靠这些词和原来的 Passphrase（如有）仍能找回钱包。但有词和 Passphrase 的人，可以在 Avibe 之外直接动用资金。只靠数据库备份无法恢复签名。"
         },
-        "approveEvery": "每次签名都批准"
+        "approveEvery": "每次签名都批准",
+        "blocked": "未能确认这就是刚创建的钱包：不要往里转账。"
       }
     }
   },

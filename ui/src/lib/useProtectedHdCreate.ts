@@ -11,6 +11,7 @@ import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useApi, type VaultCreatePayload, type VaultWebAuthnRegistrationPayload } from '@/context/ApiContext';
 
 import { ProtectedHdDesignState } from './protectedHdDesign';
+import { blockHdWallet, unblockHdWallet } from './vaultHdQuarantine';
 import { openVaultAuthorizationWindow, VaultSandboxError } from './vaultSandboxClient';
 import {
   parseProtectedHdReconciliation,
@@ -98,6 +99,7 @@ export function useProtectedHdCreate() {
     if (!op || !parsed) return 'unknown';
     if (!protectedHdMatches(parsed, op, knownId.current)) return 'mismatch';
     knownId.current = parsed.secret_id;
+    unblockHdWallet(op.name);
     setPhase({ kind: 'done', name: op.name, account0: op.expectedAccount0 });
     onSavedRef.current();
     return 'match';
@@ -114,6 +116,10 @@ export function useProtectedHdCreate() {
     } catch {
       // Unreachable, timed out or not JSON: still unconfirmed.
     }
+    // A wallet under this name may now be in Avibe without being confirmed as this one: this browser
+    // keeps it blocked from funding (no addresses, no accounts) after the dialog closes. A refusal
+    // means the name belongs to another record, which is not blocked.
+    if (refusal === null) blockHdWallet(op.name);
     setPhase({ kind: 'unconfirmed', refusal });
   }, [api, confirmWith]);
 
@@ -164,6 +170,8 @@ export function useProtectedHdCreate() {
         const outcome = confirmWith(created.reconciliation);
         if (outcome === 'match') return;
         if (outcome === 'mismatch') {
+          // The saved record is not the wallet the window made: blocked here and on the list, never deleted.
+          blockHdWallet(input.name);
           setPhase({ kind: 'mismatch' });
           return;
         }

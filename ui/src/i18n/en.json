@@ -6686,7 +6686,8 @@
           "body": "Account #0’s addresses are below. Every signature is approved in the secure window.",
           "recovery": "If the Passkey is lost, the words plus the original passphrase (if any) still recover the wallet. But anyone with them can move the funds outside Avibe. A database backup alone cannot restore signing."
         },
-        "approveEvery": "Approve every signature"
+        "approveEvery": "Approve every signature",
+        "blocked": "Not confirmed as the wallet that was just created: don’t send funds to it."
       }
     }
   },

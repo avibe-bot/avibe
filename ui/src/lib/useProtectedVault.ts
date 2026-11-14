@@ -392,9 +392,11 @@ export function useProtectedVault() {
       const registration = sessionVault.authzFactorRegistration;
       const sandbox = await getVaultSandboxClient();
       const sealed = await sandbox.sealHdWallet({ name, mode, wrapMeta }, authorizationWindow);
-      // The page's setup/root snapshot must still be the one the window used (rev0.6 §4): a lock,
-      // reset or fresh setup in between drops the result here, before anything is sent to Avibe.
-      if (sessionVault.wrapMeta !== wrapMeta || sessionVault.freshSetup !== freshSetup || sealed.establishingVmk !== freshSetup
+      // The page's setup/root snapshot must still be the one the window used (rev0.6 §4): a reset or
+      // a new setup in between drops the result here, before anything is sent to Avibe. The window's
+      // own establishment flag is sent as it reports it, as every protected seal does (the shared
+      // setup lifecycle lets it stay true after the root is committed; the daemon reconciles it).
+      if (sessionVault.wrapMeta !== wrapMeta || sessionVault.freshSetup !== freshSetup
         || (freshSetup && sessionVault.authzFactorRegistration !== registration)) {
         throw new VaultSandboxError('sandbox_reset', 'The protected vault changed while the wallet was being made', true);
       }
