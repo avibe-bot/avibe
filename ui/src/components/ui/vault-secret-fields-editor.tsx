@@ -26,24 +26,39 @@ type DraftReconciliation = {
 };
 
 function reconcileDrafts(previous: VaultSecret, next: VaultSecret, drafts: ReadonlyMap<string, string>): DraftReconciliation {
-  const reconciled = new Map(drafts);
+  // Labels can move between bare-default and dotted-extra records. Preserve drafts only for
+  // the same record role, never by reusing a label that now identifies a different record.
+  const reconciled = new Map<string, string>();
   const previousDefault = vaultDefaultField(previous);
   const nextDefault = vaultDefaultField(next);
-  if (previousDefault !== nextDefault && reconciled.has(previousDefault)) {
-    reconciled.set(nextDefault, reconciled.get(previousDefault) ?? '');
-    reconciled.delete(previousDefault);
-  }
-
-  const names = new Set(vaultFieldNames(next));
+  const nextExtras = new Set(vaultFieldNames(next).filter((field) => field !== nextDefault));
   const removed: string[] = [];
-  for (const name of reconciled.keys()) {
-    if (!names.has(name)) {
-      const value = reconciled.get(name);
-      reconciled.delete(name);
-      if (value) removed.push(name);
+  for (const [name, value] of drafts) {
+    if (name === previousDefault) {
+      reconciled.set(nextDefault, value);
+    } else if (nextExtras.has(name)) {
+      reconciled.set(name, value);
+    } else if (value) {
+      removed.push(name);
     }
   }
   return { drafts: reconciled, removed };
+}
+
+/** The same final-layout constraints apply to rendered drafts and every pre-seal attempt.
+ * Removed extras free capacity, but not their names: backend changes/removals are disjoint. */
+function fieldEditLayout(truth: VaultSecret, finalDefault: string, newField: string | null, removed: readonly string[]) {
+  const defaultField = vaultDefaultField(truth);
+  const names = vaultFieldNames(truth);
+  const extras = names.filter((field) => field !== defaultField);
+  const labelIssue = vaultFieldNameIssue(finalDefault, newField === null ? extras : [...extras, newField]);
+  const newIssue = newField === null ? null : vaultFieldNameIssue(newField, [...extras, finalDefault]);
+  const keptCount = names.filter((field) => !removed.includes(field)).length;
+  const count = keptCount + (newField === null ? 0 : 1);
+  const overLimit = count > MAX_VAULT_FIELDS;
+  const invalidRemoval = removed.some((field) => !extras.includes(field) || field === finalDefault);
+  return { labelIssue, newIssue, keptCount, count, overLimit,
+    valid: labelIssue === null && newIssue === null && !invalidRemoval && !overLimit };
 }
 
 /** What the edit dialog's Save calls: commit every field change at once, or nothing. */
@@ -277,7 +292,7 @@ export function VaultSecretFieldsEditor({
   // captured once and kept only until the request settles, which allows exactly one re-seal if the
   // server reports that a record's name changed meanwhile.
   const commitAll = async (): Promise<boolean> => {
-    if (fieldsCorrupt) return false;
+    if (fieldsCorrupt || locked || !valid) return false;
     const captured = new Map<string, string>();
     for (const [field, value] of draftsRef.current) if (value && !removed.includes(field)) captured.set(field, value);
     const adding = newField !== null && newValue ? { field: newField, value: newValue } : null;
@@ -296,6 +311,9 @@ export function VaultSecretFieldsEditor({
       const oldDefault = vaultDefaultField(truth);
       const finalDefault = renameTo ?? oldDefault;
       const names = vaultFieldNames(truth);
+      const layout = fieldEditLayout(truth, finalDefault, adding?.field ?? null, removing);
+      if (layout.overLimit) throw new Error(t('errors.too_many_fields'));
+      if (!layout.valid) throw conflict();
       const values: NonNullable<VaultFieldsBatchPayload['values']> = [];
       const entries: Array<readonly [string, string]> = [];
       for (const [field, value] of captured) {
@@ -306,12 +324,7 @@ export function VaultSecretFieldsEditor({
           entries.push([field, value]);
         }
       }
-      if (adding) {
-        // The names after Save: a renamed default's old label is free again.
-        const finalNames = [...names.filter((name) => name !== oldDefault), finalDefault];
-        if (finalNames.includes(adding.field)) throw conflict();
-        entries.push([adding.field, adding.value]);
-      }
+      if (adding) entries.push([adding.field, adding.value]);
       for (const [field, value] of entries) {
         const record = vaultRecordName(truth.name, field, finalDefault);
         values.push({ field, record, ...(await sealFor(record, value, clearAll)) });
@@ -367,21 +380,18 @@ export function VaultSecretFieldsEditor({
 
   // Names are checked against the names the secret will have after Save: the default's new label,
   // the other fields, and the field being added.
-  const extraNames = fields.filter((field) => field !== defaultField);
-  const labelIssue = vaultFieldNameIssue(defaultLabel, newField === null ? extraNames : [...extraNames, newField]);
-  const newIssue = newField === null ? null : vaultFieldNameIssue(newField, [...extraNames, defaultLabel]);
+  const layout = fieldEditLayout(current, defaultLabel, newField, removed);
+  const { labelIssue, newIssue, keptCount } = layout;
   const focusedIssue = focusedName === 'default' ? labelIssue : focusedName === 'new' ? newIssue : null;
   const showNameRule = focusedName !== null && focusedIssue !== 'nameInvalid' && focusedIssue !== 'nameTaken';
   const renaming = defaultLabel !== defaultField;
-  // Staged removals free their places for an addition in the same Save.
-  const keptCount = fields.filter((field) => !removed.includes(field)).length;
   const hasValues = [...drafts].some(([field, value]) => Boolean(value) && !removed.includes(field));
   const dirty = hasValues || renaming || removed.length > 0 || (newField !== null && (Boolean(newValue) || Boolean(newField)));
   // Corrupt field metadata blocks field changes, not the dialog: with nothing drafted here its
   // Save still saves description, tags and policy.
   const valid = !dirty || (!fieldsCorrupt
-    && (!renaming || labelIssue === null)
-    && (newField === null || (newIssue === null && Boolean(newValue)))
+    && layout.valid
+    && (newField === null || Boolean(newValue))
     && (!(hasValues || (newField !== null && newValue)) || canWriteValue));
   // The latest commit for the dialog's Save, refreshed after every render.
   useLayoutEffect(() => {
@@ -396,7 +406,8 @@ export function VaultSecretFieldsEditor({
       // Enter in a field input doesn't submit the dialog; its Save button does.
       if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.preventDefault();
     }}>
-      <VaultFieldsHeader count={keptCount + (newField === null ? 0 : 1)} note={t('vaults.fields.editHelp')} />
+      <VaultFieldsHeader count={layout.count} note={t('vaults.fields.editHelp')} />
+      {layout.overLimit && <p role="alert" className="text-xs text-destructive-ink">{t('errors.too_many_fields')}</p>}
       {draftNotice && (
         <p role="status" className="text-xs text-muted">{draftNotice}</p>
       )}
@@ -491,7 +502,7 @@ export function VaultSecretFieldsEditor({
       {busy && <Loader2 className="size-4 animate-spin text-muted" />}
       {saved && <p role="status" className="text-xs text-mint-ink">{t('vaults.fields.saved')}</p>}
       {needsAvaultAuthorization && <AvaultAuthorizationNotice forceVisible />}
-      {error && <p role="alert" className="text-xs text-destructive-ink">{error}</p>}
+      {error && !(layout.overLimit && error === t('errors.too_many_fields')) && <p role="alert" className="text-xs text-destructive-ink">{error}</p>}
     </div>
   );
 }

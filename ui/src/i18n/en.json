@@ -6269,7 +6269,7 @@
       "extraNotRenamable": "Extra fields can't be renamed",
       "discardNew": "Discard new field",
       "saved": "Field saved",
-      "draftsDropped": "Drafts for fields removed elsewhere were dropped: {{fields}}.",
+      "draftsDropped": "Drafts for fields removed or moved to a different record elsewhere were dropped: {{fields}}.",
       "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
       "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
       "replacePlaceholder": "Saved · type to replace",

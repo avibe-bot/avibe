@@ -224,6 +224,83 @@ it('drops a staged removal that another write already did', async () => {
   expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
 });
 
+// Drafts belong to records, not labels. A former extra must never become the bare default.
+it.each([
+  { staged: false, defaultDraft: '' },
+  { staged: true, defaultDraft: '' },
+  { staged: false, defaultDraft: 'real-default-draft' },
+  { staged: true, defaultDraft: 'real-default-draft' },
+])('drops a role-changed extra draft while preserving the actual default ($staged, $defaultDraft)', async ({ staged, defaultDraft }) => {
+  const truth = { ...secret, default_field: 'username', fields: ['username', 'password'], updated_at: 'version-2' };
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [truth] });
+  renderEditor();
+  if (defaultDraft) change('Value for password', defaultDraft);
+  change('Value for username', 'old-extra-draft');
+  if (staged) {
+    fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+  }
+  await act(async () => { eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' }); });
+  expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe(defaultDraft);
+  expect((screen.getByLabelText('Value for password') as HTMLInputElement).value).toBe('');
+  expect(screen.getByRole('status').textContent).toContain('username');
+  expect(lastState()).toEqual({ dirty: Boolean(defaultDraft), valid: true });
+  expect(await save()).toBe(true);
+  if (defaultDraft) {
+    expect(batch()[1]).toMatchObject({ values: [{ field: 'username', record: 'LOGIN', blind_box: box }], remove: [] });
+    expect(sealBlindBox.mock.calls.map((call) => (call as unknown[])[0])).toEqual([defaultDraft]);
+  } else {
+    expect(sealBlindBox).not.toHaveBeenCalled();
+    expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
+  }
+});
+
+// Admission at Add is not enough: Undo and live truth can both grow the final layout.
+it.each(['undo', 'refetch'] as const)('blocks over-capacity drafts after %s before sealing and preserves a way to resolve them', async (transition) => {
+  const full = { ...secret, fields: ['password', ...Array.from({ length: 31 }, (_, i) => `f${i}`)] };
+  renderEditor(transition === 'undo' ? full : { ...full, fields: full.fields.slice(0, -1) });
+  if (transition === 'undo') {
+    fireEvent.click(screen.getByRole('button', { name: 'Remove f0' }));
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+  }
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  change('New field name', 'replacement');
+  change('New field value', 'kept-new-draft');
+  if (transition === 'undo') {
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.undoRemove }));
+  } else {
+    api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [{ ...full, updated_at: 'version-2' }] });
+    await act(async () => { eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' }); });
+  }
+  expect(lastState()).toEqual({ dirty: true, valid: false });
+  expect(screen.getByRole('alert').textContent).toBe(en.errors.too_many_fields);
+  expect(await save()).toBe(false);
+  expect(sealBlindBox).not.toHaveBeenCalled();
+  expect(vault.sealValue).not.toHaveBeenCalled();
+  expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
+  expect((screen.getByLabelText('New field value') as HTMLInputElement).value).toBe('kept-new-draft');
+  fireEvent.click(screen.getByRole('button', { name: 'Remove f0' }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
+  expect(lastState().valid).toBe(true);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(await save()).toBe(true);
+  expect(batch()[1]).toMatchObject({ values: [{ field: 'replacement' }], remove: ['f0'] });
+});
+
+it('revalidates capacity before resealing on a record-mismatch retry', async () => {
+  const full = { ...secret, fields: ['password', ...Array.from({ length: 31 }, (_, i) => `f${i}`)] };
+  renderEditor({ ...full, fields: full.fields.slice(0, -1) });
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  change('New field name', 'replacement');
+  change('New field value', 'new-draft');
+  api.updateVaultSecretFields.mockResolvedValueOnce({ ok: false, code: 'record_mismatch' });
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [{ ...full, updated_at: 'version-2' }] });
+  expect(await save()).toBe(false);
+  expect(sealBlindBox).toHaveBeenCalledOnce();
+  expect(api.updateVaultSecretFields).toHaveBeenCalledOnce();
+  expect(lastState().valid).toBe(false);
+});
+
 // Entry gating must stop ciphertext writes, not metadata management.
 it('blocks protected value writes before refresh but permits a metadata-only rename on LAN HTTP', async () => {
   vi.stubGlobal('location', new URL('http://192.0.2.1:5123'));
