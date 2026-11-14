@@ -8,14 +8,20 @@ use std::mem::{size_of, zeroed};
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-use windows_sys::Win32::Security::{EqualSid, GetTokenInformation, TokenSessionId, TokenUser, TOKEN_QUERY, TOKEN_USER};
-use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+use windows_sys::Win32::Security::{
+    EqualSid, GetTokenInformation, TokenElevation, TokenElevationType, TokenElevationTypeDefault, TokenSessionId,
+    TokenUser, TOKEN_QUERY, TOKEN_USER,
+};
+use windows_sys::Win32::System::JobObjects::{
+    IsProcessInJob, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, InitializeProcThreadAttributeList, OpenProcess,
-    OpenProcessToken, TerminateProcess, UpdateProcThreadAttribute, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATE_PROCESS, PROCESS_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
-    STARTUPINFOEXW,
+    OpenProcessToken, TerminateProcess, UpdateProcThreadAttribute, CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATE_PROCESS,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, STARTUPINFOEXW,
 };
 
 const CHILD_TEST: &str = "computer_use_process::tests::fixture_child";
@@ -104,6 +110,13 @@ fn assert_same_user_and_session(process: &OwnedHandle) {
     let mut target_token = std::ptr::null_mut();
     check(unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut target_token) }).unwrap();
     let target_token = unsafe { OwnedHandle::from_raw_handle(target_token) };
+    let target_elevation = token_information(target_token.as_raw_handle(), TokenElevation);
+    assert_eq!(unsafe { *target_elevation.as_ptr().cast::<u32>() }, 0);
+    let target_elevation_type = token_information(target_token.as_raw_handle(), TokenElevationType);
+    assert_eq!(
+        unsafe { *target_elevation_type.as_ptr().cast::<i32>() },
+        TokenElevationTypeDefault
+    );
     let current_user = token_information(current_token.as_raw_handle(), TokenUser);
     let target_user = token_information(target_token.as_raw_handle(), TokenUser);
     let current_user = unsafe { &*current_user.as_ptr().cast::<TOKEN_USER>() };
@@ -112,6 +125,30 @@ fn assert_same_user_and_session(process: &OwnedHandle) {
     let current_session = token_information(current_token.as_raw_handle(), TokenSessionId);
     let target_session = token_information(target_token.as_raw_handle(), TokenSessionId);
     assert_eq!(current_session[0], target_session[0]);
+}
+
+fn allow_breakaway(job: HANDLE) {
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    check(unsafe {
+        QueryInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            std::ptr::null_mut(),
+        )
+    })
+    .unwrap();
+    limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    check(unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    })
+    .unwrap();
 }
 
 fn assert_exits(handle: &OwnedHandle) {
@@ -219,6 +256,43 @@ fn fixture_child() {
                 CloseHandle(process.hProcess);
             }
             std::fs::write(directory.join("target-pid"), target_pid.to_string()).unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+        }
+        "breakaway_launcher" => {
+            let executable = std::env::current_exe().unwrap();
+            let application = wide(executable.as_os_str()).unwrap();
+            let mut command = command_line(executable.as_os_str(), &fixture_args()).unwrap();
+            let environment = environment_block(&fixture_env("breakaway_target", &directory)).unwrap();
+            let working_directory = wide(directory.as_os_str()).unwrap();
+            let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
+            let created = unsafe {
+                CreateProcessW(
+                    application.as_ptr(),
+                    command.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                    environment.as_ptr().cast(),
+                    working_directory.as_ptr(),
+                    std::ptr::null(),
+                    &mut process,
+                )
+            };
+            check(created).unwrap();
+            let target_pid = process.dwProcessId;
+            unsafe {
+                CloseHandle(process.hThread);
+                CloseHandle(process.hProcess);
+            }
+            std::fs::write(directory.join("target-pid"), target_pid.to_string()).unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+        }
+        "breakaway_target" => {
+            assert!(std::env::var_os("AVIBE_SENTINEL_CREDENTIAL").is_none());
+            std::fs::write(directory.join("no-sentinel-credential"), "yes").unwrap();
+            std::fs::write(directory.join("no-inherited-handles"), "bInheritHandles=false").unwrap();
+            std::fs::write(directory.join("started"), "yes").unwrap();
             std::thread::sleep(Duration::from_secs(60));
         }
         _ => panic!("unknown fixture mode"),
@@ -401,8 +475,9 @@ async fn explicit_parent_attribute_inherits_parent_job_not_driver_job() {
     assert_same_user_and_session(&target);
 
     let launcher_pid = launcher.id();
+    let launcher_handle = process_handle(launcher_pid);
     launcher.stop(Duration::from_secs(1)).await.unwrap();
-    assert_exits(&process_handle(launcher_pid));
+    assert_exits(&launcher_handle);
     assert_ne!(unsafe { WaitForSingleObject(target.as_raw_handle(), 0) }, WAIT_OBJECT_0,);
 
     unsafe { TerminateProcess(target.as_raw_handle(), 1) };
@@ -410,6 +485,44 @@ async fn explicit_parent_attribute_inherits_parent_job_not_driver_job() {
     anchor.kill().unwrap();
     anchor.wait().unwrap();
     drop(anchor_handle);
+}
+#[tokio::test]
+#[ignore = "acceptance: disposable standard-user CI account only"]
+async fn explicit_breakaway_target_survives_driver_job_termination() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut launcher_env = fixture_env("breakaway_launcher", directory.path());
+    launcher_env.push(("AVIBE_SENTINEL_CREDENTIAL".into(), "test-secret-sentinel".into()));
+    let launcher = suspended_with_env("breakaway_launcher", directory.path(), launcher_env);
+    allow_breakaway(launcher.job.as_raw_handle());
+    let launcher = launcher.resume().unwrap();
+    let target_pid = wait_for_file(&directory.path().join("target-pid"))
+        .parse::<u32>()
+        .unwrap();
+    let target = query_process_handle(target_pid);
+    wait_for_file(&directory.path().join("no-inherited-handles"));
+    wait_for_file(&directory.path().join("no-sentinel-credential"));
+    wait_for_file(&directory.path().join("started"));
+    assert_same_user_and_session(&target);
+
+    let mut target_in_driver_job = 0;
+    check(unsafe {
+        IsProcessInJob(
+            target.as_raw_handle(),
+            launcher.job.as_raw_handle(),
+            &mut target_in_driver_job,
+        )
+    })
+    .unwrap();
+    assert_eq!(target_in_driver_job, 0, "breakaway target must be outside driver Job");
+
+    let launcher_pid = launcher.id();
+    let launcher_handle = process_handle(launcher_pid);
+    launcher.stop(Duration::from_secs(1)).await.unwrap();
+    assert_exits(&launcher_handle);
+    assert_ne!(unsafe { WaitForSingleObject(target.as_raw_handle(), 0) }, WAIT_OBJECT_0,);
+
+    unsafe { TerminateProcess(target.as_raw_handle(), 1) };
+    assert_exits(&target);
 }
 #[test]
 #[ignore = "acceptance: run as an elevated Windows x64 user"]

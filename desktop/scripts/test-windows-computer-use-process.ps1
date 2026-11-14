@@ -10,6 +10,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 is required.' }
 $tests = @(
     'ordinary_user_token_evidence',
     'explicit_parent_attribute_inherits_parent_job_not_driver_job',
+    'explicit_breakaway_target_survives_driver_job_termination',
     'suspended_child_never_executes_and_drop_terminates_it',
     'failed_start_and_suspended_stop_leave_no_running_child',
     'stop_is_graceful_for_eof_and_forceful_for_remaining_descendants',
@@ -85,24 +86,54 @@ try {
     # Only sibling native DLLs, if any, are needed by this exact Rust artifact.
     Get-ChildItem -LiteralPath (Split-Path $artifact) -Filter '*.dll' -File | Copy-Item -Destination $bin
 
+    $testEnvironment = @{
+        AVIBE_TEST_EXPECTED_SID = $user.SID.Value
+        TEMP = $temp
+        TMP = $temp
+        SystemRoot = $env:SystemRoot
+        SystemDrive = $env:SystemDrive
+    }
+    function Start-DisposableTestProcess([string] $TestName) {
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $fixtureExecutable
+        $startInfo.WorkingDirectory = $bin
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.LoadUserProfile = $true
+        $startInfo.UserName = $name
+        $startInfo.Domain = $env:COMPUTERNAME
+        $startInfo.Password = $password
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.Environment.Clear()
+        foreach ($entry in $testEnvironment.GetEnumerator()) {
+            $startInfo.Environment[$entry.Key] = [string]$entry.Value
+        }
+        foreach ($argument in @('--exact', "computer_use_process::tests::$TestName", '--ignored', '--nocapture')) {
+            $startInfo.ArgumentList.Add($argument)
+        }
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw "Could not start disposable test process: $TestName" }
+        return $process
+    }
+
     foreach ($test in $tests) {
         $stdout = Join-Path $logs "$test.out"
         $stderr = Join-Path $logs "$test.err"
         $process = $null
         try {
-            $process = Start-Process -FilePath $fixtureExecutable -WorkingDirectory $bin -Credential $credential `
-                -LoadUserProfile -UseNewEnvironment -WindowStyle Hidden -PassThru `
-                -Environment @{ AVIBE_TEST_EXPECTED_SID = $user.SID.Value; TEMP = $temp; TMP = $temp; SystemRoot = $env:SystemRoot; SystemDrive = $env:SystemDrive } `
-                -ArgumentList @('--exact', "computer_use_process::tests::$test", '--ignored', '--nocapture') `
-                -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $process = Start-DisposableTestProcess $test
             $null = $process.SafeHandle # retain identity; never reopen by PID to kill
             if (-not $process.WaitForExit(30000)) {
                 $process.Kill()
                 if (-not $process.WaitForExit(5000)) { throw "Timed-out test process did not exit: $test" }
                 throw "Process-lifecycle test timed out: $test"
             }
-            $output = Get-Content -LiteralPath $stdout -Raw
-            $errors = Get-Content -LiteralPath $stderr -Raw
+            $output = $process.StandardOutput.ReadToEnd()
+            $errors = $process.StandardError.ReadToEnd()
+            Set-Content -LiteralPath $stdout -Value $output -NoNewline
+            Set-Content -LiteralPath $stderr -Value $errors -NoNewline
             Write-Output $output
             if ($errors) { Write-Output $errors }
             if ($process.ExitCode -ne 0 -or $output -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') {
@@ -122,7 +153,7 @@ try {
             }
         }
     }
-    if ($completed -ne 7) { throw 'Token evidence, parent-attribute proof, and all five lifecycle tests must execute.' }
+    if ($completed -ne 8) { throw 'Token evidence, parent-attribute proof, breakaway proof, and all five lifecycle tests must execute.' }
 } catch {
     $failure = $_
 } finally {
@@ -178,4 +209,4 @@ try {
 }
 if ($cleanupFailures.Count) { throw ($cleanupFailures -join '; ') }
 if ($failure) { throw $failure }
-Write-Output 'Ordinary-user token evidence, parent-attribute Job proof, and five process-lifecycle tests executed; disposable account/profile/artifacts removed.'
+Write-Output 'Ordinary-user token evidence, parent-attribute and breakaway Job proofs, and five process-lifecycle tests executed; disposable account/profile/artifacts removed.'
