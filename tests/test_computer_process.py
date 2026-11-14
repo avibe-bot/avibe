@@ -521,6 +521,41 @@ def test_windows_script_runner_preserves_stdin_exit_and_kills_tree(tmp_path, tim
     _wait_dead(result["pid"])
 
 
+def _kernel_test_endpoint():
+    # Complete protocol shape, deliberately unreachable: these tests never
+    # perform a desktop RPC or need a real Controller credential.
+    return {
+        "transport": "tcp", "host": "127.0.0.1", "port": 1,
+        "headers": {}, "instance_id": "test-only",
+        "instance_header": "X-Avibe-Control-Instance",
+    }
+
+
+def test_kernel_fixture_passes_real_controller_endpoint_validation():
+    """Native startup needs a valid init fixture before it can test pipes.
+
+    Validate it on every host so POSIX CI cannot skip this Windows fixture
+    defect. Missing identity/header fields must still fail validation.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required for the SDK protocol validation")
+    runtime = (Path(__file__).resolve().parents[1] / "vibe/computer_sdk/runtime.mjs").as_uri()
+    endpoint = json.dumps(_kernel_test_endpoint())
+    source = (
+        f"import {{configureKernel}} from {json.dumps(runtime)};\n"
+        f"const endpoint = {endpoint};\n"
+        "for (const key of ['headers','instance_id','instance_header']) {\n"
+        "  const invalid = {...endpoint}; delete invalid[key];\n"
+        "  let rejected = false;\n"
+        "  try { configureKernel({endpoint: invalid}); } catch (error) { rejected = error.message === 'invalid Controller endpoint'; }\n"
+        "  if (!rejected) throw new Error(`Accepted missing ${key}`);\n"
+        "}\n"
+        "configureKernel({endpoint});\n"
+    )
+    subprocess.run([node, "--input-type=module", "-e", source], check=True, capture_output=True, timeout=10)
+
+
 @native_windows
 @pytest.mark.parametrize("ending", ["reset", "request_cancel"])
 def test_windows_real_kernel_pipe_timeout_and_tree_cleanup(ending, monkeypatch):
@@ -543,7 +578,7 @@ def test_windows_real_kernel_pipe_timeout_and_tree_cleanup(ending, monkeypatch):
         )
         manager = ComputerJsKernelManager(
             sessions, node_resolver=lambda: Path(node),
-            endpoint_resolver=lambda: {"transport": "tcp", "host": "127.0.0.1", "port": 1},
+            endpoint_resolver=_kernel_test_endpoint,
             status_reader=lambda: SimpleNamespace(status="ready"),
         )
         try:
