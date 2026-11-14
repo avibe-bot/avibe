@@ -34,7 +34,7 @@ final class DirectIrohBindingTests: XCTestCase {
         )
         XCTAssertEqual(received, Self.payload)
 
-        try await serverStream.send().writeAll(Self.payload)
+        try await serverStream.send().writeAll(buf: Self.payload)
         try await serverStream.send().finish()
 
         let echoed = try await clientHalves.receive.read(
