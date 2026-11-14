@@ -2,6 +2,7 @@
 //! Existing local bootstrap tests cannot exercise the account/remote boundary.
 use async_trait::async_trait;
 use avibe_runtime_host::instance_client::{
+    enrollment::EnrollmentFlow,
     protocol::{
         account_view, instance_origin, presentation_view, ClientAction, ClientError, ClientRequest, ClientState,
         Instance,
@@ -30,6 +31,112 @@ fn shared_protocol_fixtures_roundtrip_and_keep_private_results_out_of_state() {
         for private in ["catalog", "consent", "enrollment"] {
             assert!(projection.get(private).is_none());
         }
+    }
+}
+
+// A4: the old single-view grammar rejected locale even though Workbench and
+// the bundled page cannot share localStorage. Extra fields remain forbidden.
+#[test]
+fn account_locale_is_strict_presentation_data() {
+    let owned = "tauri://localhost/".parse().unwrap();
+    for locale in ["en", "zh"] {
+        assert_eq!(
+            account_view(
+                &format!("tauri://localhost/account/index.html?view=instances&locale={locale}")
+                    .parse()
+                    .unwrap(),
+                &owned
+            ),
+            Some("instances")
+        );
+    }
+    for query in [
+        "view=account&locale=fr",
+        "locale=zh&locale=en",
+        "view=account&locale=zh&action=sign_out",
+    ] {
+        assert_eq!(
+            account_view(
+                &format!("tauri://localhost/account/index.html?{query}").parse().unwrap(),
+                &owned
+            ),
+            None
+        );
+    }
+}
+
+struct Descriptor(serde_json::Value);
+#[async_trait]
+impl Transport for Descriptor {
+    async fn send(&self, request: Request) -> Result<Response, ClientError> {
+        assert_eq!(request.url.path(), "/api/desktop/local-instance");
+        Ok(Response {
+            status: 200,
+            headers: HeaderMap::new(),
+            body: serde_json::to_vec(&self.0).unwrap(),
+        })
+    }
+}
+
+// A4: registration status is not local identity. A remote-selected client must
+// still expose its actual local pairing, and failed refresh cannot retain proof.
+#[tokio::test]
+async fn local_descriptor_projects_identity_independently_of_enrollment() {
+    let mut state = ClientState::new("Local".into(), "test".into(), serde_json::json!({}));
+    state.connection.committed = serde_json::from_value(serde_json::json!({
+        "kind":"remote","name":"Studio","instance_id":"studio","canonical_origin":"https://studio.avibe.bot"
+    }))
+    .unwrap();
+    for (pairing, requested, running, expected_id, expected_url, succeeds) in [
+        (
+            serde_json::json!({"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"}),
+            true,
+            true,
+            Some("local-id"),
+            Some("https://local.avibe.bot"),
+            true,
+        ),
+        (
+            serde_json::json!({"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"}),
+            false,
+            false,
+            Some("local-id"),
+            None,
+            true,
+        ),
+        (
+            serde_json::json!({"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"}),
+            true,
+            false,
+            Some("local-id"),
+            None,
+            true,
+        ),
+        (
+            serde_json::json!({"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://evil.test"}),
+            true,
+            true,
+            None,
+            None,
+            false,
+        ),
+        (Value::Null, true, false, None, None, true),
+    ] {
+        let transport = Arc::new(Descriptor(serde_json::json!({
+            "schema_version":1,"installation_id":"installation","device_name":"Local",
+            "binding_revision":"1","pairing":pairing,
+            "remote_access":{"configured_enabled":requested,"requested":requested,"running":running}
+        })));
+        let mut local = NativeSession::new("http://127.0.0.1:1984/".parse().unwrap(), transport);
+        assert_eq!(EnrollmentFlow::read(&mut local, &mut state).await.is_ok(), succeeds);
+        let projection = state.runtime_projection();
+        assert_eq!(projection["local"]["instance_id"], serde_json::json!(expected_id));
+        assert_eq!(
+            projection["local"]["remote_access_url"],
+            serde_json::json!(expected_url)
+        );
+        assert!(state.enrollment.instance_id.is_none());
+        assert_eq!(projection["connection"]["committed"]["instance_id"], "studio");
     }
 }
 

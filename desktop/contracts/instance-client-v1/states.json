@@ -30,7 +30,9 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -92,7 +94,9 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -144,7 +148,9 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -196,7 +202,9 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -263,7 +271,9 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -331,7 +341,9 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null
     },
     "desktop": {
       "version": "0.1.0",

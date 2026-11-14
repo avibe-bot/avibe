@@ -73,37 +73,39 @@ impl AccountFlow {
         self.enrollment_token = None;
     }
 
+    fn begin_first_factor(&mut self, epoch: Epoch, state: &mut ClientState) -> Result<(), ClientError> {
+        if state.account.status == AccountStatus::SignedIn {
+            return Err(ClientError::new("invalid_action"));
+        }
+        self.clear_transient();
+        // A replacement attempt cannot carry the previous email's verifier or
+        // MFA cookie. Failure leaves a usable signed-out state on reload.
+        self.session = NativeSession::new(CONTROL_PLANE.parse().expect("fixed origin"), self.transport.clone());
+        self.session.fence(epoch);
+        self.server_order.clear();
+        state.account = AccountState {
+            status: AccountStatus::SignedOut,
+            identity: None,
+            email: None,
+            gate: None,
+            methods: vec![],
+        };
+        state.catalog = CatalogState {
+            status: CatalogStatus::Idle,
+            instances: vec![],
+        };
+        Ok(())
+    }
+
     pub async fn request_otp(
         &mut self,
         email: String,
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
-        if state.account.status == AccountStatus::SignedIn {
-            return Err(ClientError::new("invalid_action"));
-        }
-        let email = email.trim().to_owned();
-        if email.len() > 320 || !email.contains('@') || email.chars().any(char::is_control) {
-            return Err(ClientError::new("invalid_email"));
-        }
-        let response = self.session.request(Method::GET, "/api/config/auth", None).await?;
-        let config = successful_json(response)?;
-        let url =
-            Url::parse(string(&config, "supabase_url")?).map_err(|_| ClientError::new("invalid_auth_provider"))?;
-        if url.scheme() != "https"
-            || url.port().is_some()
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.path() != "/"
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(ClientError::new("invalid_auth_provider"));
-        }
-        let key = string(&config, "supabase_anon_key")?.to_owned();
-        let mut provider = NativeSession::new(url, self.transport.clone());
-        provider.fence(epoch);
+        self.begin_first_factor(epoch.clone(), state)?;
+        let email = validated_email(email)?;
+        let (mut provider, key) = self.provider(epoch).await?;
         let mut path = Url::parse("https://placeholder.test/auth/v1/otp").expect("fixed URL");
         path.query_pairs_mut().append_pair("redirect_to", EMAIL_REDIRECT);
         let response = provider
@@ -131,6 +133,78 @@ impl AccountFlow {
         Ok(())
     }
 
+    async fn provider(&mut self, epoch: Epoch) -> Result<(NativeSession, String), ClientError> {
+        let response = self.session.request(Method::GET, "/api/config/auth", None).await?;
+        let config = successful_json(response)?;
+        let url =
+            Url::parse(string(&config, "supabase_url")?).map_err(|_| ClientError::new("invalid_auth_provider"))?;
+        if url.scheme() != "https"
+            || url.port().is_some()
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(ClientError::new("invalid_auth_provider"));
+        }
+        let key = string(&config, "supabase_anon_key")?.to_owned();
+        let mut provider = NativeSession::new(url, self.transport.clone());
+        provider.fence(epoch);
+        Ok((provider, key))
+    }
+
+    pub async fn sign_in_password(
+        &mut self,
+        email: String,
+        password: String,
+        epoch: Epoch,
+        state: &mut ClientState,
+    ) -> Result<(), ClientError> {
+        self.begin_first_factor(epoch.clone(), state)?;
+        let email = validated_email(email)?;
+        if password.is_empty() || password.len() > 4096 {
+            return Err(ClientError::new("invalid_credentials"));
+        }
+        let (mut provider, key) = self.provider(epoch).await.map_err(password_error)?;
+        let response = provider
+            .request_with_headers(
+                Method::POST,
+                "/auth/v1/token?grant_type=password",
+                Some(json!({"email":email,"password":password})),
+                provider_headers(&key)?,
+            )
+            .await?;
+        if !response.success() {
+            let body = response.json().unwrap_or(Value::Null);
+            let code = body["error_code"]
+                .as_str()
+                .or(body["code"].as_str())
+                .or(body["error"].as_str());
+            let code = if response.status == 429 {
+                "rate_limited"
+            } else {
+                match code {
+                    Some("invalid_credentials" | "invalid_grant") => "invalid_credentials",
+                    Some("over_request_rate_limit" | "over_email_send_rate_limit") => "rate_limited",
+                    Some("email_not_confirmed") => "email_not_confirmed",
+                    _ => "request_failed",
+                }
+            };
+            return Err(ClientError::new(code));
+        }
+        self.establish(response.json()?, state).await.map_err(password_error)
+    }
+
+    async fn establish(&mut self, credentials: Value, state: &mut ClientState) -> Result<(), ClientError> {
+        let response = self.session.request(Method::POST, "/api/desktop/session", Some(json!({
+            "access_token":string(&credentials,"access_token")?, "refresh_token":string(&credentials,"refresh_token")?,
+        }))).await?;
+        self.clear_transient();
+        self.project(response, state)
+    }
+
     pub async fn verify_otp(&mut self, code: String, state: &mut ClientState) -> Result<(), ClientError> {
         if state.account.status != AccountStatus::Verifying || code.is_empty() || code.len() > 16 {
             return Err(ClientError::new("invalid_action"));
@@ -153,11 +227,7 @@ impl AccountFlow {
             )
             .await?;
         let credentials = successful_json(response)?;
-        let response = self.session.request(Method::POST, "/api/desktop/session", Some(json!({
-            "access_token":string(&credentials,"access_token")?, "refresh_token":string(&credentials,"refresh_token")?,
-        }))).await?;
-        self.clear_transient();
-        self.project(response, state)
+        self.establish(credentials, state).await
     }
 
     pub async fn discover(&mut self, state: &mut ClientState) -> Result<(), ClientError> {
@@ -362,4 +432,27 @@ fn provider_headers(key: &str) -> Result<HeaderMap, ClientError> {
         key.parse().map_err(|_| ClientError::new("invalid_auth_provider"))?,
     );
     Ok(headers)
+}
+
+fn validated_email(email: String) -> Result<String, ClientError> {
+    let email = email.trim().to_owned();
+    if email.len() > 320 || !email.contains('@') || email.chars().any(char::is_control) {
+        return Err(ClientError::new("invalid_email"));
+    }
+    Ok(email)
+}
+
+fn password_error(error: ClientError) -> ClientError {
+    match error.code.as_str() {
+        "invalid_response"
+        | "invalid_auth_provider"
+        | "invalid_cookie"
+        | "invalid_cookie_scope"
+        | "network_unavailable"
+        | "response_too_large"
+        | "stale_generation"
+        | "signed_out"
+        | "account_changed" => error,
+        _ => ClientError::new("request_failed"),
+    }
 }

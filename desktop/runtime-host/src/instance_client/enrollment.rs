@@ -46,6 +46,8 @@ pub struct EnrollmentFlow {
 }
 impl EnrollmentFlow {
     pub async fn read(local: &mut NativeSession, state: &mut ClientState) -> Result<LocalInstance, ClientError> {
+        state.local.instance_id = None;
+        state.local.remote_access_url = None;
         let response = local.request(Method::GET, "/api/desktop/local-instance", None).await?;
         if response.status == 404 {
             return Err(ClientError::new("local_runtime_upgrade_required"));
@@ -57,6 +59,24 @@ impl EnrollmentFlow {
         {
             return Err(ClientError::new("invalid_local_descriptor"));
         }
+        if let Some(pairing) = &descriptor.pairing {
+            let url = url::Url::parse(&pairing.public_url).map_err(|_| ClientError::new("invalid_local_descriptor"))?;
+            let instance = Instance {
+                id: pairing.instance_id.clone(),
+                name: descriptor.device_name.clone(),
+                host: url.host_str().unwrap_or("").into(),
+                url: pairing.public_url.clone(),
+                relationship: Relationship::Owner,
+                owner_email: None,
+                available: true,
+            };
+            instance_origin(&instance).map_err(|_| ClientError::new("invalid_local_descriptor"))?;
+            let backend =
+                url::Url::parse(&pairing.backend_url).map_err(|_| ClientError::new("invalid_local_descriptor"))?;
+            if backend.as_str() != "https://avibe.bot/" {
+                return Err(ClientError::new("invalid_local_descriptor"));
+            }
+        }
         state.local.name = descriptor.device_name.clone();
         state.local.remote_access = if !descriptor.remote_access.requested {
             RemoteAccessState::Off
@@ -65,6 +85,10 @@ impl EnrollmentFlow {
         } else {
             RemoteAccessState::Starting
         };
+        state.local.instance_id = descriptor.pairing.as_ref().map(|p| p.instance_id.clone());
+        if state.local.remote_access == RemoteAccessState::On {
+            state.local.remote_access_url = descriptor.pairing.as_ref().map(|p| p.public_url.clone());
+        }
         if let ClientTarget::Local { name, instance_id } = &mut state.connection.committed {
             *name = descriptor.device_name.clone();
             *instance_id = descriptor.pairing.as_ref().map(|p| p.instance_id.clone());

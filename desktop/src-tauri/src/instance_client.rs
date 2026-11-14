@@ -29,6 +29,7 @@ struct PresentationIntent {
     view: &'static str,
     owner: u64,
     guarded: bool,
+    locale: Option<&'static str>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct GuardAttempt {
@@ -50,9 +51,23 @@ struct PresentationQueue {
     guard_sequence: u64,
     guard: Option<GuardAttempt>,
     approval: Option<GuardAttempt>,
+    window: u64,
+    document: u64,
+    source: Option<(u64, u64, String)>,
+    logout: Option<LogoutReceipt>,
+}
+struct LogoutReceipt {
+    result: DirectResult,
+    owner: u64,
+    generation: u64,
+    window: u64,
+    document: u64,
+    destination: Url,
 }
 impl PresentationQueue {
-    fn enqueue(&mut self, view: &'static str, owner: u64, guarded: bool) {
+    fn enqueue(&mut self, view: &'static str, owner: u64, guarded: bool, locale: Option<&'static str>) {
+        self.logout = None;
+        self.source = None;
         self.sequence += 1;
         self.guard = None;
         self.approval = None;
@@ -61,8 +76,59 @@ impl PresentationQueue {
             view,
             owner,
             guarded,
+            locale,
         });
     }
+    fn window_created(&mut self) -> u64 {
+        self.retire_document_guard();
+        self.window += 1;
+        self.document = 0;
+        self.logout = None;
+        self.window
+    }
+    fn document_started(&mut self, window: u64, url: &Url) {
+        if window != self.window {
+            return;
+        }
+        self.retire_document_guard();
+        self.document += 1;
+        if self
+            .logout
+            .as_ref()
+            .is_some_and(|r| r.window != window || r.document != self.document || r.destination != *url)
+        {
+            self.logout = None;
+        }
+    }
+    fn retire_document_guard(&mut self) {
+        // Equal URLs do not make a reloaded document the receiver that was
+        // asked to approve. A late callback cannot re-create this authority.
+        if let Some(attempt) = self.guard.take() {
+            self.complete(attempt.intent.id);
+        }
+        self.approval = None;
+    }
+    fn logout_result(&mut self, owner: u64, generation: u64, receiver: &Url) -> Option<DirectResult> {
+        if self
+            .logout
+            .as_ref()
+            .is_some_and(|r| r.owner != owner || r.generation != generation)
+        {
+            self.logout = None;
+        }
+        self.logout
+            .as_ref()
+            .filter(|r| r.window == self.window && r.document == self.document && r.destination == *receiver)
+            .map(|r| r.result.clone())
+    }
+    fn consume_logout(&mut self, id: &str, owner: u64, generation: u64, receiver: &Url) -> bool {
+        let matches = matches!(self.logout_result(owner, generation, receiver), Some(DirectResult::SignOutIntent { intent_id, .. }) if intent_id == id);
+        if matches {
+            self.logout = None;
+        }
+        matches
+    }
+
     fn current(&mut self, owner: u64) -> Option<PresentationIntent> {
         if self.pending.is_some_and(|intent| intent.owner != owner) {
             self.pending = None;
@@ -145,6 +211,7 @@ struct Presentation {
     local_owner: Option<u64>,
     remote: Option<Url>,
     route: Option<Url>,
+    locale: Option<String>,
 }
 struct NativeView {
     app: AppHandle,
@@ -333,6 +400,7 @@ pub fn attach(
             local_owner: None,
             remote: None,
             route: None,
+            locale: None,
         }),
         windows: Arc::new(tokio::sync::Mutex::new(())),
         navigation: Mutex::new(None),
@@ -406,7 +474,15 @@ pub(crate) fn present_guarded(app: &AppHandle, view: &'static str) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    present_owned(app, view, client.coordinator.presentation_owner(), true, None)
+    present_owned(
+        app,
+        view,
+        client.coordinator.presentation_owner(),
+        true,
+        None,
+        None,
+        None,
+    )
 }
 pub(crate) fn return_local_for_link(app: &AppHandle) {
     let Some(client) = app.try_state::<Client>() else {
@@ -436,6 +512,30 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
         }
         crate::apply_pending_deep_link(&app);
     });
+}
+/// Per-physical-window callbacks cannot revive a retired document with the reused main label.
+pub fn window_created(app: &AppHandle) -> Option<u64> {
+    let client = app.try_state::<Client>()?;
+    let window = client
+        .presentations
+        .lock()
+        .expect("presentation intent")
+        .window_created();
+    Some(window)
+}
+pub fn document_started(app: &AppHandle, window: u64, url: &Url) {
+    if let Some(client) = app.try_state::<Client>() {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if queue.window != window {
+            return;
+        }
+        queue.document_started(window, url);
+        if account_view(url, &client.view.bundle).is_some() {
+            client.view.presentation.lock().expect("presentation").locale = url
+                .query_pairs()
+                .find_map(|(key, value)| (key == "locale").then(|| value.into_owned()));
+        }
+    }
 }
 pub fn page_loaded(app: &AppHandle) {
     if let Some(client) = app.try_state::<Client>() {
@@ -509,7 +609,44 @@ pub async fn desktop_client_request(
         return Err("untrusted_desktop_caller".into());
     }
     let coordinator = client.coordinator.clone();
-    Ok(coordinator.request(request).await)
+    let receiver = window.url().map_err(|_| "untrusted_desktop_caller")?;
+    let get_state = matches!(request.action, ClientAction::GetState);
+    let document = {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if let ClientAction::SignOut { intent_id: Some(id) } = &request.action {
+            if request.version != 1
+                || request.request_id.is_empty()
+                || request.request_id.len() > 128
+                || request.expected_generation != coordinator.state().generation
+                || !queue.consume_logout(
+                    id,
+                    coordinator.presentation_owner(),
+                    request.expected_generation,
+                    &receiver,
+                )
+            {
+                return Ok(ClientReply {
+                    version: 1,
+                    request_id: request.request_id,
+                    ok: false,
+                    state: coordinator.state(),
+                    result: None,
+                    error: Some(ClientError::new("invalid_sign_out_intent")),
+                });
+            }
+        } else if !get_state {
+            queue.logout = None;
+        }
+        (queue.window, queue.document)
+    };
+    let mut reply = coordinator.request(request).await;
+    if get_state && reply.ok && trusted_page(&client, &window) && window.url().ok().as_ref() == Some(&receiver) {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if (queue.window, queue.document) == document {
+            reply.result = queue.logout_result(coordinator.presentation_owner(), reply.state.generation, &receiver);
+        }
+    }
+    Ok(reply)
 }
 
 /// Only the current main document can request enumerated presentation. This is
@@ -574,20 +711,46 @@ fn presentation_source_allowed(
 /// Only native-generated guarded requests carry a correlation token. It is a
 /// presentation receipt, never updater authority, and has no uncorrelated
 /// fallback if it is stale or malformed.
-fn presentation_destination(destination: &Url) -> Option<(&'static str, Option<String>)> {
+fn presentation_destination(destination: &Url) -> Option<(&'static str, Option<String>, Option<&'static str>)> {
     let mut base = destination.clone();
-    let token = if destination.query().is_some() {
-        let pairs: Vec<_> = destination.query_pairs().collect();
-        if pairs.len() != 1 || pairs[0].0 != "native_request" || pairs[0].1.is_empty() || pairs[0].1.len() > 128 {
-            return None;
+    let mut token = None;
+    let mut locale = None;
+    for (key, value) in destination.query_pairs() {
+        match key.as_ref() {
+            "native_request" if token.is_none() && !value.is_empty() && value.len() <= 128 => {
+                token = Some(value.into_owned())
+            }
+            "locale" if locale.is_none() => {
+                locale = Some(match value.as_ref() {
+                    "en" => "en",
+                    "zh" => "zh",
+                    _ => return None,
+                })
+            }
+            _ => return None,
         }
-        base.set_query(None);
-        Some(pairs[0].1.to_string())
-    } else {
-        None
-    };
+    }
+    base.set_query(None);
     let view = presentation_view(&base).or_else(|| (base.as_str() == crate::updater::OPEN_URL).then_some("updates"))?;
-    Some((view, token))
+    Some((view, token, locale))
+}
+fn account_url(bundle: &Url, view: &str, locale: Option<&str>) -> Option<Url> {
+    let mut url = bundle.join("/account/index.html").ok()?;
+    url.query_pairs_mut()
+        .append_pair("view", view)
+        .append_pair("locale", locale.unwrap_or_else(|| system_locale()));
+    account_view(&url, bundle)?;
+    Some(url)
+}
+fn system_locale() -> &'static str {
+    if sys_locale::get_locales()
+        .next()
+        .is_some_and(|locale| locale.starts_with("zh"))
+    {
+        "zh"
+    } else {
+        "en"
+    }
 }
 
 /// Native presentation requests share one source check in every shell assembly.
@@ -601,7 +764,7 @@ pub fn presentation_request(
     if !enabled(app) || label != MAIN_WINDOW {
         return false;
     }
-    let Some((view, token)) = presentation_destination(destination) else {
+    let Some((view, token, locale)) = presentation_destination(destination) else {
         return false;
     };
     // Wry's macOS URL getter has no value during the initial navigation.
@@ -640,7 +803,7 @@ pub fn presentation_request(
         } else {
             None
         };
-        present_owned(app, view, owner, false, approval.as_ref());
+        present_owned(app, view, owner, false, approval.as_ref(), locale, Some(&receiver));
     }
     true
 }
@@ -651,7 +814,15 @@ pub fn present(app: &AppHandle, view: &'static str) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    present_owned(app, view, client.coordinator.presentation_owner(), false, None)
+    present_owned(
+        app,
+        view,
+        client.coordinator.presentation_owner(),
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 fn present_owned(
@@ -660,6 +831,8 @@ fn present_owned(
     owner: u64,
     guarded: bool,
     approval: Option<&GuardAttempt>,
+    locale: Option<&'static str>,
+    receiver: Option<&Url>,
 ) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
@@ -670,11 +843,7 @@ fn present_owned(
     if view == "updates" && !local_selected(app) {
         return crate::update_popover::open(app, &client.view.bundle, client.view.script(true, None));
     }
-    let Ok(mut url) = client.view.bundle.join("/account/index.html") else {
-        return false;
-    };
-    url.set_query(Some(&format!("view={view}")));
-    if account_view(&url, &client.view.bundle).is_none() {
+    if account_url(&client.view.bundle, view, locale).is_none() {
         return false;
     }
     {
@@ -684,7 +853,8 @@ fn present_owned(
         {
             return false;
         }
-        queue.enqueue(view, owner, guarded);
+        queue.enqueue(view, owner, guarded, locale);
+        queue.source = receiver.map(|url| (queue.window, queue.document, url.to_string()));
     }
     schedule_presentation(app);
     ensure_presentation_retry(app);
@@ -762,10 +932,9 @@ fn apply_presentation(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
         return;
     };
-    let Ok(mut url) = native.bundle.join("/account/index.html") else {
+    let Some(url) = account_url(&native.bundle, intent.view, intent.locale) else {
         return;
     };
-    url.set_query(Some(&format!("view={}", intent.view)));
     let route = window.url().ok();
     if client.coordinator.presentation_epoch(intent.owner).is_err() {
         client
@@ -830,6 +999,32 @@ fn apply_presentation(app: &AppHandle) {
         }
         return;
     }
+    {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if intent.view == "sign-out" {
+            let matched = queue.source.as_ref().is_some_and(|(window, document, receiver)| {
+                *window == queue.window
+                    && *document == queue.document
+                    && route.as_ref().is_some_and(|url| url.as_str() == receiver)
+            });
+            // Native menu entry while already bundled bypasses the Workbench guard;
+            // it is itself the explicit source-bound native intent.
+            if matched || (intent.guarded && native_account_entry) {
+                let generation = client.coordinator.state().generation;
+                queue.logout = Some(LogoutReceipt {
+                    result: DirectResult::new_sign_out_intent(generation),
+                    owner: intent.owner,
+                    generation,
+                    window: queue.window,
+                    document: queue.document + 1,
+                    destination: url.clone(),
+                });
+            } else {
+                queue.complete(intent.id);
+                return;
+            }
+        }
+    }
     let previous = {
         let mut state = native.presentation.lock().expect("presentation");
         if state.staging || state.pending_commit.is_some() {
@@ -843,6 +1038,7 @@ fn apply_presentation(app: &AppHandle) {
         previous
     };
     if window.navigate(url).is_err() {
+        client.presentations.lock().expect("presentation intent").logout = None;
         let mut state = native.presentation.lock().expect("presentation");
         state.account = previous.0;
         state.route = previous.1;
@@ -1447,7 +1643,7 @@ impl ClientView for NativeView {
             .map_err(failure)?;
         rx.await.map_err(failure)?
     }
-    async fn signed_out(&self, epoch: Epoch, _: ClientTarget) -> Result<(), ClientError> {
+    async fn signed_out(&self, epoch: Epoch, _: ClientTarget, cleanup_failed: bool) -> Result<(), ClientError> {
         let _windows = self.windows.lock().await;
         let owner = epoch.value;
         if self.presentation_epoch(owner).is_err() && !self.presentation.lock().expect("presentation").disposable {
@@ -1457,6 +1653,11 @@ impl ClientView for NativeView {
         }
         // Erase even when another local escape superseded navigation.
         let retired = self.retire_current().await;
+        if retired.is_err() && self.app.get_webview_window(MAIN_WINDOW).is_some() {
+            // The OS may refuse destruction. Keep an already trusted account
+            // receiver usable for the error/retry; never trust a remote one.
+            return retired;
+        }
         {
             let mut state = self.presentation.lock().expect("presentation");
             state.account = false;
@@ -1465,6 +1666,11 @@ impl ClientView for NativeView {
             state.disposable = false;
             state.route = None;
             state.previous = None;
+        }
+        if cleanup_failed || retired.is_err() {
+            // The coordinator records the error before admitting its fresh
+            // trusted receiver. Store retirement remains mandatory.
+            return retired;
         }
         // A newer explicit escape owns its own queued restore. Lifecycle-only
         // changes keep this owner and re-evaluate the local destination.
@@ -1477,6 +1683,49 @@ impl ClientView for NativeView {
             Ok(())
         };
         retired.and(restored)
+    }
+    async fn signout_failed(&self, epoch: Epoch) -> Result<(), ClientError> {
+        let _windows = self.windows.lock().await;
+        let owner = epoch.value;
+        loop {
+            let epoch = self.presentation_epoch(owner)?;
+            let result = async {
+                if self.app.get_webview_window(MAIN_WINDOW).is_some() {
+                    let safe = {
+                        let state = self.presentation.lock().expect("presentation");
+                        state.account && !state.disposable && !state.staging
+                    };
+                    return if safe {
+                        Ok(())
+                    } else {
+                        Err(failure("retirement incomplete"))
+                    };
+                }
+                epoch.check()?;
+                let locale = self.presentation.lock().expect("presentation").locale.clone();
+                let url =
+                    account_url(&self.bundle, "sign-out", locale.as_deref()).ok_or_else(|| failure("account route"))?;
+                {
+                    let mut state = self.presentation.lock().expect("presentation");
+                    state.account = true;
+                    state.local_owner = None;
+                    state.pending_commit = None;
+                    state.state = self.app.state::<Client>().coordinator.state();
+                }
+                // This build is not a presentation admission and mints no
+                // receipt. The UI receives the stored error through get_state.
+                self.build(epoch.clone(), url.clone(), false, vec![]).await?;
+                self.show(epoch.clone(), &url).await
+            }
+            .await;
+            if self.lifecycle_retry(owner, &epoch, &result) {
+                // Retire only the incomplete error presentation owned here,
+                // never automatically repeat failed credential/store cleanup.
+                self.retire_current().await?;
+                continue;
+            }
+            return result;
+        }
     }
 }
 
@@ -1520,17 +1769,84 @@ mod tests {
 
     // A footer/menu intent used to disappear when its deferred callback met a
     // busy window or a lifecycle rebind. Only actual admission may settle it.
+    // A4: a repeated initial request is safe, but a new physical window or
+    // same-URL reload must retire the unspent receipt permanently.
+    #[test]
+    fn logout_receipt_follows_exact_document_and_is_consumed_once() {
+        for interruption in ["none", "reload", "window", "owner", "generation"] {
+            let mut queue = PresentationQueue::default();
+            let window = queue.window_created();
+            let url: Url = "tauri://localhost/account/index.html?view=sign-out&locale=zh"
+                .parse()
+                .unwrap();
+            let result = DirectResult::new_sign_out_intent(8);
+            let DirectResult::SignOutIntent { ref intent_id, .. } = result else {
+                unreachable!()
+            };
+            let id = intent_id.clone();
+            queue.logout = Some(LogoutReceipt {
+                result,
+                owner: 7,
+                generation: 8,
+                window,
+                document: 1,
+                destination: url.clone(),
+            });
+            assert!(queue.logout_result(7, 8, &url).is_none());
+            queue.document_started(window, &url);
+            for _ in 0..2 {
+                assert!(
+                    matches!(queue.logout_result(7,8,&url),Some(DirectResult::SignOutIntent {intent_id,..}) if intent_id==id)
+                );
+            }
+            let (owner, generation) = match interruption {
+                "reload" => {
+                    queue.document_started(window, &url);
+                    (7, 8)
+                }
+                "window" => {
+                    queue.window_created();
+                    queue.document_started(window, &url);
+                    (7, 8)
+                }
+                "owner" => (9, 9),
+                "generation" => (7, 9),
+                _ => (7, 8),
+            };
+            assert_eq!(
+                queue.consume_logout(&id, owner, generation, &url),
+                interruption == "none"
+            );
+            assert!(!queue.consume_logout(&id, 7, 8, &url));
+            assert!(queue.logout_result(7, 8, &url).is_none());
+        }
+    }
+    #[test]
+    fn locale_grammar_does_not_relax_presentation_authority() {
+        assert_eq!(
+            presentation_destination(&"avibe://desktop/sign-out?locale=zh&native_request=1-2".parse().unwrap()),
+            Some(("sign-out", Some("1-2".into()), Some("zh")))
+        );
+        for query in [
+            "locale=zh&locale=en",
+            "locale=fr",
+            "locale=zh&action=sign_out",
+            "native_request=1&native_request=2",
+        ] {
+            assert!(presentation_destination(&format!("avibe://desktop/sign-out?{query}").parse().unwrap()).is_none());
+        }
+    }
     #[test]
     fn presentation_intents_survive_retries_until_the_exact_navigation_is_admitted() {
         let mut queue = PresentationQueue::default();
-        queue.enqueue("updates", 4, false);
+        queue.enqueue("updates", 4, false, None);
         let first = queue.current(4).unwrap();
         // Lock contention, pending presentation and failed navigation leave the
         // same intent available. Lifecycle generation is deliberately not owner.
         for _ in 0..3 {
             assert_eq!(queue.current(4), Some(first));
         }
-        queue.enqueue("account", 4, false);
+        queue.enqueue("account", 4, false, None);
         let newer = queue.current(4).unwrap();
         queue.complete(first.id);
         assert_eq!(queue.current(4), Some(newer));
@@ -1541,10 +1857,10 @@ mod tests {
     #[test]
     fn a_new_explicit_action_supersedes_an_old_presentation_without_reviving_it() {
         let mut queue = PresentationQueue::default();
-        queue.enqueue("updates", 4, false);
+        queue.enqueue("updates", 4, false, None);
         let old = queue.current(4).unwrap();
         assert!(queue.current(5).is_none());
-        queue.enqueue("updates", 5, false);
+        queue.enqueue("updates", 5, false, None);
         let current = queue.current(5).unwrap();
         queue.complete(old.id);
         assert_eq!(queue.current(5), Some(current));
@@ -1562,6 +1878,7 @@ mod tests {
                 view: "updates",
                 owner: 4,
                 guarded: true,
+                locale: None,
             },
             receiver: "tauri://localhost/account/index.html?view=instances".into(),
         };
@@ -1573,7 +1890,7 @@ mod tests {
     #[test]
     fn guarded_presentation_retries_only_proven_non_dispatch_and_fences_callbacks() {
         let mut queue = PresentationQueue::default();
-        queue.enqueue("updates", 4, true);
+        queue.enqueue("updates", 4, true, None);
         let intent = queue.current(4).unwrap();
         let first = queue
             .begin_guard(intent, "https://fixture.avibe.bot/apps/1".into())
@@ -1595,10 +1912,10 @@ mod tests {
         assert!(queue.current(4).is_none());
         assert!(queue.guard.is_none());
 
-        queue.enqueue("updates", 4, true);
+        queue.enqueue("updates", 4, true, None);
         let intent = queue.current(4).unwrap();
         let old = queue.begin_guard(intent, retry.receiver.clone()).unwrap();
-        queue.enqueue("instances", 4, true);
+        queue.enqueue("instances", 4, true, None);
         let successor = queue.current(4).unwrap();
         queue.guard_result(&old, "\"dispatched\"");
         assert_eq!(queue.current(4), Some(successor));
@@ -1615,7 +1932,7 @@ mod tests {
         for callback_first in [false, true] {
             let mut queue = PresentationQueue::default();
             let receiver = Url::parse("tauri://localhost/account/index.html?view=instances").unwrap();
-            queue.enqueue("updates", 4, true);
+            queue.enqueue("updates", 4, true, None);
             let intent = queue.current(4).unwrap();
             let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
             let token = attempt.token();
@@ -1633,7 +1950,7 @@ mod tests {
                 .guard_authority(&token, "updates", 4, &Url::parse("https://fixture.avibe.bot/").unwrap())
                 .is_none());
             // Approved navigation consumes the receipt in the same queue lock.
-            queue.enqueue("updates", 4, false);
+            queue.enqueue("updates", 4, false, None);
             let approved = queue.current(4).unwrap();
             queue.guard_result(&attempt, "\"dispatched\"");
             assert_eq!(queue.current(4), Some(approved));
@@ -1642,22 +1959,41 @@ mod tests {
         }
         let mut queue = PresentationQueue::default();
         let receiver = Url::parse("https://fixture.avibe.bot/apps/1").unwrap();
-        queue.enqueue("updates", 4, true);
+        queue.enqueue("updates", 4, true, None);
         let intent = queue.current(4).unwrap();
         let old = queue.begin_guard(intent, receiver.to_string()).unwrap();
         queue.guard_result(&old, "\"dispatched\"");
-        queue.enqueue("instances", 4, true);
+        queue.enqueue("instances", 4, true, None);
         assert!(queue.guard_authority(&old.token(), "updates", 4, &receiver).is_none());
         assert!(!queue.owns_guard_authority(&old));
     }
 
     #[test]
+    fn a_same_url_reload_cannot_reuse_a_previous_guard_approval() {
+        let mut queue = PresentationQueue::default();
+        let receiver = Url::parse("http://127.0.0.1:1984/").unwrap();
+        let window = queue.window_created();
+        queue.document_started(window, &receiver);
+        queue.enqueue("sign-out", 4, true, None);
+        let intent = queue.current(4).unwrap();
+        let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+        queue.guard_result(&attempt, "\"dispatched\"");
+        assert!(queue
+            .guard_authority(&attempt.token(), "sign-out", 4, &receiver)
+            .is_some());
+        queue.document_started(window, &receiver);
+        assert!(queue
+            .guard_authority(&attempt.token(), "sign-out", 4, &receiver)
+            .is_none());
+    }
+
+    #[test]
     fn native_presentation_tokens_have_no_malformed_or_uncorrelated_fallback() {
         let parse = |url| presentation_destination(&Url::parse(url).unwrap());
-        assert_eq!(parse("avibe://updates"), Some(("updates", None)));
+        assert_eq!(parse("avibe://updates"), Some(("updates", None, None)));
         assert_eq!(
             parse("avibe://desktop/updates?native_request=1-2"),
-            Some(("updates", Some("1-2".into())))
+            Some(("updates", Some("1-2".into()), None))
         );
         for url in [
             "avibe://desktop/updates?native_request=",
@@ -1677,6 +2013,7 @@ mod tests {
     fn presentation_sources_require_owned_documents_not_an_idle_window() {
         let local = LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap();
         let mut view = Presentation {
+            locale: None,
             state: ClientState::new("fixture".into(), "0.1.0".into(), serde_json::json!({})),
             previous: None,
             account: false,

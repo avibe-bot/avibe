@@ -40,3 +40,34 @@ click keeps its existing uncorrelated presentation URL and source checks.
 Runtime projection excludes catalog, enrollment transaction, second-factor
 inputs and consent details. It includes account identity, connection, local
 status, Desktop update facts, revision/generation and auxiliary limitation.
+
+## A4: account feedback
+
+`local.instance_id` and `local.remote_access_url` are nullable current local
+descriptor facts. Older missing fields mean null. Only a validated local
+pairing supplies the ID; only remote access On supplies its URL. Unpaired or
+failed/unreadable proof clears both without changing enrollment ownership.
+
+The trusted `sign_in_password` action carries transient `email` and `password`.
+Native validates its provider configuration, requests the password grant, and
+uses the existing Desktop session/cookie and second-factor owner. A replacement
+first factor retires the preceding OTP/MFA attempt even when the new attempt
+fails. Passwords and provider tokens never enter state or events.
+
+Presentation and owned account URLs accept one optional `locale=en|zh`;
+unknown, duplicate and extra parameters remain invalid. Workbench captures
+the locale with its guard, and bundled mounting applies it before rendering.
+
+An admitted sign-out presentation requests direct logout. A bare
+`?view=sign-out` does not authorize it. Native binds a one-use opaque intent to
+the admitted source, owner, generation, physical window and document.
+`get_state` may return the same unspent `{type:"sign_out_intent", intent_id,
+generation}` direct result repeatedly in that document. Automatic logout
+sends `sign_out {intent_id}`; native consumes the receipt once through the
+existing cleanup owner. Reload, replacement, cancellation or supersession
+invalidates it. Ordinary explicit trusted controls retain tokenless sign-out.
+Neither the intent nor direct reply is persisted or broadcast. A receipt
+binds execution, not proof of a human click.
+
+See `docs/plans/desktop-rc19-account-feedback.md` for the owning tests and
+acceptance boundaries. Synthetic fixture values authorize no real account.

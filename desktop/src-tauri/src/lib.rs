@@ -1921,8 +1921,14 @@ fn build_main_window(
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
         ))
         .on_new_window(|url, _features| handle_new_window_request(url));
+    let document_window = instance_client::window_created(app);
     let generation = instance_client::epoch(app);
     let builder = builder.on_page_load(move |webview, payload| {
+        if payload.event() == tauri::webview::PageLoadEvent::Started {
+            if let Some(window) = document_window {
+                instance_client::document_started(webview.app_handle(), window, payload.url());
+            }
+        }
         if payload.event() == tauri::webview::PageLoadEvent::Finished {
             if let Some(generation) = generation {
                 instance_client::navigation_loaded(webview.app_handle(), generation, payload.url());

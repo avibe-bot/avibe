@@ -1172,7 +1172,9 @@ scenarios:
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Actual backend session and native account producer-consumer evidence is pending.
+    reason: Native password/OTP owner and isolated HTTP/cookie/second-factor consumers exist; live provider and installed acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
   - id: AUTH-SETUP-172
     name: One Desktop installation retains one instance and device across concurrency, lost replies, and restart
     status: partial
@@ -1225,14 +1227,20 @@ scenarios:
     kind: concurrency
     layer: scenario
     backend: desktop
-    reason: Native coordinator and lifecycle integration evidence is pending.
+    reason: Native coordinator and isolated WebView receipt/cleanup consumers exist; these are owning-layer tests, not execution by the canonical Python harness or installed acceptance.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_plain_admitted_signout_returns_native_receipt
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_retries
   - id: AUTH-SETUP-177
     name: Remote and embedded documents gain no Desktop local capability or account credentials
     status: gap
     kind: authorization
     layer: contract
     backend: desktop
-    reason: Native caller admission, store isolation, and bundled UI integration evidence is pending.
+    reason: Isolated native transport and real document admission consumers exist; live account and installed OS credential acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_menu_guard_receipt_keeps_actual_source_and_owner
   - id: AUTH-SETUP-178
     name: Desktop footer geometry and local updater scope hold across locale, theme, window size, and target
     status: gap

@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target-dir", type=Path, required=True)
     parser.add_argument("--shell-consumers", action="store_true")
+    parser.add_argument("--account-feedback", action="store_true")
     parser.add_argument("--shell-fixture", type=Path)
     args = parser.parse_args()
     assert not any(part.endswith(".app") for part in args.output.resolve().parts), "native fixture must stay outside an application bundle"
@@ -45,6 +46,65 @@ def main():
     assets.mkdir(exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(bundle)) as stream:
         stream.extractall(assets, filter="data")
+    if args.account_feedback:
+        assert not args.shell_consumers
+        # This archive-only adapter invokes the same menu owner as production.
+        # No public product seam, alternate admission or updater change is added.
+        library = source / "desktop/src-tauri/src/lib.rs"
+        original_library = library.read_bytes()
+        library.write_text(library.read_text() + """
+pub fn fixture_account_menu(app: &tauri::AppHandle) { instance_client::menu_present(app, "sign-out"); }
+pub static FIXTURE_RETIRE_FAILURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static FIXTURE_ERROR_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static FIXTURE_ERROR_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+""")
+        example = source / "desktop/src-tauri/examples/instance_client_probe.rs"
+        text = example.read_text()
+        needle = '                        "state"=>emit('
+        assert text.count(needle) == 1
+        text = text.replace(needle, '                        "menu"=> avibe_desktop_lib::fixture_account_menu(&handle),\n' + needle)
+        text = text.replace(needle, '''                        "retire_failure"=> {
+                            avibe_desktop_lib::FIXTURE_RETIRE_FAILURE.store(true,std::sync::atomic::Ordering::SeqCst);
+                            emit(json!({"event":"control_ready"}));
+                        },
+                        "hold_error_view"=> {
+                            avibe_desktop_lib::FIXTURE_ERROR_HOLD.store(true,std::sync::atomic::Ordering::SeqCst);
+                            emit(json!({"event":"control_ready"}));
+                        },
+                        "release_error_view"=> avibe_desktop_lib::FIXTURE_ERROR_RELEASE.notify_one(),
+''' + needle)
+        example.write_text(text)
+        native = source / "desktop/src-tauri/src/instance_client.rs"
+        native_original = native.read_bytes()
+        needle = "        retired.and(removed)"
+        assert native.read_text().count(needle) == 1
+        native.write_text(native.read_text().replace(needle, """
+        let result = retired.and(removed);
+        if result.is_ok() && crate::FIXTURE_RETIRE_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            Err(failure("fixture retirement result"))
+        } else { result }
+"""))
+        needle = "    async fn signout_failed(&self, epoch: Epoch) -> Result<(), ClientError> {\n"
+        if needle in native.read_text():
+            native.write_text(native.read_text().replace(needle, needle + """
+        if crate::FIXTURE_ERROR_HOLD.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            println!("{}", serde_json::json!({"event":"error_view_held"}));
+            tokio::time::timeout(std::time::Duration::from_secs(20), crate::FIXTURE_ERROR_RELEASE.notified())
+                .await.expect("fixture error view release");
+        }
+"""))
+        build(args, source, "", {
+            "head":args.head, "bundle_sha256":args.bundle_sha256, "mode":"account-feedback",
+            "library_original_sha256":hashlib.sha256(original_library).hexdigest(),
+            "library_fixture_sha256":hashlib.sha256(library.read_bytes()).hexdigest(),
+            "native_original_sha256":hashlib.sha256(native_original).hexdigest(),
+            "native_fixture_sha256":hashlib.sha256(native.read_bytes()).hexdigest(),
+            "updater_sha256":hashlib.sha256((source / "desktop/src-tauri/src/updater.rs").read_bytes()).hexdigest(),
+            "updater_key":"empty", "adaptations":["archive-only call to existing native menu owner",
+                                                 "optional one-shot failure after actual store retirement",
+                                                 "bounded pause before error presentation owner check"],
+        })
+        return
     # Fail if a source change moves the transport boundary; never fuzzy-patch
     # the discovery/decision/installation code.
     updater = source / "desktop/src-tauri/src/updater.rs"
@@ -113,7 +173,7 @@ def main():
             needle, needle + "        crate::fixture_shell::before_link_return(&app).await;\n",
         )
         client_source = client_source[:start] + return_source + client_source[end:]
-        needle = "        crate::apply_pending_deep_link(&app);\n    });\n}\npub fn page_loaded"
+        needle = "        crate::apply_pending_deep_link(&app);\n    });\n}"
         assert client_source.count(needle) == 1
         client_source = client_source.replace(
             needle, '        println!("{}", serde_json::json!({"event":"link_return_finished"}));\n' + needle,
@@ -181,6 +241,16 @@ def main():
         assert pet_source.count(needle) == 1
         pet.write_text(pet_source.replace(needle, "        reconcile_now(&handle);"))
         shell_adaptations["recorded_peripheral_calls"] = ["notification.show", "window.set_badge_count", "pet.apply_shortcuts"]
+    build(args, source, (source / "desktop/runtime-host/tests/fixtures/updater/public-key.txt").read_text().strip(), {
+        "head": args.head, "bundle_sha256": args.bundle_sha256,
+        "updater_original_sha256": hashlib.sha256(original.encode()).hexdigest(),
+        "updater_fixture_sha256": hashlib.sha256(updater.read_bytes()).hexdigest(),
+        "fixture_public_key": "desktop/runtime-host/tests/fixtures/updater/public-key.txt",
+        "recorded_peripheral_calls": peripheral_calls, "shell_adaptations": shell_adaptations,
+    })
+
+
+def build(args, source, public_key, record):
     environment = {key: os.environ[key] for key in ("PATH", "LANG", "CARGO_HOME", "RUSTUP_HOME") if key in os.environ}
     environment.setdefault("CARGO_HOME", str(Path.home() / ".cargo"))
     environment.setdefault("RUSTUP_HOME", str(Path.home() / ".rustup"))
@@ -189,9 +259,7 @@ def main():
         path.mkdir()
         environment[key] = str(path)
     environment["CARGO_TARGET_DIR"] = str(args.target_dir.resolve())
-    environment["AVIBE_DESKTOP_UPDATER_PUBLIC_KEY"] = (
-        source / "desktop/runtime-host/tests/fixtures/updater/public-key.txt"
-    ).read_text().strip()
+    environment["AVIBE_DESKTOP_UPDATER_PUBLIC_KEY"] = public_key
     command = [
         "cargo", "build", "--manifest-path", "desktop/Cargo.toml", "-p", "avibe-desktop",
         "--example", "instance_client_probe", "--locked", "--offline",
@@ -202,16 +270,8 @@ def main():
     executable = args.output / "instance_client_probe"
     shutil.copy2(args.target_dir / "debug/examples/instance_client_probe", executable)
     assert not any(part.endswith(".app") for part in executable.resolve().parts)
-    record = {
-        "head": args.head, "bundle_sha256": args.bundle_sha256, "command": command,
-        "updater_original_sha256": hashlib.sha256(original.encode()).hexdigest(),
-        "updater_fixture_sha256": hashlib.sha256(updater.read_bytes()).hexdigest(),
-        "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
-        "binary": str(executable), "source": str(source),
-        "fixture_public_key": "desktop/runtime-host/tests/fixtures/updater/public-key.txt",
-        "recorded_peripheral_calls": peripheral_calls,
-        "shell_adaptations": shell_adaptations,
-    }
+    record.update({"command":command, "binary_sha256":hashlib.sha256(executable.read_bytes()).hexdigest(),
+                   "binary":str(executable), "source":str(source)})
     (args.output / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps(record))
 

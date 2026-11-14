@@ -22,6 +22,7 @@ use tokio::sync::{oneshot, Notify};
 enum Reply {
     Ready(Response),
     Held(oneshot::Receiver<Response>, Arc<Notify>),
+    Failure,
 }
 struct Http {
     replies: Mutex<VecDeque<(&'static str, Reply)>>,
@@ -43,6 +44,7 @@ impl Transport for Http {
             .expect("unexpected HTTP request");
         assert_eq!(path, expected);
         match reply {
+            Reply::Failure => Err(ClientError::new("network_unavailable")),
             Reply::Ready(response) => Ok(response),
             Reply::Held(receiver, entered) => {
                 entered.notify_one();
@@ -142,7 +144,7 @@ impl ClientView for View {
         self.restored.lock().unwrap().push(target);
         Ok(())
     }
-    async fn signed_out(&self, _: Epoch, _: ClientTarget) -> Result<(), ClientError> {
+    async fn signed_out(&self, _: Epoch, _: ClientTarget, _: bool) -> Result<(), ClientError> {
         if self.retirement_failure.load(Ordering::SeqCst) {
             Err(ClientError::new("window_unavailable"))
         } else {
@@ -206,6 +208,168 @@ async fn action(client: &Coordinator, action: ClientAction) -> ClientReply {
             action,
         })
         .await
+}
+
+// A4 requires current local proof, including failure after a successful read.
+// A URL validation case alone cannot exercise transport failure publication.
+#[tokio::test]
+async fn local_refresh_failure_clears_proof_without_reclassifying_enrollment() {
+    for failure in [Reply::Failure, Reply::Ready(response(503, json!({}), None))] {
+        let f = fixture(vec![
+            ("/api/desktop/local-instance", ok(local_proof())),
+            ("/api/desktop/local-instance", failure),
+        ]);
+        f.client.local_origin(Some(
+            avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
+        ));
+        f.client.refresh_local().await;
+        assert_eq!(f.client.state().local.instance_id.as_deref(), Some("local-id"));
+        assert_eq!(
+            f.client.state().local.remote_access_url.as_deref(),
+            Some("https://local.avibe.bot")
+        );
+        let enrollment = serde_json::to_value(f.client.state().enrollment).unwrap();
+        f.client.refresh_local().await;
+        let state = f.client.state();
+        assert!(state.local.instance_id.is_none() && state.local.remote_access_url.is_none());
+        assert_eq!(state.local.remote_access, RemoteAccessState::Unavailable);
+        assert_eq!(serde_json::to_value(state.enrollment).unwrap(), enrollment);
+    }
+}
+
+fn local_proof() -> Value {
+    json!({"schema_version":1,"installation_id":"fixture","binding_revision":"one","device_name":"Local",
+        "pairing":{"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"},
+        "remote_access":{"configured_enabled":true,"requested":true,"running":true}})
+}
+
+// A suspended account transaction cloned the old local proof. Its later
+// persistence must not resurrect that proof after a failed local refresh.
+#[tokio::test]
+async fn local_refresh_cannot_be_overwritten_by_an_older_account_transaction() {
+    let (release, waiting) = oneshot::channel();
+    let entered = Arc::new(Notify::new());
+    let f = fixture(vec![
+        ("/api/desktop/local-instance", ok(local_proof())),
+        (
+            "/api/config/auth",
+            ok(json!({"supabase_url":"https://provider.test","supabase_anon_key":"fixture"})),
+        ),
+        ("/auth/v1/token", Reply::Held(waiting, entered.clone())),
+        ("/api/desktop/local-instance", Reply::Failure),
+    ]);
+    f.client.local_origin(Some(
+        avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
+    ));
+    f.client.refresh_local().await;
+    let client = f.client.clone();
+    let password = tokio::spawn(async move {
+        action(
+            &client,
+            ClientAction::SignInPassword {
+                email: "user@example.test".into(),
+                password: "synthetic".into(),
+            },
+        )
+        .await
+    });
+    entered.notified().await;
+    let client = f.client.clone();
+    let mut refresh = tokio::spawn(async move {
+        client.refresh_local().await;
+    });
+    // Old behavior completes the refresh while the older account clone is held.
+    // Serialized refresh legitimately waits for that operation to finish.
+    let finished = tokio::time::timeout(std::time::Duration::from_millis(50), &mut refresh)
+        .await
+        .is_ok();
+    release
+        .send(response(400, json!({"error":"invalid_credentials"}), None))
+        .ok()
+        .unwrap();
+    assert!(!password.await.unwrap().ok);
+    if !finished {
+        refresh.await.unwrap();
+    }
+    assert!(
+        f.client.state().local.instance_id.is_none(),
+        "old account clone resurrected local proof"
+    );
+    assert!(f.client.state().local.remote_access_url.is_none());
+}
+
+// A4 first factor must use the existing cookie/2FA owner; the prior OTP-only
+// cases never exercised password dispatch or a delayed password provider reply.
+#[tokio::test]
+async fn password_first_factor_continues_second_factor_and_fences_late_provider() {
+    let password = || {
+        serde_json::from_value::<ClientAction>(json!({
+            "type":"sign_in_password","email":"user@example.test","password":"synthetic-password"
+        }))
+        .expect("A4 password action")
+    };
+    for cancel in [false, true] {
+        let (release, waiting) = oneshot::channel();
+        let entered = Arc::new(Notify::new());
+        let f = fixture(vec![
+            (
+                "/api/config/auth",
+                ok(json!({"supabase_url":"https://provider.test","supabase_anon_key":"public-fixture"})),
+            ),
+            ("/auth/v1/token", Reply::Held(waiting, entered.clone())),
+            (
+                "/api/desktop/session",
+                Reply::Ready(response(
+                    403,
+                    json!({"error":"two_factor_required","email":"user@example.test","gate":"challenge","methods":["totp"]}),
+                    Some("account=fixture; Path=/; Secure; HttpOnly"),
+                )),
+            ),
+            ("/api/two-factor/verify", ok(json!({}))),
+            ("/api/mobile/session", ok(signed_in())),
+        ]);
+        let client = f.client.clone();
+        let input = password();
+        assert!(!format!("{input:?}").contains("synthetic-password"));
+        let pending = tokio::spawn(async move { action(&client, input).await });
+        entered.notified().await;
+        assert_eq!(f.client.state().generation, 1);
+        if cancel {
+            assert!(action(&f.client, ClientAction::Cancel).await.ok);
+        }
+        assert!(release
+            .send(response(
+                200,
+                json!({"access_token":"synthetic-access","refresh_token":"synthetic-refresh"}),
+                None
+            ))
+            .is_ok());
+        let reply = pending.await.unwrap();
+        if cancel {
+            assert_eq!(reply.error.unwrap().code, "stale_generation");
+            assert_eq!(
+                f.http.calls.lock().unwrap().as_slice(),
+                ["/api/config/auth", "/auth/v1/token"]
+            );
+            assert!(f.private.0.lock().unwrap().is_empty());
+        } else {
+            assert!(reply.ok);
+            assert_eq!(reply.state.account.status, AccountStatus::SecondFactorRequired);
+            assert!(
+                action(
+                    &f.client,
+                    ClientAction::VerifySecondFactor {
+                        method: CodeMethod::Recovery,
+                        code: "fixture-code".into()
+                    }
+                )
+                .await
+                .ok
+            );
+            assert_eq!(f.client.state().account.status, AccountStatus::SignedIn);
+        }
+        assert!(!serde_json::to_string(&f.client.state()).unwrap().contains("synthetic-"));
+    }
 }
 // AUTH-SETUP-177/178: local updater intents must not become selected-Runtime
 // actions or account transactions. Existing OTP/selection tests do not dispatch
@@ -367,7 +531,11 @@ async fn native_link_admission_preserves_only_its_received_action_authority() {
         if interruption == "cleanup_failure" {
             f.view.retirement_failure.store(true, Ordering::SeqCst);
             assert_eq!(
-                action(&f.client, ClientAction::SignOut).await.error.unwrap().code,
+                action(&f.client, ClientAction::SignOut { intent_id: None })
+                    .await
+                    .error
+                    .unwrap()
+                    .code,
                 "window_unavailable"
             );
         }
@@ -524,8 +692,8 @@ async fn startup_restore_continues_only_after_local_lifecycle_invalidation() {
             (None, false),
             (Some(ClientAction::Cancel), false),
             (Some(ClientAction::ReturnLocal), false),
-            (Some(ClientAction::SignOut), false),
-            (Some(ClientAction::SignOut), true),
+            (Some(ClientAction::SignOut { intent_id: None }), false),
+            (Some(ClientAction::SignOut { intent_id: None }), true),
         ] {
             let mut replies = first_factor();
             replies.push((
@@ -629,7 +797,7 @@ async fn startup_restore_continues_only_after_local_lifecycle_invalidation() {
                     "credentials_unavailable"
                 );
                 f.private.2.store(false, Ordering::SeqCst);
-                assert!(action(&restored, ClientAction::SignOut).await.ok);
+                assert!(action(&restored, ClientAction::SignOut { intent_id: None }).await.ok);
                 assert!(f.private.0.lock().unwrap().is_empty());
             }
             assert!(f.http.replies.lock().unwrap().is_empty());
@@ -658,7 +826,7 @@ async fn signout_during_session_establishment_discards_late_cookie_and_stops_enr
     let verification =
         tokio::spawn(async move { action(&client, ClientAction::VerifyOtp { code: "123456".into() }).await });
     entered.notified().await;
-    assert!(action(&f.client, ClientAction::SignOut).await.ok);
+    assert!(action(&f.client, ClientAction::SignOut { intent_id: None }).await.ok);
     release
         .send(response(
             200,
@@ -814,7 +982,7 @@ async fn signout_owns_and_erases_a_first_credential_write_before_public_commit()
     assert!(f.client.state().account.identity.is_none());
     assert!(!f.private.0.lock().unwrap().is_empty());
     let client = f.client.clone();
-    let logout = tokio::spawn(async move { action(&client, ClientAction::SignOut).await });
+    let logout = tokio::spawn(async move { action(&client, ClientAction::SignOut { intent_id: None }).await });
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while f.client.state().account.status != AccountStatus::SignedOut {
             tokio::task::yield_now().await;
@@ -839,7 +1007,7 @@ async fn old_signout_cannot_erase_a_newer_generation() {
             version: 1,
             request_id: "old".into(),
             expected_generation: 0,
-            action: ClientAction::SignOut,
+            action: ClientAction::SignOut { intent_id: None },
         })
         .await;
     assert_eq!(reply.error.unwrap().code, "stale_generation");
@@ -1074,7 +1242,7 @@ async fn cancellation_rolls_back_unpublished_credential_writes() {
                 Some("credentials_unavailable")
             );
             f.private.2.store(false, Ordering::SeqCst);
-            assert!(action(&f.client, ClientAction::SignOut).await.ok);
+            assert!(action(&f.client, ClientAction::SignOut { intent_id: None }).await.ok);
         } else {
             assert!(cancelled.ok);
         }
@@ -1159,6 +1327,9 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
             Some(error.code.as_str())
         );
         if erase_failure || retirement_failure {
+            let snapshot = action(&restored, ClientAction::GetState).await;
+            assert_eq!(snapshot.error.unwrap().code, error.code);
+            assert!(snapshot.result.is_none());
             assert_eq!(!f.private.0.lock().unwrap().is_empty(), erase_failure);
             f.http
                 .replies
@@ -1181,8 +1352,9 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
             assert_eq!(blocked.error.unwrap().code, error.code);
             f.private.2.store(false, Ordering::SeqCst);
             f.view.retirement_failure.store(false, Ordering::SeqCst);
-            assert!(action(&restored, ClientAction::SignOut).await.ok);
+            assert!(action(&restored, ClientAction::SignOut { intent_id: None }).await.ok);
             assert!(restored.state().enrollment.error_code.is_none());
+            assert!(action(&restored, ClientAction::GetState).await.ok);
         }
         assert!(f.private.0.lock().unwrap().is_empty());
         assert!(f.store.load("unused").unwrap().account_id.is_none());
@@ -1444,4 +1616,59 @@ async fn an_instance_dropped_from_recency_returns_to_server_order() {
     assert!(reply.ok, "{:?}", reply.error);
     assert_eq!(order(&f.client), ["two", "one", "three"]);
     assert!(f.http.replies.lock().unwrap().is_empty());
+}
+
+// A rejected replacement first factor cannot leave an unusable old OTP or MFA
+// projection. The previous success/cancel cases did not switch first-factor modes.
+#[tokio::test]
+async fn rejected_password_retires_previous_first_factor_state() {
+    for factor in [false, true] {
+        let mut replies = first_factor();
+        replies.truncate(2);
+        if factor {
+            replies.extend([
+                ("/auth/v1/verify", ok(json!({"access_token":"a","refresh_token":"r"}))),
+                ("/api/desktop/session", Reply::Ready(response(403,json!({"error":"two_factor_required","email":"old@example.test","gate":"challenge","methods":["totp"]}),Some("old_factor=private; Path=/; Secure; HttpOnly")))),
+            ]);
+        }
+        replies.extend([
+            ("/api/config/auth", ok(json!({"supabase_url":"https://provider.test","supabase_anon_key":"public"}))),
+            ("/auth/v1/token", Reply::Ready(response(400,json!({"error":"invalid_grant","error_code":"invalid_credentials","error_description":"synthetic-private-detail"}),None))),
+        ]);
+        let f = fixture(replies);
+        assert!(
+            action(
+                &f.client,
+                ClientAction::RequestOtp {
+                    email: "old@example.test".into()
+                }
+            )
+            .await
+            .ok
+        );
+        if factor {
+            assert!(
+                action(&f.client, ClientAction::VerifyOtp { code: "123456".into() })
+                    .await
+                    .ok
+            );
+        }
+        let reply = action(
+            &f.client,
+            serde_json::from_value(
+                json!({"type":"sign_in_password","email":"new@example.test","password":"synthetic-password"}),
+            )
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(reply.error.unwrap().code, "invalid_credentials");
+        assert_eq!(reply.state.account.status, AccountStatus::SignedOut);
+        assert!(reply.state.account.email.is_none());
+        assert!(reply.state.account.gate.is_none());
+        assert!(reply.state.catalog.instances.is_empty());
+        assert!(f.private.0.lock().unwrap().is_empty());
+        assert!(!serde_json::to_string(&f.client.state())
+            .unwrap()
+            .contains("synthetic-private"));
+    }
 }
