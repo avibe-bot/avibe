@@ -13,7 +13,7 @@ Approved input: `rc19-final-change-list.md` v2, Max 2026-11-14 21:00 (password l
 
 ## Verification
 
-Focused observable regressions cover footer presentation and switcher/auth transitions; hermetic browser fixtures cover long content, opening/failure/upgrade/offline/consent and both languages/themes. Run UI/account builds, lint, test/browser/design type checks, scoped design shots and inspect results. No live account/OTP, credentials or services. Existing native evidence is not attributed to this candidate.
+Focused observable regressions cover footer presentation and switcher/auth transitions; hermetic browser fixtures cover long content, opening/failure/upgrade/offline/consent and both languages/themes. Run `npm run build` in both `ui/` and `desktop/`: the full Desktop build checks its stricter imported TypeScript graph and produces bootstrap plus account assets. Also run lint, test/browser/design type checks, scoped design shots and inspect results. No live account/OTP, credentials or services. Existing native evidence is not attributed to this candidate.
 
 ## Progress
 
@@ -51,3 +51,11 @@ With native's explicit reserved-file coordination, `useAccountClient.ts` now ret
 The follow-up passed 54 focused unit tests (`ipc-unit-final.log`), including eight table scenarios for reject/malformed, unchanged/advanced generation and Escape/newer signed-out contrasts, plus the native get-state cleanup-error consumer. Twelve affected browser cases passed (`ipc-browser-final.log`), including actual rejected and malformed invoke promises after a pending-generation broadcast, row-local errors and successful explicit Retry. Two additional en/zh native-error/offline browser cases passed (`ipc-native-error-browser.log`). The new screenshots are in `ipc-browser-artifacts/` and were inspected. UI/account builds, test/browser types and lint passed (`ipc-ui-build.log`, `ipc-account-build.log`, `ipc-types.log`, `ipc-browser-types.log`, `ipc-lint.log`). Unchanged design views retain the earlier 88 exported shots and 156-capture DOM evidence.
 
 The `aba058c95ffb1c38303e9a809063a30af20c2ef0` archives remain historical. New source-locked archives supersede them; the external evidence manifest records the exact follow-up commit and SHA256 values. Delivery remains local before installed-package acceptance and PR creation.
+
+## Full Desktop build prerequisite
+
+The integrated `648acf5a696a2cec46fde9bb7e42e9b03a595742` candidate exposed 11 indexed-access diagnostics in shared motion/sheet-drag helpers through the account page's Dialog dependency. Desktop enables `noUncheckedIndexedAccess`; the earlier UI build did not exercise that stricter configuration. The retained reproduction is `desktop-strict-build-red.log`.
+
+The bounded correction expresses existing four-capture regex and nonempty-array/touch invariants in six erased type expressions. Runtime guards, animation, gesture behavior, APIs and compiler settings are unchanged. A before/after JavaScript transform comparison is identical after removing the added explanatory comments (`desktop-strict-runtime-equivalence.log`).
+
+Full Desktop build (strict typecheck, bootstrap and account), UI build, test types and lint passed (`desktop-strict-build-green.log`, `desktop-strict-ui-build.log`, `desktop-strict-types.log`, `desktop-strict-lint.log`). Existing motion/sheet-drag and actual AccountApp consumers passed 37 tests (`desktop-strict-unit-green.log`). Eight bundled login-to-consent browser cases passed across both sizes, languages and themes (`desktop-strict-browser.log`). No new tests or visual source changes were needed. Source-dependent package outputs must be rebuilt from the new committed pin; earlier artifacts remain historical.
