@@ -188,9 +188,9 @@ class LaunchUpstream(FakeUpstream):
         return result
 
 
-def server_for(tmp_path):
+def server_for(tmp_path, upstream=None):
     state_path, state = _state(tmp_path)
-    upstream = LaunchUpstream()
+    upstream = upstream if upstream is not None else LaunchUpstream()
     server = cs.ComputerUseServer(state_path=state_path,
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
         status_reader=lambda: ComputerUseStatus("ready", None, state))
@@ -221,6 +221,20 @@ async def test_controller_bad_file_never_dispatches(tmp_path, fake_kernel):
     assert not upstream.calls
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("component", ["Apps.", "Apps ", ".", ".."])
+async def test_controller_refuses_final_path_that_changes_meaning(tmp_path, fake_kernel, component):
+    # The public spelling is valid; only the opened file's OS-final name is unsafe.
+    fake_kernel[0].final = "\\\\?\\C:\\" + component + "\\App.exe"
+    server, upstream = server_for(tmp_path, FakeUpstream())
+    result = await server.call_tool("launch_app", {"session": "s", "path": r"C:\Tools\App.exe"})
+    assert result.get("isError") is True
+    assert result["structuredContent"]["code"] == "invalid_arguments"
+    assert result["structuredContent"]["dispatched"] is False
+    assert not upstream.calls
+    assert fake_kernel[2] == [10]
+
+
 native = pytest.mark.skipif(os.name != "nt", reason="Windows native path API")
 
 
@@ -242,14 +256,49 @@ def test_windows_native_path_canonical_regular_exe_and_missing(tmp_path):
 
 
 @native
-def test_windows_native_path_follows_junction_to_final_local_file(tmp_path):
-    actual = tmp_path / "actual"
-    actual.mkdir()
-    shutil.copyfile(sys.executable, actual / "Target.exe")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["", ".", " "])
+async def test_windows_native_path_follows_junction_to_final_local_file(tmp_path, suffix):
+    ordinary = tmp_path / "Apps"
+    ordinary.mkdir()
+    shutil.copyfile(sys.executable, ordinary / "Target.exe")
+    # Verbatim paths create genuinely distinct directories, not normalized aliases.
+    actual = "\\\\?\\" + str(ordinary) + suffix
+    if suffix:
+        os.mkdir(actual)
+        shutil.copyfile(sys.executable, actual + "\\Target.exe")
+        assert not os.path.samefile(str(ordinary / "Target.exe"), actual + "\\Target.exe")
     junction = tmp_path / "junction"
-    subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(junction), str(actual)],
-                   check=True, capture_output=True, timeout=10)
     try:
-        assert cs._windows_executable_path(str(junction / "Target.exe")) == cs._windows_executable_path(str(actual / "Target.exe"))
+        subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(junction), actual],
+                       check=True, capture_output=True, timeout=10)
+        requested = str(junction / "Target.exe")
+        assert os.path.samefile(requested, actual + "\\Target.exe")
+        state_path, state = _state(tmp_path)
+        upstream = FakeUpstream()
+        server = cs.ComputerUseServer(state_path=state_path,
+            upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+            status_reader=lambda: ComputerUseStatus("ready", None, state))
+        # Valid ordinary sibling proves native file/drive admission is working.
+        safe = await server.call_tool("launch_app", {"session": "s", "path": str(ordinary / "Target.exe")})
+        assert not safe.get("isError")
+        upstream.calls.clear()
+        result = await server.call_tool("launch_app", {"session": "s", "path": requested})
+        if suffix:
+            assert result.get("isError") is True
+            assert result["structuredContent"]["code"] == "invalid_arguments"
+            assert result["structuredContent"]["dispatched"] is False
+            with pytest.raises(cs.ComputerServerError, match="cannot be represented"):
+                cs._windows_executable_path(requested)
+            assert not upstream.calls
+        else:
+            assert not result.get("isError")
+            forwarded = [call[1]["arguments"]["path"] for call in upstream.calls
+                         if call[1].get("name") == "launch_app"]
+            assert forwarded == [cs._windows_executable_path(str(ordinary / "Target.exe"))]
     finally:
-        junction.rmdir()
+        if os.path.lexists(junction):
+            junction.rmdir()
+        if suffix:
+            os.unlink(actual + "\\Target.exe")
+            os.rmdir(actual)

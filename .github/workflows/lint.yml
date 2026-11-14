@@ -1415,8 +1415,8 @@ jobs:
           [xml]$report = Get-Content ci-junit/computer-use-native.xml -Raw
           $cases = @($report.SelectNodes('//testcase') | Where-Object { $_.name -like 'test_windows_native_*' })
           $pathCases = @($cases | Where-Object { $_.name -like 'test_windows_native_path_*' })
-          if ($cases.Count -ne 9 -or $pathCases.Count -ne 2) {
-            throw "Expected seven foundation plus two native path cases, got $($cases.Count) total / $($pathCases.Count) path"
+          if ($cases.Count -ne 11 -or $pathCases.Count -ne 4) {
+            throw "Expected seven foundation plus four native path cases, got $($cases.Count) total / $($pathCases.Count) path"
           }
           if (@($cases | Where-Object { $_.SelectSingleNode('skipped') }).Count -ne 0) {
             throw "Native Computer Use cases must execute, not skip"
