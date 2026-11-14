@@ -1879,6 +1879,23 @@ final class MobileOnboardingTests: XCTestCase {
                 }
             }
             await fulfillment(of: [started], timeout: 30)
+            if operation == "logout" {
+                // Reset now reserves authority before cleanup. A duplicate
+                // must refuse without invalidating or stranding that owner.
+                do {
+                    _ = try await coordinator.logout()
+                    XCTFail("Duplicate logout must be busy")
+                } catch {
+                    XCTAssertEqual(error as? MobileAccountError, .busy)
+                }
+                release.fulfill()
+                let signedOut = try await pending.value
+                XCTAssertEqual(signedOut, .signedOut)
+                _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
+                XCTAssertEqual(coordinator.currentAccount?.id, "account-2")
+                XCTAssertEqual(created, 2)
+                continue
+            }
             let signedOut = try await coordinator.logout()
             XCTAssertEqual(signedOut, .signedOut, operation)
             _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
@@ -1915,6 +1932,11 @@ final class MobileOnboardingTests: XCTestCase {
             let replacement = FakeMobileAuthTransport()
             let accountB = snapshot(accountID: "account-2")
             replacement.session = accountB
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = .nonPersistent()
+            let retainedView = WKWebView(frame: .zero, configuration: configuration)
+            let lateBarrier = WebsiteDataStoreReleaseBarrier(webViews: [retainedView])
+            var transitions = 0
             let transports = [original, resetting, replacement]
                 + (0..<3).map { _ in FakeMobileAuthTransport() }
             var otpRequests = 0
@@ -1925,7 +1947,13 @@ final class MobileOnboardingTests: XCTestCase {
             var opened: MobileRuntimeContext?
             let coordinator = makeCoordinator(
                 defaults: defaults, websiteDataStore: store, transports: transports,
-                onCreateTransport: { created += 1 }, onOpen: { opened = $0 }
+                onCreateTransport: { created += 1 }, onOpen: { opened = $0 },
+                onPrepareAccountTransition: {
+                    transitions += 1
+                    // The NEW reset records a retained view after the old
+                    // rotation has already entered its asynchronous listing.
+                    return transitions == 2 ? [lateBarrier] : []
+                }
             )
             coordinator.activateAccountSurface()
             let pending = Task {
@@ -1953,7 +1981,129 @@ final class MobileOnboardingTests: XCTestCase {
             XCTAssertEqual(created, 3, operation)
             XCTAssertTrue(coordinator.isCurrentRuntime(runtime), operation)
             XCTAssertFalse(coordinator.isAccountSurfaceActive, operation)
+            XCTAssertTrue(registry.removalAttempts.isEmpty, operation)
+            withExtendedLifetime(retainedView) {}
         }
+    }
+
+    func testLogoutReservesAuthorityBeforeAnOlderRefreshReturns() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        let rows: [(String, MobileSessionDiscovery?)] = [
+            ("second factor", .secondFactorRequired(requirement)),
+            ("removed origin", .signedIn(snapshot(accountID: "account-1", instances: []))),
+            ("signed out", nil),
+            ("other account", .signedIn(snapshot(accountID: "account-2"))),
+        ]
+        for (kind, discovery) in rows {
+            for refreshFirst in [false, true] {
+                let name = "\(kind), refresh completes first: \(refreshFirst)"
+                let defaults = makeDefaults()
+                let store = makeAccountStore(defaults: defaults)
+                let oldIdentifier = store.identifier
+                let first = FakeMobileAuthTransport()
+                first.session = snapshot(accountID: "account-1")
+                let fetch = FakeMobileAuthTransport()
+                let fetched = expectation(description: "fetch \(name)")
+                let releaseFetch = expectation(description: "release fetch \(name)")
+                fetch.fetchSessionHandler = {
+                    fetched.fulfill()
+                    await self.fulfillment(of: [releaseFetch], timeout: 30)
+                    return discovery
+                }
+                let replacement = FakeMobileAuthTransport()
+                let cleanup = expectation(description: "logout owns cleanup \(name)")
+                let releaseCleanup = expectation(description: "release cleanup \(name)")
+                let coordinator = makeCoordinator(
+                    defaults: defaults, websiteDataStore: store,
+                    transports: [first, fetch, replacement, FakeMobileAuthTransport()],
+                    onPreparePushLogout: {
+                        cleanup.fulfill()
+                        await self.fulfillment(of: [releaseCleanup], timeout: 30)
+                    }
+                )
+                coordinator.activateAccountSurface()
+                _ = try await coordinator.bootstrap()
+                _ = try coordinator.selectInstance(id: instance.id)
+                coordinator.activateAccountSurface()
+                let refresh = Task { try await coordinator.refresh() }
+                await fulfillment(of: [fetched], timeout: 30)
+                let logout = Task { try await coordinator.logout() }
+                await fulfillment(of: [cleanup], timeout: 30)
+                let refreshResult: Result<MobileSessionState, Error>
+                let logoutResult: Result<MobileSessionState, Error>
+                if refreshFirst {
+                    releaseFetch.fulfill()
+                    refreshResult = await refresh.result
+                    releaseCleanup.fulfill()
+                    logoutResult = await logout.result
+                } else {
+                    releaseCleanup.fulfill()
+                    logoutResult = await logout.result
+                    releaseFetch.fulfill()
+                    refreshResult = await refresh.result
+                }
+                switch refreshResult {
+                case .success: XCTFail("Older refresh must lose: \(name)")
+                case .failure(let error):
+                    XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session", name)
+                }
+                XCTAssertEqual(try logoutResult.get(), .signedOut, name)
+                XCTAssertNil(coordinator.currentAccount, name)
+                XCTAssertNotEqual(store.identifier, oldIdentifier, name)
+                let bootstrap = try await coordinator.bootstrap()
+                XCTAssertEqual(bootstrap, .signedOut, name)
+                let cooldown = try await coordinator.requestOTP(email: "next@example.com")
+                XCTAssertEqual(cooldown, 60, name)
+            }
+        }
+    }
+
+    func testAnOlderCleanupDoesNotSuppressANewerAccountsCleanup() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-2@example.com", gate: .challenge, methods: [.totp]
+        )
+        let initial = FakeMobileAuthTransport()
+        initial.session = snapshot(accountID: "account-1")
+        let oldRefresh = FakeMobileAuthTransport()
+        oldRefresh.session = snapshot(accountID: "account-1", instances: [])
+        let replacement = FakeMobileAuthTransport()
+        replacement.session = snapshot(accountID: "account-2")
+        let newRefresh = FakeMobileAuthTransport()
+        newRefresh.secondFactor = requirement
+        let oldCleanup = expectation(description: "old account cleanup")
+        let releaseOld = expectation(description: "release old account cleanup")
+        var cleanups = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(), transports: [initial, oldRefresh, replacement, newRefresh],
+            onPreparePushLogout: {
+                cleanups += 1
+                if cleanups == 1 {
+                    oldCleanup.fulfill()
+                    await self.fulfillment(of: [releaseOld], timeout: 30)
+                }
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        coordinator.activateAccountSurface()
+        let pending = Task { try await coordinator.refresh() }
+        await fulfillment(of: [oldCleanup], timeout: 30)
+        _ = try await coordinator.logout()
+        _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
+        _ = try coordinator.selectInstance(id: instance.id)
+        let state = try await coordinator.refresh()
+        releaseOld.fulfill()
+        switch await pending.result {
+        case .success: XCTFail("Old account refresh must lose authority")
+        case .failure(let error):
+            XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
+        }
+        XCTAssertEqual(cleanups, 2)
+        XCTAssertEqual(state, .twoFactorRequired(requirement))
+        XCTAssertFalse(coordinator.isAccountSurfaceActive)
     }
 
     func testRefreshPushLogoutKeepsTheOuterTransportOwner() async throws {
@@ -2310,7 +2460,7 @@ final class MobileOnboardingTests: XCTestCase {
                     operation
                 )
             }
-            XCTAssertTrue(coordinator.isAccountSurfaceActive, operation)
+            XCTAssertEqual(coordinator.isAccountSurfaceActive, operation == "refresh")
         }
     }
 
@@ -3034,63 +3184,63 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     func testStoreRemovalWaitIsBoundedAndDefersCleanupForARetainedWebView() async throws {
-        let defaults = makeDefaults()
-        let registry = FakeNamedDataStoreRegistry()
-        let store = AccountWebsiteDataStore(
-            defaults: defaults,
-            operations: registry.operations
-        )
-        let oldIdentifier = store.identifier
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        var retainedWebView: WKWebView? = WKWebView(
-            frame: .zero,
-            configuration: configuration
-        )
-        var secondRetainedWebView: WKWebView? = WKWebView(
-            frame: .zero,
-            configuration: configuration
-        )
-        let releaseBarrier = WebsiteDataStoreReleaseBarrier(
-            webViews: [try XCTUnwrap(retainedWebView)]
-        )
-        let secondReleaseBarrier = WebsiteDataStoreReleaseBarrier(
-            webViews: [try XCTUnwrap(secondRetainedWebView)]
-        )
-        let coordinator = makeCoordinator(
-            defaults: defaults,
-            websiteDataStore: store,
-            transports: [
-                FakeMobileAuthTransport(),
-                FakeMobileAuthTransport(),
-            ],
-            onPrepareAccountTransition: {
-                [releaseBarrier, secondReleaseBarrier]
+        for supersedesWaiter in [false, true] {
+            let defaults = makeDefaults()
+            let registry = FakeNamedDataStoreRegistry()
+            let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+            let oldIdentifier = store.identifier
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = .nonPersistent()
+            var retainedWebView: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
+            var secondRetainedWebView: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
+            let releaseBarrier = WebsiteDataStoreReleaseBarrier(webViews: [try XCTUnwrap(retainedWebView)])
+            let secondReleaseBarrier = WebsiteDataStoreReleaseBarrier(webViews: [try XCTUnwrap(secondRetainedWebView)])
+            let firstWait = supersedesWaiter
+                ? expectation(description: "old transport released before barrier wait") : nil
+            let original = FakeMobileAuthTransport()
+            if let firstWait { original.onInvalidate = { firstWait.fulfill() } }
+            var transitions = 0
+            let coordinator = makeCoordinator(
+                defaults: defaults, websiteDataStore: store,
+                transports: [original, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+                onPrepareAccountTransition: {
+                    transitions += 1
+                    // AppModel drains the barriers once, not again on reset.
+                    return transitions == 1 ? [releaseBarrier, secondReleaseBarrier] : []
+                }
+            )
+            coordinator.activateAccountSurface()
+            var older: Task<Int, Error>?
+            if let firstWait {
+                older = Task { try await coordinator.requestOTP(email: "old@example.com") }
+                await fulfillment(of: [firstWait], timeout: 30)
+                XCTAssertEqual(store.identifier, oldIdentifier)
             }
-        )
-        coordinator.activateAccountSurface()
+            let clock = ContinuousClock()
+            let startedAt = clock.now
+            let state = try await coordinator.logout()
+            let elapsed = startedAt.duration(to: clock.now)
+            if let older {
+                switch await older.result {
+                case .success: XCTFail("Old rotation must lose reset authority")
+                case .failure(let error):
+                    XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
+                }
+            }
+            XCTAssertEqual(state, .signedOut)
+            XCTAssertLessThan(elapsed, .milliseconds(1500))
+            XCTAssertNotEqual(store.identifier, oldIdentifier)
+            XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
+            XCTAssertTrue(registry.removalAttempts.isEmpty, "supersedes waiter: \(supersedesWaiter)")
 
-        let clock = ContinuousClock()
-        let startedAt = clock.now
-        let state = try await coordinator.logout()
-        let elapsed = startedAt.duration(to: clock.now)
-
-        XCTAssertEqual(state, .signedOut)
-        XCTAssertLessThan(elapsed, .milliseconds(1500))
-        XCTAssertNotEqual(store.identifier, oldIdentifier)
-        XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
-        XCTAssertTrue(registry.removalAttempts.isEmpty)
-
-        retainedWebView = nil
-        secondRetainedWebView = nil
-        let unreleased = await WebsiteDataStoreReleaseBarrier.waitForRelease(
-            of: [releaseBarrier, secondReleaseBarrier]
-        )
-        XCTAssertTrue(unreleased.isEmpty)
-        await store.sweepOrphans()
-
-        XCTAssertFalse(registry.identifiers.contains(oldIdentifier))
-        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
+            retainedWebView = nil
+            secondRetainedWebView = nil
+            let unreleased = await WebsiteDataStoreReleaseBarrier.waitForRelease(of: [releaseBarrier, secondReleaseBarrier])
+            XCTAssertTrue(unreleased.isEmpty)
+            await store.sweepOrphans()
+            XCTAssertFalse(registry.identifiers.contains(oldIdentifier))
+            XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
+        }
     }
 
     func testAccountTransitionReleasesARealPopupBeforeStoreRemoval() async throws {

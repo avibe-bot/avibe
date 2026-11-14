@@ -403,7 +403,10 @@ final class AccountWebsiteDataStore {
         dataStore = operations.makeDataStore(resolvedIdentifier)
     }
 
-    func rotate(sweepOwnedStores: Bool = true) async {
+    func rotate(
+        sweepOwnedStores: Bool = true,
+        canSweep: @escaping @MainActor () -> Bool = { true }
+    ) async {
         onWillRotate?()
         let newIdentifier = UUID()
         ownedIdentifiers.insert(newIdentifier)
@@ -413,8 +416,8 @@ final class AccountWebsiteDataStore {
         dataStore = operations.makeDataStore(newIdentifier)
 
         await Task.yield()
-        if sweepOwnedStores {
-            await sweepOrphans()
+        if sweepOwnedStores, canSweep() {
+            await sweepOrphans(canSweep: canSweep)
         }
     }
 
@@ -425,16 +428,23 @@ final class AccountWebsiteDataStore {
     /// a removal WebKit reported as done. So the sweep that removes a store
     /// keeps it, and a later sweep (the next launch or account change) removes
     /// it again if it came back, or forgets it once it is gone.
-    func sweepOrphans() async {
+    func sweepOrphans(
+        canSweep: @escaping @MainActor () -> Bool = { true }
+    ) async {
         let candidates = ownedIdentifiers.subtracting([identifier])
         guard !candidates.isEmpty else {
             return
         }
         let listed = await operations.listIdentifiers()
+        guard canSweep() else { return }
 
         for candidate in candidates.sorted(by: {
             $0.uuidString < $1.uuidString
         }) {
+            // Listing/removal can suspend while a reset acquires authority or
+            // records another retained view. Never use an entry-time decision
+            // to remove a store after either ownership condition has changed.
+            guard canSweep() else { break }
             guard listed.contains(candidate) else {
                 ownedIdentifiers.remove(candidate)
                 continue
@@ -547,7 +557,7 @@ final class MobileSessionCoordinator {
         case ready
         case operation(UUID)
         case resetting(UUID)
-        case pushLogout(UUID?)
+        case pushLogout(UUID, resetting: Bool)
     }
 
     var isAccountSurfaceActive: Bool {
@@ -631,6 +641,11 @@ final class MobileSessionCoordinator {
         if let authoritativeTransition {
             return authoritativeTransition.state
         }
+        if case .resetting = phase {
+            // Reset authority was reserved before cleanup's first await.
+            // Old internal account data may still be needed by push cleanup.
+            return .signedOut
+        }
         if let snapshot {
             guard keepsSelection else {
                 throw MobileAccountError.busy
@@ -638,12 +653,6 @@ final class MobileSessionCoordinator {
             return state(for: snapshot)
         }
         if signedOutStoreIsFresh {
-            return .signedOut
-        }
-        if case .resetting = phase, snapshot == nil {
-            // logout() has already invalidated the old account and is
-            // replacing the page. The replacement must not race the reset's
-            // transport operation with a busy error.
             return .signedOut
         }
         return try await runExclusive {
@@ -936,10 +945,22 @@ final class MobileSessionCoordinator {
     }
 
     func logout() async throws -> MobileSessionState {
-        try await preparePushLogout(publishing: .signedOut, generation: generation)
+        // Reserve invalidation and phase authority BEFORE any await. An older
+        // fetch cannot advance generation and strand this logout in cleanup.
+        let borrowsCleanup: Bool
+        if case .pushLogout = phase {
+            borrowsCleanup = true
+        } else {
+            borrowsCleanup = false
+        }
         let resetToken = try beginReset()
+        let resetGeneration = generation
         defer { finishReset(resetToken) }
-        let resetGeneration = beginAccountTransition(clearSelection: true)
+        try await preparePushLogout(
+            publishing: .signedOut, generation: resetGeneration,
+            borrowingCleanup: borrowsCleanup
+        )
+        invalidateAccount(clearSelection: true)
         secondFactorEmail = nil
 
         if let oldTransport = transport {
@@ -1013,7 +1034,8 @@ final class MobileSessionCoordinator {
 
     private func preparePushLogout(
         publishing state: MobileSessionState,
-        generation requestGeneration: Int
+        generation requestGeneration: Int,
+        borrowingCleanup: Bool = false
     ) async throws {
         try requireCurrentGeneration(requestGeneration)
         let publicationID = UUID()
@@ -1023,33 +1045,34 @@ final class MobileSessionCoordinator {
                 authoritativeTransition = nil
             }
         }
-        await preparePushLogout()
+        if !borrowingCleanup {
+            await preparePushLogout()
+        }
         // Push cleanup can be superseded by logout and even a new login.
         // Transport ownership alone does not authorize the old state write.
         try requireCurrentGeneration(requestGeneration)
     }
 
     private func preparePushLogout() async {
-        let resumePhase: UUID?
-        switch phase {
-        case .ready:
-            resumePhase = nil
-        case .operation(let token):
-            resumePhase = token
-        case .resetting, .pushLogout:
+        let resumePhase = phase
+        let cleanupPhase: Phase
+        switch resumePhase {
+        case .operation(let owner):
+            cleanupPhase = .pushLogout(owner, resetting: false)
+        case .resetting(let owner):
+            cleanupPhase = .pushLogout(owner, resetting: true)
+        case .ready, .pushLogout:
             return
         }
-        let requestGeneration = generation
-        phase = .pushLogout(resumePhase)
+        phase = cleanupPhase
+        defer {
+            // Always release a phase we still own, even when the caller's
+            // generation became stale. Never restore somebody else's phase.
+            if phase == cleanupPhase {
+                phase = resumePhase
+            }
+        }
         await onPreparePushLogout()
-        guard generation == requestGeneration, phase == .pushLogout(resumePhase) else {
-            return
-        }
-        if let resumePhase {
-            phase = .operation(resumePhase)
-        } else {
-            phase = .ready
-        }
     }
 
     private func belongsToAnotherAccount(
@@ -1068,6 +1091,7 @@ final class MobileSessionCoordinator {
         with snapshot: MobileSessionSnapshot
     ) {
         generation += 1
+        authoritativeTransition = nil
         clearStoredSelection()
         self.snapshot = snapshot
         pendingStoreReleaseBarriers.append(
@@ -1287,6 +1311,11 @@ final class MobileSessionCoordinator {
     ) -> Int {
         generation += 1
         authoritativeTransition = nil
+        invalidateAccount(clearSelection: clearSelection)
+        return generation
+    }
+
+    private func invalidateAccount(clearSelection: Bool) {
         snapshot = nil
         if clearSelection {
             clearStoredSelection()
@@ -1297,23 +1326,29 @@ final class MobileSessionCoordinator {
         // An account page over a live runtime starts no transport; the
         // runtime is released by now, so the transition's requests can run.
         ensureTransport()
-        return generation
     }
 
     private func beginReset() throws -> UUID {
-        if case .resetting = phase {
+        switch phase {
+        case .resetting, .pushLogout(_, resetting: true):
+            // A duplicate never revokes the accepted reset's authority.
             throw MobileAccountError.busy
+        default:
+            break
         }
         let token = UUID()
         phase = .resetting(token)
-        // A reset supersedes any older exclusive operation. Its late
-        // completion may not release the replacement account transport.
-        transportOperationToken = nil
+        generation += 1
+        authoritativeTransition = nil
+        // Reset is now the sole owner across cleanup and store replacement;
+        // an old operation's defer cannot release its replacement transport.
+        transportOperationToken = token
         return token
     }
 
     private func finishReset(_ token: UUID) {
         if phase == .resetting(token) {
+            finishTransportOperation(token)
             phase = .ready
         }
     }
@@ -1385,16 +1420,20 @@ final class MobileSessionCoordinator {
     }
 
     private func rotateWebsiteDataStore(generation requestGeneration: Int) async throws {
-        // New releases can be recorded while this wait is suspended. Consume
-        // only this batch, then retain both its unreleased views and any new
-        // barriers, even if a reset has superseded this operation meanwhile.
-        let barriers = pendingStoreReleaseBarriers
-        pendingStoreReleaseBarriers = []
-        let unreleased = await WebsiteDataStoreReleaseBarrier.waitForRelease(of: barriers)
-        pendingStoreReleaseBarriers.append(contentsOf: unreleased)
+        // Waiters borrow barriers, never take them out of the shared registry.
+        // Every concurrent rotation must still see all retained views.
+        _ = await WebsiteDataStoreReleaseBarrier.waitForRelease(
+            of: pendingStoreReleaseBarriers
+        )
+        pendingStoreReleaseBarriers.removeAll(where: \.isReleased)
         try requireCurrentGeneration(requestGeneration)
         await websiteDataStore.rotate(
-            sweepOwnedStores: pendingStoreReleaseBarriers.isEmpty
+            sweepOwnedStores: pendingStoreReleaseBarriers.isEmpty,
+            canSweep: { [weak self] in
+                guard let self else { return false }
+                return self.generation == requestGeneration
+                    && self.pendingStoreReleaseBarriers.allSatisfy(\.isReleased)
+            }
         )
         try requireCurrentGeneration(requestGeneration)
     }
