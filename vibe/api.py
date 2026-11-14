@@ -10711,8 +10711,9 @@ def avault_agent_pubkey() -> dict:
 
 
 AVAULT_GENERATE_SECRET_MIN_VERSION = "0.1.13"
-# The shortest password avault generate-secret makes (0.1.13 accepts 12..=128). Requests and the
-# browser generator start at vault_service.GENERATE_PASSWORD_LENGTH; direct generation cannot yet.
+# An Agent-generated password is at least 12 characters: custody's own floor (avault generate-secret
+# accepts 12..=128), kept on purpose. The user picks 8..100 (vault_service.GENERATE_PASSWORD_LENGTH)
+# in the browser or through a request preset; Avibe refuses an Agent recipe above 100.
 AVAULT_GENERATE_PASSWORD_MIN_LENGTH = 12
 
 

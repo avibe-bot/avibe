@@ -132,8 +132,8 @@ def test_invalid_recipe_never_reaches_custody_or_storage(engine, monkeypatch, re
 
 @pytest.mark.parametrize("length,generated", [(8, False), (11, False), (12, True), (100, True)])
 def test_direct_generation_lengths_are_what_avault_makes(engine, monkeypatch, length, generated):
-    # Requests take 8..100, but avault generate-secret makes 12 or more: shorter is refused here,
-    # before custody, with a way forward, rather than failing inside avault.
+    # The user picks 8..100; an Agent generates 12..100 (custody's floor). Shorter is refused here,
+    # before custody, with the request preset as the way forward, rather than failing inside avault.
     custody = Mock(return_value=Sealed("generated-envelope", "nonce", "wrap"))
     monkeypatch.setattr(api, "avault_generate_secret", custody)
     response = _run({"recipe": {"type": "password", "length": length}})
@@ -143,7 +143,7 @@ def test_direct_generation_lengths_are_what_avault_makes(engine, monkeypatch, le
         return
     assert response["execution"] == "not_executed"
     assert response["payload"]["code"] == "invalid_generate_recipe"
-    assert "12 to 100" in response["payload"]["error"]
+    assert "at least 12 characters" in response["payload"]["error"]
     assert "vibe vault request" in response["payload"]["hint"]
     custody.assert_not_called()
     assert _counts(engine) == (0, 0)

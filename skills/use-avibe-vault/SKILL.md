@@ -52,7 +52,7 @@ Generate a password into a new Standard login entry, then use it by name without
 `vibe vault generate LOGIN --field password --length 32 --no-lookalikes --description "Automation login" --tag automation`
 `vibe vault run --env PASSWORD=LOGIN.password -- python login.py`
 
-The password default is 24 characters (12..100; for 8 to 11, use a `vibe vault request` preset below); letters are always enabled, digits and symbols are enabled unless `--no-digits` / `--no-symbols` is supplied, and lookalikes are allowed unless `--no-lookalikes` is supplied. No plaintext is printed. `--length` and the three password flags are invalid with hex/base64, even if another caller explicitly sends false for a password-only option.
+The password default is 24 characters (12..100: an Agent-generated password is at least 12 characters; for 8 to 11, ask the user with a `vibe vault request` generate preset below); letters are always enabled, digits and symbols are enabled unless `--no-digits` / `--no-symbols` is supplied, and lookalikes are allowed unless `--no-lookalikes` is supplied. No plaintext is printed. `--length` and the three password flags are invalid with hex/base64, even if another caller explicitly sends false for a password-only option.
 
 Add a new random field to that Standard entry, or create a separate Base64 secret:
 `vibe vault generate LOGIN --field api_token --type hex --bytes 32`
@@ -63,7 +63,7 @@ Hex is lowercase; Base64 uses standard padded encoding without line wrapping. Bo
 Request that the user add a missing static secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
 `vibe vault request OPENAI_API_KEY --reason "Need OpenAI API access" --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`
 
-A request may suggest a generator preset for an application that accepts a user-chosen secret. This is only a hint: the user chooses whether to generate and save, for either tier. Passwords default to 24 characters (8–100); hex and standard padded Base64 default to 32 random bytes (16–64). Do not use a generator to invent a third-party API key:
+A request may suggest a generator preset for an application that accepts a user-chosen secret. This is only a hint: the user chooses whether to generate and save, for either tier. Passwords default to 24 characters (8–100, chosen by the user); hex and standard padded Base64 default to 32 random bytes (16–64). Do not use a generator to invent a third-party API key:
 `vibe vault request APP_SECRET --reason "Configure the app signing secret" --spec-json '{"generate":{"type":"hex","bytes":32}}'`
 
 Request a multi-field login item with a password default. These are field names only, never values:
