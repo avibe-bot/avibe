@@ -715,11 +715,35 @@ def test_backend_failure_notify_passes_durable_web_push_gates(monkeypatch, tmp_p
             text="Still working",
         )
 
+        # A new workspace notice counts as unread, so it is gated on being read like a reply.
+        from storage.agent_session_rows import resolve_workspace_notice_session
+
+        notice_session = resolve_workspace_notice_session(conn)
+        workspace_notice = messages_service.append(
+            conn,
+            scope_id=None,
+            session_id=notice_session,
+            platform="avibe",
+            author="agent",
+            source="agent",
+            metadata={"event": "backend_failure", "failure_id": "failure_2"},
+            message_type="notify",
+            text="A background task failed",
+        )
+
     with engine.connect() as conn:
         assert web_push_notifications._message_still_unread(conn, failure["id"]) is True
         assert web_push_notifications._web_push_user_keys_for_message(conn, failure["id"]) == ["remote:user-a"]
         assert web_push_notifications._message_still_unread(conn, ordinary_notify["id"]) is False
         assert web_push_notifications._web_push_user_keys_for_message(conn, ordinary_notify["id"]) == []
+        assert web_push_notifications._message_still_unread(conn, workspace_notice["id"]) is True
+    with engine.begin() as conn:
+        messages_service.mark_session_read(conn, notice_session)
+        # Read before the push delay ran out: not pushed, as a read reply would not be.
+        assert web_push_notifications._message_still_unread(conn, workspace_notice["id"]) is False
+        # An ordinary Session's failure notice stays ungated, read or not.
+        messages_service.mark_session_read(conn, "ses_failure")
+        assert web_push_notifications._message_still_unread(conn, failure["id"]) is True
     engine.dispose()
 
 

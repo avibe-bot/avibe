@@ -16,6 +16,7 @@ from typing import Any, Mapping
 from sqlalchemy import literal_column, or_, select
 
 from storage import messages_service, web_push_service
+from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, WORKSPACE_NOTICE_UNREAD_METADATA_KEY
 from storage.models import agent_sessions, messages
 from vibe.message_types import spec_for, types_with
 from vibe.authorization import AuthorizationContext, context_from_session_payload
@@ -860,17 +861,23 @@ def _message_still_unread(conn: Any, message_id: str | None) -> bool:
     if not message_id:
         return False
     row = conn.execute(
-        select(messages.c.type, messages.c.read_at, messages.c.metadata_json)
+        select(messages.c.type, messages.c.read_at, messages.c.metadata_json, messages.c.session_id)
         .where(messages.c.id == message_id)
         .where(messages.c.platform == "avibe")
         .where(messages.c.author == "agent")
         .where(messages.c.type.in_(_NOTIFIABLE_TYPES))
     ).first()
-    return bool(
-        row is not None
-        and _is_notifiable_message(row[0], _parse_metadata(row[2]))
-        and (row[0] not in _UNREAD_GATED_TYPES or row[1] is None)
+    if row is None:
+        return False
+    metadata = _parse_metadata(row[2])
+    # A row that counts as unread is gated on it, like the Inbox counts it: a catalog unread
+    # type, or a new workspace notice (messages_service.unread_message_predicates).
+    gated = row[0] in _UNREAD_GATED_TYPES or (
+        row[0] == "notify"
+        and row[3] == WORKSPACE_NOTICE_SESSION_ID
+        and metadata.get(WORKSPACE_NOTICE_UNREAD_METADATA_KEY) is True
     )
+    return bool(_is_notifiable_message(row[0], metadata) and (not gated or row[1] is None))
 
 
 def _metadata_user_keys(metadata: dict[str, Any]) -> list[str]:
