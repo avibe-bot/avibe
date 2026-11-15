@@ -46,11 +46,14 @@ const sessionVault: {
   wrapMeta: string | null;
   freshSetup: boolean;
   authzFactorRegistration: VaultWebAuthnRegistrationPayload | null;
+  /** The sandbox root exists only in memory until POST /api/vault/setup succeeds. */
+  durableSetupPending: boolean;
 } = {
   status: 'needs-setup',
   wrapMeta: null,
   freshSetup: false,
   authzFactorRegistration: null,
+  durableSetupPending: false,
 };
 
 // The unlock-window deadline (ms epoch) is now owned by the sandbox — the parent only *mirrors*
@@ -89,14 +92,14 @@ export function subscribeVaultLock(listener: () => void): () => void {
 }
 
 export function vaultUnlockExpiresAt(): number | null {
-  return sessionVault.status === 'unlocked' ? vaultLockExpiresAt : null;
+  return vaultUnlocked() ? vaultLockExpiresAt : null;
 }
 
 export function vaultUnlocked(): boolean {
   // The sandbox is authoritative: it auto-locks and emits a `vault.state` event we mirror, so the
   // parent no longer second-guesses the clock. A rendered countdown reaching 0 is cosmetic; the
   // real transition arrives as an event (or the next `status` reconciliation).
-  return sessionVault.status === 'unlocked';
+  return sessionVault.status === 'unlocked' && !sessionVault.durableSetupPending;
 }
 
 export function vaultFreshSetup(): boolean {
@@ -104,11 +107,31 @@ export function vaultFreshSetup(): boolean {
 }
 
 function vaultStatusNow(): ProtectedVaultStatus {
-  return sessionVault.status;
+  return sessionVault.durableSetupPending ? 'needs-setup' : sessionVault.status;
 }
 
-function clearUnlockState(): void {
+function assertDurableSetupReady(): void {
+  if (sessionVault.durableSetupPending) throw new Error('vault-setup-pending');
+}
+
+function hasPendingSetupProof(): boolean {
+  return Boolean(
+    sessionVault.durableSetupPending
+    && sessionVault.freshSetup
+    && sessionVault.wrapMeta
+    && sessionVault.authzFactorRegistration,
+  );
+}
+
+function clearUnlockState(options: { discardPendingSetup?: boolean } = {}): void {
   vaultLockExpiresAt = null;
+  // Ordinary sandbox lock/unload events must not destroy the exact tuple needed to retry an
+  // unresolved setup POST. Explicit abandonment or a final server refusal opts into discard.
+  if (hasPendingSetupProof() && !options.discardPendingSetup) {
+    sessionVault.status = 'needs-setup';
+    return;
+  }
+  sessionVault.durableSetupPending = false;
   if (sessionVault.freshSetup) {
     // A fresh setup that never persisted a secret: locking reverts to needs-setup (the daemon has
     // no wrap_meta yet), so drop the in-memory handle rather than pretend a vault exists.
@@ -132,7 +155,7 @@ function applyVaultStateEvent(event: VaultStateEvent): void {
     if (!sessionVault.wrapMeta) return;
     sessionVault.status = 'unlocked';
     if (typeof event.expiresAt === 'number' && Number.isFinite(event.expiresAt)) vaultLockExpiresAt = event.expiresAt;
-    notifyVaultLockChange();
+    if (!sessionVault.durableSetupPending) notifyVaultLockChange();
     return;
   }
   clearUnlockState();
@@ -195,15 +218,19 @@ function commitUnlocked(
   freshSetup: boolean,
   expiresAt?: number | null,
   authzFactorRegistration: VaultWebAuthnRegistrationPayload | null = null,
+  options: { deferNotification?: boolean } = {},
 ): void {
   sessionVault.wrapMeta = baseVmkWrapMeta(wrapMeta);
   sessionVault.status = 'unlocked';
   sessionVault.freshSetup = freshSetup;
   sessionVault.authzFactorRegistration = authzFactorRegistration;
+  sessionVault.durableSetupPending = Boolean(options.deferNotification);
+  // A setup root is not usable by the create flow until its root+factor POST has answered. Keep the
+  // sandbox material for a same-proof retry, but do not notify hooks or expose an unlocked state.
   // Mirror the sandbox-provided deadline directly; the event stream keeps it fresh on renewal.
   vaultLockExpiresAt = typeof expiresAt === 'number' && Number.isFinite(expiresAt) ? expiresAt : null;
   getVaultLockChannel();
-  notifyVaultLockChange();
+  if (!options.deferNotification) notifyVaultLockChange();
 }
 
 function commitLocked(wrapMeta: string): void {
@@ -212,6 +239,7 @@ function commitLocked(wrapMeta: string): void {
   sessionVault.status = 'locked';
   sessionVault.freshSetup = false;
   sessionVault.authzFactorRegistration = null;
+  sessionVault.durableSetupPending = false;
   notifyVaultLockChange();
 }
 
@@ -232,7 +260,10 @@ type SetupApi = Pick<ApiContextType, 'createVaultAuthzWebAuthnOptions' | 'getVau
 
 /** The sandbox setup ceremony: a new Passkey and Vault root, held in this tab until something
  *  persists it (the first protected key, or {@link setupVaultDurably}). */
-async function runPasskeySetup(api: SetupApi, options: { onlyFirstFactor?: boolean } = {}): Promise<void> {
+async function runPasskeySetup(
+  api: SetupApi,
+  options: { onlyFirstFactor?: boolean; deferNotification?: boolean } = {},
+): Promise<void> {
   const sandbox = await getVaultSandboxClient();
   const [authzOptions, rootMetadata] = await Promise.all([
     api.createVaultAuthzWebAuthnOptions(),
@@ -253,7 +284,7 @@ async function runPasskeySetup(api: SetupApi, options: { onlyFirstFactor?: boole
     rootMetadata: rootMetadata.root_metadata,
   });
   const authzRegistration = registrationFromSandbox(result.authzRegistration);
-  commitUnlocked(result.wrapMeta, true, result.expiresAt, authzRegistration);
+  commitUnlocked(result.wrapMeta, true, result.expiresAt, authzRegistration, { deferNotification: options.deferNotification });
 }
 
 /**
@@ -273,7 +304,7 @@ export async function setupVaultDurably(
   if (sessionVault.wrapMeta && !pendingFresh) return { ok: false, code: 'vault_already_initialized' };
   if (!pendingFresh) {
     try {
-      await runPasskeySetup(api, { onlyFirstFactor: true });
+      await runPasskeySetup(api, { onlyFirstFactor: true, deferNotification: true });
     } catch (error) {
       if ((error as { code?: unknown } | null)?.code === 'vault_already_initialized') return { ok: false, code: 'vault_already_initialized' };
       throw error;
@@ -297,14 +328,33 @@ export async function setupVaultDurably(
     const final = typeof committed.code === 'string' && committed.code !== 'network_error';
     if (final) {
       resetVaultSandboxClient();
-      clearUnlockState();
+      clearUnlockState({ discardPendingSetup: true });
       notifyVaultLockChange();
     }
     return { ok: false, code: committed.code || 'setup_failed' };
   }
   sessionVault.freshSetup = false;
   sessionVault.authzFactorRegistration = null;
+  sessionVault.durableSetupPending = false;
   if (typeof committed.wrap_meta === 'string') sessionVault.wrapMeta = baseVmkWrapMeta(committed.wrap_meta);
+  if (sessionVault.wrapMeta && sessionVault.status !== 'unlocked') {
+    try {
+      const sandboxStatus = await (await getVaultSandboxClient()).status(sessionVault.wrapMeta);
+      if (sandboxStatus.state === 'unlocked') {
+        sessionVault.status = 'unlocked';
+        vaultLockExpiresAt =
+          typeof sandboxStatus.expiresAt === 'number' && Number.isFinite(sandboxStatus.expiresAt) ? sandboxStatus.expiresAt : null;
+      } else {
+        sessionVault.status = 'locked';
+        vaultLockExpiresAt = null;
+      }
+    } catch {
+      // The root is durable even if status reconciliation is unavailable; fail closed and let the
+      // normal unlock path re-query the sandbox rather than claiming the VMK is available.
+      sessionVault.status = 'locked';
+      vaultLockExpiresAt = null;
+    }
+  }
   notifyVaultLockChange();
   return { ok: true };
 }
@@ -312,7 +362,7 @@ export async function setupVaultDurably(
 export function useProtectedVault() {
   const api = useApi();
   const { t } = useTranslation();
-  const [status, setStatus] = useState<ProtectedVaultStatus>(sessionVault.status);
+  const [status, setStatus] = useState<ProtectedVaultStatus>(vaultStatusNow());
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -335,7 +385,7 @@ export function useProtectedVault() {
       setError(vaultErrorMessage(t, error, t('errors.sandbox_entry_unavailable')));
       return;
     }
-    if (sessionVault.status === 'unlocked') {
+    if (sessionVault.status === 'unlocked' && !sessionVault.durableSetupPending) {
       // Already unlocked and kept honest by the event stream — don't flash a "checking" state or
       // re-query (a `status` call is silent but pointless here).
       setStatus('unlocked');
@@ -351,6 +401,11 @@ export function useProtectedVault() {
       // channel is live so a policy `reset` broadcast reaches this tab and drops its pinned client.
       getVaultLockChannel();
       if (res.exists && res.wrap_meta) {
+        // An unknown setup response may have committed on the server. Discovery is authoritative
+        // in that case: stop treating the sandbox root as transient and allow normal unlock state.
+        sessionVault.durableSetupPending = false;
+        sessionVault.freshSetup = false;
+        sessionVault.authzFactorRegistration = null;
         sessionVault.wrapMeta = baseVmkWrapMeta(res.wrap_meta);
         const sandboxStatus = await sandbox.status(sessionVault.wrapMeta);
         if (sandboxStatus.state === 'unlocked') {
@@ -361,8 +416,15 @@ export function useProtectedVault() {
           sessionVault.status = 'locked';
           vaultLockExpiresAt = null;
         }
+      } else if (hasPendingSetupProof()) {
+        // The setup POST may still be retryable after an unknown response. Do not discard the
+        // exact root + registration proof merely because discovery raced before the commit landed.
+        sessionVault.status = 'needs-setup';
       } else {
         sessionVault.wrapMeta = null;
+        sessionVault.freshSetup = false;
+        sessionVault.authzFactorRegistration = null;
+        sessionVault.durableSetupPending = false;
         sessionVault.status = 'needs-setup';
         vaultLockExpiresAt = null;
       }
@@ -372,7 +434,7 @@ export function useProtectedVault() {
       // remount that finds an already-unlocked session leaves siblings on stale lock state until
       // the next `vault.state` event.
       notifyVaultLockChange();
-      setStatus(sessionVault.status);
+      setStatus(vaultStatusNow());
     } catch (err) {
       sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
       setStatus('error');
@@ -381,12 +443,23 @@ export function useProtectedVault() {
   }, [api, t]);
 
   const setupPasskey = useCallback(async () => {
-    await runPasskeySetup(api);
-    setStatus('unlocked');
+    const result = await setupVaultDurably(api);
+    if (!result.ok) {
+      // A concurrent tab may have established the root between options discovery and this
+      // ceremony. Reconcile the committed root immediately so the open dialog offers unlock
+      // instead of leaving the user in a repeatable setup conflict.
+      if (result.code === 'vault_already_initialized') {
+        await refresh();
+        setStatus(vaultStatusNow());
+      }
+      throw Object.assign(new Error(result.code), { code: result.code });
+    }
+    setStatus(vaultStatusNow());
     setError(null);
-  }, [api]);
+  }, [api, refresh]);
 
   const unlockPasskey = useCallback(async () => {
+    assertDurableSetupReady();
     assertVaultEntryAvailable();
     const wrapMeta = sessionVault.wrapMeta;
     if (!wrapMeta) throw new Error('vault-not-setup');
@@ -409,6 +482,7 @@ export function useProtectedVault() {
       }
     > => {
       assertVaultEntryAvailable();
+      assertDurableSetupReady();
       const wrapMeta = sessionVault.wrapMeta;
       if (!wrapMeta) throw new Error('vault-locked');
       const sandbox = await getVaultSandboxClient();
@@ -439,11 +513,13 @@ export function useProtectedVault() {
   );
 
   const afterCreated = useCallback(() => {
+    if (sessionVault.durableSetupPending) return;
     sessionVault.freshSetup = false;
     sessionVault.authzFactorRegistration = null;
   }, []);
 
   const syncProtectedOperationStatus = useCallback(async (wrapMeta: string) => {
+    if (sessionVault.durableSetupPending) return;
     const sandbox = await getVaultSandboxClient();
     const baseWrapMeta = baseVmkWrapMeta(wrapMeta);
     const sandboxStatus = await sandbox.status(baseWrapMeta);
@@ -465,6 +541,7 @@ export function useProtectedVault() {
       context: VaultSignedOperationContext,
       authorizationWindow?: string,
     ): Promise<SignatureResult> => {
+      assertDurableSetupReady();
       const sandbox = await getVaultSandboxClient();
       try {
         // Approval cards include display metadata (kind/field); the sign RPC accepts
@@ -488,6 +565,7 @@ export function useProtectedVault() {
   const approveProtectedRelease = useCallback(
     async (items: ApproveReleaseItem[], authorizationWindow?: string): Promise<BlindBox[]> => {
       if (items.length === 0) return [];
+      assertDurableSetupReady();
       const sandbox = await getVaultSandboxClient();
       try {
         const result = await sandbox.approveRelease({ items }, authorizationWindow);
@@ -511,6 +589,7 @@ export function useProtectedVault() {
       context: VaultSignedOperationContext,
       authorizationWindow?: string,
     ): Promise<{ completed: boolean }> => {
+      assertDurableSetupReady();
       const sandbox = await getVaultSandboxClient();
       try {
         return await sandbox.reveal({ material, context }, authorizationWindow);
@@ -535,7 +614,7 @@ export function useProtectedVault() {
   }, []);
 
   const discardAndRefresh = useCallback(async () => {
-    clearUnlockState();
+    clearUnlockState({ discardPendingSetup: true });
     sessionVault.wrapMeta = null;
     sessionVault.freshSetup = false;
     sessionVault.authzFactorRegistration = null;
@@ -543,9 +622,9 @@ export function useProtectedVault() {
     await refresh();
   }, [refresh]);
 
-  const hasPasskey = useCallback(() => hasPasskeyCopy(sessionVault.wrapMeta), []);
+  const hasPasskey = useCallback(() => !sessionVault.durableSetupPending && hasPasskeyCopy(sessionVault.wrapMeta), []);
 
-  const passkeyUsableHere = useCallback(() => hasPasskeyCopy(sessionVault.wrapMeta), []);
+  const passkeyUsableHere = useCallback(() => !sessionVault.durableSetupPending && hasPasskeyCopy(sessionVault.wrapMeta), []);
 
   return {
     status,
