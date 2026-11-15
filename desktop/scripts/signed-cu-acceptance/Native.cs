@@ -34,6 +34,52 @@ public static class AcceptanceNative {
     [DllImport("advapi32.dll", SetLastError=true)] private static extern bool GetKernelObjectSecurity(IntPtr handle, uint info, byte[] descriptor, uint length, out uint needed);
     [DllImport("advapi32.dll", SetLastError=true)] private static extern bool SetKernelObjectSecurity(IntPtr handle, uint info, byte[] descriptor);
 
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder path, ref int size);
+    [DllImport("kernel32.dll", SetLastError=true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("advapi32.dll", EntryPoint="GetTokenInformation", SetLastError=true)] private static extern bool GetTokenPointer(IntPtr token, int kind, IntPtr value, int length, out int returned);
+
+    // Query and synchronization only: no debug privilege, VM access or ACL change.
+    // Keep the exact process object pinned through identity checks and exit waits.
+    public sealed class ObservedProcess : IDisposable {
+        private IntPtr handle;
+        public int Id { get; private set; }
+        public ObservedProcess(int pid) {
+            handle = OpenProcess(0x1000 | 0x100000, false, pid);
+            if (handle == IntPtr.Zero) throw new Win32Exception();
+            Id = pid;
+        }
+        public string ImagePath() {
+            var path = new StringBuilder(32768); int size = path.Capacity;
+            if (!QueryFullProcessImageName(handle, 0, path, ref size)) throw new Win32Exception();
+            return path.ToString();
+        }
+        public string OwnerSid() {
+            IntPtr token = IntPtr.Zero, data = IntPtr.Zero;
+            try {
+                if (!OpenProcessToken(handle, 8, out token)) throw new Win32Exception();
+                int size; GetTokenPointer(token, 1, IntPtr.Zero, 0, out size);
+                if (size <= 0 || size > 65536) throw new InvalidOperationException("process_token_size_invalid");
+                data = Marshal.AllocHGlobal(size);
+                if (!GetTokenPointer(token, 1, data, size, out size)) throw new Win32Exception();
+                return new SecurityIdentifier(Marshal.ReadIntPtr(data)).Value;
+            } finally {
+                if (data != IntPtr.Zero) Marshal.FreeHGlobal(data);
+                if (token != IntPtr.Zero) CloseHandle(token);
+            }
+        }
+        public bool WaitForExit(int milliseconds) {
+            uint wait = WaitForSingleObject(handle, (uint)Math.Max(0, milliseconds));
+            if (wait == 0xffffffff) throw new Win32Exception();
+            if (wait != 0 && wait != 258) throw new InvalidOperationException("process_wait_invalid");
+            return wait == 0;
+        }
+        public bool HasExited { get { return WaitForExit(0); } }
+        public void Dispose() {
+            if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; }
+        }
+    }
+    public static ObservedProcess ObserveProcess(int pid) { return new ObservedProcess(pid); }
+
     public static bool IsElevated(int pid) {
         IntPtr process = OpenProcess(0x1000, false, pid);
         if (process == IntPtr.Zero) throw new Win32Exception();

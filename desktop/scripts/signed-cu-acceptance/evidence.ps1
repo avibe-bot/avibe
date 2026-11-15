@@ -1,6 +1,6 @@
 # Shared value-free evidence path for the real harness and inert dry runner.
 function Copy-AcceptanceHarness([string] $Source, [string] $Destination) {
-    foreach ($file in @('user.ps1', 'evidence.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1', 'update.ps1', 'update-observer.ps1', 'release.ps1')) {
+    foreach ($file in @('user.ps1', 'evidence.ps1', 'inventory.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1', 'update.ps1', 'update-observer.ps1', 'release.ps1')) {
         Copy-Item -LiteralPath (Join-Path $Source $file) -Destination (Join-Path $Destination $file) -ErrorAction Stop
     }
 }

@@ -10,8 +10,14 @@ Set-StrictMode -Version Latest
 New-Item -ItemType Directory -Force $Work, $Evidence | Out-Null
 $windowsHost = [Environment]::OSVersion.Platform -eq 'Win32NT'
 if (-not $OneCase) {
-    $summaries = @(); $dryFailure = $null; $activeFault = 'evidence_finalization'; $partial = $null
+    $summaries = @(); $dryFailure = $null; $activeFault = 'inventory'; $partial = $null; $inventoryProof = $null
     try {
+    & (Join-Path $PSScriptRoot 'windows_signed_acceptance_inventory.ps1') -Source (Join-Path $SourceRoot 'inventory.ps1') -Work (Join-Path $Work 'inventory-unit')
+    if ($windowsHost) {
+        & (Join-Path $PSScriptRoot 'windows_signed_acceptance_inventory.ps1') -Source (Join-Path $SourceRoot 'inventory.ps1') -Work (Join-Path $Work 'inventory-hosted') -Hosted
+        $inventoryProof = Get-Content -LiteralPath (Join-Path $Work 'inventory-hosted/inventory-native-proof.json') -Raw | ConvertFrom-Json
+    }
+    $activeFault = 'evidence_finalization'
     & (Join-Path $PSScriptRoot 'windows_signed_acceptance_evidence.ps1') -Source (Join-Path $SourceRoot 'evidence.ps1') -Work $Work
     foreach ($fault in @('none', 'stderr_zero', 'aggregate_timeout', 'launch_js_receipt_write', 'launch_js_receipt_rename', 'type_js_receipt_write', 'type_js_receipt_rename', 'receipt_write_exit', 'receipt_rename_exit', 'dispatch_write_exit', 'dispatch_rename_exit', 'result_write_exit', 'result_rename_exit', 'missing_receipt', 'malformed_receipt', 'wrapper_parse', 'turn', 'missing_wrapper', 'wrapper_native', 'missing_result', 'stale_result', 'stale_receipt', 'launch_cli_exit', 'launch_cli_json', 'launch_cli_empty', 'launch_cli_null', 'launch_cli_kind', 'launch_cli_fields', 'app', 'launch', 'wait_for', 'observe', 'activate', 'unusable', 'unstable', 'focus', 'native_focus', 'type_cli_exit', 'type_cli_json', 'type_cli_empty', 'type_cli_null', 'type_cli_kind', 'type_cli_fields', 'lost_binding', 'observe_before', 'type', 'type_after', 'observe_after')) {
         $activeFault = $fault
@@ -27,7 +33,7 @@ if (-not $OneCase) {
             try { $partial = Get-Content -LiteralPath $partialPath -Raw | ConvertFrom-Json -AsHashtable } catch { }
         }
     } finally {
-        Write-AcceptanceEvidence @{ mode='dry'; product_acceptance=$false; hosted_windows=($windowsHost -and $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted'); dry_gate_passed=($null -eq $dryFailure); failure=$dryFailure; partial_evidence=$partial; cases=$summaries } (Join-Path $Evidence 'verdict.json')
+        Write-AcceptanceEvidence @{ mode='dry'; product_acceptance=$false; hosted_windows=($windowsHost -and $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted'); dry_gate_passed=($null -eq $dryFailure); failure=$dryFailure; partial_evidence=$partial; inventory_native=$inventoryProof; cases=$summaries } (Join-Path $Evidence 'verdict.json')
         '# Harness-only dry gate: no signed installer, model, GUI, clipboard or product acceptance' | Set-Content -LiteralPath (Join-Path $Evidence 'verdict.md')
     }
     if ($dryFailure) { throw 'dry_fixture_gate_failed_see_value_free_evidence' }
@@ -224,7 +230,7 @@ else:
     Complete-AcceptanceGate $aggregate
     if ($aggregate.required_cases_passed -ne ($OneCase -in @('none', 'stderr_zero'))) { throw 'dry_final_gate_disagrees' }
     $aggregate.source_hashes = @{}
-    foreach ($file in @('enabled.ps1', 'model_stub.py', 'evidence.ps1', 'Native.cs')) {
+    foreach ($file in @('enabled.ps1', 'model_stub.py', 'evidence.ps1', 'Native.cs', 'inventory.ps1')) {
         $aggregate.source_hashes[$file] = (Get-FileHash -LiteralPath (Join-Path $SourceRoot $file) -Algorithm SHA256).Hash.ToLowerInvariant()
     }
     $aggregate.os_version = [Environment]::OSVersion.Version.ToString()

@@ -47,10 +47,25 @@ activation PR has landed and its installer/Stage 2 provenance are published.
 The two enabled attempts (`43701888417`, `43706480357`) did not retain the
 originating enabled-operation result. They establish a harness observability
 failure, **not** a product failure or product pass. The enabled product outcome
-remains **UNKNOWN**. The workflow is now explicitly **dry-only**; no third signed
-attempt is permitted until hosted Windows dry evidence and the same independent
-reviewer's delta review have passed. Changing back to enabled is a separate,
-explicit lane decision, followed by fresh release admission. This PR never merges.
+remains **UNKNOWN** for their missing operations. The subsequent 48-case hosted
+dry gate and independent review passed before signed run `43724343207`. That run
+retained the real launch/type returns and passed native unsaved-text readback,
+but stopped at helper inventory before CU Off. No lifecycle/security PASS follows.
+
+The inventory correction keeps the shipped lifecycle: a persistent Desktop-owned
+installed daemon plus same-image runtime MCP proxies, not per-call or temporary
+copies. CIM supplies candidate names and parent links only: its `ExecutablePath`
+property has a documented debug-privilege qualifier, unsuitable as an existence
+oracle for a Users-only worker. Query-only retained handles now bind native image,
+installed hash and token SID; unknown identity blocks acceptance. Bounded candidate
+rows record basename, nullable path/hash/owner matches, parent relation and error
+class without full paths. This diagnoses future misses; it does not prove which
+field caused the earlier miss. Replacement/descendant scans use the same observer.
+
+The workflow is **dry-only** while this correction is verified. The authorized
+sequence is one hosted dry run, then one further signed attempt after fresh
+release admission; independent review runs in parallel. Only the explicit mode
+change enables that attempt. This PR never merges.
 
 The dry fixture stages the harness through the same `Copy-AcceptanceHarness`
 manifest as the ordinary-user worker, then invokes `Invoke-EnabledCases` from the
@@ -65,7 +80,11 @@ runs in a persistent, test-owned V8 evaluator with inert computer/window methods
 The same case reader, diagnostic persistence, worker merger and required-case
 gate produce the final JSON. `InputOnly` returns a **dry-only** verdict before
 any target-process/native lifecycle acceptance; no dry result is product proof.
-The real `Native.cs` is compiled separately under PS5.1, never invoked by dry tests.
+The real `Native.cs` is compiled under PS5.1. A separate dry positive control runs
+its query-only process identity/retained-exit methods against a test-owned inert
+executable under a newly created Users-only account, without elevation or process
+ACL grants. The account/profile/processes are cleaned up. No UI/native input
+methods or shipped product processes are invoked by this dry control.
 
 Evidence boundaries and fault ownership:
 

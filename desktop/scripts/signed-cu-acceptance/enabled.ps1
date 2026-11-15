@@ -130,57 +130,29 @@ function Invoke-EnabledCases([hashtable] $Context) {
             Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
         }
     }
+    . (Join-Path $Root 'inventory.ps1')
     function Driver-Handles([int] $AppPid) {
-        $rows = @(Get-CimInstance Win32_Process)
-        $ids = [Collections.Generic.HashSet[int]]::new()
-        foreach ($row in $rows) {
-            if ($row.ExecutablePath -eq $driverPath) {
-                $owner = Invoke-CimMethod -InputObject $row -MethodName GetOwnerSid
-                if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $inputData.expected_sid) { $null = $ids.Add([int]$row.ProcessId) }
-            }
-        }
-        if (-not $ids.Count) { throw 'live_installed_driver_missing' }
-        do {
-            $changed = $false
-            foreach ($row in $rows) {
-                if ($ids.Contains([int]$row.ParentProcessId) -and [int]$row.ProcessId -ne $AppPid) {
-                    if ($ids.Add([int]$row.ProcessId)) { $changed = $true }
-                }
-            }
-        } while ($changed)
-        $handles = [Collections.Generic.List[Diagnostics.Process]]::new()
-        foreach ($id in $ids) {
-            try { $p = [Diagnostics.Process]::GetProcessById($id); $null = $p.SafeHandle; $handles.Add($p) } catch [ArgumentException] { }
-        }
-        if (-not $handles.Count) { throw 'live_driver_handles_missing' }
-        return ,$handles
+        $inventory = [ordered]@{}
+        $result.cu_input_diagnostics[$operationId].helper_inventory = $inventory
+        try {
+            Get-AcceptanceHelpers -DriverPath $driverPath -DriverHash $inputData.driver_hash -OwnerSid $inputData.expected_sid -AppPid $AppPid -DesktopPid $Context.Desktop.Id -Known ([Collections.Generic.HashSet[int]]::new()) -Evidence $inventory
+        } finally { Write-AcceptanceEvidence $result (Join-Path $work 'result.json') }
     }
-    function Assert-NoReplacementDriver([Collections.Generic.List[Diagnostics.Process]] $Prior, [int] $AppPid) {
+    function Assert-NoReplacementDriver($Prior, [int] $AppPid) {
         $known = [Collections.Generic.HashSet[int]]::new()
         foreach ($process in $Prior) { $null = $known.Add($process.Id) }
-        # Include late descendants and new driver generations, not just the
-        # pre-action handles. Stay quiet across the native five-second reprobe.
+        $result.cu_input_diagnostics[$operationId].replacement_inventory = @()
+        # The same image/hash/owner observer covers proxies and late descendants.
         $quietUntil = (Get-Date).AddSeconds(6)
         do {
-            $rows = @(Get-CimInstance Win32_Process)
-            do {
-                $changed = $false
-                foreach ($row in $rows) {
-                    if ([int]$row.ProcessId -ne $AppPid -and ($row.ExecutablePath -eq $driverPath -or $known.Contains([int]$row.ParentProcessId))) {
-                        if ($known.Add([int]$row.ProcessId)) { $changed = $true }
-                    }
-                }
-            } while ($changed)
-            foreach ($row in $rows) {
-                if (-not $known.Contains([int]$row.ProcessId) -or [int]$row.ProcessId -eq $AppPid) { continue }
-                $owner = Invoke-CimMethod -InputObject $row -MethodName GetOwnerSid -ErrorAction SilentlyContinue
-                if (-not $owner -or $owner.ReturnValue -ne 0 -or $owner.Sid -ne $inputData.expected_sid) { continue }
-                $live = $null
-                try {
-                    $live = [Diagnostics.Process]::GetProcessById([int]$row.ProcessId)
-                    $null = $live.SafeHandle
-                    if (-not $live.HasExited) { throw 'replacement_driver_or_late_helper_survived_shutdown' }
-                } catch [ArgumentException] { } finally { if ($live) { $live.Dispose() } }
+            $inventory = [ordered]@{}; $live = $null
+            $result.cu_input_diagnostics[$operationId].replacement_inventory += $inventory
+            try {
+                $live = Get-AcceptanceHelpers -DriverPath $driverPath -DriverHash $inputData.driver_hash -OwnerSid $inputData.expected_sid -AppPid $AppPid -DesktopPid $Context.Desktop.Id -Known $known -Evidence $inventory -AllowEmpty
+                if ($live.Count) { throw 'replacement_driver_or_late_helper_survived_shutdown' }
+            } finally {
+                if ($null -ne $live) { foreach ($process in $live) { $process.Dispose() } }
+                Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
             }
             Start-Sleep -Milliseconds 500
         } while ((Get-Date) -lt $quietUntil)
