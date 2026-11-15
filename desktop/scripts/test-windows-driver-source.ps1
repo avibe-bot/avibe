@@ -39,6 +39,8 @@ $tests = @(
     @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::retained_exited_process_is_not_registered_as_running' },
     @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::original_handle_evidence_never_serializes' },
     @{ Package = 'cua-driver-core'; Selector = 'tool::windows_launch_ownership_tests::registration_future_is_send' },
+    @{ Package = 'platform-windows'; Selector = 'security::tests::security_refusals_keep_their_identity_through_the_daemon_gate' },
+    @{ Package = 'platform-windows'; Selector = 'security::tests::refusal_normalization_preserves_other_results_and_existing_params' },
     @{ Package = 'platform-windows'; Selector = 'literal_launch::native::tests::literal_native_canonicalizes_existing_regular_executable' },
     @{ Package = 'platform-windows'; Selector = 'literal_launch::native::tests::literal_native_profile_environment_and_job_survival' },
     @{ Package = 'platform-windows'; Selector = 'tools::impl_::literal_launch_callsite_tests::unsupported_routes_refuse_at_actual_launch_tool_before_native_effects' },
@@ -141,7 +143,7 @@ function Verify-JunitEvidence {
         $names.Add([string]$cases[0].name)
     }
     if ($names.Count -ne $expected.Count -or @($names | Select-Object -Unique).Count -ne $expected.Count) {
-        throw 'Per-test JUnit selector names are not exactly 11 unique cases.'
+        throw "Per-test JUnit selector names are not exactly $($tests.Count) unique cases."
     }
     $actual = @($names | Sort-Object) -join "`n"
     $wanted = @($expected | Sort-Object) -join "`n"
@@ -422,6 +424,14 @@ try {
             dump_docs = 'ordinary-user dump-docs --type mcp'
             desktop_actions = $false
             snapshot_edited_by_capture = $false
+        }
+        # Source-built PR CI only. Packaging passes an externally prepared
+        # ProductionBinaryPath and retains its existing metadata-only contract.
+        if (-not $ProductionBinaryPath) {
+            . (Join-Path $PSScriptRoot 'windows-refusal-transport\run.ps1')
+            $provenance.native_refusal_transport = Invoke-WindowsRefusalTransport `
+                -Repo $repo -Binary $captureBinary -Bin $bin -Temp $temp -Logs $logs `
+                -User $user -Password $password -Environment $environment
         }
     }
 

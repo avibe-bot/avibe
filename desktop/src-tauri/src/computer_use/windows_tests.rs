@@ -32,7 +32,7 @@ fn windows_requires_explicit_runtime_capability_not_legacy_schema_one() {
     let snapshot = include_bytes!("../../../cua-driver/tools-windows-v0.31.0.json");
     assert_eq!(
         lower_hex(&Sha256::digest(snapshot)),
-        "0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293"
+        "20bfe2c6c205c22e35465706736704f5f8effbab88a1e79357646f556d9a5cad"
     );
 }
 

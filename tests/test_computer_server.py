@@ -1151,15 +1151,23 @@ def test_result_folding_preserves_images_and_moves_structured_content() -> None:
     assert "outputSchema" not in result
 
 
-def test_result_folding_preserves_driver_error_code_params_and_detail() -> None:
+@pytest.mark.parametrize("code, params", [
+    ("capture_failed", {"scope": "window"}),
+    ("protected_window", {"pid": 41, "window_id": 9, "reason": "administrator"}),
+    ("protected_window", {"reason": "higher_integrity"}),
+    ("unverified_window", {"pid": 41, "window_id": 9}),
+    ("desktop_unavailable", {}),
+    ("administrator_runtime_refused", {}),
+])
+def test_result_folding_preserves_driver_error_code_params_and_detail(code, params) -> None:
     result = _fold_tool_result(
         {
             "result": {
                 "content": [{"type": "text", "text": "fallback driver text"}],
                 "structuredContent": {
-                    "code": "capture_failed",
-                    "params": {"scope": "window"},
-                    "reason": "ScreenCaptureKit window was unavailable",
+                    "code": code,
+                    "params": params,
+                    "message": "Driver refusal diagnostic",
                 },
                 "isError": True,
             }
@@ -1168,9 +1176,10 @@ def test_result_folding_preserves_driver_error_code_params_and_detail() -> None:
 
     payload = json.loads(result["content"][0]["text"])
     assert payload == {
-        "code": "capture_failed",
-        "detail": "ScreenCaptureKit window was unavailable",
-        "params": {"scope": "window"},
+        "code": code,
+        "detail": "Driver refusal diagnostic",
+        "message": "Driver refusal diagnostic",
+        "params": params,
     }
     assert result["structuredContent"] == payload
 
@@ -1220,6 +1229,7 @@ def test_result_folding_preserves_bounded_detail_inside_driver_params() -> None:
     assert payload == {
         "code": "capture_failed",
         "detail": "api_key=[redacted] capture failed",
+        "message": "api_key=[redacted] capture failed",
         "params": {
             "detail": "api_key=[redacted] capture failed",
             "scope": "window",
@@ -1252,6 +1262,7 @@ def test_result_folding_preserves_real_driver_exit_code_and_content_detail() -> 
     assert payload == {
         "code": "tool_invocation_failed",
         "detail": "window ownership lookup failed in the driver",
+        "message": "window ownership lookup failed in the driver",
         "params": {"exit_code": 1},
     }
     assert result["structuredContent"] == payload
@@ -1274,6 +1285,7 @@ def test_result_folding_uses_bounded_content_text_for_unstructured_driver_errors
     assert payload == {
         "code": "upstream_tool_error",
         "detail": "driver detail with controls",
+        "message": "driver detail with controls",
         "params": {"tool": "get_window_state"},
     }
     assert result["structuredContent"] == payload
@@ -1294,6 +1306,7 @@ def test_result_folding_preserves_json_rpc_error_code_and_detail() -> None:
     assert payload == {
         "code": "upstream_error",
         "detail": "driver rejected request",
+        "message": "driver rejected request",
         "params": {"rpc_code": -32001},
     }
     assert result["structuredContent"] == payload
@@ -1313,6 +1326,7 @@ def test_diagnostic_text_is_bounded_and_single_line() -> None:
 
     payload = json.loads(result["content"][0]["text"])
     detail = payload["detail"]
+    assert payload["message"] == detail
     assert len(detail) == 2048
     assert "\n" not in detail
     assert "\x1b" not in detail
@@ -1342,6 +1356,7 @@ def test_driver_error_detail_redacts_credential_material() -> None:
     assert payload == {
         "code": "capture_failed",
         "detail": "capture failed with api_key=[redacted]",
+        "message": "capture failed with api_key=[redacted]",
         "params": {"scope": "window"},
     }
     assert result["structuredContent"] == payload
@@ -1488,6 +1503,7 @@ async def test_call_tool_preserves_upstream_unavailable_detail_and_logs(
     assert payload == {
         "code": "upstream_unavailable",
         "detail": "transport failed",
+        "message": "transport failed",
         "dispatched": False,
         "params": {},
     }
@@ -1580,6 +1596,7 @@ async def test_real_stdio_proxy_preserves_driver_failure_detail(
     assert payload == {
         "code": "tool_invocation_failed",
         "detail": "simulated owner lookup failure from the driver",
+        "message": "simulated owner lookup failure from the driver",
         "params": {"exit_code": 1},
     }
 

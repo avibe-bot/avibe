@@ -112,7 +112,7 @@ No model credentials belong on hosted runners.
   connected-handle owner/DACL and peer SID checks, ordinary Runtime/shell tokens,
   WTS-active/default input and thread desktops, and the already-pinned source
   driver's action-time target-token/desktop guards. The Windows snapshot pin is
-  `0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293`;
+  `20bfe2c6c205c22e35465706736704f5f8effbab88a1e79357646f556d9a5cad`;
   the Mac snapshot is not accepted as Windows readiness evidence.
 - Driver/helper processes are atomically Job-owned from suspended creation.
   Production Job limits include `KILL_ON_JOB_CLOSE | BREAKAWAY_OK`, never
