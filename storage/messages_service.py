@@ -1291,7 +1291,7 @@ def unread_counts(
         query = query.where(or_(messages.c.session_id.is_(None), messages.c.session_id.not_in(hidden)))
     # Workspace notices have no scope, so their branch cannot contribute here.
     query = query.where(unread_message_predicates()[0])
-    return {scope: int(count) for scope, count in conn.execute(query)}
+    return {scope: int(count) for scope, count in conn.execute(query).all()}
 
 
 def unread_counts_by_session(
@@ -1346,7 +1346,7 @@ def unread_counts_by_session(
         query = query.where(messages.c.session_id.not_in(hidden))
     counts: dict[str, int] = {}
     for predicate in unread_message_predicates():
-        for session_id, count in conn.execute(query.where(predicate)):
+        for session_id, count in conn.execute(query.where(predicate)).all():
             counts[session_id] = counts.get(session_id, 0) + int(count)
     return counts
 
