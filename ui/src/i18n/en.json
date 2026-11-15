@@ -6524,12 +6524,17 @@
       "empty": "No activity yet."
     },
     "askOff": {
+      "setupFailed": "The Passkey couldn’t be set up. Try again.",
+      "setupConflict": "A Passkey was just set up elsewhere. Try turning this off again.",
+      "setupDone": "Your Passkey is set up. Turn this off again to finish.",
+      "settingUp": "Setting up your Passkey…",
+      "setupAction": "Set up a Passkey",
       "turnedOff": "Turned off with your Passkey; in effect now.",
       "offHintEdit": "Turning this off needs your Passkey and takes effect right away; you don’t need to Save.",
       "legacyRegistration": "Your Passkey was set up in a very early preview, and this Avibe didn’t keep what it needs to confirm turning this off. The switch stays on.",
       "waiting": "Waiting for your Passkey…",
       "popupBlocked": "Your browser blocked the confirmation window. Allow pop-ups and turn it off again.",
-      "setupRequired": "Turning this off needs a Passkey. You set one up when you add a protected key; after that you can turn it off here.",
+      "setupRequired": "Turning this off needs a Passkey, and this Avibe doesn’t have one yet. Set one up now; then you can turn this off here.",
       "factorUnavailable": "The Passkey on record isn’t available to this Avibe, so it can’t confirm turning this off. The switch stays on.",
       "expired": "The confirmation timed out, so nothing changed. Turn it off again.",
       "clockSkew": "This device’s clock is off, so nothing changed. Fix the time and try again.",
