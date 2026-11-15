@@ -45,7 +45,7 @@ from core.handlers.model_hub.json_wire import (
     JSONScope,
     project_json_reader,
 )
-from core.handlers.model_hub.request import FORWARDED_CALLER_HEADERS
+from core.handlers.model_hub.request import FORWARDED_CALLER_HEADERS, OPENCODE_SESSION_CALLER_HEADER
 from core.os_errors import local_os_errno
 from core.handlers.model_hub.stream_wire import (
     GOOGLE_ERROR_STATUS_MACHINE_CODES,
@@ -663,7 +663,9 @@ class EngineClient:
             body["model"] = routed_model
             body["stream"] = stream
         headers = {
-            key.lower(): value for key, value in (request_headers or {}).items() if key.lower() in FORWARDED_CALLER_HEADERS
+            key.lower(): value
+            for key, value in (request_headers or {}).items()
+            if key.lower() in FORWARDED_CALLER_HEADERS or key.lower() == OPENCODE_SESSION_CALLER_HEADER
         }
         headers.update(
             {
