@@ -21,7 +21,7 @@ import urllib.request
 import psutil
 
 REPO = "avibe-bot/avibe"
-ROOT = Path(os.environ["SMOKE_ROOT"])
+ROOT = Path(os.environ.get("SMOKE_ROOT") or os.environ.get("ACCEPTANCE_ROOT") or (os.environ["RUNNER_TEMP"] + "/signed-rc-smoke"))
 EVIDENCE = ROOT / "evidence"
 SOURCE_TAG = os.environ.get("SOURCE_TAG", "gh-v3.2.7rc2")
 TARGET_TAG = os.environ.get("TARGET_TAG", "gh-v3.2.7rc3")
