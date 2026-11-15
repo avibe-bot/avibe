@@ -705,6 +705,31 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     await waitFor(() => expect(control.getAttribute('data-switch-state')).toBe('off'));
   });
 
+  it.each([
+    ['the off write fails and the saved opt-in is still on', true, 'on'],
+    ['off is saved but stopping the driver fails', false, 'off'],
+  ])('shows what the server reports when %s, keeping the failure', async (_case, enabledAfter, shown) => {
+    const invoke = enterSwitchShell(vi.fn(async (command: string) => {
+      if (command === 'computer_use_disable') throw new Error('off failed');
+    }));
+    statusSequence({ ...windowsHost, enabled: true, status: 'ready', reason: null });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    const control = await switchControl();
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+    // The saved record decides what a restart does; the page shows that, never a guess.
+    statusSequence({ ...windowsHost, enabled: enabledAfter, status: 'unavailable', reason: 'daemon_unreachable' });
+    await user.click(control);
+
+    expect(invoke).toHaveBeenLastCalledWith('computer_use_disable');
+    expect(await screen.findByTestId('computer-use-switch-failed')).toBeTruthy();
+    await waitFor(() => expect(control.getAttribute('data-switch-state')).toBe(shown));
+    expect(control.getAttribute('aria-checked')).toBe(String(enabledAfter));
+    // A rejected Off is never reported as done.
+    expect(screen.getByTestId('computer-use-switch-failed')).toBeTruthy();
+  });
+
   it('returns to the server value with a note when the change fails or never shows up', async () => {
     enterSwitchShell(vi.fn(async () => { throw new Error('denied'); }));
     statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
