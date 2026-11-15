@@ -196,17 +196,24 @@ it('Escape during pending consent approval still cancels the native operation', 
 });
 
 
-it.each([true, false])('deduplicates only a known authoritative local ID (%s), independently of enrollment and names', async (known) => {
+it.each([
+  { currentKind: 'local', known: true },
+  { currentKind: 'local', known: false },
+  { currentKind: 'remote', known: true },
+  { currentKind: 'remote', known: false },
+])('deduplicates only a known authoritative local ID (current=$currentKind, known=$known), independently of enrollment and names', async ({ currentKind, known }) => {
   const item = states.signed_in.catalog.instances[0];
   const state = { ...states.signed_in,
     local: { ...states.signed_in.local, name: item.name, instance_id: known ? item.id : null, remote_access_url: null },
     enrollment: { ...states.signed_in.enrollment, instance_id: item.id },
-    connection: { status: 'remote_connected', pending: null, committed: { kind: 'remote', name: 'Another instance', instance_id: 'another', canonical_origin: 'https://another-app.avibe.bot' } },
+    // A failed local refresh clears proof but retains the old committed ID.
+    connection: { status: currentKind === 'local' ? 'local' : 'remote_connected', pending: null, committed: { kind: currentKind, name: 'Another instance', instance_id: currentKind === 'local' ? item.id : 'another', canonical_origin: 'https://another-app.avibe.bot' } },
   };
   const invoke = mount(state, (request) => ({ ...replies.success, state, request_id: request.request_id }));
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
   const catalogRows = [...document.querySelectorAll('[data-instance-id]')];
   expect(catalogRows.some((node) => node.getAttribute('data-instance-id') === item.id)).toBe(!known);
+  expect(catalogRows.filter((node) => node.getAttribute('data-instance-id') === 'local')).toHaveLength(1);
 });
 
 // Native advances generation when it starts selection; this is not a logout.
