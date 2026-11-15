@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $inputData = Get-Content -LiteralPath (Join-Path $Root 'input.json') -Raw | ConvertFrom-Json
 $work = Join-Path $Root 'work'
 $result = @{ installed_driver_sha256 = $null; cases = [ordered]@{} }
-$stage = 'standard_user'; $failed = $false; $desktop = $null; $install = $null; $python = $null; $stub = $null
+$stage = 'standard_user'; $failed = $false; $desktop = $null; $install = $null; $python = $null; $stub = $null; $caseContext = $null
 function Verdict([string] $Id, [string] $Verdict, [string] $Reason) {
     $result.cases[$Id] = @{ verdict = $Verdict; reason = $Reason }
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $work 'result.json') -Encoding utf8
@@ -21,6 +21,12 @@ function Run-Process([string] $File, [string[]] $Arguments, [int] $Seconds = 180
         if (-not $p.WaitForExit($Seconds * 1000)) { throw 'child_process_timeout' }
         $text = $stdout.GetAwaiter().GetResult(); $errors = $stderr.GetAwaiter().GetResult()
         if ($p.ExitCode -ne 0) {
+            if ($Arguments -contains (Join-Path $Root 'cdp.mjs')) {
+                try {
+                    $detail = $text | ConvertFrom-Json -AsHashtable
+                    if ($detail['reason'] -match '^(cdp|settings)_[a-z_]+$') { $result.cdp_detail = $detail['reason'] }
+                } catch { }
+            }
             # Classify only known shipped diagnostics; never publish their raw
             # text, paths, PIDs or arbitrary command output.
             foreach ($entry in @(
@@ -107,6 +113,7 @@ try {
     } while ((Get-Date) -lt $deadline)
     if (-not $status -or $desktop.MainWindowHandle -eq 0) { throw 'desktop_window_or_runtime_not_ready' }
     Verdict 'desktop_launch' 'PASS' 'installed_desktop_window_and_its_runtime_status_ready_under_standard_user'
+    $null = Run-Process $python @('-I', '-B', (Join-Path $Root 'configure_stub.py'), '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--port', '0', '--work', $work, '--setup-only') 120
     $cdpPhase = 'http'
     try {
         $cdpDeadline = (Get-Date).AddSeconds(45)
@@ -147,9 +154,6 @@ try {
         foreach ($id in @('settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock')) {
             Verdict $id 'NOT RUN' 'rc3_feature_disabled_preparation_only'
         }
-    } else {
-        $stage = 'settings_enable'
-        throw 'enabled_acceptance_not_implemented_yet'
     }
 
     $stage = 'model_stub_tool_path'
@@ -179,11 +183,17 @@ try {
     $probe = Get-Content -LiteralPath (Join-Path $work 'probe-context.json') -Raw | ConvertFrom-Json
     if ($probe.ok -ne $true -or $probe.kind -ne 'computer_js' -or $probe.result.fixture_admission -ne $true) { throw 'shipped_computer_js_admission_not_proven' }
     Verdict 'model_stub_tool_path' 'PASS' 'real_controller_vibey_turn_and_shipped_cli_js_with_deterministic_model_stub_not_llm'
+    if ($inputData.mode -eq 'enabled') {
+        $stage = 'settings_enable'
+        . (Join-Path $Root 'enabled.ps1')
+        $caseContext = @{ Desktop = $desktop }
+        try { Invoke-EnabledCases $caseContext } finally { $desktop = $caseContext.Desktop }
+    }
 } catch {
     $failed = $true
     $result.failure = @{ exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
     $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'ordinary_user_operation_failed' }
-    Verdict $stage 'FAIL' $reason
+    if ($reason -ne 'enabled_acceptance_case_failed') { Verdict $stage 'FAIL' $reason }
 } finally {
     try {
         if ($stub) { if (-not $stub.HasExited) { $stub.Kill(); $null = $stub.WaitForExit(10000) }; $stub.Dispose() }

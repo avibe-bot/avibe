@@ -24,10 +24,11 @@ $record = [ordered]@{
     actual_os_build = [Environment]::OSVersion.Version.ToString()
     launch_method = 'ProcessStartInfo with UserName, LoadUserProfile (CreateProcessWithLogonW); not a second interactive session'
     screenshots = $false; clipboard_capture = $false; model_credentials = $false
+    turn_evidence = 'deterministic model stub, not an LLM; real LLM Agent Turn NOT RUN'
     installer_sha256 = $null; installed_driver_sha256 = $null; stage2_driver_sha256 = $null
     cases = $cases
 }
-$user = $null; $password = $null; $worker = $null; $result = $null; $failed = $false; $stage = 'release_integrity'
+$user = $null; $password = $null; $worker = $null; $result = $null; $security = $null; $failed = $false; $stage = 'release_integrity'
 
 function Verdict([string] $Id, [string] $Result, [string] $Reason) {
     $cases[$Id] = @{ verdict = $Result; reason = $Reason }
@@ -135,7 +136,7 @@ try {
     if (-not (Get-LocalGroupMember -Group $group | Where-Object { $_.SID -eq $user.SID })) { Add-LocalGroupMember -Group $group -Member $user }
     $groups = @(Get-LocalGroup | Where-Object { @(Get-LocalGroupMember -Group $_ | Where-Object { $_.SID -eq $user.SID }).Count -gt 0 })
     if ($groups.Count -ne 1 -or $groups[0].SID.Value -ne 'S-1-5-32-545') { throw 'account_not_users_only' }
-    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs')) {
+    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $root $file)
     }
     Set-FixtureAccess $root 'ReadAndExecute'
@@ -159,7 +160,19 @@ try {
     $null = $worker.SafeHandle
     $deadline = (Get-Date).AddMinutes(32)
     $nextAdmission = (Get-Date).AddSeconds(180)
+    . (Join-Path $PSScriptRoot 'security.ps1')
+    $security = @{ Root = $root; User = $user; DriverHash = $hash; ElevatedApp = $null; Completed = $false }
     while (-not $worker.WaitForExit(1000)) {
+        $securityRequest = Join-Path $work 'security-request.json'
+        if ($Mode -eq 'enabled' -and -not $security.Completed -and (Test-Path -LiteralPath $securityRequest)) {
+            $request = Get-Content -LiteralPath $securityRequest -Raw | ConvertFrom-Json
+            if ($request.action -ne 'prepare-security-fixtures') { throw 'unknown_security_fixture_request' }
+            try { $securityReply = Invoke-SecurityFixtures $security } catch { $securityReply = @{ ok = $false; reason = 'security_fixture_failed' } }
+            $security.Completed = $true
+            $replyPath = Join-Path $work 'security-response.json'
+            $securityReply | ConvertTo-Json | Set-Content -LiteralPath ($replyPath + '.tmp') -Encoding utf8
+            Move-Item -LiteralPath ($replyPath + '.tmp') -Destination $replyPath
+        }
         if ((Get-Date) -gt $deadline) { throw 'ordinary_user_worker_timeout' }
         if ((Get-Date) -ge $nextAdmission) { Assert-ReleaseIdle; $nextAdmission = (Get-Date).AddSeconds(180) }
     }
@@ -169,10 +182,16 @@ try {
         $cases[$id] = $result.cases[$id]
     }
     $record.installed_driver_sha256 = $result.installed_driver_sha256
-    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'stub_turn_diagnostics', 'stub_receipt')) {
+    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt')) {
         if ($result.Contains($field)) { $record[$field] = $result[$field] }
     }
     if ($worker.ExitCode -ne 0) { $failed = $true }
+    if ($security.ElevatedApp -and $cases.elevated_app_refused.verdict -eq 'PASS') {
+        if ($security.ElevatedApp.HasExited -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) {
+            Verdict 'elevated_app_refused' 'FAIL' 'elevated_notepad_did_not_preserve_empty_document'
+            $failed = $true
+        }
+    }
 } catch {
     $failed = $true
     # Only harness-owned reason codes escape; never serialize an exception,
@@ -184,6 +203,10 @@ try {
 } finally {
     if ($worker) { if (-not $worker.HasExited) { $worker.Kill(); $null = $worker.WaitForExit(10000) }; $worker.Dispose() }
     try {
+        if ($security -and $security.ElevatedApp) {
+            if (-not $security.ElevatedApp.HasExited) { $security.ElevatedApp.Kill(); $null = $security.ElevatedApp.WaitForExit(10000) }
+            $security.ElevatedApp.Dispose()
+        }
         if ($user) {
             Stop-FixtureProcesses
             foreach ($portField in @('cdp_port', 'stub_port')) {

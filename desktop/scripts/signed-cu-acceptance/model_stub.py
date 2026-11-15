@@ -47,12 +47,9 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
     if "powershell" not in functions:
         raise ValueError("shipped_windows_powershell_tool_required")
     script = work / f"{marker}.js"
-    output = work / f"{marker}.json"
     command = (
         f"& {ps_quote(python)} -I -B -m vibe computer js "
-        f"--code {ps_quote('@' + str(script))} --timeout-ms 60000 "
-        f"| Set-Content -LiteralPath {ps_quote(str(output))} -Encoding utf8; "
-        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+        f"--code {ps_quote('@' + str(script))} --timeout-ms 60000"
     )
     return {
         "role": "assistant",
@@ -92,7 +89,22 @@ def handler(python: str, work: Path):
                 receipt = {"received": True, "finish": finish, "shell_tool_called": bool(delta.get("tool_calls"))}
                 tool_messages = [row for row in request.get("messages", []) if row.get("role") == "tool"]
                 if tool_messages:
-                    content = json.dumps(tool_messages[-1].get("content", "")).lower()
+                    raw_content = tool_messages[-1].get("content", "")
+                    if isinstance(raw_content, list):
+                        raw_content = "\n".join(str(item.get("text", "")) for item in raw_content if isinstance(item, dict))
+                    content = str(raw_content).lower()
+                    # Preserve the actual shipped CLI result for the external
+                    # observer, not a verdict invented by the model fixture.
+                    matching_case = next((case for case in CASES if tool_messages[-1].get("tool_call_id") == "call_cu_" + case.replace("-", "_")), None)
+                    try:
+                        cli_result = json.loads(str(raw_content))
+                    except ValueError:
+                        cli_result = None
+                    if matching_case and isinstance(cli_result, dict) and cli_result.get("kind") == "computer_js":
+                        (work / f"{matching_case}.json").write_text(json.dumps(cli_result), encoding="utf-8")
+                    receipt["exit_codes"] = re.findall(r"command exited with code (-?\d+)", content)
+                    receipt["powershell_error_ids"] = re.findall(r"fullyqualifiederrorid\s*:\s*([a-z0-9_,.]+)", content)
+                    receipt["cli_error_codes"] = re.findall(r'"code"\s*:\s*"([a-z_]+)"', content)
                     receipt["tool_result_classes"] = [label for text, label in (
                         ("working directory does not exist", "cwd_missing"),
                         ("working directory is not accessible", "cwd_inaccessible"),
@@ -109,6 +121,13 @@ def handler(python: str, work: Path):
                         ("cannot find path", "path_missing"),
                         ("cannot bind", "powershell_binding_failed"),
                         ("no output", "no_output"),
+                        ("unknown tool", "unknown_tool"),
+                        ("unexpected token", "shell_parse_error"),
+                        ("terminator", "shell_quote_error"),
+                        ("modulenotfounderror", "python_module_missing"),
+                        ("filenotfounderror", "python_file_missing"),
+                        ("command cannot be run due to", "native_command_start_failed"),
+                        ("erroractionpreference", "powershell_action_preference"),
                     ) if text in content]
                     receipt["tool_result_characters"] = len(content)
                 (work / "stub-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")

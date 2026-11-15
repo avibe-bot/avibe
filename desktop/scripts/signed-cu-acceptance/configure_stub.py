@@ -64,9 +64,14 @@ def main():
     parser.add_argument("--origin", required=True)
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--work", required=True, type=Path)
+    parser.add_argument("--setup-only", action="store_true")
     args = parser.parse_args()
     try:
-        configure(RuntimeAPI(args.origin), args.port, args.work)
+        api = RuntimeAPI(args.origin)
+        if args.setup_only:
+            api.call("POST", "/api/config", {"setup_completed": True, "runtime": {"default_cwd": str(args.work)}})
+        else:
+            configure(api, args.port, args.work)
     except Exception as error:
         # Public API failure code and type only, never a source key/CSRF cookie,
         # request or response body, profile path, or arbitrary exception text.
