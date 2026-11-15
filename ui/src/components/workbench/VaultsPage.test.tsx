@@ -34,6 +34,8 @@ const api = vi.hoisted(() => ({
   getAvaultAuthorization: vi.fn(),
   getVaultGrants: vi.fn(),
   getVaultRequests: vi.fn(),
+  // A handed-off request's full read; left unanswered unless a test answers it.
+  getVaultRequest: vi.fn(() => new Promise(() => {})),
   listVaultSecrets: vi.fn(),
   listDependencies: vi.fn(),
   listSkills: vi.fn(),
