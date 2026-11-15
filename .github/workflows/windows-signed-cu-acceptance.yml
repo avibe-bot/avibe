@@ -9,6 +9,8 @@ on:
       - '.github/workflows/windows-signed-cu-acceptance.yml'
       - 'desktop/scripts/signed-cu-acceptance/**'
       - 'docs/plans/windows-signed-acceptance.md'
+      - 'tests/test_windows_signed_acceptance.py'
+      - 'tests/windows_signed_acceptance_*'
 
 permissions:
   contents: read

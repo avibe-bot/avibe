@@ -35,6 +35,11 @@ def test_draft_workflow_cannot_dispatch_or_receive_release_write_authority():
         Loader=yaml.BaseLoader,
     )
     assert set(workflow["on"]) == {"pull_request"}
+    # Test-only fixes must still produce the exact-head native check watched by
+    # this draft; path filtering must not leave that gate permanently missing.
+    paths = workflow["on"]["pull_request"]["paths"]
+    assert "tests/test_windows_signed_acceptance.py" in paths
+    assert "tests/windows_signed_acceptance_*" in paths
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
     assert workflow["concurrency"]["cancel-in-progress"] == "false"
     job = workflow["jobs"]["signed-installer"]

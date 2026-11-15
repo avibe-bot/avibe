@@ -7,7 +7,9 @@ Set-StrictMode -Version Latest
 $env:SystemRoot = 'C:\Windows'; $env:TEMP = 'C:\fixture'
 $script:Events = [Collections.Generic.List[string]]::new()
 $script:Rows = @(); $script:Processes = @{}; $script:Listeners = @(); $script:Mode = 'cleanup'
-$now = [DateTime]::UtcNow.AddSeconds(-10)
+# Exercise sub-microsecond Process time explicitly, independently of the host
+# clock's resolution; the synthetic CIM rows below have microsecond precision.
+$now = [DateTime]::new(2026, 11, 15, 7, 0, 0, [DateTimeKind]::Utc).AddTicks(7)
 function New-FakeProcess([int] $Id, [string] $Label, [datetime] $Created, [bool] $Fail = $false) {
     $p = [pscustomobject]@{ Id = $Id; Label = $Label; HasExited = $false; StartTime = $Created; Fail = $Fail; Disposed = $false }
     $p | Add-Member ScriptMethod Kill { $script:Events.Add($this.Label); if ($this.Fail) { throw 'fixture_stop_refused' }; $this.HasExited = $true }
@@ -17,7 +19,10 @@ function New-FakeProcess([int] $Id, [string] $Label, [datetime] $Created, [bool]
     return $p
 }
 function New-Row([int] $Id, [int] $Parent, [datetime] $Created, [string] $Image = 'C:\app\webview.exe', [string] $Command = '') {
-    return [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; CreationDate = $Created; ExecutablePath = $Image; CommandLine = $Command }
+    # Every fixture Process time has the literal seven-tick residue above;
+    # specify its CIM counterpart without reusing the observer's normalization.
+    $cimCreated = $Created.AddTicks(-7)
+    return [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; CreationDate = $cimCreated; ExecutablePath = $Image; CommandLine = $Command }
 }
 function Get-CimInstance($Class, $Filter, $OperationTimeoutSec) {
     if ($script:Mode -eq 'lineage') { return $script:Rows }
