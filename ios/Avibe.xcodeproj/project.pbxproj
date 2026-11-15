@@ -93,6 +93,10 @@
 		91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000006 /* FixtureNativeBridgeSupport.swift */; };
 		91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000003 /* RealBundleCaptureUITests.swift */; };
 		910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000001 /* InstanceSheetGestureUITests.swift */; };
+		100000000000000000000141 /* DirectIrohInteropWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000141 /* DirectIrohInteropWire.swift */; };
+		100000000000000000000142 /* DirectIrohInteropEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000142 /* DirectIrohInteropEngine.swift */; };
+		100000000000000000000143 /* DirectIrohInteropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000143 /* DirectIrohInteropTests.swift */; };
+		100000000000000000000144 /* DirectIrohInteropProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000144 /* DirectIrohInteropProtocolTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -212,6 +216,10 @@
 		930000000000000000000003 /* RealBundleCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealBundleCaptureUITests.swift; sourceTree = "<group>"; };
 		930000000000000000000001 /* InstanceSheetGestureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstanceSheetGestureUITests.swift; sourceTree = "<group>"; };
 		930000000000000000000002 /* AvibeSheetFixtureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AvibeSheetFixtureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000141 /* DirectIrohInteropWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropWire.swift; sourceTree = "<group>"; };
+		200000000000000000000142 /* DirectIrohInteropEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropEngine.swift; sourceTree = "<group>"; };
+		200000000000000000000143 /* DirectIrohInteropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropTests.swift; sourceTree = "<group>"; };
+		200000000000000000000144 /* DirectIrohInteropProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropProtocolTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -350,6 +358,10 @@
 				200000000000000000000125 /* DirectIrohByteStreamTests.swift */,
 				200000000000000000000126 /* DirectIrohTestSupport.swift */,
 				200000000000000000000139 /* DirectIrohBindingTests.swift */,
+				200000000000000000000141 /* DirectIrohInteropWire.swift */,
+				200000000000000000000142 /* DirectIrohInteropEngine.swift */,
+				200000000000000000000143 /* DirectIrohInteropTests.swift */,
+				200000000000000000000144 /* DirectIrohInteropProtocolTests.swift */,
 				200000000000000000000127 /* DirectIrohTransportTests.swift */,
 				200000000000000000000128 /* DirectRendezvousFetcherTests.swift */,
 				200000000000000000000129 /* DirectRendezvousTests.swift */,
@@ -818,6 +830,10 @@
 				100000000000000000000125 /* DirectIrohByteStreamTests.swift in Sources */,
 				100000000000000000000126 /* DirectIrohTestSupport.swift in Sources */,
 				100000000000000000000139 /* DirectIrohBindingTests.swift in Sources */,
+				100000000000000000000141 /* DirectIrohInteropWire.swift in Sources */,
+				100000000000000000000142 /* DirectIrohInteropEngine.swift in Sources */,
+				100000000000000000000143 /* DirectIrohInteropTests.swift in Sources */,
+				100000000000000000000144 /* DirectIrohInteropProtocolTests.swift in Sources */,
 				100000000000000000000127 /* DirectIrohTransportTests.swift in Sources */,
 				100000000000000000000128 /* DirectRendezvousFetcherTests.swift in Sources */,
 				100000000000000000000129 /* DirectRendezvousTests.swift in Sources */,
