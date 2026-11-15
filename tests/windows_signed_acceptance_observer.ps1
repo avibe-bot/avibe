@@ -124,4 +124,25 @@ if ($double.reason -ne 'update_product_double_launch') { throw 'fixture_double_l
 $none = Resolve-UpdateDesktops @([pscustomobject]@{ pid = 45; exited = $true })
 if ($none.reason -ne 'update_real_relaunch_unproven') { throw 'fixture_no_survivor_accepted' }
 if ((Resolve-UpdateDesktops @()).reason -ne 'update_real_relaunch_unproven') { throw 'fixture_no_desktop_accepted' }
+# Outcome-only update helpers, executed from the real update.ps1.
+$tokens = $null; $errors = $null
+$updateAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $Source) 'update.ps1'), [ref]$tokens, [ref]$errors)
+foreach ($name in @('Get-InstalledDesktops', 'Resolve-UpdateOutcomeCount')) {
+    $definition = $updateAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+if ((Resolve-UpdateOutcomeCount @(1)) -ne $null) { throw 'fixture_single_desktop_rejected' }
+if ((Resolve-UpdateOutcomeCount @(1, 2)) -ne 'update_product_double_launch') { throw 'fixture_double_launch_accepted' }
+if ((Resolve-UpdateOutcomeCount @()) -ne 'update_relaunched_desktop_exited') { throw 'fixture_no_desktop_accepted' }
+# Plain same-user listing against this real process: exact path matches, a
+# different path never does, and returned handles carry start time.
+$self = Get-Process -Id $PID
+$selfPath = $self.Path; $selfName = $self.ProcessName; $self.Dispose()
+$listed = Get-InstalledDesktops $selfPath $selfName
+try {
+    if (-not @($listed | Where-Object { $_.Id -eq $PID }).Count) { throw 'fixture_own_process_not_listed' }
+    foreach ($process in $listed) { $null = $process.StartTime }
+} finally { foreach ($process in $listed) { $process.Dispose() } }
+$none = Get-InstalledDesktops ($selfPath + '.other') $selfName
+if (@($none).Count) { throw 'fixture_wrong_path_listed' }
 Write-Output 'update_observer_fixture_cases_passed'
