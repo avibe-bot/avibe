@@ -22,7 +22,7 @@ function Open-UpdateProcess($Row, [datetime] $Since) {
 function Invoke-UpdateCase([hashtable] $Context) {
     $phase = 'update_panel_start'; $clicker = $null; $updater = $null; $replacement = $null; $supervisor = $null
     $original = $Context.Desktop; $since = [DateTime]::UtcNow; $completed = $false
-    $desktops = [ordered]@{}; $firstDesktopSeen = $null
+    $desktops = [ordered]@{}; $firstDesktopSeen = $null; $lastDesktopSeen = $null
     $supervisorFound = $false; $installerFound = $false; $installerHashMatches = $null
     $Context.Quiesced = $false
     . (Join-Path $Root 'update-observer.ps1')
@@ -100,6 +100,7 @@ function Invoke-UpdateCase([hashtable] $Context) {
                             elseif ($updater -and $parentPid -eq $updater.Id) { 'installer' }
                             elseif ($desktops.Contains($parentPid)) { 'replacement' } else { 'other' }
                         if (-not $firstDesktopSeen) { $firstDesktopSeen = Get-Date }
+                        $lastDesktopSeen = Get-Date
                         $desktops[[int]$row.ProcessId] = @{ process = $candidate; record = [ordered]@{
                             pid = [int]$row.ProcessId; parent_pid = $parentPid; parent_relation = $relation
                             started_after_click_ms = [int]($row.CreationDate - $since).TotalMilliseconds
@@ -115,8 +116,9 @@ function Invoke-UpdateCase([hashtable] $Context) {
                     $entry.record.lifetime_ms = [int]($entry.process.ExitTime.ToUniversalTime() - $entry.process.StartTime.ToUniversalTime()).TotalMilliseconds
                 }
             }
-            # Settle: observe every post-click Desktop for 60 s after the first.
-            if ($receipt -and $supervisor -and $supervisor.HasExited -and $updater -and $updater.HasExited -and $original.HasExited -and $firstDesktopSeen -and ((Get-Date) - $firstDesktopSeen).TotalSeconds -ge 60) { break }
+            # Settle: 60 s after the first post-click Desktop, and at least 15 s
+            # after the most recent one, so a late handoff gets time to exit.
+            if ($receipt -and $supervisor -and $supervisor.HasExited -and $updater -and $updater.HasExited -and $original.HasExited -and $firstDesktopSeen -and ((Get-Date) - $firstDesktopSeen).TotalSeconds -ge 60 -and ((Get-Date) - $lastDesktopSeen).TotalSeconds -ge 15) { break }
             Start-Sleep -Milliseconds 100
         } while ((Get-Date) -lt $deadline)
         if (-not $result.Contains('update_transition')) { $result.update_transition = @{} }
