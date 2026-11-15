@@ -164,9 +164,13 @@ kernel, SDK, saved flows, and safety rules above are the same.
 - Windows asks for no Accessibility or Screen Recording grant. Never tell the
   owner to open System Settings; report the state you received instead.
 - Avibe refuses some Windows actions on purpose. The error's `code` says
-  which; its `message` is written for you to relay to the user in their
-  language. None of these is retried, forced with foreground delivery, or
-  worked around, and you never ask anyone to raise Avibe's or an app's rights:
+  which; its `message` explains the refusal and the next step. Tell the user
+  what happened in their language, as below. Apart from the one fresh
+  observation allowed for `unverified_window`, none of these is retried,
+  forced with foreground delivery, or worked around, and you never ask anyone
+  to raise Avibe's or an app's rights. After a `protected_window` or
+  `unverified_window` refusal, other work that does not need that window can
+  continue:
   - `protected_window`, `params.reason` `administrator`: the window runs as
     administrator. Tell the user Avibe cannot control it, and that reopening
     the app without "Run as administrator" lets you continue.
@@ -182,7 +186,6 @@ kernel, SDK, saved flows, and safety rules above are the same.
   - `administrator_runtime_refused`: Avibe itself runs as administrator, so
     Computer Use stays off. Tell the user to quit Avibe and reopen it
     normally, and stop.
-  Other work that does not need that window can continue.
 - Avibe launches a Windows app only from the absolute path of its `.exe` on a
   local drive. Network, relative, and other paths are refused, and Avibe never
   launches by name. To work in an app the owner named, first check `observe
