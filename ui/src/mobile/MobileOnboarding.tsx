@@ -201,10 +201,7 @@ function useOperationOwner() {
   };
 }
 
-const installGuideUrl = (language: string): string =>
-  language.toLowerCase().startsWith('zh')
-    ? 'https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI_ZH.md'
-    : 'https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI.md';
+const installGuideUrl = 'https://avibe.bot/#install';
 
 const screenForSession = (session: MobileSessionState): Screen => {
   if (session.status === 'signedOut') return 'welcome';
