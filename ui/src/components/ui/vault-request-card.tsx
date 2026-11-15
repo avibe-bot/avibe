@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import type { VaultRequest } from '@/context/ApiContext';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
+import { vaultRequestNeedsFullRead } from '@/lib/vaultFullRequest';
 import { partitionTags } from '@/lib/vaultTags';
 import { Badge } from './badge';
 import { Button } from './button';
@@ -122,13 +123,15 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
   // members/selector live on the card. Fall back to those so the card is never nameless.
   const { name, extra } = useMemo(() => {
     if (request.secret_name) return { name: request.secret_name, extra: 0 };
+    // A proof-free summary names nothing; the details come with the full request on Review.
+    if (vaultRequestNeedsFullRead(request)) return { name: t('vaults.requests.detailsOnReview'), extra: 0 };
     const names = card.secret_names ?? [];
     if (names.length) return { name: names[0], extra: names.length - 1 };
     const selector = card.source_selector ?? {};
     const { tags, skills } = partitionTags(selector.tags);
     const token = skills[0] ? `skill:${skills[0]}` : tags[0] ? `#${tags[0]}` : (selector.env ?? [])[0];
     return { name: token ?? '', extra: 0 };
-  }, [request.secret_name, card]);
+  }, [request, card, t]);
 
   const meta =
     type === 'provision'

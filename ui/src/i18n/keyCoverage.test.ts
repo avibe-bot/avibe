@@ -969,6 +969,7 @@ const NON_KEY_LITERALS = [
   'avibe.sidebar.sections.v1',
   'avibe.terminal.fontSize.v1',
   'avibe.terminal.sessionId',
+  'avibe.vault.addTier',
   'avibe.vault.crypto',
   'avibe.vault.hdAddressCheckFailed',
   'avibe.workbench.windows.v1',

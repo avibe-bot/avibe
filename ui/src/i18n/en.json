@@ -6341,12 +6341,13 @@
       "browserNote": "Passkeys don't work in the desktop app. Continue in your browser, on this same Avibe, and fill in this secret there.",
       "openInBrowser": "Open in browser",
       "errors": {
-        "prfUnavailable": "This passkey/browser doesn't support the PRF extension needed for encryption. Try a platform passkey (Touch ID / Windows Hello).",
+        "prfUnavailable": "This passkey doesn’t support the encryption Protected needs, so setup didn’t finish. On a Mac, choose iCloud Keychain when your browser asks where to save the passkey. On Windows, you can use Chrome signed in to your Google account and save it to Google Password Manager. Then try again.",
         "cancelled": "Passkey prompt was cancelled.",
         "noPasskey": "No passkey is configured for this protected vault.",
         "wrongFactor": "Couldn't unlock with this passkey.",
         "discoveryFailed": "Couldn't load your protected vault. Check your connection and retry — don't set up a new one, or you'll split your vault keys.",
-        "alreadyInitialized": "This vault was just set up elsewhere. Reload and unlock with your existing passkey."
+        "alreadyInitialized": "This vault was just set up elsewhere. Reload and unlock with your existing passkey.",
+        "prfUnavailableUnlock": "This browser couldn't unlock Protected with your passkey, so it is still locked. Try again in a current Chrome or Safari, on a device where this passkey is saved."
       }
     },
     "dialog": {
@@ -6438,10 +6439,19 @@
       "solanaImportHint": "Its address appears after you create it. Recovery phrases aren’t supported yet.",
       "solanaImportInfo": "The pasted key is encrypted in your browser, then avault on this computer checks it and stores it.",
       "protectedKeyInfo": "The key is made and encrypted inside an isolated sandbox. The private key never leaves it; Avibe receives only the encrypted key and its address.",
-      "protectedBitcoinInfo": "Protected Bitcoin keys can approve spending only from a Taproot address, in a compatible sandbox. Legacy and SegWit addresses can’t be spent from.",
+      "protectedBitcoinInfo": "A protected Bitcoin key can spend only from the address types shown for that key, in a compatible secure window.",
       "moreInfo": "More info",
       "keySource": "Key source",
-      "signingImportHint": "Its addresses appear as soon as you paste it, so you can check them before you create it."
+      "signingImportHint": "Its addresses appear as soon as you paste it, so you can check them before you create it.",
+      "nameTaken": "Another key already uses this name. Choose a different name.",
+      "nameCaseConflict": "A key named {{name}} already exists; names can't differ only in letter case. Choose a different name.",
+      "nameRequired": "Enter a name to create the secret.",
+      "nameRequiredWallet": "Enter a name to create the wallet.",
+      "createNeedsValue": "Enter a value to create the secret.",
+      "createNeedsWords": "Paste the recovery words to import the wallet.",
+      "createNeedsKey": "Paste the private key to import.",
+      "createNeedsProtected": "Set up or unlock Protected above first.",
+      "createNeedsAvault": "Install or update avault as shown above first."
     },
     "requests": {
       "title": "Pending requests",
@@ -6457,7 +6467,11 @@
       "provision": "Provide secret",
       "approved": "Access approved",
       "signed": "Signed",
-      "denied": "Request denied"
+      "denied": "Request denied",
+      "loadingFull": "Loading the request…",
+      "loadFullFailed": "Couldn’t load this request. Check your connection and try again.",
+      "retry": "Try again",
+      "detailsOnReview": "Signing request · details on Review"
     },
     "approval": {
       "accessTitle": "Agent wants to use a secret",
@@ -6718,8 +6732,12 @@
           "secret_exists": "A secret with this name already exists",
           "secret_name_case_conflict": "A secret with this name in different letter case already exists",
           "vault_already_initialized": "The protected vault was just set up elsewhere"
-        }
-      }
+        },
+        "nameTakenCreate": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold a wallet for the words just shown; don’t send funds to its addresses. Create it again with a different name; you’ll get a new set of words.",
+        "nameTakenImport": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold the wallet you just imported; don’t send funds to its addresses. Import it again with a different name, using the same words."
+      },
+      "nameTakenAfterSave": "Another key already uses this name, so the wallet isn’t saved yet. Change the name and save again; your recovery words stay the same.",
+      "standardTierLine": "You're using Standard: the words are entered on this page and stored encrypted on the computer that runs Avibe."
     },
     "generate": {
       "password": "Random password",

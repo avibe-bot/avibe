@@ -10,6 +10,7 @@ import base64
 import copy
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from threading import Barrier
 
 import pytest
@@ -211,3 +212,77 @@ def test_setup_rejects_nonobject_or_malformed_client_data_without_registration(r
         api.complete_vault_setup(setup, origin=ORIGIN)
     assert error.value.code == "invalid_protected_authz" and error.value.status == 403
     assert snapshot() == before
+
+
+def test_existing_factor_registration_keeps_short_authorization_window(monkeypatch):
+    """Only first-time setup gets the long registration window; factor auth stays at 120 seconds."""
+    class SetupClock(datetime):
+        current = datetime(2026, 11, 15, 13, 0, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            value = cls.current
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(vault_service, "datetime", SetupClock)
+    _credential, setup = candidate()
+    api.complete_vault_setup(setup, origin=ORIGIN)
+    options = api.create_vault_authz_webauthn_options(origin=ORIGIN)
+    assert options["requires_existing_factor"] is True
+    rows = {row["id"]: row for row in snapshot()["vault_operation_challenges"]}
+    registration_expires = datetime.fromisoformat(rows[options["challenge_id"]]["expires_at"])
+    authorization_expires = datetime.fromisoformat(rows[options["authorization"]["challenge_id"]]["expires_at"])
+    assert (registration_expires - SetupClock.current).total_seconds() == 120
+    assert (authorization_expires - SetupClock.current).total_seconds() == 120
+
+
+@pytest.mark.parametrize("registration_age", [121, 1801])
+def test_first_setup_registration_window_is_long_but_setup_root_outlives_it(monkeypatch, registration_age):
+    """The first setup proof gets 30 minutes; later protected creates need no proof replay."""
+    class SetupClock(datetime):
+        current = datetime(2026, 11, 15, 13, 0, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            value = cls.current
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(vault_service, "datetime", SetupClock)
+    _credential, setup = candidate()
+    challenge = next(
+        (
+            item for item in snapshot()["vault_operation_challenges"]
+            if item["id"] == setup["authz_factor_registration"]["challenge_id"]
+        ),
+        None,
+    )
+    assert challenge is not None
+    options_expires_at = datetime.fromisoformat(challenge["expires_at"])
+    assert (options_expires_at - SetupClock.current).total_seconds() == 1800
+
+    SetupClock.current += timedelta(seconds=registration_age)
+    if registration_age == 1801:
+        with pytest.raises(api.VaultApiError) as error:
+            api.complete_vault_setup(setup, origin=ORIGIN)
+        assert error.value.code == "invalid_protected_authz"
+        saved = snapshot()
+        assert saved["vault_secrets"] == [] and saved["vault_auth_factors"] == [] and saved["vault_audit"] == []
+        assert not any(row["key"] == vault_setup.META_KEY for row in saved["state_meta"])
+        return
+
+    root = api.complete_vault_setup(setup, origin=ORIGIN)
+    assert root["ok"]
+    # The setup transaction is complete; the original registration may now be far past expiry.
+    SetupClock.current += timedelta(seconds=1801)
+    static = api.create_vault_secret(create_payload("DELAYED_STATIC", setup), origin=ORIGIN)
+    keypair = create_payload("DELAYED_KEYPAIR", setup)
+    keypair.update({
+        "kind": "keypair",
+        "signer_kind": "local",
+        "public_meta": {"signing_public_key": {
+            "curve": "secp256k1",
+            "public_key": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        }},
+    })
+    created_keypair = api.create_vault_secret(keypair, origin=ORIGIN)
+    assert static["ok"] and created_keypair["ok"]

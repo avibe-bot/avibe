@@ -3731,6 +3731,7 @@ async def desktop_computer_use_status():
                 "supported": False,
                 "status": "unavailable",
                 "reason": "unsupported_host",
+                "enabled": None,
                 "host_platform": host_platform,
             }
         )
@@ -3739,12 +3740,13 @@ async def desktop_computer_use_status():
 
     status = await asyncio.to_thread(effective_computer_use_status)
     if status.status == "ready" and await internal_client.health_identity() is None:
-        status = ComputerUseStatus("unavailable", "controller_unavailable")
+        status = ComputerUseStatus("unavailable", "controller_unavailable", status.state)
     response_payload = jsonify(
         {
             "supported": True,
             "status": status.status,
             "reason": status.reason,
+            "enabled": status.enabled,
             "host_platform": host_platform,
         }
     )

@@ -20,9 +20,12 @@ export function isVaultApprovalRequest(request: VaultRequest): boolean {
 /**
  * Whether approving this request runs the sandbox's protected ceremony: a protected sign, or an
  * access whose fixed set includes protected members. Provision requests never approve.
+ * Call it on a full request only: a proof-free summary (`card: null`) says nothing about protection
+ * (rev0.4 §4.3); the shared approval dialog reads it in full first.
  */
 export function vaultApprovalNeedsPasskey(request: VaultRequest): boolean {
   const type = vaultRequestType(request);
+  if (request.card == null && type === 'sign') return false;
   if (type === 'provision' || type === 'delete') return false;
   const card = (request.card ?? {}) as {
     protection?: string | null;

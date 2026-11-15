@@ -5,6 +5,7 @@
 //! between. PROC_THREAD_ATTRIBUTE_JOB_LIST closes that gap (Windows 10+).
 //! No shell elevation, silent breakaway, pipe admission, or resource discovery here.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -18,16 +19,18 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, IsProcessInJob, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    CreateJobObjectW, IsProcessInJob, JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, InitializeProcThreadAttributeList,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, InitializeProcThreadAttributeList, OpenProcess,
     OpenProcessToken, ResumeThread, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
     CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 const FORCE_STOP_LIMIT: Duration = Duration::from_secs(3);
@@ -48,6 +51,9 @@ pub(crate) struct OwnedDriver {
     initial_thread: Option<OwnedHandle>,
     stdin: Option<OwnedHandle>,
     pid: u32,
+    stop_members: BTreeMap<u32, OwnedHandle>,
+    #[cfg(test)]
+    stop_failures: u8,
 }
 
 impl OwnedDriver {
@@ -119,6 +125,9 @@ impl OwnedDriver {
             initial_thread: Some(unsafe { OwnedHandle::from_raw_handle(info.hThread) }),
             stdin: Some(stdin_write),
             pid: info.dwProcessId,
+            stop_members: BTreeMap::new(),
+            #[cfg(test)]
+            stop_failures: 0,
         };
         let mut in_job = 0;
         check(unsafe { IsProcessInJob(child.process.as_raw_handle(), child.job.as_raw_handle(), &mut in_job) })?;
@@ -158,23 +167,134 @@ impl OwnedDriver {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn assert_member(&self, process: std::os::windows::io::BorrowedHandle<'_>) {
+        let mut member = 0;
+        check(unsafe { IsProcessInJob(process.as_raw_handle(), self.job.as_raw_handle(), &mut member) }).unwrap();
+        assert_ne!(member, 0, "fixture helper must belong to this exact owned Job");
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+        check(unsafe {
+            QueryInformationJobObject(
+                self.job.as_raw_handle(),
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                null_mut(),
+            )
+        })
+        .unwrap();
+        eprintln!(
+            "owned job before Off: total={}, active={}",
+            accounting.TotalProcesses, accounting.ActiveProcesses
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_stops(&mut self, count: u8) {
+        self.stop_failures = count;
+    }
+
     /// Close parent-liveness stdin, then allow a bounded graceful exit. Always
     /// terminate remaining descendants, even if the direct child already exited.
-    /// Cancellation drops this owner and triggers the same job-wide cleanup.
+    /// The caller retains this owner on an error or cancelled wait so a later
+    /// Off can verify the SAME job instead of treating a missing owner as done.
+    /// Dropping the owner still triggers job-wide cleanup on shell exit.
     /// Success means the job has no active processes, not merely that a kill was
     /// requested. A timeout/error must not be treated as a successful restart.
-    pub(crate) async fn stop(mut self, grace: Duration) -> io::Result<()> {
+    pub(crate) async fn stop(&mut self, grace: Duration) -> io::Result<()> {
+        // Take custody before EOF can make a helper leave job accounting.
+        // Keep these handles across a failed/cancelled stop. Historical members
+        // that already exited are not part of this snapshot's completion claim.
+        let snapshot = self.capture_stop_members();
         drop(self.stdin.take());
-        // A suspended child's stdin cannot be read, so do not delay its abort.
-        if self.initial_thread.is_none() && self.wait_empty(grace).await? {
+        #[cfg(test)]
+        if self.stop_failures > 0 {
+            self.stop_failures -= 1;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "injected unconfirmed job teardown",
+            ));
+        }
+        // Observation errors still reach job-wide cleanup. A suspended child's
+        // stdin cannot be read, so do not delay its abort.
+        if snapshot.is_ok() && self.initial_thread.is_none() && self.wait_empty(grace).await.unwrap_or(false) {
             return Ok(());
         }
+        let later_snapshot = self.capture_stop_members();
         check(unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) })?;
-        if self.wait_empty(FORCE_STOP_LIMIT).await? {
-            Ok(())
-        } else {
-            Err(io::Error::new(io::ErrorKind::TimedOut, "driver job did not terminate"))
+        if !self.wait_empty(FORCE_STOP_LIMIT).await? {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "driver job did not terminate"));
         }
+        snapshot.and(later_snapshot)
+    }
+
+    fn capture_stop_members(&mut self) -> io::Result<()> {
+        self.capture_stop_members_with_capacity(16)
+    }
+
+    fn capture_stop_members_with_capacity(&mut self, mut capacity: usize) -> io::Result<()> {
+        // x64 only: two DWORD counts occupy one usize; IDs are pointer-aligned.
+        // Grow on truncation rather than silently omitting active members.
+        loop {
+            let mut storage = vec![0_usize; capacity + 1];
+            let list = storage.as_mut_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.job.as_raw_handle(),
+                    JobObjectBasicProcessIdList,
+                    list.cast(),
+                    (storage.len() * size_of::<usize>()) as u32,
+                    null_mut(),
+                )
+            };
+            let assigned = unsafe { (*list).NumberOfAssignedProcesses } as usize;
+            let count = unsafe { (*list).NumberOfProcessIdsInList } as usize;
+            if ok == 0 || count < assigned {
+                let error = io::Error::last_os_error();
+                if ok == 0 && error.raw_os_error() != Some(234) {
+                    // ERROR_MORE_DATA
+                    return Err(error);
+                }
+                capacity = capacity.saturating_mul(2).max(assigned);
+                if capacity > 65536 {
+                    return Err(io::Error::other("driver job process list exceeds bounded snapshot"));
+                }
+                continue;
+            }
+            if count > capacity {
+                return Err(io::Error::other("invalid driver job process list"));
+            }
+            for raw_pid in &storage[1..1 + count] {
+                let pid = u32::try_from(*raw_pid).map_err(|_| io::Error::other("invalid job process id"))?;
+                if pid == self.pid || self.stop_members.contains_key(&pid) {
+                    continue;
+                }
+                let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
+                if handle.is_null() {
+                    // It may have exited since the snapshot. A missing handle
+                    // alone never proves success: we still require job drain.
+                    continue;
+                }
+                let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+                let mut member = 0;
+                check(unsafe { IsProcessInJob(handle.as_raw_handle(), self.job.as_raw_handle(), &mut member) })?;
+                if member != 0 {
+                    self.stop_members.insert(pid, handle);
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    fn stop_members_signaled(&self) -> io::Result<bool> {
+        for handle in std::iter::once(&self.process).chain(self.stop_members.values()) {
+            match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => return Ok(false),
+                _ => return Err(io::Error::last_os_error()),
+            }
+        }
+        Ok(true)
     }
 
     async fn wait_empty(&self, limit: Duration) -> io::Result<bool> {
@@ -190,7 +310,7 @@ impl OwnedDriver {
                     null_mut(),
                 )
             })?;
-            if accounting.ActiveProcesses == 0 {
+            if accounting.ActiveProcesses == 0 && self.stop_members_signaled()? {
                 return Ok(true);
             }
             if tokio::time::Instant::now() >= deadline {

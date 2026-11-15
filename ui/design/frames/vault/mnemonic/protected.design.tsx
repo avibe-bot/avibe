@@ -16,7 +16,7 @@ import type { ProtectedHdPhase } from '@/lib/useProtectedHdCreate';
 import { IMPORTED_ADDRESSES } from '../../../kit/vault-mnemonic/data';
 import { frames } from '../../../frame';
 import { consolePage } from '../../workbench/fixtures';
-import { alone, avaultFixtures, walletAccounts, walletFixtures, walletSecret } from './fixtures';
+import { alone, avaultFixtures, nameTakenFixtures, walletAccounts, walletFixtures, walletSecret } from './fixtures';
 
 const fixtures = avaultFixtures('0.1.12');
 const T = '添加密钥';
@@ -27,6 +27,10 @@ const create = [
   'role=button[name^="{t:vaults.dialog.protectedProtection}"]',
 ];
 const importing = [...create, 'role=radio[name="{t:vaults.dialog.signingImport}"]'];
+// Leaving the name field checks it: focus the name, then move on.
+const leaveName = ['role=textbox[name^="{t:vaults.dialog.name}"]', 'role=radio[name="{t:vaults.hd.chainMnemonic}"]'];
+const standardTaken = ['role=radio[name="{t:vaults.dialog.kindKeypair}"]', 'role=radio[name="{t:vaults.hd.chainMnemonic}"]', ...leaveName];
+const standardImport = ['role=radio[name="{t:vaults.dialog.kindKeypair}"]', 'role=radio[name="{t:vaults.hd.chainMnemonic}"]', 'role=radio[name="{t:vaults.dialog.signingImport}"]'];
 const add = (phase: ProtectedHdPhase) => () => (
   <ProtectedHdDesignState.Provider value={{ phase, name: 'COLD_WALLET' }}>
     <VaultSecretDialog open onOpenChange={noop} onCreated={noop} />
@@ -51,6 +55,10 @@ const designFrames = frames([
   { name: 'saving', title: '保护档 · 窗口完成，正在保存', width: 800, height: 1560, status: 'shipped', fixtures, click: create, render: add({ kind: 'saving' }) },
   { name: 'checking', title: '保护档 · 没有确定回复，向 Avibe 核对（不重来、不再生成）', width: 800, height: 1600, status: 'shipped', fixtures, click: create, render: add({ kind: 'checking', refusal: null }) },
   { name: 'unconfirmed', title: '保护档 · 仍无法确认（显示 Avibe 的拒绝原因，不说“未保存”）', width: 800, height: 1640, status: 'shipped', fixtures, click: create, render: add({ kind: 'unconfirmed', refusal: { code: 'secret_exists', text: 'A secret with this name already exists' } }) },
+  { name: 'name-taken', title: '名称已被占用 · 离开名称框就提示，创建按钮等新名称', width: 800, height: 1500, status: 'shipped', fixtures: nameTakenFixtures, click: standardTaken, render: add({ kind: 'idle' }) },
+  { name: 'name-taken-create', title: '保护档 · 保存时名称已被占用：没有保存，换名称会生成新助记词', width: 800, height: 1600, status: 'shipped', fixtures, click: create, render: add({ kind: 'nameTaken', mode: 'create' }) },
+  { name: 'name-taken-import', title: '保护档 · 导入时名称已被占用：没有保存，换名称用同一组词再导入', width: 800, height: 1600, status: 'shipped', fixtures, click: importing, render: add({ kind: 'nameTaken', mode: 'import' }) },
+  { name: 'standard-import-tier', title: '标准档 · 导入：词框旁说明助记词在这个页面输入', width: 800, height: 1400, status: 'shipped', fixtures, click: standardImport, render: add({ kind: 'idle' }) },
   { name: 'mismatch', title: '保护档 · 保存的和窗口生成的对不上，不要转账', width: 800, height: 1600, status: 'shipped', fixtures, click: create, render: add({ kind: 'mismatch' }) },
   { name: 'done', title: '回到页面 · 已创建（保护档）· 恢复说明', width: 800, height: 900, status: 'shipped', fixtures, render: done },
   { name: 'accounts', title: '保护档钱包 · 账户卡：BTC 只有 Taproot，每次签名都批准', width: 860, height: 900, status: 'shipped', fixtures: walletFixtures, render: accounts },

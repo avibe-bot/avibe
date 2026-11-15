@@ -517,3 +517,51 @@ it('says the passphrase is set when its section is folded again', async () => {
   expect(screen.getByText(hd.passphrase.set)).toBeTruthy();
   expect(screen.queryByText(hd.passphrase.folded)).toBeNull();
 });
+
+it('a name another key took by the time of saving: back to the first step with the same words, only the name to change', async () => {
+  await openWallet();
+  fireEvent.click(screen.getByRole('button', { name: hd.generateCta }));
+  fireEvent.click(await screen.findByRole('button', { name: hd.backup.show.replace('{{count}}', '12') }));
+  const readWords = () => within(screen.getByRole('list', { name: hd.steps.backup })).getAllByRole('listitem').map((item) => item.querySelectorAll('span')[1].textContent ?? '');
+  const words = readWords();
+  fireEvent.click(screen.getByRole('button', { name: hd.backup.done }));
+  const answer = () => {
+    for (const group of screen.getAllByRole('radiogroup')) {
+      const position = Number(/\d+/.exec(group.getAttribute('aria-label') ?? '')![0]);
+      fireEvent.click(within(group).getByRole('radio', { name: words[position - 1] }));
+    }
+  };
+  answer();
+  api.createVaultSecret.mockResolvedValueOnce({ ok: false, code: 'secret_exists', message: 'exists' });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.createCta })); });
+  // Nothing was saved; the name field says so and Create waits for another name.
+  expect(await screen.findByText(hd.nameTakenAfterSave)).toBeTruthy();
+  const nameBox = screen.getByRole('textbox', { name: new RegExp(`^${en.vaults.dialog.name}`) });
+  expect(nameBox.getAttribute('aria-invalid')).toBe('true');
+  expect((screen.getByRole('button', { name: hd.generateCta }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(nameBox, { target: { value: 'AGENT_WALLET_2' } });
+  expect(screen.queryByText(hd.nameTakenAfterSave)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: hd.generateCta }));
+  // The same words as before, not a new set.
+  fireEvent.click(await screen.findByRole('button', { name: hd.backup.show.replace('{{count}}', '12') }));
+  expect(readWords()).toEqual(words);
+  fireEvent.click(screen.getByRole('button', { name: hd.backup.done }));
+  answer();
+  api.createVaultSecret.mockResolvedValueOnce({ ok: true, secret: { accounts: [storedFor(words)] } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.createCta })); });
+  expect(await screen.findByText(hd.done.verified)).toBeTruthy();
+  expect(api.createVaultSecret).toHaveBeenCalledTimes(2);
+  expect(sealed.context).toEqual(expect.objectContaining({ name: 'AGENT_WALLET_2' }));
+  expect(bytesToHex(sealed.plaintext!)).toBe(bytesToHex(wordsToSeed(words)));
+});
+
+it('an import whose name was taken keeps the pasted words, and says which tier holds them', async () => {
+  await openWallet();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  expect(screen.getByText(hd.standardTierLine)).toBeTruthy();
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: OFFICIAL } });
+  api.createVaultSecret.mockResolvedValueOnce({ ok: false, code: 'secret_name_case_conflict', message: 'case' });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
+  expect(await screen.findByText(hd.nameTakenAfterSave)).toBeTruthy();
+  expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe(OFFICIAL);
+});
