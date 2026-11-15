@@ -3,6 +3,13 @@ param([Parameter(Mandatory)][string] $Source, [Parameter(Mandatory)][string] $Wo
 $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 New-Item -ItemType Directory -Force $Work | Out-Null
 . $Source
+# user.ps1 consumes JSON as PSCustomObject, not a hashtable. The optional
+# identity exception must recognize only an explicit JSON boolean true.
+foreach ($json in @('{}','{"allow_unverified_helpers":false}','{"allow_unverified_helpers":true}','{"allow_unverified_helpers":"true"}')) {
+    $config=$json | ConvertFrom-Json
+    $expected=$json -eq '{"allow_unverified_helpers":true}'
+    if ((Test-AcceptanceHelperIdentityOptional $config) -ne $expected) { throw 'optional_json_boolean_contract_failed' }
+}
 if ($NativeWorker) {
     $phase='identity'; $e=[ordered]@{}; $nativeFailure=$null; $nativePassed=$false; $ordinaryUser=$false
     $child=$null; $handles=$null

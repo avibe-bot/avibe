@@ -469,7 +469,7 @@ try {
                     $helpers = Driver-Handles $target.Id
                     $result.cu_input_diagnostics[$operationId].helper_identity = @{status='VERIFIED'; reason_class=$null}
                 } catch {
-                    if (-not $inputData.ContainsKey('allow_unverified_helpers') -or -not $inputData.allow_unverified_helpers) { throw }
+                    if (-not (Test-AcceptanceHelperIdentityOptional $inputData)) { throw }
                     $result.helper_identity_verified = $false
                     $result.cu_input_diagnostics[$operationId].helper_identity = @{status='NOT VERIFIED'; reason_class=$_.Exception.GetBaseException().GetType().FullName}
                     Write-AcceptanceEvidence $result (Join-Path $work 'result.json')

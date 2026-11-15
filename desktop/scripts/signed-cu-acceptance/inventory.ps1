@@ -1,5 +1,10 @@
 # Test-owned observer. CIM supplies candidate names/parent links, never image identity.
 # Keep unknown fields null and retain query-only process handles across lifecycle actions.
+function Test-AcceptanceHelperIdentityOptional([object] $InputData) {
+    $property = $InputData.PSObject.Properties['allow_unverified_helpers']
+    return $null -ne $property -and $property.Value -is [bool] -and $property.Value
+}
+
 function Get-AcceptanceHelpers {
     param([string] $DriverPath, [string] $DriverHash, [string] $OwnerSid,
           [int] $AppPid, [int] $DesktopPid, [Collections.Generic.HashSet[int]] $Known,
