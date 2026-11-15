@@ -137,7 +137,7 @@ try {
         $cdpPhase = 'settings_page'
         $page = Run-Process $node @((Join-Path $Root 'cdp.mjs'), '--port', [string]$cdpPort, '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--action', 'inspect') 90 | ConvertFrom-Json
         if ($page.ok -ne $true) { throw 'cdp_settings_page_unproven' }
-        Verdict 'webview_cdp_preflight' 'PASS' 'installed_webview_settings_page_automated_over_loopback_cdp'
+        Verdict 'webview_cdp_preflight' 'PASS' 'real_settings_rail_link_clicked_and_installed_webview_dom_inspected_over_loopback_cdp'
     } catch {
         $result.cdp_failure = @{ phase = $cdpPhase; exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber }
         Verdict 'webview_cdp_preflight' 'NOT RUN' ('signed_webview_cdp_unproven_' + $cdpPhase)
@@ -180,9 +180,12 @@ try {
     }
     $receiptPath = Join-Path $work 'stub-receipt.json'
     if (Test-Path -LiteralPath $receiptPath) { $result.stub_receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json -AsHashtable }
-    $probe = Get-Content -LiteralPath (Join-Path $work 'probe-context.json') -Raw | ConvertFrom-Json
-    if ($probe.ok -ne $true -or $probe.kind -ne 'computer_js' -or $probe.result.fixture_admission -ne $true) { throw 'shipped_computer_js_admission_not_proven' }
-    Verdict 'model_stub_tool_path' 'PASS' 'real_controller_vibey_turn_and_shipped_cli_js_with_deterministic_model_stub_not_llm'
+    $probe = Get-Content -LiteralPath (Join-Path $work 'probe-context.json') -Raw | ConvertFrom-Json -AsHashtable
+    # This is deliberately BEFORE Settings enable. The genuine live Turn is
+    # admitted first, then the shipped JS endpoint refuses its default-off state.
+    # Requiring JS success here incorrectly treats the safe guard as a failure.
+    if ($probe['ok'] -ne $false -or $probe['code'] -ne 'computer_use_unavailable' -or $probe['details']['error']['params']['status'] -ne 'off') { throw 'shipped_cli_default_off_guard_not_proven' }
+    Verdict 'model_stub_tool_path' 'PASS' 'real_controller_turn_shipped_cli_reached_default_off_guard_deterministic_stub_not_llm_js_not_executed'
     if ($inputData.mode -eq 'enabled') {
         $stage = 'settings_enable'
         . (Join-Path $Root 'enabled.ps1')

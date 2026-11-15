@@ -55,6 +55,36 @@ function Invoke-EnabledCases([hashtable] $Context) {
         if (-not $handles.Count) { throw 'live_driver_handles_missing' }
         return ,$handles
     }
+    function Assert-NoReplacementDriver([Collections.Generic.List[Diagnostics.Process]] $Prior, [int] $AppPid) {
+        $known = [Collections.Generic.HashSet[int]]::new()
+        foreach ($process in $Prior) { $null = $known.Add($process.Id) }
+        # Include late descendants and new driver generations, not just the
+        # pre-action handles. Stay quiet across the native five-second reprobe.
+        $quietUntil = (Get-Date).AddSeconds(6)
+        do {
+            $rows = @(Get-CimInstance Win32_Process)
+            do {
+                $changed = $false
+                foreach ($row in $rows) {
+                    if ([int]$row.ProcessId -ne $AppPid -and ($row.ExecutablePath -eq $driverPath -or $known.Contains([int]$row.ParentProcessId))) {
+                        if ($known.Add([int]$row.ProcessId)) { $changed = $true }
+                    }
+                }
+            } while ($changed)
+            foreach ($row in $rows) {
+                if (-not $known.Contains([int]$row.ProcessId) -or [int]$row.ProcessId -eq $AppPid) { continue }
+                $owner = Invoke-CimMethod -InputObject $row -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+                if (-not $owner -or $owner.ReturnValue -ne 0 -or $owner.Sid -ne $inputData.expected_sid) { continue }
+                $live = $null
+                try {
+                    $live = [Diagnostics.Process]::GetProcessById([int]$row.ProcessId)
+                    $null = $live.SafeHandle
+                    if (-not $live.HasExited) { throw 'replacement_driver_or_late_helper_survived_shutdown' }
+                } catch [ArgumentException] { } finally { if ($live) { $live.Dispose() } }
+            }
+            Start-Sleep -Milliseconds 500
+        } while ((Get-Date) -lt $quietUntil)
+    }
     try {
         $initial = Status
         if ($initial.supported -ne $true -or $initial.status -ne 'off' -or $initial.host_platform -ne 'windows') { throw 'activation_default_off_not_proven' }
@@ -104,8 +134,9 @@ await win.observe({include_screenshot: false});
                     $remaining = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalMilliseconds)
                     if (-not $helper.WaitForExit($remaining)) { throw 'driver_or_helper_survived_shutdown' }
                 }
+                Assert-NoReplacementDriver $helpers $target.Id
                 if ($target.HasExited -or -not [AcceptanceNative]::UnsavedTextEquals($window, $text)) { throw 'original_app_or_unsaved_text_did_not_survive' }
-                Verdict $currentCase 'PASS' 'same_real_created_app_and_unsaved_text_survived_all_recorded_driver_helpers_exited'
+                Verdict $currentCase 'PASS' 'original_app_and_unsaved_text_survived_pinned_helpers_exited_and_no_replacement_generation'
             } finally {
                 if ($helpers) { foreach ($helper in $helpers) { $helper.Dispose() } }
                 if (-not $target.HasExited) { $target.Kill(); $null = $target.WaitForExit(10000) }
@@ -130,11 +161,17 @@ await win.observe({include_screenshot: false});
         $response = Join-Path $work 'security-response.json'
         $deadline = (Get-Date).AddSeconds(120)
         while (-not (Test-Path -LiteralPath $response) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
-        $securityResult = Get-Content -LiteralPath $response -Raw | ConvertFrom-Json
-        if (-not ($securityResult.ok -and $securityResult.second_user_pipe_denied -and $securityResult.second_user_lock_denied)) { throw 'second_user_pipe_lock_not_denied' }
-        Verdict 'second_user_pipe_lock' 'PASS' 'owner_pipe_open_positive_control_second_users_only_account_denied_pipe_and_lock'
-        if (-not $securityResult.elevated_driver_refused) { throw 'elevated_driver_refusal_missing' }
-        Verdict 'elevated_driver_refused' 'PASS' 'exact_installed_driver_refused_elevated_serve_before_binding'
+        $currentCase = 'security_fixture'
+        $securityResult = Get-Content -LiteralPath $response -Raw | ConvertFrom-Json -AsHashtable
+        foreach ($id in $securityResult.cases.Keys) {
+            if ($id -notin @('security_fixture', 'elevated_driver_refused', 'second_user_pipe_lock')) { throw 'unknown_security_verdict' }
+            Verdict $id $securityResult.cases[$id].verdict $securityResult.cases[$id].reason
+        }
+        if (-not $securityResult.ok) { throw 'security_fixture_failed_see_individual_verdicts' }
+        if ($securityResult.cases.second_user_pipe_lock.verdict -ne 'PASS' -or $securityResult.cases.elevated_driver_refused.verdict -ne 'PASS') { throw 'security_verdict_missing' }
+        try {
+            if (-not [AcceptanceNative]::IsElevated([int]$securityResult.elevated_pid)) { throw 'elevated_target_query_access_unproven' }
+        } catch { throw 'elevated_target_query_access_unproven' }
         $currentCase = 'elevated_app_refused'
         $elevatedScript = @"
 const app = await computer.app({nameContains: 'notepad'});

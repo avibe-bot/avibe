@@ -30,6 +30,7 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
     $psi.Environment['CUA_DRIVER_RS_UPDATE_CHECK'] = 'false'
     foreach ($arg in @('serve', '--socket', ($pipePrefix + $refusalPipe), '--pid-file', $pidFile, '--no-overlay')) { $psi.ArgumentList.Add($arg) }
     $process = [Diagnostics.Process]::Start($psi)
+    $Context.Stage = 'elevated_driver_refused'
     $null = $process.SafeHandle
     try {
         $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
@@ -45,6 +46,8 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
         throw 'elevated_driver_bound_pipe'
     } catch [TimeoutException] { } finally { $client.Dispose() }
 
+    $Context.Cases.elevated_driver_refused = @{ verdict = 'PASS'; reason = 'installed_driver_explicit_elevated_serve_refusal_and_no_residual_pipe' }
+    $Context.Stage = 'security_fixture'
     $second = $null; $password = $null; $probe = $null
     try {
         $password = [Security.SecureString]::new()
@@ -53,6 +56,7 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
         for ($i=0; $i -lt 40; $i++) { $password.AppendChar($alphabet[[Security.Cryptography.RandomNumberGenerator]::GetInt32($alphabet.Length)]) }
         $password.MakeReadOnly()
         $second = New-LocalUser -Name ('avicub' + [guid]::NewGuid().ToString('N').Substring(0,10)) -Password $password -AccountExpires (Get-Date).AddHours(1)
+        $Context.SecondUser = $second
         $group = Get-LocalGroup -SID 'S-1-5-32-545'
         if (-not (Get-LocalGroupMember -Group $group | Where-Object { $_.SID -eq $second.SID })) { Add-LocalGroupMember -Group $group -Member $second }
         $groups = @(Get-LocalGroup | Where-Object { @(Get-LocalGroupMember -Group $_ | Where-Object { $_.SID -eq $second.SID }).Count -gt 0 })
@@ -73,25 +77,38 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
         $psi.Environment.Clear()
         foreach ($key in @('SystemRoot', 'SystemDrive', 'COMPUTERNAME')) { $psi.Environment[$key] = [Environment]::GetEnvironmentVariable($key) }
         foreach ($arg in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $Context.Root 'second-user.ps1'), '-InputFile', $inputFile, '-OutputFile', $outputFile)) { $psi.ArgumentList.Add($arg) }
+        $Context.Stage = 'second_user_pipe_lock'
         $probe = [Diagnostics.Process]::Start($psi)
         $null = $probe.SafeHandle
         if (-not $probe.WaitForExit(30000) -or $probe.ExitCode -ne 0) { throw 'second_user_boundary_probe_failed' }
         $denial = Get-Content -LiteralPath $outputFile -Raw | ConvertFrom-Json
         if (-not ($denial.standard_user -and $denial.pipe_denied -and $denial.lock_denied)) { throw 'second_user_boundary_not_denied' }
+        $Context.Cases.second_user_pipe_lock = @{ verdict = 'PASS'; reason = 'owner_pipe_open_positive_control_second_users_only_account_denied_pipe_and_lock' }
+        $Context.Stage = 'security_fixture'
     } finally {
-        if ($probe) { if (-not $probe.HasExited) { $probe.Kill(); $null = $probe.WaitForExit(10000) }; $probe.Dispose() }
+        # Keep the identity in parent state until ALL cleanup succeeds. Each
+        # action is attempted even if an earlier profile/process action fails.
+        $cleanupFailed = $false
+        try { if ($probe) { if (-not $probe.HasExited) { $probe.Kill(); $null = $probe.WaitForExit(10000) }; $probe.Dispose() } } catch { $cleanupFailed = $true }
         if ($second) {
-            $deadline = (Get-Date).AddSeconds(20)
-            do {
-                $secondProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$($second.SID.Value)'"
-                if (-not $secondProfile -or -not $secondProfile.Loaded) { break }
-                Start-Sleep -Milliseconds 250
-            } while ((Get-Date) -lt $deadline)
-            if ($secondProfile -and $secondProfile.Loaded) { throw 'second_profile_still_loaded' }
-            if ($secondProfile) { $secondProfile | Remove-CimInstance }
-            Remove-LocalUser -SID $second.SID
+            try {
+                $deadline = (Get-Date).AddSeconds(20)
+                do {
+                    $secondProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$($second.SID.Value)'"
+                    if (-not $secondProfile -or -not $secondProfile.Loaded) { break }
+                    Start-Sleep -Milliseconds 250
+                } while ((Get-Date) -lt $deadline)
+                if ($secondProfile -and $secondProfile.Loaded) { throw 'second_profile_still_loaded' }
+                if ($secondProfile) { $secondProfile | Remove-CimInstance }
+            } catch { $cleanupFailed = $true }
+            try {
+                Remove-LocalUser -SID $second.SID
+                if ((Get-LocalUser -SID $second.SID -ErrorAction SilentlyContinue) -or (Get-CimInstance Win32_UserProfile -Filter "SID='$($second.SID.Value)'")) { throw 'second_fixture_identity_remains' }
+            } catch { $cleanupFailed = $true }
         }
         if ($password) { $password.Dispose() }
+        if ($cleanupFailed) { throw 'second_fixture_cleanup_failed' }
+        $Context.SecondUser = $null
     }
     # A real elevated system Win32 app, no shim, model key, or inherited GH_TOKEN.
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -110,5 +127,6 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
     } while ((Get-Date) -lt $deadline)
     if ($Context.ElevatedApp.MainWindowHandle -eq 0 -or -not [AcceptanceNative]::IsElevated($Context.ElevatedApp.Id)) { throw 'elevated_notepad_identity_unproven' }
     if (-not [AcceptanceNative]::UnsavedTextEquals($Context.ElevatedApp.MainWindowHandle, '')) { throw 'elevated_notepad_not_blank' }
-    return @{ ok = $true; elevated_driver_refused = $true; second_user_pipe_denied = $true; second_user_lock_denied = $true; elevated_pid = $Context.ElevatedApp.Id; elevated_hwnd = $Context.ElevatedApp.MainWindowHandle.ToInt64() }
+    $Context.Cases.security_fixture = @{ verdict = 'PASS'; reason = 'elevated_target_verified_and_secondary_fixture_removed' }
+    return @{ ok = $true; cases = $Context.Cases; elevated_pid = $Context.ElevatedApp.Id; elevated_hwnd = $Context.ElevatedApp.MainWindowHandle.ToInt64() }
 }

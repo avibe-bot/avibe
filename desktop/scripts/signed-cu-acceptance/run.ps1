@@ -12,7 +12,7 @@ $root = Join-Path $env:RUNNER_TEMP ('signed-cu-' + [guid]::NewGuid().ToString('N
 $work = Join-Path $root 'work'
 New-Item -ItemType Directory -Path $evidence, $root, $work -Force | Out-Null
 $cases = [ordered]@{}
-foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
+foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
     $cases[$id] = @{ verdict = 'NOT RUN'; reason = 'prerequisite_not_reached' }
 }
 $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_desktop'
@@ -74,12 +74,12 @@ function Set-FixtureAccess([string] $Path, [string] $Rights) {
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
-function Stop-FixtureProcesses {
+function Stop-FixtureProcesses([string] $OwnerSid) {
     # Every process of this unique account was created by this task. Pin its
     # handle and check creation identity and SID before terminating it.
     foreach ($row in @(Get-CimInstance Win32_Process -OperationTimeoutSec 15)) {
         $owner = Invoke-CimMethod -InputObject $row -MethodName GetOwnerSid -ErrorAction SilentlyContinue
-        if (-not $owner -or $owner.ReturnValue -ne 0 -or $owner.Sid -ne $user.SID.Value) { continue }
+        if (-not $owner -or $owner.ReturnValue -ne 0 -or $owner.Sid -ne $OwnerSid) { continue }
         $process = $null
         try {
             $process = [Diagnostics.Process]::GetProcessById([int]$row.ProcessId)
@@ -161,13 +161,17 @@ try {
     $deadline = (Get-Date).AddMinutes(32)
     $nextAdmission = (Get-Date).AddSeconds(180)
     . (Join-Path $PSScriptRoot 'security.ps1')
-    $security = @{ Root = $root; User = $user; DriverHash = $hash; ElevatedApp = $null; Completed = $false }
+    $security = @{ Root = $root; User = $user; SecondUser = $null; DriverHash = $hash; ElevatedApp = $null; Completed = $false; Stage = 'security_fixture'; Cases = @{} }
     while (-not $worker.WaitForExit(1000)) {
         $securityRequest = Join-Path $work 'security-request.json'
         if ($Mode -eq 'enabled' -and -not $security.Completed -and (Test-Path -LiteralPath $securityRequest)) {
             $request = Get-Content -LiteralPath $securityRequest -Raw | ConvertFrom-Json
             if ($request.action -ne 'prepare-security-fixtures') { throw 'unknown_security_fixture_request' }
-            try { $securityReply = Invoke-SecurityFixtures $security } catch { $securityReply = @{ ok = $false; reason = 'security_fixture_failed' } }
+            try { $securityReply = Invoke-SecurityFixtures $security } catch {
+                $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'security_fixture_failed' }
+                $security.Cases[$security.Stage] = @{ verdict = 'FAIL'; reason = $reason }
+                $securityReply = @{ ok = $false; reason = $reason; cases = $security.Cases }
+            }
             $security.Completed = $true
             $replyPath = Join-Path $work 'security-response.json'
             $securityReply | ConvertTo-Json | Set-Content -LiteralPath ($replyPath + '.tmp') -Encoding utf8
@@ -201,33 +205,45 @@ try {
     $verdict = if ($reason -eq 'release_priority_yield') { 'NOT RUN' } else { 'FAIL' }
     Verdict $stage $verdict $reason
 } finally {
-    if ($worker) { if (-not $worker.HasExited) { $worker.Kill(); $null = $worker.WaitForExit(10000) }; $worker.Dispose() }
+    $cleanupFailed = $false
+    try { if ($worker) { if (-not $worker.HasExited) { $worker.Kill(); $null = $worker.WaitForExit(10000) }; $worker.Dispose() } } catch { $cleanupFailed = $true }
     try {
         if ($security -and $security.ElevatedApp) {
             if (-not $security.ElevatedApp.HasExited) { $security.ElevatedApp.Kill(); $null = $security.ElevatedApp.WaitForExit(10000) }
             $security.ElevatedApp.Dispose()
         }
-        if ($user) {
-            Stop-FixtureProcesses
-            foreach ($portField in @('cdp_port', 'stub_port')) {
-                if ($result -and $result.Contains($portField)) {
-                    $remaining = @(Get-NetTCPConnection -LocalPort $result[$portField] -State Listen -ErrorAction SilentlyContinue)
-                    if ($remaining.Count) { throw 'test_port_still_listening' }
-                }
-            }
+    } catch { $cleanupFailed = $true }
+    $accounts = @($user)
+    if ($security -and $security.SecondUser) { $accounts += $security.SecondUser }
+    foreach ($account in $accounts) {
+        if (-not $account) { continue }
+        try { Stop-FixtureProcesses $account.SID.Value } catch { $cleanupFailed = $true }
+        try {
             $deadline = (Get-Date).AddSeconds(30)
             do {
-                $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'"
+                $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($account.SID.Value)'"
                 if (-not $profile -or -not $profile.Loaded) { break }
                 Start-Sleep -Milliseconds 500
             } while ((Get-Date) -lt $deadline)
             if ($profile -and $profile.Loaded) { throw 'profile_still_loaded' }
             if ($profile) { $profile | Remove-CimInstance }
-            Remove-LocalUser -SID $user.SID
+        } catch { $cleanupFailed = $true }
+        try {
+            if (Get-LocalUser -SID $account.SID -ErrorAction SilentlyContinue) { Remove-LocalUser -SID $account.SID }
+            if ((Get-LocalUser -SID $account.SID -ErrorAction SilentlyContinue) -or (Get-CimInstance Win32_UserProfile -Filter "SID='$($account.SID.Value)'")) { throw 'fixture_identity_remains' }
+        } catch { $cleanupFailed = $true }
+    }
+    try {
+        foreach ($portField in @('cdp_port', 'stub_port')) {
+            if ($result -and $result.Contains($portField)) {
+                $remaining = @(Get-NetTCPConnection -LocalPort $result[$portField] -State Listen -ErrorAction SilentlyContinue)
+                if ($remaining.Count) { throw 'test_port_still_listening' }
+            }
         }
         Remove-Item -LiteralPath $root -Recurse -Force
-        Verdict 'cleanup' 'PASS' 'owned_processes_profile_account_and_work_removed'
-    } catch { Verdict 'cleanup' 'FAIL' 'fixture_cleanup_failed'; $failed = $true }
+    } catch { $cleanupFailed = $true }
+    if ($cleanupFailed) { Verdict 'cleanup' 'FAIL' 'fixture_cleanup_failed'; $failed = $true }
+    else { Verdict 'cleanup' 'PASS' 'owned_processes_profiles_accounts_and_work_removed' }
     if ($password) { $password.Dispose() }
     Save-Report
 }
