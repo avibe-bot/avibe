@@ -167,7 +167,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   const minute = useMinute();
 
   // The Vault requests waiting on the reader, above the conversations and outside the tabs: they are
-  // answered here with the same rows and dialog as on Vaults (ui/design: inbox/inbox-page/approvals).
+  // answered here with the same rows and dialog as on Vaults (ui/design: inbox/approvals/desktop).
   // Entering the Inbox reads them again, so one that expired meanwhile leaves the list and the badge.
   const { requests: pendingRequests, refresh: refreshPendingRequests, forget: forgetPendingRequest } = usePendingVaultRequestsList();
   const waitingRequests = useMemo(() => liveVaultRequests(pendingRequests, minute * 60_000), [pendingRequests, minute]);
@@ -305,7 +305,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
         </span>
       </Button>
 
-      {waitingRequests.length > 0 && <VaultPendingRequests requests={waitingRequests} onSettled={onRequestSettled} />}
+      <VaultPendingRequests requests={waitingRequests} onSettled={onRequestSettled} />
 
       {/* Toolbar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-2">

@@ -180,7 +180,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
   // Badge only — the shell is mounted on every route and renders no feed.
   const { totalUnread } = useWorkbenchInbox({ feed: false });
   // The Vault requests waiting on this reader: the Inbox lists them, and its entry counts them with
-  // unread (ui/design: inbox/inbox-page/approvals). One read for the whole shell.
+  // unread (ui/design: inbox/approvals/desktop, inbox/approvals/phone). One read for the whole shell.
   const pendingVaultRequests = usePendingVaultRequestsSource();
   // The sidebar's own <aside> is hidden below md by CSS, which hides it without
   // unmounting it — so its inbox-feed and project-tree consumers would still

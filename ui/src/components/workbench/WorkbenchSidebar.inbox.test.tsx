@@ -171,7 +171,7 @@ describe('Workbench sidebar inbox counter', () => {
     expect(inboxIcon().getAttribute('class')).toContain('text-cyan-ink');
   });
 
-  // ui/design: inbox/inbox-page/approvals. A request blocks an Agent until answered, so it counts
+  // ui/design: inbox/approvals/desktop. A request blocks an Agent until answered, so it counts
   // whatever the notification switches, and the entry names both what is unread and what waits.
   it('counts the Vault requests waiting on the reader with unread', () => {
     inbox.totalUnread = 4;
@@ -183,7 +183,8 @@ describe('Workbench sidebar inbox counter', () => {
       </PendingVaultRequestsContext.Provider>,
     );
 
-    const name = en.workbench.inbox.navUnreadAndRequests.replace('{{count}}', '3').replace('{{requests}}', '2');
+    const name = en.workbench.inbox.navUnreadAndRequests.replace('{{count}}', '3')
+      .replace('{{requests}}', en.workbench.inbox.pendingRequestCount_other.replace('{{count}}', '2'));
     expect(screen.getByRole('link', { name }).textContent).toBe('5');
     cleanup();
 
@@ -194,7 +195,7 @@ describe('Workbench sidebar inbox counter', () => {
         {sidebarElement(true)}
       </PendingVaultRequestsContext.Provider>,
     );
-    expect(screen.getByRole('link', { name: en.workbench.inbox.navRequests.replace('{{count}}', '2') }).textContent).toBe('2');
+    expect(screen.getByRole('link', { name: en.workbench.inbox.navRequests_other.replace('{{count}}', '2') }).textContent).toBe('2');
   });
 
   it('marks muted unread with a grey dot instead of a number', () => {

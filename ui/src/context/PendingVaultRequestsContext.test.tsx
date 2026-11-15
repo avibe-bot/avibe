@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 // The shell's one read of the Vault requests waiting on the reader, which the Inbox lists and its
-// entry counts (ui/design: inbox/inbox-page/approvals). It reads once and then only on what can
+// entry counts (ui/design: inbox/approvals/desktop). It reads once and then only on what can
 // change the list: no polling, no timer.
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';

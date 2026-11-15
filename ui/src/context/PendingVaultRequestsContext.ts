@@ -6,7 +6,7 @@ import { isReviewableVaultRequest } from '../lib/vaultPendingRequests';
 
 /**
  * The Vault requests waiting on this reader, for the Inbox: its 「待处理请求」 section and the count
- * its entry (the sidebar icon, the phone's tab) adds to unread. ui/design: inbox/inbox-page/approvals
+ * its entry (the sidebar icon, the phone's tab) adds to unread. ui/design: inbox/approvals/desktop
  */
 export interface PendingVaultRequests {
   requests: VaultRequest[];
@@ -15,6 +15,9 @@ export interface PendingVaultRequests {
   /** Drop a request this reader just answered, before the next read confirms it. */
   forget: (requestId: string) => void;
 }
+
+const sameRequests = (a: VaultRequest[], b: VaultRequest[]) =>
+  a.length === b.length && a.every((request, index) => request.id === b[index].id && request.expires_at === b[index].expires_at);
 
 const NONE: PendingVaultRequests = { requests: [], refresh: () => {}, forget: () => {} };
 
@@ -49,7 +52,9 @@ export function usePendingVaultRequestsSource(): PendingVaultRequests {
   const load = useCallback(() => {
     if (!enabled) return;
     void read().then((next) => {
-      if (next) setRequests(next);
+      // The same requests keep the same list, so an event that changed none of them (a secret
+      // edited, a grant expiring) re-renders nothing that reads it.
+      if (next) setRequests((prev) => sameRequests(prev, next) ? prev : next);
     });
   }, [enabled, read]);
 

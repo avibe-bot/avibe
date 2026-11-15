@@ -77,7 +77,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
  * dialog for a request to provide a value). The caller owns the list; `onSettled` tells it a request
  * was answered so it can drop that row and read the list again.
  */
-export const VaultPendingRequests: React.FC<{
+type PendingRequestsProps = {
   requests: VaultRequest[];
   onSettled: (requestId: string) => void;
   /** A request to open on arrival, read in full by its id (an IM link or the desktop app's hand-off). */
@@ -86,13 +86,40 @@ export const VaultPendingRequests: React.FC<{
   focusStartProtected?: boolean;
   onFocusRequestOpened?: () => void;
   className?: string;
-}> = ({ requests, onSettled, focusRequestId, focusStartProtected = false, onFocusRequestOpened, className }) => {
-  const { t } = useTranslation();
-  const api = useApi();
-  const { showToast } = useToast();
+};
+
+type OpenDialogs = {
+  reviewing: VaultRequest | null;
+  setReviewing: (request: VaultRequest | null) => void;
+  provisioning: VaultRequest | null;
+  setProvisioning: (request: VaultRequest | null) => void;
+  provisionStartsProtected: boolean;
+  setProvisionStartsProtected: (value: boolean) => void;
+};
+
+export const VaultPendingRequests: React.FC<PendingRequestsProps> = (props) => {
+  // The open dialog is held here, above the list: a dialog outlives the row it was opened from, as
+  // the request it answers leaves the list while it finishes (a wallet's done screen, a retry).
   const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
   const [provisioning, setProvisioning] = useState<VaultRequest | null>(null);
   const [provisionStartsProtected, setProvisionStartsProtected] = useState(false);
+  // Nothing listed, open or to open: no section.
+  if (props.requests.length === 0 && !reviewing && !provisioning && !props.focusRequestId) return null;
+  return (
+    <PendingRequestsBody
+      {...props}
+      open={{ reviewing, setReviewing, provisioning, setProvisioning, provisionStartsProtected, setProvisionStartsProtected }}
+    />
+  );
+};
+
+const PendingRequestsBody: React.FC<PendingRequestsProps & { open: OpenDialogs }> = ({
+  requests, onSettled, focusRequestId, focusStartProtected = false, onFocusRequestOpened, className, open,
+}) => {
+  const { t } = useTranslation();
+  const api = useApi();
+  const { showToast } = useToast();
+  const { reviewing, setReviewing, provisioning, setProvisioning, provisionStartsProtected, setProvisionStartsProtected } = open;
 
   const openRequest = useCallback((request: VaultRequest, startProtected = false) => {
     if (vaultRequestReviewType(request) === 'provision') {
@@ -101,7 +128,7 @@ export const VaultPendingRequests: React.FC<{
     } else {
       setReviewing(request);
     }
-  }, []);
+  }, [setProvisioning, setProvisionStartsProtected, setReviewing]);
 
   // A focused or handed-off request is read in full by its id (rev0.4 §4.3), whether or not any
   // list has it yet; the full request decides which dialog opens.
@@ -144,7 +171,7 @@ export const VaultPendingRequests: React.FC<{
       setReviewing(null);
       if (reviewing) onSettled(reviewing.id);
     },
-    [reviewing, showToast, t, onSettled],
+    [reviewing, setReviewing, showToast, t, onSettled],
   );
 
   const denyProvisionRequest = useCallback(
@@ -161,11 +188,8 @@ export const VaultPendingRequests: React.FC<{
         return false;
       }
     },
-    [api, showToast, t, onSettled],
+    [api, setProvisioning, showToast, t, onSettled],
   );
-
-  // A focused request may open before (or without) any list showing it.
-  if (requests.length === 0 && !reviewing && !provisioning) return null;
 
   return (
     <div className={cn('flex flex-col gap-2', className)}>

@@ -3939,8 +3939,11 @@
         "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
       },
       "navUnread": "收件箱，{{count}} 条未读",
-      "navRequests": "收件箱，{{count}} 个待处理请求",
-      "navUnreadAndRequests": "收件箱，{{count}} 条未读，{{requests}} 个待处理请求",
+      "navRequests_one": "收件箱，{{count}} 个待处理请求",
+      "navRequests_other": "收件箱，{{count}} 个待处理请求",
+      "pendingRequestCount_one": "{{count}} 个待处理请求",
+      "pendingRequestCount_other": "{{count}} 个待处理请求",
+      "navUnreadAndRequests": "收件箱，{{count}} 条未读，{{requests}}",
       "sections": {
         "bots": "伙伴",
         "sessions": "会话",

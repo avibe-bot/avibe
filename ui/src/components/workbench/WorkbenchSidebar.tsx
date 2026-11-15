@@ -758,7 +758,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   // is all in muted categories shows as a grey dot instead, so it is there to
   // find but asks for nothing (docs/plans/workbench-refinements.md §1).
   // A Vault request waiting on the reader counts too, whatever the switches: it blocks an Agent until
-  // answered (ui/design: inbox/inbox-page/approvals).
+  // answered (ui/design: inbox/approvals/desktop).
   const { requests: pendingVaultRequests } = usePendingVaultRequestsList();
   const waitingRequests = pendingVaultRequests.length;
   const badgeCount = badgeTotal + waitingRequests;
@@ -807,7 +807,10 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                 aria-label={
                   waitingRequests > 0
                     ? badgeTotal > 0
-                      ? t('workbench.inbox.navUnreadAndRequests', { count: badgeTotal, requests: waitingRequests })
+                      ? t('workbench.inbox.navUnreadAndRequests', {
+                        count: badgeTotal,
+                        requests: t('workbench.inbox.pendingRequestCount', { count: waitingRequests }),
+                      })
                       : t('workbench.inbox.navRequests', { count: waitingRequests })
                     : badge
                     ? t('workbench.inbox.navUnread', { count: badgeTotal })

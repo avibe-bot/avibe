@@ -313,7 +313,7 @@ export const InboxHoverPopover: React.FC<{
           </div>
 
           {/* What waits on the reader comes first; it is answered on the full Inbox (ui/design:
-              inbox/inbox-page/approvals-popover). */}
+              inbox/approvals/popover). */}
           {pendingRequests > 0 && (
             <button
               type="button"

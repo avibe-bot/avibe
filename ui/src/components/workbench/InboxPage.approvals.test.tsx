@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-// ui/design: inbox/inbox-page/approvals. The Inbox lists the Vault requests still waiting on the
+// ui/design: inbox/approvals/desktop. The Inbox lists the Vault requests still waiting on the
 // reader, above the conversations, and reads them again each time it is entered; nothing polls, so
 // entering is when one that expired meanwhile leaves the list (and the entry's count).
 import { cleanup, render, screen } from '@testing-library/react';
@@ -52,7 +52,9 @@ it('lists the requests still waiting and reads them again on entry', () => {
   expect(refresh).toHaveBeenCalled();
 });
 
-it('draws no section while nothing waits', () => {
+it('keeps the section mounted while nothing waits, so a dialog it opened can finish', () => {
+  // The request a dialog answers leaves the list while the dialog finishes (a wallet's done screen);
+  // the section itself decides it has nothing to draw.
   render(<MemoryRouter initialEntries={['/inbox']}><InboxPage onOpenSearch={() => {}} /></MemoryRouter>);
-  expect(screen.queryByRole('list', { name: 'pending' })).toBeNull();
+  expect(screen.getByRole('list', { name: 'pending' }).textContent).toBe('');
 });
