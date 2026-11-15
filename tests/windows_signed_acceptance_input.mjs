@@ -25,7 +25,14 @@ if (mode === 'client') {
   let attempts = 0;
   let activations = 0;
   let observations = 0;
-  const fail = (stage) => { if (fault === stage) { const error = new Error('fixture-only'); error.code = 'injected_boundary_failure'; throw error; } };
+  const fail = (stage) => {
+    const combined = (stage === 'launch' && fault.startsWith('launch_js_receipt_')) || (stage === 'type' && fault.startsWith('type_js_receipt_'));
+    if (fault === stage || combined) {
+      const error = new Error('fixture-only');
+      error.code = combined ? `injected_${stage}_failure` : 'injected_boundary_failure';
+      throw error;
+    }
+  };
   const window = {
     windowId: 42,
     observe: async () => {
@@ -66,6 +73,13 @@ if (mode === 'client') {
       // only transforms these generated snippets, not arbitrary user code.
       const answer = await post({expression: code.replace(/\bconst\b/g, 'let'), replMode: true, awaitPromise: true, returnByValue: true});
       envelope = answer.exceptionDetails ? {ok: false, kind: 'computer_js', error: {code: 'js_exception'}} : {ok: true, kind: 'computer_js', result: answer.result.value};
+    }
+    const combinedReceiptFault = (fault.startsWith('launch_js_receipt_') && !isType) || (fault.startsWith('type_js_receipt_') && isType);
+    if (combinedReceiptFault) {
+      const context = JSON.parse(fs.readFileSync(path.join(work, 'launch-off-context.json'), 'utf8').replace(/^\uFEFF/, ''));
+      const target = path.join(work, `input-${context.operation_id}.json`);
+      const blocked = fault.endsWith('_write') ? `${target}.tmp` : target;
+      fs.rmSync(blocked, {recursive: true, force: true}); fs.mkdirSync(blocked);
     }
     if (fault === `${label}_cli_null`) envelope = null;
     if (fault === `${label}_cli_kind`) envelope = {ok: true, kind: 'wrong'};

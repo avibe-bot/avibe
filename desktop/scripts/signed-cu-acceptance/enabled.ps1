@@ -381,6 +381,20 @@ function Invoke-ComputerJs([string] $Script, [string] $Call) {
         if (-not $text) { throw 'input_cli_empty_result' }
         $answer = $text | ConvertFrom-Json
         if (-not $answer.ok -or $answer.kind -ne 'computer_js') { throw 'input_cli_envelope_failed' }
+        # Adopt the returned operation evidence at its producer boundary,
+        # BEFORE finally can add a cleanup/persistence failure. Both launch
+        # and type intentionally return exit0 for caught JavaScript errors.
+        $incoming = $answer.result.diagnostics
+        if (-not $incoming) { throw 'input_cli_diagnostics_missing' }
+        $merged = [ordered]@{}
+        if ($receipt.diagnostics -is [Collections.IDictionary]) {
+            foreach ($key in $receipt.diagnostics.Keys) { $merged[$key]=$receipt.diagnostics[$key] }
+        } else {
+            foreach ($property in $receipt.diagnostics.PSObject.Properties) { $merged[$property.Name]=$property.Value }
+        }
+        foreach ($property in $incoming.PSObject.Properties) { $merged[$property.Name]=$property.Value }
+        $receipt.diagnostics = $merged
+        if ($merged.first_error -and -not $receipt.first_error) { $receipt.first_error=$merged.first_error }
         return $answer
     } catch {
         $entry.error_class = $_.Exception.GetType().FullName
@@ -406,12 +420,9 @@ try {
     $receipt.phase = 'native_observer_load'; Save-Receipt -Required
     Add-Type -Path '__NATIVE_PATH__'
     $launch = Invoke-ComputerJs $LaunchScript 'launch_js'
-    if ($receipt.first_error) { throw 'input_cli_cleanup_failed' }
     $finalResult = $launch.result
-    $receipt.diagnostics = $launch.result.diagnostics
-    if ($receipt.diagnostics.first_error) { $receipt.first_error = $receipt.diagnostics.first_error }
     Save-Receipt -Required
-    if ($receipt.diagnostics.first_error) { throw 'input_launch_failed' }
+    if ($receipt.first_error) { throw 'input_launch_failed' }
     if (-not $launch.result.diagnostics.ready_stable -or -not $launch.result.diagnostics.ready_usable) {
         throw 'input_readiness_unproven'
     }

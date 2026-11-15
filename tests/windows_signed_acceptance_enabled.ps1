@@ -13,7 +13,7 @@ if (-not $OneCase) {
     $summaries = @(); $dryFailure = $null; $activeFault = 'evidence_finalization'; $partial = $null
     try {
     & (Join-Path $PSScriptRoot 'windows_signed_acceptance_evidence.ps1') -Source (Join-Path $SourceRoot 'evidence.ps1') -Work $Work
-    foreach ($fault in @('none', 'stderr_zero', 'aggregate_timeout', 'receipt_write_exit', 'receipt_rename_exit', 'dispatch_write_exit', 'dispatch_rename_exit', 'result_write_exit', 'result_rename_exit', 'missing_receipt', 'malformed_receipt', 'wrapper_parse', 'turn', 'missing_wrapper', 'wrapper_native', 'missing_result', 'stale_result', 'stale_receipt', 'launch_cli_exit', 'launch_cli_json', 'launch_cli_empty', 'launch_cli_null', 'launch_cli_kind', 'launch_cli_fields', 'app', 'launch', 'wait_for', 'observe', 'activate', 'unusable', 'unstable', 'focus', 'native_focus', 'type_cli_exit', 'type_cli_json', 'type_cli_empty', 'type_cli_null', 'type_cli_kind', 'type_cli_fields', 'lost_binding', 'observe_before', 'type', 'type_after', 'observe_after')) {
+    foreach ($fault in @('none', 'stderr_zero', 'aggregate_timeout', 'launch_js_receipt_write', 'launch_js_receipt_rename', 'type_js_receipt_write', 'type_js_receipt_rename', 'receipt_write_exit', 'receipt_rename_exit', 'dispatch_write_exit', 'dispatch_rename_exit', 'result_write_exit', 'result_rename_exit', 'missing_receipt', 'malformed_receipt', 'wrapper_parse', 'turn', 'missing_wrapper', 'wrapper_native', 'missing_result', 'stale_result', 'stale_receipt', 'launch_cli_exit', 'launch_cli_json', 'launch_cli_empty', 'launch_cli_null', 'launch_cli_kind', 'launch_cli_fields', 'app', 'launch', 'wait_for', 'observe', 'activate', 'unusable', 'unstable', 'focus', 'native_focus', 'type_cli_exit', 'type_cli_json', 'type_cli_empty', 'type_cli_null', 'type_cli_kind', 'type_cli_fields', 'lost_binding', 'observe_before', 'type', 'type_after', 'observe_after')) {
         $activeFault = $fault
         $caseWork = Join-Path $Work $fault
         & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $PSCommandPath -SourceRoot $SourceRoot -Work $caseWork -Evidence $Evidence -OneCase $fault
@@ -196,6 +196,11 @@ else:
     }
     if ($OneCase -eq 'type_after') {
         if ($record.wrapper.diagnostics.first_error.code -ne 'injected_type_failure' -or $record.wrapper.diagnostics.secondary_errors.Count -ne 1) { throw 'dry_after_observe_masked_type_failure' }
+    }
+    if ($OneCase -match '^(launch|type)_js_receipt_(write|rename)$') {
+        $expectedCall=$Matches[1]
+        if ($record.wrapper.first_error.call -ne $expectedCall -or $record.wrapper.first_error.code -ne ("injected_${expectedCall}_failure") -or $record.wrapper.calls[-1].exit_code -ne 0 -or $record.wrapper.persistence_errors.Count -lt 1) { throw 'dry_finally_masked_caught_js_failure' }
+        if ($record.wrapper.diagnostics.first_error.code -ne $record.wrapper.first_error.code) { throw 'dry_js_diagnostics_not_adopted' }
     }
     if ($OneCase -in @('receipt_write_exit', 'receipt_rename_exit', 'dispatch_write_exit', 'dispatch_rename_exit', 'result_write_exit', 'result_rename_exit')) {
         $known = $record.wrapper.first_error
