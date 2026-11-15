@@ -28,10 +28,18 @@ fn shared_protocol_fixtures_roundtrip_and_keep_private_results_out_of_state() {
     for state in states.as_object().unwrap().values() {
         let state: ClientState = serde_json::from_value(state.clone()).unwrap();
         let projection = state.runtime_projection();
-        for private in ["catalog", "consent", "enrollment"] {
+        for private in ["catalog", "consent", "enrollment", "current_instance"] {
             assert!(projection.get(private).is_none());
         }
     }
+    // Released producers omit A5 display metadata; absence grants no owner or
+    // identity inference and must normalize to the nullable new fields.
+    let mut legacy = states["remote_connected"].clone();
+    legacy.as_object_mut().unwrap().remove("current_instance");
+    legacy["local"].as_object_mut().unwrap().remove("slug");
+    let legacy: ClientState = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.local.slug.is_none());
+    assert!(legacy.current_instance.is_none());
 }
 
 // A4: the old single-view grammar rejected locale even though Workbench and

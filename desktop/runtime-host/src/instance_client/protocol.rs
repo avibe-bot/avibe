@@ -129,6 +129,8 @@ pub enum RemoteAccessState {
 pub struct LocalState {
     pub name: String,
     #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
     pub instance_id: Option<String>,
     #[serde(default)]
     pub remote_access_url: Option<String>,
@@ -161,6 +163,8 @@ pub struct ClientState {
     pub connection: ConnectionState,
     pub enrollment: EnrollmentState,
     pub catalog: CatalogState,
+    #[serde(default)]
+    pub current_instance: Option<Instance>,
     pub local: LocalState,
     pub desktop: DesktopState,
     pub consent: Option<ConsentState>,
@@ -198,11 +202,13 @@ impl ClientState {
             },
             local: LocalState {
                 name,
+                slug: None,
                 instance_id: None,
                 remote_access_url: None,
                 remote_access: RemoteAccessState::Off,
             },
             desktop: DesktopState { version, update },
+            current_instance: None,
             consent: None,
             remote_auxiliary: RemoteAuxiliary::Local,
         }

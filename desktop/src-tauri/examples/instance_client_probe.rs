@@ -138,12 +138,15 @@ impl Transport for Wire {
     }
 }
 #[derive(Default)]
-struct Private(Mutex<HashMap<String, Vec<u8>>>, AtomicBool, AtomicUsize);
+struct Private(Mutex<HashMap<String, Vec<u8>>>, AtomicBool, AtomicUsize, AtomicBool);
 impl Credentials for Private {
     fn read(&self, id: &str) -> Result<Option<Vec<u8>>, ClientError> {
         Ok(self.0.lock().unwrap().get(id).cloned())
     }
     fn write(&self, id: &str, bytes: &[u8]) -> Result<(), ClientError> {
+        if self.3.swap(false, Ordering::SeqCst) {
+            return Err(ClientError::new("credentials_unavailable"));
+        }
         self.0.lock().unwrap().insert(id.into(), bytes.into());
         Ok(())
     }
@@ -168,7 +171,7 @@ fn emit(value: Value) {
 }
 #[tauri::command]
 async fn desktop_client_request(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     app: tauri::AppHandle,
     request: ClientRequest,
 ) -> Result<ClientReply, String> {
@@ -211,7 +214,7 @@ fn main() {
             })
             .on_page_load(|view, payload| {
                 emit(json!({"event":"page_load","label":view.label(),"finished":payload.event()==tauri::webview::PageLoadEvent::Finished,"origin":payload.url().origin().ascii_serialization(),"path":payload.url().path()}));
-                if view.label()=="main" && payload.event()==tauri::webview::PageLoadEvent::Finished {
+                if view.window().label()=="main" && payload.event()==tauri::webview::PageLoadEvent::Finished {
                     instance_client::page_loaded(view.app_handle());
                     emit(json!({"event":"loaded","url":payload.url().as_str()}));
                 }
@@ -271,6 +274,10 @@ fn main() {
                 for line in std::io::stdin().lock().lines() {
                     let command:Value=serde_json::from_str(&line.unwrap()).unwrap();
                     match command["action"].as_str().unwrap() {
+                        "credential_write_failure"=> {
+                            private.3.store(true, Ordering::SeqCst);
+                            emit(json!({"event":"control_ready"}));
+                        },
                         "credential_failure"=> {
                             private.1.store(command["enabled"].as_bool().unwrap(), Ordering::SeqCst);
                             emit(json!({"event":"control_ready"}));
@@ -278,7 +285,8 @@ fn main() {
                         "state"=>emit(json!({"event":"state","state":coordinator.state(),"credential_count":private.0.lock().unwrap().len(),
                             "erase_calls": private.2.load(Ordering::SeqCst),
                             "instance_stores": std::fs::read_dir(handle.path().app_local_data_dir().unwrap().join("instance-stores")).map(|entries|entries.count()).unwrap_or(0),
-                            "visible":handle.get_webview_window("main").is_some_and(|window|window.is_visible().unwrap_or(false)),
+                            "visible":handle.get_window("main").is_some_and(|window|window.is_visible().unwrap_or(false)),
+                            "views":handle.webviews().into_values().map(|view|json!({"label":view.label(),"physical":view.window().label()})).collect::<Vec<_>>(),
                         })),
                         "wrong_csrf"=> { controls.bad_csrf.store(true, Ordering::SeqCst);emit(json!({"event":"control_ready"})); },
                         "hold"=> {
@@ -332,10 +340,11 @@ fn main() {
                             emit(json!({"event":"control_ready"}));
                         },
                         "presentation_status"=> {
-                            let window=handle.get_webview_window("main").unwrap();
-                            let url=window.url().unwrap();
-                            emit(json!({"event":"presentation_status","url":url.as_str(),
-                                "allowed":instance_client::caller_can_present(&handle,"main",&url)}));
+                            let view=instance_client::active_webview(&handle);
+                            let url=view.as_ref().and_then(|view|view.url().ok());
+                            emit(json!({"event":"presentation_status","url":url,
+                                "label":view.as_ref().map(|view|view.label()),
+                                "allowed":view.as_ref().zip(url.as_ref()).is_some_and(|(view,url)|instance_client::caller_can_present(&handle,view.label(),url))}));
                         },
                         "remote_update"=> {
                             let path=handle.path().app_data_dir().unwrap().join(avibe_runtime_host::update_status::DESKTOP_UPDATE_REQUEST_FILE);
@@ -345,7 +354,7 @@ fn main() {
                             avibe_desktop_lib::updater::handle_remote_update_request(&handle);
                             emit(json!({"event":"remote_dispatched"}));
                         },
-                        "eval"=> { let window=handle.get_webview_window("main").expect("main"); window.eval(command["script"].as_str().unwrap()).unwrap(); },
+                        "eval"=> { let window=command["label"].as_str().and_then(|label|handle.get_webview(label)).or_else(||instance_client::active_webview(&handle)).expect("active"); window.eval(command["script"].as_str().unwrap()).unwrap(); },
                         "present"=> { instance_client::present(&handle, match command["view"].as_str().unwrap() {
                             "instances"=>"instances","sign-out"=>"sign-out","account"=>"account","updates"=>"updates",_=>panic!("unsupported view"),
                         }); },

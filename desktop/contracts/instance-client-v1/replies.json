@@ -49,7 +49,8 @@
         "name": "小明的 Mac",
         "remote_access": "off",
         "instance_id": null,
-        "remote_access_url": null
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -65,7 +66,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     }
   },
   "stale": {
@@ -118,7 +120,8 @@
         "name": "小明的 Mac",
         "remote_access": "off",
         "instance_id": null,
-        "remote_access_url": null
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -134,7 +137,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "error": {
       "code": "stale_generation"
@@ -190,7 +194,8 @@
         "name": "小明的 Mac",
         "remote_access": "off",
         "instance_id": null,
-        "remote_access_url": null
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -206,7 +211,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "error": {
       "code": "pairing_redeem_pending",
@@ -253,7 +259,8 @@
         "name": "小明的 Mac",
         "remote_access": "off",
         "instance_id": null,
-        "remote_access_url": null
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -269,7 +276,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "result": {
       "type": "totp_enrollment",
@@ -328,7 +336,8 @@
         "name": "小明的 Mac",
         "remote_access": "off",
         "instance_id": null,
-        "remote_access_url": null
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -344,7 +353,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "result": {
       "type": "totp_enrolled",
@@ -411,7 +421,8 @@
         "name": "小明的 Mac",
         "remote_access": "off",
         "instance_id": null,
-        "remote_access_url": null
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -427,7 +438,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "result": {
       "type": "sign_out_intent",

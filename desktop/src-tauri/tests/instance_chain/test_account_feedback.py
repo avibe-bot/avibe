@@ -1,4 +1,4 @@
-"""A4 owning native boundaries over isolated HTTP and actual WKWebView documents.
+"""A4/A5 owning native boundaries over isolated HTTP and actual WKWebView documents.
 
 Uses the existing native probe (in-memory credential substitute, loopback-only
 transport mapping) and fixture TLS proxy. Provider/control-plane replies are
@@ -14,7 +14,7 @@ import queue
 import subprocess
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
@@ -22,7 +22,7 @@ import proxy
 
 
 @pytest.fixture
-def account_native(tmp_path):
+def account_native(tmp_path, request):
     calls = []
     policy = {"grant": "ok", "factor": False}
     identity = {"account": {"id": "synthetic-account", "email": "user@example.test"}, "instances": []}
@@ -39,6 +39,7 @@ def account_native(tmp_path):
             calls.append((self.command, self.path, headers, body))
             path = urlsplit(self.path).path
             status, value, cookie = 200, {}, None
+            location = None
             content_type = "application/json"
             if path == "/api/config/auth":
                 value = {"supabase_url": "https://provider.fixture.test", "supabase_anon_key": "public-fixture"}
@@ -57,6 +58,8 @@ def account_native(tmp_path):
                     status = 429 if grant == "rate" else 400
                     value = {"error_code": "invalid_credentials" if grant == "invalid" else "unexpected",
                              "error_description": "secret-should-never-reach-reply"}
+            elif path == "/auth/v1/verify":
+                value = {"access_token": "synthetic-access", "refresh_token": "synthetic-refresh"}
             elif path == "/auth/v1/otp":
                 value = {}
             elif path == "/api/desktop/session":
@@ -64,12 +67,19 @@ def account_native(tmp_path):
                     status, value = 400, {"error": "synthetic_secret_lowercase"}
                 elif policy["factor"]:
                     status, value = 403, {"error": "two_factor_required", "email": "user@example.test",
-                                          "gate": "challenge", "methods": ["totp", "passkey"]}
+                                          "gate": policy.get("gate", "challenge"), "methods": ["totp", "passkey"]}
                     cookie = "account_gate=synthetic; Path=/; Secure; HttpOnly"
                 else:
                     value, cookie = identity, "account=synthetic; Path=/; Secure; HttpOnly"
             elif path == "/api/two-factor/verify":
                 value, cookie = {}, "account=synthetic; Path=/; Secure; HttpOnly"
+            elif path == "/api/two-factor/totp/setup":
+                value = {"uri": "otpauth://totp/fixture", "qrSvg": "<svg></svg>", "secret": "fixture-secret", "token": "fixture-enroll"}
+            elif path == "/api/two-factor/totp":
+                value = {"method": {"id": "totp-fixture", "kind": "totp", "name": "Authenticator",
+                                    "createdAt": "2026-11-15", "lastUsedAt": None},
+                         "recoveryCodes": ["fixture-recovery"]}
+                cookie = "account=synthetic; Path=/; Secure; HttpOnly"
             elif path == "/api/mobile/session":
                 if self.command == "DELETE":
                     value = {}
@@ -77,11 +87,37 @@ def account_native(tmp_path):
                     value = identity
                 else:
                     status, value = 401, {"error": "signed_out"}
+            elif path == "/auth/login":
+                host = headers["host"]
+                status = 302
+                location = "https://avibe.bot/oauth/authorize?state=owned&redirect_uri=" + quote(f"https://{host}/auth/callback", safe="")
+            elif path == "/api/desktop/instance-authorization":
+                callback = parse_qs(body["authorize_query"])["redirect_uri"][0]
+                value = {"status": "authorized", "redirect_url": callback + "?code=fixture&state=owned"}
+            elif path == "/auth/callback":
+                status = 302
+                cookie = "__Host-vibe_remote_session=fixture; Secure; HttpOnly; Path=/"
+            elif path == "/api/session":
+                value = {"remote": True, "authenticated": True, "authorization_state": "current",
+                         "sub": "synthetic-account", "instance_id": headers["host"].split(".")[0],
+                         "capabilities": {"can_read_instance": True}}
             elif path == "/api/desktop/local-instance":
-                status, value = 404, {"error": "not_supported"}
+                if policy.get("paired"):
+                    value = local_descriptor()
+                else:
+                    status, value = 404, {"error": "not_supported"}
+            elif path == "/api/csrf-token":
+                value, cookie = {"csrf_token": "fixture-csrf"}, "vibe_csrf_token=fixture-csrf; Path=/"
+            elif path == "/api/desktop/local-instance/prepare":
+                assert headers["x-vibe-csrf-token"] == "fixture-csrf"
+                value = {"operation_id": "fixture-operation", "local": local_descriptor()}
+            elif path == "/api/desktop/instances/ensure-local":
+                value = {"outcome": "already_paired", "owner_match": True, "instance_id": "local"}
             elif path == "/":
                 content_type = "text/html"
                 value = "<!doctype html><html><body>Isolated local Workbench</body></html>"
+                if policy.get("document_redirect") and headers["host"] == "studio.avibe.bot":
+                    status, location = 302, "https://other.avibe.bot/"
             else:
                 status, value = 404, {"error": "fixture_unknown_path"}
             data = value.encode() if isinstance(value, str) else json.dumps(value).encode()
@@ -90,6 +126,8 @@ def account_native(tmp_path):
             self.send_header("Content-Length", str(len(data)))
             if cookie:
                 self.send_header("Set-Cookie", cookie)
+            if location:
+                self.send_header("Location", location)
             self.end_headers()
             self.wfile.write(data)
 
@@ -99,12 +137,16 @@ def account_native(tmp_path):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_port}"
     mappings = tmp_path / "mappings.json"
-    mappings.write_text(json.dumps({"avibe.bot": base, "provider.fixture.test": base}))
+    mappings.write_text(json.dumps({"avibe.bot": base, "provider.fixture.test": base,
+                                    "studio.avibe.bot": base, "other.avibe.bot": base,
+                                    f"127.0.0.1:{server.server_port}": base}))
     tunnel, tunnel_url, fingerprint, hold = proxy.start(tmp_path, mappings)
     config = tmp_path / "native.json"
     config.write_text(json.dumps({"root": str(tmp_path), "backend": base, "provider": base,
                                  "local": base, "proxy": tunnel_url, "mappings": str(mappings)}))
     environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "AVIBE_FIXTURE_TLS_SHA256": fingerprint}
+    if getattr(request, "param", {}).get("shell"):
+        environment["AVIBE_FIXTURE_SHELL"] = "1"
     for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
                 "AVIBE_HOME", "CODEX_HOME", "TMPDIR"):
         destination = tmp_path / key.lower()
@@ -145,8 +187,8 @@ def account_native(tmp_path):
             if value.get("event") == kind and predicate(value):
                 return value
 
-    def js(script):
-        send(action="eval", script="Promise.resolve().then(async()=>{" + script
+    def js(script, label=None):
+        send(action="eval", label=label, script="Promise.resolve().then(async()=>{" + script
              + "}).then(value=>location='fixture-result://probe?value='+encodeURIComponent(JSON.stringify(value)))"
              + ".catch(error=>location='fixture-result://probe?value='+encodeURIComponent(JSON.stringify({error:String(error)})))")
         return wait("javascript")["value"]
@@ -166,12 +208,25 @@ def account_native(tmp_path):
         send(action="eval", script=f"location='avibe://desktop/{view}{suffix}';")
         wait("loaded", lambda event: f"view={view}" in event["url"] and
              (locale is None or f"locale={locale}" in event["url"]))
+        presentation_ready(view)
+
+    def presentation_ready(view):
+        deadline = time.monotonic() + 8
+        while True:
+            send(action="presentation_status")
+            status = wait("presentation_status")
+            if status["allowed"] and f"view={view}" in (status["url"] or ""):
+                return
+            assert time.monotonic() < deadline, status
+            time.sleep(.02)
 
     try:
         wait("native_ready")
         wait("loaded", lambda event: "/account/index.html" in event["url"])
+        presentation_ready("account")
         yield {"send": send, "wait": wait, "js": js, "state": state, "request": request, "present": present,
-               "calls": calls, "policy": policy, "root": tmp_path, "history": history}
+               "calls": calls, "policy": policy, "root": tmp_path, "history": history,
+               "identity": identity, "hold": hold}
     finally:
         hold.release.set()
         if process.poll() is None:
@@ -189,6 +244,13 @@ def account_native(tmp_path):
             {"method": method, "path": path, "headers": sorted(headers), "fields": sorted(body or {})}
             for method, path, headers, body in calls
         ], indent=2))
+
+
+def local_descriptor():
+    return {"schema_version": 1, "installation_id": "fixture-installation", "device_name": "Fixture computer",
+            "binding_revision": "fixture-binding", "pairing": {"instance_id": "local", "backend_url": "https://avibe.bot",
+            "public_url": "https://local.avibe.bot"}, "remote_access": {"configured_enabled": False, "requested": False, "running": False},
+            "enrollment": None}
 
 
 def password(f):
@@ -287,9 +349,9 @@ def test_cancel_fences_password_response_from_actual_http(account_native):
     envelope["action"] = {"type": "cancel"}
     f["send"](action="eval", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
               + json.dumps(envelope) + "});")
-    f["wait"]("loaded", lambda event: event["url"].startswith("http://127.0.0.1"))
+    eventually(f, lambda _: (active(f)["url"] or "").startswith("http://127.0.0.1"))
     f["send"](action="release")
-    f["wait"]("reply", lambda event: event["error"] == "stale_generation")
+    f["wait"]("reply", lambda event: event["error"] == "untrusted_desktop_caller")
     assert f["state"]()["credential_count"] == 0
     assert f["state"]()["state"]["account"]["status"] == "signed_out"
     assert not any(call[1] == "/api/desktop/session" for call in f["calls"])
@@ -300,7 +362,8 @@ def test_signout_receipt_repeats_only_in_admitted_document_and_consumes_once(acc
     assert password(f)["ok"]
     # A route alone has no authority, even when it is otherwise trusted.
     f["send"](action="eval", script="location='tauri://localhost/account/index.html?view=sign-out&locale=en';")
-    f["wait"]("loaded", lambda event: "view=sign-out" in event["url"])
+    # A5 also rejects direct replacement of the admitted account route.
+    assert "view=account" in f["js"]("return location.href;")
     assert "result" not in f["request"]({"type": "get_state"})
     f["present"]("sign-out", "zh")
     one = f["request"]({"type": "get_state"})
@@ -331,6 +394,8 @@ def test_logout_receipt_cannot_reappear_after_document_or_owner_replacement(acco
     if replacement == "reload":
         f["send"](action="eval", script="location.reload();")
         f["wait"]("loaded", lambda event: "view=sign-out" in event["url"])
+        assert f["request"]({"type": "get_state"})["error"] == "untrusted_desktop_caller"
+        return
     elif replacement == "route":
         f["present"]()
     elif replacement == "lifecycle":
@@ -351,6 +416,7 @@ def test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_ret
     assert password(f)["ok"]
     f["present"]("sign-out", locale)
     receipt = f["request"]({"type": "get_state"})["result"]
+    original_receiver = active(f)["label"]
     error = "window_unavailable" if store_failure else "credentials_unavailable"
     f["send"](action="retire_failure" if store_failure else "credential_failure", enabled=True)
     f["wait"]("control_ready")
@@ -359,6 +425,7 @@ def test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_ret
     f["send"](action="eval", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
               + json.dumps(envelope) + "});")
     f["wait"]("reply", lambda event: event["error"] == error)
+    eventually(f, lambda _: owned_error_ready(f, original_receiver))
     state = f["state"]()
     assert state["credential_count"] == (0 if store_failure else 1) and state["erase_calls"] == 1
     assert state["state"]["account"]["status"] == "signed_out"
@@ -381,7 +448,8 @@ def test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_ret
     envelope["action"] = {"type": "sign_out"}
     f["send"](action="eval", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
               + json.dumps(envelope) + "});")
-    f["wait"]("reply", lambda event: event["error"] is None)
+    f["wait"]("reply", lambda event: event["error"] == "untrusted_desktop_caller")
+    assert f["js"]("return location.protocol;") == "http:"
     assert f["state"]()["credential_count"] == 0
     assert f["state"]()["erase_calls"] == (1 if store_failure else 2)
 
@@ -392,7 +460,7 @@ def test_native_menu_guard_receipt_keeps_actual_source_and_owner(account_native,
     f = account_native
     assert password(f)["ok"]
     f["send"](action="escape")
-    f["wait"]("loaded", lambda event: event["url"].startswith("http://127.0.0.1"))
+    assert f["wait"]("escaped")["ok"]
     f["js"]("window.addEventListener('avibe:desktop-present',e=>{e.preventDefault();window.fixtureGuard=e.detail;});return true;")
     original = f["state"]()
     f["send"](action="menu")
@@ -443,7 +511,390 @@ def test_new_explicit_escape_supersedes_delayed_cleanup_error_presentation(accou
     f["wait"]("loaded", lambda event: event["url"].startswith("http://127.0.0.1"))
     generation = f["state"]()["state"]["generation"]
     f["send"](action="release_error_view")
-    f["wait"]("reply", lambda event: event["error"] == "credentials_unavailable")
+    f["wait"]("reply", lambda event: event["error"] == "untrusted_desktop_caller")
     assert f["state"]()["state"]["generation"] == generation
     assert f["js"]("return location.protocol;") == "http:"
     assert f["state"]()["erase_calls"] == 1
+
+
+@pytest.mark.parametrize("source", ["local", "remote"])
+def test_back_preserves_actual_workbench_document(account_native, source):
+    """A5: Back retains DOM, route, scroll and draft; URL restoration is insufficient."""
+    f = account_native
+    if source == "local":
+        f["send"](action="escape")
+        assert f["wait"]("escaped")["ok"]
+    else:
+        f["identity"]["instances"] = [{"id": "studio", "name": "shared-studio", "host": "studio.avibe.bot",
+            "url": "https://studio.avibe.bot", "relationship": "shared", "owner_email": "owner@example.test", "available": True}]
+        assert password(f)["ok"]
+        f["send"](action="eval", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                  + json.dumps({"version": 1, "request_id": "select", "expected_generation": f["state"]()["state"]["generation"],
+                                "action": {"type": "select_instance", "instance_id": "studio"}}) + "});")
+        deadline = time.monotonic() + 15
+        while f["state"]()["state"]["connection"]["committed"]["kind"] != "remote":
+            assert time.monotonic() < deadline
+            time.sleep(.05)
+    before = f["js"]("""
+        window.feedbackDocument = crypto.randomUUID();
+        document.body.innerHTML = '<textarea id="draft"></textarea><div style="height:3000px"></div>';
+        document.querySelector('#draft').value = 'unsubmitted fixture';
+        history.pushState({}, '', '/?session=retained#draft');
+        window.scrollTo(0, 600);
+        return {id:window.feedbackDocument,url:location.href,scroll:scrollY,draft:document.querySelector('#draft').value};
+    """)
+    f["present"]("instances")
+    f["send"](action="eval", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+              + json.dumps({"version": 1, "request_id": "back", "expected_generation": f["state"]()["state"]["generation"],
+                            "action": {"type": "cancel"}}) + "});")
+    deadline = time.monotonic() + 8
+    while True:
+        f["send"](action="presentation_status")
+        status = f["wait"]("presentation_status")
+        if status["url"] == before["url"]:
+            break
+        assert time.monotonic() < deadline, status
+        time.sleep(.05)
+    after = f["js"]("return {id:window.feedbackDocument ?? null,url:location.href,scroll:scrollY,draft:document.querySelector('#draft')?.value ?? null};")
+    assert after == before
+
+
+def catalog_entry(instance_id="studio"):
+    return {"id": instance_id, "name": f"shared-{instance_id}", "host": f"{instance_id}.avibe.bot",
+            "url": f"https://{instance_id}.avibe.bot", "relationship": "shared",
+            "owner_email": "owner@example.test", "available": True}
+
+
+def dispatch(f, action, request_id="a5-operation"):
+    envelope = {"version": 1, "request_id": request_id, "expected_generation": f["state"]()["state"]["generation"],
+                "action": action}
+    f["send"](action="eval", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+              + json.dumps(envelope) + "}).catch(()=>{});")
+
+
+def active(f):
+    f["send"](action="presentation_status")
+    return f["wait"]("presentation_status")
+
+
+def owned_error_ready(f, previous=None):
+    status = active(f)
+    return status["allowed"] and status["label"] != previous and "view=sign-out" in (status["url"] or "")
+
+
+def eventually(f, predicate, timeout=15):
+    deadline = time.monotonic() + timeout
+    while True:
+        state = f["state"]()
+        if predicate(state):
+            return state
+        assert time.monotonic() < deadline, state
+        time.sleep(.03)
+
+
+@pytest.mark.parametrize("escape", ["cancel", "sign_out"])
+def test_held_candidate_never_gets_authority_and_escape_retires_only_its_roles(account_native, escape):
+    """A5: actual document socket held before retirement; escape must beat its completion."""
+    f = account_native
+    f["identity"]["instances"] = [catalog_entry()]
+    assert password(f)["ok"]
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)
+    marker = f["js"]("window.retainedMarker=crypto.randomUUID();return window.retainedMarker;")
+    f["present"]("instances")
+    hidden = f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                    + json.dumps({"version": 1, "request_id": "hidden", "expected_generation": 0,
+                                  "action": {"type": "get_state"}})
+                    + "}).then(()=>({allowed:true}),error=>({allowed:false,error:String(error)}));", original["label"])
+    assert not hidden["allowed"], hidden
+    f["hold"].arm("studio.avibe.bot", "/")
+    dispatch(f, {"type": "select_instance", "instance_id": "studio"})
+    assert f["hold"].entered.wait(10)
+    staged = f["state"]()
+    assert staged["state"]["connection"]["committed"]["kind"] == "local"
+    assert any(view["label"] == original["label"] for view in staged["views"])
+    assert not (f["root"] / "instance-recency.json").exists()
+    dispatch(f, {"type": escape})
+    eventually(f, lambda state: len(state["views"]) == 1 and not state["views"][0]["label"].startswith("main-account-"))
+    f["hold"].release.set()
+    if escape == "cancel":
+        assert active(f)["label"] == original["label"]
+        assert f["js"]("return window.retainedMarker;") == marker
+        assert f["state"]()["credential_count"] == 1
+    else:
+        assert active(f)["label"] != original["label"]
+        assert f["state"]()["credential_count"] == 0
+    assert not (f["root"] / "instance-recency.json").exists()
+    assert f["state"]()["instance_stores"] == 0
+
+
+@pytest.mark.parametrize("failure,code", [
+    ("show_failure", "window_unavailable"),
+    ("retire_failure", "window_unavailable"),
+    ("credential_write_failure", "credentials_unavailable"),
+    ("connection_record_failure", "connection_record_unavailable"),
+])
+def test_terminal_selection_failure_converges_without_success_or_recency(account_native, failure, code):
+    """A5: await OS/persistence, keep a visible error receiver and explicit safe cleanup."""
+    f = account_native
+    f["identity"]["instances"] = [catalog_entry(), catalog_entry("other")]
+    assert password(f)["ok"]
+    if failure == "retire_failure":
+        dispatch(f, {"type": "select_instance", "instance_id": "studio"})
+        eventually(f, lambda state: state["state"]["connection"]["committed"]["kind"] == "remote")
+        assert f["state"]()["instance_stores"] == 1
+    else:
+        f["send"](action="escape")
+        assert f["wait"]("escaped")["ok"]
+    recency_path = f["root"] / "instance-recency.json"
+    previous_recency = recency_path.read_bytes() if recency_path.exists() else None
+    old = active(f)["label"]
+    f["present"]("instances", "zh")
+    record_path = f["root"] / "connection.json"
+    original_record = record_path.read_bytes()
+    if failure == "connection_record_failure":
+        record_path.unlink()
+        record_path.mkdir()
+    else:
+        f["send"](action=failure)
+        f["wait"]("control_ready")
+    dispatch(f, {"type": "select_instance", "instance_id": "other"})
+    eventually(f, lambda state: state["state"]["enrollment"]["error_code"] == code)
+    eventually(f, lambda _: owned_error_ready(f))
+    status = active(f)
+    assert "view=sign-out" in status["url"] and "locale=zh" in status["url"], status
+    assert all(view["label"] != old for view in f["state"]()["views"])
+    assert (recency_path.read_bytes() if recency_path.exists() else None) == previous_recency
+    if failure == "connection_record_failure":
+        assert record_path.is_dir()
+        assert f["request"]({"type": "refresh_instances"})["error"]["code"] == code
+        # Only the test-owned failed destination is repaired; native retry must
+        # still complete the outstanding cleanup through its original owner.
+        record_path.rmdir()
+        record_path.write_bytes(original_record)
+    else:
+        assert json.loads(record_path.read_text())["last_committed"]["kind"] == "local"
+    assert f["state"]()["state"]["connection"]["committed"]["kind"] == "local"
+    deadline = time.monotonic() + 5
+    while not f["js"]("return Boolean(document.querySelector('[role=alert]')?.textContent.trim());"):
+        assert time.monotonic() < deadline
+    assert "result" not in f["request"]({"type": "get_state"})
+    dispatch(f, {"type": "sign_out"})
+    eventually(f, lambda state: state["credential_count"] == 0 and len(state["views"]) == 1
+               and not state["views"][0]["label"].startswith("main-account-"))
+    eventually(f, lambda _: (active(f)["url"] or "").startswith("http://127.0.0.1"))
+    assert f["state"]()["instance_stores"] == 0
+    assert json.loads(record_path.read_text())["last_committed"]["kind"] == "local"
+
+
+@pytest.mark.parametrize("method", ["password", "otp", "totp", "retry"])
+def test_native_auth_completion_returns_retained_document_only_after_paired_success(account_native, method):
+    """A5: initiating auth owner, rather than a late UI reply, returns the retained page."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    label = active(f)["label"]
+    marker = f["js"]("window.authReturnMarker=crypto.randomUUID();return window.authReturnMarker;")
+    f["present"]()
+    f["policy"]["paired"] = method != "retry"
+    if method == "otp":
+        assert f["request"]({"type": "request_otp", "email": "user@example.test"})["ok"]
+        action = {"type": "verify_otp", "code": "123456"}
+    elif method == "totp":
+        f["policy"]["factor"] = True
+        assert password(f)["state"]["account"]["status"] == "second_factor_required"
+        action = {"type": "verify_second_factor", "method": "totp", "code": "123456"}
+    elif method == "retry":
+        assert password(f)["ok"]
+        assert "view=account" in active(f)["url"]
+        # get_state/refresh of an already signed-in account never auto-return.
+        assert f["request"]({"type": "get_state"})["ok"]
+        assert f["request"]({"type": "refresh_instances"})["ok"]
+        assert "view=account" in active(f)["url"]
+        f["policy"]["paired"] = True
+        action = {"type": "retry_enrollment"}
+    else:
+        action = {"type": "sign_in_password", "email": "user@example.test", "password": "synthetic-password"}
+    dispatch(f, action)
+    state = eventually(f, lambda state: len(state["views"]) == 1 and state["views"][0]["label"] == label)
+    assert state["state"]["account"]["status"] == "signed_in"
+    assert state["state"]["enrollment"]["status"] == "paired_this_account"
+    assert f["js"]("return window.authReturnMarker;") == marker
+    assert state["credential_count"] == 1
+    assert not (f["root"] / "instance-recency.json").exists()
+
+
+def test_recovery_material_stays_in_owned_receiver_until_ack_and_late_full_event_dies_on_reload(account_native):
+    """A5/A4: recovery direct result survives; full state cannot cross actual document reload."""
+    f = account_native
+    f["policy"].update({"paired": True, "factor": True, "gate": "enroll"})
+    assert password(f)["state"]["account"]["gate"] == "enroll"
+    assert f["request"]({"type": "begin_totp_enrollment"})["result"]["type"] == "totp_enrollment"
+    reply = f["request"]({"type": "finish_totp_enrollment", "code": "123456"})
+    assert reply["result"]["recoveryCodes"] == ["fixture-recovery"], reply
+    assert reply["state"]["enrollment"]["status"] == "paired_this_account"
+    assert "view=account" in active(f)["url"]
+    f["send"](action="hold_account_event")
+    f["wait"]("account_event_held")
+    f["send"](action="eval", script="location.reload();")
+    f["wait"]("loaded", lambda event: "view=account" in event["url"])
+    f["js"]("window.lateFullEvents=[];window.addEventListener('avibe:desktop-client-state',e=>window.lateFullEvents.push(e.detail));return true;")
+    f["send"](action="release_account_event")
+    f["wait"]("account_event_released")
+    assert f["js"]("return window.lateFullEvents;") == []
+    assert f["request"]({"type": "get_state"})["error"] == "untrusted_desktop_caller"
+
+
+def test_failed_candidate_navigation_retains_source_and_later_local_rebind_keeps_committed_remote(account_native):
+    """A5: a real rejected navigation is preterminal; a local rebind cannot displace remote."""
+    f = account_native
+    f["identity"]["instances"] = [catalog_entry()]
+    assert password(f)["ok"]
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    label = active(f)["label"]
+    marker = f["js"]("window.navigationMarker=crypto.randomUUID();return window.navigationMarker;")
+    f["present"]("instances")
+    f["policy"]["document_redirect"] = True
+    dispatch(f, {"type": "select_instance", "instance_id": "studio"})
+    f["wait"]("reply", lambda event: event["error"] == "instance_navigation_timeout", timeout=36)
+    assert any(view["label"] == label for view in f["state"]()["views"])
+    assert not (f["root"] / "instance-recency.json").exists()
+    dispatch(f, {"type": "cancel"})
+    eventually(f, lambda _: active(f)["label"] == label)
+    assert f["js"]("return window.navigationMarker;") == marker
+    f["policy"]["document_redirect"] = False
+    f["present"]("instances")
+    dispatch(f, {"type": "select_instance", "instance_id": "studio"})
+    eventually(f, lambda state: state["state"]["connection"]["committed"]["kind"] == "remote")
+    remote = active(f)["label"]
+    remote_marker = f["js"]("window.remoteMarker=crypto.randomUUID();return window.remoteMarker;")
+    for command in ["runtime_offline", "runtime_rebind"]:
+        f["send"](action=command)
+        f["wait"](command)
+    assert active(f)["label"] == remote
+    assert f["js"]("return window.remoteMarker;") == remote_marker
+    assert json.loads((f["root"] / "instance-recency.json").read_text())["accounts"]["synthetic-account"] == ["studio"]
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+def test_physical_main_focus_close_resize_updates_and_owned_guide_keep_roles(account_native):
+    """A5: actual production main callbacks consume the retained and account child roles."""
+    f = account_native
+    assert password(f)["ok"]
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)["label"]
+    f["present"]("instances")
+    account = active(f)["label"]
+    for operation in ["hide", "focus", "close", "focus"]:
+        f["send"](action="shell_control", operation=operation)
+        f["wait"]("shell_control")
+        expected = operation == "focus"
+        eventually(f, lambda state: state["visible"] == expected)
+        assert active(f)["label"] == account
+    for width, height in [(1200, 800), (880, 600)]:
+        f["send"](action="shell_control", operation="resize", width=width, height=height)
+        f["wait"]("shell_control")
+        deadline = time.monotonic() + 5
+        while True:
+            f["send"](action="shell_control", operation="geometry")
+            geometry = f["wait"]("geometry")
+            if all(view["size"] == {"width": width * geometry["scale"], "height": height * geometry["scale"]}
+                   for view in geometry["views"]):
+                break
+            assert time.monotonic() < deadline, geometry
+        assert geometry["size"] == [width, height]
+        assert [button["x"] for button in geometry["buttons"]] == [12, 35, 58]
+        assert all(button["top"] == 7 and button["height"] == 14 for button in geometry["buttons"])
+        assert {view["physical"] for view in geometry["views"]} == {"main"}
+    # The actual UI guide reuses the same admitted document and external-open handler.
+    eventually(f, lambda _: f["js"]("return [...document.querySelectorAll('button')].some(b=>b.textContent.includes('Add instance'));"))
+    assert f["js"]("""
+        const add=[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Add instance'));
+        if (!add) return {missing:document.body.innerText}; add.click(); return true;
+    """) is True
+    eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('a[href=\"https://docs.avibe.bot/get-started/install\"]'));"))
+    f["send"](action="eval", script="document.querySelector('a[href=\"https://docs.avibe.bot/get-started/install\"]').click();")
+    assert f["wait"]("external_browser_request")["url"] == "https://docs.avibe.bot/get-started/install"
+    assert active(f)["label"] == account
+    f["send"](action="shell_control", operation="updates")
+    f["wait"]("loaded", lambda event: "view=updates" in event["url"])
+    assert f["request"]({"type": "get_state"})["ok"]
+    dispatch(f, {"type": "cancel"})
+    eventually(f, lambda _: active(f)["label"] == original)
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+def test_actual_main_destruction_retires_document_and_pending_auth_authority(account_native):
+    f = account_native
+    f["send"](action="hold", path="/auth/v1/token")
+    f["wait"]("control_ready")
+    dispatch(f, {"type": "sign_in_password", "email": "user@example.test", "password": "synthetic-password"})
+    f["wait"]("http_held")
+    f["send"](action="shell_control", operation="destroy")
+    f["wait"]("shell_control")
+    eventually(f, lambda state: state["views"] == [])
+    f["send"](action="release")
+    f["wait"]("reply", lambda event: event["error"] == "untrusted_desktop_caller")
+    state = f["state"]()
+    assert state["credential_count"] == 0 and state["state"]["account"]["status"] == "signed_out"
+    assert state["views"] == []
+    assert not any(call[1] == "/api/desktop/session" for call in f["calls"])
+
+
+def test_successful_reenrollment_returns_same_remote_without_reordering_recency(account_native):
+    f = account_native
+    f["identity"]["instances"] = [catalog_entry()]
+    assert password(f)["ok"]
+    dispatch(f, {"type": "select_instance", "instance_id": "studio"})
+    eventually(f, lambda state: state["state"]["connection"]["committed"]["kind"] == "remote")
+    label = active(f)["label"]
+    marker = f["js"]("window.remoteAuthMarker=crypto.randomUUID();return window.remoteAuthMarker;")
+    recency = (f["root"] / "instance-recency.json").read_bytes()
+    f["present"]()
+    f["policy"]["paired"] = True
+    dispatch(f, {"type": "retry_enrollment"})
+    eventually(f, lambda state: len(state["views"]) == 1 and active(f)["label"] == label)
+    assert f["js"]("return window.remoteAuthMarker;") == marker
+    assert (f["root"] / "instance-recency.json").read_bytes() == recency
+
+
+@pytest.mark.parametrize("write_failure", [False, True])
+def test_final_account_ui_recovery_ack_obeys_native_persistence_result(account_native, write_failure):
+    """Actual final UI buttons consume native recovery material and its persistence error."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    label = active(f)["label"]
+    f["present"]()
+    f["policy"].update({"paired": True, "factor": True, "gate": "enroll"})
+    assert password(f)["state"]["account"]["gate"] == "enroll"
+    eventually(f, lambda _: f["js"]("return [...document.querySelectorAll('button')].some(b=>b.textContent==='Add authenticator');"))
+    f["js"]("[...document.querySelectorAll('button')].find(b=>b.textContent==='Add authenticator').click();return true;")
+    eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('#factor-code'));"))
+    if write_failure:
+        f["send"](action="credential_write_failure")
+        f["wait"]("control_ready")
+    f["js"]("""
+        const input=document.querySelector('#factor-code');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'123456');
+        input.dispatchEvent(new Event('input',{bubbles:true}));return true;
+    """)
+    eventually(f, lambda _: f["js"]("return !document.querySelector('#factor-code').form.querySelector('button').disabled;"))
+    f["js"]("document.querySelector('#factor-code').form.requestSubmit();return true;")
+    eventually(f, lambda _: f["js"]("return document.body.innerText.includes('fixture-recovery');"))
+    assert "view=account" in active(f)["url"]
+    before = f["state"]()["state"]
+    assert before["enrollment"]["status"] == "paired_this_account"
+    assert before["enrollment"]["error_code"] == ("credentials_unavailable" if write_failure else None)
+    f["send"](action="eval", script="[...document.querySelectorAll('button')].find(b=>b.textContent==='I have saved these codes').click();")
+    if write_failure:
+        eventually(f, lambda _: f["js"]("return !document.body.innerText.includes('fixture-recovery');"))
+        assert "view=account" in active(f)["url"]
+        assert f["state"]()["state"]["generation"] == before["generation"]
+        assert f["state"]()["credential_count"] == 0
+    else:
+        eventually(f, lambda state: len(state["views"]) == 1 and active(f)["label"] == label)
+        assert f["state"]()["credential_count"] == 1

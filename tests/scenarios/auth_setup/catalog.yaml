@@ -1175,6 +1175,7 @@ scenarios:
     reason: Native password/OTP owner and isolated HTTP/cookie/second-factor consumers exist; live provider and installed acceptance remain separate.
     supporting_tests:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_auth_completion_returns_retained_document_only_after_paired_success
   - id: AUTH-SETUP-172
     name: One Desktop installation retains one instance and device across concurrency, lost replies, and restart
     status: partial
@@ -1221,6 +1222,8 @@ scenarios:
     partial_evidence:
       covers: The real session endpoint projects instance_id only with current authorization, never in unavailable or revoked states.
       test: tests/test_remote_authorization_revision.py::test_session_endpoint_only_adds_fields_to_its_released_shape
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_terminal_selection_failure_converges_without_success_or_recency
   - id: AUTH-SETUP-176
     name: Desktop switch, cancel, logout, and restart fence late callbacks while local work continues
     status: gap
@@ -1231,6 +1234,8 @@ scenarios:
     supporting_tests:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_plain_admitted_signout_returns_native_receipt
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_retries
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_back_preserves_actual_workbench_document
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_held_candidate_never_gets_authority_and_escape_retires_only_its_roles
   - id: AUTH-SETUP-177
     name: Remote and embedded documents gain no Desktop local capability or account credentials
     status: gap
@@ -1241,6 +1246,7 @@ scenarios:
     supporting_tests:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_menu_guard_receipt_keeps_actual_source_and_owner
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_material_stays_in_owned_receiver_until_ack_and_late_full_event_dies_on_reload
   - id: AUTH-SETUP-178
     name: Desktop footer geometry and local updater scope hold across locale, theme, window size, and target
     status: gap

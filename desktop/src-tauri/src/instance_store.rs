@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use avibe_runtime_host::instance_client::{protocol::ClientError, transport::Epoch};
-use tauri::{Manager, WebviewWindow};
+use tauri::{Manager, Webview};
 
 const ERASE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -16,7 +16,7 @@ const ERASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Wry's macOS adapter writes the string "FALSE" for Some(false); Foundation
 /// treats an explicit HttpOnly property as enabled. Omit disabled properties
 /// when round-tripping a native cookie so a readable CSRF cookie stays readable.
-pub fn project(window: &WebviewWindow, cookies: &[cookie::Cookie<'static>], epoch: &Epoch) -> Result<(), ClientError> {
+pub fn project(window: &Webview, cookies: &[cookie::Cookie<'static>], epoch: &Epoch) -> Result<(), ClientError> {
     for cookie in cookies {
         epoch.check()?;
         #[cfg(target_os = "macos")]
@@ -56,7 +56,7 @@ pub fn project(window: &WebviewWindow, cookies: &[cookie::Cookie<'static>], epoc
     epoch.check()
 }
 
-pub fn retire(window: &WebviewWindow) -> Result<(), String> {
+pub fn retire(window: &Webview) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if objc2::MainThreadMarker::new().is_some() {
         return Err("instance store retirement requires a worker thread".into());
@@ -69,7 +69,7 @@ pub fn retire(window: &WebviewWindow) -> Result<(), String> {
     erased.and(destroyed)
 }
 
-fn erase_completed(window: &WebviewWindow) -> Result<(), String> {
+fn erase_completed(window: &Webview) -> Result<(), String> {
     let (sender, receiver) = mpsc::channel();
     window
         .with_webview(move |platform| clear_platform(platform, sender))
@@ -87,12 +87,12 @@ fn erase_completed(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn destroy_completed(window: &WebviewWindow) -> Result<(), String> {
+pub(crate) fn destroy_completed(window: &Webview) -> Result<(), String> {
     let label = window.label().to_owned();
     let app = window.app_handle().clone();
-    window.destroy().map_err(|_| "instance window destruction failed")?;
+    window.close().map_err(|_| "instance window destruction failed")?;
     let deadline = Instant::now() + ERASE_TIMEOUT;
-    while app.get_webview_window(&label).is_some() {
+    while app.get_webview(&label).is_some() {
         if Instant::now() >= deadline {
             return Err("instance window destruction timed out".into());
         }

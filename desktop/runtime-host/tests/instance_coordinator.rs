@@ -74,6 +74,7 @@ struct Private(
     Mutex<Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     AtomicBool,
     Mutex<Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    AtomicBool,
 );
 impl Credentials for Private {
     fn read(&self, id: &str) -> Result<Option<Vec<u8>>, ClientError> {
@@ -85,6 +86,9 @@ impl Credentials for Private {
         Ok(bytes)
     }
     fn write(&self, id: &str, bytes: &[u8]) -> Result<(), ClientError> {
+        if self.4.swap(false, Ordering::SeqCst) {
+            return Err(ClientError::new("credentials_unavailable"));
+        }
         self.0.lock().unwrap().insert(id.into(), bytes.into());
         if let Some((entered, release)) = self.1.lock().unwrap().take() {
             let _ = entered.send(());
@@ -140,7 +144,7 @@ impl ClientView for View {
         self.committed.lock().unwrap().push(target);
         Ok(())
     }
-    async fn restore(&self, _: Epoch, target: ClientTarget) -> Result<(), ClientError> {
+    async fn restore(&self, _: Epoch, target: ClientTarget, _: bool) -> Result<(), ClientError> {
         self.restored.lock().unwrap().push(target);
         Ok(())
     }
@@ -1671,4 +1675,91 @@ async fn rejected_password_retires_previous_first_factor_state() {
             .unwrap()
             .contains("synthetic-private"));
     }
+}
+
+// A5: display proof comes from the same account's catalog, never the OS name or
+// URL. A selected shared row remains displayable when a later catalog omits it.
+#[tokio::test]
+async fn display_proof_is_account_and_current_identity_bound() {
+    let mut session = catalog("account-a", &["local-id", "shared"]);
+    session["instances"][0]["name"] = json!("authoritative-local");
+    session["instances"][1]["relationship"] = json!("shared");
+    session["instances"][1]["owner_email"] = json!("owner@example.test");
+    let f = fixture(vec![]);
+    sign_in(&f, session.clone()).await;
+    f.client.local_origin(Some(
+        avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
+    ));
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/desktop/local-instance", ok(local_proof())));
+    f.client.refresh_local().await;
+    assert_eq!(
+        serde_json::to_value(f.client.state()).unwrap()["local"]["slug"],
+        "authoritative-local"
+    );
+    f.http.replies.lock().unwrap().extend(selection(
+        &session,
+        "shared",
+        Reply::Ready(ready("account-a", "shared")),
+    ));
+    assert!(select(&f, "shared").await.ok);
+    let selected = serde_json::to_value(f.client.state()).unwrap()["current_instance"].clone();
+    assert_eq!(selected["relationship"], "shared");
+    assert!(!f
+        .client
+        .state()
+        .runtime_projection()
+        .as_object()
+        .unwrap()
+        .contains_key("current_instance"));
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/mobile/session", ok(catalog("account-a", &[]))));
+    assert!(action(&f.client, ClientAction::RefreshInstances).await.ok);
+    let state = serde_json::to_value(f.client.state()).unwrap();
+    assert_eq!(state["current_instance"], selected);
+    assert!(state["local"]["slug"].is_null());
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/desktop/local-instance", Reply::Failure));
+    f.client.refresh_local().await;
+    assert!(serde_json::to_value(f.client.state()).unwrap()["local"]["slug"].is_null());
+    assert!(action(&f.client, ClientAction::SignOut { intent_id: None }).await.ok);
+    let state = serde_json::to_value(f.client.state()).unwrap();
+    assert!(state["current_instance"].is_null() && state["local"]["slug"].is_null());
+}
+
+// A5: source/native staging alone is not a successful open. A failed durable
+// write must leave the published target and account-specific recency unchanged.
+#[tokio::test]
+async fn failed_selection_persistence_never_publishes_success_or_recency() {
+    let session = catalog("account-a", &["one", "two"]);
+    let f = fixture(vec![]);
+    sign_in(&f, session.clone()).await;
+    let record = f.store.load("fixture").unwrap();
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .extend(selection(&session, "two", Reply::Ready(ready("account-a", "two"))));
+    f.private.4.store(true, Ordering::SeqCst);
+    let reply = select(&f, "two").await;
+    assert_eq!(reply.error.unwrap().code, "credentials_unavailable");
+    assert!(
+        reply.state.connection.committed.is_local(),
+        "failed selection was publicly committed"
+    );
+    assert_eq!(
+        serde_json::to_value(f.store.load("fixture").unwrap().last_committed).unwrap(),
+        serde_json::to_value(record.last_committed).unwrap()
+    );
+    assert!(!f._root.path().join("instance-recency.json").exists());
+    assert_eq!(order(&f.client), ["one", "two"]);
 }

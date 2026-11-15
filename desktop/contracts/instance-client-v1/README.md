@@ -71,3 +71,32 @@ binds execution, not proof of a human click.
 
 See `docs/plans/desktop-rc19-account-feedback.md` for the owning tests and
 acceptance boundaries. Synthetic fixture values authorize no real account.
+
+## A5: retained Workbench and display metadata
+
+The physical main window contains one committed Runtime WebView and, during
+account/list presentation, one separately admitted bundled account WebView.
+Back and native-owned successful login reveal the same retained document.
+Initial/restored state, errors and new recovery codes do not trigger return.
+Explicit recovery acknowledgement uses the existing trusted Cancel action.
+
+`local.slug` is nullable in full state and the minimal projection. Its only
+producer is the signed-in catalog's authoritative name joined to validated
+current local ID. Full-state-only `current_instance` reuses `Instance`, bound
+to the current remote ID, validated origin and account. It may retain the
+successful selection's display snapshot when a later catalog omits it. Neither
+field authorizes a connection or changes persisted schema. Old missing fields
+decode as null; new producers emit them. Unknown relationship remains unknown.
+
+Account capability selects only `main-account-*` WebViews, plus Rust ownership,
+document and exact bundled URL checks. Physical-window selectors grant no
+account authority. Reload retires account admission and one-use receipts.
+Full DOM events check their URL and ephemeral document nonce at execution;
+retained Runtime views receive only minimal state.
+
+A candidate loads in a separate hidden store before terminal retirement.
+Native erase/close/show and credential/record persistence are awaited before
+role publication and successful-only MRU. A preterminal failure retains the
+source. Once retirement begins, failure uses visible trusted recovery and
+cannot revive the old cookies/document or publish success. OS cleanup refusal
+remains a blocking obligation until explicit cleanup succeeds.

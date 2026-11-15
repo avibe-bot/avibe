@@ -6,7 +6,7 @@
 use avibe_runtime_host::instance_client::protocol::ClientAction;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Manager, PhysicalPosition, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use url::Url;
 
 pub(crate) const UPDATE_POPOVER: &str = "update-popover";
@@ -27,8 +27,10 @@ pub(crate) fn page_url(bundle: &Url) -> Option<Url> {
     Some(url)
 }
 
-pub(crate) fn is_page<R: tauri::Runtime>(window: &WebviewWindow<R>, bundle: &Url) -> bool {
-    window.label() == UPDATE_POPOVER && window.url().ok().is_some_and(|url| Some(url) == page_url(bundle))
+pub(crate) fn is_page<R: tauri::Runtime>(window: &Webview<R>, bundle: &Url) -> bool {
+    window.label() == UPDATE_POPOVER
+        && window.window().label() == UPDATE_POPOVER
+        && window.url().ok().is_some_and(|url| Some(url) == page_url(bundle))
 }
 
 /// What the popup may ask of the desktop client: its state and this computer's
@@ -230,7 +232,7 @@ pub(crate) fn publish(app: &AppHandle, bundle: &Url, script: impl FnOnce(&Url) -
         return;
     };
     if let Ok(url) = window.url() {
-        if is_page(&window, bundle) {
+        if is_page(window.as_ref(), bundle) {
             let _ = window.eval(script(&url));
         }
     }
@@ -289,7 +291,7 @@ mod tests {
             assert!(allows(&action), "{action:?}");
         }
         for action in [
-            ClientAction::SignOut,
+            ClientAction::SignOut { intent_id: None },
             ClientAction::ReturnLocal,
             ClientAction::RefreshInstances,
             ClientAction::SelectInstance {
