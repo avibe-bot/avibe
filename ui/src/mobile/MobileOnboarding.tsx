@@ -206,6 +206,8 @@ const installGuideUrl = (language: string): string =>
     ? 'https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI_ZH.md'
     : 'https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI.md';
 
+const desktopDownloadUrl = 'https://avibe.bot/#install';
+
 const screenForSession = (session: MobileSessionState): Screen => {
   if (session.status === 'signedOut') return 'welcome';
   if (session.status === 'twoFactorRequired') return 'secondFactor';
@@ -1600,6 +1602,7 @@ function EmptyInstances({
   onRefresh,
   onShowCli,
   onOpenGuide,
+  onOpenDownload,
   onExit,
 }: {
   /** In the sheet: Back returns to the instance list there. */
@@ -1613,6 +1616,7 @@ function EmptyInstances({
   onRefresh: () => void;
   onShowCli: () => void;
   onOpenGuide: () => void;
+  onOpenDownload: () => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -1672,7 +1676,7 @@ function EmptyInstances({
                 raised,
                 'flex items-start gap-3 text-left disabled:opacity-60',
               )}
-              onClick={onOpenGuide}
+              onClick={onOpenDownload}
             >
               <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft">
                 <MonitorDown className="size-5 text-mint-ink" />
@@ -2465,6 +2469,11 @@ function MobileOnboardingScreens() {
     void openMobileExternal(installGuideUrl(i18n.language));
   };
 
+  const openDesktopDownload = () => {
+    if (isOperationLocked()) return;
+    void openMobileExternal(desktopDownloadUrl);
+  };
+
   const openAccountSecurity = () => {
     if (isOperationLocked()) return;
     void openMobileExternal(ACCOUNT_SECURITY_URL);
@@ -2676,6 +2685,7 @@ function MobileOnboardingScreens() {
           }
         }}
         onOpenGuide={openGuide}
+        onOpenDownload={openDesktopDownload}
         onExit={inSheet ? () => {
           if (!isOperationLocked()) {
             setErrorKey(null);

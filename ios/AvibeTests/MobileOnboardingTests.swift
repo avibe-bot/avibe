@@ -985,13 +985,23 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(owed["methods"] as? [String], [])
     }
 
-    func testExternalURLAllowlistAddsOnlyTheAccountSecurityPage() {
+    func testExternalURLAllowlistAddsOnlyTheAccountSecurityAndDownloadPages() {
         XCTAssertTrue(
             MobileExternalURLPolicy.allows(
                 URL(string: "https://avibe.bot/app/account/security")!
             )
         )
+        XCTAssertTrue(
+            MobileExternalURLPolicy.allows(
+                URL(string: "https://avibe.bot/#install")!
+            )
+        )
         for url in [
+            "http://avibe.bot/#install",
+            "https://avibe.bot/",
+            "https://avibe.bot/#install?next=/",
+            "https://avibe.bot/#install/other",
+            "https://avibe.bot.example.com/#install",
             "http://avibe.bot/app/account/security",
             "https://avibe.bot/app/account/security?next=/",
             "https://avibe.bot/app/account",
