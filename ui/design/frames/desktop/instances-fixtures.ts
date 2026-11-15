@@ -3,6 +3,7 @@ import zh from '@/i18n/zh.json';
 import type { DesktopAccountRowViewProps } from '@/desktop/DesktopAccountRowView';
 import type { InstanceSwitcherViewProps } from '@/desktop/InstanceSwitcherView';
 import type { AccountSecondFactorViewProps } from '@/desktop/AccountSecondFactorView';
+import type { AccountDetailsViewProps } from '@/desktop/AccountDetailsView';
 import type { AccountLoginViewProps } from '@/desktop/AccountLoginView';
 import type { FrameSpec } from '../../frame';
 import type { DesktopInstanceFixture, DesktopInstanceState } from '../../kit/desktop-instances';
@@ -20,10 +21,15 @@ const states: [DesktopInstanceState, string][] = [
   ['signed-out', 'Workbench · bottom account row beneath existing tools'],
   ['updates', 'Workbench · Desktop update popover'],
   ['setup-entry', 'Setup completion · optional sign-in handoff'],
-  ['account', 'Bottom account menu · enabled local address'],
-  ['account-remote-disabled', 'Account menu · remote access off'],
-  ['account-long', 'Account menu · long email and hostname'],
-  ['instances', 'Local, owned and shared instances'],
+  ['account', 'Footer · direct instance entry'],
+  ['account-remote-disabled', 'Footer · unregistered local fallback'],
+  ['account-long', 'Footer · long instance name'],
+  ['instances', 'Current instance and grouped other instances'],
+  ['current-shared', 'Current shared instance · ownership retained'],
+  ['offline-shared', 'Shared offline instance · disabled'],
+  ['profile', 'Account · local remote access address'],
+  ['profile-disabled', 'Account · remote access off'],
+  ['sign-out-error', 'Sign-out cleanup failure · explicit retry'],
   ['empty', 'Signed in · no other instances'],
   ['loading', 'Instance list loading · local stays available'],
   ['list-error', 'Instance discovery failed'],
@@ -37,10 +43,9 @@ const states: [DesktopInstanceState, string][] = [
   ['consent', 'Instance authorization modal'],
   ['switch-error', 'Failed switch · retry on selected row'],
   ['upgrade-error', 'Selected instance requires upgrade'],
-  ['offline-help', 'Offline row · instructions and refresh'],
+  ['offline-help', 'Offline row · disabled with page refresh'],
   ['long-content', 'Long instance names and shared account email'],
   ['registering', 'Automatic local registration in progress'],
-  ['registered', 'Local registration and remote access ready'],
   ['registration-error', 'Registered · tunnel not ready'],
   ['conflict', 'Local instance linked to another account'],
   ['add', 'Add another computer or CLI server'],
@@ -92,13 +97,12 @@ export function accountRowViewProps(fixture: DesktopInstanceFixture): Omit<Deskt
       desktop: { version: '3.2.6rc9', update: { phase: 'current', latest: null, channel: 'test', skippedVersion: null, interactive: false } },
       remote_auxiliary: 'disabled_incomplete',
     },
-    localRemoteUrl: fixture.state === 'account-remote-disabled' ? null : 'https://local-fixture-app.avibe.bot',
-    menuOpen: signedIn, onMenuOpenChange: () => {}, onPresent: () => {},
+    onPresent: () => {},
   };
 }
 
 export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwitcherViewProps | null {
-  if (!['instances', 'empty', 'loading', 'list-error', 'offline', 'switching', 'consent', 'switch-error', 'upgrade-error', 'offline-help', 'long-content'].includes(fixture.state)) return null;
+  if (!['instances', 'empty', 'loading', 'list-error', 'offline', 'switching', 'consent', 'switch-error', 'upgrade-error', 'offline-help', 'long-content', 'current-shared', 'offline-shared'].includes(fixture.state)) return null;
   const strings = (fixture.lang === 'en' ? en : zh).desktopClient;
   const noop = () => {};
   const state: InstanceSwitcherViewProps['state'] = {
@@ -121,11 +125,12 @@ export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwit
   const target = { kind: 'remote' as const, name: 'Studio', instance_id: 'studio', canonical_origin: 'https://studio-app.avibe.bot' };
   if (fixture.state === 'switching') state.connection = { ...state.connection, status: 'switching', pending: target };
   if (fixture.state === 'offline') state.connection = { status: 'remote_unreachable', committed: target, pending: null };
+  if (fixture.state === 'current-shared') state.connection = { status: 'remote_connected', committed: { kind: 'remote', name: 'Product team', instance_id: 'team', canonical_origin: 'https://team-app.avibe.bot' }, pending: null };
+  if (fixture.state === 'offline-shared') state.catalog.instances = state.catalog.instances.map((item) => item.id === 'team' ? { ...item, available: false } : item);
   if (fixture.state === 'consent') state.consent = { instance_id: 'team', instance_name: 'Product team', host: 'team-app.avibe.bot', scope: 'openid email profile' };
   return { state, localInstanceId: 'local', busy: false, pendingId: fixture.state === 'switching' ? 'studio' : null,
     failure: ['switch-error', 'upgrade-error'].includes(fixture.state) ? { instanceId: 'studio', message: fixture.state === 'upgrade-error' ? strings.errors.upgrade : strings.errors.request } : null,
-    offlineId: fixture.state === 'offline-help' ? 'weekend' : null,
-    onOfflineChange: noop, onSelect: noop, onLocal: noop, onCancel: noop, onRefresh: noop, onConsent: noop };
+    onAccount: noop, onAdd: noop, onSelect: noop, onLocal: noop, onCancel: noop, onRefresh: noop, onConsent: noop };
 }
 
 export function factorViewProps(fixture: DesktopInstanceFixture): AccountSecondFactorViewProps | null {
@@ -133,4 +138,10 @@ export function factorViewProps(fixture: DesktopInstanceFixture): AccountSecondF
   const noop = () => {};
   return { enroll: false, methods: ['totp'], method: fixture.state === 'recovery' ? 'recovery' : 'totp', code: '', busy: false, material: null, errorMessage: null,
     onCodeChange: noop, onMethodChange: noop, onVerify: noop, onEnroll: noop, onPasskey: noop, onLocal: noop };
+}
+
+export function profileViewProps(fixture: DesktopInstanceFixture): AccountDetailsViewProps | null {
+  if (!['profile', 'profile-disabled'].includes(fixture.state)) return null;
+  return { email: 'long-research-account-name@example.test', localRemoteUrl: fixture.state === 'profile-disabled' ? null : 'https://local-fixture-app.avibe.bot', busy: false,
+    onBack: () => {}, onSignOut: () => {} };
 }

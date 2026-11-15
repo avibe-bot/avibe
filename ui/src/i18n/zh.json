@@ -7568,7 +7568,7 @@
     "switchInstance": "切换实例",
     "localRemoteAccess": "本机远程访问",
     "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。",
-    "signOut": "退出账号",
+    "signOut": "在此设备退出",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。本机登记、远程访问设置和正在运行的任务都会保留。",
     "localVersion": "本机 Desktop 版本 {{version}}",
     "continueLocal": "继续使用本机",
@@ -7632,7 +7632,7 @@
     "transferSteps": "请当前所有者登录 avibe.bot 控制台，通过此实例现有的所有权转移流程操作。转移完成后，在这里重新登录。Desktop 不会替换当前所有者。",
     "keepLink": "保持绑定，仅使用本机",
     "reviewChange": "查看改绑步骤",
-    "otherInstances": "查看其他实例",
+    "otherInstances": "其他实例",
     "signedIn": "已登录",
     "registeringBody": "登记本机，然后开启远程访问…",
     "remoteAccessTitle": "远程访问",
@@ -7681,7 +7681,25 @@
     "opening": "正在打开…",
     "offlineInstructions": "去那台电脑打开 Avibe 并连接网络，然后刷新列表。",
     "signingOut": "正在退出账号…",
-    "signOutReturn": "返回工作台继续使用。"
+    "signOutReturn": "返回工作台继续使用。",
+    "instancesTitle": "实例",
+    "currentlyUsing": "正在使用",
+    "accountTitle": "账户",
+    "currentAccount": "当前登录",
+    "addInstance": "添加实例",
+    "thisDevice": "本机",
+    "sharedBy": "{{owner}} 共享",
+    "addGuide": {
+      "body": "将另一台电脑或服务器加入同一账户，再回到这里刷新列表。",
+      "computerTitle": "在另一台电脑上",
+      "computerBody": "安装 Avibe Desktop，使用同一账户登录，并在那台电脑上完成账户验证与本机登记。",
+      "serverTitle": "在服务器或命令行安装中",
+      "serverBody": "按安装指南安装 Avibe 并完成设置，然后在那台服务器上运行：",
+      "pairingBody": "按照引导，使用同一 avibe.bot 账户完成配对。配对密钥只在那台服务器上使用，不要填到这里。",
+      "installGuide": "打开安装指南",
+      "done": "返回并刷新",
+      "command": "vibe remote"
+    }
   },
   "update": {
     "row": {

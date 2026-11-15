@@ -15,8 +15,9 @@ import requests from './__fixtures__/instance-client-v1/requests.json';
 // consumer field drift by entering the real account hook and rendered actions.
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
-afterEach(async () => { cleanup(); vi.unstubAllGlobals(); await i18n.changeLanguage('en'); });
+afterEach(async () => { cleanup(); window.history.replaceState(null, '', '/'); vi.unstubAllGlobals(); await i18n.changeLanguage('en'); });
 function mount(initial: unknown, response: (request: DesktopClientRequest) => unknown) {
+  if (!window.location.search) window.history.replaceState(null, '', '/account/index.html?view=instances');
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', initial);
   const invoke = vi.fn(async (command: string, { request }: { request: DesktopClientRequest }) => {
@@ -106,29 +107,22 @@ it.each([1, 2])('AUTH-SETUP-171 preserves direct recovery material only in the c
   expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain(replies.totp_enrolled.result.recoveryCodes[0]);
 });
 
-it('keeps the native instance order inside each section, with the current shared instance leading Shared', async () => {
-  // Native orders the catalog: current, then opened on this device, then avibe.bot.
-  // The page only splits it into Owned and Shared; it must not re-sort.
+// Feedback.2 merges ownership sections but must preserve native recency/server order.
+it('shows the current shared instance once, followed by native-ordered other instances and the local escape', async () => {
   const instance = states.signed_in.catalog.instances[0];
-  const row = (id: string, relationship: 'owner' | 'shared') => ({
-    ...instance, id, name: id.toUpperCase(), host: `${id}.avibe.bot`, url: `https://${id}.avibe.bot`, relationship,
-  });
-  const state = {
-    ...states.signed_in,
-    connection: {
-      status: 'remote_connected', pending: null,
-      committed: { kind: 'remote', name: 'ZETA', instance_id: 'zeta', canonical_origin: 'https://zeta.avibe.bot' },
-    },
-    catalog: { status: 'ready', instances: [row('zeta', 'shared'), row('beta', 'owner'), row('alpha', 'owner'), row('gamma', 'shared')] },
+  const row = (id: string, relationship: 'owner' | 'shared') => ({ ...instance, id, name: id.toUpperCase(), relationship });
+  const state = { ...states.signed_in,
+    connection: { status: 'remote_connected', pending: null, committed: { kind: 'remote', name: 'ZETA', instance_id: 'zeta', canonical_origin: 'https://zeta.avibe.bot' } },
+    catalog: { status: 'ready', instances: [row('zeta', 'shared'), row('beta', 'owner'), row('gamma', 'shared'), row('alpha', 'owner')] },
   };
   mount(state, (request) => ({ ...replies.success, request_id: request.request_id, state }));
-  const names = (heading: string) => within(screen.getByRole('heading', { name: heading }).closest('section')!)
-    .getAllByRole('button').map((button) => button.textContent?.match(/[A-Z]+/)?.[0]);
-  await waitFor(() => expect(names('Your instances')).toEqual(['BETA', 'ALPHA']));
-  expect(names('Shared with you')).toEqual(['ZETA', 'GAMMA']);
-  const shared = within(screen.getByRole('heading', { name: 'Shared with you' }).closest('section')!).getAllByRole('button');
-  expect(within(shared[0]).getByLabelText('Current')).toBeTruthy();
-  expect(within(shared[1]).queryByLabelText('Current')).toBeNull();
+  const current = await screen.findByRole('region', { name: 'Currently using' });
+  expect(within(current).getByText('ZETA')).toBeTruthy();
+  expect(current.querySelector('[data-instance-icon="shared"]')).toBeTruthy();
+  expect(screen.getAllByText('ZETA')).toHaveLength(1);
+  const other = screen.getByRole('region', { name: 'Other instances' });
+  expect([...other.querySelectorAll('[data-instance-id]')].map((node) => node.getAttribute('data-instance-id'))).toEqual(['beta', 'gamma', 'alpha', 'local']);
+  expect(within(other).getByText('小明的 Mac')).toBeTruthy();
 });
 
 // The old full-page transition and bottom error never kept the selected row visible.
@@ -158,16 +152,19 @@ it('keeps opening, failure and retry on the selected instance without replacing 
   await act(async () => finish({ ...replies.success, request_id: pendingRequest.request_id }));
 });
 
-it('expands an offline row locally and refreshes without issuing select_instance', async () => {
+it('disables offline instances without expansion or a retry bypass and keeps page refresh usable', async () => {
   const initial = structuredClone(states.signed_in);
   initial.catalog.instances[0].available = false;
   const invoke = mount(initial, (request) => ({ ...replies.success, state: initial, request_id: request.request_id }));
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
-  fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
   const row = screen.getByText('工作室 Studio').closest('[data-instance-id]') as HTMLElement;
-  expect(within(row).getByText(en.desktopClient.offlineInstructions)).toBeTruthy();
+  const button = within(row).getByRole('button');
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  expect(button.hasAttribute('aria-expanded')).toBe(false);
+  fireEvent.click(button); fireEvent.keyDown(button, { key: 'Enter' });
   expect(invoke).toHaveBeenCalledOnce();
-  fireEvent.click(within(row).getByRole('button', { name: 'Refresh instances' }));
+  expect(within(row).queryByText(en.desktopClient.offlineInstructions)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh instances' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   expect(invoke.mock.calls[1][1].request.action).toEqual({ type: 'refresh_instances' });
 });
@@ -356,4 +353,55 @@ it('shows a native get_state cleanup error without manufacturing a sign-out rece
   } finally {
     window.history.replaceState({}, '', '/');
   }
+});
+
+// The removed popup used to own the local link and sign-out. The real container
+// must retain them on the account page without treating presentation as consent.
+it.each(['on', 'off', 'starting', 'unavailable'])('account page shows only the enabled local address and signs out explicitly (%s)', async (access) => {
+  const state = { ...states.signed_in, local: { ...states.signed_in.local, remote_access: access, remote_access_url: 'https://local-fixture-app.avibe.bot' } };
+  const invoke = mount(state, (request) => request.action.type === 'sign_out'
+    ? { ...replies.success, state, request_id: request.request_id, ok: false, error: { code: 'cleanup_error' } }
+    : { ...replies.success, state, request_id: request.request_id });
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: 'Account', exact: true }));
+  expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy();
+  expect(screen.getByText(state.account.identity!.email)).toBeTruthy();
+  const link = screen.queryByRole('link', { name: state.local.remote_access_url });
+  if (access === 'on') expect(link?.getAttribute('href')).toBe(state.local.remote_access_url);
+  else expect(link).toBeNull();
+  expect(invoke).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out on this device' }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  expect(invoke.mock.calls[1][1].request.action).toEqual({ type: 'sign_out' });
+  expect(await screen.findByRole('alert')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+  expect(invoke.mock.calls[2][1].request.action).toEqual({ type: 'sign_out' });
+});
+
+it('Add instance gives supported target-machine instructions and returns with a refresh only', async () => {
+  const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: 'Add instance' }));
+  expect(screen.getByText('vibe remote')).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Open installation guide' }).getAttribute('href')).toBe('https://docs.avibe.bot/get-started/install');
+  expect(invoke).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('button', { name: 'Return and refresh' }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  expect(invoke.mock.calls[1][1].request.action).toEqual({ type: 'refresh_instances' });
+  expect(screen.getByRole('heading', { name: 'Instances', exact: true })).toBeTruthy();
+});
+
+it('a failed instance becoming offline removes its retry action without losing the row error', async () => {
+  const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id,
+    ...(request.action.type === 'select_instance' ? { ok: false, error: { code: 'instance_upgrade_required' } } : {}) }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
+  expect(await screen.findByRole('button', { name: 'Retry' })).toBeTruthy();
+  const next = structuredClone(states.signed_in); next.revision += 20; next.catalog.instances[0].available = false;
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: next }));
+  expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  const row = screen.getByText('工作室 Studio').closest('[data-instance-id]') as HTMLElement;
+  expect(within(row).getByRole('alert')).toBeTruthy();
+  expect((within(row).getByRole('button') as HTMLButtonElement).disabled).toBe(true);
 });

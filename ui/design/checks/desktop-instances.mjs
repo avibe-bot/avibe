@@ -17,7 +17,9 @@ try {
   const list = await context.newPage();
   await list.goto(`${base}design.html?list`);
   await list.waitForFunction(() => window.__DESIGN__);
-  const frames = await list.evaluate(() => window.__DESIGN__.frames.filter(frame => frame.id.startsWith('desktop/instances/')));
+  const prefixes = process.argv.slice(2);
+  const frames = (await list.evaluate(() => window.__DESIGN__.frames.filter(frame => frame.id.startsWith('desktop/instances/'))))
+    .filter(frame => !prefixes.length || prefixes.some(prefix => frame.id.startsWith(prefix)));
   await list.close();
   assert.ok(frames.length, 'instance frames must be discovered');
   const tasks = frames.flatMap(frame => (frame.themes ?? ['light', 'dark']).map(theme => ({ frame, theme })));
@@ -50,6 +52,8 @@ try {
               version: productRow.querySelector('[data-version-trigger] button')?.getAttribute('title'),
             } : null,
             switcher: !!document.querySelector('[data-instance-switcher]'),
+            profile: !!document.querySelector('[data-account-details],[data-account-sign-out]'),
+            add: !!document.querySelector('[data-add-instance]'),
             entries: [...document.querySelectorAll('[data-placement-entry="bottom"]')].map(entry => {
               const indicator = entry.querySelector('[data-status-indicator]');
               const label = entry.querySelector('[data-account-label]');
@@ -84,7 +88,7 @@ try {
         const key = `${frame.id}.${theme}`;
         const productFooter = /^desktop\/instances\/(signed-out|account|account-remote-disabled|account-long)-(zh|en)$/.test(frame.id);
         const productLogin = /^desktop\/instances\/(email|code|code-error|password|password-help|two-factor|recovery)-(zh|en)$/.test(frame.id);
-        const productSwitcher = /^desktop\/instances\/(instances|empty|loading|list-error|offline|switching|consent|switch-error|upgrade-error|offline-help|long-content)-(zh|en)$/.test(frame.id);
+        const productSwitcher = /^desktop\/instances\/(instances|empty|loading|list-error|offline|switching|consent|switch-error|upgrade-error|offline-help|long-content|current-shared|offline-shared)-(zh|en)$/.test(frame.id);
         if (productFooter) {
           assert.ok(actual.product, `${key}: canonical footer must render the product row`);
           assert.equal(frame.status, 'shipped', `${key}: product-backed frame status`);
@@ -94,13 +98,15 @@ try {
           assert.equal(actual.product.toolsHeight, 39, `${key}: real Apps/Settings tools row`);
           assert.equal(actual.product.avatarX, 24, `${key}: padded product account trigger`);
           assert.equal(actual.product.version, 'v3.2.6rc9', `${key}: product VersionBadge`);
-          const signedIn = frame.id.includes('/account-');
-          assert.equal(actual.product.chevron, signedIn, `${key}: signed-out entry has no menu chevron`);
-          assert.equal(actual.product.menu, signedIn, `${key}: controlled account menu`);
-          assert.equal(actual.product.expanded, signedIn ? 'true' : null, `${key}: account expansion semantics`);
+          assert.equal(actual.product.chevron, false, `${key}: direct presentation has no menu chevron`);
+          assert.equal(actual.product.menu, false, `${key}: no account popup`);
+          assert.equal(actual.product.expanded, null, `${key}: direct presentation has no expansion semantics`);
         } else if (productSwitcher) {
           assert.ok(actual.switcher, `${key}: product switcher`);
           assert.equal(actual.entries.length, 0, `${key}: no kit footer in bundled instance view`);
+        } else if (/\/(profile|profile-disabled|sign-out-error|add)-(en|zh)$/.test(frame.id)) {
+          assert.ok(actual.profile || actual.add, `${key}: shared product page`);
+          assert.equal(actual.entries.length, 0, `${key}: no old kit footer`);
         } else if (productLogin) {
           assert.equal(actual.entries.length, 0, `${key}: product login card has no kit footer`);
         } else {
@@ -152,7 +158,7 @@ try {
       else indicatorMarkup.set(key, entry.indicatorMarkup);
     }
   }
-  for (const lang of ['zh', 'en']) for (const theme of ['light', 'dark']) {
+  if (!prefixes.length) for (const lang of ['zh', 'en']) for (const theme of ['light', 'dark']) {
     // Offline now renders the bundled product switcher, which has no Runtime footer.
     for (const connection of ['signed-in', 'signed-out', 'switching']) {
       assert.ok(combinations.has(`${lang}:${theme}:${connection}:true`), `${lang}/${theme}: missing ${connection}+update fixture`);

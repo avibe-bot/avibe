@@ -39,13 +39,12 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
         const rect = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
         return { avatar: rect('[data-account-avatar]').x, tools: node.firstElementChild!.getBoundingClientRect().x,
           dotGap: rect('[data-status-indicator]').x - rect('[data-account-label]').right,
-          arrowGap: rect('[data-account-chevron]').x - rect('[data-status-indicator]').right,
           versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right };
       });
       expect(measurements.avatar).toBe(24);
       expect(measurements.tools).toBe(16);
       expect(measurements.dotGap).toBeLessThanOrEqual(6);
-      expect(measurements.arrowGap).toBeLessThanOrEqual(6);
+      await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
       expect(measurements.versionRight).toBe(measurements.footerRight);
       await expect(footer).not.toContainText('max@example.test');
       await page.locator('[data-version-trigger] button').click();
@@ -59,15 +58,10 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.keyboard.press('Escape');
       await expect(page.locator('[data-version-trigger] button')).toBeFocused();
       await page.locator('[data-account-trigger]').click();
-      await expect(page.locator('[data-instance-menu]')).toContainText('max@example.test');
-      // What a remote computer lacks, in plain words, only in the instance menu.
-      await expect(page.locator('[data-instance-menu]')).toContainText(lang === 'en' ? 'Desktop Mini and system notifications are off' : '桌面迷你窗和系统通知暂时关闭');
+      await expect(page.locator('[data-instance-menu]')).toHaveCount(0);
       await expect(popup).toHaveCount(0);
       await expect(page.locator('[data-update-menu]')).toHaveCount(0);
-      await expect(page.locator('[data-instance-menu]')).toHaveCSS('opacity', '1');
-      await page.screenshot({ animations: 'disabled', path: info.outputPath('account-menu.png') });
-      await page.keyboard.press('Escape');
-      await expect(page.locator('[data-account-trigger]')).toBeFocused();
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('account-entry.png') });
       expect(requests).toEqual([]); expect(denied).toEqual([]);
     });
     test(`AUTH-SETUP-177 bundled login ${viewport.width} ${lang} ${theme}`, async ({ page }, info) => {
@@ -83,8 +77,9 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await expect(page.getByRole('heading', { name: lang === 'en' ? 'Check your inbox' : '查看你的邮箱' })).toBeVisible();
       await field.fill('123456');
       await page.getByRole('button', { name: lang === 'en' ? 'Verify and sign in' : '验证并登录' }).click();
-      await expect(page.getByRole('heading', { name: lang === 'en' ? 'This Mac is now in your account' : '本机已加入你的账号' })).toBeVisible();
-      await page.getByRole('button', { name: lang === 'en' ? 'View instances' : '查看实例', exact: true }).click();
+      await expect.poll(() => requests.at(-1)?.action.type).toBe('verify_otp');
+      // Open the separate instance presentation after login; native owns the Workbench return.
+      await page.goto(`${ACCOUNT}?view=instances&theme=${theme}`);
       await expect(page.getByText('工作室 Studio', { exact: true })).toBeVisible();
       await expect(page.getByText('共享团队', { exact: true })).toBeVisible();
       await page.screenshot({ animations: 'disabled', path: info.outputPath('instances.png') });
@@ -162,8 +157,8 @@ for (const method of ['totp', 'recovery', 'passkey'] as const) test(`AUTH-SETUP-
     await page.screenshot({ animations: 'disabled', path: info.outputPath(`${method}.png`) });
     await page.getByRole('button', { name: 'Verify', exact: true }).click();
   }
-  await expect(page.getByRole('heading', { name: 'This Mac is now in your account' })).toBeVisible();
-  expect(requests.at(-1)?.action).toEqual(method === 'passkey' ? { type: 'verify_passkey' } : { type: 'verify_second_factor', method, code: method === 'totp' ? '654321' : 'fixture-recovery' });
+  await expect(page.getByRole('heading', { name: 'This Mac is now in your account' })).toHaveCount(0);
+  await expect.poll(() => requests.at(-1)?.action).toEqual(method === 'passkey' ? { type: 'verify_passkey' } : { type: 'verify_second_factor', method, code: method === 'totp' ? '654321' : 'fixture-recovery' });
 });
 
 test('AUTH-SETUP-177 a bare sign-out view never authorizes logout; Back clears setup material', async ({ page }) => {
@@ -182,7 +177,7 @@ test('AUTH-SETUP-177 a bare sign-out view never authorizes logout; Back clears s
   await expect(page.getByText('JBSWY3DPEHPK3PXP', { exact: true })).toHaveCount(0);
 });
 
-for (const lang of ['en', 'zh'] as const) test(`rc19 switch failure, offline instructions and wrapping ${lang}`, async ({ page }, info) => {
+for (const lang of ['en', 'zh'] as const) test(`feedback2 inline failure, disabled offline and wrapping ${lang}`, async ({ page }, info) => {
   await page.setViewportSize({ width: 880, height: 600 });
   const denied = await isolateAccount(page); await language(page, lang);
   const state = clientState(); signIn(state);
@@ -197,12 +192,17 @@ for (const lang of ['en', 'zh'] as const) test(`rc19 switch failure, offline ins
   await row.getByRole('button', { name: lang === 'en' ? 'Retry' : '重试', exact: true }).click();
   await expect.poll(() => requests.filter((request) => request.action.type === 'select_instance').length).toBe(2);
   const offline = page.locator('[data-instance-id="team"]');
-  await offline.getByRole('button').click();
-  await expect(offline).toContainText(lang === 'en' ? 'Open Avibe on that computer' : '去那台电脑打开 Avibe');
+  await expect(offline.getByRole('button')).toBeDisabled();
+  await expect(offline).toContainText(lang === 'en' ? 'Offline' : '离线');
+  const errorBox = await row.getByRole('alert').boundingBox();
+  const rowBox = await row.boundingBox();
+  expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(rowBox!.y + rowBox!.height);
+  const retryBox = await row.getByRole('button').boundingBox();
+  expect(Math.abs(retryBox!.y + retryBox!.height / 2 - rowBox!.y - rowBox!.height / 2)).toBeLessThanOrEqual(2);
   expect(requests.filter((request) => request.action.type === 'select_instance')).toHaveLength(2);
   await page.screenshot({ animations: 'disabled', path: info.outputPath('row-failure-offline.png') });
   expect(await page.locator('main').evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
-  await offline.getByRole('button', { name: lang === 'en' ? 'Refresh instances' : '刷新实例' }).click();
+  await page.getByRole('button', { name: lang === 'en' ? 'Refresh instances' : '刷新实例' }).click();
   await expect.poll(() => requests.at(-1)?.action.type).toBe('refresh_instances');
   expect(denied).toEqual([]);
 });

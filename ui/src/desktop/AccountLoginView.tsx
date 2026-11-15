@@ -60,7 +60,7 @@ export function AccountLoginView({ verify, email, value, busy, errorMessage, pas
         </Button>
       </form>
       {verify ? <div className="mt-4 text-center"><p className="text-xs text-muted">{t('desktopClient.noCode')}</p><Button variant="link" disabled={busy} onClick={onResendCode}>{t('desktopClient.resendCode')}</Button></div>
-        : password && <Button variant="link" className="mt-3 w-full" disabled={busy} onClick={() => { setReveal(false); password.onToggle(); }}>{passwordMode ? <Mail className="size-4" /> : <KeyRound className="size-4" />}{t(passwordMode ? 'desktopClient.useEmailCode' : 'desktopClient.usePassword')}</Button>}
+        : password && <Button variant="link" className="mt-3 w-full gap-2 text-foreground underline underline-offset-4" disabled={busy} onClick={() => { setReveal(false); password.onToggle(); }}>{passwordMode ? <Mail className="size-4" /> : <KeyRound className="size-4" />}{t(passwordMode ? 'desktopClient.useEmailCode' : 'desktopClient.usePassword')}</Button>}
     </div>
     {(passwordMode || password?.forgot) && <p role={password?.forgot ? 'status' : undefined} className="mt-4 text-center text-xs leading-6 text-muted">{t('desktopClient.passwordHelp')}</p>}
     {!verify && <p className="mt-4 text-center text-xs leading-5 text-muted">{t('desktopClient.registrationDisclosure')}</p>}

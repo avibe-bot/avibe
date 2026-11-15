@@ -91,8 +91,8 @@ it('AUTH-SETUP-178 current version offers no install; the account menu has no up
   expect(document.querySelector('[data-update-menu]')).toBeNull();
   fireEvent.click(within(dialog).getByRole('button', { name: en.common.close }));
   fireEvent.click(document.querySelector('[data-account-trigger]')!);
-  const menu = document.querySelector('[data-instance-menu]')!;
-  expect(menu.textContent).not.toMatch(/update|upgrade/i);
+  expect(document.querySelector('[data-instance-menu]')).toBeNull();
+  expect(mock.present).toHaveBeenCalledWith('instances');
 });
 
 it('AUTH-SETUP-178 remote Runtime presents the trusted update view without local or remote update IPC', async () => {
@@ -142,29 +142,13 @@ it('AUTH-SETUP-177 signed-out footer directly presents account without opening a
   expect(document.querySelector('[data-instance-menu]')).toBeNull();
 });
 
-it('AUTH-SETUP-178 signed-in menu groups account actions without a remote-access status row', async () => {
-  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
-  render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
-  const trigger = document.querySelector('[data-account-trigger]')!;
-  fireEvent.click(trigger);
-  expect(trigger.getAttribute('aria-expanded')).toBe('true');
-  expect(mock.present).not.toHaveBeenCalled();
-  expect(screen.queryByText('Remote access to this Mac')).toBeNull();
-  expect(trigger.textContent).toBe('小麦的 Mac');
-  expect(trigger.getAttribute('title')).toBe('小麦的 Mac.local');
-  fireEvent.click(screen.getByRole('button', { name: 'Switch instance' }));
-  expect(mock.present).toHaveBeenCalledExactlyOnceWith('instances');
-  fireEvent.click(trigger);
-  fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
-  expect(mock.present).toHaveBeenLastCalledWith('sign-out');
-});
-
-// The address must come from the local native projection, even on a remote Runtime.
-it.each(['on', 'off', 'starting', 'unavailable'])('only shows the authoritative local link while access is on (%s)', async (access) => {
-  mock.remote = true; mock.localAccess = access; mock.localUrl = 'https://local-fixture-app.avibe.bot';
+it('AUTH-SETUP-178 the whole signed-in footer directly opens instances without a popup or caret', async () => {
   mount();
-  fireEvent.click(document.querySelector('[data-account-trigger]')!);
-  const link = screen.queryByRole('link', { name: mock.localUrl });
-  if (access === 'on') expect(link?.getAttribute('href')).toBe(mock.localUrl);
-  else expect(link).toBeNull();
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  fireEvent.click(trigger.querySelector('[data-account-avatar]')!);
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith('instances');
+  expect(trigger.hasAttribute('aria-expanded')).toBe(false);
+  expect(document.querySelector('[data-instance-menu]')).toBeNull();
+  expect(document.querySelector('[data-account-chevron]')).toBeNull();
+  expect(trigger.textContent).toBe('This device');
 });
