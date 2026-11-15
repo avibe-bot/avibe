@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.3.0
+version: 0.3.1
 ---
 
 # Use Avibe Harness
@@ -41,7 +41,7 @@ To pick the Agent, model, and effort for new work, load the `choose-model` Skill
 ### Reporting
 Dispatch inputs name how to report. If the recipient is idle without writing back and has no pending input, delegate, Task, or Watch, Avibe sends a read receipt with its last reply. Failures, cancellations, and interruptions still notify immediately. `--sync` waits inline; read results with `vibe runs show`.
 
-Add `--no-reply` to an existing `--session-id` or `--bot` message: the receiver sees `[No reply needed.]` and should not answer. It opens no delegation or receipt, does not re-arm a pair, and closes a reverse pair. It rejects `--sync` and forks/new Sessions. Agent Run callback flags are deprecated no-ops; Vault auto-resume is unchanged.
+Add `--no-reply` to an existing `--session-id` or `--bot` message: the receiver sees `[No reply needed.]` and should not answer. It opens no delegation or receipt, does not re-arm a pair, and closes a reverse pair. It rejects `--sync` and forks/new Sessions; it does not change delivery. Agent Run callback flags are deprecated no-ops; Vault auto-resume is unchanged.
 
 ### Tasks and Watches
 Tasks and Watches created from an Agent shell report to this Session by default. Write cron weekdays as names (`0 9 * * mon-fri`); numeric weekdays are rejected. A command Task is silent on success and sends a failure notice naming the exit code; `--on-failure agent --message "..."` hands each failure to an Agent instead.
@@ -49,7 +49,7 @@ Tasks and Watches created from an Agent shell report to this Session by default.
 Watch waiter contract: exit `0` only for one new reportable event, a retry code (default `75`) while still waiting, and `64` with `avibe-watch: no-event` on stderr for a quiet cycle with no Agent Run, which retires a once Watch and re-arms a forever one. A forever Watch needs a durable cursor, state transition, or cooldown so a condition that persists is not reported again; Avibe pauses a Watch that reports six events within 60 seconds.
 
 ### Steering and queues
-`--session-id` steers its message into the Session's running Turn, or starts a Turn when the Session is idle; `--queue` waits for the running Turn instead. Steer when the message changes what the Session is doing now, and queue when its current work should finish first; weigh the dependency, urgency, and cost of disruption. `vibe session send-now --session-id <id>` sends the oldest queued message now without adding one; a refused steer stays queued and never stops the Turn. To drop an obsolete queued message, run `vibe session queue list --session-id <id>` first and remove the returned id with `vibe session queue remove <message-id> --session-id <id>`; never guess an id.
+`--session-id` and `--bot` join the running Turn (steer), or start one if idle; `--queue` waits for the running Turn instead. Steer when the message changes what the Session is doing now, and queue when its current work should finish first; weigh the dependency, urgency, and cost of disruption. `vibe session send-now --session-id <id>` sends the oldest queued message now without adding one; a refused steer stays queued and never stops the Turn. To drop an obsolete queued message, run `vibe session queue list --session-id <id>` first and remove the returned id with `vibe session queue remove <message-id> --session-id <id>`; never guess an id.
 
 ### Managing work
 Use `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`. Lists read this Session; add `--session-id <id>` for another Session or `--global` for every Session, and find a definition by text with `--q <text>`, such as a PR number. `vibe runs cancel <run-id>` stops the whole Turn that run joined, including other runs sharing it.

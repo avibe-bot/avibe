@@ -19,7 +19,7 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import select
 
-from storage import vault_service
+from storage import vault_service, vault_signatures
 from storage.models import agent_sessions, scopes, vault_audit, vault_auth_factors, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from tests.vault_webauthn_helpers import WebAuthnTestCredential
@@ -100,13 +100,13 @@ def _browser_ecdsa_signature_for_digest(digest: str, *, key_value: int = 1) -> t
     )
     der = private_key.sign(bytes.fromhex(digest), ec.ECDSA(utils.Prehashed(hashes.SHA256())))
     r, s = utils.decode_dss_signature(der)
-    if s > api._SECP256K1_N // 2:
-        s = api._SECP256K1_N - s
+    if s > vault_signatures.N // 2:
+        s = vault_signatures.N - s
     recovery_id = next(
         index
         for index in range(4)
-        if api._secp256k1_recover_ecdsa_public_key(r, s, bytes.fromhex(digest), index)
-        == api._secp256k1_decompress_public_key(public_key)
+        if vault_signatures.recover_ecdsa(r, s, bytes.fromhex(digest), index)
+        == vault_signatures.decompress(public_key)
     )
     signature = {
         "signature": r.to_bytes(32, "big").hex() + s.to_bytes(32, "big").hex(),
@@ -4445,7 +4445,9 @@ def test_signing_key_meta_exposes_addresses_not_public_key(monkeypatch):
     addresses = secret["signing_addresses"]
     assert set(addresses) == {"eth", "btc_legacy", "btc_segwit", "btc_taproot"}
     assert addresses["eth"] == "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
-    assert addresses["btc_segwit"] == "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    # The current exact source registry is Taproot-only for protected inputs.
+    assert secret["bitcoin_address_types"] == ["p2tr"]
+    assert addresses["btc_legacy"] is None and addresses["btc_segwit"] is None
     assert addresses["btc_taproot"].startswith("bc1p")
 
 

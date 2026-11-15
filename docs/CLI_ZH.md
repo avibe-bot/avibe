@@ -732,14 +732,14 @@ vibe agent run --close-after --agent release-reviewer --message 'Run a disposabl
 没有 `--session-id` 也没有 fork 参数时，这次运行会为 `--agent` 新建一个后台
 Session；`--same-scope` 或 `--scope-id` 决定它的位置，`--visible` 让它面向用户。
 
-指定现有 `--session-id` 时，默认是 P1：新消息会 steering 进活动 native Turn，
+指定现有 `--session-id` 或 `--bot` 时，默认是 P1：新消息会 steering 进活动 native Turn，
 Session 空闲时立即启动；只有明确拒绝后才回退到 P3。它不会打断活动 Turn，也不会
 提升更早的排队消息。`--queue` 则把新 Run 放进活动 Turn 之后的 P3 队列。
 `vibe session send-now` 是无内容 P1 操作，只提升现有的精确 FIFO 队头，不新增消息。
 过期队头会被拒绝，而不会改为提升下一条；两个命令都不会调用 Stop。
 
-`--bot <handle>` 按代号给伙伴（Bot）的永久 Session 发消息（见 `vibe bot`）。这次运行会像
-`--queue` 一样排在伙伴之前的消息之后，所以伙伴一次只处理一条消息。伙伴只有一个对话，
+`--bot <handle>` 按代号给伙伴（Bot）的永久 Session 发消息（见 `vibe bot`），投递规则
+与 `--session-id` 相同。伙伴只有一个对话，
 用自己的模型：`--agent`、`--session-id`、fork 参数、`--model`、`--reasoning-effort`、
 位置参数、`--cwd` 和 `--close-after` 都不能与 `--bot` 一起使用。对同时是伙伴的
 Agent，`--agent` 的含义不变：它新建该 Agent 的一个 Session，而不是给伙伴发消息。

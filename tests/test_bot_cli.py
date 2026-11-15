@@ -93,13 +93,14 @@ def _agent_run(home, capsys, argv):
     return result, json.loads(captured.out or captured.err), request_store
 
 
-def test_agent_run_bot_queues_on_the_bots_permanent_session(home, capsys):
-    result, payload, store = _agent_run(home, capsys, ["--bot", "main", "--no-callback", "--message", "hello"])
+@pytest.mark.parametrize("extra, intent", [([], "steer"), (["--queue"], "queue"), (["--no-reply"], "steer"), (["--queue", "--no-reply"], "queue")])
+def test_agent_run_bot_uses_session_delivery_policy(home, capsys, extra, intent):
+    result, payload, store = _agent_run(home, capsys, ["--bot", "main", *extra, "--no-callback", "--message", "hello"])
     assert result == 0, payload
     assert payload["run"]["session_id"] == "ses_main"
     stored = store.get_run(payload["run"]["id"])
     assert stored["session_id"] == "ses_main"
-    assert stored["metadata"]["delivery_intent"] == "queue"
+    assert stored["metadata"]["delivery_intent"] == intent
     assert (home / "bots" / "main" / ".git").is_dir()
 
     result, payload, _store = _agent_run(home, capsys, ["--bot", "ghost", "--no-callback", "--message", "hi"])
@@ -156,7 +157,7 @@ def test_a_bot_message_has_no_callback_and_tells_the_bot_where_to_report(home, c
     stored = store.get_run(payload["run"]["id"])
     assert (stored["session_id"], stored["callback_session_id"]) == ("ses_cso", "ses_main")
     assert stored["metadata"]["callback_mode"] == "failure"
-    assert stored["metadata"]["delivery_intent"] == "queue"
+    assert stored["metadata"]["delivery_intent"] == "steer"
     assert (stored["source_kind"], stored["source_actor"]) == ("agent", "ses_main")
 
     # The input the cso Bot receives, through the scheduler's own dispatch context for this run.

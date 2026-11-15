@@ -89,8 +89,22 @@ def stored_settings(snapshot, account=None):
     return json.loads(row["policy"] or "{}") if account is None else json.loads(row["public_meta"])["hd_accounts"][account]
 
 
+@pytest.fixture
+def capable_policy_sandbox(monkeypatch):
+    # Test-only registry entry; no shipped pin or browser capability is asserted.
+    from vibe import vault_sandbox_release as release
+
+    current = release.current_support()
+    assert current is not None
+    monkeypatch.setattr(release, "CAPABILITIES_BY_PIN_ID", {current.pin_id: {
+        "ordinary_input_types": ("p2pkh", "p2wpkh", "p2tr"),
+        "hd_input_types": (), "ecdsa_return_types": ("p2pkh", "p2wpkh", "p2tr"),
+    }})
+    return release.current_support()
+
+
 @pytest.mark.parametrize("kind,protection", [("local", "standard"), ("local", "protected"), ("hd-seed", "standard")])
-def test_real_assertion_lowers_only_bound_flag_and_consumes_everything_together(kind, protection):
+def test_real_assertion_lowers_only_bound_flag_and_consumes_everything_together(kind, protection, capable_policy_sandbox):
     create_target(kind, protection)
     credential, factor_id = enroll()
     account = 0 if kind == "hd-seed" else None
@@ -155,9 +169,9 @@ def test_modified_context_or_proof_never_mutates_state(mutation):
     assert state() == before
 
 
-@pytest.mark.parametrize("change", ["rotate", "rename-account", "aba", "delete-recreate", "disabled-factor", "wrong-operation", "expiry"])
+@pytest.mark.parametrize("change", ["rotate", "rename-account", "hd-protected", "aba", "delete-recreate", "disabled-factor", "wrong-operation", "expiry"])
 def test_stale_server_state_rejects_original_valid_assertion(change):
-    account = 0 if change == "rename-account" else None
+    account = 0 if change in {"rename-account", "hd-protected"} else None
     create_target("hd-seed" if account is not None else "local")
     credential, factor_id = enroll()
     context = issue(account)
@@ -167,6 +181,9 @@ def test_stale_server_state_rejects_original_valid_assertion(change):
             vault_service.rotate_secret(conn, NAME, Sealed(ciphertext="replacement", nonce="other", wrap_meta="other"))
         elif change == "rename-account":
             vault_service.update_hd_account(conn, NAME, account=0, changes={"name": "Renamed"})
+        elif change == "hd-protected":
+            # An otherwise valid standard proof must never lower protected HD.
+            conn.execute(vault_secrets.update().where(vault_secrets.c.name == NAME).values(protection="protected"))
         elif change == "aba":
             other = vault_service.create_signing_policy_challenge(conn, NAME, {"always_ask": False}, rp_id=RP, origin=ORIGIN)["context"]
             vault_service.complete_signing_policy_downgrade(conn, NAME, proof(other, credential, factor_id), rp_id=RP, origin=ORIGIN)

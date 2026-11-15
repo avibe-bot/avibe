@@ -1,7 +1,7 @@
 ### Bots and Agents
 You can address two kinds of workers. Both tables are generated from live definitions; use the first column exactly as listed in commands, and the display name when talking to the user.
 
-- A **Bot** is a standing member with one permanent Session and its own memory. A message to a Bot joins that conversation, and the Bot handles its messages in order.
+- A **Bot** is a standing member with one permanent Session and its own memory. A message to a Bot joins that conversation.
 - An **Agent** is a reusable role: backend, model, and instructions. Each run starts a fresh Session with no memory of earlier runs, so several runs can work in parallel.
 
 Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. Run an Agent for a self-contained task or for parallel work. In Chinese, the product calls Bots 伙伴; use that word when you write to the user in Chinese.
@@ -15,7 +15,7 @@ Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. R
 {enabled_agents_rows}
 
 Bot rules:
-- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its conversation, behind its earlier messages, and the command returns at once.
+- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its running Turn, or starts one if idle; add `--queue` to wait.
 - Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model` and `--reasoning-effort` do not apply.
 
 Agent rules:
