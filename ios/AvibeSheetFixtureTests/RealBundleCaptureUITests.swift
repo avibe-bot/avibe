@@ -163,9 +163,10 @@ final class RealBundleCaptureUITests: XCTestCase {
             SheetFixtureReadiness.waitForDocument(in: app)
             let arm = app.buttons["fixture-arm-stall"]
             let armed = arm.waitForExistence(timeout: 10)
+            var attemptedTap = false
             if armed {
                 arm.tap()
-                SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
+                attemptedTap = SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
             }
             let surface = app.otherElements["fixture-document-surface"]
             let replied = XCTNSPredicateExpectation(
@@ -178,7 +179,7 @@ final class RealBundleCaptureUITests: XCTestCase {
             let evidence = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
             let events = evidence["events"] as? [[String: Any]] ?? []
             trials.append([
-                "trial": trial, "armed": armed,
+                "trial": trial, "armed": armed, "attemptedTap": attemptedTap,
                 "nativeTouch": events.contains { ($0["kind"] as? String) == "native-touch-began" },
                 "rowPointerdown": events.contains { ($0["kind"] as? String) == "pointerdown" && ($0["onLab"] as? Bool) == true },
                 "rowClick": events.contains { ($0["kind"] as? String) == "click" && ($0["onLab"] as? Bool) == true },

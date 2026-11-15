@@ -152,9 +152,13 @@ enum SheetFixtureReadiness {
                        "Expected native invalid_instance and row error; receipt=\(surface.label)")
     }
 
-    static func tapRow(containing name: String, in app: XCUIApplication) {
+    @discardableResult
+    static func tapRow(containing name: String, in app: XCUIApplication) -> Bool {
         let row = app.webViews.firstMatch.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        guard row.waitForExistence(timeout: 10) else {
+            XCTFail("Row missing at the intended press: \(name)")
+            return false
+        }
         if !row.isHittable { app.swipeUp(velocity: .slow) }
         // Assert at the existing press point. Do not wait for a stalled/covered
         // target to become actionable and thereby hide the missed-input defect.
@@ -171,8 +175,12 @@ enum SheetFixtureReadiness {
         evidence.name = "\(name)-pre-press"
         evidence.lifetime = .keepAlways
         XCTContext.runActivity(named: "Record \(name) press geometry") { $0.add(evidence) }
-        XCTAssertTrue(enabled && hittable, "Row not actionable at the intended press; no settling wait: \(name)")
+        guard enabled && hittable else {
+            XCTFail("Row not actionable at the intended press; no settling wait: \(name)")
+            return false
+        }
         row.tap()
+        return true
     }
 
     static func waitForDocument(
