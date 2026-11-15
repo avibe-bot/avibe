@@ -18,6 +18,23 @@
         }
       }
     },
+    "NSLocalNetworkUsageDescription" : {
+      "comment" : "Explains the system Local Network permission prompt.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lets Avibe connect directly to the computer running Avibe when it's on the same network. If you don't allow it, Avibe still works over the internet."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许 Avibe 在同一网络中直接连接运行 Avibe 的电脑。不允许也能正常使用，只是经由互联网连接。"
+          }
+        }
+      }
+    },
     "NSMicrophoneUsageDescription" : {
       "comment" : "Explains the system microphone permission prompt.",
       "localizations" : {
