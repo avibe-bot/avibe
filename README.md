@@ -6,7 +6,7 @@
 
 ### Make your computer a home for your AI partner.
 
-Avibe is the local-first Agent OS: it turns your own Mac or PC into a place where AI helpers live and work, instead of someone else's server. Vibey, its built-in AI partner, lives there. It remembers what you are working on, does the work on your machine, and comes to find you when it is done or needs a decision.<br/>
+Avibe is the local-first Agent OS: it turns your own Mac or PC into a home for AI partners, where they live and work, not on someone else's server. Vibey, its built-in AI partner, lives there. It remembers what you are working on, does the work on your machine, and comes to find you when it is done or needs a decision.<br/>
 Reach it from the desktop app, your iPhone, or the chat app you already have open.
 
 **[Download for Mac](#mac)** · **[Download for Windows](#windows)** · **[iPhone](#iphone)** · **[Linux and servers](#linux-and-servers)**
