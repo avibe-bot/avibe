@@ -55,6 +55,19 @@ export type StatusTone = 'muted' | 'mint' | 'gold' | 'destructive';
 /** The Runtime host's OS, from the server's `host_platform`; its setup guidance differs per OS. */
 export type ComputerUseHost = 'macos' | 'windows' | 'linux' | 'unknown';
 
+/**
+ * Windows refusals the desktop shell can also record as a lifecycle `error`
+ * (desktop/src-tauri/src/computer_use/windows.rs `stable_error`). They keep
+ * the same Windows guidance as when the Runtime reports them `unavailable`.
+ */
+const windowsRefusalErrorReasons = new Set([
+  'elevated_runtime',
+  'session_locked',
+  'session_unavailable',
+  'session_mismatch',
+  'pipe_unverified',
+]);
+
 /** Error reasons whose detail names macOS settings or paths. */
 const macosOnlyErrorReasons = new Set(['ax_capability', 'capture_failed', 'socket_path_too_long']);
 
@@ -127,9 +140,11 @@ export const computerUseStatusCopy = (
   }
   if (status.status === 'error') {
     const reason = status.reason ?? '';
-    const detailKey = (host === 'windows' && macosOnlyErrorReasons.has(reason)
-      ? undefined
-      : errorDetailKeys[reason])
+    const detailKey = (host === 'windows' && windowsRefusalErrorReasons.has(reason)
+      ? unavailableDetailKeys[reason]
+      : host === 'windows' && macosOnlyErrorReasons.has(reason)
+        ? undefined
+        : errorDetailKeys[reason])
       ?? 'workbench.home.computerUse.errorDetail';
     return { label: t('workbench.home.computerUse.error'), detail: t(detailKey), tone: 'destructive' };
   }

@@ -501,6 +501,30 @@ describe('computerUseStatusCopy on a Windows host', () => {
     expect(copy('unavailable', 'future_reason', 'windows').detail).toBe('workbench.home.computerUse.unavailableDetail');
   });
 
+  it.each([
+    ['elevated_runtime', 'elevatedRuntimeDetail'],
+    ['session_locked', 'sessionLockedDetail'],
+    ['session_unavailable', 'sessionUnavailableDetail'],
+    ['session_mismatch', 'sessionMismatchDetail'],
+    ['pipe_unverified', 'pipeUnverifiedDetail'],
+  ])('gives the Windows guidance for a %s refusal the shell records as an error', (reason, key) => {
+    expect(copy('error', reason, 'windows')).toEqual({
+      label: 'workbench.home.computerUse.error',
+      detail: `workbench.home.computerUse.${key}`,
+      tone: 'destructive',
+    });
+    // macOS never reports these; its error copy stays the generic text.
+    expect(copy('error', reason, 'macos').detail).toBe('workbench.home.computerUse.errorDetail');
+  });
+
+  it('keeps unknown and ordinary error reasons on their existing copy', () => {
+    for (const host of ['windows', 'macos'] as const) {
+      expect(copy('error', 'future_reason', host).detail).toBe('workbench.home.computerUse.errorDetail');
+      expect(copy('error', null, host).detail).toBe('workbench.home.computerUse.errorDetail');
+      expect(copy('error', 'daemon_exited', host).detail).toBe('workbench.home.computerUse.daemonExitedDetail');
+    }
+  });
+
   it('keeps the macOS copy unchanged by default', () => {
     expect(copy('needs_permission', 'accessibility').detail).toBe('workbench.home.computerUse.accessibilityDetail');
     expect(copy('needs_permission', 'screen_recording', 'macos').detail)
