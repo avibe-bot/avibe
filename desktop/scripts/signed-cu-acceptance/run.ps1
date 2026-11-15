@@ -167,11 +167,13 @@ try {
         $cases[$id] = $result.cases[$id]
     }
     $record.installed_driver_sha256 = $result.installed_driver_sha256
+    if ($result.Contains('failure')) { $record.failure = $result.failure }
     if ($worker.ExitCode -ne 0) { $failed = $true }
 } catch {
     $failed = $true
     # Only harness-owned reason codes escape; never serialize an exception,
     # credential-bearing HTTP request, process environment or native output.
+    $record.failure = @{ exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
     $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'harness_operation_failed' }
     $verdict = if ($reason -eq 'release_priority_yield') { 'NOT RUN' } else { 'FAIL' }
     Verdict $stage $verdict $reason

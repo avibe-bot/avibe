@@ -74,9 +74,10 @@ try {
     $desktop = Start-Process -FilePath $apps[0].FullName -PassThru
     $null = $desktop.SafeHandle
     $runtime = Join-Path $env:LOCALAPPDATA 'bot.avibe.desktop\runtime'
-    $interpreters = @(Get-ChildItem -LiteralPath $runtime -Recurse -File -Filter 'python.exe')
-    if ($interpreters.Count -ne 1) { throw 'installed_runtime_interpreter_ambiguous' }
-    $python = $interpreters[0].FullName
+    $manifest = Get-Content -LiteralPath (Join-Path $install 'runtime\runtime-manifest.json') -Raw | ConvertFrom-Json
+    $runtimeSlot = Join-Path (Join-Path $runtime $manifest.runtime_version) $manifest.archive_sha256.Substring(0, 16)
+    $python = Join-Path $runtimeSlot $manifest.python_entrypoint
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'manifest_runtime_interpreter_missing' }
     $descriptor = Run-Process $python @('-I', '-B', '-m', 'vibe', 'desktop', 'endpoint', '--json') 180 | ConvertFrom-Json
     $origin = [uri]$descriptor.origin
     if ($origin.Scheme -ne 'http' -or $origin.Host -ne '127.0.0.1') { throw 'unexpected_runtime_origin' }
@@ -109,6 +110,7 @@ try {
     }
 } catch {
     $failed = $true
+    $result.failure = @{ exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
     $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'ordinary_user_operation_failed' }
     Verdict $stage 'FAIL' $reason
 } finally {
