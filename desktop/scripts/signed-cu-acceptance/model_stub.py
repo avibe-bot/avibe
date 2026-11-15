@@ -89,6 +89,8 @@ def handler(python: str, work: Path):
                     raise ValueError("invalid_fixture_request")
                 request = json.loads(self.rfile.read(length))
                 delta, finish = scripted_reply(request, python=python, work=work)
+                receipt = {"received": True, "finish": finish, "shell_tool_called": bool(delta.get("tool_calls"))}
+                (work / "stub-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
                 envelope = {"id": "chatcmpl-cu-fixture", "object": "chat.completion.chunk", "created": int(time.time()), "model": MODEL}
                 frames = []
                 for payload, reason in ((delta, None), ({}, finish)):
@@ -96,7 +98,9 @@ def handler(python: str, work: Path):
                     frames.append("data: " + json.dumps(frame) + "\n\n")
                 frames.append("data: [DONE]\n\n")
                 self.respond(200, "text/event-stream", "".join(frames).encode())
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError, KeyError) as error:
+                reason = str(error) if str(error) in {"fixture_marker_required", "shipped_windows_powershell_tool_required", "invalid_fixture_request"} else "malformed_fixture_request"
+                (work / "stub-receipt.json").write_text(json.dumps({"received": True, "refused": reason}), encoding="utf-8")
                 self.respond(400, "application/json", b'{"error":"invalid_fixture_request"}')
     return Handler
 

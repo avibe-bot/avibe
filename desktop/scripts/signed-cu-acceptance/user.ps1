@@ -108,10 +108,14 @@ try {
     Verdict 'desktop_launch' 'PASS' 'installed_desktop_window_and_its_runtime_status_ready_under_standard_user'
     $cdpPhase = 'http'
     try {
-        $targets = @(Invoke-RestMethod -Uri "http://127.0.0.1:$cdpPort/json/list" -TimeoutSec 5)
+        $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$cdpPort/json/list" -TimeoutSec 5
         $cdpPhase = 'workbench_target'
         $workbench = @($targets | Where-Object { $_.type -eq 'page' -and $_.url.StartsWith($origin.AbsoluteUri.TrimEnd('/') + '/') })
-        $result.cdp_diagnostics = @{ targets = $targets.Count; workbench_targets = $workbench.Count }
+        $result.cdp_diagnostics = @{ targets = @($targets).Count; workbench_targets = $workbench.Count; target_metadata = @($targets | ForEach-Object {
+            $targetUri = $null
+            $validUri = [Uri]::TryCreate([string]$_.url, [UriKind]::Absolute, [ref]$targetUri)
+            @{ type = if ($_.type -in @('page', 'webview', 'iframe', 'service_worker')) { $_.type } else { 'other' }; loopback = $validUri -and $targetUri.IsLoopback; runtime_port = $validUri -and $targetUri.Port -eq $origin.Port }
+        }) }
         $cdpPhase = 'listener'
         $listeners = @(Get-NetTCPConnection -LocalPort $cdpPort -State Listen -ErrorAction Stop)
         if ($workbench.Count -lt 1 -or $listeners.Count -lt 1 -or @($listeners | Where-Object { $_.LocalAddress -notin @('127.0.0.1', '::1') }).Count) {
@@ -155,7 +159,14 @@ try {
     if ($stub.HasExited) { throw 'deterministic_upstream_exited' }
     $null = Run-Process $python @('-I', '-B', (Join-Path $Root 'configure_stub.py'), '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--port', [string]$stubPort, '--work', $work) 480
     Set-Content -LiteralPath (Join-Path $work 'probe-context.js') -Value '({fixture_admission: true})' -Encoding utf8
-    $null = Run-Process $python @('-I', '-B', '-m', 'vibe', 'agent', 'run', '--agent', 'vibey', '--model', 'cu-acceptance', '--reasoning-effort', 'low', '--cwd', $work, '--message', 'AVIBE_CU_CASE:probe-context', '--sync', '--wait-timeout', '120') 180
+    $turn = Run-Process $python @('-I', '-B', '-m', 'vibe', 'agent', 'run', '--agent', 'vibey', '--model', 'cu-acceptance', '--reasoning-effort', 'low', '--cwd', $work, '--message', 'AVIBE_CU_CASE:probe-context', '--sync', '--wait-timeout', '120') 180 | ConvertFrom-Json -AsHashtable
+    $result.stub_turn_diagnostics = @{ ok = $turn['ok']; kind = $turn['kind']; fields = @($turn.Keys) }
+    if ($turn.Contains('run')) {
+        $result.stub_turn_diagnostics.run_status = $turn.run['status']
+        $result.stub_turn_diagnostics.run_fields = @($turn.run.Keys)
+    }
+    $receiptPath = Join-Path $work 'stub-receipt.json'
+    if (Test-Path -LiteralPath $receiptPath) { $result.stub_receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json -AsHashtable }
     $probe = Get-Content -LiteralPath (Join-Path $work 'probe-context.json') -Raw | ConvertFrom-Json
     if ($probe.ok -ne $true -or $probe.kind -ne 'computer_js' -or $probe.result.fixture_admission -ne $true) { throw 'shipped_computer_js_admission_not_proven' }
     Verdict 'model_stub_tool_path' 'PASS' 'real_controller_vibey_turn_and_shipped_cli_js_with_deterministic_model_stub_not_llm'
@@ -167,7 +178,21 @@ try {
 } finally {
     try {
         if ($stub) { if (-not $stub.HasExited) { $stub.Kill(); $null = $stub.WaitForExit(10000) }; $stub.Dispose() }
-        # This is preparation teardown, NOT the Desktop-quit acceptance case.
+        # Preflight the real menu route; no target-app survival is claimed here.
+        if ($desktop -and -not $desktop.HasExited) {
+            try {
+                Add-Type -Path (Join-Path $Root 'Native.cs')
+                $desktop.Refresh()
+                [AcceptanceNative]::InvokeMenu($desktop.MainWindowHandle, 'Quit', $false)
+                $deadline = (Get-Date).AddSeconds(30)
+                while (-not $desktop.WaitForExit(200) -and (Get-Date) -lt $deadline) {
+                    $null = [AcceptanceNative]::ClickDialogButton($desktop.Id, 'Keep Runtime running')
+                }
+                if (-not $desktop.HasExited -or $desktop.ExitCode -ne 0) { throw 'native_quit_not_confirmed' }
+                Verdict 'native_menu_quit_preflight' 'PASS' 'real_native_quit_menu_and_keep_runtime_dialog_exited_desktop'
+            } catch { Verdict 'native_menu_quit_preflight' 'NOT RUN' 'native_menu_quit_unproven' }
+        }
+        # Forced fallback is cleanup only, never a graceful-quit PASS.
         if ($desktop -and -not $desktop.HasExited) { $desktop.Kill(); $null = $desktop.WaitForExit(10000) }
         if ($desktop) { $desktop.Dispose() }
         if ($python) {
