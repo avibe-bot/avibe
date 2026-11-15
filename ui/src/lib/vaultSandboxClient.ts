@@ -73,8 +73,9 @@ const SURFACE_REFRESH_INTERVAL_MS = 10_000;
 type OptionalSandboxOp = typeof POLICY_DOWNGRADE_OP | typeof PROTECTED_HD_OP;
 /** Protected seed-phrase wallets (contract rev0.7): offered only when the pinned build lists it. */
 export const PROTECTED_HD_OP = 'sealHdWallet' as const;
-// The sandbox's own 300 s ceremony deadline plus a short grace for its terminal reply (rev0.6 §4).
-const PROTECTED_HD_TIMEOUT_MS = 305_000;
+// The pinned sandbox's own ceremony deadline (35 minutes, so a person can write the words down
+// without racing a clock; auto-lock no longer ends the attempt) plus a short grace for its terminal reply.
+const PROTECTED_HD_TIMEOUT_MS = 2_105_000;
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | OptionalSandboxOp | 'handshake';
 type ParentOnlySandboxOp = 'set-appearance';
 type PendingRequest = {
