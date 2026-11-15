@@ -24,7 +24,7 @@ function Run-Process([string] $File, [string[]] $Arguments, [int] $Seconds = 180
             if ($Arguments -contains (Join-Path $Root 'cdp.mjs')) {
                 try {
                     $detail = $text | ConvertFrom-Json -AsHashtable
-                    if ($detail['reason'] -match '^(cdp|settings)_[a-z_]+$') { $result.cdp_detail = $detail['reason'] }
+                    if ($detail['reason'] -match '^(cdp|settings|update)_[a-z_]+$') { $result.cdp_detail = $detail['reason'] }
                 } catch { }
             }
             # Classify only known shipped diagnostics; never publish their raw
@@ -232,6 +232,16 @@ try {
             if (-not [AcceptanceNative]::IsElevated([int]$queryFixture.elevated_pid)) { throw 'elevated_target_query_access_unproven' }
             Verdict 'elevated_target_query_preflight' 'PASS' 'users_only_caller_reopened_elevated_target_process_and_token_with_query_only_object_grants_not_control_acceptance'
         } catch { Verdict 'elevated_target_query_preflight' 'NOT RUN' 'elevated_target_query_access_unproven' }
+        # Follow-on preparation only, after the CU/shared fixture prerequisites.
+        # No Update click occurs until an explicitly selected public candidate.
+        if ($result.cases.webview_cdp_preflight.verdict -eq 'PASS') {
+            try {
+                $panel = Run-Process $node @((Join-Path $Root 'cdp.mjs'), '--port', [string]$cdpPort, '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--action', 'update-inspect', '--current-version', $inputData.release_version) 90 | ConvertFrom-Json
+                if (-not ($panel.ok -and $panel.badge_clicked -and $panel.check_clicked) -or $panel.current -ne $inputData.release_version) { throw 'update_panel_preflight_unproven' }
+                $result.update_panel_preflight = @{ current = $panel.current; auto_update = $panel.auto_update; prereleases = $panel.prereleases }
+                Verdict 'unified_update_panel_preflight' 'PASS' 'real_version_badge_and_check_clicked_current_row_verified_no_update_attempt'
+            } catch { Verdict 'unified_update_panel_preflight' 'NOT RUN' 'unified_update_panel_click_unproven' }
+        } else { Verdict 'unified_update_panel_preflight' 'NOT RUN' 'shared_cdp_prerequisite_not_proven_on_this_run' }
     }
     if ($inputData.mode -eq 'enabled') {
         $stage = 'settings_enable'

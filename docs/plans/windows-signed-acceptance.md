@@ -82,8 +82,11 @@ actual Users-only caller, reopening the target process/token by PID. A narrow
 candidate grants that SID only process-query and token-query object rights on
 the freshly created elevated editor. Existing ACEs, integrity, identity and
 privileges stay unchanged; shared target/runner token objects are refused.
-Native sufficiency is not yet proven. Until it is, report
-`elevated_target_query_access_unproven`, not a protected-window PASS.
+Native run `43680355580` proved this narrow positive control on the pinned
+editor: the actual Users-only caller reopened the elevated target, and the
+parent's retained-target postcheck passed. This is query feasibility only,
+not a protected-window control PASS. Failures remain
+`elevated_target_query_access_unproven`.
 
 Run `43678884845` found that Server 2025's System32 Notepad exited/rebrokered;
 the query-ACL positive control was therefore **NOT RUN**, not disproved or
@@ -98,7 +101,14 @@ and session reuse disabled. No name/descendant fallback may replace the exact
 created PID. A prep-only ordinary-process/blank-document readback and an
 elevated query positive control are separate from actual CU typing/refusal.
 The observer reads one visible Edit/RichEdit/Scintilla document control with
-`WM_GETTEXT`; it never writes document contents.
+`WM_GETTEXT`; it never writes document contents. Run `43680355580` also proved
+the standard-user exact-created-PID/window/blank-document preflight and
+recorded executable SHA256
+`5518ad65f576b993c48da1878bda83a62f7a101d246aefab472379ca8800390c`, with a valid
+timestamped `NOTEPAD++` signature. Additional fixture preparation took about
+17 minutes (13:06–13:23 UTC+08). Nonempty CU typing and elevated control remain
+NOT RUN on rc3. That run's Settings DOM readiness timed out; the earlier CDP
+proof is not substituted for a fresh per-run prerequisite.
 
 Settings is an on-only **Turn on button**, not a switch. The native menu owns
 Off and Quit. Settings automation must click the shipped button in the actual

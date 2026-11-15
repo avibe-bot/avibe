@@ -12,7 +12,7 @@ $root = Join-Path $env:RUNNER_TEMP ('signed-cu-' + [guid]::NewGuid().ToString('N
 $work = Join-Path $root 'work'
 New-Item -ItemType Directory -Path $evidence, $root, $work -Force | Out-Null
 $cases = [ordered]@{}
-foreach ($id in @('release_integrity', 'target_fixture_integrity', 'real_win32_fixture_preflight', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'elevated_target_query_preflight', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
+foreach ($id in @('release_integrity', 'target_fixture_integrity', 'real_win32_fixture_preflight', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'unified_update_panel_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'elevated_target_query_preflight', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
     $cases[$id] = @{ verdict = 'NOT RUN'; reason = 'prerequisite_not_reached' }
 }
 $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_desktop'
@@ -162,7 +162,7 @@ try {
     }
     Set-FixtureAccess $root 'ReadAndExecute'
     Set-FixtureAccess $work 'Modify'
-    $config = @{ installer = $installer; driver_hash = $hash; mode = $Mode; expected_sid = $user.SID.Value; target_app = $targetApp; target_app_hash = $targetHash }
+    $config = @{ installer = $installer; driver_hash = $hash; mode = $Mode; release_version = ($ReleaseTag -replace '^gh-v', ''); expected_sid = $user.SID.Value; target_app = $targetApp; target_app_hash = $targetHash }
     $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'input.json')
     Assert-ReleaseIdle
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -224,7 +224,7 @@ try {
         $cases[$id] = $result.cases[$id]
     }
     $record.installed_driver_sha256 = $result.installed_driver_sha256
-    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail')) {
+    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail', 'update_panel_preflight')) {
         if ($result.Contains($field)) { $record[$field] = $result[$field] }
     }
     if ($worker.ExitCode -ne 0) { $failed = $true }
