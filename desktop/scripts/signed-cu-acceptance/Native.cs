@@ -5,6 +5,8 @@ using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 public static class AcceptanceNative {
     private delegate bool EnumProc(IntPtr window, IntPtr parameter);
@@ -25,6 +27,9 @@ public static class AcceptanceNative {
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
     [DllImport("advapi32.dll", SetLastError=true)] private static extern bool OpenProcessToken(IntPtr process, uint rights, out IntPtr token);
     [DllImport("advapi32.dll", SetLastError=true)] private static extern bool GetTokenInformation(IntPtr token, int kind, out int value, int length, out int returned);
+    [DllImport("advapi32.dll", EntryPoint="GetTokenInformation", SetLastError=true)] private static extern bool GetTokenBytes(IntPtr token, int kind, byte[] value, int length, out int returned);
+    [DllImport("advapi32.dll", SetLastError=true)] private static extern bool GetKernelObjectSecurity(IntPtr handle, uint info, byte[] descriptor, uint length, out uint needed);
+    [DllImport("advapi32.dll", SetLastError=true)] private static extern bool SetKernelObjectSecurity(IntPtr handle, uint info, byte[] descriptor);
 
     public static bool IsElevated(int pid) {
         IntPtr process = OpenProcess(0x1000, false, pid);
@@ -36,6 +41,50 @@ public static class AcceptanceNative {
             if (!GetTokenInformation(token, 20, out elevated, 4, out size) || size != 4) throw new Win32Exception();
             return elevated != 0;
         } finally { if (token != IntPtr.Zero) CloseHandle(token); CloseHandle(process); }
+    }
+    // Fixture-only object grants: preserve every existing ACE and all identity,
+    // integrity, owner/group and SACL state. No privilege or global ACL changes.
+    private static void GrantQuery(IntPtr handle, SecurityIdentifier reader, int mask) {
+        uint needed;
+        GetKernelObjectSecurity(handle, 4, null, 0, out needed); // DACL only
+        if (needed == 0 || needed > 65536) throw new InvalidOperationException("fixture_object_dacl_unreadable");
+        byte[] bytes = new byte[needed];
+        if (!GetKernelObjectSecurity(handle, 4, bytes, needed, out needed)) throw new Win32Exception();
+        var descriptor = new RawSecurityDescriptor(bytes, 0);
+        var acl = descriptor.DiscretionaryAcl;
+        if (acl == null) return; // A null DACL already permits the read.
+        int index = 0;
+        while (index < acl.Count && (acl[index].AceFlags & AceFlags.Inherited) == 0) index++;
+        acl.InsertAce(index, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, mask, reader, false, null));
+        bytes = new byte[descriptor.BinaryLength];
+        descriptor.GetBinaryForm(bytes, 0);
+        if (!SetKernelObjectSecurity(handle, 4, bytes)) throw new Win32Exception();
+    }
+    private static long TokenObjectId(IntPtr token) {
+        int needed;
+        GetTokenBytes(token, 10, null, 0, out needed); // TOKEN_STATISTICS.TokenId
+        if (needed < 8 || needed > 4096) throw new InvalidOperationException("fixture_token_identity_unreadable");
+        byte[] bytes = new byte[needed];
+        if (!GetTokenBytes(token, 10, bytes, bytes.Length, out needed)) throw new Win32Exception();
+        return BitConverter.ToInt64(bytes, 0);
+    }
+    public static void GrantFixtureTargetQuery(IntPtr process, string standardUserSid) {
+        var reader = new SecurityIdentifier(standardUserSid);
+        // Borrow the retained handle returned when this fixture created Notepad;
+        // do not reopen a potentially recycled PID or close the caller's handle.
+        if (process == IntPtr.Zero || process == new IntPtr(-1)) throw new InvalidOperationException("fixture_owned_process_handle_required");
+        IntPtr token = IntPtr.Zero, ownToken = IntPtr.Zero;
+        try {
+            if (!OpenProcessToken(process, 8 | 0x20000 | 0x40000, out token) ||
+                !OpenProcessToken(new IntPtr(-1), 8, out ownToken)) throw new Win32Exception();
+            // Refuse any shared-token object: never modify the runner's token.
+            if (TokenObjectId(token) == TokenObjectId(ownToken)) throw new InvalidOperationException("fixture_target_token_shared_with_parent");
+            GrantQuery(token, reader, 8);       // TOKEN_QUERY only
+            GrantQuery(process, reader, 0x1000); // PROCESS_QUERY_LIMITED_INFORMATION only
+        } finally {
+            if (ownToken != IntPtr.Zero) CloseHandle(ownToken);
+            if (token != IntPtr.Zero) CloseHandle(token);
+        }
     }
     private static string Label(IntPtr window) {
         var text = new StringBuilder(512);

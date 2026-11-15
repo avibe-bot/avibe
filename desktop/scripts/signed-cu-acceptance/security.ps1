@@ -110,6 +110,17 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
         if ($cleanupFailed) { throw 'second_fixture_cleanup_failed' }
         $Context.SecondUser = $null
     }
+    Initialize-ElevatedQueryTarget $Context
+    $Context.Cases.security_fixture = @{ verdict = 'PASS'; reason = 'elevated_target_verified_and_secondary_fixture_removed' }
+    return @{ ok = $true; cases = $Context.Cases; elevated_pid = $Context.ElevatedApp.Id; elevated_hwnd = $Context.ElevatedApp.MainWindowHandle.ToInt64() }
+}
+
+function Initialize-ElevatedQueryTarget([hashtable] $Context) {
+    if (-not ('AcceptanceNative' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'Native.cs') }
+    if (-not [AcceptanceNative]::IsElevated($PID)) { throw 'runner_elevation_not_proven' }
+    if ($Context.ElevatedApp) { throw 'elevated_fixture_already_created' }
+    $securityRoot = Join-Path $Context.Root 'security'
+    New-Item -ItemType Directory -Path $securityRoot -Force | Out-Null
     # A real elevated system Win32 app, no shim, model key, or inherited GH_TOKEN.
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = Join-Path $env:SystemRoot 'System32\notepad.exe'; $psi.UseShellExecute = $false
@@ -127,6 +138,6 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
     } while ((Get-Date) -lt $deadline)
     if ($Context.ElevatedApp.MainWindowHandle -eq 0 -or -not [AcceptanceNative]::IsElevated($Context.ElevatedApp.Id)) { throw 'elevated_notepad_identity_unproven' }
     if (-not [AcceptanceNative]::UnsavedTextEquals($Context.ElevatedApp.MainWindowHandle, '')) { throw 'elevated_notepad_not_blank' }
-    $Context.Cases.security_fixture = @{ verdict = 'PASS'; reason = 'elevated_target_verified_and_secondary_fixture_removed' }
-    return @{ ok = $true; cases = $Context.Cases; elevated_pid = $Context.ElevatedApp.Id; elevated_hwnd = $Context.ElevatedApp.MainWindowHandle.ToInt64() }
+    [AcceptanceNative]::GrantFixtureTargetQuery($Context.ElevatedApp.SafeHandle.DangerousGetHandle(), $Context.User.SID.Value)
+    if ($Context.ElevatedApp.HasExited) { throw 'elevated_target_exited_during_query_setup' }
 }

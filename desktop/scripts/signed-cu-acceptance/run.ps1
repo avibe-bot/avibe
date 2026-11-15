@@ -12,7 +12,7 @@ $root = Join-Path $env:RUNNER_TEMP ('signed-cu-' + [guid]::NewGuid().ToString('N
 $work = Join-Path $root 'work'
 New-Item -ItemType Directory -Path $evidence, $root, $work -Force | Out-Null
 $cases = [ordered]@{}
-foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
+foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'elevated_target_query_preflight', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
     $cases[$id] = @{ verdict = 'NOT RUN'; reason = 'prerequisite_not_reached' }
 }
 $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_desktop'
@@ -161,8 +161,25 @@ try {
     $deadline = (Get-Date).AddMinutes(32)
     $nextAdmission = (Get-Date).AddSeconds(180)
     . (Join-Path $PSScriptRoot 'security.ps1')
-    $security = @{ Root = $root; User = $user; SecondUser = $null; DriverHash = $hash; ElevatedApp = $null; Completed = $false; Stage = 'security_fixture'; Cases = @{} }
+    $security = @{ Root = $root; User = $user; SecondUser = $null; DriverHash = $hash; ElevatedApp = $null; Completed = $false; QueryPrepared = $false; Stage = 'security_fixture'; Cases = @{} }
     while (-not $worker.WaitForExit(1000)) {
+        $queryRequest = Join-Path $work 'query-fixture-request.json'
+        if ($Mode -eq 'preparation' -and -not $security.QueryPrepared -and (Test-Path -LiteralPath $queryRequest)) {
+            $request = Get-Content -LiteralPath $queryRequest -Raw | ConvertFrom-Json
+            if ($request.action -ne 'prepare-elevated-query-fixture') { throw 'unknown_query_fixture_request' }
+            try {
+                Initialize-ElevatedQueryTarget $security
+                $queryReply = @{ ok = $true; elevated_pid = $security.ElevatedApp.Id }
+            } catch {
+                $message = $_.Exception.GetBaseException().Message
+                $reason = if ($message -match '^[a-z][a-z0-9_]+$') { $message } else { 'elevated_query_fixture_failed' }
+                $queryReply = @{ ok = $false; reason = $reason }
+            }
+            $security.QueryPrepared = $true
+            $queryReplyPath = Join-Path $work 'query-fixture-response.json'
+            $queryReply | ConvertTo-Json | Set-Content -LiteralPath ($queryReplyPath + '.tmp') -Encoding utf8
+            Move-Item -LiteralPath ($queryReplyPath + '.tmp') -Destination $queryReplyPath
+        }
         $securityRequest = Join-Path $work 'security-request.json'
         if ($Mode -eq 'enabled' -and -not $security.Completed -and (Test-Path -LiteralPath $securityRequest)) {
             $request = Get-Content -LiteralPath $securityRequest -Raw | ConvertFrom-Json
@@ -186,10 +203,16 @@ try {
         $cases[$id] = $result.cases[$id]
     }
     $record.installed_driver_sha256 = $result.installed_driver_sha256
-    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt')) {
+    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail')) {
         if ($result.Contains($field)) { $record[$field] = $result[$field] }
     }
     if ($worker.ExitCode -ne 0) { $failed = $true }
+    if ($cases.elevated_target_query_preflight.verdict -eq 'PASS') {
+        if (-not $security.ElevatedApp -or $security.ElevatedApp.HasExited -or -not [AcceptanceNative]::IsElevated($security.ElevatedApp.Id) -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) {
+            Verdict 'elevated_target_query_preflight' 'FAIL' 'original_elevated_target_not_preserved'
+            $failed = $true
+        }
+    }
     if ($security.ElevatedApp -and $cases.elevated_app_refused.verdict -eq 'PASS') {
         if ($security.ElevatedApp.HasExited -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) {
             Verdict 'elevated_app_refused' 'FAIL' 'elevated_notepad_did_not_preserve_empty_document'
@@ -240,8 +263,8 @@ try {
                 if ($remaining.Count) { throw 'test_port_still_listening' }
             }
         }
-        Remove-Item -LiteralPath $root -Recurse -Force
     } catch { $cleanupFailed = $true }
+    try { Remove-Item -LiteralPath $root -Recurse -Force } catch { $cleanupFailed = $true }
     if ($cleanupFailed) { Verdict 'cleanup' 'FAIL' 'fixture_cleanup_failed'; $failed = $true }
     else { Verdict 'cleanup' 'PASS' 'owned_processes_profiles_accounts_and_work_removed' }
     if ($password) { $password.Dispose() }

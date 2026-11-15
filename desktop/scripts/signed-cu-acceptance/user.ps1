@@ -186,6 +186,23 @@ try {
     # Requiring JS success here incorrectly treats the safe guard as a failure.
     if ($probe['ok'] -ne $false -or $probe['code'] -ne 'computer_use_unavailable' -or $probe['details']['error']['params']['status'] -ne 'off') { throw 'shipped_cli_default_off_guard_not_proven' }
     Verdict 'model_stub_tool_path' 'PASS' 'real_controller_turn_shipped_cli_reached_default_off_guard_deterministic_stub_not_llm_js_not_executed'
+    if ($inputData.mode -eq 'preparation') {
+        # Fixture feasibility only, NOT elevated-app control acceptance.
+        try {
+            $request = Join-Path $work 'query-fixture-request.json'
+            @{ action = 'prepare-elevated-query-fixture' } | ConvertTo-Json | Set-Content -LiteralPath ($request + '.tmp')
+            Move-Item -LiteralPath ($request + '.tmp') -Destination $request
+            $response = Join-Path $work 'query-fixture-response.json'
+            $deadline = (Get-Date).AddSeconds(45)
+            while (-not (Test-Path -LiteralPath $response) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+            $queryFixture = Get-Content -LiteralPath $response -Raw | ConvertFrom-Json -AsHashtable
+            if (-not $queryFixture.ok) { $result.query_fixture_detail = $queryFixture.reason; throw 'elevated_target_query_access_unproven' }
+            Add-Type -Path (Join-Path $Root 'Native.cs')
+            if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $inputData.expected_sid -or [AcceptanceNative]::IsElevated($PID)) { throw 'ordinary_query_caller_identity_changed' }
+            if (-not [AcceptanceNative]::IsElevated([int]$queryFixture.elevated_pid)) { throw 'elevated_target_query_access_unproven' }
+            Verdict 'elevated_target_query_preflight' 'PASS' 'users_only_caller_reopened_elevated_target_process_and_token_with_query_only_object_grants_not_control_acceptance'
+        } catch { Verdict 'elevated_target_query_preflight' 'NOT RUN' 'elevated_target_query_access_unproven' }
+    }
     if ($inputData.mode -eq 'enabled') {
         $stage = 'settings_enable'
         . (Join-Path $Root 'enabled.ps1')
