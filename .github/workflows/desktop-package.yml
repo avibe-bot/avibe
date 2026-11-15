@@ -398,7 +398,7 @@ jobs:
       - name: Remove first-party build output before saving
         if: ${{ !inputs.release_tag && env.DESKTOP_CACHE_WARMUP == 'true' && steps.rust-cache.outputs.cache-hit != 'true' }}
         working-directory: desktop
-        run: cargo clean --locked --release -p avibe-desktop -p avibe-runtime-host
+        run: cargo clean --locked --release -p avibe-computer-use-windows -p avibe-desktop -p avibe-runtime-host
 
       - name: Save Rust build cache
         if: ${{ !inputs.release_tag && env.DESKTOP_CACHE_WARMUP == 'true' && steps.rust-cache.outputs.cache-hit != 'true' }}

@@ -119,7 +119,7 @@ def test_the_rust_cache_is_saved_without_first_party_output():
         re.search(r'^name = "([^"]+)"$', (ROOT / "desktop" / member / "Cargo.toml").read_text(encoding="utf-8"), re.M).group(1)
         for member in members
     ]
-    assert len(crates) == 2
+    assert set(crates) == {"avibe-computer-use-windows", "avibe-runtime-host", "avibe-desktop"}
     assert clean["run"] == "cargo clean --locked --release " + " ".join(f"-p {crate}" for crate in sorted(crates))
 
 

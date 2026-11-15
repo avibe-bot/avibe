@@ -23,6 +23,8 @@
 pub mod bootstrap;
 pub mod bootstrap_log;
 pub mod computer_use;
+#[cfg(windows)]
+pub use avibe_computer_use_windows as computer_use_windows;
 pub mod deep_link;
 pub mod download;
 pub mod hashing;

@@ -163,6 +163,7 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-pet-bind",
             "main-pet-settings",
             "main-computer-use",
+            "main-computer-use-windows",
             "main-desktop-update",
             "main-app-windows",
             "main-desktop-notifications",
@@ -1471,31 +1472,44 @@ fn loopback_patterns(grant: &Value) -> Vec<tauri::utils::acl::RemoteUrlPattern> 
 }
 
 #[test]
-fn the_workbench_gets_the_computer_use_guide_actions_only_on_macos_loopback_pages() {
-    let grant = read_json(crate_dir().join("capabilities/main-computer-use.json"));
-    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW]));
-    assert_eq!(grant["local"], false, "the bundled bootstrap page never gets them");
-    assert_eq!(grant["platforms"], serde_json::json!(["macOS"]));
-    assert_eq!(
-        grant["permissions"],
-        serde_json::json!(["allow-computer-use-enable", "allow-computer-use-open-permission"])
-    );
-    let patterns = loopback_patterns(&grant);
-    for allowed in ["http://127.0.0.1:5123/settings/computer-use", "http://[::1]:6174/"] {
-        let url = url::Url::parse(allowed).unwrap();
-        assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
-    }
-    for rejected in [
-        "https://example.com/settings/computer-use",
-        "http://127.0.0.1.example.com/",
-        "http://192.168.1.2:5123/settings/computer-use",
+fn the_workbench_gets_only_platform_specific_computer_use_actions_on_loopback_pages() {
+    for (file, platform, permissions) in [
+        (
+            "main-computer-use.json",
+            "macOS",
+            serde_json::json!(["allow-computer-use-enable", "allow-computer-use-open-permission"]),
+        ),
+        (
+            "main-computer-use-windows.json",
+            "windows",
+            serde_json::json!(["allow-computer-use-enable"]),
+        ),
     ] {
-        let url = url::Url::parse(rejected).unwrap();
-        assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        let grant = read_json(crate_dir().join("capabilities").join(file));
+        assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW]));
+        assert_eq!(grant["local"], false, "the bundled bootstrap page never gets them");
+        assert_eq!(grant["platforms"], serde_json::json!([platform]));
+        assert_eq!(grant["permissions"], permissions);
+        let patterns = loopback_patterns(&grant);
+        for allowed in ["http://127.0.0.1:5123/settings/computer-use", "http://[::1]:6174/"] {
+            let url = url::Url::parse(allowed).unwrap();
+            assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        }
+        for rejected in [
+            "https://example.com/settings/computer-use",
+            "http://127.0.0.1.example.com/",
+            "http://192.168.1.2:5123/settings/computer-use",
+        ] {
+            let url = url::Url::parse(rejected).unwrap();
+            assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        }
     }
     for entry in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
         let path = entry.unwrap().path();
-        if path.file_name().is_some_and(|name| name != "main-computer-use.json") {
+        if path
+            .file_name()
+            .is_some_and(|name| name != "main-computer-use.json" && name != "main-computer-use-windows.json")
+        {
             assert!(
                 !read_to_string(&path).contains("allow-computer-use-"),
                 "{} must not grant Computer Use commands",

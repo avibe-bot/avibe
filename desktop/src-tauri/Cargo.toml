@@ -63,6 +63,7 @@ keyring = { version = "3.6", features = ["windows-native"] }
 # Match Tauri's Known Folder lookup without initializing the GUI.
 dirs = "7"
 # The pet's drag: the primary button's state and a one-step window frame.
+uuid = { version = "1", features = ["v4"] }
 windows-sys = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",

@@ -1,9 +1,9 @@
-//! Windows x64 child ownership, deliberately not a Computer Use enablement path.
+//! Windows x64 driver/helper ownership for the shell lifecycle.
 //!
 //! A child is born suspended *inside* an unnamed kill-on-close job. Assigning a
 //! job after CreateProcess returns would leave an orphan if the shell died in
 //! between. PROC_THREAD_ATTRIBUTE_JOB_LIST closes that gap (Windows 10+).
-//! No shell, elevation, breakaway, pipe admission, or resource discovery here.
+//! No shell elevation, silent breakaway, pipe admission, or resource discovery here.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -20,7 +20,7 @@ use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_EL
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
@@ -69,7 +69,9 @@ impl OwnedDriver {
         // inheritable. Each successful API allocation immediately has an owner.
         let job = unsafe { owned(CreateJobObjectW(null(), null()))? };
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // Helpers inherit the job normally. Only the source driver's explicit
+        // CREATE_BREAKAWAY_FROM_JOB target launch escapes; never SILENT_BREAKAWAY.
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         check(unsafe {
             SetInformationJobObject(
                 job.as_raw_handle(),
