@@ -5,7 +5,6 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import re
-import subprocess
 
 import pytest
 
@@ -19,79 +18,86 @@ def _manifest_module():
     return module
 
 
-
-def _pbx_phase(project: str, phase_id: str) -> str:
-    if phase_id.startswith("A"):
-        section_name = "PBXResourcesBuildPhase"
-    else:
-        section_name = "PBXSourcesBuildPhase"
+def _pbx_objects(project: str, section_name: str) -> dict[str, str]:
     section = project.split(f"/* Begin {section_name} section */", 1)[1].split(
         f"/* End {section_name} section */", 1
     )[0]
-    match = re.search(
-        rf"(?ms)^\s*{phase_id} /\*.*?\*/ = \{{.*?^\s*\}};",
+    return dict(re.findall(
+        r"(?ms)^\s*([0-9A-Fa-f]{24}) /\*[^\n]*?\*/ = (\{.*?\});",
         section,
+    ))
+
+
+def _validate_fixture_membership(project: str) -> None:
+    """Validate this checkout, without Git history or a moving remote baseline."""
+    definitions = set(re.findall(
+        r"(?m)^\s*([0-9A-Fa-f]{24})(?: /\*[^\n]*?\*/)? = \{",
+        project,
+    ))
+    builds = _pbx_objects(project, "PBXBuildFile")
+    files = _pbx_objects(project, "PBXFileReference")
+    sources = _pbx_objects(project, "PBXSourcesBuildPhase")
+    resources = _pbx_objects(project, "PBXResourcesBuildPhase")
+    groups = _pbx_objects(project, "PBXGroup")
+    for body in [*builds.values(), *sources.values(), *resources.values(), *groups.values()]:
+        references = set(re.findall(r"\b[0-9A-Fa-f]{24}\b", body))
+        assert references <= definitions, f"Dangling PBX references: {references - definitions}"
+
+    def phase_files(body: str) -> set[str]:
+        result = set()
+        for build_id in re.findall(r"\b[0-9A-Fa-f]{24}\b", body):
+            assert build_id in builds, f"Missing PBXBuildFile {build_id}"
+            ref = re.search(r"fileRef = ([0-9A-Fa-f]{24})", builds[build_id])
+            assert ref, f"Missing fileRef in {build_id}"
+            assert ref.group(1) in files, f"Missing PBXFileReference {ref.group(1)}"
+            result.add(files[ref.group(1)])
+        return result
+
+    fixture_id = "900000000000000000000005"
+    fixture_files = phase_files(sources[fixture_id])
+    for name in ("NativeBridge.swift", "NativeBadge.swift", "FixtureNativeBridgeSupport.swift"):
+        assert any(f"path = {name};" in entry for entry in fixture_files), name
+    for phase_id, body in sources.items():
+        entries = phase_files(body)
+        if phase_id != fixture_id:
+            assert not any("FixtureNativeBridgeSupport.swift" in entry for entry in entries)
+    for body in resources.values():
+        phase_files(body)
+    fixture_resources = phase_files(resources["A00000000000000000000004"])
+    assert any("path = MobileApp;" in entry for entry in fixture_resources)
+
+
+def test_fixture_bridge_membership_is_self_contained():
+    project = Path(__file__).resolve().parents[1] / "ios/Avibe.xcodeproj/project.pbxproj"
+    _validate_fixture_membership(project.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("missing_id", [
+    "2000000000000000000000B1",  # shared production push processor
+    "91000000000000000000000A",  # real MobileApp fixture resource
+])
+def test_fixture_membership_rejects_dangling_references(missing_id: str):
+    project = Path(__file__).resolve().parents[1] / "ios/Avibe.xcodeproj/project.pbxproj"
+    broken = re.sub(
+        rf"(?m)^\s*{missing_id} /\*[^\n]*?\*/ = \{{[^\n]*\}};\n",
+        "",
+        project.read_text(encoding="utf-8"),
     )
-    assert match, f"missing PBX phase {phase_id}"
-    return match.group(0)
+    with pytest.raises(AssertionError, match="Dangling PBX references"):
+        _validate_fixture_membership(broken)
 
 
-def _pbx_section_object(project: str, section_name: str, object_id: str) -> str:
-    section = project.split(f"/* Begin {section_name} section */", 1)[1].split(
-        f"/* End {section_name} section */", 1
-    )[0]
-    match = re.search(
-        rf"(?m)^\s*{object_id} /\*.*?\*/ = \{{.*?\}};",
-        section,
+def test_fixture_membership_rejects_support_in_production_sources():
+    project = Path(__file__).resolve().parents[1] / "ios/Avibe.xcodeproj/project.pbxproj"
+    text = project.read_text(encoding="utf-8")
+    source_phase = _pbx_objects(text, "PBXSourcesBuildPhase")["900000000000000000000001"]
+    broken_phase = source_phase.replace(
+        "files = (",
+        "files = (\n91000000000000000000000E /* fixture support */,",
+        1,
     )
-    assert match, f"missing PBX object {object_id} in {section_name}"
-    return match.group(0)
-
-
-def _app_target_membership_closure(project: str) -> set[str]:
-    closure: set[str] = set()
-    for phase_id in ("900000000000000000000001", "A00000000000000000000001"):
-        phase = _pbx_phase(project, phase_id)
-        closure.add(phase)
-        build_ids = re.findall(
-            r"^\s*([0-9A-Fa-f]{24}) /\*.*? in (?:Sources|Resources) \*/",
-            phase,
-            re.MULTILINE,
-        )
-        for build_id in build_ids:
-            build = _pbx_section_object(project, "PBXBuildFile", build_id)
-            closure.add(build)
-            file_ref = re.search(r"fileRef = ([0-9A-Fa-f]{24})", build)
-            assert file_ref, f"build file {build_id} has no fileRef"
-            closure.add(_pbx_section_object(project, "PBXFileReference", file_ref.group(1)))
-    return closure
-
-
-def test_fixture_bridge_additions_leave_avibe_target_membership_byte_identical():
-    """The production App target must remain exactly the master membership closure."""
-    project_path = Path(__file__).resolve().parents[1] / "ios/Avibe.xcodeproj/project.pbxproj"
-    current = project_path.read_text(encoding="utf-8")
-    master = subprocess.run(
-        ["git", "show", "origin/master:ios/Avibe.xcodeproj/project.pbxproj"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    assert _app_target_membership_closure(current) == _app_target_membership_closure(master)
-
-    fixture_phase = _pbx_phase(current, "900000000000000000000005")
-    for build_id in (
-        "91000000000000000000000D",  # production NativeBridge.swift
-        "91000000000000000000000F",  # production NativeBadge.swift
-        "91000000000000000000000E",  # fixture dependency shapes
-    ):
-        assert build_id in fixture_phase
-    for build_id in (
-        "91000000000000000000000D",
-        "91000000000000000000000F",
-        "91000000000000000000000E",
-    ):
-        assert build_id not in _pbx_phase(current, "900000000000000000000001")
+    with pytest.raises(AssertionError):
+        _validate_fixture_membership(text.replace(source_phase, broken_phase, 1))
 
 
 def test_ios_project_object_ids_are_unique():
