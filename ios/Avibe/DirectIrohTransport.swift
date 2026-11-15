@@ -5,8 +5,8 @@ import WebKit
 
 // The direct transport over iroh (rows A1 and A2 of
 // docs/plans/remote-direct-phase1.md; docs/plans/remote-direct-ios.md
-// section 12). Nothing in the App creates it: `AvibeApp` registers no
-// transport, and no build links an iroh binary yet.
+// section 12). `AvibeApp` registers the binding-backed transport; the
+// transport remains inactive until the selected runtime is ready.
 // Design: docs/plans/remote-direct-ios-transport.md.
 
 /// What the transport is asked to reach: one opened runtime's instance.
@@ -1286,7 +1286,8 @@ final class DirectIrohTransport {
 
 // What joins this transport to the local proxy's seam
 // (`DirectTransport.swift`). The transport keeps its own value types; this
-// is the whole mapping. Nothing in the App creates the transport yet.
+// is the whole mapping. `AvibeApp` supplies the real binding and rendezvous
+// source; tests may still inject a stand-in transport.
 
 extension DirectIrohSelection {
     /// The selection for a target the path controller issued. The
