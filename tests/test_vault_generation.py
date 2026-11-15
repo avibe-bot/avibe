@@ -227,6 +227,22 @@ def test_list_find_and_rest_project_the_same_generated_provenance(engine, monkey
     assert response.get_json()["secrets"][0]["generated"] == provenance
 
 
+@pytest.mark.parametrize("length,retained", [
+    (8, True), (11, True), (100, True), (128, True),
+    (7, False), (129, False), (True, False),
+])
+def test_password_provenance_projection_keeps_compatible_lengths_not_admission(engine, length, retained):
+    # Projection reads persisted metadata, not a new recipe: historical 128 must
+    # remain visible without widening service admission (101 is rejected there).
+    generated = generate(engine)["secret"]["generated"][0]
+    with engine.begin() as conn:
+        conn.execute(vault_secrets.update().values(public_meta=json.dumps({
+            "generated": [{**generated, "length": length}],
+        })))
+        projected = vs.get_secret_meta(conn, "LOGIN").get("generated", [])
+    assert projected == ([{**generated, "length": length}] if retained else [])
+
+
 def test_strict_provenance_projection_never_reflects_arbitrary_nested_metadata(engine):
     generated = generate(engine)["secret"]["generated"][0]
     known_plaintext = "never-reflect-this-stored-test-value"

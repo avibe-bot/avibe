@@ -2,7 +2,7 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or signing digests and Solana messages without exposing secret values to the agent.
-version: 0.11.1
+version: 0.11.2
 ---
 
 # Use Avibe Vault
@@ -29,7 +29,7 @@ Rules:
 - Authorization is per secret: approving a protected secret unlocks **all its fields** for the grant's lifetime. The user creates, replaces, and deletes values in the browser. The CLI's narrow exception is `generate`: it can add a new random static Standard secret or an explicitly named new field, never replace an existing value or generate Protected material.
 - `--env NAME.field` delivers one value to `NAME_FIELD` (only the field is uppercased); `--env LOCAL=NAME.field` chooses the variable. `--tag` and `--skill` deliver every field of each selected secret, using `NAME` for the default and `NAME_FIELD` for extras. Conflicting variable mappings fail before delivery.
 - `list` and `find` print the same value-free row: a static secret lists its `fields`, and a multi-field secret also names its `default_field`, the field `NAME` selects. A generated field has typed `generated` provenance (field, creator, originating Session/title when available, time, format and length/bytes), not a value. Agent generation says `by: agent`; an owner-terminal command without a Session says `by: cli`. Replacing or removing the field clears its provenance; renaming the default label moves it. If a ref fails with `field_not_found`, use the listed field names rather than guessing.
-- `vibe vault generate` uses only the running service and avault >=0.1.13. avault generates and seals the value; Python, the invoking Agent, and command output never receive plaintext. There is no offline generation fallback. On `avault_upgrade_required` or `service_unavailable`, stop and request the approved dependency/service update; never install an arbitrary binary, start/restart the service, downgrade protection, or generate a value in a script as a workaround. On `execution_unknown`, inspect `vibe vault list` before any retry.
+- `vibe vault generate` uses only the running service and avault >=0.1.14. avault generates and seals the value; Python, the invoking Agent, and command output never receive plaintext. There is no offline generation fallback. On `avault_upgrade_required` or `service_unavailable`, stop and request the approved dependency/service update; never install an arbitrary binary, start/restart the service, downgrade protection, or generate a value in a script as a workaround. On `execution_unknown`, inspect `vibe vault list` before any retry.
 - Generate only a **new** static Standard secret or an explicit new `--field` of an existing static Standard secret. Existing names without a new field, existing fields (including the default alias), Protected targets and keypairs are refused with a `vibe vault request` hint. For an existing value or Protected secret, ask the user through `request`; never rotate or overwrite it by generating under another name to bypass the refusal.
 - `export` remains deprecated and has no delivery. Prefer `run`; advanced `inject` writes a restricted-permission file, so use it only for tools that require file-based configuration.
 - With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
@@ -52,7 +52,9 @@ Generate a password into a new Standard login entry, then use it by name without
 `vibe vault generate LOGIN --field password --length 32 --no-lookalikes --description "Automation login" --tag automation`
 `vibe vault run --env PASSWORD=LOGIN.password -- python login.py`
 
-The password default is 24 characters (12..100: an Agent-generated password is at least 12 characters; for 8 to 11, ask the user with a `vibe vault request` generate preset below); letters are always enabled, digits and symbols are enabled unless `--no-digits` / `--no-symbols` is supplied, and lookalikes are allowed unless `--no-lookalikes` is supplied. No plaintext is printed. `--length` and the three password flags are invalid with hex/base64, even if another caller explicitly sends false for a password-only option.
+The password default is 24 characters (8..100 for both Agent and user generation); letters are always enabled, digits and symbols are enabled unless `--no-digits` / `--no-symbols` is supplied, and lookalikes are allowed unless `--no-lookalikes` is supplied. No plaintext is printed. `--length` and the three password flags are invalid with hex/base64, even if another caller explicitly sends false for a password-only option.
+
+New Avibe requires avault >=0.1.14 for **every** generation recipe, including passwords of 12 or more characters and hex/Base64. An older Avibe keeps its shipped 12-character Agent floor and 0.1.13 capability behavior: updating the binary alone does not relax that Avibe's admission. Wait for the approved Avibe/dependency update, not a script, truncation, or offline fallback.
 
 Add a new random field to that Standard entry, or create a separate Base64 secret:
 `vibe vault generate LOGIN --field api_token --type hex --bytes 32`

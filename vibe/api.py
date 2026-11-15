@@ -10710,11 +10710,9 @@ def avault_agent_pubkey() -> dict:
     return {"public_key": public_key, "fingerprint": fingerprint}
 
 
-AVAULT_GENERATE_SECRET_MIN_VERSION = "0.1.13"
-# An Agent-generated password is at least 12 characters: custody's own floor (avault generate-secret
-# accepts 12..=128), kept on purpose. The user picks 8..100 (vault_service.GENERATE_PASSWORD_LENGTH)
-# in the browser or through a request preset; Avibe refuses an Agent recipe above 100.
-AVAULT_GENERATE_PASSWORD_MIN_LENGTH = 12
+# All generation recipes require the unified password contract, not only 8..11.
+# Avibe uses the shared 8..100 admission range; avault 0.1.14 accepts 8..=128.
+AVAULT_GENERATE_SECRET_MIN_VERSION = "0.1.14"
 
 
 def avault_generate_secret(name: str, recipe: dict):
