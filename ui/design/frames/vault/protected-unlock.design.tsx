@@ -20,6 +20,7 @@ const vault = (status: Vault['status'], error: string | null = null): Vault => (
   setupPasskey: idle,
   unlockPasskey: idle,
   sealValue: unavailable,
+  sealHdWallet: unavailable,
   signProtectedRequest: unavailable,
   approveProtectedRelease: unavailable,
   revealProtectedValue: unavailable,

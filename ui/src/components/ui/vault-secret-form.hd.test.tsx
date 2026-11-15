@@ -49,7 +49,11 @@ const sealBlindBox = vi.hoisted(() => vi.fn(async (plaintext: Uint8Array, _key: 
   return blindBox;
 }));
 vi.mock('@/context/ApiContext', async (original) => ({ ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api }));
-vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => ({ status: 'locked', refresh: vi.fn(), afterCreated: vi.fn(), sealValue: vi.fn() }) }));
+vi.mock('@/lib/useProtectedVault', () => ({
+  useProtectedVault: () => ({ status: 'locked', refresh: vi.fn(), afterCreated: vi.fn(), sealValue: vi.fn() }),
+  useProtectedHdSupported: () => false,
+  useVaultSandboxWarm: () => true,
+}));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
 vi.mock('./avault-authorization-notice', () => ({ AvaultAuthorizationNotice: () => <div role="note">avault-authorization</div> }));
 vi.mock('@/lib/vaultCrypto', async (original) => ({ ...await original<typeof import('@/lib/vaultCrypto')>(), sealBlindBox }));
