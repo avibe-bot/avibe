@@ -30,6 +30,7 @@ TARGET_VERSION = os.environ.get("TARGET_VERSION", "3.2.7-rc.3")
 SOURCE_SHORT = re.sub(r"-?(rc|beta|alpha)\.(\d+)", r"\1\2", SOURCE_VERSION)
 TARGET_SHORT = re.sub(r"-?(rc|beta|alpha)\.(\d+)", r"\1\2", TARGET_VERSION)
 ACTIONS = []
+OWNED_CHILDREN = {}
 
 
 def record(action: str, **details):
@@ -139,6 +140,18 @@ def verify_public_assets(target: str) -> dict:
     return {"installer": source, "manifest": manifest, "evidence": evidence}
 
 
+def powershell(script: str, *, env=None, timeout=120):
+    # Use the runner's PowerShell 7 consistently with its inherited module path.
+    path = ROOT / "observer-command.ps1"
+    path.write_text("$ErrorActionPreference = 'Stop'\n[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" + script, encoding="utf-8")
+    result = subprocess.run(["pwsh.exe", "-NoProfile", "-NonInteractive", "-File", str(path)],
+                            text=True, encoding="utf-8-sig", capture_output=True, env=env, timeout=timeout)
+    if result.returncode:
+        save("powershell-failure.json", {"code": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+        result.check_returncode()
+    return result.stdout.strip()
+
+
 def windows_signature(path: Path) -> dict:
     script = (
         "$s=Get-AuthenticodeSignature -LiteralPath $env:SMOKE_INSTALLER; "
@@ -146,9 +159,9 @@ def windows_signature(path: Path) -> dict:
     )
     env = os.environ.copy()
     env["SMOKE_INSTALLER"] = str(path)
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                            check=True, text=True, capture_output=True, env=env, timeout=120)
-    value = json.loads(result.stdout)
+    output = powershell(script, env=env)
+    save("source-signature-output.json", {"stdout": output})
+    value = json.loads(output)
     if value.get("Status") not in (0, "Valid"):
         raise RuntimeError(f"source installer Authenticode invalid: {value}")
     return value
@@ -170,17 +183,14 @@ def install_windows(installer: Path) -> tuple[Path, int]:
         raise RuntimeError(f"expected one installed Avibe shortcut, got {len(shortcuts)}")
     env = os.environ.copy()
     env["SMOKE_SHORTCUT"] = str(shortcuts[0])
-    target = subprocess.check_output(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-         "(New-Object -ComObject WScript.Shell).CreateShortcut($env:SMOKE_SHORTCUT).TargetPath"],
-        text=True, env=env, timeout=60).strip()
+    target = powershell("(New-Object -ComObject WScript.Shell).CreateShortcut($env:SMOKE_SHORTCUT).TargetPath", env=env, timeout=60)
     exe = Path(target)
     if not exe.is_relative_to(Path(os.environ["LOCALAPPDATA"])):
         raise RuntimeError("source app is not installed in the default per-user directory")
     save("source-signature.json", signature)
     if normalize_version(windows_version(exe)) != normalize_version(SOURCE_VERSION):
         raise RuntimeError("installed Windows source version mismatch")
-    run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "Start-Process -FilePath $env:SMOKE_SHORTCUT"], timeout=60, env=env)
+    powershell("Start-Process -FilePath $env:SMOKE_SHORTCUT", env=env, timeout=60)
     original = wait_for(lambda: find_process(exe, exclude=set()), 180, "rc2 Windows process did not start")
     save("source-install.json", {"shortcut": str(shortcuts[0]), "executable": str(exe), "pid": original.pid, "version": windows_version(exe)})
     return exe, original.pid
@@ -188,10 +198,7 @@ def install_windows(installer: Path) -> tuple[Path, int]:
 
 def windows_version(exe: Path) -> str:
     env = os.environ.copy(); env["SMOKE_EXE"] = str(exe)
-    return subprocess.check_output(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-         "[Diagnostics.FileVersionInfo]::GetVersionInfo($env:SMOKE_EXE).ProductVersion"],
-        text=True, env=env, timeout=60).strip()
+    return powershell("[Diagnostics.FileVersionInfo]::GetVersionInfo($env:SMOKE_EXE).ProductVersion", env=env, timeout=60)
 
 
 def find_process(exe: Path, exclude: set[int]):
@@ -313,6 +320,7 @@ def install_macos(installer: Path) -> tuple[Path, int]:
     if normalize_version(mac_version(app)) != normalize_version(SOURCE_VERSION):
         raise RuntimeError("installed macOS source version mismatch")
     process = subprocess.Popen([str(binary)], cwd=str(app.parent), env=os.environ.copy())
+    OWNED_CHILDREN[process.pid] = process
     original = wait_for(lambda: psutil.Process(process.pid) if psutil.pid_exists(process.pid) else None, 180, "rc2 macOS process did not start")
     save("source-signature.json", {"dmg": signature, "app": "spctl --assess passed"})
     save("source-install.json", {"app": str(app), "executable": str(binary), "pid": original.pid, "version": mac_version(app)})
@@ -331,6 +339,7 @@ def apple_script(script: str, *args: str) -> str:
 
 # Only public accessibility actions; no JS injection, deep links or updater IPC.
 MAC_AX = r'''on run argv
+local dumpText, candidateControls
 set targetPid to (item 1 of argv) as integer
 set operation to item 2 of argv
 set needle to item 3 of argv
@@ -338,8 +347,8 @@ set needle to item 3 of argv
   set p to first application process whose unix id is targetPid
   tell p
    set frontmost to true
-   set rows to ""
-   set matches to {}
+   set dumpText to ""
+   set candidateControls to {}
    repeat with e in entire contents
     set elementRole to ""
     set elementName to ""
@@ -357,21 +366,21 @@ set needle to item 3 of argv
     try
      set elementDescription to description of e as text
     end try
-    set rows to rows & elementRole & tab & elementName & tab & elementValue & tab & elementDescription & linefeed
+    set dumpText to dumpText & elementRole & tab & elementName & tab & elementValue & tab & elementDescription & linefeed
     set labelMatch to elementName is needle or elementValue is needle or elementDescription is needle
     if operation is "version" then
      set labelMatch to elementName contains needle or elementValue contains needle or elementDescription contains needle
     end if
     if labelMatch then
      try
-      if (enabled of e) and ((name of every action of e) contains "AXPress") then set end of matches to e
+      if (enabled of e) and ((name of every action of e) contains "AXPress") then set end of candidateControls to e
      end try
     end if
    end repeat
-   if operation is "dump" then return rows
-   if (count matches) is 0 then error "no matching enabled AXPress control: " & needle
-   if (count matches) is not 1 and needle is not "Check for updates" then error "ambiguous AXPress control: " & needle
-   set chosen to item 1 of matches
+   if operation is "dump" then return dumpText
+   if (count candidateControls) is 0 then error "no matching enabled AXPress control: " & needle
+   if (count candidateControls) is not 1 and needle is not "Check for updates" then error "ambiguous AXPress control: " & needle
+   set chosen to item 1 of candidateControls
    if operation is "available" then return "ready"
    if operation is "state" then return value of chosen as text
    perform action "AXPress" of chosen
@@ -438,12 +447,22 @@ def mac_ui(app: Path, original_pid: int) -> None:
     record("click-update", version=TARGET_SHORT, platform="macos", receipt=receipt)
 
 
+def source_is_running(pid):
+    child = OWNED_CHILDREN.get(pid)
+    if child is not None:
+        return child.poll() is None  # poll reaps our own exited child on POSIX.
+    try:
+        return psutil.Process(pid).status() not in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD)
+    except psutil.NoSuchProcess:
+        return False
+
+
 def wait_for_target(exe_or_app, original_pid: int):
     def replacement():
         version = mac_version(exe_or_app) if sys.platform == "darwin" else windows_version(exe_or_app)
         if normalize_version(version) != normalize_version(TARGET_VERSION):
             return None
-        if psutil.pid_exists(original_pid):
+        if source_is_running(original_pid):
             return None
         for process in psutil.process_iter(["pid", "exe"]):
             try:

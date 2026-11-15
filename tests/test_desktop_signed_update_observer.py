@@ -67,6 +67,31 @@ def test_check_prefers_header_but_update_fails_ambiguous(observer):
     assert observer.windows_button(Window(Control('Update', enabled=False)), 'Update') is None
 
 
+def test_owned_child_is_reaped_before_relaunch(observer):
+    from unittest.mock import Mock
+    child = Mock()
+    observer.OWNED_CHILDREN[123] = child
+    child.poll.return_value = None
+    assert observer.source_is_running(123)
+    child.poll.return_value = 0
+    assert not observer.source_is_running(123)
+    assert child.poll.call_count == 2
+
+
+def test_powershell_preserves_env_and_fails_closed(observer):
+    import subprocess
+    from unittest.mock import Mock
+    result = Mock(returncode=0, stdout='{"Status": 0}\n', stderr='')
+    with patch.object(observer.subprocess, 'run', return_value=result) as call:
+        assert observer.powershell('Get-AuthenticodeSignature $env:SMOKE_INSTALLER', env={'SMOKE_INSTALLER': 'fixture'}) == '{"Status": 0}'
+        assert call.call_args.args[0][:4] == ['pwsh.exe', '-NoProfile', '-NonInteractive', '-File']
+        assert call.call_args.kwargs['env'] == {'SMOKE_INSTALLER': 'fixture'}
+        assert "$ErrorActionPreference = 'Stop'" in (observer.ROOT / 'observer-command.ps1').read_text()
+    failed = subprocess.CompletedProcess(['pwsh.exe'], 1, '', 'test error')
+    with patch.object(observer.subprocess, 'run', return_value=failed), pytest.raises(subprocess.CalledProcessError):
+        observer.powershell('throw')
+
+
 def test_mac_version_requires_exact_field(observer):
     assert observer.mac_has_version('AXStaticText\t\t3.2.7rc3\t', observer.TARGET_SHORT)
     assert not observer.mac_has_version('AXStaticText\t\t3.2.7rc30\t', observer.TARGET_SHORT)
