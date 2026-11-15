@@ -240,24 +240,39 @@ def latest_installers(releases: Sequence[Release]) -> dict[str, tuple[str, Asset
     return {}
 
 
+# Every stable release from 3.2.6 on ships this signed updater set for each
+# desktop target: manifest, signature and payload. Earlier stables predate the
+# full set, are already listed, and are not gated.
+_GATED_STABLE_FLOOR = (3, 2, 6)
+_DESKTOP_UPDATER_TARGETS = (
+    ("aarch64-apple-darwin", ".app.tar.gz"),
+    ("x86_64-apple-darwin", ".app.tar.gz"),
+    ("x86_64-pc-windows-msvc", ".exe"),
+)
+
+
 def index_visible(release: Release) -> bool:
-    # Desktop 3.2.5 selects the latest release before checking updater assets.
-    # Hide only this transition release until every desktop target is ready;
-    # remove this compatibility gate after the 3.2.6 rollout. Object mirroring
-    # still includes the release, so core downloads need not wait for desktop.
-    if release.repository != "avibe-bot/avibe" or release.tag != "v3.2.6":
+    """Whether the index may advertise a release yet.
+
+    Desktop 3.2.5 selects the highest stable release before checking its updater
+    assets, so a stable listed before its desktop set is attached surfaces as an
+    update error there. A stable Avibe release is therefore listed only once every
+    target's signed updater set exists. Object mirroring still includes it, so
+    core downloads need not wait for desktop. Pre-releases are never gated.
+    """
+    if release.repository != LATEST_REPOSITORY or release.prerelease:
         return True
+    match = _STABLE_TAG_RE.fullmatch(release.tag)
+    if match is None or tuple(int(part) for part in match.groups()) < _GATED_STABLE_FLOOR:
+        return True
+    version = release.tag.removeprefix("v")
     required = {
         name
-        for target, suffix in (
-            ("aarch64-apple-darwin", ".app.tar.gz"),
-            ("x86_64-apple-darwin", ".app.tar.gz"),
-            ("x86_64-pc-windows-msvc", ".exe"),
-        )
+        for target, suffix in _DESKTOP_UPDATER_TARGETS
         for name in (
             f"desktop-update-{target}.json",
             f"desktop-update-{target}.json.sig",
-            f"Avibe_3.2.6_{target}{suffix}",
+            f"Avibe_{version}_{target}{suffix}",
         )
     }
     return required <= {asset.name for asset in release.assets}
