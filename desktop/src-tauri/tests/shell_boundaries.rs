@@ -413,6 +413,8 @@ fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     assert!(source.contains("window.eval(open_settings_script())"));
     assert!(source.contains("eval_with_callback"));
     assert!(source.contains("avibe:desktop-open-updates"));
+    assert!(source.contains("open_updates_fallback"));
+    assert!(source.contains("present_guarded(app, \"updates\")"));
     assert!(source.contains("ensure_pending_update_retry"));
     assert!(source.contains("return window.__AVIBE_DESKTOP_UPDATES_HANDLED__ ? 'handled' : 'unhandled';"));
     assert!(source.contains("PendingDesktopUpdateOpen>().requested()"));

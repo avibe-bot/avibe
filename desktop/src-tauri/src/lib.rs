@@ -815,7 +815,14 @@ fn ensure_pending_update_retry(app: &AppHandle) {
 }
 
 fn open_updates_fallback(app: &AppHandle) {
-    request_desktop_updates(app);
+    let Some(pending) = app.try_state::<PendingDesktopUpdateOpen>() else {
+        return;
+    };
+    if instance_client::present_guarded(app, "updates") {
+        pending.complete();
+        return;
+    }
+    pending.request();
     ensure_pending_update_retry(app);
 }
 
