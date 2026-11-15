@@ -812,7 +812,17 @@
         "enableDetail": "Turns on Computer Use for this PC. It stays off until you turn it on.",
         "actionFailed": "The desktop app did not respond. Try again, or quit and reopen Avibe.",
         "unsupportedDetail": "Computer Use is set up from the Avibe desktop app on this Windows PC. Open the desktop app to continue.",
-        "remoteNotice": "Complete this step in the Avibe desktop app on the Windows PC. This page shows its progress."
+        "remoteNotice": "Complete this step in the Avibe desktop app on the Windows PC. This page shows its progress.",
+        "switch": {
+          "description": "Turning this off stops Computer Use. Your apps stay open.",
+          "stateOn": "On. See the status above for whether it is ready.",
+          "stateOff": "Off.",
+          "stateUnknown": "Avibe cannot read whether Computer Use is on. See the status above.",
+          "turningOn": "Turning on…",
+          "turningOff": "Turning off…",
+          "failed": "Could not change Computer Use. Check the status above and try again.",
+          "trayOnly": "Turn it off from the Avibe tray menu."
+        }
       }
     },
     "diagnosticsTab": "Diagnostics",

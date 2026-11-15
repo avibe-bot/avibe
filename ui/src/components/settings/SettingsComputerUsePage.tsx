@@ -22,6 +22,7 @@ import {
 import { computerUseStatusCopy, type ComputerUseCopyKey } from '../workbench/computerUseStatusCopy';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsPanel } from './SettingsPrimitives';
+import { WindowsComputerUseSwitch } from './WindowsComputerUseSwitch';
 
 const STEP_COPY: Record<ComputerUseGuideStep, { title: TranslationKey; detail: TranslationKey }> = {
   enable: {
@@ -43,12 +44,6 @@ const STEP_PANE: Partial<Record<ComputerUseGuideStep, ComputerUsePermissionPane>
   accessibility: 'accessibility',
   screenRecording: 'screen_recording',
 };
-
-/**
- * Windows grants no per-app privacy permissions, so its guide is the switch
- * alone. The macOS Accessibility and Screen Recording steps never appear there.
- */
-const WINDOWS_GUIDE_STEPS: readonly ComputerUseGuideStep[] = ['enable'];
 
 const WINDOWS_NOTES: { testId: string; icon: LucideIcon; text: TranslationKey }[] = [
   { testId: 'computer-use-windows-apps', icon: AppWindow, text: 'settings.computerUse.windows.apps' },
@@ -128,6 +123,10 @@ export const SettingsComputerUsePage: FC = () => {
   const desktopShell = isDesktopShell();
   const actions = useMemo(() => computerUseShellActions(), []);
   const [read, setRead] = useState<ComputerUseStatusRead | null>(null);
+  // Which read produced `read`, numbered by when each read started, so a
+  // change confirms only on a read that began after its native call settled.
+  const [readSeq, setReadSeq] = useState(0);
+  const startedReads = useRef(0);
   const [checking, setChecking] = useState(false);
   const [runningStep, setRunningStep] = useState<ComputerUseGuideStep | null>(null);
   const [failedStep, setFailedStep] = useState<ComputerUseGuideStep | null>(null);
@@ -141,9 +140,13 @@ export const SettingsComputerUsePage: FC = () => {
   // A transient failure (`null`) keeps the last observed state.
   const readStatus = useCallback((): Promise<void> => {
     if (!inFlight.current) {
+      const seq = ++startedReads.current;
       inFlight.current = readComputerUseStatus()
         .then((next) => {
-          if (mounted.current && next) setRead(next);
+          if (mounted.current && next) {
+            setRead(next);
+            setReadSeq(seq);
+          }
         })
         .finally(() => {
           inFlight.current = null;
@@ -256,7 +259,6 @@ export const SettingsComputerUsePage: FC = () => {
   const status = read?.kind === 'status' ? read.status : null;
   const copy = status ? computerUseStatusCopy(status, (key: ComputerUseCopyKey) => t(key), host) : null;
   const progress = status ? computerUseGuideProgress(status) : null;
-  const steps = windows ? WINDOWS_GUIDE_STEPS : COMPUTER_USE_GUIDE_STEPS;
 
   return (
     <SettingsPageShell
@@ -331,9 +333,19 @@ export const SettingsComputerUsePage: FC = () => {
         </div>
       </div>
 
+      {windows ? (
+        <WindowsComputerUseSwitch
+          enabled={read?.kind === 'status' ? read.enabled : null}
+          readSeq={readSeq}
+          nextReadSeq={() => startedReads.current + 1}
+          enable={actions?.enable ?? null}
+          disable={actions?.disable ?? null}
+          refresh={() => void readStatus().then(() => readStatus())}
+        />
+      ) : (
       <SettingsPanel title={t('settings.computerUse.stepsTitle')}>
         <ol className="flex flex-col" data-testid="computer-use-steps">
-          {steps.map((step, index) => {
+          {COMPUTER_USE_GUIDE_STEPS.map((step, index) => {
             const state = progress?.[step] ?? 'pending';
             const actionable = actions !== null && progress !== null
               && (step === 'enable' ? state === 'current' : state !== 'complete');
@@ -364,9 +376,7 @@ export const SettingsComputerUsePage: FC = () => {
                     <span className="sr-only">{` — ${t(STEP_STATE_LABEL[state])}`}</span>
                   </p>
                   <p className="max-w-2xl text-[12px] leading-relaxed text-muted">
-                    {windows && step === 'enable'
-                      ? t('settings.computerUse.windows.enableDetail')
-                      : t(STEP_COPY[step].detail)}
+                    {t(STEP_COPY[step].detail)}
                   </p>
                   {actionable && failedStep === step && (
                     <GuideNote testId="computer-use-action-failed" tone="destructive">
@@ -406,6 +416,7 @@ export const SettingsComputerUsePage: FC = () => {
           })}
         </ol>
       </SettingsPanel>
+      )}
     </SettingsPageShell>
   );
 };

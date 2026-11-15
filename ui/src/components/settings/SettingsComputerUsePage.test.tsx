@@ -13,6 +13,7 @@ import {
 } from '../workbench/computerUseStatus';
 import { computerUseStatusCopy } from '../workbench/computerUseStatusCopy';
 import { SettingsComputerUsePage } from './SettingsComputerUsePage';
+import { COMPUTER_USE_SWITCH_SETTLE_MS } from './WindowsComputerUseSwitch';
 
 const apiFetch = vi.hoisted(() => vi.fn());
 
@@ -47,6 +48,15 @@ const browserOn = (os: 'windows' | 'mac') => {
 
 const windowsHost = { supported: true, host_platform: 'windows' };
 
+// A shell that can also turn Computer Use off from the page.
+const enterSwitchShell = (invoke = vi.fn(async (_command: string, _args?: Record<string, unknown>) => undefined)) => {
+  enterActionableShell(invoke);
+  Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE_DISABLE__', { value: true, configurable: true });
+  return invoke;
+};
+
+const switchControl = () => screen.findByRole('switch');
+
 const setVisibility = (state: DocumentVisibilityState) => {
   Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
   document.dispatchEvent(new Event('visibilitychange'));
@@ -71,6 +81,7 @@ afterEach(() => {
   apiFetch.mockReset();
   Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
   Reflect.deleteProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE__');
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE_DISABLE__');
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
   Reflect.deleteProperty(document, 'visibilityState');
   Reflect.deleteProperty(window.navigator, 'platform');
@@ -545,46 +556,50 @@ describe('readComputerUseStatus host', () => {
     expect(await read({ supported: false, host_platform: 'linux' })).toEqual({ kind: 'unsupported', host: 'linux' });
     expect(await read({ supported: false })).toEqual({ kind: 'unsupported', host: 'macos' });
     expect(await read({ supported: true, host_platform: 'beos', status: 'off' })).toMatchObject({ host: 'unknown' });
+    // The opt-in is the server's own field; a missing or malformed one is unknown, never guessed.
+    expect(await read({ ...windowsHost, enabled: true, status: 'error', reason: 'x' })).toMatchObject({ enabled: true });
+    expect(await read({ ...windowsHost, enabled: false, status: 'off' })).toMatchObject({ enabled: false });
+    expect(await read({ ...windowsHost, enabled: null, status: 'unavailable' })).toMatchObject({ enabled: null });
+    expect(await read({ ...windowsHost, status: 'ready' })).toMatchObject({ enabled: null });
+    expect(await read({ ...windowsHost, enabled: 'yes', status: 'ready' })).toMatchObject({ enabled: null });
   });
 });
 
 describe('SettingsComputerUsePage on a Windows host', () => {
-  it('labels the feature Preview and offers only the switch, without macOS permission steps', async () => {
-    const invoke = enterActionableShell();
-    statusSequence({ ...windowsHost, status: 'off', reason: 'never_enabled' });
-    const user = userEvent.setup();
+  it('labels the feature Preview and shows one Computer Use switch, without macOS permission steps', async () => {
+    enterSwitchShell();
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
 
     render(<SettingsComputerUsePage />);
 
-    await waitFor(() => expect(stepStates()).toEqual({ enable: 'current' }));
+    expect((await switchControl()).getAttribute('aria-checked')).toBe('false');
     expect(screen.getByTestId('computer-use-preview-badge').textContent)
       .toBe('settings.computerUse.windows.previewBadge');
     expect(screen.getByText('settings.computerUse.windows.subtitle')).toBeTruthy();
-    expect(screen.getByText('settings.computerUse.windows.enableDetail')).toBeTruthy();
+    expect(screen.getByText('settings.computerUse.windows.switch.description')).toBeTruthy();
+    expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.stateOff');
     for (const note of ['apps', 'elevated', 'launch', 'stop']) {
       expect(screen.getByTestId(`computer-use-windows-${note}`).textContent)
         .toBe(`settings.computerUse.windows.${note}`);
     }
-    expect(screen.queryByText(/steps\.(accessibility|screenRecording)/)).toBeNull();
-    expect(screen.queryByText('settings.computerUse.steps.enable.detail')).toBeNull();
-
-    await user.click(screen.getByTestId('computer-use-action-enable'));
-    expect(invoke).toHaveBeenLastCalledWith('computer_use_enable');
-    expect(invoke.mock.calls.some(([command]) => command === 'computer_use_open_permission')).toBe(false);
+    expect(screen.queryByTestId('computer-use-steps')).toBeNull();
+    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
   });
 
   it('describes a Windows runtime to a browser on a Mac, read-only', async () => {
     browserOn('mac');
-    statusSequence({ ...windowsHost, status: 'unavailable', reason: 'session_locked' });
+    statusSequence({ ...windowsHost, enabled: true, status: 'unavailable', reason: 'session_locked' });
 
     render(<SettingsComputerUsePage />);
 
-    await waitFor(() => expect(stepStates()).toEqual({ enable: 'pending' }));
+    const control = await switchControl();
+    expect(control.getAttribute('aria-checked')).toBe('true');
+    expect((control as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId('computer-use-preview-badge')).toBeTruthy();
     expect(screen.getByTestId('computer-use-remote-notice').textContent)
       .toBe('settings.computerUse.windows.remoteNotice');
     expect(screen.getByText('workbench.home.computerUse.sessionLockedDetail')).toBeTruthy();
-    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
+    expect(screen.queryByTestId('computer-use-switch-tray-only')).toBeNull();
   });
 
   it('describes a macOS runtime to a browser on Windows with the macOS guide', async () => {
@@ -612,27 +627,148 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(screen.getByTestId('computer-use-action-screenRecording')).toBeTruthy();
   });
 
-  it('marks the switch done once the host reports any state past off', async () => {
-    enterActionableShell();
-    statusSequence({ ...windowsHost, status: 'needs_permission', reason: 'accessibility' });
-
-    render(<SettingsComputerUsePage />);
-
-    await waitFor(() => expect(stepStates()).toEqual({ enable: 'complete' }));
-    expect(screen.queryAllByTestId(/computer-use-action-/)).toHaveLength(0);
-    expect(screen.getByText('workbench.home.computerUse.errorDetail')).toBeTruthy();
-  });
-
-  it('reports a failed switch with Windows recovery, not the macOS menu bar', async () => {
-    enterActionableShell(vi.fn(async () => { throw new Error('denied'); }));
-    statusSequence({ ...windowsHost, status: 'off', reason: 'never_enabled' });
+  it('turns Computer Use on, holding the switch until a later read confirms the opt-in', async () => {
+    const invoke = enterSwitchShell();
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
     const user = userEvent.setup();
 
     render(<SettingsComputerUsePage />);
-    await user.click(await screen.findByTestId('computer-use-action-enable'));
+    const control = await switchControl();
+    // The call has gone out, but no read after it has reported the opt-in yet.
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
+    await user.click(control);
 
-    expect((await screen.findByTestId('computer-use-action-failed')).textContent)
-      .toBe('settings.computerUse.windows.actionFailed');
+    expect(invoke).toHaveBeenLastCalledWith('computer_use_enable');
+    expect(control.getAttribute('aria-checked')).toBe('true');
+    expect((control as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.turningOn');
+
+    statusSequence({ ...windowsHost, enabled: true, status: 'starting', reason: null });
+    // The page's own polling brings the confirming read.
+    await waitFor(() => expect(control.getAttribute('data-switch-state')).toBe('on'), { timeout: 4_000 });
+    expect((control as HTMLButtonElement).disabled).toBe(false);
+    // On is the opt-in, not readiness: the status band still says starting.
+    expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.stateOn');
+    expect(screen.getByTestId('computer-use-guide-status').getAttribute('data-computer-use-status')).toBe('starting');
+  });
+
+  it('turns Computer Use off with the off command and confirms it from the status', async () => {
+    const invoke = enterSwitchShell();
+    statusSequence({ ...windowsHost, enabled: true, status: 'ready', reason: null });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    const control = await switchControl();
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'toggle_off' });
+    await user.click(control);
+
+    expect(invoke).toHaveBeenLastCalledWith('computer_use_disable');
+    await waitFor(() => expect(control.getAttribute('data-switch-state')).toBe('off'));
+    expect(screen.queryByTestId('computer-use-switch-failed')).toBeNull();
+  });
+
+  it('does not let a read that started before the change confirm it', async () => {
+    let release!: () => void;
+    const invoke = enterSwitchShell(vi.fn(() => new Promise<undefined>((resolve) => { release = () => resolve(undefined); })));
+    // Every status read waits until the test answers it, in order.
+    const reads: ((body: Record<string, unknown>) => void)[] = [];
+    apiFetch.mockImplementation(() => new Promise((resolve) => {
+      reads.push((body) => resolve(statusResponse(body)));
+    }));
+    const answer = async (body: Record<string, unknown>) => {
+      await waitFor(() => expect(reads.length).toBeGreaterThan(0));
+      await act(async () => reads.shift()!(body));
+    };
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    await answer({ ...windowsHost, enabled: true, status: 'ready', reason: null });
+    const control = await switchControl();
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+
+    await user.click(control);
+    expect(invoke).toHaveBeenLastCalledWith('computer_use_disable');
+    // A read starts while the off call runs ...
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(reads.length).toBe(1));
+    await act(async () => release());
+    // ... and reports off only after the call settled. It began before, so it cannot confirm.
+    await answer({ ...windowsHost, enabled: false, status: 'off', reason: 'toggle_off' });
+    expect(control.getAttribute('data-switch-state')).toBe('pending');
+    // The next read, started after the call, confirms.
+    await answer({ ...windowsHost, enabled: false, status: 'off', reason: 'toggle_off' });
+    await waitFor(() => expect(control.getAttribute('data-switch-state')).toBe('off'));
+  });
+
+  it('returns to the server value with a note when the change fails or never shows up', async () => {
+    enterSwitchShell(vi.fn(async () => { throw new Error('denied'); }));
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
+    const user = userEvent.setup();
+
+    const first = render(<SettingsComputerUsePage />);
+    const control = await switchControl();
+    await user.click(control);
+    expect((await screen.findByTestId('computer-use-switch-failed')).textContent)
+      .toBe('settings.computerUse.windows.switch.failed');
+    expect(control.getAttribute('aria-checked')).toBe('false');
+    expect((control as HTMLButtonElement).disabled).toBe(false);
+    first.unmount();
+
+    // The call succeeds but the status never reports the opt-in: give up after the bound.
+    enterSwitchShell();
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<SettingsComputerUsePage />);
+    const again = await switchControl();
+    await act(async () => { fireEvent.click(again); });
+    expect(again.getAttribute('data-switch-state')).toBe('pending');
+    await act(async () => { await vi.advanceTimersByTimeAsync(COMPUTER_USE_SWITCH_SETTLE_MS + 2_000); });
+    expect(again.getAttribute('data-switch-state')).toBe('off');
+    expect((again as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId('computer-use-switch-failed')).toBeTruthy();
+  });
+
+  it('follows a change made from the tray', async () => {
+    enterSwitchShell();
+    statusSequence({ ...windowsHost, enabled: true, status: 'ready', reason: null });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    const control = await switchControl();
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'toggle_off' });
+    await user.click(screen.getByRole('button', { name: /settings\.computerUse\.recheck/ }));
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'));
+  });
+
+  it('never offers an Off an older shell cannot perform', async () => {
+    const invoke = enterActionableShell();
+    statusSequence({ ...windowsHost, enabled: true, status: 'ready', reason: null });
+
+    render(<SettingsComputerUsePage />);
+
+    const control = await switchControl();
+    await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+    expect((control as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('computer-use-switch-tray-only').textContent)
+      .toBe('settings.computerUse.windows.switch.trayOnly');
+    fireEvent.click(control);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an unreadable state', { enabled: null, status: 'unavailable', reason: 'invalid_state_file' }],
+    ['an older server without the field', { status: 'error', reason: 'daemon_exited' }],
+  ])('shows no switch for %s, never a guessed on or off', async (_case, body) => {
+    enterSwitchShell();
+    statusSequence({ ...windowsHost, ...body });
+
+    render(<SettingsComputerUsePage />);
+
+    expect(await screen.findByTestId('computer-use-switch-unknown')).toBeTruthy();
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.stateUnknown');
   });
 
   it('keeps the unsupported notice for an unsupported Windows host, in Windows terms and in Preview', async () => {
@@ -652,8 +788,12 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(en.settings.computerUse.windows.previewBadge).toBe('Preview');
     expect(zh.settings.computerUse.windows.previewBadge).toBe('预览');
     for (const locale of [en, zh]) {
-      const copy = locale.settings.computerUse.windows;
-      for (const text of [...Object.values(copy), ...Object.values(locale.workbench.home.setup.computer_use_windows)]) {
+      const { switch: switchCopy, ...copy } = locale.settings.computerUse.windows;
+      for (const text of [
+        ...Object.values(copy),
+        ...Object.values(switchCopy),
+        ...Object.values(locale.workbench.home.setup.computer_use_windows),
+      ]) {
         expect(text).toBeTruthy();
         expect(text).not.toMatch(/\bMac\b|System Settings|系统设置|菜单栏|menu bar/);
       }
@@ -662,5 +802,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(zh.workbench.home.setup.computer_use_windows.title).toContain('预览');
     expect(en.settings.computerUse.windows.elevated).toContain('administrator');
     expect(zh.settings.computerUse.windows.elevated).toContain('管理员');
+    expect(en.settings.computerUse.windows.switch.description).toBe('Turning this off stops Computer Use. Your apps stay open.');
+    expect(zh.settings.computerUse.windows.switch.description).toBe('关闭后停止电脑操作，已打开的应用保持打开。');
   });
 });

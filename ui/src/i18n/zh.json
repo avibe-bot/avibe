@@ -812,7 +812,17 @@
         "enableDetail": "为这台电脑开启电脑操作。在你开启之前，它会保持关闭。",
         "actionFailed": "桌面应用没有响应。请重试，或退出并重新打开 Avibe。",
         "unsupportedDetail": "电脑操作需要在这台 Windows 电脑上的 Avibe 桌面应用中设置。请打开桌面应用继续。",
-        "remoteNotice": "请在这台 Windows 电脑上的 Avibe 桌面应用中操作。本页会同步显示进度。"
+        "remoteNotice": "请在这台 Windows 电脑上的 Avibe 桌面应用中操作。本页会同步显示进度。",
+        "switch": {
+          "description": "关闭后停止电脑操作，已打开的应用保持打开。",
+          "stateOn": "已开启。是否已就绪请查看上方状态。",
+          "stateOff": "已关闭。",
+          "stateUnknown": "Avibe 无法读取电脑操作是否已开启。请查看上方状态。",
+          "turningOn": "正在开启…",
+          "turningOff": "正在关闭…",
+          "failed": "未能更改电脑操作状态。请查看上方状态提示后重试。",
+          "trayOnly": "请从 Avibe 托盘菜单中关闭。"
+        }
       }
     },
     "diagnosticsTab": "诊断",
