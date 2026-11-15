@@ -16,8 +16,9 @@ export interface PendingVaultRequests {
   forget: (requestId: string) => void;
 }
 
-const sameRequests = (a: VaultRequest[], b: VaultRequest[]) =>
-  a.length === b.length && a.every((request, index) => request.id === b[index].id && request.expires_at === b[index].expires_at);
+// Whole-request equality: a re-read can bring the same requests with something they show changed
+// (the asking Session's title arrives after its first turn). The list is a handful of rows.
+const sameRequests = (a: VaultRequest[], b: VaultRequest[]) => JSON.stringify(a) === JSON.stringify(b);
 
 const NONE: PendingVaultRequests = { requests: [], refresh: () => {}, forget: () => {} };
 

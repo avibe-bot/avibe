@@ -43,6 +43,22 @@ it('reads on mount and again on a Vault event, keeping only requests the reader 
   await waitFor(() => expect(result.current.requests).toEqual([]));
 });
 
+it('keeps the same list for an unchanged read, and takes one that changed what a row shows', async () => {
+  const untitled = { ...request('vrq_use', 'access'), session: { id: 'ses_new', title: null, label: 'ses_new', is_workbench: true } } as unknown as VaultRequest;
+  api.getVaultRequests.mockResolvedValue({ ok: true, requests: [untitled] });
+  const { result } = renderHook(() => usePendingVaultRequestsSource());
+  await waitFor(() => expect(result.current.requests).toHaveLength(1));
+  const first = result.current.requests;
+
+  await act(async () => { result.current.refresh(); });
+  expect(result.current.requests).toBe(first);
+
+  const titled = { ...untitled, session: { ...untitled.session, title: 'Promote the build' } } as VaultRequest;
+  api.getVaultRequests.mockResolvedValue({ ok: true, requests: [titled] });
+  await act(async () => { result.current.refresh(); });
+  expect(result.current.requests[0].session?.title).toBe('Promote the build');
+});
+
 it('drops what it read under an old authorization at once', async () => {
   api.getVaultRequests.mockResolvedValueOnce({ ok: true, requests: [request('vrq_use', 'sign')] });
   const { result } = renderHook(() => usePendingVaultRequestsSource());
