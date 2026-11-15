@@ -22,6 +22,7 @@ vi.hoisted(() => {
 import { ToastProvider } from '../../context/ToastProvider';
 import en from '../../i18n/en.json';
 import { ImageViewerProvider } from '../ui/image-viewer';
+import { sessionDraftAttachmentsCache } from '../../lib/sessionDraftAttachmentsCache';
 
 const uploadWorkbenchAttachment = vi.hoisted(() => vi.fn());
 
@@ -86,6 +87,7 @@ const stageImages = async (...names: string[]) => {
 beforeEach(() => {
   onSend.mockReset();
   uploadWorkbenchAttachment.mockReset();
+  sessionDraftAttachmentsCache.clear('ses-1');
   uploadWorkbenchAttachment.mockImplementation(async (_sid: string, file: File) => ({
     token: `tok-${file.name}`,
     name: file.name,
