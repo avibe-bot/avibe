@@ -423,6 +423,14 @@ try {
             desktop_actions = $false
             snapshot_edited_by_capture = $false
         }
+        # Source-built PR CI only. Packaging passes an externally prepared
+        # ProductionBinaryPath and retains its existing metadata-only contract.
+        if (-not $ProductionBinaryPath) {
+            . (Join-Path $PSScriptRoot 'windows-refusal-transport\run.ps1')
+            $provenance.native_refusal_transport = Invoke-WindowsRefusalTransport `
+                -Repo $repo -Binary $captureBinary -Bin $bin -Temp $temp -Logs $logs `
+                -User $user -Password $password -Environment $environment
+        }
     }
 
     foreach ($test in $tests) {
