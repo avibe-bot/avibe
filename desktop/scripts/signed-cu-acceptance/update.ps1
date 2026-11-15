@@ -33,17 +33,20 @@ function Get-InstalledDesktops([string] $Executable, [string] $Name) {
     }
     return ,$found
 }
+# Records after the settle window: is_original, post_click, has_window.
 function Resolve-UpdateOutcomeCount($Records) {
-    $count = @($Records).Count
-    if ($count -ge 2) { return 'update_product_double_launch' }
-    if ($count -eq 0) { return 'update_relaunched_desktop_exited' }
+    $all = @($Records)
+    if (@($all | Where-Object { $_.is_original }).Count) { return 'update_original_desktop_not_exited' }
+    if ($all.Count -ge 2) { return 'update_product_double_launch' }
+    if ($all.Count -eq 0) { return 'update_relaunched_desktop_exited' }
+    if (-not ($all[0].post_click -and $all[0].has_window)) { return 'update_relaunched_desktop_unproven' }
     return $null
 }
 function Invoke-UpdateCase([hashtable] $Context) {
     $phase = 'update_panel_start'; $clicker = $null; $completed = $false; $survivor = $null
     $original = $Context.Desktop
     $Context.Quiesced = $false
-    $observed = [ordered]@{ relaunched_window_seen = $false; relaunch_seconds_after_click = $null
+    $observed = [ordered]@{ original_exited = $null; relaunched_window_seen = $false; relaunch_seconds_after_click = $null
         desktop_processes_after_settle = $null; desktop_file_version = $null; runtime_version = $null
         installed_driver_sha256 = $null; installed_driver_size = $null; panel_after_relaunch = $null; settings_unchanged = $null }
     try {
@@ -96,10 +99,12 @@ function Invoke-UpdateCase([hashtable] $Context) {
         # (2) Sixty seconds later, how many installed Desktops this user has.
         Start-Sleep -Seconds 60
         $final = Get-InstalledDesktops $executable $desktopName
+        $observed.original_exited = $original.HasExited
         $observed.desktop_processes_after_settle = @($final | ForEach-Object {
-            [ordered]@{ pid = $_.Id; started_utc = $_.StartTime.ToUniversalTime().ToString('o'); seconds_after_click = [int]($_.StartTime.ToUniversalTime() - $clickedAt).TotalSeconds; has_window = $_.MainWindowHandle -ne 0 }
+            [ordered]@{ pid = $_.Id; is_original = $_.Id -eq $original.Id; post_click = $_.StartTime.ToUniversalTime() -gt $clickStartedAt
+                started_utc = $_.StartTime.ToUniversalTime().ToString('o'); seconds_after_click = [int]($_.StartTime.ToUniversalTime() - $clickedAt).TotalSeconds; has_window = $_.MainWindowHandle -ne 0 }
         })
-        $countFailure = Resolve-UpdateOutcomeCount $final
+        $countFailure = Resolve-UpdateOutcomeCount $observed.desktop_processes_after_settle
         if ($countFailure) { foreach ($process in $final) { $process.Dispose() }; throw $countFailure }
         $survivor = $final[0]
         $Context.Desktop = $survivor

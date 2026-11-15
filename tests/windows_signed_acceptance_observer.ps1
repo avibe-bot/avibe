@@ -131,9 +131,18 @@ foreach ($name in @('Get-InstalledDesktops', 'Resolve-UpdateOutcomeCount')) {
     $definition = $updateAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     . ([scriptblock]::Create($definition.Extent.Text))
 }
-if ((Resolve-UpdateOutcomeCount @(1)) -ne $null) { throw 'fixture_single_desktop_rejected' }
-if ((Resolve-UpdateOutcomeCount @(1, 2)) -ne 'update_product_double_launch') { throw 'fixture_double_launch_accepted' }
-if ((Resolve-UpdateOutcomeCount @()) -ne 'update_relaunched_desktop_exited') { throw 'fixture_no_desktop_accepted' }
+function D([bool] $Original, [bool] $PostClick, [bool] $Window) { [pscustomobject]@{ is_original = $Original; post_click = $PostClick; has_window = $Window } }
+foreach ($case in @(
+    @(@((D $false $true $true)), $null),
+    @(@((D $false $true $true), (D $false $true $true)), 'update_product_double_launch'),
+    @(@(), 'update_relaunched_desktop_exited'),
+    @(@((D $true $false $true)), 'update_original_desktop_not_exited'),
+    @(@((D $true $false $true), (D $false $true $true)), 'update_original_desktop_not_exited'),
+    @(@((D $false $false $true)), 'update_relaunched_desktop_unproven'),
+    @(@((D $false $true $false)), 'update_relaunched_desktop_unproven')
+)) {
+    if ((Resolve-UpdateOutcomeCount $case[0]) -ne $case[1]) { throw "fixture_outcome_wrong_$($case[1])" }
+}
 # Plain same-user listing against this real process: exact path matches, a
 # different path never does, and returned handles carry start time.
 $self = Get-Process -Id $PID
