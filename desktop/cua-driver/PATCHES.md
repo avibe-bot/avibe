@@ -84,7 +84,7 @@ Apply this supplement only to the pinned source **after the complete, unchanged
 0001 patch**. Production `sources.json`, the Windows tool snapshot, and
 preparation now select the ordered 0001 → 0002 chain; macOS preparation still
 selects 0001 alone. The hosted Windows source-test step explicitly applies both
-patches, records source/patch/test-binary hashes, and requires all 11 selected
+patches, records source/patch/test-binary hashes, and requires all 13 selected
 native tests with JUnit no-skip/count evidence. Passing those fixtures is not
 signed-installer or interactive GUI acceptance.
 
@@ -133,6 +133,16 @@ text in `message` and the existing `detail` field. The latter preserves existing
 JavaScript SDK behavior without changing its error classes. Observation and
 attachment permissions, target admission, launch ownership and default-off
 behavior are unchanged.
+
+The source-build PR runner additionally creates real elevated and ordinary EDIT
+fixtures under its existing disposable account setup. It exercises the built
+driver daemon, embedded MCP proxy, Python server and JavaScript SDK, checks the
+exact protected-window code/parameters/message, and independently reads both
+editors: the protected target must receive no input while the ordinary control
+must contain the requested text. The shell state and loopback HTTP adapter are
+test-owned; this is not shell readiness or signed-installer acceptance. Locked
+desktop behavior remains outside that hosted proof. Packaging with an externally
+provided binary keeps its existing metadata-only runner path.
 
 This changes the Windows driver build input: the supplement SHA, both manifest
 patch entries, and the snapshot provenance must move together. Tool definitions
