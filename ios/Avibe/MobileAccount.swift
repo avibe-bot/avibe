@@ -1450,6 +1450,8 @@ enum MobileExternalURLPolicy {
     private static let allowedURLs: Set<String> = [
         "https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI.md",
         "https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI_ZH.md",
+        // The empty-state desktop app card opens the avibe.bot download section.
+        "https://avibe.bot/#install",
         // Where an account that must turn on two-step verification sets it up.
         "https://avibe.bot/app/account/security",
     ]

@@ -577,15 +577,27 @@ def test_invalidation_cancels_every_admitted_call(event, reason: str) -> None:
 
     async def scenario(h: _Harness) -> tuple[list[dict], list, Any]:
         await h.js("1")
+        slot = h.kernels._slots[SESSION]
+
+        async def wait_for_admission(count: int) -> None:
+            async def ready() -> None:
+                while len(slot.calls) != count or sum(call.executing for call in slot.calls) != 1:
+                    await asyncio.sleep(0.01)
+
+            # Client task creation does not mean its HTTP request has reached
+            # evaluate(). Invalidate only once this same slot owns every call,
+            # with the non-terminating first call holding the execution lock.
+            await asyncio.wait_for(ready(), 5)
+
         executing = asyncio.create_task(h.js("await new Promise(() => {})", timeout_ms=10000))
-        await asyncio.sleep(0.2)
+        await wait_for_admission(1)
         queued = [
             asyncio.create_task(
                 h.js("globalThis.executed = true; await computer.app({ bundleId: 'com.apple.mail' })")
             )
             for _ in range(3)
         ]
-        await asyncio.sleep(0.1)
+        await wait_for_admission(4)
         await event(h)
         reports = await asyncio.wait_for(asyncio.gather(executing, *queued), 5)
         await asyncio.sleep(0.2)
