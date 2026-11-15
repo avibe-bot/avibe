@@ -178,7 +178,7 @@ function AccountCard({ wallet, account, fresh, canManage, protectedWallet = fals
           </span>
         )}
       </div>
-      {account.always_ask && canManage && !protectedWallet ? <AskTurnOffNote state={askOff.state} /> : null}
+      {account.always_ask && canManage && !protectedWallet ? <AskTurnOffNote state={askOff.state} onSetup={askOff.setup} /> : null}
       <LastSigned account={account} />
       <HdAccountAddressList account={account} hint={!protectedWallet} />
       {error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}

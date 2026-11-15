@@ -309,7 +309,8 @@ def asset_names(version: str, target: str) -> list[str]:
 
 def pinned_driver_source(target: str | None = None) -> dict:
     source = json.loads(CUA_DRIVER_SOURCES.read_text(encoding="utf-8"))["driver"]
-    return {
+    patch = source["windows"]["patch"] if target == "x86_64-pc-windows-msvc" else source["patch"]
+    pinned = {
         "version": source["version"],
         "tag": source["tag"],
         "source_commit": source["source_commit"],
@@ -318,15 +319,19 @@ def pinned_driver_source(target: str | None = None) -> dict:
         "archive_sha256": source["macos"]["sha256"],
         "source_archive": source["source"]["archive"],
         "source_archive_sha256": source["source"]["sha256"],
-        "patch_variant": source["patch"]["variant"],
-        "patch_file": source["patch"]["file"],
-        "patch_sha256": source["patch"]["sha256"],
-        "patch_contract": source["patch"]["contract"],
+        "patch_variant": patch["variant"],
+        "patch_file": patch["file"],
+        "patch_sha256": patch["sha256"],
+        "patch_contract": patch["contract"],
         "tool_snapshot_sha256": (
             source["windows"]["tool_snapshot_sha256"]
             if target == "x86_64-pc-windows-msvc" else source["tool_snapshot_sha256"]
         ),
     }
+    if target == "x86_64-pc-windows-msvc":
+        pinned["patch_order"] = source["windows"]["patch_order"]
+        pinned["patch_chain"] = source["windows"]["patches"]
+    return pinned
 
 
 def verify_windows_driver_pe(binary: Path) -> None:
@@ -409,6 +414,8 @@ def driver_provenance(
         "patch_contract",
         "tool_snapshot_sha256",
     )
+    if windows:
+        patched_fields += ("patch_order", "patch_chain")
     if (
         provenance.get("schema_version") != 2
         or any(provenance.get(field) != pinned[field] for field in patched_fields)
@@ -438,6 +445,45 @@ def driver_provenance(
         "packaged_sha256": digest(packaged_driver),
         "packaged_cdhash": packaged_cdhash,
     }
+
+
+def verify_driver_prepared(
+    target: str,
+    driver: Path,
+    provenance_path: Path,
+    *,
+    windows_evidence: Path | None = None,
+    summary: Path | None = None,
+) -> None:
+    provenance = driver_provenance(target, driver, provenance_path)
+    if windows_evidence is None:
+        if summary is not None:
+            raise ValueError("Driver summary requires Windows capture evidence")
+        return
+    if target != "x86_64-pc-windows-msvc":
+        raise ValueError("Windows capture evidence requires the Windows target")
+    # The ordinary-user fixture copies the staged EXE into its ACL-isolated bin.
+    # Bind both that copy and its capture record back to the installer input,
+    # not merely to the same source revision or an earlier CI build.
+    production = windows_evidence / "production"
+    capture = json.loads((production / "capture.json").read_text(encoding="utf-8"))
+    native = json.loads((windows_evidence / "provenance.json").read_text(encoding="utf-8-sig"))
+    expected = provenance["prepared_binary_sha256"]
+    if (
+        capture.get("binary_sha256") != expected
+        or native.get("production_binary_sha256") != expected
+        or digest(production / "cua-driver.exe") != expected
+    ):
+        raise ValueError("Windows Cua Driver capture does not match the staged installer input")
+    if summary is not None:
+        with summary.open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\n### Windows Cua Driver packaging gate\n\n"
+                f"- Packaged candidate SHA-256: `{expected}`\n"
+                f"- Committed Windows tool snapshot SHA-256: `{provenance['tool_snapshot_sha256']}`\n"
+                "- tools/list and dump-docs: exact staged EXE (ordinary-user fixture copy).\n"
+                "- 11 native selectors: separate source-built Rust test executables, not production EXE actions.\n"
+            )
 
 
 def record(*, version: str, target: str, tag: str, source_sha: str,
@@ -750,6 +796,8 @@ def main() -> None:
     verifier.add_argument("--target", choices=TARGETS, required=True)
     verifier.add_argument("--driver", type=Path, required=True)
     verifier.add_argument("--provenance-path", type=Path, required=True)
+    verifier.add_argument("--windows-evidence", type=Path)
+    verifier.add_argument("--summary", type=Path)
     for command in ("verify", "check-remote", "stage"):
         consumer = sub.add_parser(command)
         consumer.add_argument("--directory", type=Path, required=True)
@@ -778,11 +826,7 @@ def main() -> None:
     elif command == "record":
         record(**args)
     elif command == "verify-driver-prepared":
-        driver_provenance(
-            args["target"],
-            args["driver"],
-            args["provenance_path"],
-        )
+        verify_driver_prepared(**args)
     elif command == "verify":
         verify(**args)
     elif command == "stage":

@@ -10,7 +10,7 @@ export type GenerateRecipe =
   | { type: 'password'; length: number; digits: boolean; symbols: boolean; noLookalikes: boolean }
   | { type: 'hex' | 'base64'; bytes: number };
 
-export const PASSWORD_LENGTH = { min: 12, max: 128, default: 24 } as const;
+export const PASSWORD_LENGTH = { min: 8, max: 100, default: 24 } as const;
 export const RANDOM_BYTES = { min: 16, max: 64, default: 32 } as const;
 
 /** Safe in env files, shells and URLs: no quotes, backslash, space, comma or backtick. */
@@ -133,23 +133,27 @@ export function generateSecretValue(recipe: GenerateRecipe, random: RandomSource
 }
 
 /** A request spec's `generate` hint (snake_case on the wire), as a recipe; null when absent or
- *  not one the generator can make. The hint only presets the generator. */
-export function recipeFromSpec(hint: unknown): GenerateRecipe | null {
+ *  not one the generator can make. The hint only presets the generator. A request saved under an
+ *  earlier, wider password range (up to 128) is brought within today's limits, and `adjusted` says
+ *  so, so the dialog can show it rather than quietly starting from something else. */
+export function recipeFromSpec(hint: unknown): { recipe: GenerateRecipe; adjusted: boolean } | null {
   if (!hint || typeof hint !== 'object') return null;
   const spec = hint as Record<string, unknown>;
-  let recipe: GenerateRecipe;
   if (spec.type === 'password') {
-    recipe = {
+    const length = typeof spec.length === 'number' ? spec.length : PASSWORD_LENGTH.default;
+    if (!Number.isInteger(length)) return null;
+    const recipe = withSize({
       type: 'password',
-      length: typeof spec.length === 'number' ? spec.length : PASSWORD_LENGTH.default,
+      length,
       digits: spec.digits !== false,
       symbols: spec.symbols !== false,
       noLookalikes: spec.no_lookalikes === true,
-    };
-  } else if (spec.type === 'hex' || spec.type === 'base64') {
-    recipe = { type: spec.type, bytes: typeof spec.bytes === 'number' ? spec.bytes : RANDOM_BYTES.default };
-  } else {
-    return null;
+    }, length);
+    return { recipe, adjusted: recipeSize(recipe) !== length };
   }
-  return isValidRecipe(recipe) ? recipe : null;
+  if (spec.type === 'hex' || spec.type === 'base64') {
+    const recipe: GenerateRecipe = { type: spec.type, bytes: typeof spec.bytes === 'number' ? spec.bytes : RANDOM_BYTES.default };
+    return isValidRecipe(recipe) ? { recipe, adjusted: false } : null;
+  }
+  return null;
 }

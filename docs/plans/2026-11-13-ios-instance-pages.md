@@ -1,6 +1,6 @@
 # iOS App: account and instance pages, redesign
 
-Status: **approved** by the owner on 2026-11-14 at 13:23 Asia/Shanghai: variant A now, variant B with Runtime 3.2.7. Contents: map and diagnosis (1–2), structure and frames (3), desktop consistency (4), building it (5). Frames: `ui/design/frames/mobile-app/switcher.design.tsx`, kit `ui/design/kit/mobile-instance-sheet.tsx`.
+Status: **approved** by the owner on 2026-11-14 at 13:23 Asia/Shanghai: variant A now, variant B with Runtime 3.2.7. Contents: map and diagnosis (1–2), structure and frames (3), desktop consistency (4), building it (5). Frames: `ui/design/frames/mobile-app/switcher.design.tsx` (the shipped pages), kit `ui/design/kit/mobile-instance-sheet.tsx` (the native sheet, gestures and the native failure screen).
 Date: 2026-11-13. Base: Avibe `d8187b453`. Design only: no product code changes here.
 
 The owner: 「现在这两个页面的逻辑都有点怪，一个是实例列表页，一个是切换实例页，感觉有点复杂，让用户不好理解。重新设计一下吧，然后交互也看一下。」
@@ -117,7 +117,7 @@ Rules:
 6. **Gestures:** sheet drag-down = back (native). Account page: swipe from the left edge = back. **Pull to refresh only on the full first-run page**: in a sheet, pulling down at the top dismisses; the sheet refreshes when it opens instead.
 7. **First run** (nothing selected yet) is a full page, not a sheet: same rows, 「想从哪里开始？」 kept from the approved A flow, the avatar for Account, pull to refresh. Signed out and no-instances keep their approved pages.
 8. **Native failure screen** uses the same words: 「暂时连不上 {name}」 · 重试 · 其他实例. 其他实例 opens the same sheet over the failed instance without stopping it first, so ✕ returns to the retry screen (fixes C13).
-9. **One vocabulary** across web, native and desktop: 实例 / 切换 / 账户 / 当前 / 离线 / 添加实例. 「更换实例」 and 「账号」 go.
+9. **One vocabulary** across web, native and desktop: 实例 / 切换 / 账号 / 当前 / 离线 / 添加实例. 「更换实例」 goes. The sign-in account is 「账号」 (Product, 2026-11-15); 「账户」 stays only for Vault and billing.
 
 ### Variants (the one real choice)
 
@@ -126,7 +126,7 @@ Rules:
 | Home header | unchanged: 「Avibe」 + avatar | 「{instance name} ⌄」 + avatar |
 | Avatar | instances sheet (account is its last row) | Account page directly |
 | Answers "where am I" on Home | no (one tap away) | yes (C1) |
-| Ships with | the next TestFlight build only (bundled page + Swift) | TestFlight **and** a Runtime release: the instance's own header changes. Gated by a new capability (`instancePresentation: 1`, `app.showInstances`, the current instance's name in `app.info`). Older instances keep 「Avibe」 + avatar, and their avatar opens the A sheet, so both kinds work side by side. |
+| Ships with | the next TestFlight build only (bundled page + Swift) | TestFlight **and** a Runtime release: the instance's own header changes. Gated by a new capability (`instancePresentation: 1`, `app.showInstances`, the current instance's name in `app.info`). The name opens the sheet at `#sheet-instances` (the list without the account row); the avatar, and every other in-App account entry (More's 「账号与 Avibe」, the account menu), calls `app.showAccount({start:'account'})`, which opens the same sheet at `#sheet-account` with Account as its root (✕ returns to the instance, no Back). Older instances keep 「Avibe」 + avatar, and their avatar opens the A sheet, so both kinds work side by side. |
 
 Decision (owner, 2026-11-14 13:23): **A now, B with 3.2.7.** A removes every confusion except C1 with no Runtime dependency; B is additive on top of A.
 

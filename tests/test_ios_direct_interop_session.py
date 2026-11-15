@@ -66,7 +66,9 @@ for line in sys.stdin:
             ingress = SimpleNamespace(token=start["token"], client_id=client_id)
             observed = {"control_tcp": True}
             if name in {"not_admitted", "wrong_identity"}:
-                observed.update(failure="handshake", case_streams=0)
+                observed.update(failure="closed_by_peer" if name == "not_admitted" else "handshake",
+                                local_streams=1 if name == "not_admitted" else 0,
+                                payload_streams=0, usable=False)
             else:
                 assert await probe(ingress, ingress_port) == b"HTTP/1.1 200 Connection Established\r\n\r\n"
                 barrier = {"type": "setup_done", "schema": 2, "name": name}

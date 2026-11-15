@@ -20,18 +20,22 @@ def host_platform(request, monkeypatch):
     return request.param
 
 
-def test_controller_ipc_owns_desktop_capability_and_identity() -> None:
+@pytest.mark.parametrize("os_name,windows_schema", [("posix", 0), ("posix", 1), ("nt", 0), ("nt", 1)])
+def test_controller_ipc_owns_desktop_capability_and_identity(monkeypatch, os_name, windows_schema) -> None:
     """The UI process must not infer support from its own package version."""
+    from core import computer_use
 
     controller = SimpleNamespace(controller_id="controller-test")
-    response = TestClient(internal_server.create_app(controller)).get(
-        "/internal/desktop/capabilities"
-    )
+    client = TestClient(internal_server.create_app(controller))
+    monkeypatch.setattr(internal_server, "os", SimpleNamespace(name=os_name))
+    monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", windows_schema)
+    monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
+    response = client.get("/internal/desktop/capabilities")
     assert response.status_code == 200
-    assert response.json() == {
-        "computer_use_schema": 1,
-        "controller_id": "controller-test",
-    }
+    expected = {"computer_use_schema": 1, "controller_id": "controller-test"}
+    if os_name == "nt":
+        expected["computer_use_windows_schema"] = windows_schema
+    assert response.json() == expected
 
 
 def test_old_controller_unknown_endpoint_maps_to_schema_zero(monkeypatch) -> None:
@@ -59,6 +63,27 @@ def test_old_controller_unknown_endpoint_maps_to_schema_zero(monkeypatch) -> Non
         "computer_use_schema": 0,
         "controller_id": "legacy",
     }
+
+
+@pytest.mark.parametrize("windows_schema", [None, 0, 1, True, "1", -1])
+def test_internal_client_preserves_valid_windows_capability_and_refuses_malformed(monkeypatch, windows_schema):
+    endpoint = SimpleNamespace(base_url="http://controller", headers={}, descriptor=None)
+
+    async def resolve(_socket_path):
+        return endpoint
+
+    payload = {"computer_use_schema": 1, "controller_id": "test"}
+    if windows_schema is not None:
+        payload["computer_use_windows_schema"] = windows_schema
+    monkeypatch.setattr(internal_client, "_resolve_endpoint_async", resolve)
+    monkeypatch.setattr(internal_client, "_async_transport", lambda _endpoint: httpx.MockTransport(
+        lambda _request: httpx.Response(200, json=payload)
+    ))
+    if windows_schema is True or windows_schema == "1" or windows_schema == -1:
+        with pytest.raises(internal_client.InternalServerUnavailable):
+            asyncio.run(internal_client.desktop_capabilities())
+    else:
+        assert asyncio.run(internal_client.desktop_capabilities()) == payload
 
 
 def test_ui_desktop_capabilities_are_forwarded_from_controller(monkeypatch) -> None:
@@ -296,7 +321,12 @@ def test_workbench_status_reports_server_host_platform_for_unsupported_windows_h
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(ui_server, "_desktop_host_platform", lambda: "windows")
-    monkeypatch.setattr(ui_server, "_desktop_computer_use_supported", lambda: False)
+    # Exercise the actual Windows rollback guard, not a fake supported result.
+    from core import computer_use
+
+    monkeypatch.setattr(computer_use, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
+    monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 0)
 
     response = app.test_client().get(
         "/api/desktop/computer-use/status",

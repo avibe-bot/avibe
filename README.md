@@ -6,7 +6,7 @@
 
 ### Make your computer a home for your AI partner.
 
-Avibe is the local-first Agent OS: it runs on your own Mac or PC. Vibey, its built-in AI partner, lives there. It remembers what you are working on, does the work on your machine, and comes to find you when it is done or needs a decision.<br/>
+Avibe is the local-first Agent OS: it turns your own Mac or PC into a home for AI partners, where they live and work, not on someone else's server. Vibey, its built-in AI partner, lives there. It remembers what you are working on, does the work on your machine, and comes to find you when it is done or needs a decision.<br/>
 Reach it from the desktop app, your iPhone, or the chat app you already have open.
 
 **[Download for Mac](#mac)** · **[Download for Windows](#windows)** · **[iPhone](#iphone)** · **[Linux and servers](#linux-and-servers)**
@@ -25,7 +25,7 @@ Reach it from the desktop app, your iPhone, or the chat app you already have ope
 
 <p align="center"><sub>The Avibe Workbench, with sample data</sub></p>
 
-Avibe is free and open source. It runs on the Claude or ChatGPT subscription you already pay for, or on an API key.
+Avibe is free and open source. It runs on the Claude or ChatGPT subscription you already pay for, or on an API key from an AI provider.
 
 ## What you can ask it
 
@@ -96,13 +96,13 @@ The Desktop App is the recommended way to run Avibe on both.
 
 <img src="assets/mascot/cloud-tuanzi.png" alt="Vibey, Avibe's built-in AI partner" width="130" align="right"/>
 
-**Vibey** is your main Bot. It is built in, it is the first one you talk to, and it can see everything on your Avibe.
+**Vibey** is your main Bot. It is built in, it is the first one you talk to, and it can see all your projects, conversations and other Bots.
 
-A Bot is a standing member of your Avibe, not a chat you start over each time. It has a name, a role, a memory of its own, and one conversation that never ends. Add a Researcher or a Bookkeeper when an area deserves one; you can have up to five besides Vibey.
+A Bot is like a team member who stays, not a chat you start over each time. It has a name, a role, a memory of its own, and one conversation that never ends, so you can pick up where you left off. Add a Researcher or a Bookkeeper when an area deserves one; you can have up to five besides Vibey.
 
-You talk things through with a Bot and decide together. The Bot hands the work to **Agents**, which do the job in their own sessions, several at once if needed. It follows each job to the end and comes back with the result.
+You talk things through with a Bot and decide together. When there is work to do, the Bot hands it to helpers called **Agents**. Each one works on its own task, and several can work at the same time. The Bot keeps track of each job and comes back to you with the result.
 
-On long work, Vibey keeps hold of what you asked for and why. In our own benchmark on a GPT model, after its memory had been condensed eight or more times it still answered what the task was, what the rules were, and what came next 97% of the time. The benchmark is internal and AI-judged. [How Vibey remembers](https://docs.avibe.bot/agents/vibey-memory) · [The benchmark and its limits](https://docs.avibe.bot/agents/vibey-memory-benchmark)
+On long work, Vibey keeps hold of what you asked for and why. Long conversations force any AI to shorten what it remembers. In our own tests, even after that had happened eight or more times, Vibey still knew what the task was, what the rules were, and what came next 97% of the time. Results differ by model, and the tests are scored by AI, not by people. [How Vibey remembers](https://docs.avibe.bot/agents/vibey-memory) · [The benchmark and its limits](https://docs.avibe.bot/agents/vibey-memory-benchmark)
 
 <br clear="all"/>
 
@@ -123,31 +123,31 @@ Wherever you reach it from, it is the same Avibe on the same computer.
 
 ### Workbench
 
-Your conversations, files, a terminal, and an editor, as windows side by side in one place. The pages and small apps your Bots build open right next to them.
+Avibe's main screen. Your conversation sits next to the files your Bots work on, so you can watch and check their work without switching apps. A terminal and an editor are there when you want to look closer, and the pages and small apps your Bots build open right beside them.
 
 ### Model Hub: the plans you already pay for
 
 Sign in with a Claude or ChatGPT subscription, or add API keys, and every Bot and Agent can use them. Line up more than one, and when a plan hits its limit the next takes over. Model Hub also shows how much of each plan you have used.
 
-### Vault: secrets by name, not by value
+### Vault: use passwords and keys without showing them to the AI
 
-Save a password, API key, or signing key once. Agents ask for it by name. Avibe does not show them the value: it hands it straight to the command or request that needs it. A signing key never leaves the Vault; only the signature comes back. You can make any secret ask you before each use.
+Save a password, API key, or signing key once. Agents ask for it by name. Avibe does not show them the value: it hands it straight to the command or request that needs it. A signing key, such as the key of a crypto wallet, is never handed out at all: the Vault signs, and only the result comes back. You can make any secret ask you before each use.
 
 <img src="assets/screenshots/v6/vaults-en.png" alt="The Vaults list: names, tags, and usage, never the values" />
 
-### Show Pages
+### Show Pages: answers you can open and share
 
-Ask for a comparison, a dashboard, a report, or a small tool and get a live page. Point at any part of it and say what to change. Keep it private, share it with people you choose, or publish it at a link.
+Ask for a comparison, a dashboard, a report, or a small tool and get a live page instead of a long reply. Point at any part of it and say what to change. Keep it private, share it with people you choose, or publish it at a link.
 
 ### Scheduled and background work
 
-Bots set their own reminders and schedules, wait for things to happen, and keep working in the background. Everything they have set up is listed in one place.
+Bots set their own reminders and schedules, wait for something to happen, such as a web page changing, and keep working in the background. Everything they have set up is listed in one place.
 
 <img src="assets/screenshots/v6/harness-tasks-en.png" alt="The Tasks list: a one-time reminder to decide on the offsite venue on Friday at 9:00, and a weekly brief every Monday at 9:00" />
 
 ### Skills and MCP
 
-Teach your Agents a way of working once, as a Skill, and all of them follow it. Connect an MCP server once, and all of them can use its tools.
+A **Skill** is a way of working you write down once, for example how you want a weekly report laid out, and every Agent follows it. **MCP** is a common way to connect AI to other services, such as a documentation site, a database, or a project tracker. Connect one once, and every Agent can use it. [More about MCP](https://docs.avibe.bot/concepts/mcp)
 
 ### Computer Use (macOS)
 
@@ -156,8 +156,8 @@ On a Mac, with Computer Use turned on in the Desktop App, Agents can see and ope
 ## Yours, on your machine
 
 - Your files, your keys, and the Agents themselves stay on your computer.
-- What an Agent needs for a job goes to the AI provider you chose.
-- avibe.bot signs you in and opens a secure tunnel to your computer. Your workspace does not pass through it.
+- To do a job, an Agent sends what it needs, such as your request and the relevant parts of a file, to the AI provider you chose.
+- When you open your Avibe from your phone, avibe.bot checks that it is you and connects you to your computer over an encrypted connection. Your files are not uploaded to avibe.bot; what you see comes from your computer.
 - Two things do pass through avibe.bot: voice input, which is transcribed there, and iPhone notifications, which are encrypted on your computer before they leave it.
 
 The docs list [every path that carries your content](https://docs.avibe.bot/concepts/local-first#what-leaves-your-machine).
@@ -191,13 +191,13 @@ Yes. Avibe and your Agents run on your computer, so scheduled and background wor
 <details>
 <summary><b>Is remote access safe?</b></summary>
 
-Your computer dials out to open the tunnel; no port is opened to the internet. Apart from Show Pages you choose to publish, nothing is reachable without signing in, and only the people you allow can sign in. If something is misconfigured, access is refused, not opened. See [Remote access](https://docs.avibe.bot/concepts/remote-ui).
+Your computer makes the connection itself, outward; nothing on your computer is opened to the internet. Apart from Show Pages you choose to publish, nothing is reachable without signing in, and only the people you allow can sign in. If something is misconfigured, access is refused, not opened. See [Remote access](https://docs.avibe.bot/concepts/remote-ui).
 </details>
 
 <details>
 <summary><b>Does it run local models?</b></summary>
 
-Local-first here means your files and the work stay on your machine, not necessarily the model. If you want the model local too, point Model Hub at any compatible endpoint you host.
+Local-first here means your files and the work stay on your machine, not necessarily the model. If you run a model yourself, on your computer or your own server, you can add it in Model Hub, as long as it accepts requests in the same format as the major AI services.
 </details>
 
 <details>

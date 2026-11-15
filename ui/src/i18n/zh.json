@@ -297,14 +297,14 @@
       "title": "让电脑与手机相连。",
       "subtitle": "在电脑上运行，从手机上连接",
       "body": "还没有可用实例。先在电脑上安装 Avibe，并配对这个账号。",
-      "desktopTitle": "在电脑上安装",
-      "desktopBody": "完成设置后，在「远程访问」中配对",
+      "desktopTitle": "在 Mac 或 Windows 电脑上安装",
+      "desktopBody": "从 avibe.bot 下载 Avibe 桌面应用，完成设置后在「远程访问」中配对",
       "commandTitle": "使用命令行",
-      "commandBody": "安装 CLI，再运行 vibe remote",
+      "commandBody": "适合 Linux 和服务器：安装 CLI，再运行 vibe remote",
       "refresh": "我已完成配对，刷新",
       "cliTitle": "安装与配对",
       "cliSubtitle": "在电脑上运行，从手机上连接",
-      "cliBody": "在 macOS 或 Linux 终端运行。Windows 用户请按指南使用 WSL。",
+      "cliBody": "在 Linux 或服务器的终端里运行。Mac 和 Windows 电脑请从 avibe.bot 下载 Avibe 桌面应用。",
       "stepInstall": "1. 安装并完成设置",
       "installCommand": "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'",
       "stepPair": "2. 配对你的账号",
@@ -313,7 +313,7 @@
       "guide": "安装指南"
     },
     "account": {
-      "title": "账户",
+      "title": "账号",
       "signedInAs": "当前登录",
       "signOut": "在此设备退出",
       "signingOut": "正在退出…",
@@ -374,6 +374,34 @@
       "crate": "{{name}} {{version}}",
       "withAuthors": "{{crate}}（{{authors}}）",
       "separator": "、"
+    },
+    "sheet": {
+      "title": "实例",
+      "close": "关闭，回到 {{name}}",
+      "returnTo": "{{name}}，当前实例。回到这里",
+      "youreIn": "正在使用",
+      "others": "其他实例",
+      "recent": "最近使用的在前",
+      "updating": "正在更新…",
+      "opening": "正在打开…",
+      "openFailed": "没能打开 {{name}}，再试一次。",
+      "openFailedOffline": "{{name}} 现在离线。",
+      "openFailedGone": "这个实例已不在你的列表里。",
+      "offlineLine": "离线 · {{host}}",
+      "sharedLine": "{{owner}} 共享 · {{host}}",
+      "offlineBody": "{{name}} 现在离线。在那台电脑上打开 Avibe 并联网，它就会出现为在线。",
+      "refreshList": "刷新列表",
+      "stale": "没能更新实例列表，下面是上次的结果，在线状态可能已经变了。",
+      "noOthers": "还没有其他实例",
+      "noOthersBody": "在另一台电脑上安装 Avibe 并用这个账号配对，它会出现在这里。",
+      "add": "添加实例",
+      "addBody": "在电脑或服务器上安装 Avibe",
+      "accountBody": "退出登录、开源许可",
+      "firstRunSubtitle": "选一个实例打开。以后在屏幕顶部就能切换。",
+      "pullToRefresh": "下拉刷新",
+      "releaseToRefresh": "松开即可刷新",
+      "loadFailed": "没能载入实例列表",
+      "loadFailedBody": "再试一次；如果一直这样，检查一下网络。"
     }
   },
   "common": {
@@ -771,6 +799,20 @@
           "title": "允许屏幕与系统音频录制",
           "detail": "在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中授权正在运行的 Avibe 桌面应用：点击 +，或将 Avibe 拖入列表，然后启用它。"
         }
+      },
+      "windows": {
+        "subtitle": "让 Avibe Agent 查看并操作这台 Windows 电脑。",
+        "title": "Windows 上的电脑操作",
+        "previewBadge": "预览",
+        "previewDetail": "Windows 上的电脑操作目前为预览版，显示缩放、多显示器和输入法仍在验证中。",
+        "apps": "Agent 可以操作以你的 Windows 账户运行的普通应用，无需设置辅助功能或屏幕录制。",
+        "elevated": "以管理员身份运行的窗口会被拒绝。Avibe 不会自行提升权限，Agent 会告诉你它无法操作该窗口。如需让它协助，请不要使用“以管理员身份运行”，重新打开该应用。",
+        "launch": "Agent 会启动它能在这台电脑上可靠找到的桌面应用。商店应用和无法可靠找到的应用，需要你先手动打开：Agent 会请你打开，然后在该窗口中继续操作。",
+        "stop": "关闭电脑操作、退出 Avibe，或 Avibe 意外退出时，驱动会停止，正在进行的操作也会结束。",
+        "enableDetail": "为这台电脑开启电脑操作。在你开启之前，它会保持关闭。",
+        "actionFailed": "桌面应用没有响应。请重试，或退出并重新打开 Avibe。",
+        "unsupportedDetail": "电脑操作需要在这台 Windows 电脑上的 Avibe 桌面应用中设置。请打开桌面应用继续。",
+        "remoteNotice": "请在这台 Windows 电脑上的 Avibe 桌面应用中操作。本页会同步显示进度。"
       }
     },
     "diagnosticsTab": "诊断",
@@ -3592,8 +3634,9 @@
     "navigationLabel": "控制台",
     "statusLabel": "服务状态",
     "versionLabel": "版本",
-    "accountMenuLabel": "账户（{{email}}）",
-    "signedInAs": "当前登录账户",
+    "accountMenuLabel": "账号（{{email}}）",
+    "signedInAs": "当前登录账号",
+    "switchInstanceLabel": "{{name}}，当前实例。切换实例",
     "openMobileAccount": "账号与 Avibe",
     "signOut": "退出登录",
     "signingOut": "正在退出…",
@@ -3635,6 +3678,11 @@
           "title": "允许操作电脑",
           "why": "授予辅助功能和屏幕录制权限。",
           "action": "去授权"
+        },
+        "computer_use_windows": {
+          "title": "开启电脑操作（预览）",
+          "why": "让 {{name}} 操作这台 Windows 电脑上的普通应用。",
+          "action": "去开启"
         },
         "chat_apps": {
           "title": "连接聊天应用",
@@ -3744,7 +3792,15 @@
         "shellNotRunningDetail": "请打开或重新打开 Avibe 桌面应用，以使用电脑操作。",
         "daemonUnreachableDetail": "桌面驱动当前无法连接。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
         "controllerUnavailableDetail": "当前无法连接 Avibe Controller。请等待服务恢复后再使用电脑操作 CLI。",
-        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。"
+        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。",
+        "unsupportedArchitectureDetail": "Windows 上的电脑操作需要 x64 电脑，预览版暂不支持此设备。",
+        "elevatedRuntimeDetail": "Avibe 服务正以管理员身份运行，因此电脑操作不可用。请退出 Avibe，然后不要使用“以管理员身份运行”，正常重新打开。",
+        "sessionUnavailableDetail": "电脑操作需要已登录的 Windows 桌面。请登录这台电脑的桌面，然后重新打开 Avibe。",
+        "sessionLockedDetail": "这台电脑已锁定，或远程会话已断开。请解锁或重新连接后再检查。",
+        "sessionMismatchDetail": "Avibe 服务和桌面应用运行在不同的 Windows 会话中。请退出 Avibe，然后在你正在使用的桌面上重新打开。",
+        "pipeUnverifiedDetail": "Avibe 无法验证与电脑操作驱动的连接，因此拒绝了它。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "stateUnverifiedDetail": "Avibe 无法验证这台电脑上的电脑操作状态，因此拒绝了它。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "lockUnverifiedDetail": "Avibe 无法确认电脑操作由它的桌面应用持有，因此拒绝了它。请退出并重新打开 Avibe 桌面应用。"
       }
     },
     "openControlPanel": "进入控制面板",
@@ -6482,12 +6538,17 @@
       "empty": "暂无活动。"
     },
     "askOff": {
+      "setupFailed": "没能设置 Passkey。再试一次。",
+      "setupConflict": "Passkey 刚在别处设置好了。再关一次试试。",
+      "setupDone": "Passkey 已设置好。再关一次就能关闭。",
+      "settingUp": "正在设置 Passkey…",
+      "setupAction": "设置 Passkey",
       "turnedOff": "已用 Passkey 关闭，立即生效。",
       "offHintEdit": "关闭需要用 Passkey 确认，确认后立即生效，不用点保存。",
       "legacyRegistration": "你的 Passkey 是在很早的预览版里设置的，这台 Avibe 没有存下确认关闭所需的资料。开关会保持打开。",
       "waiting": "等待 Passkey 确认…",
       "popupBlocked": "浏览器拦截了确认窗口。请允许弹出窗口，再关一次。",
-      "setupRequired": "关闭需要 Passkey。添加一个保护档密钥时会设置 Passkey，之后就能在这里关闭。",
+      "setupRequired": "关闭需要 Passkey，这台 Avibe 还没有设置。现在设置一个，之后就能在这里关闭。",
       "factorUnavailable": "这台 Avibe 记录的 Passkey 现在用不了，不能用来确认关闭。开关会保持打开。",
       "expired": "确认超时了，没有关闭。再关一次即可。",
       "clockSkew": "这台设备的时间不准，没有关闭。校准时间后再试。",
@@ -6657,8 +6718,9 @@
       "password": "随机密码",
       "key": "随机密钥",
       "regenerate": "换一个",
-      "bits": "约 {{bits}} 位随机性 · 改任何设置都会立刻换一个",
+      "bits": "约 {{bits}} 位随机性",
       "suggested": "按 Agent 的建议预设",
+      "suggestedAdjusted": "按 Agent 的建议预设，长度已调整到 {{min}}–{{max}} 位以内",
       "type": "类型",
       "typePassword": "密码",
       "typeHex": "Hex",
@@ -6675,6 +6737,19 @@
       "base64Note": "标准 Base64（含 + / =），和 openssl rand -base64 输出的一样。",
       "generated": "已生成 · 未保存",
       "generatedHint": "保存时才存下；直接输入就换成你自己的值。"
+    },
+    "generatedBy": {
+      "agent": "Agent 生成",
+      "cli": "命令行生成",
+      "agentInSession": "Agent 在会话「{{session}}」里生成",
+      "cliLong": "在命令行里生成",
+      "password": "密码 {{count}} 位",
+      "hex": "Hex {{count}} 字节",
+      "base64": "Base64 {{count}} 字节",
+      "agentNote": "它没见过这个值，和其他标准档密钥一样可以使用它。",
+      "badge": "{{who}} · {{detail}}",
+      "line": "{{who}} · {{when}} · <recipe>{{recipe}}</recipe>",
+      "openSession": "打开会话"
     }
   },
   "permissions": {

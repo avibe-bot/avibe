@@ -11759,7 +11759,7 @@ def cmd_vault_sign(args):
             args, digest=digest, message_hex=message_hex, help_command=help_command,
         )
         engine = _open_vault_engine()
-        api._preflight_hd_signing(engine, name, derivation, scheme)
+        derivation = api._preflight_hd_signing(engine, name, derivation, scheme)
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
             if meta.get("kind") != "keypair":
@@ -19995,7 +19995,7 @@ def build_parser():
     vault_generate_parser.add_argument("name", help="New secret name, or existing static Standard secret for a new field")
     vault_generate_parser.add_argument("--field", help="New field label; new secrets default to value")
     vault_generate_parser.add_argument("--type", choices=["password", "hex", "base64"], default="password", help="Format (default password)")
-    vault_generate_parser.add_argument("--length", type=int, help="Password characters, 12..128 (default 24); password only")
+    vault_generate_parser.add_argument("--length", type=int, help="Password characters, 8..100 (default 24); password only")
     vault_generate_parser.add_argument("--bytes", type=int, help="Random bytes, 16..64 (default 32); hex/base64 only")
     vault_generate_parser.add_argument("--no-digits", action="store_true", default=None, help="Exclude digits; password only")
     vault_generate_parser.add_argument("--no-symbols", action="store_true", default=None, help="Exclude symbols; password only")
@@ -20130,7 +20130,7 @@ def build_parser():
     vault_sign_parser.add_argument("name", help="Keypair secret name")
     vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="HD only; selects chain and scheme")
     vault_sign_parser.add_argument("--account", type=int, help="HD index 0..19 (default: 0)")
-    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="HD Bitcoin type (default: p2tr)")
+    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="Default p2tr; protected:p2tr only")
     vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",

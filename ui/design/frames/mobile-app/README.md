@@ -369,6 +369,7 @@ live instance: where you are, the other instances by recent use, Add, and the
 account as its last row (a page pushed inside the sheet). Drag down, ✕ or the
 current instance return. First use keeps a full page with the same rows. Plan,
 variants A/B, desktop consistency and build notes:
-`docs/plans/2026-11-13-ios-instance-pages.md`. Kit:
-`ui/design/kit/mobile-instance-sheet.tsx`; frames `switcher/*`, 19 states ×
-zh/en, light and dark.
+`docs/plans/2026-11-13-ios-instance-pages.md`. The frames `switcher/*` (20
+states × zh/en, light and dark) draw the shipped pages; the kit
+`ui/design/kit/mobile-instance-sheet.tsx` keeps only what the web cannot render:
+the native sheet, the gestures, and the native failure screen.

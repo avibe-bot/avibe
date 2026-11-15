@@ -30,6 +30,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Avibe uses the camera when you choose to capture an attachment.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Lets Avibe connect directly to the computer running Avibe when it's on the same network. If you don't allow it, Avibe still works over the internet.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Avibe uses the microphone for hold-to-talk and voice transcription.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

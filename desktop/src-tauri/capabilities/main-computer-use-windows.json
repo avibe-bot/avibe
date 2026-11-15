@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-computer-use-windows",
+  "description": "Windows Preview opt-in from the adopted loopback Workbench only; no permission-pane or elevation action.",
+  "platforms": ["windows"],
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": ["allow-computer-use-enable"]
+}

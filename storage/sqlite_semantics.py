@@ -60,4 +60,7 @@ def sqlite_cast_integer(raw: Any) -> int:
     match = _CAST_INTEGER_PREFIX.match(str(raw))
     if match is None or not match.group(2):
         return 0
-    return min(max(int(match.group(1) + match.group(2)), _INT64_MIN), _INT64_MAX)
+    digits = match.group(2).lstrip("0") or "0"
+    if len(digits) > len(str(_INT64_MAX)):
+        return _INT64_MIN if match.group(1) == "-" else _INT64_MAX
+    return min(max(int(match.group(1) + digits), _INT64_MIN), _INT64_MAX)

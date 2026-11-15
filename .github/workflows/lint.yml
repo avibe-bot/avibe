@@ -108,7 +108,8 @@ jobs:
           .venv/bin/python -m pytest -q
           tests/test_ci_scope.py tests/test_ci_manifest_guard.py tests/test_ci_release_backstop.py
           tests/test_ci_docs_only.py tests/test_ci_scenario_evidence.py
-          tests/test_workflow_call_permissions.py tests/test_repository_guidance.py tests/test_ci_pipeline.py
+          tests/test_workflow_call_permissions.py tests/test_workflow_runner_isolation.py
+          tests/test_repository_guidance.py tests/test_ci_pipeline.py
           -k 'not unit_file and not file_metrics and not shard_lanes and not release_gating_is_read'
 
   python-smoke:
@@ -871,7 +872,8 @@ jobs:
   npm-wrapper:
     needs: changes
     if: fromJSON(needs.changes.outputs.plan).jobs['npm-wrapper'] == 'run'
-    runs-on: [self-hosted, Linux, X64, avibe]
+    # Fork PR code must never execute on a persistent self-hosted machine.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -1415,8 +1417,8 @@ jobs:
           [xml]$report = Get-Content ci-junit/computer-use-native.xml -Raw
           $cases = @($report.SelectNodes('//testcase') | Where-Object { $_.name -like 'test_windows_native_*' })
           $pathCases = @($cases | Where-Object { $_.name -like 'test_windows_native_path_*' })
-          if ($cases.Count -ne 9 -or $pathCases.Count -ne 2) {
-            throw "Expected seven foundation plus two native path cases, got $($cases.Count) total / $($pathCases.Count) path"
+          if ($cases.Count -ne 13 -or $pathCases.Count -ne 4) {
+            throw "Expected nine foundation/state-reader/token plus four native path cases, got $($cases.Count) total / $($pathCases.Count) path"
           }
           if (@($cases | Where-Object { $_.SelectSingleNode('skipped') }).Count -ne 0) {
             throw "Native Computer Use cases must execute, not skip"

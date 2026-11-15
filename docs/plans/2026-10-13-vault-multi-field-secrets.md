@@ -236,8 +236,11 @@ saves, or authorizes anything: the browser may use it to preset the user's
 explicit generator action on either tier. Recipes are strict objects:
 
 - Password: `{"type":"password","length":24,"digits":true,"symbols":true,"no_lookalikes":false}`.
-  `length` is 12–128 characters; the other options are booleans. Omitted options
-  use these defaults.
+  `length` is 8–100 characters, the browser generator's range (a request saved
+  earlier with up to 128 presets 100 and says so). Agent direct generation uses
+  the same 8–100 range (`vibe vault generate`, avault >=0.1.14), superseding the
+  previous Agent-only 12-character floor on 2026-11-15; the other options are
+  booleans. Omitted options use these defaults.
 - Hex or standard padded Base64: `{"type":"hex","bytes":32}` or
   `{"type":"base64","bytes":32}`. `bytes` is 16–64 and defaults to 32;
   password options are not accepted for these types.
@@ -325,7 +328,7 @@ secrets with fields work without it; protected secrets with fields need it.
 - Ordinary CLI commands cannot replace or remove field values; values enter
   through the browser. The narrow `vibe vault generate` exception creates only
   a new random static Standard secret or an explicitly named new field, with
-  generation and sealing entirely inside avault >=0.1.13. See
+  generation and sealing entirely inside avault >=0.1.14. See
   `2026-11-14-vault-agent-generate.md` for additive-write guards and typed
   per-field generated provenance.
 - `export` remains deprecated and never delivers values. Agent-initiated field

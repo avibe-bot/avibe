@@ -5,6 +5,7 @@ import { BellRing, ChevronDown, ChevronRight, Cpu, MessagesSquare, MousePointer2
 import clsx from 'clsx';
 
 import type { SetupItem } from '@/lib/homePreferences';
+import type { ComputerUseHost } from '../workbench/computerUseStatusCopy';
 import { useIsDesktop } from '@/lib/useIsDesktop';
 import { Button } from '../ui/button';
 
@@ -29,6 +30,7 @@ export function GettingStarted({
   onAction,
   onNotNeeded,
   onLater,
+  computerUseHost = 'macos',
 }: {
   pending: SetupItem[];
   /** Who the copy speaks of: the main Bot's name. */
@@ -36,6 +38,8 @@ export function GettingStarted({
   onAction: (item: SetupItem) => void;
   onNotNeeded: (item: SetupItem) => void;
   onLater: () => void;
+  /** A Windows host turns Computer Use on without macOS permission grants, in Preview. */
+  computerUseHost?: ComputerUseHost;
 }) {
   const { t } = useTranslation();
   const desktop = useIsDesktop();
@@ -45,8 +49,10 @@ export function GettingStarted({
     ? (['model'] as SetupItem[])
     : expanded ? pending : pending.slice(0, desktop ? 2 : 1);
   const rest = pending.length - shown.length;
+  const copyItem = (item: SetupItem) =>
+    item === 'computer_use' && computerUseHost === 'windows' ? 'computer_use_windows' : item;
   const copy = (item: SetupItem, part: 'title' | 'why' | 'action') =>
-    t(`workbench.home.setup.${item}.${part}`, { name });
+    t(`workbench.home.setup.${copyItem(item)}.${part}`, { name });
   return (
     <section className="flex w-full flex-col rounded-2xl border border-edge bg-surface p-1.5 shadow-elevation-0">
       <header className={clsx('flex items-center gap-2 px-2.5', desktop ? 'h-8' : 'h-7')}>

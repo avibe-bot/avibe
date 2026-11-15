@@ -2,6 +2,8 @@
 
 NPM entrypoint for [Avibe](https://github.com/avibe-bot/avibe), the local-first Agent OS.
 
+On a Mac or Windows PC, the [Desktop App](https://avibe.bot) is the recommended way to run Avibe; this package is for people who want the command line through npm.
+
 Avibe is installed and upgraded as the Python package `avibe-os`.
 This package is a thin bootstrapper for developers who expect npm-native entry
 points.

@@ -12,16 +12,15 @@ final class DirectPathAppTests: XCTestCase {
         "https://instance-one.example"
     )!
 
-    // MARK: The App as shipped
+    // MARK: App composition controls
 
-    /// Built exactly as `AvibeApp` builds it, with no transport argument.
-    /// Observed from before the App exists and at every step: no `direct`
+    /// The compatibility path with no registered transport: no `direct`
     /// capability, `direct.status` unsupported, no event, WebKit's
     /// `proxyConfigurations` setter never called on any store, and no
-    /// listening socket. The next test, with a stand-in transport, is the
-    /// positive control: the same capability, count, and scan do move.
+    /// listening socket. The registered App's positive control is covered by
+    /// `testWithATransportTheRouteIsWrittenBeforeTheFirstLoadAndTheStatusReachesThePage`.
     @MainActor
-    func testTheAppAsShippedHasNoDirectCapabilityNoListenerAndNoRouteWrite() async throws {
+    func testWithoutATransportHasNoDirectCapabilityNoListenerAndNoRouteWrite() async throws {
         try assertSocketScanSeesListeners()
         let routeWrites = try ProxyConfigurationWrites.count()
         var listening: Set<ListeningSocket> = []
@@ -568,21 +567,88 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertEqual(starts, 1)
 
-        // A reload held in the background, and the runtime is replaced
-        // before the return: it is never made.
-        let primary = try XCTUnwrap(
-            controller.view.subviews.compactMap { $0 as? WKWebView }.first
-        )
-        enterBackground()
-        controller.webViewWebContentProcessDidTerminate(primary)
-        app.showInstancePicker()
+        // A replacement selection ends the held runtime before the return.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         enterForeground()
         try await eventually { app.directLoadGate(for: runtime) != .held }
         try await settle()
         XCTAssertEqual(starts, 1)
     }
 
-    /// The gate the runtime's WebView is given is the App's own: held while
+    @MainActor
+    func testFailureInstancePickerCoversTheSelectedRuntimeWithoutStoppingIt()
+        async throws
+    {
+        let app = try await makeApp(directTransport: nil)
+        let runtime = try await select("instance-1", in: app)
+        let identity = app.runtimeIdentity
+
+        // The native failure action uses the same sheet as the avatar and
+        // leaves the selected route available for Close/current-instance.
+        app.showInstancePicker()
+        XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+        XCTAssertEqual(app.runtimeIdentity, identity)
+        XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        XCTAssertTrue(app.returnToRuntime())
+        XCTAssertEqual(app.route, .browser(runtime))
+    }
+
+    /// The named entry and avatar share one presentation owner: repeated
+    /// requests cannot change its mode, reload the runtime or mutate selection.
+    @MainActor
+    func testNamedInstanceEntryKeepsOneSheetAndReadsTheCurrentCatalogName() async throws {
+        for initialMode in [MobileOnboardingStartScreen.sheet, .sheetInstances, .sheetAccount] {
+            let session = SessionAnswerOverride()
+            let app = try await makeApp(directTransport: nil, sessionResponse: { session.response })
+            XCTAssertNil(app.selectedInstanceName())
+            let runtime = try await select("instance-1", in: app)
+            let identity = app.runtimeIdentity
+            XCTAssertEqual(app.selectedInstanceName(), "One")
+
+            let presentations: [(MobileOnboardingStartScreen, () -> Void)] = [
+                (.sheet, app.showAccount), (.sheetInstances, app.showInstances),
+                (.sheetAccount, app.showAccountRoot),
+            ]
+            let initial = try XCTUnwrap(presentations.first { $0.0 == initialMode })
+            initial.1()
+            for (_, present) in presentations { present() }
+            XCTAssertEqual(app.accountSheetStartScreen, initialMode)
+            XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+            XCTAssertEqual(app.runtimeIdentity, identity)
+            XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+
+            session.replace(with: .json(
+                """
+                {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+                  {"id":"instance-1","name":"Renamed One","host":"instance-one.example",
+                   "url":"https://instance-one.example","relationship":"owner","available":true},
+                  {"id":"instance-2","name":"Two","host":"instance-two.example",
+                   "url":"https://instance-two.example","relationship":"owner","available":true}
+                ]}
+                """
+            ))
+            _ = try await app.mobileSessionCoordinator.refresh()
+            XCTAssertEqual(app.selectedInstanceName(), "Renamed One")
+            XCTAssertEqual(runtime.instance.name, "One")
+            XCTAssertEqual(app.runtimeIdentity, identity)
+            XCTAssertTrue(app.returnToRuntime())
+            XCTAssertEqual(app.route, .browser(runtime))
+            XCTAssertFalse(app.returnToRuntime())
+
+            // After dismissal, every entry can choose its own mode; all
+            // other valid entry requests stay quiet while it is presented.
+            for (mode, present) in presentations {
+                present()
+                for (_, duplicate) in presentations { duplicate() }
+                XCTAssertEqual(app.accountSheetStartScreen, mode)
+                XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+                XCTAssertEqual(app.runtimeIdentity, identity)
+                XCTAssertTrue(app.returnToRuntime())
+                XCTAssertEqual(app.route, .browser(runtime))
+            }
+        }
+    }
+
     /// the App is in the background with a route, open again once the
     /// listener serves.
     @MainActor
@@ -700,6 +766,10 @@ final class DirectPathAppTests: XCTestCase {
 
     // MARK: The App with a transport
 
+    /// The registered App's positive control, with a stand-in transport so
+    /// this test exercises the App/seam composition without native iroh:
+    /// the route is written before the first load, the capability reaches the
+    /// page, and direct path reports change its status.
     @MainActor
     func testWithATransportTheRouteIsWrittenBeforeTheFirstLoadAndTheStatusReachesThePage() async throws {
         let transport = StandInDirectTransport()
@@ -819,6 +889,72 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.route, .browser(runtime))
         XCTAssertFalse(app.mobileSessionCoordinator.isAccountSurfaceActive)
         withExtendedLifetime(controller) {}
+    }
+
+    /// Exercise the real AppModel -> NativePushCoordinator cleanup callback,
+    /// not just the coordinator hook: opening Account in this early window
+    /// must bootstrap signed out rather than leave the new page on bootError.
+    @MainActor
+    func testAccountReopenedDuringRefreshPushCleanupBootstrapsSignedOut() async throws {
+        let session = SessionAnswerOverride()
+        let keychain = InMemoryPushKeychainStore()
+        let marker = InMemoryPushInstallationMarkerStore()
+        let center = HeldCleanupNotificationCenter()
+        let app = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { session.response },
+            pushKeychain: keychain,
+            pushInstallationMarker: marker,
+            pushNotificationCenter: center
+        )
+        let runtime = try await select("instance-1", in: app)
+        let installationID = UUID()
+        marker.installationID = installationID
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 12, count: 32),
+            accountID: "account-1", bindGeneration: 1,
+            providerGeneration: 0, provider: nil,
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        // A retired key is enough for notification cleanup, without enabling
+        // APNs registration, prompting permissions, or recovery networking.
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "fixture-retired-key", instanceOrigin: "https://instance-one.example",
+            accountID: "account-1", accountGeneration: 1, bindGeneration: 1,
+            privateKey: Data(), authSecret: Data(), vapidKeyHash: "fixture",
+            state: .retiring, pendingRevoke: false, replacementRegistrationIDs: [],
+            retirementDeadline: .distantFuture
+        ))
+        let fetched = FixtureEvent(description: "refresh fetch held before 401")
+        let releaseFetch = DispatchSemaphore(value: 0)
+        defer { releaseFetch.signal() }
+        session.holdSignedOut(started: fetched, release: releaseFetch)
+        app.showAccount()
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let refresh = Task { try await app.mobileSessionCoordinator.refresh() }
+        await fulfillment(of: [fetched.expectation], timeout: 30)
+        XCTAssertTrue(app.returnToRuntime())
+        XCTAssertEqual(app.route, .browser(runtime))
+        releaseFetch.signal()
+        await fulfillment(of: [center.cleanupStarted], timeout: 30)
+
+        app.showAccount()
+        XCTAssertEqual(app.route, .onboarding(.account))
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let replacement: Result<MobileSessionState, Error>
+        do {
+            replacement = .success(try await app.mobileSessionCoordinator.bootstrap())
+        } catch {
+            replacement = .failure(error)
+        }
+        center.releaseCleanup()
+        let final = try await refresh.value
+        trackStore(of: app)
+        XCTAssertEqual(try replacement.get(), .signedOut)
+        XCTAssertEqual(final, .signedOut)
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        XCTAssertEqual(app.route, .onboarding(.account))
     }
 
     // MARK: A runtime abandoned when its WebView registers
@@ -985,9 +1121,13 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(app.directRendezvousWebView(for: selection))
         XCTAssertNil(app.directRendezvousWebView(for: second))
 
-        // The instance picker ends the selection.
+        // The instance picker now opens the instances sheet over the
+        // selected runtime; it does not end the selection by itself.
         app.showInstancePicker()
-        XCTAssertNil(app.directRendezvousWebView(for: second))
+        guard case .accountOverBrowser(let covered) = app.route else {
+            return XCTFail("The instance picker did not open the sheet")
+        }
+        XCTAssertEqual(covered.instance.id, "instance-2")
     }
 
     /// Without a transport there is no target, so no WebView is handed
@@ -1683,6 +1823,10 @@ final class DirectPathAppTests: XCTestCase {
         directTransport: DirectTransporting?,
         directFaultMarker: DirectFaultMarkerStoring? = nil,
         pushHolds: [PushHold] = [],
+        sessionResponse: (@Sendable () -> LocalHTTPResponse?)? = nil,
+        pushKeychain: InMemoryPushKeychainStore? = nil,
+        pushInstallationMarker: InMemoryPushInstallationMarkerStore? = nil,
+        pushNotificationCenter: PushNotificationCentering? = nil,
         beforeTheAppExists: () throws -> Void = {}
     ) async throws -> AppModel {
         let server = try LocalHTTPServer { request in
@@ -1695,6 +1839,9 @@ final class DirectPathAppTests: XCTestCase {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
+                if let response = sessionResponse?() {
+                    return response
+                }
                 return .json(
                     """
                     {
@@ -1750,10 +1897,10 @@ final class DirectPathAppTests: XCTestCase {
                 controlPlane: controlPlane,
                 directTransport: directTransport,
                 directFaultMarker: directFaultMarker,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         } else if let directTransport {
@@ -1761,20 +1908,20 @@ final class DirectPathAppTests: XCTestCase {
                 defaults: defaults,
                 controlPlane: controlPlane,
                 directTransport: directTransport,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         } else {
             app = AppModel(
                 defaults: defaults,
                 controlPlane: controlPlane,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         }
@@ -2418,6 +2565,63 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
         loadingWebView = nil
         pending?.resume(with: result)
     }
+}
+
+/// Only the loopback server reads this from outside the main actor.
+private final class SessionAnswerOverride: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResponse: LocalHTTPResponse?
+    private var heldFetch: (FixtureEvent, DispatchSemaphore)?
+    var response: LocalHTTPResponse? {
+        lock.lock()
+        let response = storedResponse
+        let held = heldFetch
+        heldFetch = nil
+        lock.unlock()
+        // A 401 is consumed at headers, so hold BEFORE responding instead of
+        // holding its body (which would not actually suspend fetchSession).
+        if let (started, release) = held {
+            started.signal()
+            release.wait()
+        }
+        return response
+    }
+
+    func replace(with response: LocalHTTPResponse) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedResponse = response
+    }
+
+    func holdSignedOut(started: FixtureEvent, release: DispatchSemaphore) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedResponse = .status(401)
+        heldFetch = (started, release)
+    }
+}
+
+@MainActor
+private final class HeldCleanupNotificationCenter: PushNotificationCentering {
+    let cleanupStarted = XCTestExpectation(description: "native push notification cleanup suspended")
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func deliveredNotifications() async -> [PushNotificationCenterEntry] {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            cleanupStarted.fulfill()
+        }
+        return []
+    }
+
+    func releaseCleanup() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry] { [] }
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
 }
 
 @MainActor

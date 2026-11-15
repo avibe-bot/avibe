@@ -110,14 +110,87 @@ def test_app_pass_cannot_override_independent_host_contradictions(tmp_path, muta
         case.confirm(app)
 
 
-@pytest.mark.parametrize("name", ["not_admitted", "wrong_identity"])
-def test_negative_verdict_does_not_invent_reasons_or_accept_deadline(tmp_path, name):
+def negative_evidence(tmp_path, name):
     case = host.Case(name, "a" * 64, tmp_path / "unused", tmp_path)
-    app = {"outcome": "passed", "observed": {"control_tcp": True, "failure": "handshake", "case_streams": 0}}
+    app = {"outcome": "passed", "observed": {
+        "control_tcp": True, "failure": "handshake", "local_streams": 0,
+        "payload_streams": 0, "usable": False,
+    }}
+    return case, app
+
+
+@pytest.mark.parametrize("local_streams", [0, 1, 2])
+def test_not_admitted_local_opens_are_not_host_ingress(tmp_path, local_streams):
+    case, app = negative_evidence(tmp_path, "not_admitted")
+    app["observed"].update(failure="closed_by_peer", local_streams=local_streams)
     observed = case.confirm(app)
     assert observed["case_streams"] == 0 and "peer_closed_reason" not in observed
-    app["observed"]["failure"] = "local_deadline"
-    with pytest.raises(host.HostFault, match="rejection"):
+    assert app["observed"]["local_streams"] == local_streams
+    # Any ingress, even malformed, contradicts the same App evidence.
+    case.ingress.streams.append({"kind": "malformed", "phase": "case", "authenticated": False})
+    with pytest.raises(host.HostFault, match="reached ingress"):
+        case.confirm(app)
+
+
+@pytest.mark.parametrize("name", ["not_admitted", "wrong_identity"])
+@pytest.mark.parametrize("failure", ["local_deadline", "timeout", "local_shutdown", "local_close", "", None, [], True])
+def test_negative_verdict_does_not_credit_unqualified_failure(tmp_path, name, failure):
+    case, app = negative_evidence(tmp_path, name)
+    observed = case.confirm(app)
+    assert observed["case_streams"] == 0 and "peer_closed_reason" not in observed
+    app["observed"]["failure"] = failure
+    with pytest.raises(host.HostFault):
+        case.confirm(app)
+
+
+@pytest.mark.parametrize("name", ["not_admitted", "wrong_identity"])
+@pytest.mark.parametrize("field", ["control_tcp", "failure", "local_streams", "payload_streams", "usable"])
+def test_negative_observations_require_every_field(tmp_path, name, field):
+    case, app = negative_evidence(tmp_path, name)
+    del app["observed"][field]
+    with pytest.raises(host.HostFault):
+        case.confirm(app)
+
+
+@pytest.mark.parametrize("name", ["not_admitted", "wrong_identity"])
+@pytest.mark.parametrize("field,value", [
+    ("case_streams", 0), ("setup_attempts", 0), ("successful_connects", 0), ("extra", None),
+    ("control_tcp", 1), ("control_tcp", False), ("control_tcp", "true"),
+    ("usable", 0), ("usable", True), ("usable", "false"), ("usable", None),
+    ("payload_streams", 1),
+])
+def test_negative_observations_reject_extra_or_contradictory_fields(tmp_path, name, field, value):
+    case, app = negative_evidence(tmp_path, name)
+    app["observed"][field] = value
+    with pytest.raises(host.HostFault):
+        case.confirm(app)
+
+
+@pytest.mark.parametrize("name", ["not_admitted", "wrong_identity"])
+@pytest.mark.parametrize("field", ["local_streams", "payload_streams"])
+@pytest.mark.parametrize("value", [True, False, 0.0, 1.0, -1, "0", None, []])
+def test_negative_counts_are_nonnegative_integers(tmp_path, name, field, value):
+    case, app = negative_evidence(tmp_path, name)
+    app["observed"][field] = value
+    with pytest.raises(host.HostFault):
+        case.confirm(app)
+
+
+@pytest.mark.parametrize("failure,local_streams", [("closed_by_peer", 0), ("handshake", 1)])
+def test_wrong_identity_cannot_credit_post_connect_rejection(tmp_path, failure, local_streams):
+    case, app = negative_evidence(tmp_path, "wrong_identity")
+    app["observed"].update(failure=failure, local_streams=local_streams)
+    with pytest.raises(host.HostFault, match="before any local stream"):
+        case.confirm(app)
+
+
+@pytest.mark.parametrize("name", ["not_admitted", "wrong_identity"])
+def test_negative_app_failure_cannot_be_overridden(tmp_path, name):
+    case, app = negative_evidence(tmp_path, name)
+    # The App must fail wrong_identity on ANY successful connect, even with no
+    # successful local open. The host must not turn that failed result into a pass.
+    app["outcome"] = "failed"
+    with pytest.raises(host.HostFault):
         case.confirm(app)
 
 

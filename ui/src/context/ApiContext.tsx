@@ -71,6 +71,7 @@ import {
   type SessionDraftServerState,
   type SessionDraftWrite,
 } from '../lib/sessionDraftPersistence';
+import { sessionDraftAttachmentsCache } from '../lib/sessionDraftAttachmentsCache';
 import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
 import { useLatestRef } from '../lib/useLatestRef';
 import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
@@ -148,6 +149,9 @@ export type VaultSecret = {
   fields?: string[];
   /** Present only when the stored extra-field section could not be read safely. */
   fields_state?: 'corrupt';
+  /** Fields whose current value an Agent (`vibe vault generate` from a Session) or the CLI generated
+   *  inside avault. The server drops an entry when the user replaces or removes that value. */
+  generated?: VaultGeneratedField[];
   /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
   tags: string[];
   kind: string;
@@ -173,6 +177,19 @@ export type VaultSecret = {
   use_count: number;
   created_at: string;
   updated_at: string;
+};
+
+/** Who generated one field's current value. `session_title` is the title when it was generated;
+ *  the Session may have been renamed or deleted since. */
+export type VaultGeneratedField = {
+  field: string;
+  by: 'agent' | 'cli';
+  session_id: string | null;
+  session_title: string | null;
+  at: string;
+  type: 'password' | 'hex' | 'base64';
+  length?: number;
+  bytes?: number;
 };
 
 /** A Bitcoin script type the server can sign for: Legacy P2PKH, Native SegWit P2WPKH, Taproot. */
@@ -1100,6 +1117,8 @@ export type ApiContextType = {
   completeVaultSigningPolicyDowngrade: (name: string, payload: { context: PolicyDowngradeContext; authorization: VaultWebAuthnAuthz }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   /** Derive a seed wallet's Legacy and SegWit public keys from its sealed seed (no words). */
   prepareVaultBitcoinAddressTypes: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  /** Commit a Passkey and Vault root on their own, without a protected key (contract v1.1 §G). */
+  completeVaultSetup: (payload: { wrap_meta: string; authz_factor_registration: VaultWebAuthnRegistrationPayload }) => Promise<{ ok: boolean; exists?: boolean; wrap_meta?: string; code?: string; message?: string }>;
   updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecretField: (name: string, field: string, payload: { expected_updated_at: string }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecretFields: (name: string, payload: VaultFieldsBatchPayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
@@ -2820,8 +2839,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
   const sessionDraftPersistence = useMemo(() => new SessionDraftPersistence(), []);
 
-  const convergeSessionArchived = (sessionId: string) => {
+  const clearSessionDraftCaches = (sessionId: string) => {
     sessionDraftPersistence.clearSession(sessionId);
+    sessionDraftAttachmentsCache.clear(sessionId);
+  };
+
+  const convergeSessionArchived = (sessionId: string) => {
+    clearSessionDraftCaches(sessionId);
     void forgetLocalStoreSession(sessionId);
     for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
       try {
@@ -3460,7 +3484,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (envelope.data.session_id) {
         clearSessionReadCache(envelope.data.session_id);
         if (envelope.data.event === 'archived') {
-          sessionDraftPersistence.clearSession(envelope.data.session_id);
+          clearSessionDraftCaches(envelope.data.session_id);
         }
         // A Session that leaves the reader's Inbox takes its history in the local
         // message store with it (docs/plans/local-sync-store.md section 6.2).
@@ -4529,7 +4553,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // whole when it is opened again (lib/chatSnapshots).
         void recordLocalStorePage(stored, { kind: 'tail' }, payload, payload?.session, payload ? chatChromeFromBootstrap(payload) : undefined);
         if (payload?.session?.status === 'archived') {
-          sessionDraftPersistence.clearSession(sessionId);
+          clearSessionDraftCaches(sessionId);
           return payload;
         }
         const server = sessionDraftServerState(payload?.draft);
@@ -4556,7 +4580,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     archiveSession: async (sessionId) => {
       const payload = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
-      sessionDraftPersistence.clearSession(sessionId);
+      clearSessionDraftCaches(sessionId);
       return payload;
     },
     convergeSessionArchived,
@@ -4824,6 +4848,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createVaultSigningPolicyChallenge: (name, payload) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/signing-policy/challenge`, payload, { handleError: false }),
     completeVaultSigningPolicyDowngrade: (name, payload) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/signing-policy`, payload, { handleError: false }),
     prepareVaultBitcoinAddressTypes: (name, opts) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/bitcoin-address-types`, {}, opts),
+    completeVaultSetup: (payload) => postJson('/api/vault/setup', payload, { handleError: false }),
     updateVaultSecretField: async (name, field, payload, opts) => {
       const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;
       const { payloadJson } = await requestJson(path, {

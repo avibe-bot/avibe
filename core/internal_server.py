@@ -836,12 +836,17 @@ def create_app(
 
     @app.get("/internal/desktop/capabilities")
     async def _desktop_capabilities() -> dict[str, Any]:
-        from core.computer_use import COMPUTER_USE_SCHEMA_VERSION
+        from core.computer_use import COMPUTER_USE_SCHEMA_VERSION, windows_computer_use_supported
 
-        return {
+        result = {
             "computer_use_schema": COMPUTER_USE_SCHEMA_VERSION,
             "controller_id": str(controller.controller_id),
         }
+        if os.name == "nt":
+            # Schema v1 predates Windows admission. An old Runtime must never
+            # authorize a Windows daemon just because it understands the JSON.
+            result["computer_use_windows_schema"] = int(windows_computer_use_supported())
+        return result
 
     @app.post("/internal/computer-use")
     async def _computer_use(request: Request) -> Any:

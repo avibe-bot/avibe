@@ -260,6 +260,48 @@ it.each([12, 23, 47, 101, 211, 431, 863, 1723])('keeps final-layout invariants t
 // Give shared CI workers a bounded budget without reducing seeds, steps or invariants.
 }, 15_000);
 
+// The name rule shows while a field name has focus and is hidden in place on blur. Unmounting it
+// moved the dialog's Save up mid-click (focus leaves the name on the press), so the click was lost.
+it('keeps the field-name rule in place, hidden and unannounced, when the name loses focus', () => {
+  renderEditor();
+  const name = screen.getByLabelText('Default field name');
+  fireEvent.focus(name);
+  const rule = screen.getByText(en.vaults.fields.nameRule);
+  expect(rule.classList.contains('invisible')).toBe(false);
+  expect(rule.getAttribute('aria-hidden')).toBeNull();
+  fireEvent.blur(name);
+  expect(screen.getByText(en.vaults.fields.nameRule)).toBe(rule);
+  expect(rule.classList.contains('invisible')).toBe(true);
+  expect(rule.getAttribute('aria-hidden')).toBe('true');
+});
+
+it('says nothing about an empty new field’s blank name when it loses focus; it is not saved', () => {
+  renderEditor();
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  const name = screen.getByLabelText('New field name');
+  fireEvent.blur(name);
+  expect(screen.queryByText(en.vaults.fields.nameRequired)).toBeNull();
+  expect(lastState()).toEqual({ dirty: false, valid: true });
+  // Once it has a value, the blank name is what blocks Save, and it says so.
+  change('New field value', 'seed');
+  expect(screen.getByText(en.vaults.fields.nameRequired)).toBeTruthy();
+  expect(lastState()).toEqual({ dirty: true, valid: false });
+});
+
+it('explains an empty new field’s blank name at once when other changes make it block Save', () => {
+  renderEditor();
+  change('Default field name', 'credential');
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  const name = screen.getByLabelText('New field name');
+  const error = screen.getByText(en.vaults.fields.nameRequired);
+  expect(name.getAttribute('aria-invalid')).toBe('true');
+  expect(name.getAttribute('aria-describedby')).toBe(error.id);
+  expect(lastState()).toEqual({ dirty: true, valid: false });
+  // Already shown before the blur, so leaving the name changes nothing.
+  fireEvent.blur(name);
+  expect(screen.getByText(en.vaults.fields.nameRequired)).toBe(error);
+});
+
 it('saves nothing and reports clean when nothing changed', async () => {
   renderEditor();
   expect(lastState()).toEqual({ dirty: false, valid: true });

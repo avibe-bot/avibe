@@ -5,13 +5,18 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 import math
 import statistics
+import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import requests
 from prometheus_client.parser import text_string_to_metric_families
+
+
+logger = logging.getLogger(__name__)
 
 
 SAMPLE_INTERVAL_SECONDS = 15
@@ -180,6 +185,105 @@ def probe_request_path(
         latency_ms=tuple(latency_values),
         successes=tuple(successes),
     )
+
+
+class BackgroundRequestPathProbe:
+    """Single-flight public probe with a DNS-inclusive monotonic window budget.
+
+    The monitor only polls. A timed-out OS resolver cannot be cancelled safely,
+    so retain its worker slot until it exits, ignore late results, and never
+    queue more workers behind it. Only the worker uses the persistent session;
+    shutdown defers its close until outstanding IO has finished.
+    """
+
+    def __init__(self, session_factory: Callable[[], requests.Session], *, attempts: int = 3, timeout: float = 3.5):
+        self._session = session_factory()
+        self._closed = False
+        self._attempts = attempts
+        self._timeout = timeout
+        self._budget = attempts * timeout
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._context: object = None
+        self._started_at = 0.0
+        self._finished_at: float | None = None
+        self._samples: list[RequestPathSample] = []
+        self._reported = False
+
+    def _run(self, url: str) -> None:
+        try:
+            for _ in range(self._attempts):
+                if self._closed:
+                    break
+                remaining = self._budget - (time.monotonic() - self._started_at)
+                if remaining <= 0:
+                    break
+                sample = probe_request_path(self._session, url, attempts=1, timeout=min(self._timeout, remaining))
+                with self._lock:
+                    if time.monotonic() - self._started_at >= self._budget:
+                        break
+                    self._samples.append(sample)
+        except Exception:
+            logger.debug("Tunnel request-path probe failed", exc_info=True)
+        finally:
+            with self._lock:
+                self._finished_at = time.monotonic()
+                if self._closed:
+                    self._session.close()
+
+    def close(self) -> None:
+        """Defer session cleanup to an outstanding worker; never join DNS."""
+        with self._lock:
+            self._closed = True
+            if self._thread is None or self._finished_at is not None:
+                self._session.close()
+
+    def poll(self, context: object, url: str | None) -> RequestPathSample | None:
+        """Collect this identity's result and start its next window without waiting.
+
+        Passing no URL invalidates any outstanding evidence (e.g. while a
+        candidate is being evaluated). Even an ABA identity change cannot reuse
+        that invalidated window.
+        """
+        result = None
+        with self._lock:
+            if self._closed:
+                return None
+            now = time.monotonic()
+            if self._thread is not None:
+                if context != self._context or url is None:
+                    self._reported = True
+                elapsed = (self._finished_at if self._finished_at is not None else now) - self._started_at
+                if not self._reported and (self._finished_at is not None or elapsed >= self._budget):
+                    timed_out = elapsed >= self._budget
+                    latencies = [sample.latency_ms[0] for sample in self._samples]
+                    successes = [sample.successes[0] for sample in self._samples]
+                    missing = self._attempts - len(successes)
+                    result = RequestPathSample(
+                        sampled_at=time.time(),
+                        latency_ms=tuple(latencies + [self._timeout * 1000] * missing),
+                        successes=tuple(successes + [False] * missing),
+                    )
+                    logger.info(
+                        "Tunnel public health probe duration_seconds=%.3f result=%s successes=%d attempts=%d",
+                        min(elapsed, self._budget),
+                        "timeout" if timed_out else ("success" if all(result.successes) else "failed"),
+                        sum(result.successes), self._attempts,
+                    )
+                    self._reported = True
+                if not self._thread.is_alive():
+                    self._thread = None
+            if self._thread is None and url is not None:
+                self._context = context
+                self._started_at = now
+                self._finished_at = None
+                self._samples = []
+                self._reported = False
+                self._thread = threading.Thread(
+                    target=self._run, args=(url,), name="vibe-tunnel-public-probe", daemon=True,
+                )
+                self._thread.start()
+        return result
 
 
 def rtt_stats(values: tuple[float, ...] | list[float]) -> dict[str, float] | None:

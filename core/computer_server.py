@@ -181,9 +181,16 @@ class _WindowsPathAPI:
             self.fail()
         value = buffer.value
         # Only the OS result may use the internal DOS verbatim prefix; external
-        # input never may. No UNC, volume GUID or NT-device conversion fallback.
+        # input never may. Dropping it re-enables Win32 normalization, so refuse
+        # final components whose trailing dot/space would change their meaning.
+        # This checks one returned string, not the input spelling or ancestors.
         if value.startswith("\\\\?\\"):
             value = value[4:]
+        if any(part.endswith((".", " ")) for part in value.split("\\")):
+            raise ComputerServerError(
+                "invalid_arguments",
+                "Resolved executable cannot be represented as a conventional Windows path.",
+            )
         return _literal_windows_executable(value)
 
     def canonical_executable(self, path: str) -> str:
@@ -286,9 +293,12 @@ class JsonRpcUpstream:
             or state.host_bundle_id is None
         ):
             raise UpstreamUnavailable("ready desktop state lacks proxy fields")
+        env_keys = _PROXY_PROCESS_ENV_KEYS
+        if os.name == "nt":
+            env_keys = ("SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP")
         env = {
             key: value
-            for key in _PROXY_PROCESS_ENV_KEYS
+            for key in env_keys
             if (value := os.environ.get(key))
         }
         env.update(
@@ -311,6 +321,7 @@ class JsonRpcUpstream:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             limit=_UPSTREAM_RESPONSE_LIMIT,
+            **({"creationflags": 0x08000000} if os.name == "nt" else {}),  # CREATE_NO_WINDOW
         )
         upstream = cls(process)
         try:
