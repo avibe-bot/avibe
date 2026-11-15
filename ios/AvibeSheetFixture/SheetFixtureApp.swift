@@ -1,4 +1,5 @@
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import WebKit
 
 @main
@@ -28,6 +29,14 @@ private final class SheetFixtureRootViewController: UIViewController {
     private var runtimeWebView: WKWebView?
     private var runtimeRouteTask: Task<Void, Never>?
     private var documentReadinessTask: Task<Void, Never>?
+    private var selectionReceiptObserver: FixtureSelectionReceiptObserver?
+    private var selectionEvidence: [String: Any] = ["bridgeStage": "selection-none"]
+    private var selectionDisplayLink: CADisplayLink?
+    private var lastDisplayTick: TimeInterval?
+    private var maximumDisplayGap: TimeInterval = 0
+    private var readinessJavaScriptPending = false
+    private var presentationStartedUptime: TimeInterval?
+    private var presentationCompletedUptime: TimeInterval?
     // These controls exist only in the simulator fixture app, never Avibe.
     private let captureState = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_CAPTURE_STATE"]
     private let captureTheme = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_CAPTURE_THEME"]
@@ -146,6 +155,37 @@ private final class SheetFixtureRootViewController: UIViewController {
             }
         )
         controller.view.accessibilityIdentifier = "fixture-document-surface"
+        if captureState == "open-failed" {
+            let webView = controller.view.subviews.compactMap { $0 as? WKWebView }.first!
+            let observer = FixtureSelectionReceiptObserver { [weak self, weak controller, weak webView] event in
+                guard let self, let controller, let webView else { return }
+                self.recordSelectionEvidence(event, in: controller, webView: webView)
+            }
+            selectionReceiptObserver = observer
+            recordSelectionEvidence(["kind": "observer-installed"], in: controller, webView: webView)
+            let touches = FixtureTouchObserver { [weak self, weak controller, weak webView] event in
+                guard let self, let controller, let webView else { return }
+                self.recordSelectionEvidence(event, in: controller, webView: webView)
+            }
+            webView.addGestureRecognizer(touches)
+            lastDisplayTick = ProcessInfo.processInfo.systemUptime
+            selectionDisplayLink = CADisplayLink(target: self, selector: #selector(recordDisplayTick))
+            selectionDisplayLink?.add(to: .main, forMode: .common)
+            webView.configuration.userContentController.add(observer, name: "fixtureSelectionReceipt")
+            webView.configuration.userContentController.addUserScript(WKUserScript(
+                source: FixtureSelectionReceiptObserver.script,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+            if ProcessInfo.processInfo.environment["AVIBE_FIXTURE_STALL_DIAGNOSTIC"] == "1" {
+                let arm = UIButton(type: .system)
+                arm.setTitle("Arm diagnostic stall", for: .normal)
+                arm.accessibilityIdentifier = "fixture-arm-stall"
+                arm.frame = CGRect(x: 16, y: 10, width: 180, height: 36)
+                arm.addTarget(self, action: #selector(armDiagnosticStall), for: .touchUpInside)
+                controller.view.addSubview(arm)
+            }
+        }
         controller.modalPresentationStyle = .pageSheet
         sheetController = controller
         publishReadiness()
@@ -158,7 +198,10 @@ private final class SheetFixtureRootViewController: UIViewController {
             view.addSubview(controller.view)
             controller.didMove(toParent: self)
         } else {
-            present(controller, animated: false)
+            presentationStartedUptime = ProcessInfo.processInfo.systemUptime
+            present(controller, animated: false) { [weak self] in
+                self?.presentationCompletedUptime = ProcessInfo.processInfo.systemUptime
+            }
         }
     }
 
@@ -173,6 +216,7 @@ private final class SheetFixtureRootViewController: UIViewController {
             while clock.now < deadline {
                 guard let self, let controller, let webView,
                       self.sheetController === controller, !Task.isCancelled else { return }
+                self.readinessJavaScriptPending = true
                 let loaded = try? await webView.evaluateJavaScript(
                     """
                     document.readyState === "complete"
@@ -181,6 +225,7 @@ private final class SheetFixtureRootViewController: UIViewController {
                       && location.pathname === "/mobile.html"
                     """
                 ) as? Bool
+                self.readinessJavaScriptPending = false
                 guard self.sheetController === controller, !Task.isCancelled else { return }
                 if loaded == true {
                     self.documentReady = true
@@ -256,8 +301,74 @@ private final class SheetFixtureRootViewController: UIViewController {
             "\(documentReady ? "document-ready" : "document-loading");fetch-\(fetchCount)"
     }
 
+    @objc private func armDiagnosticStall() {
+        // On-demand CI only. This is deliberately a stall, never a readiness wait.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, let controller = self.sheetController,
+                  let webView = controller.view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
+            self.recordSelectionEvidence(["kind": "stall-start"], in: controller, webView: webView)
+            let end = ProcessInfo.processInfo.systemUptime + 1.5
+            while ProcessInfo.processInfo.systemUptime < end {}
+            self.recordSelectionEvidence(["kind": "stall-end"], in: controller, webView: webView)
+        }
+    }
+
+    @objc private func recordDisplayTick() {
+        let now = ProcessInfo.processInfo.systemUptime
+        defer { lastDisplayTick = now }
+        guard let lastDisplayTick else { return }
+        let gap = now - lastDisplayTick
+        guard gap > maximumDisplayGap else { return }
+        maximumDisplayGap = gap
+        // Publish only new material gaps, not every display tick/AX snapshot.
+        if gap > 0.25, let controller = sheetController,
+           let webView = controller.view.subviews.compactMap({ $0 as? WKWebView }).first {
+            recordSelectionEvidence(["kind": "display-gap", "gap": gap], in: controller, webView: webView)
+        }
+    }
+
+    private func frameEvidence(_ rect: CGRect) -> [String: Double] {
+        ["x": Double(rect.origin.x), "y": Double(rect.origin.y),
+         "width": Double(rect.size.width), "height": Double(rect.size.height)]
+    }
+
+    private func recordSelectionEvidence(
+        _ event: [String: Any], in controller: MobileOnboardingViewController, webView: WKWebView
+    ) {
+        let kind = event["kind"] as? String ?? "unknown"
+        if kind == "bridge", let stage = event["stage"] as? String {
+            selectionEvidence["bridgeStage"] = stage
+        }
+        var events = selectionEvidence["events"] as? [[String: Any]] ?? []
+        var observation = event
+        observation["receivedUptime"] = ProcessInfo.processInfo.systemUptime
+        observation["sheetWindowFrame"] = frameEvidence(controller.view.convert(controller.view.bounds, to: nil))
+        observation["sheetLayerFrame"] = frameEvidence(controller.view.layer.frame)
+        observation["presentationLayerFrame"] = controller.view.layer.presentation().map { frameEvidence($0.frame) } ?? [:]
+        observation["transitionCoordinator"] = controller.transitionCoordinator != nil
+        observation["presenterTransitionCoordinator"] = controller.presentingViewController?.transitionCoordinator != nil
+        observation["isBeingPresented"] = controller.isBeingPresented
+        observation["detent"] = controller.sheetPresentationController?.selectedDetentIdentifier?.rawValue ?? "none"
+        observation["webViewWindowFrame"] = frameEvidence(webView.convert(webView.bounds, to: nil))
+        observation["readinessJavaScriptPending"] = readinessJavaScriptPending
+        observation["documentReady"] = documentReady
+        observation["fetchCount"] = fetchCount
+        observation["maximumDisplayGap"] = maximumDisplayGap
+        observation["presentationStartedUptime"] = presentationStartedUptime
+        observation["presentationCompletedUptime"] = presentationCompletedUptime
+        observation["presentationAnimated"] = false
+        events.append(observation)
+        selectionEvidence["events"] = Array(events.suffix(32))
+        if let data = try? JSONSerialization.data(withJSONObject: selectionEvidence, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            controller.view.accessibilityLabel = text
+        }
+    }
+
     @discardableResult
     private func dismissFixtureSheet() -> Bool {
+        selectionDisplayLink?.invalidate()
+        selectionDisplayLink = nil
         runtimeRouteTask?.cancel()
         runtimeWebView?.removeFromSuperview()
         runtimeWebView = nil
@@ -268,6 +379,90 @@ private final class SheetFixtureRootViewController: UIViewController {
         }
         return true
     }
+}
+
+// Observe only the synthetic open-failed fixture's real WebKit request/reply.
+// Do not replace the frozen avibeMobile API, the native handler, or its result.
+@MainActor
+private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHandler {
+    private let publish: ([String: Any]) -> Void
+
+    init(publish: @escaping ([String: Any]) -> Void) {
+        self.publish = publish
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame,
+              let event = message.body as? [String: Any] else { return }
+        publish(event)
+    }
+
+    static let script = #"""
+    (() => {
+      const handler = window.webkit.messageHandlers.avibeMobile;
+      const original = handler.postMessage.bind(handler);
+      const receipt = (stage) => window.webkit.messageHandlers.fixtureSelectionReceipt.postMessage({kind: "bridge", stage});
+      for (const kind of ["pointerdown", "pointerup", "pointercancel", "click"]) {
+        document.addEventListener(kind, (event) => {
+          if (!event.isTrusted) return;
+          const row = [...document.querySelectorAll("button")].find(button => button.textContent.includes("Lab"));
+          const hit = document.elementFromPoint(event.clientX, event.clientY);
+          const rect = row?.getBoundingClientRect();
+          window.webkit.messageHandlers.fixtureSelectionReceipt.postMessage({
+            kind, timestamp: event.timeStamp, clientX: event.clientX, clientY: event.clientY,
+            screenX: event.screenX, screenY: event.screenY,
+            onLab: !!row && row.contains(event.target), hitOnLab: !!row && row.contains(hit),
+            targetTag: event.target.tagName ?? "none", hitTag: hit?.tagName ?? "none",
+            rowRect: rect ? {x: rect.x, y: rect.y, width: rect.width, height: rect.height} : null,
+            rowDisabled: row?.disabled ?? null,
+            viewport: {width: innerWidth, height: innerHeight, scale: visualViewport?.scale ?? 1}
+          });
+        }, true);
+      }
+      handler.postMessage = (request) => {
+        if (request?.method !== "session.selectInstance") return original(request);
+        receipt("selection-submitted");
+        const result = original(request);
+        Promise.resolve(result).then((reply) => {
+          receipt(reply?.ok === true ? "selection-accepted"
+            : reply?.error?.code === "invalid_instance" ? "selection-rejected-invalid_instance"
+            : "selection-rejected-other");
+        }, () => receipt("selection-transport-rejected"));
+        return result;
+      };
+    })();
+    """#
+}
+
+// A passive recognizer: it never recognizes, prevents another recognizer, or
+// delays/cancels touches. Its window point is an observation, never a forced tap.
+@MainActor
+private final class FixtureTouchObserver: UIGestureRecognizer {
+    private let publish: ([String: Any]) -> Void
+
+    init(publish: @escaping ([String: Any]) -> Void) {
+        self.publish = publish
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("Fixture-only touch observer") }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let touch = touches.first else { return }
+        let point = touch.location(in: nil)
+        publish(["kind": "native-touch-began", "timestamp": touch.timestamp,
+                 "windowX": Double(point.x), "windowY": Double(point.y)])
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { state = .failed }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) { state = .failed }
 }
 
 // Data-only transport shapes keep the fixture independent of the production
