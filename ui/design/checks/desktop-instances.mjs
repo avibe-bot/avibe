@@ -52,6 +52,13 @@ try {
               version: productRow.querySelector('[data-version-trigger] button')?.getAttribute('title'),
             } : null,
             switcher: !!document.querySelector('[data-instance-switcher]'),
+            accountEntry: (() => {
+              const section = document.querySelector('[data-instance-account]');
+              const button = section?.querySelector('button');
+              return section ? { heading: section.querySelector('h2')?.textContent,
+                email: button?.textContent, arrow: !!button?.querySelector('.lucide-chevron-right'),
+                overflow: button.scrollWidth > button.clientWidth } : null;
+            })(),
             profile: !!document.querySelector('[data-account-details],[data-account-sign-out]'),
             add: !!document.querySelector('[data-add-instance]'),
             entries: [...document.querySelectorAll('[data-placement-entry="bottom"]')].map(entry => {
@@ -103,6 +110,12 @@ try {
           assert.equal(actual.product.expanded, null, `${key}: direct presentation has no expansion semantics`);
         } else if (productSwitcher) {
           assert.ok(actual.switcher, `${key}: product switcher`);
+          assert.ok(actual.accountEntry, `${key}: account entry before details`);
+          assert.equal(actual.accountEntry.heading, frame.id.endsWith('-en') ? 'Account' : '账户', `${key}: account section heading`);
+          assert.equal(actual.accountEntry.email, frame.id.includes('/long-content-')
+            ? 'international-design-and-engineering-account@cross-region-research-and-development-workstations.example.test' : 'max@example.test', `${key}: current email in entry button`);
+          assert.equal(actual.accountEntry.arrow, true, `${key}: entry arrow`);
+          assert.equal(actual.accountEntry.overflow, false, `${key}: email stays inside the card`);
           assert.equal(actual.entries.length, 0, `${key}: no kit footer in bundled instance view`);
         } else if (/\/(profile|profile-disabled|profile-error|sign-out-error|add)-(en|zh)$/.test(frame.id)) {
           assert.ok(actual.profile || actual.add, `${key}: shared product page`);

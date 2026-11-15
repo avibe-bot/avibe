@@ -353,7 +353,7 @@ for (const lang of ['en', 'zh'] as const) test(`A5 current shared snapshot and r
   await expect(page.locator('[data-instance-id="local"]')).toContainText(lang === 'en' ? 'This computer' : '本机');
   await page.screenshot({ animations: 'disabled', path: info.outputPath('a5-current-snapshot.png') });
   expect(requests.map((request) => request.action.type)).toEqual(['get_state']);
-  await page.getByRole('button', { name: lang === 'en' ? 'Account' : '账户', exact: true }).click();
+  await page.getByRole('button', { name: state.account.identity!.email, exact: true }).click();
   await expect(page.locator('[data-account-details]')).toBeVisible();
   expect(requests.map((request) => request.action.type)).toEqual(['get_state']);
   // Reloading an already signed-in account is not a newly completed login.

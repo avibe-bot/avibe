@@ -2,7 +2,7 @@ import { expect, test } from '../support/browserTest';
 import { clientState, installBridge, signIn } from './bridge-fixture';
 
 const ACCOUNT = 'http://127.0.0.1:5214/account/index.html';
-for (const [lang, theme, width, height] of [['en', 'light', 1200, 800], ['zh', 'dark', 880, 600]] as const) {
+for (const [lang, theme, width, height] of [['en', 'light', 880, 600], ['en', 'dark', 880, 600], ['zh', 'light', 880, 600], ['zh', 'dark', 880, 600]] as const) {
   test(`feedback2 current shared group, offline keyboard, account and guide ${lang} ${theme}`, async ({ page }, info) => {
     await page.setViewportSize({ width, height });
     const denied: string[] = [];
@@ -12,7 +12,7 @@ for (const [lang, theme, width, height] of [['en', 'light', 1200, 800], ['zh', '
     });
     await page.addInitScript((lng) => localStorage.setItem('i18nextLng', lng), lang);
     const state = clientState(); signIn(state);
-    state.account.identity!.email = 'long-account-for-design-and-research@example.test';
+    state.account.identity!.email = 'international-design-and-engineering-account@cross-region-research-and-development-workstations.example.test';
     state.local.remote_access = 'on'; state.local.remote_access_url = 'https://local-fixture-app.avibe.bot';
     state.catalog.instances[1].available = true;
     state.catalog.instances[1].name = 'Shared design and engineering workstation · 跨时区产品研发团队';
@@ -34,7 +34,27 @@ for (const [lang, theme, width, height] of [['en', 'light', 1200, 800], ['zh', '
     for (let i = 0; i < 8; i += 1) { await page.keyboard.press('Tab'); await expect(offline.getByRole('button')).not.toBeFocused(); }
     expect(requests.filter((r) => r.action.type === 'select_instance')).toEqual([]);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('shared-current.png') });
-    await page.getByRole('button', { name: lang === 'en' ? 'Account' : '账户', exact: true }).click();
+    const entry = page.getByRole('region', { name: lang === 'en' ? 'Account' : '账户', exact: true });
+    const emailButton = entry.getByRole('button', { name: state.account.identity!.email, exact: true });
+    await entry.scrollIntoViewIfNeeded();
+    await expect(entry.getByRole('heading', { level: 2 })).toHaveText(lang === 'en' ? 'Account' : '账户');
+    await expect(emailButton).toBeVisible();
+    await expect(emailButton.locator('.lucide-chevron-right')).toBeVisible();
+    const geometry = await emailButton.evaluate((button) => {
+      const text = button.querySelector('span')!;
+      const arrow = button.querySelector('.lucide-chevron-right')!.getBoundingClientRect();
+      const card = button.getBoundingClientRect();
+      return { textHeight: text.getBoundingClientRect().height, lineHeight: parseFloat(getComputedStyle(text).lineHeight),
+        cardRight: card.right, arrowRight: arrow.right, arrowTop: arrow.top, arrowBottom: arrow.bottom,
+        cardTop: card.top, cardBottom: card.bottom, overflow: button.scrollWidth > button.clientWidth };
+    });
+    expect(geometry.textHeight).toBeGreaterThan(geometry.lineHeight * 1.5);
+    expect(geometry.overflow).toBe(false);
+    expect(geometry.arrowRight).toBeLessThan(geometry.cardRight);
+    expect(geometry.arrowTop).toBeGreaterThan(geometry.cardTop);
+    expect(geometry.arrowBottom).toBeLessThan(geometry.cardBottom);
+    await page.screenshot({ animations: 'disabled', path: info.outputPath('account-entry-email.png') });
+    await page.getByRole('button', { name: state.account.identity!.email, exact: true }).click();
     await expect(page.getByRole('heading', { name: lang === 'en' ? 'Account' : '账户' })).toBeVisible();
     await expect(page.getByRole('link', { name: state.local.remote_access_url })).toHaveAttribute('href', state.local.remote_access_url);
     await expect(page.getByText(state.account.identity!.email)).toBeVisible();
@@ -46,7 +66,7 @@ for (const [lang, theme, width, height] of [['en', 'light', 1200, 800], ['zh', '
     await page.screenshot({ animations: 'disabled', path: info.outputPath('add-guide.png') });
     await page.getByRole('button', { name: lang === 'en' ? 'Return and refresh' : '返回并刷新' }).click();
     await expect.poll(() => requests.at(-1)?.action.type).toBe('refresh_instances');
-    await page.getByRole('button', { name: lang === 'en' ? 'Account' : '账户', exact: true }).click();
+    await page.getByRole('button', { name: state.account.identity!.email, exact: true }).click();
     expect(requests.filter((r) => r.action.type === 'sign_out')).toHaveLength(0);
     await page.getByRole('button', { name: lang === 'en' ? 'Sign out on this device' : '在此设备退出' }).click();
     await expect(page.getByRole('alert')).toBeVisible();
@@ -54,7 +74,9 @@ for (const [lang, theme, width, height] of [['en', 'light', 1200, 800], ['zh', '
     await expect.poll(() => requests.filter((r) => r.action.type === 'sign_out').length).toBe(2);
     expect(denied).toEqual([]);
   });
+}
 
+for (const [lang, theme, width, height] of [['en', 'light', 1200, 800], ['zh', 'dark', 880, 600]] as const) {
   test(`feedback2 password link has themed underline and real icon spacing ${lang} ${theme}`, async ({ page }, info) => {
     await page.setViewportSize({ width, height });
     await page.route('**/*', (route) => new URL(route.request().url()).origin === new URL(ACCOUNT).origin ? route.continue() : route.abort());

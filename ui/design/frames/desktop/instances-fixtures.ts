@@ -106,9 +106,10 @@ export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwit
   if (!['instances', 'empty', 'loading', 'list-error', 'offline', 'switching', 'consent', 'switch-error', 'upgrade-error', 'offline-help', 'long-content', 'current-shared', 'offline-shared'].includes(fixture.state)) return null;
   const strings = (fixture.lang === 'en' ? en : zh).desktopClient;
   const noop = () => {};
+  const email = fixture.state === 'long-content' ? 'international-design-and-engineering-account@cross-region-research-and-development-workstations.example.test' : 'max@example.test';
   const state: InstanceSwitcherViewProps['state'] = {
     version: 1, revision: 1, generation: 1,
-    account: { status: 'signed_in', identity: { id: 'fixture', email: 'max@example.test' }, email: 'max@example.test', gate: null, methods: ['totp'] },
+    account: { status: 'signed_in', identity: { id: 'fixture', email }, email, gate: null, methods: ['totp'] },
     connection: { status: 'local', committed: { kind: 'local', name: 'Max-2.local', instance_id: 'local' }, pending: null },
     enrollment: { status: 'paired_this_account', instance_id: 'local', error_code: null },
     local: { name: 'Max-2.local', instance_id: 'local', slug: 'max', remote_access: 'on' },

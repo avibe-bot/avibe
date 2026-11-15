@@ -365,6 +365,54 @@ it('shows a native get_state cleanup error without manufacturing a sign-out rece
   }
 });
 
+// The entry and details are distinct surfaces: the previous test checked email
+// only after navigation, allowing the entry to ship a fixed Account label.
+it.each([
+  { identityEmail: 'identity@example.test', email: 'fallback@example.test', label: 'identity@example.test' },
+  { identityEmail: null, email: 'fallback@example.test', label: 'fallback@example.test' },
+  { identityEmail: null, email: null, label: 'Account' },
+  { identityEmail: undefined, email: undefined, label: 'Account' },
+])('account entry identifies the current account before navigation ($label/$identityEmail)', async ({ identityEmail, email, label }) => {
+  let state = { ...states.signed_in, account: { ...states.signed_in.account,
+    identity: identityEmail ? { id: 'entry-account', email: identityEmail } : null, email } };
+  let finishRefresh: (() => void) | undefined;
+  const invoke = mount(state, (request) => {
+    const reply = { ...replies.success, state, request_id: request.request_id };
+    if (request.action.type === 'refresh_instances') return new Promise((resolve) => { finishRefresh = () => resolve(reply); });
+    return reply;
+  });
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  // Email is absent here on the pre-fix product, before details can mask the omission.
+  const entry = screen.getByRole('button', { name: label, exact: true });
+  expect(within(entry).getByText(label)).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Account', level: 2 })).toBeTruthy();
+  fireEvent.click(entry);
+  const details = document.querySelector('[data-account-details]') as HTMLElement;
+  expect(within(details).getByRole('heading', { name: 'Account' })).toBeTruthy();
+  if (email || identityEmail) expect(within(details).getByText(label)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledOnce();
+  fireEvent.click(within(details).getByRole('button', { name: 'Instances', exact: true }));
+  await waitFor(() => expect(finishRefresh).toBeDefined());
+  expect(screen.getByRole('button', { name: label, exact: true }).hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: label, exact: true }));
+  expect(document.querySelector('[data-account-details]')).toBeNull();
+  await act(async () => finishRefresh!());
+  state = { ...state, generation: state.generation + 1, revision: state.revision + 1,
+    account: { ...state.account, identity: { id: 'next-account', email: 'next@example.test' }, email: 'next@example.test' } };
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: state }));
+  expect(screen.getByRole('button', { name: 'next@example.test' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: label, exact: true })).toBeNull();
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: { ...state, generation: state.generation + 1,
+    account: { ...state.account, identity: null, email: null },
+    connection: { ...state.connection, status: 'switching', pending: { kind: 'remote', name: 'Pending', instance_id: 'pending', canonical_origin: 'https://pending.example.test' } } } }));
+  const cleared = screen.getByRole('button', { name: 'Account', exact: true });
+  expect(cleared.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(cleared);
+  expect(screen.queryByText('next@example.test')).toBeNull();
+  expect(document.querySelector('[data-account-details]')).toBeNull();
+  expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state', 'refresh_instances']);
+});
+
 // The removed popup used to own the local link and sign-out. The real container
 // must retain them on the account page without treating presentation as consent.
 it.each(['on', 'off', 'starting', 'unavailable'])('account page shows only the enabled local address and signs out explicitly (%s)', async (access) => {
@@ -373,7 +421,7 @@ it.each(['on', 'off', 'starting', 'unavailable'])('account page shows only the e
     ? { ...replies.success, state, request_id: request.request_id, ok: false, error: { code: 'cleanup_error' } }
     : { ...replies.success, state, request_id: request.request_id });
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
-  fireEvent.click(screen.getByRole('button', { name: 'Account', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
   expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy();
   expect(screen.getByText(state.account.identity!.email)).toBeTruthy();
   const link = screen.queryByRole('link', { name: state.local.remote_access_url });

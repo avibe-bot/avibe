@@ -62,8 +62,11 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
     </div>
     <div className="mt-6 space-y-3">
       <Button variant="ghost" disabled={blocked} className="h-auto w-full justify-start gap-3 rounded-xl border border-edge bg-surface p-4 [--press-scale:1]" onClick={onAdd}><Plus className="size-5 text-muted" /><span className="flex-1 text-left">{t('desktopClient.addInstance')}</span><ChevronRight className="size-4 text-muted" /></Button>
-      <Button variant="ghost" disabled={blocked} className="h-auto w-full justify-start gap-3 rounded-xl border border-edge bg-surface p-4 [--press-scale:1]" onClick={onAccount}><UserRound className="size-5 text-muted" /><span className="flex-1 text-left">{t('desktopClient.accountTitle')}</span><ChevronRight className="size-4 text-muted" /></Button>
     </div>
+    <section aria-label={t('desktopClient.accountTitle')} className="mt-6" data-instance-account>
+      <h2 className="mb-2 text-sm font-medium text-muted">{t('desktopClient.accountTitle')}</h2>
+      <Button variant="ghost" disabled={blocked} className="h-auto w-full justify-start gap-3 rounded-xl border border-edge bg-surface p-4 [--press-scale:1]" onClick={onAccount}><UserRound className="size-5 shrink-0 text-muted" /><span className="min-w-0 flex-1 whitespace-normal break-words text-left [overflow-wrap:anywhere]">{state.account.identity?.email ?? state.account.email ?? t('desktopClient.accountTitle')}</span><ChevronRight className="size-4 shrink-0 text-muted" /></Button>
+    </section>
     <Dialog open={!!state.consent} onOpenChange={(open) => { if (!open) { if (busy) onCancel(); else onConsent(false); } }}>
       {state.consent && <DialogContent closeLabel={t('common.close')} onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); if (busy) onCancel(); else onConsent(false); }}>
         <DialogHeader><DialogTitle>{t('desktopClient.consentTitle', { name: state.consent.instance_name })}</DialogTitle><DialogDescription>{t('desktopClient.consentBody', { name: state.consent.instance_name })}</DialogDescription></DialogHeader>
