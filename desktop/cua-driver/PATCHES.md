@@ -114,6 +114,33 @@ the original created PID and reports whether it is still running. Ordinary app
 metadata remains the existing `list_apps` responsibility; launch performs no
 additional installed-app scan.
 
+### Windows refusal transport
+
+The Windows action wrapper normalizes the platform's known security refusals
+before the common daemon output-schema gate. Text-only actuator errors previously
+reached that gate without an error identity and received `tool_invocation_failed`.
+The supplement now carries `protected_window`, `unverified_window`,
+`desktop_unavailable`, or `administrator_runtime_refused` as structured codes,
+retaining existing parameters and supplying a message. An elevated target and a
+non-elevated higher-integrity target share `protected_window`, with distinct
+`reason` values; an unavailable desktop does not acquire an invented cause.
+Existing explicit error identities and successful results are not replaced.
+This is diagnostic normalization, not a new admission check, retry, foreground
+fallback, or claim about whether earlier action preparation ran.
+
+The Python proxy retains code/parameters and emits the same bounded, sanitized
+text in `message` and the existing `detail` field. The latter preserves existing
+JavaScript SDK behavior without changing its error classes. Observation and
+attachment permissions, target admission, launch ownership and default-off
+behavior are unchanged.
+
+This changes the Windows driver build input: the supplement SHA, both manifest
+patch entries, and the snapshot provenance must move together. Tool definitions
+and output schemas are unchanged; native MCP `tools/list` capture remains the
+verification boundary. The source archive and complete macOS 0001 patch remain
+pinned unchanged. A released Windows binary must be rebuilt from this chain;
+Python-only updating does not repair a text-only refusal from an older driver.
+
 ### Known-by-design shared-source scope
 
 The supplement changes three core source files: `protocol.rs`, `tool.rs`, and

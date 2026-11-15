@@ -116,9 +116,9 @@ def test_windows_manifest_records_ordered_final_patch():
     windows = manifest["driver"]["windows"]
     assert windows["patches"] == [
         {"file": windows["patch_order"][0], "sha256": "c464b2cbd3416aeb15dffee396bc0dcf5aa0b01748af8dd79bd84c9a2f58125e"},
-        {"file": windows["patch_order"][1], "sha256": "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f"},
+        {"file": windows["patch_order"][1], "sha256": "5f277c1bfc5e0e3d07710e903cf15a68ef5ee3d07f87de1fbe0cf64f364a10a0"},
     ]
-    assert windows["patch"]["sha256"] == "9a8ab6af58de18fa85dc268f22da9e60f528e798f9386b4ead6f3127f6f80e9f"
+    assert windows["patch"]["sha256"] == "5f277c1bfc5e0e3d07710e903cf15a68ef5ee3d07f87de1fbe0cf64f364a10a0"
 
 
 def test_native_evidence_upload_is_bounded():
