@@ -490,9 +490,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   // A desktop-managed Runtime relays the desktop app's own conclusion. The
   // shell also exposes its in-memory state so a fresh native check lights the
   // badge before the Runtime's status file has been reread.
+  // A discovered offer is always visible in the unified panel. The saved
+  // skip is still consumed by the unattended installer, but it no longer
+  // hides the signed offer from the user-facing availability badge.
   const hasUpdate = desktopActions
     ? desktopUpdateState?.phase === 'available'
-      && (desktopUpdateState.interactive || desktopUpdateState.skippedVersion !== desktopUpdateState.latest)
     : versionInfo?.has_update === true && !completedTargetStillReportedAvailable;
   const shellVersion = inDesktopShell ? window.__AVIBE_DESKTOP_VERSION__ : undefined;
   const runtimeVersion = versionInfo?.current;
@@ -623,7 +625,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         current: currentVersion,
         checkedAt: versionInfo?.checked_at ?? null,
         installFailed: nativeInstall.failed,
-        hidden: desktopUpdateState.phase === 'available' && !hasUpdate,
+        hidden: false,
       })
       : isDesktopManaged && versionInfo
         ? modelFromDesktopRelay(versionInfo, {

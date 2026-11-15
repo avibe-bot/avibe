@@ -111,8 +111,9 @@ const SHORTCUT_SETTINGS_DEEP_LINK: &str = "avibe://settings/shortcuts";
 const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
 const OPEN_SHORTCUT_SETTINGS_EVENT: &str = "avibe:desktop-open-shortcut-settings";
 /// The in-page request to open the Version popover, read by
-/// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to the
-/// native updater dialog when the Workbench cannot receive it.
+/// `ui/src/lib/desktopShell.ts`. An uncancelled request is handled by the
+/// shell's guarded, delayed account presentation; it never opens a native
+/// installer dialog.
 const OPEN_UPDATES_EVENT: &str = "avibe:desktop-open-updates";
 /// Internal shell-only target used when an adopted Workbench has no listener
 /// for `OPEN_UPDATES_EVENT`. It is intercepted before any page can navigate.
@@ -137,8 +138,12 @@ impl PendingDesktopUpdateOpen {
         self.0.store(true, Ordering::SeqCst);
     }
 
-    fn take(&self) -> bool {
-        self.0.swap(false, Ordering::SeqCst)
+    fn complete(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+
+    fn requested(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -730,8 +735,19 @@ fn request_desktop_updates(app: &AppHandle) {
     app.state::<PendingDesktopUpdateOpen>().request();
 }
 
-fn take_desktop_update_request(app: &AppHandle) -> bool {
-    app.state::<PendingDesktopUpdateOpen>().take()
+fn request_and_open_desktop_updates(app: &AppHandle) {
+    request_desktop_updates(app);
+    if open_desktop_updates(app) {
+        app.state::<PendingDesktopUpdateOpen>().complete();
+    }
+}
+
+fn open_updates_fallback(app: &AppHandle) {
+    request_desktop_updates(app);
+    if instance_client::present_guarded(app, "updates") {
+        focus_or_restore_main_window(app);
+        app.state::<PendingDesktopUpdateOpen>().complete();
+    }
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -2036,8 +2052,10 @@ fn main_document_finished(webview: &tauri::Webview) {
     macos_title_bar::sync(webview);
     instance_client::page_loaded(webview.app_handle());
     apply_pending_deep_link(webview.app_handle());
-    if take_desktop_update_request(webview.app_handle()) && !open_desktop_updates(webview.app_handle()) {
-        updater::check(webview.app_handle().clone(), true);
+    if webview.app_handle().state::<PendingDesktopUpdateOpen>().requested()
+        && open_desktop_updates(webview.app_handle())
+    {
+        webview.app_handle().state::<PendingDesktopUpdateOpen>().complete();
     }
     // Settings become available the moment a Workbench is on
     // screen, not at the monitor's first tick. The shared
@@ -2057,7 +2075,7 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
         }
     }
     if updates_requested {
-        request_desktop_updates(app);
+        request_and_open_desktop_updates(app);
     }
     if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
         links.receive_owned(workbench_arguments, instance_client::presentation_owner(app));
@@ -2066,9 +2084,6 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
         return;
     }
     focus_or_restore_main_window(app);
-    if updates_requested && open_desktop_updates(app) {
-        let _ = take_desktop_update_request(app);
-    }
     apply_pending_deep_link(app);
 }
 
@@ -2477,11 +2492,7 @@ pub fn run() {
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
-                updater::MENU_ID => {
-                    if !open_desktop_updates(app) {
-                        updater::check(app.clone(), true);
-                    }
-                }
+                updater::MENU_ID => request_and_open_desktop_updates(app),
                 updater::CHANNEL_ID => updater::toggle_channel(app),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
                 "desktop-client-account" => instance_client::menu_present(app, "account"),
@@ -2532,13 +2543,11 @@ pub fn run() {
                         }
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
-                        if !open_desktop_updates(webview.app_handle()) {
-                            updater::check(webview.app_handle().clone(), true);
-                        }
+                        request_and_open_desktop_updates(webview.app_handle());
                         return false;
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == OPEN_UPDATES_FALLBACK_URL {
-                        updater::check(webview.app_handle().clone(), true);
+                        open_updates_fallback(webview.app_handle());
                         return false;
                     }
                     let active_origin = webview
@@ -2759,10 +2768,18 @@ mod tests {
     #[test]
     fn a_pending_update_open_survives_until_a_workbench_takes_it() {
         let pending = PendingDesktopUpdateOpen::default();
-        assert!(!pending.take());
+        assert!(!pending.requested());
         pending.request();
-        assert!(pending.take());
-        assert!(!pending.take());
+        assert!(pending.requested());
+        pending.complete();
+        assert!(!pending.requested());
+    }
+
+    #[test]
+    fn a_pending_update_open_is_retained_when_the_workbench_is_not_ready() {
+        let pending = PendingDesktopUpdateOpen::default();
+        pending.request();
+        assert!(pending.requested(), "a failed presentation must remain queued");
     }
 
     #[test]
