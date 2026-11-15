@@ -46,7 +46,7 @@ pub fn attach(app: &AppHandle, local: LoopbackOrigin, root: &Path) -> Arc<Mutex<
     let active = shell.active_origin.clone();
     app.manage(shell);
     app.manage(Mutex::new(DeepLinks::default()));
-    app.manage(PendingDesktopUpdateOpen(AtomicBool::new(false)));
+    app.manage(PendingDesktopUpdateOpen::default());
     app.manage(notifications::Notifications::new(root.join("notifications.json")));
     app.manage(pet::Pet::new(root.join("pet.json")));
     app.manage(LinkAdmission::default());
