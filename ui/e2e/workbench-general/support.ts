@@ -120,6 +120,8 @@ export async function serveProduct(page: Page, lang: Lang = 'en') {
   await page.route('**/api/web-push/status', (route) => route.fulfill({
     json: { ok: true, configured: false, public_key: '', subscription_count: 0 },
   }));
+  // The shell's read of the Vault requests waiting on the reader (the Inbox and its count): none.
+  await page.route('**/api/vault/requests**', (route) => route.fulfill({ json: { ok: true, requests: [] } }));
   // The service badge polls the bare `/status`, not an `/api` path.
   await page.route('**/status', (route) => route.fulfill({ json: { state: 'running' } }));
   await page.route('**/api/version**', (route) => route.fulfill({
