@@ -120,7 +120,18 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
             "  if (-not $child.WaitForExit(135000)) { throw 'input_dispatch_timeout' }",
             "  $receipt.exit_code=$child.ExitCode; $receipt.phase='dispatch_drain'; Save-Dispatch",
             "  if (-not $out.Wait(5000) -or -not $err.Wait(5000)) { throw 'input_dispatch_drain_timeout' }",
-            "  if ($child.ExitCode -ne 0) { throw 'input_dispatch_nonzero' }",
+            # Keep the shipped CLI's own value-free error codes on a non-zero exit
+            # (signed run 43743511166 lost them by throwing before reading stdout).
+            "  if ($child.ExitCode -ne 0) {",
+            "    try {",
+            "      $failed=$out.GetAwaiter().GetResult() | ConvertFrom-Json",
+            "      $topCode=$failed.PSObject.Properties['code']; if ($topCode -and $topCode.Value -is [string] -and $topCode.Value -match '^[a-z_]{1,64}$') { $receipt.cli_code=$topCode.Value }",
+            "      $details=$failed.PSObject.Properties['details']; $inner=if ($details -and $details.Value) { $details.Value.PSObject.Properties['error'] } else { $null }",
+            "      $innerCode=if ($inner -and $inner.Value) { $inner.Value.PSObject.Properties['code'] } else { $null }",
+            "      if ($innerCode -and $innerCode.Value -is [string] -and $innerCode.Value -match '^[a-z_]{1,64}$') { $receipt.cli_error_code=$innerCode.Value }",
+            "    } catch { $receipt.cli_code='cli_output_unparsed' }",
+            "    Save-Dispatch; throw 'input_dispatch_nonzero'",
+            "  }",
             "  $receipt.phase='dispatch_parse'; Save-Dispatch",
             "  $parsed=$out.GetAwaiter().GetResult() | ConvertFrom-Json",
             "  if ($parsed.kind -ne 'computer_js') { throw 'input_dispatch_envelope_invalid' }",
@@ -164,7 +175,7 @@ def evidence_projection(value):
     keys = {
         "operation_id", "phase", "first_error", "powershell_version", "calls",
         "cleanup_errors", "persistence_errors", "diagnostics", "call", "exit_code",
-        "error_class", "code", "cli_code", "secondary_errors", "ready_stable",
+        "error_class", "code", "cli_code", "cli_error_code", "secondary_errors", "ready_stable",
         "ready_usable", "ready", "activation", "native_focus_before_type",
         "typed_attempted", "type_attempt_count", "type", "type_error", "after",
         "observation_changed", "has_tree", "element_count", "exact_handle_observed",

@@ -177,6 +177,19 @@ function Invoke-EnabledCases([hashtable] $Context) {
             Verdict $currentCase 'FAIL' $reason
         }
     }
+    # Elevated-app decision from evidence the case reads itself. The parent
+    # independently re-reads the elevated document afterwards; PASS here is
+    # conditional on that empty-document check.
+    function Resolve-ElevatedAppVerdict($Evidence) {
+        if (-not $Evidence) { return @{verdict='FAIL'; reason='elevated_app_evidence_missing'} }
+        $elevated = $Evidence.elevated
+        if ($elevated.type_ok -eq $true) { return @{verdict='FAIL'; reason='elevated_type_accepted_product_failure'} }
+        if (-not ($Evidence.control.type_ok -eq $true -and $Evidence.control_text_verified)) { return @{verdict='FAIL'; reason='ordinary_control_window_unproven'} }
+        if ($elevated.pid_match -eq $true -and ($elevated.type_code -eq 'protected_window' -or $elevated.error_code -eq 'protected_window')) {
+            return @{verdict='PASS'; reason='real_elevated_notepad_control_refused_with_protected_window'}
+        }
+        return @{verdict='FAIL'; reason='explicit_protected_window_refusal_missing'}
+    }
     $operationId = [guid]::NewGuid().ToString('N')
     if (-not $result.ContainsKey('cu_input_diagnostics')) { $result.cu_input_diagnostics = [ordered]@{} }
     $result.cu_input_diagnostics[$operationId] = [ordered]@{
@@ -623,20 +636,85 @@ try {
         } catch { throw 'elevated_target_query_access_unproven' }
         $currentCase = 'elevated_app_refused'
         Set-CasePhase 'elevated_script_generation'
+        # The script never throws: it returns the shipped error codes it saw, so
+        # the case is decided by evidence, not by a CLI exit status. The elevated
+        # attempt runs first (one notepad++ instance), then an ordinary control.
+        $controlSettings = Join-Path $work 'editor-control-settings'
+        New-Item -ItemType Directory -Path $controlSettings -Force | Out-Null
+        $controlArguments = @('-multiInst', '-nosession', '-noPlugin', ('-settingsDir=' + $controlSettings))
         $elevatedScript = @"
-const app = await computer.app({nameContains: 'notepad++'});
-if (app.pid !== $($securityResult.elevated_pid)) throw new Error('wrong_elevated_target');
-const win = await app.window({windowId: $($securityResult.elevated_hwnd)});
-await win.observe({include_screenshot: false});
-let refused = false;
-try { await win.type('must-not-be-inserted'); } catch (error) { if (error.code === 'protected_window') refused = true; else throw error; }
-({protected_window: refused})
+const code = (error) => typeof error?.code === 'string' && /^[a-z_]{1,64}$/.test(error.code) ? error.code : 'js_exception';
+const out = {
+  elevated: {phase: 'lookup', pid_match: null, type_attempted: false, type_ok: null, type_code: null, error_code: null},
+  control: {phase: 'app', pid: null, hwnd: null, type_ok: null, type_code: null, error_code: null},
+};
+try {
+  const app = await computer.app({nameContains: 'notepad++'});
+  out.elevated.pid_match = app.pid === $($securityResult.elevated_pid);
+  if (!out.elevated.pid_match) throw Object.assign(new Error('wrong target'), {code: 'wrong_elevated_target'});
+  out.elevated.phase = 'window';
+  const win = await app.window({windowId: $($securityResult.elevated_hwnd)});
+  out.elevated.phase = 'observe';
+  await win.observe({include_screenshot: false});
+  out.elevated.phase = 'type';
+  out.elevated.type_attempted = true;
+  try { await win.type('must-not-be-inserted'); out.elevated.type_ok = true; }
+  catch (error) { out.elevated.type_ok = false; out.elevated.type_code = code(error); }
+  out.elevated.phase = 'done';
+} catch (error) { out.elevated.error_code = code(error); }
+try {
+  const target = await computer.app({path: $(ConvertTo-Json -InputObject $targetPath -Compress)});
+  out.control.phase = 'launch';
+  const started = await target.launch({additional_arguments: $(ConvertTo-Json -InputObject $controlArguments -Compress)});
+  out.control.pid = started?.app?.pid ?? null;
+  out.control.phase = 'wait_for';
+  const win = await started.app.waitFor({onScreen: true}, {timeout: 15000});
+  out.control.hwnd = win?.windowId ?? null;
+  out.control.phase = 'observe';
+  await win.observe({include_screenshot: false});
+  out.control.phase = 'activate';
+  await win.activate();
+  out.control.phase = 'type';
+  try { await win.type('control-ok'); out.control.type_ok = true; }
+  catch (error) { out.control.type_ok = false; out.control.type_code = code(error); }
+  out.control.phase = 'done';
+} catch (error) { out.control.error_code = code(error); }
+out
 "@
         Set-Content -LiteralPath (Join-Path $work 'attach-elevated.js') -Value $elevatedScript -Encoding utf8
-        $refusal = Run-CaseTurn 'attach-elevated'
-        Set-CasePhase 'protected_window_result'
-        if ($refusal.protected_window -ne $true) { throw 'explicit_protected_window_refusal_missing' }
-        Verdict 'elevated_app_refused' 'PASS' 'real_elevated_notepad_control_refused_with_protected_window'
+        $evidence = $null
+        try {
+            $refusal = Run-CaseTurn 'attach-elevated'
+            Set-CasePhase 'protected_window_result'
+            $evidence = [ordered]@{ elevated = $refusal.elevated; control = $refusal.control; control_text_verified = $false; control_cleanup = $null }
+            $result.elevated_app_evidence = $evidence
+            # Independent native read of the ordinary control window, then
+            # cleanup of exactly that created, non-elevated editor.
+            if ($refusal.control.pid -and $refusal.control.hwnd) {
+                $control = $null
+                try {
+                    $control = [Diagnostics.Process]::GetProcessById([int]$refusal.control.pid)
+                    $null = $control.SafeHandle
+                    if ($control.MainModule.FileName -ne $targetPath -or [AcceptanceNative]::IsElevated($control.Id)) { throw 'created_control_identity_unproven' }
+                    $deadline = (Get-Date).AddSeconds(5)
+                    do {
+                        if ([AcceptanceNative]::UnsavedTextEquals([IntPtr][long]$refusal.control.hwnd, 'control-ok')) { $evidence.control_text_verified = $true; break }
+                        Start-Sleep -Milliseconds 250
+                    } while ((Get-Date) -lt $deadline)
+                } finally {
+                    if ($control) {
+                        try {
+                            if (-not $control.HasExited) { $control.Kill(); if (-not $control.WaitForExit(10000)) { throw 'created_control_cleanup_unproven' } }
+                            $evidence.control_cleanup = 'exited'
+                        } catch { $evidence.control_cleanup = 'failed'; Add-AcceptanceFailure $result 'control_cleanup' $_ -Cleanup }
+                        finally { $control.Dispose() }
+                    }
+                }
+            }
+        } finally { if ($evidence) { Write-AcceptanceEvidence $result (Join-Path $work 'result.json') } }
+        $decision = Resolve-ElevatedAppVerdict $evidence
+        Verdict 'elevated_app_refused' $decision.verdict $decision.reason
+        if ($decision.verdict -ne 'PASS') { throw $decision.reason }
     } catch {
         Record-EnabledCaseFailure $_
         throw 'enabled_acceptance_case_failed'

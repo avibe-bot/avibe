@@ -242,11 +242,16 @@ try {
             $failed = $true
         }
     }
-    if ($cases.elevated_app_refused.verdict -eq 'PASS') {
+    # Independent elevated read of the administrator document, recorded
+    # whatever the worker decided, so a product failure is distinguishable.
+    if ($security.ElevatedApp) {
+        $documentEmpty = $null
         try {
-            if (-not $security.ElevatedApp -or $security.ElevatedApp.HasExited -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) { throw 'elevated_document_changed' }
-        } catch {
-            Add-AcceptanceFailure $record 'elevated_document_postcheck' $_
+            if ($security.ElevatedApp.HasExited) { throw 'elevated_target_exited' }
+            $documentEmpty = [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')
+        } catch { Add-AcceptanceFailure $record 'elevated_document_postcheck' $_ }
+        $record.elevated_document_empty = $documentEmpty
+        if ($cases.elevated_app_refused.verdict -eq 'PASS' -and $documentEmpty -ne $true) {
             Verdict 'elevated_app_refused' 'FAIL' 'elevated_notepad_empty_document_postcheck_failed'
             $failed = $true
         }

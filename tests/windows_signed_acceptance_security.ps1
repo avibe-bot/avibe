@@ -76,5 +76,29 @@ function Verdict($Id,$Value,$Reason) { $result.cases[$Id]=@{verdict=$Value;reaso
 try { throw 'security_fixture_failed_see_individual_verdicts' } catch { Record-EnabledCaseFailure $_ }
 if ($result.cases.security_fixture.reason -ne 'primary_lock_missing') { throw 'worker_overwrote_parent_reason' }
 $cases += @{phase='security_only_selection_and_preserved_case';passed=$true}
+# Execute the real elevated-app decision over every evidence shape it must
+# classify. PASS only for the product's protected_window plus a verified control.
+$decisionFunction=$enabledAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Resolve-ElevatedAppVerdict'},$true)
+. ([scriptblock]::Create($decisionFunction.Extent.Text))
+function Shape($TypeOk,$TypeCode,$ErrorCode,$PidMatch,$ControlOk,$Verified) {
+    [pscustomobject]@{
+        elevated=[pscustomobject]@{pid_match=$PidMatch; type_ok=$TypeOk; type_code=$TypeCode; error_code=$ErrorCode}
+        control=[pscustomobject]@{type_ok=$ControlOk}; control_text_verified=$Verified
+    }
+}
+foreach ($expected in @(
+    @((Shape $false 'protected_window' $null $true $true $true), 'PASS', 'real_elevated_notepad_control_refused_with_protected_window'),
+    @((Shape $null $null 'protected_window' $true $true $true), 'PASS', 'real_elevated_notepad_control_refused_with_protected_window'),
+    @((Shape $true $null $null $true $true $true), 'FAIL', 'elevated_type_accepted_product_failure'),
+    @((Shape $false 'protected_window' $null $true $true $false), 'FAIL', 'ordinary_control_window_unproven'),
+    @((Shape $false 'protected_window' $null $true $false $false), 'FAIL', 'ordinary_control_window_unproven'),
+    @((Shape $false 'app_missing' $null $true $true $true), 'FAIL', 'explicit_protected_window_refusal_missing'),
+    @((Shape $null $null 'wrong_elevated_target' $false $true $true), 'FAIL', 'explicit_protected_window_refusal_missing'),
+    @($null, 'FAIL', 'elevated_app_evidence_missing')
+)) {
+    $decision = Resolve-ElevatedAppVerdict $expected[0]
+    if ($decision.verdict -ne $expected[1] -or $decision.reason -ne $expected[2]) { throw "elevated_decision_wrong_$($expected[2])" }
+}
+$cases += @{phase='elevated_app_decision_shapes';passed=$true}
 $cases | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Work 'security-cases.json')
 'security_fixture_cases_passed'

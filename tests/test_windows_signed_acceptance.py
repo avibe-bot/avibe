@@ -192,6 +192,46 @@ def test_launch_wrapper_uses_native_windows_argv_handoff(tmp_path):
     assert argv[argv.index("-TypeScript") + 1] == str(work / "launch-off-type.js")
 
 
+def test_direct_case_retains_shipped_cli_error_codes_on_nonzero_exit(tmp_path):
+    # Signed run 43743511166 lost the shipped CLI's error code: the generated
+    # dispatcher threw on exit 1 before reading stdout. Execute the actual
+    # generated command against an inert CLI that fails like the product does.
+    if os.name == "nt":
+        pytest.skip("POSIX shebang fixture; hosted Windows exercises the signed path")
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is required for the generated dispatcher oracle")
+    work = tmp_path / "acceptance work"
+    prepare_context(work, marker="attach-elevated")
+    fake = tmp_path / "inert cli"
+    fake.write_text(
+        "#!/bin/sh\nprintf '%s' '{\"ok\":false,\"code\":\"computer_js_failed\","
+        "\"details\":{\"error\":{\"code\":\"protected_window\",\"message\":\"private detail\"}}}'\nexit 1\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    reply, _ = stub.scripted_reply(request(marker="attach-elevated"), python=str(fake), work=work)
+    command = json.loads(reply["tool_calls"][0]["function"]["arguments"])["command"]
+    env = {key: value for key, value in os.environ.items() if key in {"PATH"}}
+    for key in ("HOME", "TMPDIR", "TEMP", "TMP", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        env[key] = str(tmp_path)
+    outcome = subprocess.run(
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    operation_id = "a" * 32
+    receipt = json.loads((work / f"dispatch-{operation_id}.json").read_text(encoding="utf-8-sig"))
+    assert receipt["exit_code"] == 1
+    assert receipt["first_error"]["code"] == "input_dispatch_nonzero"
+    assert receipt["cli_code"] == "computer_js_failed"
+    assert receipt["cli_error_code"] == "protected_window"
+    assert "private detail" not in json.dumps(receipt)
+    result = json.loads((work / "attach-elevated.json").read_text(encoding="utf-8-sig"))
+    assert result["ok"] is False
+    assert result["dispatch_receipt"]["cli_error_code"] == "protected_window"
+    assert "private detail" not in outcome.stdout
+
+
 def test_windows_probe_still_uses_direct_shipped_js_command(tmp_path):
     reply, finish = stub.scripted_reply(request(marker="probe-context"), python="C:/installed/python.exe", work=tmp_path)
     command = json.loads(reply["tool_calls"][0]["function"]["arguments"])["command"]
