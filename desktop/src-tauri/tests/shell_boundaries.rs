@@ -1556,36 +1556,10 @@ fn the_workbench_gets_only_platform_specific_computer_use_actions_on_loopback_pa
     assert!(command.contains("PermissionPane::parse(&pane)"));
     assert!(!command.contains("open_url"));
     assert!(source.contains("if !pet::is_workbench(window)"));
-    let off = source
-        .split("async fn computer_use_disable(")
-        .nth(1)
-        .unwrap()
-        .split("\n}\n")
-        .next()
-        .unwrap();
-    assert!(
-        off.starts_with("window: WebviewWindow)"),
-        "Off has no caller-supplied state or target"
-    );
-    assert!(off.contains("computer_use_guide_controller(&window)?.disable().await"));
+    // Only the public page marker belongs in this source-level contract test.
+    // Off sequencing is exercised by the shared Controller request/reply tests
+    // and the native transition/process-owner harness, not private identifiers.
     assert!(source.contains("'__AVIBE_DESKTOP_COMPUTER_USE_DISABLE__', { value: true }"));
-    for adapter in ["src/computer_use.rs", "src/computer_use/windows.rs"] {
-        let adapter = shipping_source(adapter);
-        assert!(adapter.contains("let _ = self.disable().await;"), "tray must share Off");
-        assert!(
-            adapter.contains("reply.send(self.disable().await)"),
-            "reply is after transition, not enqueue"
-        );
-        let disable = adapter
-            .split("async fn disable(&mut self)")
-            .nth(1)
-            .unwrap()
-            .split("\n    }\n")
-            .next()
-            .unwrap();
-        assert!(disable.contains("self.lifecycle.toggle_off()"));
-        assert!(disable.contains("self.apply_state(directive).await"));
-    }
 }
 
 #[test]
