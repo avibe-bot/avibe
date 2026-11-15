@@ -6431,7 +6431,7 @@
       "solanaImportHint": "地址会在创建后显示。暂不支持助记词。",
       "solanaImportInfo": "粘贴的私钥先在你的浏览器里加密，再交给这台电脑上的 avault 校验和保存。",
       "protectedKeyInfo": "密钥在一个隔离的沙箱里生成并加密，私钥从不离开沙箱，Avibe 只收到加密后的密钥和地址。",
-      "protectedBitcoinInfo": "保护档的 Bitcoin 密钥只能在兼容的沙箱里批准从 Taproot 地址付款，旧式地址和 SegWit 地址里的币无法花出。",
+      "protectedBitcoinInfo": "保护档 Bitcoin 密钥只能在兼容的安全窗口里，从这把密钥显示的地址类型付款。",
       "moreInfo": "说明",
       "keySource": "密钥来源",
       "signingImportHint": "粘贴后会显示它的地址，可以先核对再创建。"
@@ -6450,7 +6450,11 @@
       "provision": "填写密钥",
       "approved": "已批准访问",
       "signed": "签名完成",
-      "denied": "已拒绝请求"
+      "denied": "已拒绝请求",
+      "loadingFull": "正在读取请求…",
+      "loadFullFailed": "无法读取该请求。请检查网络后重试。",
+      "retry": "重试",
+      "detailsOnReview": "签名请求 · 点审阅查看详情"
     },
     "approval": {
       "accessTitle": "Agent 想使用一个密钥",

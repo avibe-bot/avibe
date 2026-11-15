@@ -51,6 +51,7 @@ import {
   withoutVaultBrowserStep,
 } from '../../lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '../../lib/vaultRequestPlacement';
+import { readFullVaultRequest, vaultRequestNeedsFullRead } from '../../lib/vaultFullRequest';
 import { usePreparedRequest } from '../../lib/usePreparedRequest';
 import { vaultEntryIssue } from '../../lib/vaultEntry';
 import { VaultEntryNotice } from '../ui/vault-entry-notice';
@@ -427,7 +428,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate font-mono text-sm font-semibold">{r.secret_name}</span>
+          <span className="truncate font-mono text-sm font-semibold">{r.secret_name ?? (vaultRequestNeedsFullRead(r) ? t('vaults.requests.detailsOnReview') : '')}</span>
           <Badge variant="info">
             {isProvision ? t('vaults.requests.provision') : isSign ? t('vaults.requests.sign') : isDelete ? t('vaults.requests.delete') : t('vaults.requests.access')}
           </Badge>
@@ -522,13 +523,27 @@ const PendingRequestsSection: React.FC<{
     }
   }, []);
 
+  // A focused or handed-off request is read in full by its id (rev0.4 §4.3), whether or not any
+  // list has it yet; the full request decides which dialog opens.
   useEffect(() => {
-    if (!focusRequestId) return;
-    const request = requests.find((r) => r.id === focusRequestId);
-    if (!request) return;
-    openRequest(request, focusStartProtected);
-    onFocusRequestOpened?.();
-  }, [focusRequestId, focusStartProtected, onFocusRequestOpened, openRequest, requests]);
+    if (!focusRequestId) return undefined;
+    const controller = new AbortController();
+    void readFullVaultRequest(api, focusRequestId, controller.signal).then((read) => {
+      if (controller.signal.aborted) return;
+      if (read.phase === 'ready') {
+        openRequest(read.request, focusStartProtected);
+        onFocusRequestOpened?.();
+      } else if (read.code === 'request_not_pending' || read.code === 'request_not_found') {
+        // Settled or gone: say so and let the hand-off go.
+        showToast(t('vaults.approval.errors.loadFailed'), 'warning');
+        onFocusRequestOpened?.();
+      } else {
+        // Could not read it now: the hand-off stays, so a reload tries again.
+        showToast(t('vaults.requests.loadFullFailed'), 'warning');
+      }
+    });
+    return () => controller.abort();
+  }, [api, focusRequestId, focusStartProtected, onFocusRequestOpened, openRequest, showToast, t]);
 
   const handleOutcome = useCallback(
     (outcome: ApprovalOutcome) => {
@@ -575,16 +590,17 @@ const PendingRequestsSection: React.FC<{
     [api, showToast, t, load, onResolved],
   );
 
-  if (requests.length === 0) return null;
+  // A focused request may open before (or without) any list showing it.
+  if (requests.length === 0 && !reviewing && !provisioning) return null;
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2 px-1">
+      {requests.length > 0 ? <div className="flex items-center gap-2 px-1">
         <Inbox className="size-4 text-gold-ink" />
         <span className="text-sm font-semibold">{t('vaults.requests.title')}</span>
         <Badge variant="warning">{requests.length}</Badge>
         <span className="hidden text-xs text-muted sm:inline">{t('vaults.requests.subtitle')}</span>
-      </div>
+      </div> : null}
       {requests.map((r) => (
         <RequestRow
           key={r.id}
