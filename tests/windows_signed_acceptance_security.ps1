@@ -19,15 +19,23 @@ function Fail-Boundary([string] $Phase) {
 function Add-Type { param($Path); Fail-Boundary 'compile_native' }
 function Get-CimInstance { param($ClassName,$Filter); Fail-Boundary 'primary_profile'; return @{LocalPath=$Work} }
 function Get-FileHash { param($LiteralPath,$Algorithm); Fail-Boundary 'installed_driver_hash'; return @{Hash=('a'*64)} }
-function Get-Content { param($LiteralPath,[switch]$Raw); Fail-Boundary 'primary_state'; return '{"state":"ready","socket_path":"\\\\.\\pipe\\fixture"}' }
-function Test-Path { param($LiteralPath,$PathType); Fail-Boundary 'primary_lock'; return $true }
+# Regression for signed run 43738110889: the elevated parent was denied reading
+# the primary user's private state. It must never read it or probe its lock.
+function Get-Content { param($LiteralPath,[switch]$Raw); throw 'parent_read_primary_private_state' }
+function Test-Path { param($LiteralPath,$PathType); throw 'parent_probed_primary_private_lock' }
 function New-Item { param($ItemType,$Path,[switch]$Force); Fail-Boundary 'security_directory'; throw 'test_must_stop_before_native_probe' }
-$phases=@('compile_native','runner_token','primary_profile','installed_driver_hash','primary_state','primary_lock','security_directory')
+$phases=@('compile_native','runner_token','primary_profile','installed_driver_hash','primary_request:pipe','primary_request:lock','security_directory')
 $cases=@()
-foreach ($phase in $phases) {
+$validLeaf='avibe-cua-0123abcd-0123-4567-89ab-0123456789ab-1'
+$validLock=Join-Path (Join-Path $Work 'AppData\Roaming\bot.avibe.desktop') 'computer-use.lock'
+foreach ($entry in $phases) {
+    $phase,$variant=$entry.Split(':')
     $script:failPhase=$phase
     [AcceptanceNative]::FailToken=($phase -eq 'runner_token')
-    $context=@{Root=$Work; User=@{SID=@{Value='fixture'}}; DriverHash=('a'*64); Stage='security_fixture'; Cases=@{}}
+    $request=[pscustomobject]@{action='prepare-security-fixtures'; pipe_leaf=$validLeaf; lock_path=$validLock}
+    if ($variant -eq 'pipe') { $request.pipe_leaf='..\other-pipe' }
+    if ($variant -eq 'lock') { $request.lock_path=(Join-Path $Work 'elsewhere.lock') }
+    $context=@{Root=$Work; User=@{SID=@{Value='fixture'}}; DriverHash=('a'*64); Stage='security_fixture'; Cases=@{}; Request=$request}
     $reply=Invoke-SecurityFixtureResponse $context
     if ($reply.ok -or $reply.diagnostics.security_fixture.failure.call -ne $phase) { throw "wrong_failure_boundary_$phase" }
     if ($reply.diagnostics.security_fixture.failure.script_line -le 0) { throw 'source_line_missing' }
@@ -38,7 +46,7 @@ foreach ($phase in $phases) {
     try { throw 'security_cleanup_failed' } catch { $null=Add-SecurityFailure $context $_ }
     if (($reply.diagnostics.security_fixture.failure | ConvertTo-Json -Compress) -ne $first) { throw 'first_error_overwritten' }
     if ($reply.diagnostics.security_fixture.secondary_errors.Count -ne 1) { throw 'secondary_error_missing' }
-    $cases += @{phase=$phase; passed=$true}
+    $cases += @{phase=$entry; passed=$true}
 }
 # Test serialization and parent/worker merge using the actual shared merger.
 foreach ($name in @('Add-Type','Get-CimInstance','Get-FileHash','Get-Content','Test-Path','New-Item')) { Remove-Item -LiteralPath "Function:\$name" }

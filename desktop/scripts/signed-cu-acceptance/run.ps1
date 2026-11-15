@@ -217,6 +217,7 @@ try {
         if ($Mode -in @('enabled', 'security') -and -not $security.Completed -and (Test-Path -LiteralPath $securityRequest)) {
             $request = Get-Content -LiteralPath $securityRequest -Raw | ConvertFrom-Json
             if ($request.action -ne 'prepare-security-fixtures') { throw 'unknown_security_fixture_request' }
+            $security.Request = $request
             $securityReply = Invoke-SecurityFixtureResponse $security
             # Parent-owned immutable diagnostics survive worker overwrite or loss.
             $record.security_fixture_receipt = $securityReply

@@ -594,9 +594,14 @@ try {
         Set-CasePhase 'owner_pipe_positive_control'
         $ownerPipe = [IO.Pipes.NamedPipeClientStream]::new('.', $state.socket_path.Substring(9), [IO.Pipes.PipeDirection]::InOut)
         try { $ownerPipe.Connect(3000) } finally { $ownerPipe.Dispose() }
+        # The owner (not the elevated parent) proves its own lock exists and
+        # hands the parent only the pipe leaf and fixed lock path.
+        Set-CasePhase 'owner_lock_present'
+        $lockPath = Join-Path $env:APPDATA 'bot.avibe.desktop\computer-use.lock'
+        if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { throw 'ready_primary_lock_missing' }
         Set-CasePhase 'security_fixture_request'
         $request = Join-Path $work 'security-request.json'
-        @{action='prepare-security-fixtures'} | ConvertTo-Json | Set-Content -LiteralPath ($request + '.tmp')
+        @{action='prepare-security-fixtures'; pipe_leaf=$state.socket_path.Substring(9); lock_path=$lockPath} | ConvertTo-Json | Set-Content -LiteralPath ($request + '.tmp')
         Move-Item -LiteralPath ($request + '.tmp') -Destination $request
         $response = Join-Path $work 'security-response.json'
         $deadline = (Get-Date).AddSeconds(120)

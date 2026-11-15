@@ -36,15 +36,17 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
     $installed = Join-Path $profile.LocalPath 'AppData\Local\Programs\AvibeAcceptance'
     $driver = Join-Path $installed 'computer-use\cua-driver.exe'
     if ((Get-FileHash -LiteralPath $driver -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Context.DriverHash) { throw 'security_probe_driver_hash_mismatch' }
-    $Context.Phase = 'primary_state'
-    $stateRoot = Join-Path $profile.LocalPath 'AppData\Roaming\bot.avibe.desktop'
-    $state = Get-Content -LiteralPath (Join-Path $stateRoot 'computer-use.json') -Raw | ConvertFrom-Json
+    # The primary user's private state is read by that user (the worker), never
+    # by this elevated parent: signed run 43738110889 was denied that read.
+    # Accept only the exact pipe leaf and the fixed lock path under this profile.
+    $Context.Phase = 'primary_request'
     $pipePrefix = '\\.\pipe\'
-    if (-not $state.socket_path.StartsWith($pipePrefix) -or $state.state -ne 'ready') { throw 'primary_driver_not_ready' }
-    $pipeLeaf = $state.socket_path.Substring($pipePrefix.Length)
-    $Context.Phase = 'primary_lock'
-    $lockPath = Join-Path $stateRoot 'computer-use.lock'
-    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { throw 'primary_lock_missing' }
+    $stateRoot = Join-Path $profile.LocalPath 'AppData\Roaming\bot.avibe.desktop'
+    $request = $Context.Request
+    $pipeLeaf = [string]$request.pipe_leaf
+    $lockPath = [string]$request.lock_path
+    if ($pipeLeaf -notmatch '^avibe-cua-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9]{1,20}$') { throw 'primary_pipe_request_invalid' }
+    if ($lockPath -ne (Join-Path $stateRoot 'computer-use.lock')) { throw 'primary_lock_request_invalid' }
 
     $Context.Phase = 'security_directory'
     $securityRoot = Join-Path $Context.Root 'security'
