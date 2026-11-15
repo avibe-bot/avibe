@@ -94,7 +94,7 @@ own. A Session has none of these; a Bot has all three.
   icons, separated by a hairline. An Agent that is a Bot appears once, as the
   Bot.
 - The kind of the item decides the meaning: `@Bot` sends to that Bot's
-  permanent conversation (it remembers, and handles messages in order);
+  permanent conversation (it remembers);
   `@Agent` starts a new Session of that Agent (no memory, can run in
   parallel).
 - Markers carry the kind: `@<bot:cso>`, `@<agent:reviewer>`. An untyped
@@ -107,7 +107,9 @@ own. A Session has none of these; a Bot has all three.
 ### D4. CLI, roster, and provenance
 
 - `vibe agent run --bot <handle> --message ...` sends to `ses_<handle>`, with
-  validation, and returns at once.
+  validation, and returns at once. Like `--session-id`, it joins the running Turn
+  (steer), or starts one when idle; only an explicit `--queue` requests queuing
+  (owner decision, 2026-11-15). `--no-reply` does not change delivery.
 - **Successful callbacks are retired; failures still return** (owner decision,
   2026-11-09). One rule covers every `vibe agent run`: `--callback`,
   `--callback-session-id`, and `--no-callback` remain accepted as deprecated
@@ -125,8 +127,8 @@ own. A Session has none of these; a Bot has all three.
   work keeps the PREFIX suppression rule. `--no-reply` is only for an existing
   Session or Bot and changes the line to `[No reply needed.]`; it opens no
   delegation and sends no read receipt. It rejects `--sync` and new/forked
-  Sessions. Ordinary and no-reply Deliveries do not share an input batch, so
-  their reply-policy hints cannot contradict each other.
+  Sessions. Ordinary and no-reply Deliveries do not share a merged input batch,
+  so each keeps its own reply-policy hint; they may join the same running Turn.
   Why: the receipt is now the one successful-result mechanism, while
   an informational dispatch should not create a follow-up obligation.
 - **Delivery and compatibility.** The accepted-exchange projection records a
@@ -159,7 +161,13 @@ own. A Session has none of these; a Bot has all three.
   is on (steer). Only a definitive steer refusal leaves the message waiting for
   that Turn to end; the conversation then says it has not reached the Bot yet,
   without calling it a queue. Messages from Agents and Bots (`--bot`, Harness
-  input) keep their priority and wait behind the user's.
+  input) use the same delivery policy as ordinary Session dispatches: steer by
+  default, queue only when requested. The existing shared P1 safeguards still
+  apply: a definitive refusal queues the undelivered input, an unknown receipt
+  is reconciled, and a target-Turn change before claim falls back to the queue.
+  No Bot-specific refusal or batching policy is added. A Bot may receive several
+  senders' messages inside a Turn started for other work; Harness labels and
+  reply-policy hints belong to each input, not to the Turn.
 - No hop limit between Bots (owner decision, 2026-11-01): Bots are meant to
   message each other, and run lineage is not reliable enough to enforce one.
   Without automatic callbacks, a message between Bots is always one a Bot chose
@@ -643,7 +651,7 @@ English, per the repository rule. Placeholders in braces.
 ### Bots and Agents
 You can address two kinds of workers. Both tables are generated from live definitions; use the first column exactly as listed in commands, and the display name when talking to the user.
 
-- A **Bot** is a standing member with one permanent Session and its own memory. A message to a Bot joins that conversation, and the Bot handles its messages in order.
+- A **Bot** is a standing member with one permanent Session and its own memory. A message to a Bot joins that conversation.
 - An **Agent** is a reusable role: backend, model, and instructions. Each run starts a fresh Session with no memory of earlier runs, so several runs can work in parallel.
 
 Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. Run an Agent for a self-contained task or for parallel work. In Chinese, the product calls Bots 伙伴; use that word when you write to the user in Chinese.
@@ -657,7 +665,7 @@ Ask a Bot when the work needs its memory, ongoing responsibility, or judgment. R
 {enabled_agents_rows}
 
 Bot rules:
-- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its conversation, behind its earlier messages, and the command returns at once.
+- Message a Bot with `vibe agent run --bot <bot> --message ...`. The message joins its running Turn, or starts one if idle; add `--queue` to wait.
 - Reach a Bot only through `--bot`, never through `--agent` or `--session-id`. `--model` and `--reasoning-effort` do not apply.
 
 Agent rules:
@@ -745,7 +753,7 @@ complete is still reported (D4, D14). Successful callbacks are retired.
 ## Handing out work
 You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that takes finding out or getting done goes to a Session, in a Project that fits how long the matter will last. Searching the web and reading pages or code count as finding out. Follow each matter through to the end.
 
-`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
+`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`) or another Bot (`--bot <bot>`), both joining the Turn under way unless you add `--queue`, or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
 The Sessions you dispatch are told how to report; if one handles your message without writing back, Avibe sends you a read receipt with its last reply, and following up is yours when you were waiting on it. A run that fails, is canceled, or is interrupted still sends an immediate notice. Use `--no-reply` for informational work that needs neither a delegation nor a receipt. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
 ```

@@ -420,7 +420,7 @@ def test_agent_run_help_states_session_callback_and_fork_rules(capsys) -> None:
     assert "--no-reply Existing Session/Bot: no delegation or read receipt" in text
     assert "--no-reply rejects --sync and new/forked Sessions." in text
     assert "--session-id ID Join this Session's running turn, or start one if idle" in text
-    assert "--queue With --session-id: wait for the running turn" in text
+    assert "--queue With --session-id or --bot: wait for the running turn" in text
     assert "Fork this Session's context, backend, scope, and cwd" in text
     assert "Agent for a new Session (a fork: same backend only)" in text
     assert "apply only to a new or forked Session." in text

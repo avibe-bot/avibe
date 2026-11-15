@@ -7237,11 +7237,11 @@ _BOT_RUN_CONFLICTS = (
     ("close_after", "--close-after"),
 )
 def _resolve_bot_run_target(args) -> None:
-    """``--bot <handle>``: a message into the Bot's permanent Session, queued (``docs/plans/bots.md`` D4).
+    """Resolve ``--bot <handle>`` to its permanent Session (``docs/plans/bots.md`` D4).
 
     A Bot keeps one conversation on its own model, so flags that pick or shape a Session do not apply.
-    Its Session and directory are prepared here when missing, then the run continues as a queued
-    ``--session-id`` run, with the same failure notice and read-receipt policy as any other target.
+    Its Session and directory are prepared here when missing, then the run continues as an ordinary
+    ``--session-id`` run, including delivery, failure notices, and read receipts.
     """
     from core.bots import MAIN_BOT_HANDLE, BotError, BotService
 
@@ -7275,7 +7275,6 @@ def _resolve_bot_run_target(args) -> None:
             details={"bot": handle},
         ) from exc
     args.session_id = bot.session_id
-    args.queue = True
 
 
 def _projects_cli_engine(*, read_only: bool = False):
@@ -19498,7 +19497,7 @@ def build_parser():
     agent_run_parser.add_argument(
         "--session-id", metavar="ID", help="Join this Session's running turn, or start one if idle"
     )
-    agent_run_parser.add_argument("--queue", action="store_true", help="With --session-id: wait for the running turn")
+    agent_run_parser.add_argument("--queue", action="store_true", help="With --session-id or --bot: wait for the running turn")
     agent_run_parser.add_argument("--fork-session", metavar="ID", help="Fork this Session's context, backend, scope, and cwd")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork the caller Session")
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place the new Session in the caller's scope")

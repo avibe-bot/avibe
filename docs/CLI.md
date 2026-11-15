@@ -935,7 +935,7 @@ Without `--session-id` or a fork flag, the run creates a new background Session
 for `--agent`; `--same-scope` or `--scope-id` places it, and `--visible` makes it
 user-facing.
 
-With an existing `--session-id`, the default admission is P1: Avibe steers the
+With an existing `--session-id` or `--bot`, the default admission is P1: Avibe steers the
 new Run into an active native Turn, starts it immediately when idle, or moves the
 same Delivery to the durable P3 queue after a definitive refusal/not-active
 receipt. It does not interrupt the active Turn, and it never promotes an older
@@ -945,9 +945,8 @@ promotes the exact existing FIFO head without adding a message. A stale head is
 refused rather than replaced by the next queued item, and neither command calls
 Stop.
 
-`--bot <handle>` messages a Bot's permanent Session (see `vibe bot`). The run is
-queued behind the Bot's earlier messages, as with `--queue`, so a Bot handles
-one message at a time. A Bot keeps one conversation on its own model:
+`--bot <handle>` messages a Bot's permanent Session (see `vibe bot`), with the
+same delivery policy as `--session-id`. A Bot keeps one conversation on its own model:
 `--agent`, `--session-id`, the fork flags, `--model`, `--reasoning-effort`, `--speed`,
 the placement flags, `--cwd`, and `--close-after` are refused with `--bot`.
 `--agent` keeps its meaning for an Agent that is also a Bot: it starts a new
