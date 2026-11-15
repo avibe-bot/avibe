@@ -112,7 +112,8 @@ function Stop-FixtureProcesses([string] $OwnerSid) {
 Save-Report
 try {
     Assert-ReleaseIdle
-    if ($Mode -eq 'update' -and ($ReleaseTag -ne 'gh-v3.2.7rc3' -or $UpdateTag -ne 'gh-v3.2.7rc4')) { throw 'only_authorized_rc3_to_rc4_update_allowed' }
+    # Lead 02:40: the published rc5 -> rc6 pair (both carry the fixed panel).
+    if ($Mode -eq 'update' -and ($ReleaseTag -ne 'gh-v3.2.7rc5' -or $UpdateTag -ne 'gh-v3.2.7rc6')) { throw 'only_authorized_rc5_to_rc6_update_allowed' }
     . (Join-Path $PSScriptRoot 'release.ps1')
     $sourcePin = if ($Mode -eq 'update') { '' } else { $CandidateSourceSha }
     $driverPin = if ($Mode -eq 'update') { '' } else { $CandidateDriverHash }

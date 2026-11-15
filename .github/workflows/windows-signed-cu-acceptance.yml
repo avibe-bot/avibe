@@ -21,17 +21,18 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: gh-v3.2.7rc4
-  # Security-only follow-up: one dry gate before the separately authorized
-  # security mode. Never restore enabled (survival) or select update here.
+  # Update follow-up (lead 02:40): install signed rc5, update to rc6 through
+  # the real unified panel. One dry gate, then one explicitly selected update
+  # run. CU cases are not run in this mode.
+  RELEASE_TAG: gh-v3.2.7rc5
   ACCEPTANCE_MODE: dry
   HELPER_IDENTITY_OPTIONAL: 'true'
-  CANDIDATE_SOURCE_SHA: bcc71bc8d6430fc72697eb4695caef5d15da55ba
-  CANDIDATE_DRIVER_SHA256: 931310cd70e4c571af416c77cdce56719bda3e1e1240ba4128ce913610b0294e
+  # Candidate pins describe the TARGET rc6 (SOURCE.json + Stage 2 43740000488
+  # driver packaging: prepared == packaged == installed hash, exact size).
+  CANDIDATE_SOURCE_SHA: 5750de50e2ee59fb3ea9a38ad3ba045f61afa907
+  CANDIDATE_DRIVER_SHA256: aa55f5f1bc491e30086c45a4dc79c6550cf7fc20e617455dcdb09534e18df08b
   CANDIDATE_DRIVER_SIZE: '34074624'
-  # Used only when this sole-writer draft explicitly selects update mode after
-  # CU work; no dispatch or independent/competing update automation.
-  UPDATE_TAG: gh-v3.2.7rc4
+  UPDATE_TAG: gh-v3.2.7rc6
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:

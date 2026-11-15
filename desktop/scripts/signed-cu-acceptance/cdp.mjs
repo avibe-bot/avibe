@@ -94,8 +94,12 @@ async function updatePanel() {
   if (state?.current !== current) throw new Error('update_current_version_row_unproven');
   if (typeof state.auto_update !== 'boolean' || typeof state.prereleases !== 'boolean') throw new Error('update_settings_unreadable');
   if (state.bridge_error) throw new Error('update_bridge_request_failed');
+  // Value-free record of what the panel actually showed at each step.
+  const shown = (s) => s ? { panel_view: s.panel_view, current: s.current, offered: s.offered, status: s.status,
+    checked_at: s.checked_at, auto_update: s.auto_update, prereleases: s.prereleases, check_enabled: s.check_enabled } : null;
+  const steps = { opened: shown(state), prerelease_switch_clicked: false };
   const automatic = state.auto_update;
-  if (values.action === 'update-verify') return { ok: true, badge_clicked: true, current_row_verified: true, ...state };
+  if (values.action === 'update-verify') return { ok: true, badge_clicked: true, current_row_verified: true, steps, ...state };
   if (values.action === 'update-start' && !state.prereleases) {
     const toggled = await evaluate(`(() => {
       const e = document.querySelector('[data-update-panel] [role="switch"][aria-label="Get pre-release updates"]');
@@ -103,6 +107,7 @@ async function updatePanel() {
       e.click(); return true;
     })()`);
     if (!toggled) throw new Error('update_prerelease_switch_click_unproven');
+    steps.prerelease_switch_clicked = true;
   }
   while (Date.now() < deadline) {
     state = await evaluate(panelExpression);
@@ -131,7 +136,8 @@ async function updatePanel() {
   }
   if (!state?.check_enabled || !['current', 'available'].includes(state.status) || !state.checked_at || state.checked_at === previousReceipt) throw new Error('update_fresh_check_receipt_unproven');
   if (state.auto_update !== automatic) throw new Error('update_auto_setting_changed');
-  if (values.action === 'update-inspect') return { ok: true, badge_clicked: true, check_clicked: true, fresh_check: true, ...state };
+  steps.after_check = shown(state);
+  if (values.action === 'update-inspect') return { ok: true, badge_clicked: true, check_clicked: true, fresh_check: true, steps, ...state };
   if (state.status !== 'available' || state.offered !== targetVersion) throw new Error('update_target_not_discoverable');
   const receipt = await evaluate(`(() => {
     // No asynchronous gap between reading this offer and clicking its handler.
@@ -147,7 +153,8 @@ async function updatePanel() {
     buttons[0].click(); return {clicked: true, state: fresh};
   })()`);
   if (!receipt.clicked) throw new Error(receipt.reason);
-  return { ok: true, badge_clicked: true, check_clicked: true, fresh_check: true, update_clicked: true, ...receipt.state };
+  steps.at_update_click = shown(receipt.state);
+  return { ok: true, badge_clicked: true, check_clicked: true, fresh_check: true, update_clicked: true, steps, ...receipt.state };
 }
 try {
   const response = await fetch(`http://127.0.0.1:${Number(values.port)}/json/list`, { signal: AbortSignal.timeout(5000) });

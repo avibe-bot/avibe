@@ -133,3 +133,16 @@ assert.equal(update.result?.ok, true);
 assert.equal(update.result?.offered, '3.2.7rc4');
 assert.equal(update.result?.update_clicked, true);
 assert.deepEqual(update.installed, ['3.2.7rc4']);
+// The value-free per-step panel record must describe what the fake panel
+// actually showed: opened (before Check), after the fresh Check, and at the
+// atomic Update click. It never contains anything beyond versions/flags.
+assert.equal(update.result?.steps?.opened?.current, '3.2.7rc3');
+assert.equal(update.result?.steps?.opened?.checked_at, '2026-11-15T06:00:00.000Z');
+assert.equal(update.result?.steps?.after_check?.status, 'available');
+assert.equal(update.result?.steps?.after_check?.offered, '3.2.7rc4');
+assert.equal(update.result?.steps?.after_check?.checked_at, '2026-11-15T06:00:01.000Z');
+assert.equal(update.result?.steps?.at_update_click?.offered, '3.2.7rc4');
+assert.equal(update.result?.steps?.prerelease_switch_clicked, false);
+assert.deepEqual(Object.keys(update.result?.steps?.opened ?? {}).sort(),
+  ['auto_update', 'check_enabled', 'checked_at', 'current', 'offered', 'panel_view', 'prereleases', 'status']);
+assert.equal(fresh.result?.steps?.after_check?.status, 'current');

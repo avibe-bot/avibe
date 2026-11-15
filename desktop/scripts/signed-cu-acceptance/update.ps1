@@ -1,4 +1,5 @@
-# One authorized rc3 -> rc4 transition, through the real unified panel only.
+# One authorized RC -> RC transition (run.ps1 pins the pair), through the real
+# unified panel only.
 # Public target bytes are a reference, never an installation fallback.
 function Open-UpdateProcess($Row, [datetime] $Since) {
     $owner = Invoke-CimMethod -InputObject $Row -MethodName GetOwnerSid -ErrorAction Stop
@@ -23,7 +24,8 @@ function Invoke-UpdateCase([hashtable] $Context) {
     try {
         if ($result.cases.webview_cdp_preflight.verdict -ne 'PASS') { throw 'update_shared_cdp_prerequisite_unproven' }
         $executable = $original.MainModule.FileName
-        if ([Diagnostics.FileVersionInfo]::GetVersionInfo($executable).ProductVersion -ne '3.2.7-rc.3') { throw 'update_base_desktop_version_mismatch' }
+        $baseDesktopVersion = $inputData.release_version -replace 'rc', '-rc.'
+        if ([Diagnostics.FileVersionInfo]::GetVersionInfo($executable).ProductVersion -ne $baseDesktopVersion) { throw 'update_base_desktop_version_mismatch' }
         $before = Invoke-RestMethod -Uri ($origin.AbsoluteUri.TrimEnd('/') + '/api/version') -TimeoutSec 10
         if ($before.current -ne $inputData.release_version) { throw 'update_base_runtime_version_mismatch' }
         $since = [DateTime]::UtcNow
@@ -49,7 +51,7 @@ function Invoke-UpdateCase([hashtable] $Context) {
                     throw 'update_panel_click_failed'
                 }
                 if (-not ($receipt.ok -and $receipt.badge_clicked -and $receipt.check_clicked -and $receipt.fresh_check -and $receipt.update_clicked) -or $receipt.current -ne $inputData.release_version -or $receipt.offered -ne $inputData.update.version) { throw 'update_exact_offer_click_unproven' }
-                $result.update_transition = @{ from = $receipt.current; to = $receipt.offered; auto_update = $receipt.auto_update; prereleases = $receipt.prereleases; fresh_check = $true }
+                $result.update_transition = @{ from = $receipt.current; to = $receipt.offered; auto_update = $receipt.auto_update; prereleases = $receipt.prereleases; fresh_check = $true; panel_steps = $receipt.steps }
                 Verdict 'update_panel_start' 'PASS' 'real_badge_check_and_exact_offered_update_clicked_fresh_receipt_not_install_success'
                 $phase = 'update_installer'
             }
@@ -150,6 +152,7 @@ function Invoke-UpdateCase([hashtable] $Context) {
         $result.update_transition.installed_driver_size = $driverProof.Size
         $result.update_transition.installed_provenance_verified = $driverProof.ProvenanceVerified
         $result.update_transition.current_row_verified = $true
+        $result.update_transition.panel_after_relaunch = $panel.steps.opened
         Verdict 'update_versions' 'PASS' 'relaunched_desktop_runtime_current_panel_row_and_installed_stage2_driver_match_target_settings_preserved'
         $completed = $true; $Context.Quiesced = $true
     } catch {
