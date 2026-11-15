@@ -212,7 +212,8 @@ export function AccountApp() {
   const localButton = <Button variant="ghost" onClick={() => leave('return_local')}>{t('desktopClient.continueLocal')}</Button>;
   const instances = () => { setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' }); };
   const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
-  const errorMessage = error ? explainError(error) : null;
+  const displayedError = error ?? (view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
+  const errorMessage = displayedError ? explainError(displayedError) : null;
   const activeSelection = selection?.generation === state?.generation ? selection : null;
   const failedPending = activeSelection?.error && activeSelection.id === state?.connection.pending?.instance_id;
   const switcher = state && <InstanceSwitcherView state={state} localInstanceId={state.local.instance_id ?? null}
@@ -245,7 +246,11 @@ export function AccountApp() {
   } else if (view === 'setup-complete') {
     content = <div className="mx-auto max-w-xl pt-12"><ShieldCheck className="mb-6 size-10 text-mint-ink" /><Heading title={t('desktopClient.setupReady')}>{t('desktopClient.setupBody')}</Heading><Notice>{t('desktopClient.registrationDisclosure')}</Notice><div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" onClick={() => leave('return_local')}>{t('desktopClient.startLocal')}</Button><Button variant="outline" onClick={() => setView('account')}>{t('desktopClient.signInAndAdd')}<ArrowRight className="size-4" /></Button></div><p className="mt-5 text-sm text-muted">{t('desktopClient.signInLater')}</p>{failure}</div>;
   } else if (direct?.type === 'totp_enrolled' && direct.recoveryCodes?.length) {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.recoveryTitle')}>{t('desktopClient.recoveryBody')}</Heading><ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{direct.recoveryCodes.map((value) => <li key={value}>{value}</li>)}</ul><Button variant="brand" className="mt-7" onClick={() => setMaterial(null)}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
+    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.recoveryTitle')}>{t('desktopClient.recoveryBody')}</Heading><ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{direct.recoveryCodes.map((value) => <li key={value}>{value}</li>)}</ul><Button variant="brand" className="mt-7" disabled={busy} onClick={() => {
+      setMaterial(null);
+      if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel');
+      else setView('account');
+    }}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
   } else if (state.account.status === 'second_factor_required') {
     centerLogin = true;
     content = <AccountSecondFactorView enroll={state.account.gate === 'enroll'} methods={state.account.methods}
@@ -271,12 +276,12 @@ export function AccountApp() {
       onChangeEmail={() => { setCode(''); setEmail(state.account.email ?? ''); setEditEmail(true); }}
       onResendCode={() => void act({ type: 'request_otp', email: state.account.email ?? email })}
       onContinueLocal={() => leave('return_local')} />;
-  } else if (state.consent || (state.connection.status === 'switching' && !failedPending) || (state.connection.status === 'remote_unreachable' && view !== 'profile' && view !== 'add')) {
+  } else if (state.consent || (state.connection.status === 'switching' && !failedPending) || (state.connection.status === 'remote_unreachable' && view === 'instances')) {
     content = switcher;
   } else if (view === 'profile' || (view === 'account' && ['unknown', 'unpaired', 'paired_this_account'].includes(state.enrollment.status))) {
     content = <AccountDetailsView email={state.account.identity?.email ?? state.account.email ?? ''}
       localRemoteUrl={state.local.remote_access === 'on' ? state.local.remote_access_url ?? null : null}
-      busy={busy} onBack={instances}
+      busy={busy} errorMessage={errorMessage} onBack={instances}
       onSignOut={() => { setView('sign-out'); leave('sign_out'); }} />;
   } else if (view === 'add') {
     content = <AddInstanceView onBack={() => setView('instances')} onRefresh={instances} busy={busy} />;

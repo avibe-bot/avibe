@@ -8,11 +8,10 @@ export type DesktopAccountRowViewProps = {
   state: DesktopClientProjection;
   onPresent: (view: DesktopClientView | 'updates') => void;
   localUpdater: ReactNode;
-  currentSlug?: string | null;
 };
 
 /** Shared product footer; the container owns native state and navigation. */
-export function DesktopAccountRowView({ state, onPresent, localUpdater, currentSlug }: DesktopAccountRowViewProps) {
+export function DesktopAccountRowView({ state, onPresent, localUpdater }: DesktopAccountRowViewProps) {
   const { t } = useTranslation();
   const remote = state.connection.committed.kind === 'remote';
   const signedIn = state.account.status === 'signed_in';
@@ -20,9 +19,9 @@ export function DesktopAccountRowView({ state, onPresent, localUpdater, currentS
   const offline = state.connection.status === 'remote_unreachable';
   const update = state.desktop.update.phase === 'available';
   const instance = state.connection.committed.kind === 'local'
-    ? t('desktopClient.thisDevice') : state.connection.committed.name;
-  const label = signedIn ? (currentSlug || instance) : t('desktopClient.signIn');
-  const accountTrigger = <Button data-account-trigger type="button" onClick={() => onPresent(signedIn ? 'instances' : 'account')} variant="ghost" className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-md px-2 text-left text-xs [--press-scale:1]" title={signedIn ? (remote ? state.connection.committed.name : state.local.name) : label}>
+    ? state.local.slug ?? t('desktopClient.thisDevice') : state.connection.committed.name;
+  const label = signedIn ? instance : t('desktopClient.signIn');
+  const accountTrigger = <Button data-account-trigger type="button" onClick={() => onPresent(signedIn ? 'instances' : 'account')} variant="ghost" className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-md px-2 text-left text-xs [--press-scale:1]" title={label}>
           {signedIn ? remote ? <Globe data-account-avatar className="size-3.5 shrink-0 text-muted" /> : <Laptop data-account-avatar className="size-3.5 shrink-0 text-muted" /> : <UserRound data-account-avatar className="size-3.5 shrink-0 text-muted" />}
           <span data-account-group className="flex min-w-0 flex-1 items-center gap-1.5">
             <span data-account-label className="min-w-0 truncate">{label}</span>

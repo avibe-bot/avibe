@@ -9,7 +9,7 @@ import { DesktopAccountRow } from './DesktopAccountRow';
 
 const mock = vi.hoisted(() => ({
   present: vi.fn(), remote: false, phase: 'available', signedIn: true,
-  invoke: vi.fn(), getVersion: vi.fn(), localUrl: null as string | null, localAccess: 'off',
+  invoke: vi.fn(), getVersion: vi.fn(), localUrl: null as string | null, localAccess: 'off', slug: undefined as string | null | undefined,
 }));
 vi.mock('../context/ApiContext', () => ({ useApi: () => ({ getVersion: mock.getVersion }) }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ capabilities: { can_manage_instance: true } }) }));
@@ -19,7 +19,7 @@ vi.mock('./useDesktopClient', () => ({
   useDesktopClientProjection: () => ({
     account: { status: mock.signedIn ? 'signed_in' : 'signed_out', identity: { id: 'fixture', email: 'max@example.test' } },
     connection: { status: mock.remote ? 'remote_connected' : 'local', committed: { kind: mock.remote ? 'remote' : 'local', name: 'Studio', instance_id: 'studio' }, pending: null },
-    local: { name: '小麦的 Mac.local', remote_access: mock.localAccess, remote_access_url: mock.localUrl },
+    local: { slug: mock.slug, name: '小麦的 Mac.local', remote_access: mock.localAccess, remote_access_url: mock.localUrl },
     desktop: { version: '3.2.6rc12', update: { phase: mock.phase, latest: '3.2.7' } },
     remote_auxiliary: 'disabled_incomplete',
   }),
@@ -27,7 +27,7 @@ vi.mock('./useDesktopClient', () => ({
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
 beforeEach(() => {
-  mock.remote = false; mock.phase = 'available'; mock.signedIn = true; mock.localUrl = null; mock.localAccess = 'off';
+  mock.remote = false; mock.phase = 'available'; mock.signedIn = true; mock.localUrl = null; mock.localAccess = 'off'; mock.slug = undefined;
   mock.getVersion.mockResolvedValue({ current: '3.2.6rc12', latest: '3.2.7', has_update: true, managed_by: 'desktop' });
   mock.invoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
     ? {
@@ -150,5 +150,20 @@ it('AUTH-SETUP-178 the whole signed-in footer directly opens instances without a
   expect(trigger.hasAttribute('aria-expanded')).toBe(false);
   expect(document.querySelector('[data-instance-menu]')).toBeNull();
   expect(document.querySelector('[data-account-chevron]')).toBeNull();
-  expect(trigger.textContent).toBe('This device');
+  expect(trigger.textContent).toBe('This computer');
+});
+
+// A5 display data must not fall back to an OS hostname or leak the local slug
+// into a remote footer. This exercises the product container and shared view.
+it.each([
+  { remote: false, slug: 'authoritative-local', label: 'authoritative-local' },
+  { remote: false, slug: null, label: 'This computer' },
+  { remote: false, slug: undefined, label: 'This computer' },
+  { remote: true, slug: 'authoritative-local', label: 'Studio' },
+])('uses authoritative footer display (remote=$remote, slug=$slug)', ({ remote, slug, label }) => {
+  mock.remote = remote; mock.slug = slug;
+  mount();
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  expect(trigger.textContent).toBe(label);
+  expect(trigger.getAttribute('title')).toBe(label);
 });

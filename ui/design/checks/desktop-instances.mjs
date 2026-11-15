@@ -104,7 +104,7 @@ try {
         } else if (productSwitcher) {
           assert.ok(actual.switcher, `${key}: product switcher`);
           assert.equal(actual.entries.length, 0, `${key}: no kit footer in bundled instance view`);
-        } else if (/\/(profile|profile-disabled|sign-out-error|add)-(en|zh)$/.test(frame.id)) {
+        } else if (/\/(profile|profile-disabled|profile-error|sign-out-error|add)-(en|zh)$/.test(frame.id)) {
           assert.ok(actual.profile || actual.add, `${key}: shared product page`);
           assert.equal(actual.entries.length, 0, `${key}: no old kit footer`);
         } else if (productLogin) {

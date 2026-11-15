@@ -32,7 +32,7 @@ function mount(initial: unknown, response: (request: DesktopClientRequest) => un
 it('AUTH-SETUP-177 consumes the native UTF-8 catalog and sends its opaque instance id', async () => {
   const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id }));
   expect(await screen.findByText('工作室 Studio')).toBeTruthy();
-  expect(screen.getByText('小明的 Mac')).toBeTruthy();
+  expect(screen.getByText('This computer')).toBeTruthy();
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
   fireEvent.click(screen.getByRole('button', { name: /工作室 Studio/ }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
@@ -93,16 +93,18 @@ it.each([1, 2])('AUTH-SETUP-171 preserves direct recovery material only in the c
   await waitFor(() => expect(finishRequest).toBeDefined());
   // A later nonsecret broadcast can overtake a direct result. It must win state
   // ordering without losing one-time recovery codes from the still-current epoch.
-  const newer = { ...states.signed_in, generation, revision: 12, local: { ...states.signed_in.local, name: '最新的 Mac' } };
+  const newer = { ...states.signed_in, generation, revision: 12, local: { ...states.signed_in.local, name: '最新的 Mac', slug: 'latest-local-slug' } };
   fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: newer }));
   await act(async () => finish({ ...replies.totp_enrolled, request_id: finishRequest.request_id, state: { ...states.signed_in, revision: 11 } }));
   expect(invoke.mock.calls.at(-1)![1].request.action).toEqual(requests.find((entry) => entry.action.type === 'finish_totp_enrollment')!.action);
   if (generation === 1) {
     expect(await screen.findByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'I have saved these codes' }));
+    // Enrollment is still unknown: acknowledgement reveals account state.
+    fireEvent.click(screen.getByRole('button', { name: 'Instances', exact: true }));
   }
   expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull();
-  expect(screen.getByText('最新的 Mac')).toBeTruthy();
+  expect(screen.getByText('latest-local-slug')).toBeTruthy();
   expect(JSON.stringify(window.__AVIBE_DESKTOP_CLIENT_STATE__)).not.toContain(replies.totp_enrollment.result.secret);
   expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain(replies.totp_enrolled.result.recoveryCodes[0]);
 });
@@ -122,7 +124,7 @@ it('shows the current shared instance once, followed by native-ordered other ins
   expect(screen.getAllByText('ZETA')).toHaveLength(1);
   const other = screen.getByRole('region', { name: 'Other instances' });
   expect([...other.querySelectorAll('[data-instance-id]')].map((node) => node.getAttribute('data-instance-id'))).toEqual(['beta', 'gamma', 'alpha', 'local']);
-  expect(within(other).getByText('小明的 Mac')).toBeTruthy();
+  expect(within(other).getByText('This computer')).toBeTruthy();
 });
 
 // The old full-page transition and bottom error never kept the selected row visible.
@@ -214,6 +216,7 @@ it.each([
   const catalogRows = [...document.querySelectorAll('[data-instance-id]')];
   expect(catalogRows.some((node) => node.getAttribute('data-instance-id') === item.id)).toBe(!known);
   expect(catalogRows.filter((node) => node.getAttribute('data-instance-id') === 'local')).toHaveLength(1);
+  if (currentKind === 'remote') expect(screen.getByRole('region', { name: 'Currently using' }).querySelector('[data-instance-icon="unknown"]')).toBeTruthy();
 });
 
 // Native advances generation when it starts selection; this is not a logout.
@@ -412,3 +415,94 @@ it('a failed instance becoming offline removes its retry action without losing t
   expect(within(row).getByRole('alert')).toBeTruthy();
   expect((within(row).getByRole('button') as HTMLButtonElement).disabled).toBe(true);
 });
+
+// A5 metadata is display-only: native sends a validated snapshot when the
+// current shared target disappears from a later catalog, and clears it on
+// account/target changes. It must never become a selectable catalog entry.
+it.each(['available', 'offline', 'unreachable'])('keeps omitted current shared metadata display-only (%s)', async (status) => {
+  const offline = status !== 'available';
+  const item = { ...states.signed_in.catalog.instances[0], relationship: 'shared', owner_email: 'owner@example.test', available: status !== 'offline' };
+  const state = { ...states.signed_in, current_instance: item,
+    connection: { status: status === 'unreachable' ? 'remote_unreachable' : 'remote_connected', pending: null,
+      committed: { kind: 'remote', name: item.name, instance_id: item.id, canonical_origin: item.url } },
+    catalog: { status: 'ready', instances: [] },
+  };
+  const invoke = mount(state, (request) => ({ ...replies.success, state, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  const current = screen.getByRole('region', { name: 'Currently using' });
+  expect(current.querySelector('[data-instance-icon="shared"]')).toBeTruthy();
+  expect(within(current).getByText(/owner@example.test/)).toBeTruthy();
+  expect(screen.getByRole('region', { name: 'Other instances' }).querySelector(`[data-instance-id="${item.id}"]`)).toBeNull();
+  if (offline) {
+    const button = within(current).getByRole('button');
+    expect(button.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(button); fireEvent.keyDown(button, { key: 'Enter' });
+    expect(invoke).toHaveBeenCalledOnce();
+  }
+  // A different account has no retained current-entry proof, even if the target
+  // itself stays committed. A later target change likewise cannot reuse it.
+  const changed = { ...state, generation: state.generation + 1, revision: state.revision + 1,
+    account: { ...state.account, identity: { id: 'other-account', email: 'other@example.test' } }, current_instance: null };
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: changed }));
+  expect(current.querySelector('[data-instance-icon="unknown"]')).toBeTruthy();
+  expect(within(current).queryByText(/owner@example.test/)).toBeNull();
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: { ...changed, generation: changed.generation + 1,
+    connection: { status: 'remote_connected', pending: null, committed: { kind: 'remote', name: 'Next target', instance_id: 'next', canonical_origin: 'https://next.example.test' } } } }));
+  expect(within(current).getByText('Next target')).toBeTruthy();
+  expect(current.querySelector('[data-instance-icon="unknown"]')).toBeTruthy();
+  expect(invoke).toHaveBeenCalledOnce();
+});
+
+it.each([
+  { lang: 'en', slug: 'catalog-slug', expected: 'catalog-slug' },
+  { lang: 'en', slug: null, expected: 'This computer' },
+  { lang: 'zh', slug: undefined, expected: '本机' },
+])('local current displays only the authoritative slug or localized fallback ($lang/$slug)', async ({ lang, slug, expected }) => {
+  await i18n.changeLanguage(lang);
+  const state = { ...states.signed_in, local: { ...states.signed_in.local, slug } };
+  const invoke = mount(state, (request) => ({ ...replies.success, state, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  const current = screen.getByRole('region', { name: lang === 'en' ? 'Currently using' : '正在使用' });
+  expect(within(current).getAllByText(expected).length).toBeGreaterThan(0);
+  expect(within(current).queryByText(state.local.name)).toBeNull();
+});
+
+// Restoring a signed-in account is presentation, not a newly completed login.
+// Only native's initiating operation can automatically return the Workbench.
+it('does not auto-cancel a restored signed-in state or a later successful broadcast', async () => {
+  window.history.replaceState(null, '', '/account/index.html?view=account');
+  const state = { ...states.signed_in, enrollment: { ...states.signed_in.enrollment, status: 'paired_this_account', error_code: null } };
+  const invoke = mount(state, (request) => ({ ...replies.success, state, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  expect(document.querySelector('[data-account-details]')).toBeTruthy();
+  await act(async () => { fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: { ...state, revision: state.revision + 1 } })); });
+  expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state']);
+});
+
+it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tunnel_unavailable', 'paired_error'])(
+  'acknowledges recovery codes before any eligible return (%s)', async (status) => {
+    window.history.replaceState(null, '', '/account/index.html?view=account');
+    const completed = { ...states.signed_in, enrollment: { ...states.signed_in.enrollment,
+      status: status === 'paired_error' ? 'paired_this_account' : status,
+      error_code: status === 'paired_error' || status === 'failed' ? 'persistence_failed' : null } };
+    const invoke = mount(states.enroll, (request) => {
+      const reply = request.action.type === 'begin_totp_enrollment' ? replies.totp_enrollment
+        : request.action.type === 'finish_totp_enrollment' ? { ...replies.totp_enrolled, state: completed }
+        : { ...replies.success, state: request.action.type === 'cancel' ? completed : states.enroll };
+      return { ...reply, request_id: request.request_id };
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: 'Add authenticator' }));
+    await screen.findByText(replies.totp_enrollment.result.secret);
+    fireEvent.change(screen.getByLabelText('Authenticator code'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and enable' }));
+    expect(await screen.findByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
+    expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'cancel')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'I have saved these codes' }));
+    await waitFor(() => expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull());
+    const cancels = invoke.mock.calls.filter((call) => call[1].request.action.type === 'cancel');
+    expect(cancels).toHaveLength(status === 'paired_this_account' ? 1 : 0);
+    if (status === 'failed') expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    if (status === 'paired_error') expect(screen.getByRole('alert')).toBeTruthy();
+  },
+);

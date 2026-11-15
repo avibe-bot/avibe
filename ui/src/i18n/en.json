@@ -7687,7 +7687,7 @@
     "accountTitle": "Account",
     "currentAccount": "Currently signed in",
     "addInstance": "Add instance",
-    "thisDevice": "This device",
+    "thisDevice": "This computer",
     "sharedBy": "Shared by {{owner}}",
     "addGuide": {
       "body": "Add another computer or server to the same account, then return here to refresh the list.",

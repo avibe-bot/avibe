@@ -29,14 +29,14 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
   const { t } = useTranslation();
   const current = state.connection.committed;
   const currentRemote = current.kind === 'remote';
-  const currentItem = currentRemote ? state.catalog.instances.find((item) => item.id === current.instance_id) : null;
+  const currentItem = currentRemote ? state.catalog.instances.find((item) => item.id === current.instance_id) ?? state.current_instance ?? null : null;
   const unreachable = state.connection.status === 'remote_unreachable';
   const blocked = busy || !!pendingId;
   const localItem = localInstanceId ? state.catalog.instances.find((item) => item.id === localInstanceId) : null;
   const others = state.catalog.instances.filter((item) => currentRemote ? item.id !== current.instance_id : item.id !== localInstanceId);
   const detail = (item: Instance) => [!item.available && t('desktopClient.offline'), item.relationship === 'shared' && (item.owner_email ? t('desktopClient.sharedBy', { owner: item.owner_email }) : t('desktopClient.shared')), item.host].filter(Boolean).join(' · ');
-  const local = (selected: boolean) => <InstanceRow key="local" id="local" name={localItem?.name ?? state.local.name.replace(/\.local$/i, '')} detail={localItem?.host ?? t('desktopClient.thisDevice')} relationship="owner" selected={selected} disabled={blocked} onClick={selected ? onCancel : onLocal} />;
-  const remoteRow = (item: Instance, selected = false) => <InstanceRow key={item.id} id={item.id} name={item.name} detail={detail(selected && unreachable ? { ...item, available: false } : item)} relationship={item.relationship} selected={selected}
+  const local = (selected: boolean) => <InstanceRow key="local" id="local" name={state.local.slug ?? t('desktopClient.thisDevice')} detail={localItem?.host ?? (state.local.slug ? t('desktopClient.thisDevice') : '')} relationship="owner" selected={selected} disabled={blocked} onClick={selected ? onCancel : onLocal} />;
+  const remoteRow = (item: Instance, selected = false) => <InstanceRow key={item.id} id={item.id} name={selected ? current.name : item.name} detail={detail(selected && unreachable ? { ...item, available: false } : item)} relationship={item.relationship} selected={selected}
     offline={!item.available || (selected && unreachable)} opening={pendingId === item.id} disabled={blocked}
     error={failure?.instanceId === item.id ? failure.message : null} onClick={() => selected && failure?.instanceId !== item.id ? onCancel() : onSelect(item.id)} />;
   return <div data-instance-switcher className="mx-auto w-full max-w-2xl pt-6">

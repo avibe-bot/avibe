@@ -24,6 +24,7 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.setViewportSize(viewport);
       const denied = await serveProduct(page, lang);
       const state = clientState(); signIn(state);
+      state.local.slug = 'authoritative-local';
       // A page this computer serves: the version opens the shared update panel (ui/design: update/panel)
       // over the desktop IPC. Remote presentation-only behavior has its own footer test and never
       // receives this native updater IPC fixture.
@@ -32,6 +33,7 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       const requests = await installBridge(page, state, { projection: true });
       await language(page, lang);
       await page.goto(`/?theme=${theme}`);
+      await expect(page.locator('[data-account-label]')).toHaveText('authoritative-local');
       const avatar = page.locator('[data-account-avatar]');
       await expect(avatar).toBeVisible();
       const footer = page.locator('[data-sidebar-footer]');
@@ -101,6 +103,7 @@ test('AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transien
   await isolateAccount(page); await language(page, 'en');
   const state = clientState();
   state.account = { ...state.account, status: 'second_factor_required', gate: 'enroll' };
+  state.connection = { status: 'remote_connected', pending: null, committed: { kind: 'remote', name: 'Retained remote', instance_id: 'remote-retained', canonical_origin: 'https://retained.example.test' } };
   const requests = await installBridge(page, state);
   await page.goto(ACCOUNT);
   await page.getByRole('button', { name: 'Add authenticator' }).click();
@@ -110,7 +113,10 @@ test('AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transien
   await page.getByRole('button', { name: 'Verify and enable' }).click();
   await expect(page.getByRole('heading', { name: 'Save your recovery codes' })).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: info.outputPath('recovery-codes.png') });
+  expect(requests.some((request) => request.action.type === 'cancel')).toBe(false);
   await page.getByRole('button', { name: 'I have saved these codes' }).click();
+  await expect.poll(() => requests.at(-1)?.action.type).toBe('cancel');
+  expect(state.connection.committed.kind).toBe('remote');
   await expect(page.getByText('fixture-recovery-one')).toHaveCount(0);
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('fixture-recovery');
   expect(JSON.stringify(state)).not.toContain('JBSWY');
@@ -121,10 +127,10 @@ for (const status of ['conflict', 'failed', 'paired_tunnel_unavailable'] as cons
   await isolateAccount(page); await language(page, 'en');
   const state = clientState(); signIn(state); state.enrollment.status = status;
   const requests = await installBridge(page, state); await page.goto(ACCOUNT);
-  await expect(page.getByRole('button', { name: 'View other instances' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Other instances' })).toBeVisible();
   if (status === 'conflict') { await page.getByRole('button', { name: 'Review account change' }).click(); await expect(page.getByText(/Ask the current owner/)).toBeVisible(); }
   await page.screenshot({ animations: 'disabled', path: info.outputPath(`${status}.png`) });
-  await page.getByRole('button', { name: 'View other instances' }).click();
+  await page.getByRole('button', { name: 'Other instances' }).click();
   await expect(page.getByText('工作室 Studio', { exact: true })).toBeVisible();
   expect(requests.map((request) => request.action.type)).toEqual(['get_state', 'refresh_instances']);
 });
@@ -134,7 +140,7 @@ test('AUTH-SETUP-176 unreachable target retains local escape; setup invitation n
   const state = clientState(); signIn(state);
   state.connection = { status: 'remote_unreachable', committed: { kind: 'remote', name: '工作室 Studio', instance_id: 'studio', canonical_origin: 'https://studio-app.avibe.bot' }, pending: null };
   state.remote_auxiliary = 'disabled_incomplete';
-  const requests = await installBridge(page, state); await page.goto(ACCOUNT);
+  const requests = await installBridge(page, state); await page.goto(`${ACCOUNT}?view=instances`);
   await expect(page.getByRole('button', { name: 'Back to this Mac' })).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: info.outputPath('offline.png') });
   await page.getByRole('button', { name: 'Back to this Mac' }).click();
@@ -325,4 +331,36 @@ for (const failure of ['reject', 'malformed'] as const) test(`rc19 IPC ${failure
   await expect(page.getByRole('dialog')).toBeVisible();
   expect(requests.filter((request) => request.action.type === 'select_instance').map((request) => request.expected_generation)).toEqual([1, 8]);
   expect(denied).toEqual([]);
+});
+
+for (const lang of ['en', 'zh'] as const) test(`A5 current shared snapshot and restored account ${lang}`, async ({ page }, info) => {
+  await isolateAccount(page); await language(page, lang);
+  await page.setViewportSize({ width: 880, height: 600 });
+  const state = clientState(); signIn(state);
+  const current = { ...state.catalog.instances[1]!, available: false };
+  state.current_instance = current;
+  state.catalog.instances = state.catalog.instances.filter((item) => item.id !== current.id);
+  state.local.slug = null;
+  state.connection = { status: lang === 'zh' ? 'remote_unreachable' : 'remote_connected', pending: null, committed: { kind: 'remote', name: current.name, instance_id: current.id, canonical_origin: current.url } };
+  const requests = await installBridge(page, state);
+  await page.goto(`${ACCOUNT}?view=instances&theme=${lang === 'en' ? 'light' : 'dark'}`);
+  const row = page.locator(`[data-instance-id="${current.id}"]`);
+  await expect(row).toHaveCount(1);
+  await expect(row.locator('[data-instance-icon="shared"]')).toBeVisible();
+  await expect(row).toContainText(current.owner_email!);
+  await expect(row.getByRole('button')).toBeDisabled();
+  await expect(page.locator('[data-other-instances]')).not.toContainText(current.name);
+  await expect(page.locator('[data-instance-id="local"]')).toContainText(lang === 'en' ? 'This computer' : '本机');
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('a5-current-snapshot.png') });
+  expect(requests.map((request) => request.action.type)).toEqual(['get_state']);
+  await page.getByRole('button', { name: lang === 'en' ? 'Account' : '账户', exact: true }).click();
+  await expect(page.locator('[data-account-details]')).toBeVisible();
+  expect(requests.map((request) => request.action.type)).toEqual(['get_state']);
+  // Reloading an already signed-in account is not a newly completed login.
+  await page.goto(`${ACCOUNT}?view=account`);
+  await expect(page.locator('[data-account-details]')).toBeVisible();
+  expect(requests.map((request) => request.action.type)).toEqual(['get_state', 'get_state']);
+  await page.getByRole('button', { name: lang === 'en' ? 'Back to Workbench' : '返回工作台' }).click();
+  await expect.poll(() => requests.at(-1)?.action.type).toBe('cancel');
+  expect(state.connection.committed.instance_id).toBe(current.id);
 });
