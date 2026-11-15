@@ -253,10 +253,28 @@ fn desktop_update_commands_are_workbench_scoped() {
     let capability = read_json(crate_dir().join("capabilities/main-desktop-update.json"));
     assert_eq!(capability["windows"], serde_json::json!([MAIN_WINDOW]));
     assert_eq!(capability["local"], Value::Bool(false));
+    let patterns: Vec<tauri::utils::acl::RemoteUrlPattern> = capability["remote"]["urls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pattern| pattern.as_str().unwrap().parse().unwrap())
+        .collect();
+    for (url, allowed) in [
+        ("http://127.0.0.1:5123/", true),
+        ("http://[::1]:5123/", true),
+        ("https://remote.example/", false),
+        ("http://127.0.0.1.evil.example/", false),
+        ("http://tauri.localhost/account/index.html", false),
+        ("tauri://localhost/account/index.html", false),
+    ] {
+        let url = tauri::Url::parse(url).unwrap();
+        assert_eq!(patterns.iter().any(|pattern| pattern.test(&url)), allowed, "{url}");
+    }
     assert_eq!(
         capability["permissions"],
         serde_json::json!([
             "core:event:default",
+            "allow-desktop-update-panel-ready",
             "allow-desktop-update-state",
             "allow-desktop-update-check",
             "allow-desktop-update-install",
@@ -268,6 +286,7 @@ fn desktop_update_commands_are_workbench_scoped() {
     );
     let source = shipping_source("src/lib.rs");
     for command in [
+        "desktop_update_panel_ready",
         "updater::desktop_update_state",
         "updater::desktop_update_check",
         "updater::desktop_update_install",
@@ -410,13 +429,12 @@ fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     assert!(!source.contains("on_open_url"));
     // The shell evaluates only its fixed Settings and Updates event scripts;
     // nothing page-supplied is ever evaluated.
-    assert_eq!(source.matches(".eval(").count(), 3);
+    assert_eq!(source.matches(".eval(").count(), 2);
     assert!(source.contains("window.eval(open_settings_script())"));
-    assert!(source.contains("window.eval(open_updates_script())"));
-    assert!(source.contains("avibe:desktop-open-updates"));
-    assert!(source.contains("request_desktop_updates(app)"));
-    assert!(source.contains("take_desktop_update_request(webview.app_handle())"));
-    assert!(source.contains("if !open_desktop_updates(webview.app_handle())"));
+    assert!(source.contains(".eval_with_callback("));
+    let update_script = shipping_source("src/open_updates.js");
+    assert!(update_script.contains("avibe:desktop-open-updates"));
+    assert!(update_script.contains("avibe://updates-fallback"));
     assert!(source.contains("avibe://updates-fallback"));
     assert!(source.contains("OPEN_UPDATES_FALLBACK_URL"));
     assert!(shipping_source("src/pet.rs").contains("link != crate::updater::OPEN_URL"));
@@ -603,6 +621,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "open_app_window",
         "computer_use_enable",
         "computer_use_open_permission",
+        "desktop_update_panel_ready",
         "desktop_update_state",
         "desktop_update_check",
         "desktop_update_install",
@@ -1058,9 +1077,9 @@ fn native_lifecycle_controls_never_add_a_webview_permission() {
     ] {
         assert!(source.contains(required), "native lifecycle wiring missing {required}");
     }
-    // The three bootstrap commands, the native app window command, and the
-    // two Computer Use guide actions.
-    assert_eq!(source.matches("#[tauri::command]").count(), 6);
+    // The three bootstrap commands, the native app window command, the
+    // two Computer Use guide actions, and the update-panel readiness signal.
+    assert_eq!(source.matches("#[tauri::command]").count(), 7);
     for permission in capability()["permissions"].as_array().expect("capability permissions") {
         let permission = permission.as_str().expect("string permission");
         assert!(!permission.contains("autostart") && !permission.contains("tray") && !permission.contains("dialog"));

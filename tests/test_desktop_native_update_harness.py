@@ -49,6 +49,7 @@ def harness(monkeypatch):
 def test_real_fixture_adaptation_keeps_installer_and_owner_sources(harness, tmp_path):
     paths = [
         "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/main.rs",
+        "desktop/src-tauri/src/open_updates.js",
         "desktop/src-tauri/src/updater.rs", "desktop/src-tauri/src/update_install.rs",
         "desktop/src-tauri/src/update_windows.ps1", "desktop/runtime-host/src/update.rs",
         "desktop/src-tauri/src/updater/activity.rs", "core/update_activity.py",
@@ -85,6 +86,21 @@ def test_fixture_requires_real_auxiliary_state_before_client_attach(harness, mis
     pet = 'app.manage(pet::Pet::new(data.join("pet.json")));'
     with pytest.raises(RuntimeError, match="lifecycle order"):
         validate(library, fixture.replace(pet, "") + "\n" + pet)
+
+
+def test_presentation_adaptation_rejects_missing_explicit_focus_and_focus_in_readiness(harness):
+    library = (ROOT / "desktop/src-tauri/src/lib.rs").read_text(encoding="utf-8")
+    fixture = (ROOT / "desktop/src-tauri/examples/support/fixture_native_update.rs").read_text(encoding="utf-8")
+    validate = harness["build"].validate_presentation_lifecycle
+    validate(library, fixture)
+    explicit = "request_desktop_updates(app);\n    focus_or_restore_main_window(app);"
+    assert library.count(explicit) == 1
+    with pytest.raises(RuntimeError, match="lifecycle missing"):
+        validate(library.replace(explicit, "request_desktop_updates(app);"), fixture)
+    ready = "let _ = deliver_desktop_update_request(&window, false);"
+    assert library.count(ready) == 1
+    with pytest.raises(RuntimeError, match="must not own focus"):
+        validate(library.replace(ready, "focus_or_restore_main_window(window.app_handle());\n    " + ready), fixture)
 
 
 def test_pinned_portable_nsis_is_verified_before_extraction(harness, monkeypatch, tmp_path):

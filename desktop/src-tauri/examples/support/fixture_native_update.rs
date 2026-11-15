@@ -267,7 +267,7 @@ pub fn run() {
             app.manage(notifications::Notifications::new(data.join("notifications.json")));
             app.manage(pet::Pet::new(data.join("pet.json")));
             app.manage(Mutex::new(DeepLinks::default()));
-            app.manage(PendingDesktopUpdateOpen(AtomicBool::new(false)));
+            app.manage(PendingDesktopUpdateOpen::default());
             updater::init(app.handle())?;
             app.listen_any(updater::STATE_EVENT, |event| {
                 emit(json!({"event":"update", "state":serde_json::from_str::<Value>(event.payload()).unwrap()}));
@@ -287,8 +287,8 @@ pub fn run() {
                 .initialization_script(instance_client::initial_script(app.handle()).unwrap())
                 .visible(false).build()?;
             assert!(instance_client::present(app.handle(), "updates"));
-            // Like open_desktop_updates, accept the real presentation first,
-            // then use the production main-window show/focus lifecycle. The
+            // Accept the real presentation before using the same production
+            // main-window show/focus lifecycle as an explicit update action. The
             // existing window prevents recreation/bootstrap; present alone
             // only queues navigation and cannot make a hidden WebView visible.
             super::focus_or_restore_main_window(app.handle());

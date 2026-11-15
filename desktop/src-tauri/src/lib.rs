@@ -110,10 +110,8 @@ const SHORTCUT_SETTINGS_DEEP_LINK: &str = "avibe://settings/shortcuts";
 /// loading the deep link's destination.
 const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
 const OPEN_SHORTCUT_SETTINGS_EVENT: &str = "avibe:desktop-open-shortcut-settings";
-/// The in-page request to open the Version popover, read by
-/// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to a
-/// native-owned discovery check without an installer dialog.
-const OPEN_UPDATES_EVENT: &str = "avibe:desktop-open-updates";
+/// Fixed update-event delivery shared with executable Workbench listener tests.
+const OPEN_UPDATES_SCRIPT: &str = include_str!("open_updates.js");
 /// Internal shell-only target used when an adopted Workbench has no listener
 /// for `OPEN_UPDATES_EVENT`. It is intercepted before any page can navigate.
 pub(crate) const OPEN_UPDATES_FALLBACK_URL: &str = "avibe://updates-fallback";
@@ -130,15 +128,35 @@ const EN_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/en.json");
 const ZH_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/zh.json");
 
 #[derive(Default)]
-struct PendingDesktopUpdateOpen(AtomicBool);
+struct PendingDesktopUpdateOpen(Mutex<PendingUpdateRequest>);
+
+#[derive(Default)]
+struct PendingUpdateRequest {
+    serial: u64,
+    pending: Option<u64>,
+}
 
 impl PendingDesktopUpdateOpen {
-    fn request(&self) {
-        self.0.store(true, Ordering::SeqCst);
+    fn request(&self) -> u64 {
+        let mut state = self.0.lock().expect("pending update request");
+        if let Some(id) = state.pending {
+            return id;
+        }
+        state.serial = state.serial.wrapping_add(1).max(1);
+        let id = state.serial;
+        state.pending = Some(id);
+        id
     }
 
-    fn take(&self) -> bool {
-        self.0.swap(false, Ordering::SeqCst)
+    fn current(&self) -> Option<u64> {
+        self.0.lock().expect("pending update request").pending
+    }
+
+    fn finish_delivery(&self, id: u64, handled: bool) {
+        let mut state = self.0.lock().expect("pending update request");
+        if handled && state.pending == Some(id) {
+            state.pending = None;
+        }
     }
 }
 
@@ -712,38 +730,72 @@ fn open_settings_script() -> String {
     )
 }
 
-fn open_updates_script() -> String {
-    format!(
-        "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
-         window.dispatchEvent(new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }})); \
-         if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('{OPEN_UPDATES_FALLBACK_URL}');"
-    )
+fn open_updates_script(request_id: u64, legacy_fallback: bool) -> String {
+    // Decimal strings keep request identity exact in JavaScript beyond 2^53.
+    format!("({})(\"{}\", {});", OPEN_UPDATES_SCRIPT, request_id, legacy_fallback)
 }
 
-/// Ask the current Workbench to open its desktop update popover. Returning
-/// `false` is the documented fallback boundary: the shell has no reachable
-/// Workbench window, or the page rejected the script.
+/// A user action owns focus. Deferred delivery never calls this entry point.
 fn open_desktop_updates(app: &AppHandle) -> bool {
+    request_desktop_updates(app);
+    focus_or_restore_main_window(app);
+    present_pending_desktop_updates(app)
+}
+
+/// Existing non-Workbench presentation remains owned by its guarded route.
+/// A local bootstrap page is not a receiver: wait for the Workbench handshake.
+fn present_pending_desktop_updates(app: &AppHandle) -> bool {
+    let pending = app.state::<PendingDesktopUpdateOpen>();
+    let Some(id) = pending.current() else {
+        return true;
+    };
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
         return false;
     };
     if !pet::is_workbench(&window) {
+        if ensure_shell_ui(&window).is_ok() {
+            return false;
+        }
         if instance_client::present_guarded(app, "updates") {
-            focus_or_restore_main_window(app);
+            // The existing guarded presentation queue now owns this intent.
+            pending.finish_delivery(id, true);
             return true;
         }
         return false;
     }
-    focus_or_restore_main_window(app);
-    window.eval(open_updates_script()).is_ok()
+    deliver_desktop_update_request(&window, true)
+}
+
+/// Submission is not consumption. Only the listener's synchronous receipt can
+/// complete the matching request; failures await another real readiness signal.
+fn deliver_desktop_update_request(window: &WebviewWindow, legacy_fallback: bool) -> bool {
+    let app = window.app_handle();
+    let Some(id) = app.state::<PendingDesktopUpdateOpen>().current() else {
+        return true;
+    };
+    let handle = app.clone();
+    window
+        .eval_with_callback(open_updates_script(id, legacy_fallback), move |result| {
+            handle
+                .state::<PendingDesktopUpdateOpen>()
+                .finish_delivery(id, result.trim() == "\"handled\"");
+        })
+        .is_ok()
+}
+
+/// A local Workbench calls this only after its update listener and native state
+/// are usable. It grants no navigation, installation, or window-focus authority.
+#[tauri::command]
+fn desktop_update_panel_ready(window: WebviewWindow) -> Result<(), String> {
+    if !pet::is_workbench(&window) {
+        return Err("This command is only available to the Avibe Workbench.".to_owned());
+    }
+    let _ = deliver_desktop_update_request(&window, false);
+    Ok(())
 }
 
 fn request_desktop_updates(app: &AppHandle) {
     app.state::<PendingDesktopUpdateOpen>().request();
-}
-
-fn take_desktop_update_request(app: &AppHandle) -> bool {
-    app.state::<PendingDesktopUpdateOpen>().take()
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -2048,8 +2100,16 @@ fn main_document_finished(webview: &tauri::Webview) {
     macos_title_bar::sync(webview);
     instance_client::page_loaded(webview.app_handle());
     apply_pending_deep_link(webview.app_handle());
-    if take_desktop_update_request(webview.app_handle()) && !open_desktop_updates(webview.app_handle()) {
-        updater::check(webview.app_handle().clone(), true);
+    // Document completion is not update-panel readiness. VersionBadge reports
+    // readiness after its listener and updater state are both available.
+    // Preserve the existing guarded account/remote route, whose native owner
+    // handles its own admission; never replay into a loading local Workbench.
+    if webview
+        .app_handle()
+        .get_webview_window(MAIN_WINDOW)
+        .is_some_and(|window| !pet::is_workbench(&window))
+    {
+        let _ = present_pending_desktop_updates(webview.app_handle());
     }
     // Settings become available the moment a Workbench is on
     // screen, not at the monitor's first tick. The shared
@@ -2078,8 +2138,8 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
         return;
     }
     focus_or_restore_main_window(app);
-    if updates_requested && open_desktop_updates(app) {
-        let _ = take_desktop_update_request(app);
+    if updates_requested {
+        let _ = present_pending_desktop_updates(app);
     }
     apply_pending_deep_link(app);
 }
@@ -2490,9 +2550,7 @@ pub fn run() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
                 updater::MENU_ID => {
-                    if !open_desktop_updates(app) {
-                        updater::check(app.clone(), true);
-                    }
+                    let _ = open_desktop_updates(app);
                 }
                 updater::CHANNEL_ID => updater::toggle_channel(app),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
@@ -2544,9 +2602,7 @@ pub fn run() {
                         }
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
-                        if !open_desktop_updates(webview.app_handle()) {
-                            updater::check(webview.app_handle().clone(), true);
-                        }
+                        let _ = open_desktop_updates(webview.app_handle());
                         return false;
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == OPEN_UPDATES_FALLBACK_URL {
@@ -2630,6 +2686,7 @@ pub fn run() {
             open_app_window,
             computer_use_enable,
             computer_use_open_permission,
+            desktop_update_panel_ready,
             updater::desktop_update_state,
             updater::desktop_update_check,
             updater::desktop_update_install,
@@ -2759,22 +2816,37 @@ mod tests {
     }
 
     #[test]
-    fn the_updates_request_is_a_cancelable_workbench_event() {
-        assert_eq!(
-            open_updates_script(),
-            "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
-             window.dispatchEvent(new Event('avibe:desktop-open-updates', { cancelable: true })); \
-             if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('avibe://updates-fallback');"
-        );
+    fn the_updates_request_keeps_its_exact_identity_and_fallback_mode() {
+        let script = open_updates_script(u64::MAX, false);
+        assert!(script.ends_with("(\"18446744073709551615\", false);"));
+        assert!(open_updates_script(1, true).ends_with("(\"1\", true);"));
+        assert!(OPEN_UPDATES_SCRIPT.contains("avibe:desktop-open-updates"));
+        assert!(OPEN_UPDATES_SCRIPT.contains(OPEN_UPDATES_FALLBACK_URL));
     }
 
     #[test]
-    fn a_pending_update_open_survives_until_a_workbench_takes_it() {
+    fn a_pending_update_open_survives_unhandled_delivery_until_the_listener_accepts_it() {
         let pending = PendingDesktopUpdateOpen::default();
-        assert!(!pending.take());
-        pending.request();
-        assert!(pending.take());
-        assert!(!pending.take());
+        assert_eq!(pending.current(), None);
+        let first = pending.request();
+        assert_ne!(first, 0);
+        assert_eq!(pending.request(), first, "repeated requests coalesce while pending");
+        pending.finish_delivery(first, false);
+        assert_eq!(pending.current(), Some(first), "loading is not consumption");
+        pending.finish_delivery(first, true);
+        assert_eq!(pending.current(), None);
+
+        let next = pending.request();
+        assert_ne!(next, first);
+        pending.finish_delivery(first, true);
+        assert_eq!(
+            pending.current(),
+            Some(next),
+            "a stale callback cannot consume a new request"
+        );
+        pending.finish_delivery(next, true);
+        pending.finish_delivery(next, true);
+        assert_eq!(pending.current(), None);
     }
 
     #[test]

@@ -54,7 +54,9 @@ def generated_metadata(row: dict[str, Any]) -> list[dict[str, Any]]:
         if at.tzinfo is None:
             continue
         parameter = "length" if item["type"] == "password" else "bytes"
-        lower, upper = (12, 128) if parameter == "length" else (16, 64)
+        # Preserve historical provenance up to 128 while projecting the newly
+        # admitted 8..11 lengths; new generation admission remains 8..100.
+        lower, upper = (8, 128) if parameter == "length" else (16, 64)
         if item["type"] not in {"password", "hex", "base64"} or set(item) != required | {parameter}:
             continue
         if type(item[parameter]) is not int or not lower <= item[parameter] <= upper:

@@ -68,13 +68,18 @@ def validate_presentation_lifecycle(library: str, fixture: str) -> dict:
         if positions != sorted(positions):
             raise RuntimeError("Native presentation lifecycle order changed")
 
-    opener = section("fn open_desktop_updates(", "\nfn request_desktop_updates(")
+    opener = section("fn open_desktop_updates(", "\nfn present_pending_desktop_updates(")
+    ordered(opener, ["request_desktop_updates(app);", "focus_or_restore_main_window(app);",
+                     "present_pending_desktop_updates(app)"])
+    presenter = section("fn present_pending_desktop_updates(", "\nfn deliver_desktop_update_request(")
     callers = [name for name in ("present", "present_guarded") if (
-        f'if instance_client::{name}(app, "updates") {{\n'
-        '            focus_or_restore_main_window(app);\n            return true;'
-    ) in opener]
+        f'if instance_client::{name}(app, "updates") {{'
+    ) in presenter]
     if len(callers) != 1:
-        raise RuntimeError("Production update presentation no longer pairs acceptance with show/focus")
+        raise RuntimeError("Production update presentation no longer reaches its guarded owner")
+    delivery = section("fn deliver_desktop_update_request(", "\nfn request_desktop_updates(")
+    if "focus_or_restore_main_window" in presenter + delivery:
+        raise RuntimeError("Deferred update presentation must not own focus")
     focus = section("fn focus_or_restore_main_window(", "\nfn main_document_finished(")
     ordered(focus, ["let created = app.get_webview_window(MAIN_WINDOW).is_none();",
                     "let Some(window) = ensure_main_window(app) else {", "window.unminimize();",
@@ -92,6 +97,7 @@ def validate_presentation_lifecycle(library: str, fixture: str) -> dict:
     if any(marker in fixture for marker in (".visible(true)", ".show()", ".set_focus()")):
         raise RuntimeError("Fixture must use the production visibility lifecycle")
     return {"production_present": callers[0], "library_sha256": hashlib.sha256(library.encode()).hexdigest(),
+            "production_open_sha256": hashlib.sha256(opener.encode()).hexdigest(),
             "production_focus_sha256": hashlib.sha256(focus.encode()).hexdigest(),
             "fixture_sha256": hashlib.sha256(fixture.encode()).hexdigest()}
 
@@ -162,7 +168,8 @@ def adapt(source: Path) -> dict:
         stream.write('\n#[path = "../examples/support/fixture_native_update.rs"]\npub mod fixture_native_update;\n')
     # Keep the normal binary target so Tauri's Windows version resources attach.
     (desktop / "src/main.rs").write_text("fn main() { avibe_desktop_lib::fixture_native_update::run(); }\n", encoding="utf-8")
-    protected = ["desktop/src-tauri/src/update_install.rs", "desktop/src-tauri/src/update_windows.ps1",
+    protected = ["desktop/src-tauri/src/open_updates.js",
+                 "desktop/src-tauri/src/update_install.rs", "desktop/src-tauri/src/update_windows.ps1",
                  "desktop/runtime-host/src/update.rs", "desktop/src-tauri/src/updater/activity.rs",
                  "core/update_activity.py", "core/internal_server.py", "vibe/internal_client.py"]
     return {"callback_variant": callback_variant, "presentation_lifecycle": presentation,

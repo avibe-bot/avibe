@@ -346,6 +346,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       }).catch(() => undefined);
     };
     window.addEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
+    if (desktopActions && desktopUpdaterStatus === 'available') {
+      // Page load is earlier than listener readiness. This notification cannot
+      // create an open request; it only lets the shell deliver one it retained.
+      // Older shells lack the command and keep the existing event-only path.
+      void desktopActions.panelReady().catch(() => undefined);
+    }
     return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
     // The updater actions and API are stable for the lifetime of the Workbench.
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
