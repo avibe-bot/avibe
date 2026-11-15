@@ -7,10 +7,13 @@ session tests independently cover residual descendants in the shared group reape
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -36,18 +39,18 @@ def inventory():
 def fake_hosted(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "hosted_root", lambda: tmp_path)
     monkeypatch.setattr(runner, "merged_source", lambda: {"head": "a" * 40, "merged_base": "a" * 40})
-    real_spawn = asyncio.create_subprocess_exec
+    real_spawn = subprocess.Popen
     scripts = {"inventory": f"print({json.dumps(inventory())!r})", "boot": "print('boot ready')"}
     commands = []
 
-    async def spawn(*command, **kwargs):
-        commands.append(command)
-        assert command[:2] == ("xcrun", "simctl")
+    def spawn(command, **kwargs):
+        commands.append(tuple(command))
+        assert tuple(command[:2]) == ("xcrun", "simctl")
         stage = "inventory" if command[2] == "list" else "boot"
         assert kwargs["start_new_session"] is True
-        return await real_spawn(sys.executable, "-c", scripts[stage], **kwargs)
+        return real_spawn([sys.executable, "-c", scripts[stage]], **kwargs)
 
-    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(runner.subprocess, "Popen", spawn)
     return scripts, commands, tmp_path / "simulator-readiness"
 
 
@@ -213,50 +216,164 @@ def test_matching_device_requires_a_uuid(udid):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["deadline", "cancel"])
-async def test_spawn_is_inside_stage_budget_and_retains_terminal_receipt(fake_hosted, monkeypatch, stop):
-    _, commands, directory = fake_hosted
+@pytest.mark.parametrize("leader_exits", [False, True])
+async def test_live_group_owned_before_delayed_pipe_attachment(fake_hosted, monkeypatch, stop, leader_exits):
+    scripts, commands, directory = fake_hosted
+    child_pid_file = directory.parent / "descendant-pid"
+    leader_pid_file = directory.parent / "leader-pid"
+    child = (
+        "import os,pathlib,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    )
+    scripts["inventory"] = f'''
+import os,pathlib,subprocess,sys,time
+pathlib.Path({str(leader_pid_file)!r}).write_text(str(os.getpid()))
+subprocess.Popen([sys.executable, "-c", {child!r}])
+while not pathlib.Path({str(child_pid_file)!r}).exists():
+    time.sleep(0.01)
+if {leader_exits!r}:
+    sys.exit(0)
+time.sleep(60)
+'''
+    loop = asyncio.get_running_loop()
+    original_connect = loop.connect_read_pipe
     entered = asyncio.Event()
-    cancelled = asyncio.Event()
+    release = asyncio.Event()
 
-    async def stalled_spawn(*args, **kwargs):
+    async def stalled_connect(*args, **kwargs):
         entered.set()
-        try:
-            await asyncio.sleep(60)
-        finally:
-            cancelled.set()
+        await release.wait()
+        return await original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", stalled_spawn)
-    original = runner.simulator_command
+    monkeypatch.setattr(loop, "connect_read_pipe", stalled_connect)
+    original_command = runner.simulator_command
+    original_wait = runner.wait_group_empty
 
     async def shorter(directory, stage, command, timeout):
-        await original(directory, stage, command, 0.05 if stop == "deadline" else timeout)
+        await original_command(directory, stage, command, 0.4 if stop == "deadline" else timeout)
+
+    async def faster(group, seconds):
+        await original_wait(group, 0.2 if seconds == 5 else seconds)
 
     monkeypatch.setattr(runner, "simulator_command", shorter)
+    monkeypatch.setattr(runner, "wait_group_empty", faster)
     task = asyncio.create_task(runner.ready_simulator())
-    await asyncio.wait_for(entered.wait(), 1)
-    if stop == "cancel":
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    else:
-        # The independent outer guard fails the test if spawn bypasses 0.05s.
-        with pytest.raises(runner.host.HostFault, match="TimeoutError"):
-            await asyncio.wait_for(task, 1)
-    assert cancelled.is_set() and commands == []
+    try:
+        async with asyncio.timeout(3):
+            await entered.wait()
+            while not child_pid_file.exists():
+                await asyncio.sleep(0.01)
+            if leader_exits:
+                while True:
+                    try:
+                        os.kill(int(leader_pid_file.read_text()), 0)
+                    except ProcessLookupError:
+                        break
+                    await asyncio.sleep(0.01)
+        if stop == "cancel":
+            task.cancel()
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3)
+        else:
+            with pytest.raises(runner.host.HostFault, match="TimeoutError"):
+                await asyncio.wait_for(task, 3)
+        record = json.loads((directory / "inventory.json").read_text())
+        assert record["pid"] == record["process_group"] and record["pid"] is not None
+        assert record["status"] == "failed" and len(commands) == 1
+        if leader_exits:
+            assert record["exit_code"] == 0
+        else:
+            assert record["exit_code"] is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(child_pid_file.read_text()), 0)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(record["process_group"], 0)
+        assert json.loads((directory / "readiness.json").read_text())["status"] == "failed"
+    finally:
+        # A failing pre-fix regression still retires only its recorded fixture group.
+        if leader_pid_file.exists():
+            group = int(leader_pid_file.read_text())
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(group, signal.SIGKILL)
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 3)
+        if leader_pid_file.exists():
+            await original_wait(group, 3)
+
+
+@pytest.mark.asyncio
+async def test_overdue_synchronous_spawn_does_not_reset_budget(fake_hosted, monkeypatch):
+    _, commands, directory = fake_hosted
+    original_spawn = runner.subprocess.Popen
+    original_command = runner.simulator_command
+
+    def slow_spawn(*args, **kwargs):
+        time.sleep(0.1)
+        return original_spawn(*args, **kwargs)
+
+    async def shorter(directory, stage, command, timeout):
+        await original_command(directory, stage, command, 0.05)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", slow_spawn)
+    monkeypatch.setattr(runner, "simulator_command", shorter)
+    with pytest.raises(runner.host.HostFault, match="TimeoutError"):
+        await runner.ready_simulator()
     record = json.loads((directory / "inventory.json").read_text())
-    assert record["status"] == "failed" and record["pid"] is None
-    assert record["failure"] == ("TimeoutError" if stop == "deadline" else "CancelledError")
-    assert json.loads((directory / "readiness.json").read_text())["status"] == "failed"
+    assert record["pid"] is not None and record["status"] == "failed"
+    assert len(commands) == 1 and "launch exceeded" in record["detail"]
+    with pytest.raises(ProcessLookupError):
+        os.killpg(record["process_group"], 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["attach", "receipt"])
+async def test_attachment_or_receipt_failure_retains_owned_cleanup(fake_hosted, monkeypatch, boundary):
+    _, commands, directory = fake_hosted
+    original_spawn = runner.subprocess.Popen
+    original_write = runner.host.write_json
+    created = []
+
+    def track_spawn(*args, **kwargs):
+        process = original_spawn(*args, **kwargs)
+        created.append(process)
+        return process
+
+    async def broken_attach(*args, **kwargs):
+        raise OSError("pipe attachment failed")
+
+    def broken_receipt(path, value):
+        if path.name == "inventory.json" and value["status"] == "running":
+            raise OSError("running receipt failed")
+        original_write(path, value)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", track_spawn)
+    if boundary == "attach":
+        monkeypatch.setattr(asyncio.get_running_loop(), "connect_read_pipe", broken_attach)
+    else:
+        monkeypatch.setattr(runner.host, "write_json", broken_receipt)
+    with pytest.raises(runner.host.HostFault, match="OSError"):
+        await runner.ready_simulator()
+    assert len(commands) == len(created) == 1
+    process = created[0]
+    assert process.returncode is not None and process.stdout.closed and process.stderr.closed
+    record = json.loads((directory / "inventory.json").read_text())
+    assert record["pid"] == process.pid and record["status"] == "failed"
+    with pytest.raises(ProcessLookupError):
+        os.killpg(process.pid, 0)
 
 
 @pytest.mark.asyncio
 async def test_spawn_failure_has_terminal_evidence_without_a_pid(fake_hosted, monkeypatch):
     _, commands, directory = fake_hosted
 
-    async def missing(*args, **kwargs):
+    def missing(*args, **kwargs):
         raise FileNotFoundError("simctl fixture unavailable")
 
-    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", missing)
+    monkeypatch.setattr(runner.subprocess, "Popen", missing)
     with pytest.raises(runner.host.HostFault, match="FileNotFoundError"):
         await runner.ready_simulator()
     record = json.loads((directory / "inventory.json").read_text())

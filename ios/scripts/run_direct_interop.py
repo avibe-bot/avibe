@@ -299,10 +299,21 @@ async def wait_group_empty(group: int, seconds: float) -> None:
             await asyncio.sleep(0.05)
 
 
-async def close_process_group(process: asyncio.subprocess.Process | None) -> None:
+async def wait_process(process: asyncio.subprocess.Process | subprocess.Popen) -> int:
+    if isinstance(process, asyncio.subprocess.Process):
+        return await process.wait()
+    # Popen.poll caches/reaps the status; concurrent execution/cleanup waits
+    # cannot double-reap it and do not depend on descendant-held output pipes.
+    while process.poll() is None:
+        await asyncio.sleep(0.05)
+    return process.returncode
+
+
+async def close_process_group(process: asyncio.subprocess.Process | subprocess.Popen | None) -> None:
     """Retire only the recorded fresh-session group, including residual children."""
     if process is not None:
         group = process.pid
+        reaped = asyncio.create_task(wait_process(process))
         try:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(group, signal.SIGTERM)
@@ -314,7 +325,7 @@ async def close_process_group(process: asyncio.subprocess.Process | None) -> Non
                 await wait_group_empty(group, 3)
         finally:
             async with asyncio.timeout(3):
-                await process.wait()
+                await reaped
 
 
 async def close_run(process: asyncio.subprocess.Process | None, fixture_host: host.Host) -> None:
@@ -336,9 +347,25 @@ async def capture_simulator_output(reader: asyncio.StreamReader, output) -> bool
     return truncated
 
 
+async def capture_simulator_pipe(pipe, output) -> bool:
+    """Attach only after PID ownership; a cancelled attachment still closes its FD."""
+    transport = None
+    try:
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(lambda: protocol, pipe)
+        return await capture_simulator_output(reader, output)
+    finally:
+        if transport is not None:
+            transport.close()
+        else:
+            pipe.close()
+
+
 async def simulator_command(directory: Path, stage: str, command: list[str], timeout: float) -> None:
     """One bounded command and owned-group cleanup on every exit, no retries."""
     started = time.monotonic()
+    deadline = asyncio.get_running_loop().time() + timeout
     process = None
     tasks = []
     failure = None
@@ -353,19 +380,27 @@ async def simulator_command(directory: Path, stage: str, command: list[str], tim
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if process is not None:
+                process.stdout.close()
+                process.stderr.close()
 
     host.write_json(path, receipt)
     with (directory / f"{stage}.stdout").open("wb") as out, (directory / f"{stage}.stderr").open("wb") as err:
         try:
-            # One budget covers process creation as well as execution/output.
-            async with asyncio.timeout(timeout):
-                process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE,
-                                                               stderr=asyncio.subprocess.PIPE, start_new_session=True)
-                receipt.update(pid=process.pid, process_group=process.pid, status="running")
-                host.write_json(path, receipt)
-                tasks = [asyncio.create_task(process.wait()),
-                         asyncio.create_task(capture_simulator_output(process.stdout, out)),
-                         asyncio.create_task(capture_simulator_output(process.stderr, err))]
+            # Popen establishes PID/PGID synchronously, before pipe attachment
+            # can suspend. Never delegate pre-return ownership to asyncio.
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       start_new_session=True, bufsize=0)
+            receipt.update(pid=process.pid, process_group=process.pid, status="running")
+            host.write_json(path, receipt)
+            # Kernel-stalled synchronous creation cannot be interrupted here;
+            # reject an overdue return instead of resetting the stage budget.
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("simulator launch exceeded stage deadline")
+            async with asyncio.timeout_at(deadline):
+                tasks = [asyncio.create_task(wait_process(process)),
+                         asyncio.create_task(capture_simulator_pipe(process.stdout, out)),
+                         asyncio.create_task(capture_simulator_pipe(process.stderr, err))]
                 pending = asyncio.gather(*tasks)
                 try:
                     code, stdout_truncated, stderr_truncated = await asyncio.shield(pending)

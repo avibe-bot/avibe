@@ -53,9 +53,18 @@ Boolean (only `true` is selectable), and matching device IDs must have UUID
 shape. A missing target or invalid inventory fails; no alternate device/runtime,
 retry or daemon restart is allowed. The selected device's existing
 `simctl bootstatus <UDID> -b` readiness operation then has a **600-second** limit.
-Each limit covers subprocess creation and execution/output together, not a new
-budget after spawn. Only successful completion prints the
-UDID to stdout for the workflow. There is no second, unbounded shell boot command.
+An absolute monotonic deadline starts before synchronous `Popen` creation;
+launching after it has expired fails rather than resetting the budget. The
+remaining budget covers asynchronous pipe attachment and execution/output.
+PID/process-group ownership is recorded before any pipe-attachment await, so
+cancellation during attachment still retires the already-created group. Only
+successful completion prints the UDID to stdout for the workflow. There is no
+second, unbounded shell boot command.
+
+Known by design: Python cannot interrupt an arbitrary kernel-stalled synchronous
+spawn. That exceptional path remains subject to the existing 35-minute hosted
+job limit and runner teardown, not a claimed hard-interruptible spawn guarantee.
+No extra launcher or general process supervisor is introduced.
 
 Both commands have recorded fresh process groups and use the same cancellation-
 safe TERM/KILL/reap path as xcodebuild (up to 5 seconds for TERM, 3 for KILL and
