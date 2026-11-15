@@ -1719,6 +1719,36 @@ def test_a_claude_model_is_registered_with_the_thinking_it_takes_upstream(tmp_pa
     }
 
 
+def test_opencode_go_source_forwards_the_client_session_header_only(tmp_path: Path) -> None:
+    """OpenCode Go needs ``x-opencode-session``; copy OpenCode's per-session id, and only for that provider."""
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    go_ref = store.store_api_key("go-secret-value", base_url="https://opencode.ai/inference/go/openai/v1")
+    other_ref = store.store_api_key("other-secret-value", base_url="https://api.example.test/v1")
+    lookalike_ref = store.store_api_key("look-secret-value", base_url="https://opencode.ai.evil.test/inference/go/v1")
+    zen_ref = store.store_api_key("zen-secret-value", base_url="https://opencode.ai/zen/v1")
+    store.sync_sources([
+        _binding(go_ref, source_id="src_gosource01", base_url="https://opencode.ai/inference/go/openai/v1"),
+        _binding(other_ref, source_id="src_othersrc01"),
+        _binding(lookalike_ref, source_id="src_lookalike1", base_url="https://opencode.ai.evil.test/inference/go/v1"),
+        _binding(zen_ref, source_id="src_zensource1", base_url="https://opencode.ai/zen/v1"),
+    ])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir, runtime_secrets=runtime_secrets,
+        sources=store.list_sources(), state_store=store,
+    )
+    entries = {
+        entry["base-url"]: entry for entry in yaml.safe_load(config_path.read_text())["openai-compatibility"]
+    }
+    # A ``$`` value is copied from the client's request per call: the id is the client's, never fixed here.
+    assert entries["https://opencode.ai/inference/go/openai/v1"]["headers"] == {
+        "x-opencode-session": "$X-Session-Id"
+    }
+    for url in ("https://api.example.test/v1", "https://opencode.ai.evil.test/inference/go/v1", "https://opencode.ai/zen/v1"):
+        assert "headers" not in entries[url]
+
+
 def test_config_generation_is_private_and_never_logs_secrets(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
