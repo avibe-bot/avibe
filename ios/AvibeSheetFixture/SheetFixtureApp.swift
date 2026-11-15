@@ -32,6 +32,9 @@ private final class SheetFixtureRootViewController: UIViewController {
     private var selectionReceiptObserver: FixtureSelectionReceiptObserver?
     private var selectionEvidence: [String: Any] = ["bridgeStage": "selection-none"]
     private var selectionDisplayLink: CADisplayLink?
+    private var geometryDisplayLink: CADisplayLink?
+    private var lastGeometrySignature: String?
+    private var geometrySequence = 0
     private var lastDisplayTick: TimeInterval?
     private var maximumDisplayGap: TimeInterval = 0
     private var readinessJavaScriptPending = false
@@ -186,6 +189,8 @@ private final class SheetFixtureRootViewController: UIViewController {
                 controller.view.addSubview(arm)
             }
         }
+        geometryDisplayLink = CADisplayLink(target: self, selector: #selector(recordGeometryTick))
+        geometryDisplayLink?.add(to: .main, forMode: .common)
         controller.modalPresentationStyle = .pageSheet
         sheetController = controller
         publishReadiness()
@@ -313,6 +318,31 @@ private final class SheetFixtureRootViewController: UIViewController {
         }
     }
 
+    @objc private func recordGeometryTick() {
+        guard let controller = sheetController,
+              let webView = controller.view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
+        let frame = controller.view.convert(controller.view.bounds, to: nil)
+        let webFrame = webView.convert(webView.bounds, to: nil)
+        let detent = controller.sheetPresentationController?.selectedDetentIdentifier?.rawValue ?? "none"
+        let orientation = frame.width > frame.height ? "landscape" : "portrait"
+        let signature = "\(orientation)|\(frame.integral)|\(webFrame.integral)|\(detent)"
+        guard signature != lastGeometrySignature else { return }
+        lastGeometrySignature = signature
+        geometrySequence += 1
+        selectionEvidence["geometry"] = [
+            "stage": "native-geometry",
+            "sequence": geometrySequence,
+            "orientation": orientation,
+            "sheetWindowFrame": frameEvidence(frame),
+            "webViewWindowFrame": frameEvidence(webFrame),
+            "detent": detent,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: selectionEvidence, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            controller.view.accessibilityLabel = text
+        }
+    }
+
     @objc private func recordDisplayTick() {
         let now = ProcessInfo.processInfo.systemUptime
         defer { lastDisplayTick = now }
@@ -338,6 +368,9 @@ private final class SheetFixtureRootViewController: UIViewController {
         let kind = event["kind"] as? String ?? "unknown"
         if kind == "bridge", let stage = event["stage"] as? String {
             selectionEvidence["bridgeStage"] = stage
+            var stages = selectionEvidence["bridgeStages"] as? [String] ?? []
+            if !stages.contains(stage) { stages.append(stage) }
+            selectionEvidence["bridgeStages"] = stages
         }
         var events = selectionEvidence["events"] as? [[String: Any]] ?? []
         var observation = event
@@ -369,6 +402,9 @@ private final class SheetFixtureRootViewController: UIViewController {
     private func dismissFixtureSheet() -> Bool {
         selectionDisplayLink?.invalidate()
         selectionDisplayLink = nil
+        geometryDisplayLink?.invalidate()
+        geometryDisplayLink = nil
+        lastGeometrySignature = nil
         runtimeRouteTask?.cancel()
         runtimeWebView?.removeFromSuperview()
         runtimeWebView = nil
@@ -402,6 +438,38 @@ private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHa
       const handler = window.webkit.messageHandlers.avibeMobile;
       const original = handler.postMessage.bind(handler);
       const receipt = (stage) => window.webkit.messageHandlers.fixtureSelectionReceipt.postMessage({kind: "bridge", stage});
+      let rowErrorReported = false;
+      const reportRowError = () => {
+        if (rowErrorReported) return;
+        const isVisible = (element) => {
+          for (let node = element; node; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0"
+                || node.getAttribute("aria-hidden") === "true") return false;
+          }
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const alert = [...document.querySelectorAll('[role="alert"]')].find(element => {
+          const chinese = navigator.language.toLowerCase().startsWith("zh");
+          const expectedError = chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.";
+          const expectedRetry = chinese ? "重试" : "Retry";
+          const row = element.closest("div");
+          const buttons = row ? [...row.querySelectorAll("button")] : [];
+          const retry = buttons.find(button => button.textContent.trim() === expectedRetry);
+          const hasLabButton = buttons.some(button => button.textContent.includes("Lab"));
+          return isVisible(element) && element.textContent.trim() === expectedError && buttons.length === 1
+            && !!retry && isVisible(retry) && !hasLabButton;
+        });
+        if (!alert) return;
+        rowErrorReported = true;
+        receipt("row-error-rendered");
+      };
+      const observerRoot = document.documentElement || document;
+      new MutationObserver(reportRowError).observe(observerRoot, {
+        subtree: true, childList: true, characterData: true, attributes: true
+      });
+      reportRowError();
       for (const kind of ["pointerdown", "pointerup", "pointercancel", "click"]) {
         document.addEventListener(kind, (event) => {
           if (!event.isTrusted) return;

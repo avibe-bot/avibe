@@ -119,7 +119,7 @@ final class RealBundleCaptureUITests: XCTestCase {
                                 : "Home is offline. Open Avibe on that computer and connect it to the internet, and it shows as online.", in: app)
                         case "open-failed":
                             SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
-                            SheetFixtureReadiness.requireFailedSelection(chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.", in: app)
+                            SheetFixtureReadiness.requireFailedSelection(in: app)
                         case "stale":
                             requireText(chinese
                                 ? "没能更新实例列表，下面是上次的结果，在线状态可能已经变了。"
@@ -171,7 +171,9 @@ final class RealBundleCaptureUITests: XCTestCase {
             let surface = app.otherElements["fixture-document-surface"]
             let replied = XCTNSPredicateExpectation(
                 predicate: NSPredicate { _, _ in
-                    surface.label.contains("\"bridgeStage\":\"selection-rejected-invalid_instance\"")
+                    SheetFixtureReadiness.hasBridgeStages(
+                        ["selection-rejected-invalid_instance"], in: surface.label
+                    )
                 }, object: nil
             )
             _ = XCTWaiter.wait(for: [replied], timeout: 10)
@@ -184,6 +186,7 @@ final class RealBundleCaptureUITests: XCTestCase {
                 "rowPointerdown": events.contains { ($0["kind"] as? String) == "pointerdown" && ($0["onLab"] as? Bool) == true },
                 "rowClick": events.contains { ($0["kind"] as? String) == "click" && ($0["onLab"] as? Bool) == true },
                 "bridgeStage": evidence["bridgeStage"] ?? "unobserved",
+                "bridgeStages": evidence["bridgeStages"] ?? [],
                 "evidence": evidence,
             ])
             app.terminate()
