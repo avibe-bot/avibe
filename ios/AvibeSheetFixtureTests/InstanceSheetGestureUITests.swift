@@ -23,6 +23,16 @@ final class InstanceSheetGestureUITests: XCTestCase {
         ))
     }
 
+    /// Exercise the same single-tap path and real bridge receipt as the matrix.
+    func testOpenFailedSelectionReportsNativeRejectionAndRendersRowError() {
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_STATE"] = "open-failed"
+        app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = "light"
+        launchFixture()
+        SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
+        SheetFixtureReadiness.requireFailedSelection("Couldn’t open Lab. Try again.", in: app)
+    }
+
     private func launchFixture() {
         app.launch()
         SheetFixtureReadiness.waitForDocument(in: app)
@@ -127,6 +137,39 @@ final class InstanceSheetGestureUITests: XCTestCase {
 /// assertions. The native marker is fixture-only and leaves the web subtree
 /// exposed; content is still checked through a fresh, scoped AX query.
 enum SheetFixtureReadiness {
+    static func requireFailedSelection(_ text: String, in app: XCUIApplication) {
+        let surface = app.otherElements["fixture-document-surface"]
+        let failed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                surface.label == "selection-rejected-invalid_instance"
+                    && app.webViews.firstMatch.staticTexts.matching(
+                        NSPredicate(format: "label == %@", text)
+                    ).firstMatch.exists
+            }, object: nil
+        )
+        let result = XCTWaiter.wait(for: [failed], timeout: 10)
+        XCTAssertEqual(result, .completed,
+                       "Expected native invalid_instance and row error; receipt=\(surface.label)")
+    }
+
+    static func tapRow(containing name: String, in app: XCUIApplication) {
+        let deadline = ProcessInfo.processInfo.systemUptime + 10
+        let row = app.webViews.firstMatch.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        if !row.isHittable { app.swipeUp(velocity: .slow) }
+        // Existence is not actionability. Re-resolve after the existing scroll,
+        // using the remainder of the original ten-second row budget.
+        let actionable = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                row.exists && row.isEnabled && row.isHittable
+            }, object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(
+            for: [actionable], timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        ), .completed, "Row must be enabled and hittable before the single tap: \(name)")
+        row.tap()
+    }
+
     static func waitForDocument(
         in app: XCUIApplication,
         file: StaticString = #filePath,

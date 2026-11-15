@@ -44,7 +44,9 @@ final class RealBundleCaptureUITests: XCTestCase {
                             XCTAssertTrue(app.webViews.firstMatch.buttons[chinese ? "关闭，回到 Studio" : "Close and return to Studio"].waitForExistence(timeout: 10))
                             let settled = XCTNSPredicateExpectation(
                                 predicate: NSPredicate { _, _ in
-                                    !app.webViews.firstMatch.staticTexts[chinese ? "正在更新…" : "Updating…"].exists
+                                    !app.webViews.firstMatch.staticTexts.matching(NSPredicate(
+                                        format: "label == %@", chinese ? "正在更新…" : "Updating…"
+                                    )).firstMatch.exists
                                 }, object: nil
                             )
                             XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 10), .completed)
@@ -66,13 +68,13 @@ final class RealBundleCaptureUITests: XCTestCase {
                                 format: "label CONTAINS %@", chinese ? "返回" : "Back"
                             )).firstMatch.exists)
                         case "offline-open":
-                            tapRow(containing: "Home", in: app)
+                            SheetFixtureReadiness.tapRow(containing: "Home", in: app)
                             requireText(chinese
                                 ? "Home 现在离线。在那台电脑上打开 Avibe 并联网，它就会出现为在线。"
                                 : "Home is offline. Open Avibe on that computer and connect it to the internet, and it shows as online.", in: app)
                         case "open-failed":
-                            tapRow(containing: "Lab", in: app)
-                            requireText(chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.", in: app)
+                            SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
+                            SheetFixtureReadiness.requireFailedSelection(chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.", in: app)
                         case "stale":
                             requireText(chinese
                                 ? "没能更新实例列表，下面是上次的结果，在线状态可能已经变了。"
@@ -105,10 +107,4 @@ final class RealBundleCaptureUITests: XCTestCase {
         XCTAssertTrue(SheetFixtureReadiness.waitForText(text, in: app), text)
     }
 
-    private func tapRow(containing name: String, in app: XCUIApplication) {
-        let row = app.webViews.firstMatch.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
-        if !row.isHittable { app.swipeUp(velocity: .slow) }
-        row.tap()
-    }
 }

@@ -28,6 +28,7 @@ private final class SheetFixtureRootViewController: UIViewController {
     private var runtimeWebView: WKWebView?
     private var runtimeRouteTask: Task<Void, Never>?
     private var documentReadinessTask: Task<Void, Never>?
+    private var selectionReceiptObserver: FixtureSelectionReceiptObserver?
     // These controls exist only in the simulator fixture app, never Avibe.
     private let captureState = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_CAPTURE_STATE"]
     private let captureTheme = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_CAPTURE_THEME"]
@@ -146,6 +147,20 @@ private final class SheetFixtureRootViewController: UIViewController {
             }
         )
         controller.view.accessibilityIdentifier = "fixture-document-surface"
+        if captureState == "open-failed" {
+            controller.view.accessibilityLabel = "selection-none"
+            let observer = FixtureSelectionReceiptObserver { [weak controller] stage in
+                controller?.view.accessibilityLabel = stage
+            }
+            selectionReceiptObserver = observer
+            let webView = controller.view.subviews.compactMap { $0 as? WKWebView }.first!
+            webView.configuration.userContentController.add(observer, name: "fixtureSelectionReceipt")
+            webView.configuration.userContentController.addUserScript(WKUserScript(
+                source: FixtureSelectionReceiptObserver.script,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+        }
         controller.modalPresentationStyle = .pageSheet
         sheetController = controller
         publishReadiness()
@@ -268,6 +283,49 @@ private final class SheetFixtureRootViewController: UIViewController {
         }
         return true
     }
+}
+
+// Observe only the synthetic open-failed fixture's real WebKit request/reply.
+// Do not replace the frozen avibeMobile API, the native handler, or its result.
+@MainActor
+private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHandler {
+    private let publish: (String) -> Void
+
+    init(publish: @escaping (String) -> Void) {
+        self.publish = publish
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame,
+              let stage = message.body as? String,
+              ["selection-clicked", "selection-submitted", "selection-accepted",
+               "selection-rejected-invalid_instance", "selection-rejected-other",
+               "selection-transport-rejected"].contains(stage) else { return }
+        publish(stage)
+    }
+
+    static let script = #"""
+    (() => {
+      const handler = window.webkit.messageHandlers.avibeMobile;
+      const original = handler.postMessage.bind(handler);
+      const receipt = (stage) => window.webkit.messageHandlers.fixtureSelectionReceipt.postMessage(stage);
+      document.addEventListener("click", (event) => {
+        const button = event.target.closest?.("button");
+        if (event.isTrusted && button?.textContent.includes("Lab")) receipt("selection-clicked");
+      }, true);
+      handler.postMessage = (request) => {
+        if (request?.method !== "session.selectInstance") return original(request);
+        receipt("selection-submitted");
+        const result = original(request);
+        Promise.resolve(result).then((reply) => {
+          receipt(reply?.ok === true ? "selection-accepted"
+            : reply?.error?.code === "invalid_instance" ? "selection-rejected-invalid_instance"
+            : "selection-rejected-other");
+        }, () => receipt("selection-transport-rejected"));
+        return result;
+      };
+    })();
+    """#
 }
 
 // Data-only transport shapes keep the fixture independent of the production
