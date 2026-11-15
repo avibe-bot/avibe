@@ -15,7 +15,7 @@
 //!   and [`ensure_shell_ui`] rejects the call a second time regardless. Only
 //!   the two built-in window drag commands are granted to the Workbench.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
