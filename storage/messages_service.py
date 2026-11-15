@@ -21,7 +21,11 @@ from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DatabaseError
 
-from storage.agent_session_rows import INBOX_SESSION_VISIBILITIES
+from storage.agent_session_rows import (
+    INBOX_SESSION_VISIBILITIES,
+    WORKSPACE_NOTICE_SESSION_ID,
+    WORKSPACE_NOTICE_UNREAD_METADATA_KEY,
+)
 from core.notification_categories import (
     CATEGORY_BOT,
     CATEGORY_SESSION,
@@ -598,6 +602,23 @@ def search_messages(
     return {"sessions": sessions, "total": total, "session_count": len(sessions)}
 
 
+def _message_write_metadata(
+    metadata: dict[str, Any] | None,
+    *,
+    session_id: str | None,
+    author: str,
+    message_type: str,
+) -> dict[str, Any]:
+    row_metadata = dict(metadata or {})
+    if (
+        session_id == WORKSPACE_NOTICE_SESSION_ID
+        and author == "agent"
+        and message_type == NOTIFY_TYPE
+    ):
+        row_metadata[WORKSPACE_NOTICE_UNREAD_METADATA_KEY] = True
+    return row_metadata
+
+
 def append(
     conn: Connection,
     *,
@@ -641,6 +662,9 @@ def append(
         author = HARNESS_TYPE
         resolved_type = HARNESS_TYPE
 
+    row_metadata = _message_write_metadata(
+        metadata, session_id=session_id, author=author, message_type=resolved_type
+    )
     now = canonical_message_timestamp(_utc_now_iso())
     assert now is not None
     payload = {
@@ -657,7 +681,7 @@ def append(
         "parent_native_message_id": parent_native_message_id,
         "content_text": plain,
         "content_json": json.dumps(body),
-        "metadata_json": json.dumps(metadata or {}),
+        "metadata_json": json.dumps(row_metadata),
         "created_at": now,
         "updated_at": now,
         "delivered_at": canonical_message_timestamp(delivered_at),
@@ -787,7 +811,11 @@ def promote_suppressed_native_message(
             type=message_type,
             content_text=text,
             content_json=json.dumps(body),
-            metadata_json=json.dumps(metadata or {}),
+            metadata_json=json.dumps(
+                _message_write_metadata(
+                    metadata, session_id=session_id, author="agent", message_type=message_type
+                )
+            ),
             delivered_at=now,
             updated_at=now,
         )
@@ -1176,13 +1204,35 @@ INBOX_ACTIVITY_TYPES = types_with("inboxActivity")
 # so they cannot be mistaken for human input. Show Page annotations in either
 # direction share one explicit transcript type. ``error`` is a terminal FAILED
 # result (turned the dot red): shown in the conversation like any terminal
-# message, but the unread queries below stay ``result``-only so a failure is not
-# counted as an unread agent reply.
+# message. Ordinary failure notices do not count as unread replies; new workspace
+# notices opt in at write time, leaving historical notices unchanged.
 TRANSCRIPT_TYPES = types_with("transcript")
 _INBOX_PREVIEW_TYPES = types_with("inboxPreview")
 _INBOX_SETTLES_REPLY_TYPES = types_with("inboxSettlesReply")
 _DETACHED_COMPLETION_TYPES = types_with("detachedCompletion")
 _UNREAD_TYPES = types_with("unread")
+
+
+def unread_message_predicates() -> tuple[Any, ...]:
+    """Disjoint branches of the shared unread predicate, for indexed probes.
+
+    Do not combine these with SQL OR: SQLite can choose a platform/history walk.
+    Each branch pins type/author/read_at; the notice branch additionally pins the
+    reserved Session before inspecting metadata. Consumers sum the branch counts.
+    """
+    pending_agent = (messages.c.author == "agent", messages.c.read_at.is_(None))
+    catalog = and_(*pending_agent, messages.c.type.in_(_UNREAD_TYPES))
+    if NOTIFY_TYPE in _UNREAD_TYPES:
+        return (catalog,)
+    workspace = and_(
+        *pending_agent,
+        messages.c.type == NOTIFY_TYPE,
+        messages.c.session_id == WORKSPACE_NOTICE_SESSION_ID,
+        func.json_extract(
+            messages.c.metadata_json, f"$.{WORKSPACE_NOTICE_UNREAD_METADATA_KEY}"
+        ) == 1,
+    )
+    return catalog, workspace
 
 
 def _hidden_ids(session_ids: Optional[Iterable[str]]) -> list[str]:
@@ -1196,17 +1246,11 @@ def unread_counts(
     scope_ids: Optional[Iterable[str]] = None,
     hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
-    """Return ``{scope_id: count}`` for unread agent ``result`` messages.
+    """Return ``{scope_id: count}`` for unread agent communication.
 
-    Used for per-scope badges. Rows without a scope (including Bot and
-    unplaced Session replies) cannot be attributed to one and are omitted.
-    They remain in ``unread_counts_by_session`` and its category/global totals.
-    Filtered to ``type='result'`` so it agrees with the inbox feed's UNREAD
-    count, which is also result-only — otherwise intermediate ``assistant`` /
-    process-event rows in ``agent_events`` would inflate the badge past what the
-    feed shows. (Inbox *eligibility* and *preview* also accept a
-    terminal ``notify`` so failed turns stay visible, but a failure notify is
-    not an unread reply — it never bumps this badge.)
+    Rows without a scope (including workspace notices, Bot and unplaced Session
+    replies) cannot be attributed to one and are omitted. They remain in
+    ``unread_counts_by_session`` and its category/global totals.
     """
 
     allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
@@ -1216,9 +1260,6 @@ def unread_counts(
     query = (
         select(messages.c.scope_id, func.count(messages.c.id))
         .where(messages.c.scope_id.is_not(None))
-        .where(messages.c.author == "agent")
-        .where(messages.c.type.in_(_UNREAD_TYPES))
-        .where(messages.c.read_at.is_(None))
         # Don't let an archived session's unread results inflate its scope badge
         # (keep null-session rows, which aren't attributable to any session).
         .where(
@@ -1248,7 +1289,9 @@ def unread_counts(
     hidden = _hidden_ids(hidden_session_ids)
     if hidden:
         query = query.where(or_(messages.c.session_id.is_(None), messages.c.session_id.not_in(hidden)))
-    return {scope: int(count) for scope, count in conn.execute(query).all()}
+    # Workspace notices have no scope, so their branch cannot contribute here.
+    query = query.where(unread_message_predicates()[0])
+    return {scope: int(count) for scope, count in conn.execute(query)}
 
 
 def unread_counts_by_session(
@@ -1258,16 +1301,11 @@ def unread_counts_by_session(
     scope_ids: Optional[Iterable[str]] = None,
     hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
-    """Return ``{session_id: count}`` for unread agent ``result`` messages.
+    """Return ``{session_id: count}`` for unread agent communication.
 
-    ``hidden_session_ids`` are Sessions this reader may not see (another member's Bots, a removed Bot's Session).
-
-    Per-session granularity for the sidebar: a project can hold several
-    sessions, so a scope-level count (see ``unread_counts``) would stamp the
-    same badge on every session row. Rows with a null ``session_id`` are
-    skipped — they can't be attributed to a specific session. Filtered to
-    ``type='result'`` so the sidebar badge matches the inbox card's unread
-    count (the realtime ``inbox.session.updated`` row is result-only too).
+    ``hidden_session_ids`` are Sessions this reader may not see (another member's
+    Bots, a removed Bot's Session). Null-session rows cannot be attributed to a
+    Session and are skipped. The predicate matches each Inbox card's count.
     """
 
     allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
@@ -1276,9 +1314,6 @@ def unread_counts_by_session(
 
     query = (
         select(messages.c.session_id, func.count(messages.c.id))
-        .where(messages.c.author == "agent")
-        .where(messages.c.type.in_(_UNREAD_TYPES))
-        .where(messages.c.read_at.is_(None))
         .where(messages.c.session_id.is_not(None))
         # Archived sessions are inert — their unread results must not light the
         # sidebar / global badge.
@@ -1309,7 +1344,11 @@ def unread_counts_by_session(
     hidden = _hidden_ids(hidden_session_ids)
     if hidden:
         query = query.where(messages.c.session_id.not_in(hidden))
-    return {session_id: int(count) for session_id, count in conn.execute(query).all()}
+    counts: dict[str, int] = {}
+    for predicate in unread_message_predicates():
+        for session_id, count in conn.execute(query.where(predicate)):
+            counts[session_id] = counts.get(session_id, 0) + int(count)
+    return counts
 
 
 def unread_counts_by_category(
@@ -1319,7 +1358,7 @@ def unread_counts_by_category(
     scope_ids: Optional[Iterable[str]] = None,
     hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
-    """Return unread result counts split by the current Bot registry."""
+    """Return unread communication counts split by the current Bot registry."""
 
     per_session = unread_counts_by_session(
         conn,
@@ -1340,7 +1379,7 @@ def total_unread(
     scope_ids: Optional[Iterable[str]] = None,
     hidden_session_ids: Optional[Iterable[str]] = None,
 ) -> int:
-    """Global unread agent-``result`` count across all non-archived sessions.
+    """Global unread agent communication count across non-archived sessions.
 
     This is the sum of :func:`unread_counts_by_session`, i.e. the exact number
     the Inbox nav badge shows (``ui_server`` returns it as ``unread_total``). It
@@ -1512,25 +1551,28 @@ def list_inbox_sessions(
         .scalar_subquery()
     )
 
-    # Unread agent messages per session.
-    m = messages
-    unread_q = (
-        select(m.c.session_id.label("session_id"), func.count().label("unread_count"))
-        .where(m.c.session_id.is_not(None))
-        .where(m.c.author == "agent")
-        .where(m.c.type.in_(_UNREAD_TYPES))
-        .where(m.c.read_at.is_(None))
-        .group_by(m.c.session_id)
-    )
-    if platform is not None:
-        unread_q = unread_q.where(m.c.platform == platform)
-    if only_session:
-        # One session's row counts only that session's unread messages, rather
-        # than grouping every session's and joining one back.
-        unread_q = unread_q.where(m.c.session_id == only_session)
-    unread_sub = unread_q.subquery()
+    # Keep the catalog's grouped query and add one reserved-Session-only probe.
+    # Combining the branches with OR can make SQLite walk message history.
+    unread_subs = []
+    for predicate in unread_message_predicates():
+        unread_q = (
+            select(messages.c.session_id.label("session_id"), func.count().label("unread_count"))
+            .where(messages.c.session_id.is_not(None))
+            .where(predicate)
+            .group_by(messages.c.session_id)
+        )
+        if platform is not None:
+            unread_q = unread_q.where(messages.c.platform == platform)
+        if only_session:
+            unread_q = unread_q.where(messages.c.session_id == only_session)
+        unread_subs.append(unread_q.subquery())
 
-    unread_count_col = func.coalesce(unread_sub.c.unread_count, 0).label("unread_count")
+    unread_count_col = sum(
+        func.coalesce(sub.c.unread_count, 0) for sub in unread_subs
+    ).label("unread_count")
+    inbox_from = agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+    for sub in unread_subs:
+        inbox_from = inbox_from.join(sub, sub.c.session_id == agent_sessions.c.id, isouter=True)
     session_rows = (
         select(
             agent_sessions.c.id.label("session_id"),
@@ -1552,11 +1594,7 @@ def list_inbox_sessions(
             last_input_id.label("last_input_id"),
             last_input_turn_state.label("last_input_turn_state"),
         )
-        .select_from(
-            agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True).join(
-                unread_sub, unread_sub.c.session_id == agent_sessions.c.id, isouter=True
-            )
-        )
+        .select_from(inbox_from)
     )
     # Archived sessions are hidden everywhere — keep them out of the inbox feed too.
     # Visibility is the ADMISSION list, not "foreground": the runtime's

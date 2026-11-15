@@ -357,30 +357,37 @@ def test_agent_output_provenance_is_hidden_metadata_and_deduplicated(isolated_st
     }
 
 
-def test_visible_replay_promotes_suppressed_nonterminal_output(isolated_state):
+@pytest.mark.parametrize("workspace_notice", [False, True])
+def test_visible_replay_promotes_suppressed_nonterminal_output(isolated_state, monkeypatch, workspace_notice):
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, resolve_workspace_notice_session
+
+    platform = "avibe" if workspace_notice else "slack"
+    channel = WORKSPACE_NOTICE_SESSION_ID if workspace_notice else "C_general"
+    message_type = "notify" if workspace_notice else "output"
+    spec = {"agent_session_id": channel} if workspace_notice else {}
+    if workspace_notice:
+        with create_sqlite_engine().begin() as conn:
+            resolve_workspace_notice_session(conn)
+    monkeypatch.setattr("core.web_push_notifications.maybe_notify_inbox_message", lambda *_args: None)
     native_message_id = "agent-output:codex:run-1:primary"
     suppressed = MessageContext(
-        user_id="U_alice",
-        channel_id="C_general",
-        platform="slack",
-        platform_specific={"suppress_delivery": True},
+        user_id="U_alice", channel_id=channel, platform=platform,
+        platform_specific={**spec, "suppress_delivery": True},
     )
     visible = MessageContext(
-        user_id="U_alice",
-        channel_id="C_general",
-        platform="slack",
+        user_id="U_alice", channel_id=channel, platform=platform, platform_specific=spec,
     )
 
     local = persist_agent_message(
         suppressed,
-        "output",
+        message_type,
         "local history",
         metadata={"delivery_suppressed": True, "run_id": "run-1"},
         native_message_id=native_message_id,
     )
     promoted = persist_agent_message(
         visible,
-        "output",
+        message_type,
         "visible reply",
         metadata={"run_id": "run-1"},
         native_message_id=native_message_id,
@@ -389,9 +396,12 @@ def test_visible_replay_promotes_suppressed_nonterminal_output(isolated_state):
     assert local is not None
     assert promoted is not None
     assert promoted["id"] == local["id"]
-    assert promoted["type"] == "output"
+    assert promoted["type"] == message_type
     assert promoted["text"] == "visible reply"
-    assert promoted["metadata"] == {"run_id": "run-1"}
+    expected_metadata = {"run_id": "run-1"}
+    if workspace_notice:
+        expected_metadata["workspace_unread"] = True
+    assert promoted["metadata"] == expected_metadata
 
 
 def test_persist_agent_reuses_cached_sqlite_engine(isolated_state, monkeypatch):
