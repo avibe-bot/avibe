@@ -64,7 +64,7 @@ def test_cli_selects_only_pinned_device_and_prints_after_readiness(fake_hosted, 
     assert capsys.readouterr().out == FIRST + "\n"
     assert commands == [("xcrun", "simctl", "list", "devices", "available", "--json"),
                         ("xcrun", "simctl", "bootstatus", FIRST, "-b")]
-    for stage, bound in [("inventory", 120), ("boot", 180)]:
+    for stage, bound in [("inventory", 120), ("boot", 600)]:
         record = json.loads((directory / f"{stage}.json").read_text())
         assert record["timeout_seconds"] == bound and record["status"] == "passed"
         assert record["pid"] == record["process_group"] and record["exit_code"] == 0
@@ -82,7 +82,7 @@ async def test_timeout_retains_diagnostics_reaps_and_never_retries(fake_hosted, 
     original = runner.simulator_command
 
     async def shorter(directory, name, command, timeout):
-        assert timeout == (120 if name == "inventory" else 180)
+        assert timeout == (120 if name == "inventory" else 600)
         await original(directory, name, command, 0.5 if name == stage else timeout)
 
     monkeypatch.setattr(runner, "simulator_command", shorter)
@@ -189,6 +189,64 @@ async def test_cleanup_failure_cannot_yield_ready(fake_hosted, monkeypatch):
     record = json.loads((directory / "inventory.json").read_text())
     assert record["cleanup_error"] == "TimeoutError: cleanup boundary"
     assert record["status"] == "failed"
+
+
+@pytest.mark.parametrize("availability", ["false", "true", 0, 1, 0.0, None, [], {}])
+def test_availability_must_be_an_exact_boolean(fake_hosted, monkeypatch, capsys, availability):
+    scripts, commands, directory = fake_hosted
+    listing = {"devices": {RUNTIME: [{"name": "iPhone 17 Pro", "isAvailable": availability, "udid": FIRST}]}}
+    scripts["inventory"] = f"print({json.dumps(listing)!r})"
+    monkeypatch.setattr(sys, "argv", ["run_direct_interop.py", "simulator"])
+    with pytest.raises(runner.host.HostFault, match="availability must be Boolean"):
+        runner.main()
+    assert commands == [("xcrun", "simctl", "list", "devices", "available", "--json")]
+    assert capsys.readouterr().out == ""
+    assert json.loads((directory / "readiness.json").read_text())["stage"] == "selection"
+
+
+@pytest.mark.parametrize("udid", [None, 1, "", "not-a-uuid", "--help"])
+def test_matching_device_requires_a_uuid(udid):
+    listing = {"devices": {RUNTIME: [{"name": "iPhone 17 Pro", "isAvailable": True, "udid": udid}]}}
+    with pytest.raises(runner.host.HostFault, match="invalid simulator UDID"):
+        runner.select_simulator(listing)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["deadline", "cancel"])
+async def test_spawn_is_inside_stage_budget_and_retains_terminal_receipt(fake_hosted, monkeypatch, stop):
+    _, commands, directory = fake_hosted
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def stalled_spawn(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.sleep(60)
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", stalled_spawn)
+    original = runner.simulator_command
+
+    async def shorter(directory, stage, command, timeout):
+        await original(directory, stage, command, 0.05 if stop == "deadline" else timeout)
+
+    monkeypatch.setattr(runner, "simulator_command", shorter)
+    task = asyncio.create_task(runner.ready_simulator())
+    await asyncio.wait_for(entered.wait(), 1)
+    if stop == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        # The independent outer guard fails the test if spawn bypasses 0.05s.
+        with pytest.raises(runner.host.HostFault, match="TimeoutError"):
+            await asyncio.wait_for(task, 1)
+    assert cancelled.is_set() and commands == []
+    record = json.loads((directory / "inventory.json").read_text())
+    assert record["status"] == "failed" and record["pid"] is None
+    assert record["failure"] == ("TimeoutError" if stop == "deadline" else "CancelledError")
+    assert json.loads((directory / "readiness.json").read_text())["status"] == "failed"
 
 
 @pytest.mark.asyncio

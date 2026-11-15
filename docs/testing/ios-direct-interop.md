@@ -48,10 +48,13 @@ perform public DNS/backend calls, or authorize device/TestFlight qualification.
 Before XCTest or any interoperability case starts, the runner rechecks the
 hosted-only and exact merged-source fences and performs one simulator inventory
 command with a **120-second** limit. It still selects the lexicographically first
-available **iPhone 17 Pro** UDID under exactly **iOS 26.5**. A missing target or
-invalid inventory fails; no alternate device/runtime, retry or daemon restart is
-allowed. The selected device's existing `simctl bootstatus <UDID> -b` readiness
-operation then has a **180-second** limit. Only successful completion prints the
+available **iPhone 17 Pro** UDID under exactly **iOS 26.5**. Availability must be a
+Boolean (only `true` is selectable), and matching device IDs must have UUID
+shape. A missing target or invalid inventory fails; no alternate device/runtime,
+retry or daemon restart is allowed. The selected device's existing
+`simctl bootstatus <UDID> -b` readiness operation then has a **600-second** limit.
+Each limit covers subprocess creation and execution/output together, not a new
+budget after spawn. Only successful completion prints the
 UDID to stdout for the workflow. There is no second, unbounded shell boot command.
 
 Both commands have recorded fresh process groups and use the same cancellation-
@@ -69,6 +72,15 @@ folder on success and failure, including failures before any App/host result
 exists. These are bounded diagnostic/readiness limits, not proof that a cold
 simulator-service delay was the cause or that native interoperability works.
 Actual qualification still requires a new authorized current-master hosted run.
+
+This reuses the same pinned image/toolchain, selection and `bootstatus -b`
+primitive as `ios-shell` and `ios-mobile-captures`, not their unbounded waits.
+Successful same-image `ios-shell` boots took about 345 and 361 seconds; 600
+seconds is a bounded empirical ceiling, while the outer workflow remains 35
+minutes. The earlier sheet document-readiness and tap-receipt fixes run inside
+an already launched App and do not supply a pre-simulator readiness mechanism.
+`ios-shell` builds for the generic Simulator SDK before inventory; that sequence
+difference is not proof that a redundant build would fix this inventory stall.
 
 ## Frozen v2 control contract
 

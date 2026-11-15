@@ -357,22 +357,23 @@ async def simulator_command(directory: Path, stage: str, command: list[str], tim
     host.write_json(path, receipt)
     with (directory / f"{stage}.stdout").open("wb") as out, (directory / f"{stage}.stderr").open("wb") as err:
         try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE,
-                                                           stderr=asyncio.subprocess.PIPE, start_new_session=True)
-            receipt.update(pid=process.pid, process_group=process.pid, status="running")
-            host.write_json(path, receipt)
-            tasks = [asyncio.create_task(process.wait()),
-                     asyncio.create_task(capture_simulator_output(process.stdout, out)),
-                     asyncio.create_task(capture_simulator_output(process.stderr, err))]
-            pending = asyncio.gather(*tasks)
-            try:
-                async with asyncio.timeout(timeout):
+            # One budget covers process creation as well as execution/output.
+            async with asyncio.timeout(timeout):
+                process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE,
+                                                               stderr=asyncio.subprocess.PIPE, start_new_session=True)
+                receipt.update(pid=process.pid, process_group=process.pid, status="running")
+                host.write_json(path, receipt)
+                tasks = [asyncio.create_task(process.wait()),
+                         asyncio.create_task(capture_simulator_output(process.stdout, out)),
+                         asyncio.create_task(capture_simulator_output(process.stderr, err))]
+                pending = asyncio.gather(*tasks)
+                try:
                     code, stdout_truncated, stderr_truncated = await asyncio.shield(pending)
-                host.require(code == 0, f"simulator {stage} exited {code}")
-                host.require(not stdout_truncated and not stderr_truncated, "simulator output exceeded 1 MiB per stream")
-            finally:
-                # Retrieve any exception even when timeout/cancellation ended the wait.
-                pending.add_done_callback(lambda result: result.exception() if not result.cancelled() else None)
+                    host.require(code == 0, f"simulator {stage} exited {code}")
+                    host.require(not stdout_truncated and not stderr_truncated, "simulator output exceeded 1 MiB per stream")
+                finally:
+                    # Retrieve any exception even when timeout/cancellation ended the wait.
+                    pending.add_done_callback(lambda result: result.exception() if not result.cancelled() else None)
         except (Exception, asyncio.CancelledError) as error:
             failure = error
         finally:
@@ -402,9 +403,13 @@ def select_simulator(listing: object) -> str:
     devices = listing["devices"].get("com.apple.CoreSimulator.SimRuntime.iOS-26-5", [])
     host.require(isinstance(devices, list) and all(isinstance(d, dict) for d in devices),
                  "invalid pinned simulator inventory")
-    matches = [d.get("udid") for d in devices if d.get("isAvailable") and d.get("name") == "iPhone 17 Pro"]
+    host.require(all(type(d.get("isAvailable")) is bool for d in devices),
+                 "simulator availability must be Boolean")
+    matches = [d.get("udid") for d in devices if d["isAvailable"] is True and d.get("name") == "iPhone 17 Pro"]
     host.require(bool(matches), "pinned iPhone 17 Pro/iOS 26.5 simulator is missing")
-    host.require(all(isinstance(value, str) and value for value in matches), "invalid simulator UDID")
+    host.require(all(isinstance(value, str) and re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) for value in matches),
+        "invalid simulator UDID")
     return sorted(matches)[0]
 
 
@@ -421,7 +426,7 @@ async def ready_simulator() -> str:
         receipt["stage"] = "selection"
         selected = select_simulator(json.loads((directory / "inventory.stdout").read_bytes()))
         receipt.update(simulator=selected, stage="boot")
-        await simulator_command(directory, "boot", ["xcrun", "simctl", "bootstatus", selected, "-b"], 180)
+        await simulator_command(directory, "boot", ["xcrun", "simctl", "bootstatus", selected, "-b"], 600)
         receipt["status"] = "ready"
         return selected
     except (Exception, asyncio.CancelledError) as error:
