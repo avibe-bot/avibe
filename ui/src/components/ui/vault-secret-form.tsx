@@ -53,6 +53,7 @@ import {
 import { useProtectedHdSupported, useProtectedVault, useVaultSandboxWarm } from '@/lib/useProtectedVault';
 import { protectedHdBusy, protectedHdSubmitted, useProtectedHdCreate } from '@/lib/useProtectedHdCreate';
 import { ProtectedHdDesignState } from '@/lib/protectedHdDesign';
+import { PROTECTED_SEED_WALLET_ENABLED } from '@/lib/vaultProtectedSeedSwitch';
 import { nameIssueAmong, rememberAddTier, rememberedAddTier, type NameIssue } from '@/lib/vaultNameCheck';
 import { askTurnOffNoteShown, useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
@@ -482,6 +483,9 @@ export const VaultSecretForm: React.FC<{
   const isSolanaKey = !editSecret && isKeypair && chain === 'solana';
   const isHd = !editSecret && isKeypair && chain === 'mnemonic';
   const hdReady = avaultDep?.status === 'ready' && versionAtLeast(avaultDep.version, AVAULT_HD_MIN_VERSION);
+  // A new seed-phrase wallet is offered on Protected only while the switch is on (design frames draw
+  // the protected screens regardless). Existing protected wallets are not affected.
+  const protectedSeedOffered = PROTECTED_SEED_WALLET_ENABLED || hdDesign;
   const isProtectedHd = isHd && protection === 'protected';
   // Offered only when the pinned sandbox build lists the operation; until then the tier says so.
   const pinnedHdSupported = useProtectedHdSupported(isProtectedHd && !entryIssue && !hdDesign);
@@ -867,6 +871,9 @@ export const VaultSecretForm: React.FC<{
   const switchChain = (next: KeyChain) => {
     if (next === chain) return;
     setChain(next);
+    // Protected isn't offered for a seed-phrase wallet: it is made on Standard (the tier memory keeps
+    // the choice made for other keys).
+    if (next === 'mnemonic' && !protectedSeedOffered && protection === 'protected') setProtection('standard');
     applySigningKey(null);
     setImportHex('');
     setSolanaImport('');
@@ -1566,13 +1573,13 @@ export const VaultSecretForm: React.FC<{
     <div className="flex flex-col gap-1.5">
       {/* The tier descriptions stay on the cards (owner, 2026-11-12): they are the choice. */}
       <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
-      <div className="grid grid-cols-2 gap-2.5">
+      <div className={cn('grid gap-2.5', isHd && !protectedSeedOffered ? 'grid-cols-1' : 'grid-cols-2')}>
         {(
           [
             { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: t('vaults.dialog.standardHelp') },
             { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: t('vaults.dialog.protectedHelp') },
           ] as const
-        ).map(({ key, icon: Icon, title, desc }) => {
+        ).filter(({ key }) => key === 'standard' || !isHd || protectedSeedOffered).map(({ key, icon: Icon, title, desc }) => {
           const selected = protection === key;
           return (
             <button

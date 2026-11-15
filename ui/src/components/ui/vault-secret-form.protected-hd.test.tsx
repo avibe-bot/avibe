@@ -54,6 +54,8 @@ vi.mock('@/lib/vaultSandboxClient', async (original) => ({
     return popup.blocked ? null : { id: 'window-1', close: popup.close };
   },
 }));
+// These tests cover the protected seed wallet itself, so its entry is on here.
+vi.mock('@/lib/vaultProtectedSeedSwitch', () => ({ PROTECTED_SEED_WALLET_ENABLED: true }));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => <div role="note">protected-unlock</div> }));
 
 const i18n = createInstance();
