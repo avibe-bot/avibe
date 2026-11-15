@@ -411,7 +411,7 @@ fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     // nothing page-supplied is ever evaluated.
     assert_eq!(source.matches(".eval(").count(), 2);
     assert!(source.contains("window.eval(open_settings_script())"));
-    assert!(source.contains(".eval_with_callback(open_updates_script()"));
+    assert!(source.contains("eval_with_callback"));
     assert!(source.contains("avibe:desktop-open-updates"));
     assert!(source.contains("window.eval_with_callback(open_updates_script()"));
     assert!(source.contains("ensure_pending_update_retry"));
