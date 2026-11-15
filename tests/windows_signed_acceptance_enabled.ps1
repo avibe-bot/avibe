@@ -13,7 +13,7 @@ if (-not $OneCase) {
     $summaries = @(); $dryFailure = $null; $activeFault = 'evidence_finalization'; $partial = $null
     try {
     & (Join-Path $PSScriptRoot 'windows_signed_acceptance_evidence.ps1') -Source (Join-Path $SourceRoot 'evidence.ps1') -Work $Work
-    foreach ($fault in @('none', 'stderr_zero', 'aggregate_timeout', 'turn', 'missing_wrapper', 'wrapper_native', 'missing_result', 'stale_result', 'stale_receipt', 'launch_cli_exit', 'launch_cli_json', 'launch_cli_empty', 'launch_cli_null', 'launch_cli_kind', 'launch_cli_fields', 'app', 'launch', 'wait_for', 'observe', 'activate', 'unusable', 'unstable', 'focus', 'native_focus', 'type_cli_exit', 'type_cli_json', 'type_cli_empty', 'type_cli_null', 'type_cli_kind', 'type_cli_fields', 'lost_binding', 'observe_before', 'type', 'type_after', 'observe_after')) {
+    foreach ($fault in @('none', 'stderr_zero', 'aggregate_timeout', 'receipt_write_exit', 'receipt_rename_exit', 'dispatch_write_exit', 'dispatch_rename_exit', 'result_write_exit', 'result_rename_exit', 'missing_receipt', 'malformed_receipt', 'wrapper_parse', 'turn', 'missing_wrapper', 'wrapper_native', 'missing_result', 'stale_result', 'stale_receipt', 'launch_cli_exit', 'launch_cli_json', 'launch_cli_empty', 'launch_cli_null', 'launch_cli_kind', 'launch_cli_fields', 'app', 'launch', 'wait_for', 'observe', 'activate', 'unusable', 'unstable', 'focus', 'native_focus', 'type_cli_exit', 'type_cli_json', 'type_cli_empty', 'type_cli_null', 'type_cli_kind', 'type_cli_fields', 'lost_binding', 'observe_before', 'type', 'type_after', 'observe_after')) {
         $activeFault = $fault
         $caseWork = Join-Path $Work $fault
         & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $PSCommandPath -SourceRoot $SourceRoot -Work $caseWork -Evidence $Evidence -OneCase $fault
@@ -37,6 +37,7 @@ if (-not $OneCase) {
 $work = [IO.Path]::GetFullPath($Work)
 $Root = Join-Path $work 'fixture-root'
 New-Item -ItemType Directory -Force $Root | Out-Null
+Copy-AcceptanceHarness $SourceRoot $Root
 $testRoot = $PSScriptRoot
 $node = (Get-Command node).Source
 $hostPython = (Get-Command python3 -ErrorAction SilentlyContinue)
@@ -99,16 +100,28 @@ try {
         if ($server.HasExited -or (Get-Date) -gt $deadline) { throw 'dry_js_server_not_ready' }
         Start-Sleep -Milliseconds 50
     }
-    $env:CU_DRY_STUB = Join-Path $SourceRoot 'model_stub.py'
+    $env:CU_DRY_STUB = Join-Path $Root 'model_stub.py'
     $dispatch = @'
-import importlib.util, json, os
+import importlib.util, json, os, sys
 from pathlib import Path
+from threading import Thread
+from urllib.request import Request, urlopen
 s = importlib.util.spec_from_file_location("stub", os.environ["CU_DRY_STUB"])
 m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
 w = Path(os.environ["CU_DRY_WORK"])
 r = {"messages":[{"role":"user","content":"AVIBE_CU_CASE:launch-off"}],"tools":[{"type":"function","function":{"name":"powershell"}}]}
-reply, _ = m.scripted_reply(r, python=str(w / "inert python.exe"), work=w)
-(w / "dispatch.ps1").write_text(json.loads(reply["tool_calls"][0]["function"]["arguments"])["command"], encoding="utf-8-sig")
+if len(sys.argv) > 1 and sys.argv[1] == "receive":
+    r["messages"].append({"role":"tool","tool_call_id":"call_cu_launch_off","content":(w / "tool-output.txt").read_text(encoding="utf-8-sig")})
+    server = m.ThreadingHTTPServer(("127.0.0.1", 0), m.handler(str(w / "inert python.exe"), w))
+    thread = Thread(target=server.serve_forever); thread.start()
+    try:
+        with urlopen(Request(f"http://127.0.0.1:{server.server_port}/v1/chat/completions", data=json.dumps(r).encode(), headers={"Content-Type":"application/json"}), timeout=10) as response:
+            response.read()
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=5)
+else:
+    reply, _ = m.scripted_reply(r, python=str(w / "inert python.exe"), work=w)
+    (w / "dispatch.ps1").write_text(json.loads(reply["tool_calls"][0]["function"]["arguments"])["command"], encoding="utf-8-sig")
 '@
     Set-Content -LiteralPath (Join-Path $work 'dispatch.py') -Value $dispatch
     $inputData = @{ target_app = $python }
@@ -135,8 +148,12 @@ reply, _ = m.scripted_reply(r, python=str(w / "inert python.exe"), work=w)
         if ($LASTEXITCODE -ne 0) { throw 'dry_dispatch_generation_failed' }
         if ($OneCase -eq 'missing_wrapper') { Remove-Item -LiteralPath (Join-Path $work 'launch-off.ps1') }
         if ($OneCase -eq 'wrapper_native') { Set-Content -LiteralPath (Join-Path $Root 'Native.cs') -Value 'not valid C#' }
-        & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -File (Join-Path $work 'dispatch.ps1')
+        if ($OneCase -eq 'wrapper_parse') { Add-Content -LiteralPath (Join-Path $work 'launch-off.ps1') -Value 'unclosed (' }
+        $toolOutput = & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -File (Join-Path $work 'dispatch.ps1')
         if ($LASTEXITCODE -ne 0) { throw "child_process_exit_$LASTEXITCODE" }
+        ($toolOutput -join "`n") | Set-Content -LiteralPath (Join-Path $work 'tool-output.txt') -Encoding utf8
+        & $hostPython (Join-Path $work 'dispatch.py') receive
+        if ($LASTEXITCODE -ne 0) { throw 'dry_stub_receipt_failed' }
         $context = Get-Content -LiteralPath (Join-Path $work 'launch-off-context.json') -Raw | ConvertFrom-Json
         $casePath = Join-Path $work 'launch-off.json'
         if ($OneCase -eq 'missing_result') { Remove-Item -LiteralPath $casePath }
@@ -145,6 +162,8 @@ reply, _ = m.scripted_reply(r, python=str(w / "inert python.exe"), work=w)
             $stale.operation_id = '00000000000000000000000000000000'
             $stale | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $casePath
         }
+        if ($OneCase -eq 'missing_receipt') { Remove-Item -LiteralPath (Join-Path $work ("input-$($context.operation_id).json")) }
+        if ($OneCase -eq 'malformed_receipt') { Set-Content -LiteralPath (Join-Path $work ("input-$($context.operation_id).json")) -Value 'invalid-json' }
         if ($OneCase -eq 'stale_receipt') {
             $path = Join-Path $work ("input-$($context.operation_id).json")
             $stale = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
@@ -152,7 +171,7 @@ reply, _ = m.scripted_reply(r, python=str(w / "inert python.exe"), work=w)
             $stale | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
         }
     }
-    . (Join-Path $SourceRoot 'enabled.ps1')
+    . (Join-Path $Root 'enabled.ps1')
     try { Invoke-EnabledCases @{InputOnly=$true} } catch {
         if ($OneCase -in @('none', 'stderr_zero')) { throw }
     }
@@ -166,7 +185,7 @@ reply, _ = m.scripted_reply(r, python=str(w / "inert python.exe"), work=w)
         if ($saved.cases.dry_input_pipeline.verdict -ne 'PASS' -or -not $record.input.typed_attempted -or -not (Test-Path (Join-Path $work 'typed'))) { throw 'dry_success_incomplete' }
     } else {
         if (-not $record.first_error -or $saved.cases.survival_cu_off.verdict -ne 'FAIL') { throw 'dry_failure_not_preserved' }
-        if ($OneCase -notin @('observe_after', 'type', 'type_after', 'type_cli_null', 'type_cli_kind', 'type_cli_fields', 'missing_result', 'stale_result', 'stale_receipt') -and (Test-Path (Join-Path $work 'typed'))) { throw 'dry_typed_after_failed_prerequisite' }
+        if ($OneCase -notin @('observe_after', 'type', 'type_after', 'type_cli_null', 'type_cli_kind', 'type_cli_fields', 'missing_result', 'stale_result', 'stale_receipt', 'missing_receipt', 'malformed_receipt') -and (Test-Path (Join-Path $work 'typed'))) { throw 'dry_typed_after_failed_prerequisite' }
     }
     $attempts = if (Test-Path (Join-Path $work 'attempts')) { [int](Get-Content (Join-Path $work 'attempts')) } else { 0 }
     if ($attempts -gt 1) { throw 'dry_input_retried' }
@@ -177,6 +196,13 @@ reply, _ = m.scripted_reply(r, python=str(w / "inert python.exe"), work=w)
     }
     if ($OneCase -eq 'type_after') {
         if ($record.wrapper.diagnostics.first_error.code -ne 'injected_type_failure' -or $record.wrapper.diagnostics.secondary_errors.Count -ne 1) { throw 'dry_after_observe_masked_type_failure' }
+    }
+    if ($OneCase -in @('receipt_write_exit', 'receipt_rename_exit', 'dispatch_write_exit', 'dispatch_rename_exit', 'result_write_exit', 'result_rename_exit')) {
+        $known = $record.wrapper.first_error
+        if ($known.exit_code -ne 37 -or $known.cli_code -ne 'injected_cli_failure') { throw 'dry_persistence_masked_original_cli_failure' }
+        $failedReceipt = if ($OneCase.StartsWith('receipt_')) { $record.wrapper } else { $record.dispatch }
+        if ($failedReceipt.persistence_errors.Count -lt 1) { throw 'dry_persistence_failure_not_recorded' }
+        if ($OneCase.StartsWith('result_') -and $record.dispatch.first_error.call -notin @('dispatch_result_write', 'dispatch_result_rename')) { throw 'dry_result_write_stage_wrong' }
     }
     if ($OneCase -eq 'aggregate_timeout') {
         if ($record.wrapper.calls[0].exit_code -ne 0 -or $record.wrapper.first_error.code -notin @('input_operation_timeout', 'input_cli_timeout')) { throw 'dry_aggregate_budget_not_exercised' }

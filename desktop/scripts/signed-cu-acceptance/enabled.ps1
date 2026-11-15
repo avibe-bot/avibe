@@ -81,6 +81,41 @@ function Invoke-EnabledCases([hashtable] $Context) {
                     if (-not $operationError) { $operationError = $_; $record.first_error = $result.failure }
                 }
             }
+            # Final stdout receipts are independent of sidecar persistence.
+            # They restore known diagnostics, never forgive a missing/invalid
+            # result file or a collector/persistence failure.
+            $envelopes = @()
+            if ($answer) {
+                try { $envelopes += ($answer | ConvertTo-Json -Depth 30 | ConvertFrom-Json -AsHashtable) } catch {
+                    Add-AcceptanceFailure $result 'envelope_evidence_decode' $_
+                    if (-not $operationError) { $operationError=$_ }
+                }
+            }
+            if ($record.Contains('stub') -and $record.stub.Contains('output_evidence')) { $envelopes += $record.stub.output_evidence }
+            foreach ($envelope in $envelopes) {
+                try {
+                    if ($envelope.operation_id -ne $operationId) { throw 'input_envelope_identity_mismatch' }
+                    $reportedFailure = -not $envelope.ok
+                    foreach ($mapping in @(@('input_receipt','wrapper'), @('dispatch_receipt','dispatch'))) {
+                        if (-not $envelope.Contains($mapping[0]) -or -not $envelope[$mapping[0]]) { continue }
+                        $embedded = $envelope[$mapping[0]]
+                        if ($embedded.operation_id -ne $operationId) { throw 'input_embedded_receipt_identity_mismatch' }
+                        $record[$mapping[1]] = $embedded
+                        if ($mapping[1] -eq 'wrapper') { $record.input = $embedded.diagnostics }
+                        if ($embedded.first_error) {
+                            $reportedFailure = $true
+                            if (-not $record.Contains('original_operation_error')) { $record.original_operation_error=$embedded.first_error }
+                        }
+                        foreach ($field in @('cleanup_errors', 'persistence_errors')) {
+                            if ($embedded.Contains($field) -and $embedded[$field].Count) { $reportedFailure=$true }
+                        }
+                    }
+                    if ($reportedFailure) { throw 'input_operation_reported_failure' }
+                } catch {
+                    Add-AcceptanceFailure $result 'envelope_evidence' $_
+                    if (-not $operationError) { $operationError=$_; $record.first_error=$result.failure }
+                }
+            }
             try { Write-AcceptanceEvidence $result (Join-Path $work 'result.json') } catch {
                 Add-AcceptanceFailure $result 'input_evidence_write' $_
                 if (-not $operationError) { $operationError = $_; $record.first_error = $result.failure }
@@ -299,19 +334,27 @@ Set-StrictMode -Version Latest
 $receipt = [ordered]@{
     operation_id = $OperationId; phase = 'wrapper_start'; first_error = $null
     powershell_version = $PSVersionTable.PSVersion.ToString()
-    calls = @(); cleanup_errors = @(); diagnostics = ('__EMPTY_DIAGNOSTICS__' | ConvertFrom-Json)
+    calls = @(); cleanup_errors = @(); persistence_errors = @(); diagnostics = ('__EMPTY_DIAGNOSTICS__' | ConvertFrom-Json)
 }
 $finalResult = $null
 $clock = [Diagnostics.Stopwatch]::StartNew()
-function Save-Receipt {
-    $receipt | ConvertTo-Json -Depth 15 -Compress | Set-Content -LiteralPath ($ReceiptPath + '.tmp') -Encoding utf8
-    Move-Item -LiteralPath ($ReceiptPath + '.tmp') -Destination $ReceiptPath -Force
+function Save-Receipt([switch] $Required) {
+    try {
+        $receipt | ConvertTo-Json -Depth 15 -Compress | Set-Content -LiteralPath ($ReceiptPath + '.tmp') -Encoding utf8
+        if (Test-Path -LiteralPath $ReceiptPath -PathType Container) { throw 'input_receipt_path_is_directory' }
+        Move-Item -LiteralPath ($ReceiptPath + '.tmp') -Destination $ReceiptPath -Force
+    } catch {
+        $failure = @{call='wrapper_receipt_write'; exit_code=$null; code='input_receipt_persistence_failed'; error_class=$_.Exception.GetType().FullName}
+        $receipt.persistence_errors += $failure
+        if (-not $receipt.first_error) { $receipt.first_error = $failure }
+    }
+    if ($Required -and $receipt.persistence_errors.Count) { throw 'input_receipt_persistence_failed' }
 }
 function Invoke-ComputerJs([string] $Script, [string] $Call) {
     $receipt.phase = $Call
     $entry = [ordered]@{ call = $Call; exit_code = $null; error_class = $null; code = $null; cli_code = $null }
     $receipt.calls += $entry
-    Save-Receipt
+    Save-Receipt -Required
     $child = $null
     try {
         $psi = New-Object Diagnostics.ProcessStartInfo
@@ -359,34 +402,36 @@ function Invoke-ComputerJs([string] $Script, [string] $Call) {
     }
 }
 try {
-    Save-Receipt
-    $receipt.phase = 'native_observer_load'; Save-Receipt
+    Save-Receipt -Required
+    $receipt.phase = 'native_observer_load'; Save-Receipt -Required
     Add-Type -Path '__NATIVE_PATH__'
     $launch = Invoke-ComputerJs $LaunchScript 'launch_js'
     if ($receipt.first_error) { throw 'input_cli_cleanup_failed' }
     $finalResult = $launch.result
     $receipt.diagnostics = $launch.result.diagnostics
-    Save-Receipt
-    if ($receipt.diagnostics.first_error) { $receipt.first_error = $receipt.diagnostics.first_error; throw 'input_launch_failed' }
+    if ($receipt.diagnostics.first_error) { $receipt.first_error = $receipt.diagnostics.first_error }
+    Save-Receipt -Required
+    if ($receipt.diagnostics.first_error) { throw 'input_launch_failed' }
     if (-not $launch.result.diagnostics.ready_stable -or -not $launch.result.diagnostics.ready_usable) {
         throw 'input_readiness_unproven'
     }
-    $receipt.phase = 'native_focus'; Save-Receipt
+    $receipt.phase = 'native_focus'; Save-Receipt -Required
     $focus = [AcceptanceNative]::IsExactWindowVisibleAndForeground([IntPtr][long]$launch.result.hwnd)
     $diagnostics = [ordered]@{}
     foreach ($property in $launch.result.diagnostics.PSObject.Properties) { $diagnostics[$property.Name] = $property.Value }
     $diagnostics.native_focus_before_type = $focus
     $receipt.diagnostics = $diagnostics
-    Save-Receipt
+    Save-Receipt -Required
     if (-not $focus) { throw 'input_focus_unproven' }
     $diagnostics.typed_attempted = $null
     $diagnostics.type_attempt_count = $null
-    Save-Receipt
+    Save-Receipt -Required
     $typed = Invoke-ComputerJs $TypeScript 'type_js'
     foreach ($property in $typed.result.diagnostics.PSObject.Properties) { $diagnostics[$property.Name] = $property.Value }
     $finalResult = [ordered]@{ pid = $launch.result.pid; hwnd = $launch.result.hwnd; diagnostics = $diagnostics }
-    Save-Receipt
-    if ($diagnostics.first_error) { $receipt.first_error = $diagnostics.first_error; throw 'input_type_failed' }
+    if ($diagnostics.first_error) { $receipt.first_error = $diagnostics.first_error }
+    Save-Receipt -Required
+    if ($diagnostics.first_error) { throw 'input_type_failed' }
     $receipt.phase = 'wrapper_complete'
 } catch {
     if (-not $receipt.first_error) {
@@ -398,7 +443,7 @@ try {
     }
 } finally {
     Save-Receipt
-    [ordered]@{ ok = ($null -eq $receipt.first_error); kind = 'computer_js'; operation_id = $OperationId; result = $finalResult } | ConvertTo-Json -Depth 15 -Compress
+    [ordered]@{ ok = ($null -eq $receipt.first_error); kind = 'computer_js'; operation_id = $OperationId; result = $finalResult; input_receipt = $receipt } | ConvertTo-Json -Depth 15 -Compress
 }
 '@.Replace('__NATIVE_PATH__', $nativePath).Replace('__EMPTY_DIAGNOSTICS__', ((New-InputDiagnostics) | ConvertTo-Json -Depth 10 -Compress))
             Set-CasePhase 'write_launch_script'

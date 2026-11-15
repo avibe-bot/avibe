@@ -52,7 +52,11 @@ attempt is permitted until hosted Windows dry evidence and the same independent
 reviewer's delta review have passed. Changing back to enabled is a separate,
 explicit lane decision, followed by fresh release admission. This PR never merges.
 
-The dry fixture invokes `Invoke-EnabledCases` from the actual `enabled.ps1`,
+The dry fixture stages the harness through the same `Copy-AcceptanceHarness`
+manifest as the ordinary-user worker, then invokes `Invoke-EnabledCases` from the
+staged `enabled.ps1`. An invalid-SID bootstrap test loads the staged `user.ps1`
+and its helpers, stopping before installation or Desktop/runtime effects; a
+missing-helper negative control must fail that bootstrap. It then
 generates its launch/type JS and Windows PowerShell wrapper, obtains the outer
 tool command from the actual `model_stub.py`, and executes that command. On
 Windows the wrapper runs in Windows PowerShell 5.1 and an inert compiled console
@@ -77,10 +81,32 @@ Evidence boundaries and fault ownership:
 | Native identity/readback/lifecycle/security | named stages and original failure retained | product behavior remains unproven in dry mode |
 | Worker/parent cleanup and aggregation | immutable original error plus separate cleanup errors | failed worker or missing required case cannot become green |
 
+Receipt persistence is not the only evidence channel: the wrapper always emits
+its sanitized receipt in its final stdout envelope, and the dispatcher does the
+same even when its result write/rename fails. The real model fixture records an
+allowlisted projection of that tool output in the operation-bound stub receipt.
+The collector may recover known diagnostics from it, but never forgives a failed
+write, missing result, or stale/malformed receipt. End-to-end injected write and
+rename failures must retain the original CLI exit 37 and code, not replace them
+with the later persistence failure. This fallback is evidence only, not a second
+writer of the case result.
+
 The earlier source-string readiness test was insufficient and has been replaced
 with an executable behavioral fixture. Local portable-PowerShell runs are useful
 regression evidence, but **do not** satisfy the hosted-Windows stop-loss gate.
 No owner Desktop, clipboard or keychain is accessed; no screenshots are saved.
+
+## Known by design: rc3 preparation status surfaces
+
+The rc3 UI capability route returns `unsupported_host/unavailable` before reading
+shared effective status. The kernel independently reads `effective_computer_use_status`,
+which returns `off` for a never-enabled/disabled state, and checks that off guard
+before its platform-support branch. Therefore preparation intentionally requires
+both the public disabled-capability response and the genuine Turn's strict
+`computer_use_unavailable` with `params.status=off`; it does not broaden the
+probe to accept a generic platform refusal. This ordering is present in rc3's
+published source `492fee198f643a2deb14277670b9906f263c82a9` and was exercised by
+signed preparation run `43689203739` with the same strict assertion.
 
 ## Selected enabled candidate
 

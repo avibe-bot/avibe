@@ -33,4 +33,30 @@ New-Item -ItemType Directory -Path ($blocked + '.tmp') -Force | Out-Null
 $writeFailed = $false
 try { Write-AcceptanceEvidence $parent $blocked } catch { $writeFailed = $true; Add-AcceptanceFailure $parent 'report_write' $_ }
 if (-not $writeFailed -or (Test-Path -LiteralPath $blocked)) { throw 'failed_write_claimed_published' }
+$staged = Join-Path $Work 'staged-worker'
+New-Item -ItemType Directory -Force $staged, (Join-Path $staged 'work') | Out-Null
+Copy-AcceptanceHarness (Split-Path $Source) $staged
+@{expected_sid='S-1-0-0'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $staged 'input.json')
+function Run-Bootstrap {
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = (Get-Process -Id $PID).Path; $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    foreach ($arg in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $staged 'user.ps1'), '-Root', $staged)) { $psi.ArgumentList.Add($arg) }
+    $p = [Diagnostics.Process]::Start($psi)
+    try {
+        $stdout=$p.StandardOutput.ReadToEndAsync(); $stderr=$p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit(30000)) { throw 'bootstrap_did_not_refuse_fixture_identity' }
+        $null=$stdout.GetAwaiter().GetResult(); $null=$stderr.GetAwaiter().GetResult()
+        if ($p.ExitCode -ne 1) { throw 'bootstrap_identity_guard_not_exercised' }
+    } finally { if (-not $p.HasExited) { $p.Kill(); $null=$p.WaitForExit(5000) }; $p.Dispose() }
+}
+# Deliberately invalid SID stops before install/profile/Desktop/runtime effects.
+# A staged worker must still load its actual helpers and emit its own verdict.
+Run-Bootstrap
+$bootstrapPath=Join-Path $staged 'work/result.json'
+$bootstrap=Get-Content -LiteralPath $bootstrapPath -Raw | ConvertFrom-Json
+if ($bootstrap.failure.call -ne 'standard_user' -or $bootstrap.cases.standard_user.verdict -ne 'FAIL') { throw 'staged_bootstrap_evidence_missing' }
+Remove-Item -LiteralPath $bootstrapPath, (Join-Path $staged 'evidence.ps1')
+Run-Bootstrap
+if (Test-Path -LiteralPath $bootstrapPath) { throw 'missing_staged_helper_not_detected' }
 Write-Output 'evidence_fixture_cases_passed'

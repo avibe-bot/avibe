@@ -2,6 +2,7 @@
 // not a model, Controller, CUA driver or product acceptance substitute.
 import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import inspector from 'node:inspector';
 
 const [mode, work, fault = 'none'] = process.argv.slice(2);
@@ -48,7 +49,14 @@ if (mode === 'client') {
     let code = ''; for await (const chunk of request) code += chunk;
     const isType = code.includes('typeDiagnostics.type_attempt_count = 1');
     const label = isType ? 'type' : 'launch';
-    const cliFault = fault === `${label}_cli_exit`;
+    const persistenceFaults = new Set(['receipt_write_exit', 'receipt_rename_exit', 'dispatch_write_exit', 'dispatch_rename_exit', 'result_write_exit', 'result_rename_exit']);
+    const cliFault = fault === `${label}_cli_exit` || persistenceFaults.has(fault);
+    if (persistenceFaults.has(fault)) {
+      const context = JSON.parse(fs.readFileSync(path.join(work, 'launch-off-context.json'), 'utf8').replace(/^\uFEFF/, ''));
+      const target = fault.startsWith('receipt_') ? path.join(work, `input-${context.operation_id}.json`) : fault.startsWith('dispatch_') ? path.join(work, `dispatch-${context.operation_id}.json`) : path.join(work, 'launch-off.json');
+      const blocked = fault.includes('_write_') ? `${target}.tmp` : target;
+      fs.rmSync(blocked, {recursive: true, force: true}); fs.mkdirSync(blocked);
+    }
     const malformed = fault === `${label}_cli_json`;
     const empty = fault === `${label}_cli_empty`;
     let envelope;

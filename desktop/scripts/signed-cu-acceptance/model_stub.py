@@ -106,11 +106,11 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
             f"$operationId = {ps_quote(operation_id)}",
             f"$resultPath = {ps_quote(str(output))}",
             f"$receiptPath = {ps_quote(str(work / f'dispatch-{operation_id}.json'))}",
-            "$receipt = [ordered]@{operation_id=$operationId; phase='dispatch_start'; exit_code=$null; first_error=$null; cleanup_errors=@()}",
-            "$child=$null; $envelope=$null",
-            "function Save-Dispatch { $receipt | ConvertTo-Json -Depth 10 -Compress | Set-Content -LiteralPath ($receiptPath + '.tmp') -Encoding utf8; Move-Item -LiteralPath ($receiptPath + '.tmp') -Destination $receiptPath -Force }",
+            "$receipt = [ordered]@{operation_id=$operationId; phase='dispatch_start'; exit_code=$null; first_error=$null; cleanup_errors=@(); persistence_errors=@()}",
+            "$child=$null; $envelope=[ordered]@{ok=$false; kind='computer_js'; operation_id=$operationId; result=$null; input_receipt=$null; dispatch_receipt=$receipt}",
+            "function Save-Dispatch([switch] $Required) { try { $receipt | ConvertTo-Json -Depth 15 -Compress | Set-Content -LiteralPath ($receiptPath + '.tmp') -Encoding utf8; if (Test-Path -LiteralPath $receiptPath -PathType Container) {throw 'input_dispatch_receipt_directory'}; Move-Item -LiteralPath ($receiptPath + '.tmp') -Destination $receiptPath -Force } catch { $failure=@{call='dispatch_receipt_write'; exit_code=$null; error_class=$_.Exception.GetType().FullName; code='input_dispatch_persistence_failed'}; $receipt.persistence_errors+=$failure; if (-not $receipt.first_error) {$receipt.first_error=$failure} }; if ($Required -and $receipt.persistence_errors.Count) {throw 'input_dispatch_persistence_failed'} }",
             "try {",
-            "  Save-Dispatch",
+            "  Save-Dispatch -Required",
             "  $p = New-Object System.Diagnostics.ProcessStartInfo", file_line,
             f"  $p.Arguments = {ps_quote(arguments)}",
             "  $p.UseShellExecute=$false; $p.CreateNoWindow=$true; $p.RedirectStandardOutput=$true; $p.RedirectStandardError=$true",
@@ -122,21 +122,33 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
             "  if (-not $out.Wait(5000) -or -not $err.Wait(5000)) { throw 'input_dispatch_drain_timeout' }",
             "  if ($child.ExitCode -ne 0) { throw 'input_dispatch_nonzero' }",
             "  $receipt.phase='dispatch_parse'; Save-Dispatch",
-            "  $envelope=$out.GetAwaiter().GetResult() | ConvertFrom-Json",
-            "  if ($envelope.kind -ne 'computer_js') { throw 'input_dispatch_envelope_invalid' }",
-            ("  if ($envelope.operation_id -ne $operationId) { throw 'input_dispatch_identity_mismatch' }" if launch_case else "  $envelope | Add-Member -NotePropertyName operation_id -NotePropertyValue $operationId"),
+            "  $parsed=$out.GetAwaiter().GetResult() | ConvertFrom-Json",
+            "  if ($parsed.kind -ne 'computer_js') { throw 'input_dispatch_envelope_invalid' }",
+            ("  if ($parsed.operation_id -ne $operationId) { throw 'input_dispatch_identity_mismatch' }" if launch_case else "  # Direct security JS still uses this operation-bound outer envelope."),
+            "  $envelope.ok=$parsed.ok; $envelope.result=$parsed.result",
+            "  if ($parsed.PSObject.Properties['input_receipt']) { $envelope.input_receipt=$parsed.input_receipt }",
             "  $receipt.phase='dispatch_complete'",
             "} catch {",
-            "  $receipt.first_error=@{call=$receipt.phase; exit_code=$receipt.exit_code; error_class=$_.Exception.GetType().FullName; code=if ($_.Exception.Message -match '^input_[a-z_]+$') {$_.Exception.Message} else {'input_dispatch_exception'}}",
-            "  $envelope=[ordered]@{ok=$false; kind='computer_js'; operation_id=$operationId; result=$null}",
+            "  if (-not $receipt.first_error) { $receipt.first_error=@{call=$receipt.phase; exit_code=$receipt.exit_code; error_class=$_.Exception.GetType().FullName; code=if ($_.Exception.Message -match '^input_[a-z_]+$') {$_.Exception.Message} else {'input_dispatch_exception'}} }",
+            "  $envelope.ok=$false",
             "} finally {",
             "  if ($child) { try { if (-not $child.HasExited) {$child.Kill(); $null=$child.WaitForExit(5000)}; $child.Dispose() } catch {$receipt.cleanup_errors+=@{call='dispatch_cleanup'; error_class=$_.Exception.GetType().FullName; exit_code=$null}} }",
-            "  if ($receipt.cleanup_errors.Count -gt 0) { $envelope.ok=$false }",
+            "  if ($receipt.cleanup_errors.Count -gt 0 -or $receipt.first_error) { $envelope.ok=$false }",
+            "  try {",
+            "    $receipt.phase='dispatch_result_write'; Save-Dispatch",
+            "    $encoded=$envelope | ConvertTo-Json -Depth 25 -Compress",
+            "    [IO.File]::WriteAllText(($resultPath + '.tmp'), $encoded, (New-Object Text.UTF8Encoding $false))",
+            "    $receipt.phase='dispatch_result_rename'",
+            "    if (Test-Path -LiteralPath $resultPath -PathType Container) {throw 'input_result_path_is_directory'}",
+            "    Move-Item -LiteralPath ($resultPath + '.tmp') -Destination $resultPath -Force",
+            "    $receipt.phase='dispatch_complete'",
+            "  } catch {",
+            "    $failure=@{call=$receipt.phase; exit_code=$null; error_class=$_.Exception.GetType().FullName; code='input_result_persistence_failed'}",
+            "    $receipt.persistence_errors+=$failure; if (-not $receipt.first_error) {$receipt.first_error=$failure}; $envelope.ok=$false",
+            "  }",
             "  Save-Dispatch",
-            "  $encoded=$envelope | ConvertTo-Json -Depth 20 -Compress",
-            "  [IO.File]::WriteAllText(($resultPath + '.tmp'), $encoded, (New-Object Text.UTF8Encoding $false))",
-            "  Move-Item -LiteralPath ($resultPath + '.tmp') -Destination $resultPath -Force",
-            "  [Console]::Out.Write($encoded)",
+            "  if ($receipt.first_error -or $receipt.persistence_errors.Count) { $envelope.ok=$false }",
+            "  [Console]::Out.Write(($envelope | ConvertTo-Json -Depth 25 -Compress))",
             "}",
         ])
     return {
@@ -145,6 +157,28 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
             "name": "powershell", "arguments": json.dumps({"command": command, "timeout": 150 if operation_id else 90, "watch": False}),
         }}],
     }, "tool_calls"
+
+
+def evidence_projection(value):
+    """Value-free stdout fallback; never retain arbitrary CLI results/trees."""
+    keys = {
+        "operation_id", "phase", "first_error", "powershell_version", "calls",
+        "cleanup_errors", "persistence_errors", "diagnostics", "call", "exit_code",
+        "error_class", "code", "cli_code", "secondary_errors", "ready_stable",
+        "ready_usable", "ready", "activation", "native_focus_before_type",
+        "typed_attempted", "type_attempt_count", "type", "type_error", "after",
+        "observation_changed", "has_tree", "element_count", "exact_handle_observed",
+        "effect", "status", "route", "delivery", "script_line", "script_role",
+    }
+    if isinstance(value, dict):
+        return {key: evidence_projection(item) for key, item in value.items() if key in keys}
+    if isinstance(value, list):
+        return [evidence_projection(item) for item in value[:100]]
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]{0,128}", value):
+        return value
+    return None
 
 
 def handler(python: str, work: Path):
@@ -188,6 +222,19 @@ def handler(python: str, work: Path):
                     if isinstance(raw_content, list):
                         raw_content = "\n".join(str(item.get("text", "")) for item in raw_content if isinstance(item, dict))
                     content = str(raw_content).lower()
+                    # The generated command always emits a safe envelope even
+                    # if file persistence failed. This is evidence only, never
+                    # a second writer of the operation result file.
+                    try:
+                        envelope = json.loads(str(raw_content))
+                    except ValueError:
+                        envelope = None
+                    if isinstance(envelope, dict) and operation_id and envelope.get("operation_id") == operation_id and envelope.get("kind") == "computer_js":
+                        receipt["output_evidence"] = {"ok": envelope.get("ok") is True, "operation_id": operation_id}
+                        for field in ("input_receipt", "dispatch_receipt"):
+                            source = envelope.get(field)
+                            if isinstance(source, dict) and source.get("operation_id") == operation_id:
+                                receipt["output_evidence"][field] = evidence_projection(source)
                     # Case results have one writer: the actual generated tool
                     # command. Never rewrite them from provider/tool history.
                     receipt["exit_codes"] = re.findall(r"command exited with code (-?\d+)", content)

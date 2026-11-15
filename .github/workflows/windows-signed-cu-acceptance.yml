@@ -60,7 +60,7 @@ jobs:
       - name: Exercise the exact generated harness with inert Windows boundaries
         if: env.ACCEPTANCE_MODE == 'dry'
         shell: pwsh
-        run: ./tests/windows_signed_acceptance_enabled.ps1 -SourceRoot "$pwd/desktop/scripts/signed-cu-acceptance" -Work "$env:RUNNER_TEMP/signed-cu-dry" -Evidence "$env:RUNNER_TEMP/signed-cu-evidence"
+        run: ./tests/windows_signed_acceptance_enabled.ps1 -SourceRoot "$pwd/desktop/scripts/signed-cu-acceptance" -Work "$env:RUNNER_TEMP/signed-cu-dry work's Unicode-测试" -Evidence "$env:RUNNER_TEMP/signed-cu-evidence"
       - name: Verify and exercise the signed release as an ordinary user
         if: env.ACCEPTANCE_MODE != 'dry'
         shell: pwsh

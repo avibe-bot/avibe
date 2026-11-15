@@ -228,6 +228,24 @@ def test_actual_loopback_wire_has_tool_call_finish_and_done(tmp_path):
         assert events[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "powershell"
         assert events[1]["choices"][0]["finish_reason"] == "tool_calls"
         assert "data: [DONE]" in frames
+        returned = request()
+        returned["messages"].append({
+            "role": "tool", "tool_call_id": "call_cu_launch_off",
+            "content": json.dumps({
+                "ok": False, "kind": "computer_js", "operation_id": "a" * 32,
+                "result": {"private": "must-not-be-retained"},
+                "input_receipt": {"operation_id": "a" * 32,
+                    "first_error": {"call": "launch_js", "exit_code": 37, "code": "input_cli_nonzero"},
+                    "diagnostics": {"tree_markdown": "must-not-be-retained", "typed_attempted": False}},
+            }),
+        })
+        with urlopen(Request(url, data=json.dumps(returned).encode(), headers={"Content-Type": "application/json"}), timeout=5) as response:
+            response.read()
+        receipt_text = (tmp_path / f"stub-{'a' * 32}.json").read_text()
+        receipt = json.loads(receipt_text)
+        assert receipt["output_evidence"]["input_receipt"]["first_error"]["exit_code"] == 37
+        assert "must-not-be-retained" not in receipt_text
+        assert not (tmp_path / "launch-off.json").exists()  # Never a second result writer.
     finally:
         server.shutdown()
         server.server_close()

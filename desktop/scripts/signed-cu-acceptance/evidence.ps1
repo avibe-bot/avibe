@@ -1,8 +1,14 @@
 # Shared value-free evidence path for the real harness and inert dry runner.
+function Copy-AcceptanceHarness([string] $Source, [string] $Destination) {
+    foreach ($file in @('user.ps1', 'evidence.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1', 'update.ps1', 'update-observer.ps1', 'release.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $Source $file) -Destination (Join-Path $Destination $file) -ErrorAction Stop
+    }
+}
 function Write-AcceptanceEvidence([Collections.IDictionary] $Record, [string] $Path) {
     $temporary = $Path + '.tmp'
     $json = $Record | ConvertTo-Json -Depth 30 -Compress
     [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
+    if (Test-Path -LiteralPath $Path -PathType Container) { throw 'input_evidence_path_is_directory' }
     Move-Item -LiteralPath $temporary -Destination $Path -Force
 }
 function Add-AcceptanceFailure([Collections.IDictionary] $Record, [string] $Call, $Failure, [switch] $Cleanup) {
