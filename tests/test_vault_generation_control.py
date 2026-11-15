@@ -130,30 +130,25 @@ def test_invalid_recipe_never_reaches_custody_or_storage(engine, monkeypatch, re
     assert _counts(engine) == (0, 0)
 
 
-@pytest.mark.parametrize("length,generated", [(8, False), (11, False), (12, True), (100, True)])
-def test_direct_generation_lengths_are_what_avault_makes(engine, monkeypatch, length, generated):
-    # The user picks 8..100; an Agent generates 12..100 (custody's floor). Shorter is refused here,
-    # before custody, with the request preset as the way forward, rather than failing inside avault.
+@pytest.mark.parametrize("length", [8, 11, 12, 100])
+def test_direct_generation_lengths_are_what_avault_makes(engine, monkeypatch, length):
+    # Shared user/Agent admission must pass the exact accepted length to custody
+    # and retain it in public provenance; the old Agent-only floor dropped 8..11.
     custody = Mock(return_value=Sealed("generated-envelope", "nonce", "wrap"))
     monkeypatch.setattr(api, "avault_generate_secret", custody)
     response = _run({"recipe": {"type": "password", "length": length}})
-    if generated:
-        assert response["exit_code"] == 0
-        assert custody.call_args.args[1]["length"] == length
-        return
-    assert response["execution"] == "not_executed"
-    assert response["payload"]["code"] == "invalid_generate_recipe"
-    assert "at least 12 characters" in response["payload"]["error"]
-    assert "vibe vault request" in response["payload"]["hint"]
-    custody.assert_not_called()
-    assert _counts(engine) == (0, 0)
+    assert response["exit_code"] == 0
+    assert custody.call_args.args[1]["length"] == length
+    assert response["payload"]["generated"]["length"] == length
+    assert response["payload"]["secret"]["generated"][0]["length"] == length
+    assert _counts(engine) == (1, 2)
 
 
 def test_generate_length_help_states_the_accepted_range(capsys):
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["vault", "generate", "--help"])
     help_text = " ".join(capsys.readouterr().out.split())
-    assert f"Password characters, {api.AVAULT_GENERATE_PASSWORD_MIN_LENGTH}..{vs.GENERATE_PASSWORD_LENGTH[1]}" in help_text
+    assert "Password characters, 8..100 (default 24)" in help_text
 
 
 @pytest.mark.parametrize("field,kind,protection", [
@@ -257,15 +252,15 @@ def test_service_requires_editor_before_custody(engine, monkeypatch):
     assert _counts(engine) == (0, 0)
 
 
-@pytest.mark.parametrize("version", ["0.1.12", None])
+@pytest.mark.parametrize("version", ["0.1.12", "0.1.13", None])
 def test_unsupported_avault_version_fails_before_subprocess(monkeypatch, version):
     monkeypatch.setattr(api, "_probe_avault_version", lambda *args: version)
     monkeypatch.setattr(api, "_resolve_avault_cli_path", lambda: "/test/avault")
     custody = Mock()
     monkeypatch.setattr(api, "_run_avault", custody)
-    with pytest.raises(api.AvaultPreHandoffError, match=r"requires avault >= 0.1.13") as error:
+    with pytest.raises(api.AvaultPreHandoffError, match=r"requires avault >= 0.1.14") as error:
         api.avault_generate_secret("LOGIN", {"type": "hex", "bytes": 32})
-    assert error.value.minimum_version == "0.1.13"
+    assert error.value.minimum_version == "0.1.14"
     custody.assert_not_called()
 
 
@@ -281,18 +276,24 @@ def test_cli_recipe_mismatches_fail_whole_call(engine, monkeypatch, capfd, tail)
     assert _counts(engine) == (0, 0)
 
 
-def test_old_avault_version_keeps_safe_actionable_error_through_service_and_cli(engine, monkeypatch, capfd):
-    monkeypatch.setattr(api, "_probe_avault_version", lambda *args: "0.1.12")
+@pytest.mark.parametrize("tail", [
+    [], ["--length", "8"], ["--length", "11"], ["--length", "12"], ["--length", "100"],
+    ["--type", "hex", "--bytes", "16"], ["--type", "base64", "--bytes", "64"],
+])
+def test_old_avault_version_keeps_safe_actionable_error_through_service_and_cli(engine, monkeypatch, capfd, tail):
+    # The capability floor is global, not a short-password-only branch. The
+    # shipped 0.1.13 must never generate or persist anything on the new Avibe.
+    monkeypatch.setattr(api, "_probe_avault_version", lambda *args: "0.1.13")
     monkeypatch.setattr(api, "_resolve_avault_cli_path", lambda: "/test/avault")
     custody = Mock()
     monkeypatch.setattr(api, "_run_avault", custody)
     monkeypatch.setattr(cli, "_vault_control_request", lambda operation, arguments, **kw: _run(arguments))
-    args = cli.build_parser().parse_args(["vault", "generate", "LOGIN"])
+    args = cli.build_parser().parse_args(["vault", "generate", "LOGIN", *tail])
     assert cli.cmd_vault_generate(args) == 1
     payload = json.loads(capfd.readouterr().err)
     assert payload["code"] == "avault_upgrade_required"
-    assert payload["details"] == {"minimum_version": "0.1.13"}
-    assert "requires avault >= 0.1.13" in payload["error"]
+    assert payload["details"] == {"minimum_version": "0.1.14"}
+    assert "requires avault >= 0.1.14" in payload["error"]
     assert payload["help_command"] == "vibe vault generate --help"
     custody.assert_not_called()
     assert _counts(engine) == (0, 0)
@@ -305,7 +306,8 @@ def test_old_avault_version_keeps_safe_actionable_error_through_service_and_cli(
     ({"type": "base64", "bytes": 64}, ["--type", "base64", "--bytes", "64"]),
 ])
 def test_custody_wrapper_has_only_recipe_flags_and_sealed_output(monkeypatch, recipe, flags):
-    monkeypatch.setattr(api, "_require_avault_min_version", lambda *args, **kw: None)
+    monkeypatch.setattr(api, "_resolve_avault_cli_path", lambda: "/test/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda *args: "0.1.14")
     run = Mock(return_value=SimpleNamespace(returncode=0, stdout=json.dumps({"ciphertext": "opaque", "nonce": "nonce", "wrap_meta": "wrap"})))
     monkeypatch.setattr(api, "_run_avault", run)
     assert api.avault_generate_secret("LOGIN.token", recipe) == Sealed("opaque", "nonce", "wrap")
