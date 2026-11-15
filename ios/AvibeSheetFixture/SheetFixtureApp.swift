@@ -453,7 +453,7 @@ private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHa
         const alert = [...document.querySelectorAll('[role="alert"]')].find(element => {
           const chinese = navigator.language.toLowerCase().startsWith("zh");
           const expectedError = chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.";
-          const expectedRetry = chinese ? "重试" : "Try again";
+          const expectedRetry = chinese ? "重试" : "Retry";
           const row = element.closest("div");
           const buttons = row ? [...row.querySelectorAll("button")] : [];
           const retry = buttons.find(button => button.textContent.trim() === expectedRetry);
