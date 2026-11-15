@@ -11239,3 +11239,14 @@ def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
             assert not client.patches
 
     asyncio.run(run())
+
+
+def test_session_header_reaches_the_engine_only_for_opencode() -> None:
+    """OpenCode's ``X-Session-Id`` crosses to the engine for OpenCode alone; Claude and Codex keep the old set."""
+    from core.handlers.model_hub.request import FORWARDED_CALLER_HEADERS, forwarded_caller_headers
+
+    assert "x-session-id" in forwarded_caller_headers("opencode")
+    assert forwarded_caller_headers("opencode") >= FORWARDED_CALLER_HEADERS
+    for backend in ("claude", "codex", "vibey"):
+        assert forwarded_caller_headers(backend) == FORWARDED_CALLER_HEADERS
+    assert "x-session-id" not in FORWARDED_CALLER_HEADERS
