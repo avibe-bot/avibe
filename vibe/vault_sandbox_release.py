@@ -21,12 +21,17 @@ _SUPPORT_KEYS = {"ordinary_input_types", "hd_input_types", "ecdsa_return_types"}
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _SRI = re.compile(r"sha256-[A-Za-z0-9+/]{43}=")
 
-# fc013b7 is the currently packaged ordinary-only legacy signing cohort. It
-# implements protected Taproot, not protected HD or the new ECDSA input kinds.
+# Reviewed fc013b7 and packaged f861216 signing cohorts retain ordinary Taproot
+# only in this registry. This does not enable HD or the new ECDSA input kinds.
 # The full pin digest was computed using the existing lossless C codec; changing
 # ANY resource, version, origin, build or manifest is a different registry key.
 CAPABILITIES_BY_PIN_ID = MappingProxyType({
     "7f320bc014c0a2ee7d65f9c48c8b91b7e0c0fcc0effbfb3a36d3a3c30fa7c08b": MappingProxyType({
+        "ordinary_input_types": ("p2tr",),
+        "hd_input_types": (),
+        "ecdsa_return_types": (),
+    }),
+    "9f1264cb022625f1d3880c16019cc4ddcf515fce252193ad482714fe30ad046a": MappingProxyType({
         "ordinary_input_types": ("p2tr",),
         "hd_input_types": (),
         "ecdsa_return_types": (),
