@@ -34,6 +34,12 @@ from typing import Any, Callable, Mapping
 logger = logging.getLogger(__name__)
 
 COMPUTER_USE_SCHEMA_VERSION = 1
+# Windows Preview's single availability/rollback guard. Setting this to zero
+# disables admission, JS and Settings without changing macOS or saved opt-in.
+COMPUTER_USE_WINDOWS_SCHEMA_VERSION = 1
+COMPUTER_USE_WINDOWS_TOOL_SNAPSHOT_SHA256 = (
+    "0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293"
+)
 COMPUTER_USE_STATE_DIR_ENV = "AVIBE_COMPUTER_USE_STATE_DIR"
 COMPUTER_USE_STATE_FILE = "computer-use.json"
 COMPUTER_USE_LOCK_FILE = "computer-use.lock"
@@ -78,6 +84,7 @@ COMPUTER_USE_TOOL_NAMES = (
 # a newer Runtime they adopt keeps Computer Use available without activation.
 COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS: Mapping[str, frozenset[str]] = {
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256: frozenset(COMPUTER_USE_TOOL_NAMES),
+    COMPUTER_USE_WINDOWS_TOOL_SNAPSHOT_SHA256: frozenset(COMPUTER_USE_TOOL_NAMES),
     "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe": frozenset(
         COMPUTER_USE_TOOL_NAMES
     ),
@@ -511,6 +518,14 @@ def _shell_lock_is_held(lock_path: Path) -> bool:
         return False
 
 
+def windows_computer_use_supported() -> bool:
+    return (
+        COMPUTER_USE_WINDOWS_SCHEMA_VERSION == 1
+        and ctypes.sizeof(ctypes.c_void_p) == 8
+        and platform_module.machine().casefold() in {"amd64", "x86_64"}
+    )
+
+
 def desktop_computer_use_shell_is_live(
     *,
     state_path: Path | None = None,
@@ -525,6 +540,8 @@ def desktop_computer_use_shell_is_live(
     remains the source for the feature's effective status.
     """
 
+    if os.name == "nt" and not windows_computer_use_supported():
+        return False
     target = state_path or computer_use_state_path()
     try:
         state = read_computer_use_state(target)
@@ -578,12 +595,18 @@ def effective_computer_use_status(
         return ComputerUseStatus("off", "never_enabled")
     if not state.enabled:
         return ComputerUseStatus("off", "toggle_off", state)
+    if os.name == "nt":
+        if not windows_computer_use_supported():
+            reason = "platform_unsupported" if COMPUTER_USE_WINDOWS_SCHEMA_VERSION != 1 else "unsupported_architecture"
+            return ComputerUseStatus("unavailable", reason, state)
+        if not _windows_private_artifact_is_safe(target):
+            return ComputerUseStatus("unavailable", "state_unverified", state)
+        if state.tool_snapshot.sha256 != COMPUTER_USE_WINDOWS_TOOL_SNAPSHOT_SHA256:
+            return ComputerUseStatus("unavailable", "snapshot_invalid", state)
     if not _snapshot_valid(state, checker):
         return ComputerUseStatus("unavailable", "snapshot_invalid", state)
     resolved_lock_path = lock_path or target.with_name(COMPUTER_USE_LOCK_FILE)
     if os.name == "nt" and shell_lock_held is _shell_lock_is_held:
-        if not _windows_private_artifact_is_safe(target):
-            return ComputerUseStatus("unavailable", "state_unverified", state)
         lock_probe = _windows_lock_probe(resolved_lock_path)
         if lock_probe == "missing":
             return ComputerUseStatus("unavailable", "shell_not_running", state)
@@ -594,13 +617,13 @@ def effective_computer_use_status(
     if state.state == "stopped":
         return ComputerUseStatus("unavailable", "shell_not_running", state)
     if os.name == "nt" and state.state == "ready":
-        if platform_module.machine().casefold() not in {"amd64", "x86_64"}:
-            return ComputerUseStatus("unavailable", "unsupported_architecture", state)
-        # Foundation only: neither a PID/session probe nor caller-injected
-        # connectivity proves the shell-owned driver generation. Keep *all*
-        # Windows ready records unavailable until that contract and the final
-        # action-time privilege/session guards are integrated and reviewed.
-        return ComputerUseStatus("unavailable", "pipe_unverified", state)
+        from core.computer_windows import windows_ready_refusal
+
+        assert state.socket_path is not None
+        if not _is_windows_named_pipe(state.socket_path):
+            return ComputerUseStatus("unavailable", "pipe_unverified", state)
+        reason = windows_ready_refusal(state.socket_path, state.shell_pid)
+        return ComputerUseStatus("unavailable", reason, state) if reason else ComputerUseStatus("ready", None, state)
     if state.state != "ready":
         return ComputerUseStatus(state.state, state.reason, state)
     assert state.socket_path is not None

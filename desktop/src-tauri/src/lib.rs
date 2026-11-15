@@ -36,10 +36,10 @@ pub mod updater;
 
 #[cfg(target_os = "macos")]
 mod computer_use;
-// Process ownership only: Windows Computer Use stays unavailable until its
-// resource, admission, private-pipe and health contracts are integrated.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-#[allow(dead_code)]
+#[path = "computer_use/windows.rs"]
+mod computer_use;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 #[path = "computer_use/windows_process.rs"]
 mod computer_use_process;
 #[cfg(target_os = "macos")]
@@ -98,7 +98,7 @@ const STOP_MENU_ID: &str = "stop-runtime";
 const QUIT_MENU_ID: &str = "quit-avibe";
 const LOGIN_MENU_ID: &str = "start-at-login";
 const SETTINGS_MENU_ID: &str = "open-settings";
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 const COMPUTER_USE_MENU_ID: &str = "computer-use";
 /// Where Settings leads: the Workbench deep link, whose destination
 /// `parse_deep_link` owns. It is delivered as a page load only when the window
@@ -151,7 +151,7 @@ struct ProductCatalog {
 #[derive(Deserialize)]
 struct DesktopBootstrapCatalog {
     tray: NativeTrayCatalog,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     #[serde(rename = "computerUse")]
     computer_use: NativeComputerUseCatalog,
     updater: updater::Catalog,
@@ -188,7 +188,7 @@ struct NativeTrayCatalog {
     login_failure: String,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeComputerUseCatalog {
@@ -263,7 +263,7 @@ fn native_tray_catalog() -> NativeTrayCatalog {
     native_catalog_for_locales(sys_locale::get_locales()).tray
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::MenuView) -> String {
     if view.save_failed {
         return catalog.save_failed.clone();
@@ -275,6 +275,10 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
         return catalog.initialization_failed.clone();
     }
     if view.asset_error {
+        return catalog.unavailable.clone();
+    }
+    #[cfg(target_os = "windows")]
+    if !view.available {
         return catalog.unavailable.clone();
     }
     if view.runtime_refused || view.phase == avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime {
@@ -310,12 +314,16 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_control_enabled(view: &computer_use::MenuView) -> bool {
+    #[cfg(target_os = "windows")]
+    if !view.available {
+        return false;
+    }
     !view.initialization_error
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_menu_state(view: &computer_use::MenuView) -> (bool, bool) {
     (computer_use_control_enabled(view), view.enabled)
 }
@@ -464,7 +472,7 @@ struct NativeMenus {
     notifications: CheckMenuItem<tauri::Wry>,
     auxiliary_note: Option<MenuItem<tauri::Wry>>,
     auxiliary_visible: AtomicBool,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     computer_use: CheckMenuItem<tauri::Wry>,
     stop_present: AtomicBool,
     displayed: Mutex<Option<(TrayRuntimeState, bool, bool)>>,
@@ -499,11 +507,11 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let (pet_toggle, pet_shortcut_settings) = pet::tray_items(app)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let computer_use_view = app.state::<computer_use::Controller>().view();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let (computer_use_enabled, computer_use_checked) = computer_use_menu_state(&computer_use_view);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let computer_use = CheckMenuItem::with_id(
         app,
         COMPUTER_USE_MENU_ID,
@@ -516,7 +524,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let updater = app.state::<updater::Updater>();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let tray = Menu::with_items(
         app,
         &[
@@ -535,7 +543,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &quit,
         ],
     )?;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64"))))]
     let tray = Menu::with_items(
         app,
         &[
@@ -565,7 +573,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         let settings_position = if cfg!(target_os = "macos") { 2 } else { 0 };
         submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)?;
         submenu.insert_items(&[&updater.menu, &updater.channel_menu], settings_position + 1)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
         submenu.insert(&computer_use, 0)?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
     }
@@ -605,7 +613,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         notifications,
         auxiliary_note,
         auxiliary_visible: AtomicBool::new(false),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
         computer_use,
         stop_present: AtomicBool::new(false),
         displayed: Mutex::new(None),
@@ -821,7 +829,7 @@ fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>)
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn refresh_computer_use_control(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -915,7 +923,7 @@ fn exit_shell(app: &AppHandle) {
         return;
     }
     authorize_exit(app);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -923,7 +931,7 @@ fn exit_shell(app: &AppHandle) {
             app.exit(0);
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64"))))]
     app.exit(0);
 }
 
@@ -950,7 +958,7 @@ fn authorize_exit(app: &AppHandle) {
     app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 pub(crate) async fn shutdown_computer_use(app: &AppHandle) {
     if let Some(controller) = app.try_state::<computer_use::Controller>() {
         controller.shutdown().await;
@@ -1126,7 +1134,7 @@ fn stop_runtime(app: AppHandle, quit: bool) {
     }
     refresh_runtime_tray(&app, TrayRuntimeState::Stopping);
     notifications::stop(&app);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     if let Some(controller) = app.try_state::<computer_use::Controller>() {
         controller.runtime_stopped();
     }
@@ -1412,11 +1420,11 @@ fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
 /// The Computer Use guide's "Turn on": the tray toggle's on half.
 #[tauri::command]
 fn computer_use_enable(window: WebviewWindow) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     {
         computer_use_guide_controller(&window)?.turn_on()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64"))))]
     {
         let _ = window;
         Err(COMPUTER_USE_UNSUPPORTED.to_owned())
@@ -1441,12 +1449,12 @@ fn computer_use_open_permission(window: WebviewWindow, pane: String) -> Result<(
 }
 
 #[cfg(not(target_os = "macos"))]
-const COMPUTER_USE_UNSUPPORTED: &str = "Computer Use is only available on macOS.";
+const COMPUTER_USE_UNSUPPORTED: &str = "This Computer Use action is unavailable on this platform.";
 
 /// The capability (`main-computer-use.json`) limits these commands to the main
 /// window on a loopback page; this also requires the Runtime the shell adopted,
 /// so a same-window page on another loopback port cannot drive them.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_guide_controller(window: &WebviewWindow) -> Result<tauri::State<'_, computer_use::Controller>, String> {
     if !pet::is_workbench(window) {
         return Err("This command is only available to the Avibe Workbench.".to_owned());
@@ -1603,7 +1611,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
             WorkbenchHandoff::Monitor => {
                 commit_deep_link_navigation(app, &navigation, true, observed_generation);
                 apply_pending_deep_link(app);
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
                 if let Some(controller) = app.try_state::<computer_use::Controller>() {
                     controller.runtime_ready(origin.clone(), true);
                 }
@@ -1669,7 +1677,7 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                 },
             );
             if readiness_loss.begin_recovery(ready, &host, &activity, &generation, observed_generation) {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
                 if let Some(controller) = app.try_state::<computer_use::Controller>() {
                     controller.runtime_lost();
                 }
@@ -1689,7 +1697,7 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                 if let Some(client) = app.try_state::<instance_client::Client>() {
                     client.coordinator.refresh_local().await;
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
                 if let Some(controller) = app.try_state::<computer_use::Controller>() {
                     controller.runtime_ready(origin.clone(), false);
                 }
@@ -1847,9 +1855,9 @@ fn build_main_window(
     };
     // macOS draws the page under a transparent native title bar (`tauri.conf.json`).
     #[cfg(target_os = "macos")]
-    let builder = builder
-        .initialization_script(macos_title_bar::inset_script())
-        .initialization_script(DESKTOP_COMPUTER_USE_MARKER);
+    let builder = builder.initialization_script(macos_title_bar::inset_script());
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
+    let builder = builder.initialization_script(DESKTOP_COMPUTER_USE_MARKER);
     let window = builder.build().ok()?;
     #[cfg(windows)]
     if instance_downloads::install(&window).is_err() {
@@ -1912,7 +1920,7 @@ const DESKTOP_APP_WINDOWS_MARKER: &str =
 /// Tells the Workbench that this shell answers the Computer Use guide's
 /// actions (`computer_use_enable`, `computer_use_open_permission`). Read by
 /// `ui/src/lib/desktopShell.ts`; a shell without it leaves the guide read-only.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 const DESKTOP_COMPUTER_USE_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE__', { value: true });";
 
@@ -2493,7 +2501,7 @@ pub fn run() {
                 pet::MENU_ID => pet::toggle(app),
                 pet::SHORTCUT_SETTINGS_MENU_ID => open_workbench_shortcut_settings(app),
                 pet::HIDE_MENU_ID => pet::toggle(app),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
                 COMPUTER_USE_MENU_ID => {
                     app.state::<computer_use::Controller>().toggle();
                 }
@@ -2665,7 +2673,7 @@ pub fn run() {
             #[cfg(not(feature = "bundled-runtime"))]
             let bootstrap_log = BootstrapLog::disabled();
             app.manage(Shell::new(host, bootstrap_log.clone()));
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
             app.manage(computer_use::Controller::start(app.handle()));
             app.manage(notifications::Notifications::new(
                 app.path().app_local_data_dir()?.join("notifications.json"),
@@ -2705,7 +2713,7 @@ pub fn run() {
 
             install_native_tray(app.handle())?;
             pet::apply_shortcuts(app.handle());
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
             refresh_computer_use_control(app.handle());
             #[cfg(feature = "bundled-runtime")]
             start_bootstrap_when_shell_url_ready(app.handle().clone(), window, bootstrap_log);

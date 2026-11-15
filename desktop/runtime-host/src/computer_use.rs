@@ -5,7 +5,9 @@
 //! transition rules so tests can exercise them without a window server or TCC.
 
 use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +21,8 @@ pub const COMPUTER_USE_LOCK_FILE: &str = "computer-use.lock";
 pub const COMPUTER_USE_SOCKET_FILE: &str = "cua-driver.sock";
 pub const COMPUTER_USE_DRIVER_VERSION: &str = "0.31.0";
 pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944";
+pub const COMPUTER_USE_WINDOWS_TOOL_SNAPSHOT_SHA256: &str =
+    "0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293";
 pub const COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256: &[&str] = &[
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
     "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe",
@@ -169,7 +173,11 @@ impl ComputerUseStateStore {
     }
 
     pub fn read(&self) -> StoredComputerUseState {
-        let bytes = match fs::read(&self.path) {
+        #[cfg(not(windows))]
+        let contents = fs::read(&self.path);
+        #[cfg(windows)]
+        let contents = crate::computer_use_windows::read_private_file(&self.path);
+        let bytes = match contents {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return StoredComputerUseState::Missing;
@@ -205,7 +213,10 @@ impl ComputerUseStateStore {
             std::process::id(),
             suffix
         ));
+        #[cfg(not(windows))]
         let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary)?;
+        #[cfg(windows)]
+        let mut file = crate::computer_use_windows::open_private_file(&temporary, true)?;
         let mut payload = serde_json::to_vec(record).map_err(io::Error::other)?;
         payload.push(b'\n');
         if let Err(error) = (|| {
@@ -235,12 +246,15 @@ impl ComputerUseShellLock {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        #[cfg(not(windows))]
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
             .open(path)?;
+        #[cfg(windows)]
+        let file = crate::computer_use_windows::open_private_file(path, false)?;
         file.try_lock()?;
         Ok(Self { _file: file })
     }
@@ -802,6 +816,12 @@ fn stable_failure_reason(reason: &str) -> &'static str {
         "socket_unreachable" => "socket_unreachable",
         "bundle_identity" => "bundle_identity",
         "ax_capability" => "ax_capability",
+        "elevated_runtime" => "elevated_runtime",
+        "session_unavailable" => "session_unavailable",
+        "session_locked" => "session_locked",
+        "session_mismatch" => "session_mismatch",
+        "pipe_unverified" => "pipe_unverified",
+        "daemon_stop_failed" => "daemon_stop_failed",
         "capture_missing" | "capture_protocol" => "capture_failed",
         "health_initialize"
         | "health_transport"
@@ -1549,6 +1569,12 @@ mod tests {
             ("socket_unreachable", "socket_unreachable"),
             ("bundle_identity", "bundle_identity"),
             ("ax_capability", "ax_capability"),
+            ("elevated_runtime", "elevated_runtime"),
+            ("session_unavailable", "session_unavailable"),
+            ("session_locked", "session_locked"),
+            ("session_mismatch", "session_mismatch"),
+            ("pipe_unverified", "pipe_unverified"),
+            ("daemon_stop_failed", "daemon_stop_failed"),
             ("capture_missing", "capture_failed"),
             ("capture_protocol", "capture_failed"),
             ("health_initialize", "driver_health_failed"),

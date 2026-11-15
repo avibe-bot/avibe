@@ -23,6 +23,8 @@
 pub mod bootstrap;
 pub mod bootstrap_log;
 pub mod computer_use;
+#[cfg(windows)]
+pub mod computer_use_windows;
 pub mod deep_link;
 pub mod download;
 pub mod hashing;

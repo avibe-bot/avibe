@@ -264,6 +264,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "uuid",
  "webview2-com",
  "windows 0.62.2",
  "windows-sys 0.61.2",
@@ -289,6 +290,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

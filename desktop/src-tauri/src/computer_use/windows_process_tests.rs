@@ -12,10 +12,7 @@ use windows_sys::Win32::Security::{
     EqualSid, GetTokenInformation, TokenElevation, TokenElevationType, TokenElevationTypeDefault, TokenSessionId,
     TokenUser, TOKEN_QUERY, TOKEN_USER,
 };
-use windows_sys::Win32::System::JobObjects::{
-    IsProcessInJob, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-};
+use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, InitializeProcThreadAttributeList, OpenProcess,
     OpenProcessToken, TerminateProcess, UpdateProcThreadAttribute, CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW,
@@ -125,30 +122,6 @@ fn assert_same_user_and_session(process: &OwnedHandle) {
     let current_session = token_information(current_token.as_raw_handle(), TokenSessionId);
     let target_session = token_information(target_token.as_raw_handle(), TokenSessionId);
     assert_eq!(current_session[0], target_session[0]);
-}
-
-fn allow_breakaway(job: HANDLE) {
-    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-    check(unsafe {
-        QueryInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            std::ptr::null_mut(),
-        )
-    })
-    .unwrap();
-    limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
-    check(unsafe {
-        SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        )
-    })
-    .unwrap();
 }
 
 fn assert_exits(handle: &OwnedHandle) {
@@ -497,7 +470,6 @@ async fn explicit_breakaway_target_survives_driver_job_termination() {
     let mut launcher_env = fixture_env("breakaway_launcher", directory.path());
     launcher_env.push(("AVIBE_SENTINEL_CREDENTIAL".into(), "test-secret-sentinel".into()));
     let launcher = suspended_with_env("breakaway_launcher", directory.path(), launcher_env);
-    allow_breakaway(launcher.job.as_raw_handle());
     let launcher = launcher.resume().unwrap();
     let target_pid = wait_for_file(&directory.path().join("target-pid"))
         .parse::<u32>()

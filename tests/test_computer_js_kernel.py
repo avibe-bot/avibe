@@ -509,13 +509,23 @@ def test_a_queued_call_stays_bound_to_its_turn() -> None:
     assert calls == []
 
 
-def test_computer_use_off_cancels_an_executing_call() -> None:
+@pytest.mark.parametrize("cause", ["off", "windows_rollback"])
+def test_computer_use_off_cancels_an_executing_call(monkeypatch, cause) -> None:
+    from core import computer_js_kernels, computer_use
+
+    if cause == "windows_rollback":
+        monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
+        monkeypatch.setattr(computer_js_kernels, "_kernel_platform_supported", computer_use.windows_computer_use_supported)
+
     async def scenario(h: _Harness) -> tuple[dict, int | None]:
         await h.js("1")
         process = h.kernel_process()
         running = asyncio.create_task(h.js("await new Promise(() => {})", timeout_ms=10000))
         await asyncio.sleep(0.2)
-        h.status = "off"
+        if cause == "windows_rollback":
+            monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 0)
+        else:
+            h.status = "off"
         report = await asyncio.wait_for(running, 5)
         await asyncio.wait_for(process.wait(), 5)
         return report, process.returncode
@@ -523,7 +533,7 @@ def test_computer_use_off_cancels_an_executing_call() -> None:
     scenario.options = {"status_poll_seconds": 0.05}
     report, returncode = _run(scenario)
     assert report["error"]["code"] == "js_kernel_reset"
-    assert report["error"]["params"] == {"reason": "computer_use_off"}
+    assert report["error"]["params"] == {"reason": "platform_unsupported" if cause == "windows_rollback" else "computer_use_off"}
     assert returncode is not None
 
 

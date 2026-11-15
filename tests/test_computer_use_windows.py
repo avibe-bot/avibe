@@ -110,7 +110,7 @@ def test_windows_lock_rechecks_opened_artifact(tmp_path, monkeypatch, fake_lock_
 
 def write_ready(directory: Path, *, shell_pid: int | None = None) -> Path:
     snapshot = directory / "tools.json"
-    snapshot.write_bytes(b'{"tools":[]}')
+    snapshot.write_bytes((Path(__file__).parents[1] / "desktop/cua-driver/tools-windows-v0.31.0.json").read_bytes())
     state = directory / "computer-use.json"
     state.write_text(json.dumps({
         "schema_version": 1, "enabled": True, "state": "ready", "reason": None,
@@ -123,20 +123,62 @@ def write_ready(directory: Path, *, shell_pid: int | None = None) -> Path:
     return state
 
 
-@pytest.mark.parametrize("machine,reason", [("AMD64", "pipe_unverified"), ("ARM64", "unsupported_architecture")])
+@pytest.mark.parametrize("reason", [None, "pipe_unverified", "elevated_runtime", "session_unavailable", "session_locked", "session_mismatch", "daemon_unreachable"])
 @pytest.mark.parametrize("injected", [False, True])
-def test_windows_ready_cannot_be_admitted(tmp_path, monkeypatch, machine, reason, injected):
+def test_windows_ready_requires_security_admission(tmp_path, monkeypatch, reason, injected):
+    from core import computer_windows
+
     state = write_ready(tmp_path)
     monkeypatch.setattr(cu, "os", types.SimpleNamespace(name="nt"))
-    monkeypatch.setattr(cu.platform_module, "machine", lambda: machine)
+    monkeypatch.setattr(cu.platform_module, "machine", lambda: "AMD64")
     monkeypatch.setattr(cu, "_windows_private_artifact_is_safe", lambda *a, **kw: True)
     monkeypatch.setattr(cu, "_windows_lock_probe", lambda p: "held")
-    kwargs = {}
-    if injected:
-        kwargs = {"shell_lock_held": lambda p: True, "socket_accepts": lambda p: True}
+    calls = []
+
+    def verify(endpoint, shell_pid):
+        calls.append((endpoint, shell_pid))
+        return reason
+
+    monkeypatch.setattr(computer_windows, "windows_ready_refusal", verify)
+    kwargs = {"socket_accepts": lambda p: True} if injected else {}
     status = cu.effective_computer_use_status(state_path=state, verifier=cu.SnapshotVerifier(), **kwargs)
-    assert (status.status, status.reason) == ("unavailable", reason)
+    assert (status.status, status.reason) == (("ready", None) if reason is None else ("unavailable", reason))
+    assert calls == [(r"\\.\pipe\avibe-cu-test", os.getpid())]
     assert cu._endpoint_accepts(r"\\.\pipe\avibe-cu-test") is False
+
+
+@pytest.mark.parametrize("machine,capability,reason", [("ARM64", 1, "unsupported_architecture"), ("AMD64", 0, "platform_unsupported")])
+def test_windows_capability_rollback_refuses_ready_shell_and_js(tmp_path, monkeypatch, machine, capability, reason):
+    from core import computer_js_kernels, computer_windows
+
+    state = write_ready(tmp_path)
+    monkeypatch.setattr(cu, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(computer_js_kernels, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(cu.platform_module, "machine", lambda: machine)
+    monkeypatch.setattr(cu, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", capability)
+    monkeypatch.setattr(cu, "_windows_private_artifact_is_safe", lambda *a, **kw: True)
+    monkeypatch.setattr(cu, "_windows_lock_probe", lambda p: "held")
+    monkeypatch.setattr(computer_windows, "windows_ready_refusal", lambda *_: pytest.fail("disabled platform opened a pipe"))
+    status = cu.effective_computer_use_status(state_path=state)
+    assert (status.status, status.reason) == ("unavailable", reason)
+    assert cu.desktop_computer_use_shell_is_live(state_path=state) is False
+    assert computer_js_kernels._kernel_platform_supported() is False
+
+
+def test_windows_rejects_macos_snapshot_before_opening_pipe(tmp_path, monkeypatch):
+    from core import computer_windows
+
+    state = write_ready(tmp_path)
+    payload = json.loads(state.read_text())
+    snapshot = tmp_path / "tools.json"
+    snapshot.write_bytes((Path(__file__).parents[1] / "desktop/cua-driver/tools-v0.31.0.json").read_bytes())
+    payload["tool_snapshot"]["sha256"] = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    state.write_text(json.dumps(payload))
+    monkeypatch.setattr(cu, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(cu.platform_module, "machine", lambda: "AMD64")
+    monkeypatch.setattr(cu, "_windows_private_artifact_is_safe", lambda *a, **kw: True)
+    monkeypatch.setattr(computer_windows, "windows_ready_refusal", lambda *_: pytest.fail("wrong snapshot opened a pipe"))
+    assert cu.effective_computer_use_status(state_path=state).reason == "snapshot_invalid"
 
 
 # Native tests run only on Windows. CI must select these explicitly and assert
@@ -201,7 +243,8 @@ def test_windows_native_lock_contention_and_ready_refusal(tmp_path):
         assert parent.recv() == "held"
         assert cu._windows_lock_probe(path) == "held"
         status = cu.effective_computer_use_status(state_path=state, verifier=cu.SnapshotVerifier())
-        assert (status.status, status.reason) == ("unavailable", "pipe_unverified")
+        assert status.status == "unavailable"
+        assert status.reason in {"elevated_runtime", "session_unavailable", "session_locked", "daemon_unreachable"}
     finally:
         if child.is_alive():
             parent.send("release")

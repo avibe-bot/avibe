@@ -128,9 +128,9 @@ def _default_node() -> Path | None:
 
 
 def _kernel_platform_supported() -> bool:
-    # Windows Job/pipe support is a foundation only. Public activation awaits
-    # the separately reviewed runtime admission and driver action guards.
-    return os.name == "posix"
+    from core.computer_use import windows_computer_use_supported
+
+    return os.name == "posix" or (os.name == "nt" and windows_computer_use_supported())
 
 
 def _default_status() -> Any:
@@ -366,6 +366,9 @@ class ComputerJsKernelManager:
     ) -> dict[str, Any]:
         if slot.invalidated is not None or call.cancel.done():
             return self._cancelled(call)
+        if not _kernel_platform_supported():
+            self._kill_slot(slot, "platform_unsupported")
+            return _failed(_envelope("platform_unsupported", "The JavaScript kernel is unavailable on this platform."))
         status = await self._computer_use_status()
         if slot.invalidated is not None or call.cancel.done():
             return self._cancelled(call)
@@ -383,13 +386,6 @@ class ComputerJsKernelManager:
         kernel_fresh = False
         kernel = slot.kernel
         if kernel is None or not kernel.alive:
-            if not _kernel_platform_supported():
-                return _failed(
-                    _envelope(
-                        "platform_unsupported",
-                        "The JavaScript kernel is unavailable on this platform.",
-                    )
-                )
             self._ensure_status_watch()
             try:
                 kernel = await self._spawn(call.cancel)
@@ -775,7 +771,10 @@ class ComputerJsKernelManager:
         ):
             await asyncio.sleep(self._status_poll_seconds)
             status = await self._computer_use_status()
-            if getattr(status, "status", None) == "off":
+            if not _kernel_platform_supported():
+                for session_id in list(self._slots):
+                    self._invalidate_slot(session_id, "platform_unsupported")
+            elif getattr(status, "status", None) == "off":
                 # Executing and queued calls are cancelled with the kernel:
                 # they report js_kernel_reset, and no binding outlives off.
                 for session_id in list(self._slots):

@@ -1373,10 +1373,16 @@ async def desktop_capabilities(
                 raise InternalServerUnavailable(
                     "desktop capabilities response was malformed"
                 )
-            return {
+            result = {
                 "computer_use_schema": schema,
                 "controller_id": controller_id,
             }
+            if "computer_use_windows_schema" in payload:
+                windows_schema = payload["computer_use_windows_schema"]
+                if isinstance(windows_schema, bool) or not isinstance(windows_schema, int) or windows_schema < 0:
+                    raise InternalServerUnavailable("desktop Windows capabilities response was malformed")
+                result["computer_use_windows_schema"] = windows_schema
+            return result
     except InternalServerUnavailable:
         raise
     except httpx.TimeoutException as exc:
