@@ -2,10 +2,11 @@
 
 ## Change contract
 
-Add protected ordinary and HD P2PKH and native P2WPKH signing with the existing
+Deliver protected **ordinary-key** P2PKH and native P2WPKH signing with the existing
 browser custody boundary, one-input/version-2/locktime-0 spending grammar,
-SIGHASH_ALL, one or two supported outputs and bounded explicit review. Standard
-signing and the shipped protected Taproot input path retain their existing
+SIGHASH_ALL, one or two supported outputs and bounded explicit review. The HD
+extension is a separate follow-on, not a prerequisite for this ordinary backend.
+Standard signing and the shipped protected Taproot input path retain their existing
 bytes, defaults and refusals. There is no fallback to raw ECDSA or standard
 custody, migration, reseal, key backfill, automatic fund movement or broadcast.
 
@@ -17,19 +18,30 @@ selected output and amount before signing: its sighash alone does not directly
 commit to previous-output amount. Native BIP143 binds the amount and outputs for
 a valid spend, not independent chain/locking-program provenance.
 
-### Independent work and dependency boundary
+### Independent ordinary delivery and HD follow-on
 
 The funding parser, both sighashes, early bounds, CLI file transport, ordinary
 request identity/atomic completion, source-owned support projection and list
-summary work can be implemented against the default branch independently.
+summaries form the independently deliverable ordinary backend. They do not import
+or require the protected-HD implementation. New typed contexts for a protected HD
+row are explicitly refused in this build; an ordinary success never grants HD
+support.
 
-Protected HD integration depends on the protected-HD implementation reaching
-the default branch. Reuse that owner's typed seed/envelope and authenticated
-20-row validation, raw-envelope fingerprint, selected-account material hydration,
-signed release shape, protected HD dispatch and completion/CAS ownership.
-Extend those seams for purpose44/84/86 at the same receiving index; do not copy
-an unmerged implementation or introduce a parallel protected-HD owner. Creation,
-response-loss reconciliation and its canonical contract are unchanged.
+The packaged pin remains the existing Taproot-only cohort. Enabling Legacy/Native
+requires a separately reviewed exact retained sandbox pin and its complete-pin
+capability entry, plus the matching Web selected-detail consumer. Source tests
+use an explicit ordinary-capable, HD-incapable registry fixture; they do not enable
+a released cohort, prove browser custody, or authorize promotion.
+
+Protected HD integration belongs to a separate branch/worktree and consumer PR.
+It may be developed against the frozen owning interface, but its merge requires
+that owning implementation on the default branch; do not stack or copy its
+unmerged source into the ordinary PR. Reuse that owner's typed seed/envelope and
+authenticated 20-row validation, raw-envelope fingerprint, selected-account
+material hydration, signed release shape, protected HD dispatch and completion/CAS
+ownership. Extend those seams for purpose44/84/86 at the same receiving index;
+do not introduce a parallel protected-HD owner. Creation, response-loss
+reconciliation and its canonical contract are unchanged.
 
 ## Required boundaries
 
@@ -116,4 +128,10 @@ funded exercises remain separately identifiable gates.
   their proof bodies.
 - [ ] Protected-HD extensions after the owning implementation is on default.
 - [x] Focused hermetic ordinary/shared/parser/transport conformance (source-only).
-- [ ] Independent source review and exact-head CI for the complete change.
+- [ ] Independent source review and exact-head CI for the current ordinary head.
+- [ ] Separate reviewed capable pin/registry and matching Web selected-detail
+  integration, followed by authorized composed/runtime acceptance.
+
+The HD item above is follow-on scope, not an ordinary PR merge prerequisite.
+Review/CI, capability enablement, runtime acceptance and funded exercises remain
+separate judgments.
