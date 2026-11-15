@@ -95,7 +95,7 @@ it('off: changing the kind and back does not reach a Protected seed wallet', asy
   fireEvent.click(protectedCard()!);
   expect(protectedCard()!.getAttribute('aria-pressed')).toBe('true');
   fireEvent.click(screen.getByRole('radio', { name: d.kindKeypair }));
-  expect((screen.getByRole('radio', { name: hd.chainMnemonic }) as HTMLInputElement).getAttribute('aria-checked') ?? 'true').toBe('true');
+  expect(screen.getByRole('radio', { name: hd.chainMnemonic }).getAttribute('aria-checked')).toBe('true');
   expect(protectedCard()).toBeNull();
   expect(standardCard().getAttribute('aria-pressed')).toBe('true');
   expect(screen.queryByText(hd.protected.tierNote)).toBeNull();
