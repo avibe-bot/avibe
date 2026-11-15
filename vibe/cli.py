@@ -19497,7 +19497,7 @@ def build_parser():
     agent_run_parser.add_argument(
         "--session-id", metavar="ID", help="Join this Session's running turn, or start one if idle"
     )
-    agent_run_parser.add_argument("--queue", action="store_true", help="With --session-id or --bot: wait for the running turn")
+    agent_run_parser.add_argument("--queue", action="store_true", help="With --session-id/--bot: wait for the running turn")
     agent_run_parser.add_argument("--fork-session", metavar="ID", help="Fork this Session's context, backend, scope, and cwd")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork the caller Session")
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place the new Session in the caller's scope")
