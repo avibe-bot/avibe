@@ -1,7 +1,8 @@
 /* @vitest-environment jsdom */
 
-// The switch that holds the Protected tier for new seed-phrase wallets (lib/vaultProtectedSeedSwitch).
-// Off, as shipped: a seed wallet is offered on Standard only, with nothing promising Protected; other
+// The switch that holds the Protected tier for new seed-phrase wallets (lib/vaultProtectedSeedSwitch),
+// tested in both states; its shipped value is the constant itself (turning it on stays one line).
+// Off: a seed wallet is offered on Standard only, with nothing promising Protected; other
 // keys keep both tiers. On: the Protected seed wallet is offered again.
 import type { ReactNode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -12,7 +13,6 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import en from '@/i18n/en.json';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
-import { PROTECTED_SEED_WALLET_ENABLED } from '@/lib/vaultProtectedSeedSwitch';
 
 import { VaultSecretForm } from './vault-secret-form';
 
@@ -55,10 +55,6 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
-it('ships off: turning the Protected seed wallet on is this one constant', () => {
-  expect(PROTECTED_SEED_WALLET_ENABLED).toBe(false);
-});
-
 it('off: a seed wallet is offered on Standard only, and nothing on the page promises Protected for it', async () => {
   await open();
   // Another key keeps both tiers; Protected chosen there…
@@ -89,6 +85,22 @@ it('off: a Protected tier remembered or handed off does not reach a seed wallet'
   expect(standardCard().getAttribute('aria-pressed')).toBe('true');
   // The memory of Protected for other keys is kept.
   expect(sessionStorage.getItem('avibe.vault.addTier')).toBe('protected');
+});
+
+it('off: changing the kind and back does not reach a Protected seed wallet', async () => {
+  await open();
+  fireEvent.click(screen.getByRole('radio', { name: hd.chainMnemonic }));
+  // A static secret on Protected, then back to a signing key: the seed-phrase chain is still chosen.
+  fireEvent.click(screen.getByRole('radio', { name: d.kindStatic }));
+  fireEvent.click(protectedCard()!);
+  expect(protectedCard()!.getAttribute('aria-pressed')).toBe('true');
+  fireEvent.click(screen.getByRole('radio', { name: d.kindKeypair }));
+  expect((screen.getByRole('radio', { name: hd.chainMnemonic }) as HTMLInputElement).getAttribute('aria-checked') ?? 'true').toBe('true');
+  expect(protectedCard()).toBeNull();
+  expect(standardCard().getAttribute('aria-pressed')).toBe('true');
+  expect(screen.queryByText(hd.protected.tierNote)).toBeNull();
+  expect(screen.queryByRole('button', { name: hd.protected.launchCreate })).toBeNull();
+  expect(screen.getByRole('button', { name: hd.generateCta })).toBeTruthy();
 });
 
 it('on: the Protected seed wallet is offered', async () => {

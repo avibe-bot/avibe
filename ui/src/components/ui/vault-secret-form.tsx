@@ -486,7 +486,14 @@ export const VaultSecretForm: React.FC<{
   // A new seed-phrase wallet is offered on Protected only while the switch is on (design frames draw
   // the protected screens regardless). Existing protected wallets are not affected.
   const protectedSeedOffered = PROTECTED_SEED_WALLET_ENABLED || hdDesign;
-  const isProtectedHd = isHd && protection === 'protected';
+  const isProtectedHd = isHd && protection === 'protected' && protectedSeedOffered;
+  // Whatever way the form reaches a seed wallet with Protected chosen (chain, kind, a remembered or
+  // handed-off tier), it is made on Standard while Protected isn't offered for it. The tier memory
+  // keeps the choice made for other keys.
+  const protectedSeedHeld = isHd && !protectedSeedOffered && protection === 'protected';
+  // Adjusted while rendering (React's pattern for state derived from other state), so no frame shows
+  // the held state.
+  if (protectedSeedHeld) setProtection('standard');
   // Offered only when the pinned sandbox build lists the operation; until then the tier says so.
   const pinnedHdSupported = useProtectedHdSupported(isProtectedHd && !entryIssue && !hdDesign);
   const protectedHdSupported = hdDesign ? true : pinnedHdSupported;
@@ -871,9 +878,6 @@ export const VaultSecretForm: React.FC<{
   const switchChain = (next: KeyChain) => {
     if (next === chain) return;
     setChain(next);
-    // Protected isn't offered for a seed-phrase wallet: it is made on Standard (the tier memory keeps
-    // the choice made for other keys).
-    if (next === 'mnemonic' && !protectedSeedOffered && protection === 'protected') setProtection('standard');
     applySigningKey(null);
     setImportHex('');
     setSolanaImport('');
