@@ -61,6 +61,11 @@ def protected_files(home: Path) -> dict:
     return {str(p.relative_to(state)): digest_file(p) for p in candidates if p.is_file() and not p.name.endswith("-shm")}
 
 
+def backup_entries(home: Path) -> list[str]:
+    backups = home / "state" / "backups"
+    return sorted(str(p.relative_to(backups)) for p in backups.rglob("*")) if backups.exists() else []
+
+
 def require_guest(root: Path, quota_bytes: int) -> dict:
     """Fail closed unless the visible filesystem is actually bounded as claimed."""
     if platform.system() != "Linux":
@@ -206,12 +211,15 @@ def main(argv=None) -> int:
         if not (root / "prepare.complete").exists():
             raise RuntimeError("prepare must complete first")
         before = protected_files(large)
+        # The published predecessor may already have left its own backups; the
+        # refused upgrade must not add, remove or alter any entry (files or dirs).
+        backups_before = backup_entries(large)
         fill = fill_to_usage(root, 0.91, args.quota_bytes)
         durable_write(root / "near-full.json", json.dumps(fill, indent=2))
         try:
             result = probe(Path(sys.executable), "refuse", large, root / "refusal.json", current=True)
             assert result["refused"] and protected_files(large) == before
-            assert not (large / "state" / "backups").exists()
+            assert backup_entries(large) == backups_before
         finally:
             # Only this script's exclusive-created filler is removed.
             (root / "test-owned-filler").unlink()
