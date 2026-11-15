@@ -38,6 +38,13 @@ const passkeyRoot = (credentialId: string) => JSON.stringify({
 });
 const SERVER_ROOT = passkeyRoot('AQID');
 const LOSING_ROOT = passkeyRoot('BAUG');
+// How the sandbox labels a record sealed under `root`: the root plus `scheme` and the record's DEK.
+const recordUnder = (root: string) => JSON.stringify({ ...JSON.parse(root), scheme: 'machine-aesgcm-v1', dek_nonce: 'd', wrapped_dek: 'k' });
+// The same root as the server may serialize it: the same fields in another order.
+const reordered = (root: string) => {
+  const { copies, ...rest } = JSON.parse(root) as Record<string, unknown>;
+  return JSON.stringify({ copies, ...Object.fromEntries(Object.entries(rest).reverse()) });
+};
 const registration = {
   challenge_id: 'wch_1',
   credential: { id: 'AQID', rawId: 'AQID', type: 'public-key', response: { clientDataJSON: 'e30=', attestationObject: 'AA==' } },
@@ -202,6 +209,45 @@ it('drops the refused setup key from the sandbox even when the server root was a
   expect(vault.vaultUnlocked()).toBe(false);
   expect(surface.result.current.status).toBe('locked');
   expect(surface.result.current.hasPasskey()).toBe(true);
+});
+
+describe('a root named by a record, or serialized in another key order, is the same root', () => {
+  it('keeps the sandbox client (and a ceremony on it) when discovery finds the root a record was opened under', async () => {
+    api.getVaultVmk.mockResolvedValue({ ok: true, exists: true, wrap_meta: SERVER_ROOT });
+    sandbox.status.mockResolvedValue({ state: 'unlocked', expiresAt: Date.now() + 60_000 });
+    const card = renderHook(() => vault.useProtectedVault());
+    await act(async () => { await card.result.current.refresh(); });
+    const material = { name: 'KEY', envelope: { ciphertext: 'c', nonce: 'n', wrap_meta: recordUnder(SERVER_ROOT) } };
+    await act(async () => {
+      await card.result.current.signProtectedRequest(material, {} as never, 'ecdsa-secp256k1' as never, {} as never);
+    });
+    await settle();
+
+    // Locked again; another protected surface mounts and discovers the same durable root.
+    act(() => { card.result.current.lock(); });
+    sandbox.status.mockResolvedValue({ state: 'locked' });
+    api.getVaultVmk.mockResolvedValue({ ok: true, exists: true, wrap_meta: reordered(SERVER_ROOT) });
+    const next = renderHook(() => vault.useProtectedVault());
+    await act(async () => { await next.result.current.refresh(); });
+    expect(resetClient).not.toHaveBeenCalled();
+    expect(next.result.current.status).toBe('locked');
+  });
+
+  it('a protected save refused with the root it sealed under drops that root and discovers the durable one', async () => {
+    api.getVaultVmk.mockResolvedValue({ ok: true, exists: true, wrap_meta: SERVER_ROOT });
+    sandbox.status.mockResolvedValue({ state: 'unlocked', expiresAt: Date.now() + 60_000 });
+    const form = renderHook(() => vault.useProtectedVault());
+    await act(async () => { await form.result.current.refresh(); });
+    expect(vault.vaultUnlocked()).toBe(true);
+    const reads = api.getVaultVmk.mock.calls.length;
+
+    api.getVaultVmk.mockResolvedValue({ ok: true, exists: true, wrap_meta: LOSING_ROOT });
+    sandbox.status.mockResolvedValue({ state: 'locked' });
+    await act(async () => { await form.result.current.discardAndRefresh(recordUnder(SERVER_ROOT)); });
+    expect(api.getVaultVmk).toHaveBeenCalledTimes(reads + 1);
+    expect(vault.vaultUnlocked()).toBe(false);
+    expect(form.result.current.status).toBe('locked');
+  });
 });
 
 describe('discovery after an unanswered setup commit', () => {

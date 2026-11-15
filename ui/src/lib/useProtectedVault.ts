@@ -79,7 +79,7 @@ function dropSandboxClient(): void {
 
 /** The sandbox client to ask about `root`: a fresh one if the current one may hold another root's key. */
 function sandboxClientFor(root: string) {
-  if (sandboxRoot !== null && sandboxRoot !== root) dropSandboxClient();
+  if (sandboxRoot !== null && !sameRoot(sandboxRoot, root)) dropSandboxClient();
   return getVaultSandboxClient();
 }
 
@@ -91,7 +91,7 @@ function writeRoot(
   durableSetupPending = false,
 ): void {
   if (
-    sessionVault.wrapMeta !== wrapMeta
+    !sameRoot(sessionVault.wrapMeta, wrapMeta)
     || sessionVault.freshSetup !== freshSetup
     || sessionVault.authzFactorRegistration !== authzFactorRegistration
     || sessionVault.durableSetupPending !== durableSetupPending
@@ -242,6 +242,37 @@ function applyPolicyResetLock(): void {
 function lockAndResetAllTabs(): void {
   getVaultLockChannel()?.postMessage('reset');
   applyPolicyResetLock();
+}
+
+// Root identity as the server's durable root and the sandbox's `reusableRootIdentity` see it: a
+// record's wrap_meta is its root plus `scheme` and its own DEK fields, none of which name the root.
+const RECORD_ONLY_FIELDS = ['scheme', 'record_meta', 'dek_nonce', 'wrapped_dek'];
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function rootIdentity(wrapMeta: string): string {
+  try {
+    const parsed = JSON.parse(wrapMeta) as unknown;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return wrapMeta;
+    const root = { ...(parsed as Record<string, unknown>) };
+    for (const key of RECORD_ONLY_FIELDS) delete root[key];
+    return canonicalJson(root);
+  } catch {
+    return wrapMeta;
+  }
+}
+
+/** Whether two wrap_metas name the same Vault root (key order and record-only fields aside). */
+function sameRoot(left: string | null, right: string | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left === right || rootIdentity(left) === rootIdentity(right);
 }
 
 function baseVmkWrapMeta(wrapMeta: string): string {
@@ -440,6 +471,7 @@ export async function setupVaultDurably(
   const committed = await api.completeVaultSetup({ wrap_meta: wrapMeta, authz_factor_registration: registration })
     .catch(() => ({ ok: false as const, code: 'network_error' }));
   // Whether this tab still holds exactly the setup it posted (an explicit discard may have dropped it).
+  // (The exact tuple it posted, not merely the same root: the registration must be that one too.)
   const stillPosted = sessionVault.durableSetupPending
     && sessionVault.wrapMeta === wrapMeta
     && sessionVault.authzFactorRegistration === registration;
@@ -466,7 +498,7 @@ export async function setupVaultDurably(
   // Durable now. This answer is newer than any discovery read that started before it, and adopting
   // it moves the root epoch, so such a read can no longer apply its older answer.
   const root = typeof committed.wrap_meta === 'string' ? baseVmkWrapMeta(committed.wrap_meta) : wrapMeta;
-  const sandboxUnlocked = stillPosted && root === wrapMeta && sessionVault.status === 'unlocked';
+  const sandboxUnlocked = stillPosted && sameRoot(root, wrapMeta) && sessionVault.status === 'unlocked';
   writeRoot(root);
   if (!sandboxUnlocked) {
     // The root is durable even if status reconciliation is unavailable; fail closed and let the
@@ -620,7 +652,7 @@ export function useProtectedVault() {
       // a new setup in between drops the result here, before anything is sent to Avibe. The window's
       // own establishment flag is sent as it reports it, as every protected seal does (the shared
       // setup lifecycle lets it stay true after the root is committed; the daemon reconciles it).
-      if (sessionVault.wrapMeta !== wrapMeta || sessionVault.freshSetup !== freshSetup
+      if (!sameRoot(sessionVault.wrapMeta, wrapMeta) || sessionVault.freshSetup !== freshSetup
         || (freshSetup && sessionVault.authzFactorRegistration !== registration)) {
         throw new VaultSandboxError('sandbox_reset', 'The protected vault changed while the wallet was being made', true);
       }
@@ -647,7 +679,8 @@ export function useProtectedVault() {
       setStatus(vaultStatusNow());
       return;
     }
-    writeRoot(baseWrapMeta);
+    // A record names its root with record-only fields: keep the shape this tab already holds.
+    writeRoot(sameRoot(sessionVault.wrapMeta, baseWrapMeta) ? sessionVault.wrapMeta : baseWrapMeta);
     mirrorSandboxStatus(answer, askedAt);
     getVaultLockChannel();
     notifyVaultLockChange();
@@ -741,8 +774,7 @@ export function useProtectedVault() {
    * tab learned since that save is kept. Either way, no read that started earlier can apply.
    */
   const discardAndRefresh = useCallback(async (rejectedRoot?: string) => {
-    const rejected = rejectedRoot ? baseVmkWrapMeta(rejectedRoot) : sessionVault.wrapMeta;
-    if (rejected === sessionVault.wrapMeta) {
+    if (!rejectedRoot || sameRoot(rejectedRoot, sessionVault.wrapMeta)) {
       clearUnlockState({ discardPendingSetup: true });
       writeRoot(null);
       sessionVault.status = 'needs-setup';
