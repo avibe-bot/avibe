@@ -43,6 +43,33 @@ It does not install anything, enable
 transport, modify pairing, use the owner's live runtime, provision certificates,
 perform public DNS/backend calls, or authorize device/TestFlight qualification.
 
+## Hosted simulator readiness
+
+Before XCTest or any interoperability case starts, the runner rechecks the
+hosted-only and exact merged-source fences and performs one simulator inventory
+command with a **120-second** limit. It still selects the lexicographically first
+available **iPhone 17 Pro** UDID under exactly **iOS 26.5**. A missing target or
+invalid inventory fails; no alternate device/runtime, retry or daemon restart is
+allowed. The selected device's existing `simctl bootstatus <UDID> -b` readiness
+operation then has a **180-second** limit. Only successful completion prints the
+UDID to stdout for the workflow. There is no second, unbounded shell boot command.
+
+Both commands have recorded fresh process groups and use the same cancellation-
+safe TERM/KILL/reap path as xcodebuild (up to 5 seconds for TERM, 3 for KILL and
+3 for leader reap, in addition to the command limit). Cleanup never targets the
+shared simulator service by name. Timeout, cancellation, nonzero exit, invalid
+inventory, missing target or cleanup failure cannot produce readiness success.
+
+`simulator-readiness/` under the isolated runner artifact directory contains the
+source identity, selected UDID when available, each command/stage/PID, elapsed
+time, exit/failure status, and separate stdout/stderr files capped at **1 MiB
+each**. Pipes continue draining through cleanup, but exceeding either output cap
+fails rather than trusting truncated inventory. The workflow uploads this
+folder on success and failure, including failures before any App/host result
+exists. These are bounded diagnostic/readiness limits, not proof that a cold
+simulator-service delay was the cause or that native interoperability works.
+Actual qualification still requires a new authorized current-master hosted run.
+
 ## Frozen v2 control contract
 
 A test method opens one loopback control TCP connection. Every NDJSON record,
