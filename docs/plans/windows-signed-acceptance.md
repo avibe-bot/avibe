@@ -57,6 +57,13 @@ Settings rail link was clicked, and the resulting Computer Use DOM was read.
 The real native Quit menu and Keep Runtime running dialog also completed. This
 is not a Settings **enable** test: rc3 still has the feature disabled.
 
+Run `43684652439` on `0dc490105` repeated all preparation/editor/query checks
+and the actual Settings DOM click successfully. Its unified-panel preflight
+clicked VersionBadge and Check and required a distinct visible checked-at
+receipt, a successful settled state, and Current version `3.2.7rc3`.
+Auto-update remained false and prereleases true. No Update was clicked; this
+proves the shared UI route, not an installation transition.
+
 The supported credential-free tool-context fixture is now proven through the
 default-off rejection: the real
 installed Model Hub points to a tiny loopback OpenAI-compatible deterministic
@@ -126,5 +133,27 @@ relaunch, then verify Desktop/runtime versions and installed helper hash against
 rc4 provenance. Preserve the existing auto-update setting; use the actual
 pre-release switch if necessary. Reacquire the CDP target after relaunch and
 check **Current version**, not the offered-version link. No direct update API,
-patched feed, or second GUI automation stack. This case remains NOT RUN until
-implemented and executed against the published candidate.
+patched feed, or second GUI automation stack.
+
+The explicit `update` mode is scaffolded separately from `preparation` and
+`enabled`, restricted to the authorized rc3 → rc4 pair. The sole writer selects
+it only after CU work has priority and the public candidate exists. It does not
+interrupt another run; workflow concurrency has cancellation disabled. It skips
+CU/model/editor fixtures rather than reporting them as update acceptance.
+Both releases pass the same checksum/Certum/provenance verifier; the downloaded
+target is reference-only and is **never executed by the harness**.
+
+The observer runs concurrently with the same CDP Update client. It retains an
+actual standard-user `avibe-update-*/update.exe` process handle, verifies its
+bytes against the target reference and its exit status, requires the original
+Desktop to exit and a distinct exact-path owned Desktop window to appear, and
+resolves the new installed runtime manifest. It then checks Desktop and runtime
+versions, the installed driver hash, and the relaunched panel's Current version
+and unchanged settings. A click or an offered-version link alone cannot pass.
+Target not discoverable/shared CDP missing is a named NOT RUN blocker; required
+update cases that are NOT RUN or FAIL fail the run. No transition is claimed
+until this mode has run against the published candidate.
+
+Downloads recheck release admission and have at most 180-second timeouts. A
+40-minute operation deadline and a bounded worker leave room under the
+45-minute job limit for owned-process/account cleanup and seven-day artifacts.

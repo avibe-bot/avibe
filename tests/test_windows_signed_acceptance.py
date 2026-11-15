@@ -36,6 +36,7 @@ def test_draft_workflow_cannot_dispatch_or_receive_release_write_authority():
     )
     assert set(workflow["on"]) == {"pull_request"}
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+    assert workflow["concurrency"]["cancel-in-progress"] == "false"
     job = workflow["jobs"]["signed-installer"]
     assert job["runs-on"] == "windows-latest"
     assert job["timeout-minutes"] == "45"
@@ -49,6 +50,27 @@ def test_draft_workflow_cannot_dispatch_or_receive_release_write_authority():
         "${{ runner.temp }}/signed-cu-evidence/verdict.json",
         "${{ runner.temp }}/signed-cu-evidence/verdict.md",
     ]
+
+
+def test_release_reference_rejects_bad_provenance_signature_checksum_and_exhausted_budget(tmp_path):
+    # The new update mode shares the actual release verifier with preparation.
+    # Regressing either signature/provenance refusal or deadline admission must
+    # fail before any installer could run; this boundary has no existing test.
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is required for the hermetic release verifier")
+    env = {key: value for key, value in os.environ.items() if key in {"PATH", "SystemRoot", "WINDIR"}}
+    for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        env[key] = str(tmp_path)
+    outcome = subprocess.run(
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+         str(ROOT / "tests/windows_signed_acceptance_release.ps1"),
+         "-Source", str(ROOT / "desktop/scripts/signed-cu-acceptance/release.ps1"),
+         "-Work", str(tmp_path)],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert "release_proof_fixture_cases_passed" in outcome.stdout
 
 
 def test_update_panel_oracle_rejects_stale_check_and_changed_offer(tmp_path):

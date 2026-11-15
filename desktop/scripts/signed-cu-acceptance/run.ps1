@@ -1,18 +1,20 @@
 param(
     [ValidatePattern('^gh-v3\.2\.7rc[0-9]+$')][string] $ReleaseTag = 'gh-v3.2.7rc3',
-    [ValidateSet('preparation', 'enabled')][string] $Mode = 'preparation'
+    [ValidateSet('preparation', 'enabled', 'update')][string] $Mode = 'preparation',
+    [ValidatePattern('^gh-v3\.2\.7rc[0-9]+$')][string] $UpdateTag = 'gh-v3.2.7rc4'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
     throw 'Only a disposable GitHub-hosted Windows runner is permitted.'
 }
+$runDeadline = (Get-Date).AddMinutes(40) # Leave five minutes for teardown/artifact upload.
 $evidence = Join-Path $env:RUNNER_TEMP 'signed-cu-evidence'
 $root = Join-Path $env:RUNNER_TEMP ('signed-cu-' + [guid]::NewGuid().ToString('N'))
 $work = Join-Path $root 'work'
 New-Item -ItemType Directory -Path $evidence, $root, $work -Force | Out-Null
 $cases = [ordered]@{}
-foreach ($id in @('release_integrity', 'target_fixture_integrity', 'real_win32_fixture_preflight', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'unified_update_panel_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'elevated_target_query_preflight', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
+foreach ($id in @('release_integrity', 'target_fixture_integrity', 'real_win32_fixture_preflight', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'unified_update_panel_preflight', 'update_release_integrity', 'update_panel_start', 'update_installer', 'update_relaunch', 'update_versions', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'elevated_target_query_preflight', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
     $cases[$id] = @{ verdict = 'NOT RUN'; reason = 'prerequisite_not_reached' }
 }
 $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_desktop'
@@ -20,6 +22,7 @@ $cases.second_interactive_session.reason = 'second_local_account_is_not_a_second
 $cases.real_agent_turn.reason = 'no_model_credentials_owner_real_machine_check_required'
 $requiredCases = @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'uninstall', 'cleanup')
 if ($Mode -eq 'enabled') { $requiredCases += @('webview_cdp_preflight', 'model_stub_tool_path', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture') }
+elseif ($Mode -eq 'update') { $requiredCases += @('webview_cdp_preflight', 'update_release_integrity', 'update_panel_start', 'update_installer', 'update_relaunch', 'update_versions') }
 else { $requiredCases += 'feature_disabled' }
 $record = [ordered]@{
     required_cases = $requiredCases; required_cases_passed = $false; missing_required_cases = @()
@@ -55,6 +58,7 @@ function Assert-ReleaseIdle {
     $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; 'X-GitHub-Api-Version' = '2022-11-28' }
     foreach ($status in @('queued', 'in_progress', 'waiting', 'pending', 'requested')) {
         for ($page = 1; ; $page++) {
+            if ((Get-Date) -ge $runDeadline.AddMinutes(-3)) { throw 'acceptance_budget_exhausted' }
             $uri = "https://api.github.com/repos/avibe-bot/avibe/actions/runs?status=$status&per_page=100&page=$page"
             $data = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 30
             foreach ($run in $data.workflow_runs) {
@@ -102,34 +106,26 @@ function Stop-FixtureProcesses([string] $OwnerSid) {
 Save-Report
 try {
     Assert-ReleaseIdle
-    $base = "https://github.com/avibe-bot/avibe/releases/download/$ReleaseTag"
-    $version = $ReleaseTag -replace '^gh-v', '' -replace 'rc', '-rc.'
-    $stem = "Avibe_${version}_x86_64-pc-windows-msvc"
-    foreach ($suffix in @('.exe', '.SHA256SUMS', '.SOURCE.json')) {
-        Invoke-WebRequest -Uri "$base/$stem$suffix" -OutFile (Join-Path $root "$stem$suffix") -TimeoutSec 240
-    }
-    $sums = Get-Content -LiteralPath (Join-Path $root "$stem.SHA256SUMS")
-    foreach ($suffix in @('.exe', '.SOURCE.json')) {
-        $name = "$stem$suffix"
-        $matchesForFile = @($sums | Where-Object { $_ -match ('^[a-fA-F0-9]{64}\s+\*?' + [regex]::Escape($name) + '$') })
-        if ($matchesForFile.Count -ne 1) { throw 'checksum_entry_missing_or_ambiguous' }
-        $actual = (Get-FileHash -LiteralPath (Join-Path $root $name) -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne $matchesForFile[0].Substring(0, 64).ToLowerInvariant()) { throw 'release_checksum_mismatch' }
-        if ($suffix -eq '.exe') { $record.installer_sha256 = $actual }
-    }
-    $installer = Join-Path $root "$stem.exe"
-    $signature = Get-AuthenticodeSignature -LiteralPath $installer
-    if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or $signature.SignerCertificate.Issuer -notmatch '(?i)Certum' -or -not $signature.TimeStamperCertificate) {
-        throw 'trusted_timestamped_certum_signature_required'
-    }
-    $source = Get-Content -LiteralPath (Join-Path $root "$stem.SOURCE.json") -Raw | ConvertFrom-Json
-    if ($source.tag -ne $ReleaseTag -or $source.target -ne 'x86_64-pc-windows-msvc') { throw 'release_source_identity_mismatch' }
-    $hash = [string]$source.computer_use_driver.prepared_binary_sha256
-    if ($hash -notmatch '^[a-f0-9]{64}$' -or $hash -ne $source.computer_use_driver.packaged_sha256) { throw 'stage2_driver_hash_mismatch' }
+    if ($Mode -eq 'update' -and ($ReleaseTag -ne 'gh-v3.2.7rc3' -or $UpdateTag -ne 'gh-v3.2.7rc4')) { throw 'only_authorized_rc3_to_rc4_update_allowed' }
+    . (Join-Path $PSScriptRoot 'release.ps1')
+    $release = Get-VerifiedRelease $ReleaseTag (Join-Path $root 'base-release') $runDeadline { Assert-ReleaseIdle }
+    $installer = $release.Installer; $hash = $release.DriverHash
+    $record.installer_sha256 = $release.InstallerHash
     $record.stage2_driver_sha256 = $hash
     Verdict 'release_integrity' 'PASS' 'sha256sums_and_timestamped_certum_authenticode_valid'
     Save-Report
+    $updateRelease = $null
+    if ($Mode -eq 'update') {
+        $stage = 'update_release_integrity'
+        # Reference bytes only: the target installer is NEVER launched by the
+        # harness. The real updater must discover/download/install its offer.
+        $updateRelease = Get-VerifiedRelease $UpdateTag (Join-Path $root 'update-reference') $runDeadline { Assert-ReleaseIdle }
+        $record.update_release = @{ tag = $UpdateTag; installer_sha256 = $updateRelease.InstallerHash; stage2_driver_sha256 = $updateRelease.DriverHash }
+        Verdict 'update_release_integrity' 'PASS' 'target_reference_sha256sums_timestamped_certum_and_stage2_provenance_verified_not_executed'
+    }
 
+    $targetApp = $null; $targetHash = $null
+    if ($Mode -ne 'update') {
     $stage = 'target_fixture_integrity'
     # A pinned real Win32 editor, not Windows' brokered Notepad launcher.
     # Binary files remain read/execute-only for the ordinary account; each
@@ -137,6 +133,7 @@ try {
     $targetUrl = 'https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.9.1/npp.8.9.9.1.portable.x64.zip'
     $targetArchiveHash = 'cbcefa34677e10fe6dd19802f7d6b3b9860cd6de62afeaae7680e09c51b47779'
     $targetArchive = Join-Path $root 'real-editor.zip'
+    Assert-ReleaseIdle
     Invoke-WebRequest -Uri $targetUrl -OutFile $targetArchive -TimeoutSec 180
     if ((Get-FileHash -LiteralPath $targetArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $targetArchiveHash) { throw 'target_fixture_archive_hash_mismatch' }
     $targetDirectory = Join-Path $root 'real-editor'
@@ -150,8 +147,10 @@ try {
     $record.target_fixture = @{ name = 'Notepad++'; version = $targetVersion; source = $targetUrl; archive_sha256 = $targetArchiveHash; executable_sha256 = $targetHash; signature_valid = $true; signer_subject = $targetSignature.SignerCertificate.Subject; signer_thumbprint = $targetSignature.SignerCertificate.Thumbprint }
     Verdict 'target_fixture_integrity' 'PASS' 'pinned_official_portable_editor_archive_hash_and_timestamped_authenticode_valid'
     Save-Report
+    }
 
     $stage = 'standard_user'
+    if ((Get-Date) -gt $runDeadline.AddMinutes(-5)) { throw 'acceptance_budget_exhausted' }
     $password = [Security.SecureString]::new()
     foreach ($character in 'aA1!'.ToCharArray()) { $password.AppendChar($character) }
     $alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%'
@@ -162,12 +161,13 @@ try {
     if (-not (Get-LocalGroupMember -Group $group | Where-Object { $_.SID -eq $user.SID })) { Add-LocalGroupMember -Group $group -Member $user }
     $groups = @(Get-LocalGroup | Where-Object { @(Get-LocalGroupMember -Group $_ | Where-Object { $_.SID -eq $user.SID }).Count -gt 0 })
     if ($groups.Count -ne 1 -or $groups[0].SID.Value -ne 'S-1-5-32-545') { throw 'account_not_users_only' }
-    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1')) {
+    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1', 'update.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $root $file)
     }
     Set-FixtureAccess $root 'ReadAndExecute'
     Set-FixtureAccess $work 'Modify'
     $config = @{ installer = $installer; driver_hash = $hash; mode = $Mode; release_version = ($ReleaseTag -replace '^gh-v', ''); expected_sid = $user.SID.Value; target_app = $targetApp; target_app_hash = $targetHash }
+    if ($updateRelease) { $config.update = @{ version = $updateRelease.Version; desktop_version = $updateRelease.DesktopVersion; installer_hash = $updateRelease.InstallerHash; driver_hash = $updateRelease.DriverHash } }
     $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'input.json')
     Assert-ReleaseIdle
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -185,6 +185,7 @@ try {
     $worker = [Diagnostics.Process]::Start($psi)
     $null = $worker.SafeHandle
     $deadline = (Get-Date).AddMinutes(32)
+    if ($deadline -gt $runDeadline.AddMinutes(-3)) { $deadline = $runDeadline.AddMinutes(-3) }
     $nextAdmission = (Get-Date).AddSeconds(180)
     . (Join-Path $PSScriptRoot 'security.ps1')
     $security = @{ Root = $root; User = $user; SecondUser = $null; TargetApp = $targetApp; TargetHash = $targetHash; DriverHash = $hash; ElevatedApp = $null; Completed = $false; QueryPrepared = $false; Stage = 'security_fixture'; Cases = @{} }
@@ -229,7 +230,7 @@ try {
         $cases[$id] = $result.cases[$id]
     }
     $record.installed_driver_sha256 = $result.installed_driver_sha256
-    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail', 'update_panel_preflight')) {
+    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail', 'update_panel_preflight', 'update_transition')) {
         if ($result.Contains($field)) { $record[$field] = $result[$field] }
     }
     if ($worker.ExitCode -ne 0) { $failed = $true }

@@ -156,6 +156,12 @@ try {
         }
     }
 
+    if ($inputData.mode -eq 'update') {
+        $stage = 'update_panel_start'
+        . (Join-Path $Root 'update.ps1')
+        $updateContext = @{ Desktop = $desktop; Python = $python }
+        try { Invoke-UpdateCase $updateContext } finally { $desktop = $updateContext.Desktop; $python = $updateContext.Python }
+    } else {
     $stage = 'model_stub_tool_path'
     $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     $portProbe.Start(); $stubPort = $portProbe.LocalEndpoint.Port; $portProbe.Stop()
@@ -252,11 +258,12 @@ try {
         $caseContext = @{ Desktop = $desktop }
         try { Invoke-EnabledCases $caseContext } finally { $desktop = $caseContext.Desktop }
     }
+    }
 } catch {
     $failed = $true
     $result.failure = @{ exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
     $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'ordinary_user_operation_failed' }
-    if ($reason -ne 'enabled_acceptance_case_failed') { Verdict $stage 'FAIL' $reason }
+    if ($reason -notin @('enabled_acceptance_case_failed', 'update_acceptance_case_failed')) { Verdict $stage 'FAIL' $reason }
 } finally {
     try {
         if ($stub) { if (-not $stub.HasExited) { $stub.Kill(); $null = $stub.WaitForExit(10000) }; $stub.Dispose() }

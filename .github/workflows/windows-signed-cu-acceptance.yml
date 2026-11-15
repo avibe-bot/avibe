@@ -21,6 +21,9 @@ concurrency:
 env:
   RELEASE_TAG: gh-v3.2.7rc3
   ACCEPTANCE_MODE: preparation
+  # Used only when this sole-writer draft explicitly selects update mode after
+  # CU work; no dispatch or independent/competing update automation.
+  UPDATE_TAG: gh-v3.2.7rc4
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -52,7 +55,7 @@ jobs:
         env:
           # Read-only, ephemeral admission token, never passed to the test user.
           GH_TOKEN: ${{ github.token }}
-        run: ./desktop/scripts/signed-cu-acceptance/run.ps1 -ReleaseTag $env:RELEASE_TAG -Mode $env:ACCEPTANCE_MODE
+        run: ./desktop/scripts/signed-cu-acceptance/run.ps1 -ReleaseTag $env:RELEASE_TAG -Mode $env:ACCEPTANCE_MODE -UpdateTag $env:UPDATE_TAG
       - name: Publish value-free verdict
         if: always()
         shell: pwsh
