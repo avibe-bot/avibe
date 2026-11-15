@@ -131,19 +131,43 @@ const EN_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/en.json");
 const ZH_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/zh.json");
 
 #[derive(Default)]
-struct PendingDesktopUpdateOpen(AtomicBool);
+struct PendingDesktopUpdateOpen {
+    requested: AtomicBool,
+    opening: AtomicBool,
+    retrying: AtomicBool,
+}
 
 impl PendingDesktopUpdateOpen {
     fn request(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.requested.store(true, Ordering::SeqCst);
     }
 
     fn complete(&self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.requested.store(false, Ordering::SeqCst);
     }
 
     fn requested(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    fn begin_attempt(&self) -> bool {
+        self.opening
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn finish_attempt(&self) {
+        self.opening.store(false, Ordering::SeqCst);
+    }
+
+    fn begin_retry(&self) -> bool {
+        self.retrying
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn finish_retry(&self) {
+        self.retrying.store(false, Ordering::SeqCst);
     }
 }
 
@@ -707,9 +731,11 @@ fn open_settings_script() -> String {
 
 fn open_updates_script() -> String {
     format!(
-        "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
-         window.dispatchEvent(new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }})); \
-         if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('{OPEN_UPDATES_FALLBACK_URL}');"
+        "(() => {{ window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
+         const event = new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }}); \
+         window.dispatchEvent(event); \
+         if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('{OPEN_UPDATES_FALLBACK_URL}'); \
+         return window.__AVIBE_DESKTOP_UPDATES_HANDLED__ ? 'handled' : 'unhandled'; }})()"
     )
 }
 
@@ -717,18 +743,41 @@ fn open_updates_script() -> String {
 /// `false` is the documented fallback boundary: the shell has no reachable
 /// Workbench window, or the page rejected the script.
 fn open_desktop_updates(app: &AppHandle) -> bool {
+    let Some(pending) = app.try_state::<PendingDesktopUpdateOpen>() else {
+        return false;
+    };
+    if !pending.begin_attempt() {
+        return true;
+    }
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        pending.finish_attempt();
         return false;
     };
     if !pet::is_workbench(&window) {
-        if instance_client::present_guarded(app, "updates") {
+        let accepted = instance_client::present_guarded(app, "updates");
+        pending.finish_attempt();
+        if accepted {
             focus_or_restore_main_window(app);
-            return true;
+            pending.complete();
         }
-        return false;
+        return accepted;
     }
     focus_or_restore_main_window(app);
-    window.eval(open_updates_script()).is_ok()
+    let handle = app.clone();
+    if window
+        .eval_with_callback(open_updates_script(), move |result| {
+            let pending = handle.state::<PendingDesktopUpdateOpen>();
+            if result.trim() == "\"handled\"" {
+                pending.complete();
+            }
+            pending.finish_attempt();
+        })
+        .is_err()
+    {
+        pending.finish_attempt();
+        return false;
+    }
+    true
 }
 
 fn request_desktop_updates(app: &AppHandle) {
@@ -737,17 +786,36 @@ fn request_desktop_updates(app: &AppHandle) {
 
 fn request_and_open_desktop_updates(app: &AppHandle) {
     request_desktop_updates(app);
-    if open_desktop_updates(app) {
-        app.state::<PendingDesktopUpdateOpen>().complete();
+    ensure_pending_update_retry(app);
+    let _ = open_desktop_updates(app);
+}
+
+fn ensure_pending_update_retry(app: &AppHandle) {
+    let Some(pending) = app.try_state::<PendingDesktopUpdateOpen>() else {
+        return;
+    };
+    if !pending.begin_retry() {
+        return;
     }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let pending = app.state::<PendingDesktopUpdateOpen>();
+        let mut delay = std::time::Duration::from_millis(100);
+        loop {
+            tokio::time::sleep(delay).await;
+            if !pending.requested() {
+                pending.finish_retry();
+                return;
+            }
+            let _ = open_desktop_updates(&app);
+            delay = (delay * 2).min(std::time::Duration::from_secs(2));
+        }
+    });
 }
 
 fn open_updates_fallback(app: &AppHandle) {
     request_desktop_updates(app);
-    if instance_client::present_guarded(app, "updates") {
-        focus_or_restore_main_window(app);
-        app.state::<PendingDesktopUpdateOpen>().complete();
-    }
+    ensure_pending_update_retry(app);
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -2052,10 +2120,9 @@ fn main_document_finished(webview: &tauri::Webview) {
     macos_title_bar::sync(webview);
     instance_client::page_loaded(webview.app_handle());
     apply_pending_deep_link(webview.app_handle());
-    if webview.app_handle().state::<PendingDesktopUpdateOpen>().requested()
-        && open_desktop_updates(webview.app_handle())
-    {
-        webview.app_handle().state::<PendingDesktopUpdateOpen>().complete();
+    if webview.app_handle().state::<PendingDesktopUpdateOpen>().requested() {
+        ensure_pending_update_retry(webview.app_handle());
+        let _ = open_desktop_updates(webview.app_handle());
     }
     // Settings become available the moment a Workbench is on
     // screen, not at the monitor's first tick. The shared
@@ -2759,9 +2826,11 @@ mod tests {
     fn the_updates_request_is_a_cancelable_workbench_event() {
         assert_eq!(
             open_updates_script(),
-            "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
-             window.dispatchEvent(new Event('avibe:desktop-open-updates', { cancelable: true })); \
-             if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('avibe://updates-fallback');"
+            "(() => { window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
+             const event = new Event('avibe:desktop-open-updates', { cancelable: true }); \
+             window.dispatchEvent(event); \
+             if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('avibe://updates-fallback'); \
+             return window.__AVIBE_DESKTOP_UPDATES_HANDLED__ ? 'handled' : 'unhandled'; })()"
         );
     }
 
@@ -2771,6 +2840,12 @@ mod tests {
         assert!(!pending.requested());
         pending.request();
         assert!(pending.requested());
+        assert!(pending.begin_attempt());
+        assert!(!pending.begin_attempt());
+        pending.finish_attempt();
+        assert!(pending.begin_retry());
+        assert!(!pending.begin_retry());
+        pending.finish_retry();
         pending.complete();
         assert!(!pending.requested());
     }

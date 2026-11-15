@@ -409,11 +409,13 @@ fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     assert!(!source.contains("on_open_url"));
     // The shell evaluates only its fixed Settings and Updates event scripts;
     // nothing page-supplied is ever evaluated.
-    assert_eq!(source.matches(".eval(").count(), 3);
+    assert_eq!(source.matches(".eval(").count(), 2);
     assert!(source.contains("window.eval(open_settings_script())"));
-    assert!(source.contains("window.eval(open_updates_script())"));
+    assert!(source.contains("eval_with_callback(open_updates_script()"));
     assert!(source.contains("avibe:desktop-open-updates"));
-    assert!(source.contains("request_and_open_desktop_updates(app)"));
+    assert!(source.contains("window.eval_with_callback(open_updates_script()"));
+    assert!(source.contains("ensure_pending_update_retry"));
+    assert!(source.contains("return window.__AVIBE_DESKTOP_UPDATES_HANDLED__ ? 'handled' : 'unhandled';"));
     assert!(source.contains("PendingDesktopUpdateOpen>().requested()"));
     assert!(source.contains("PendingDesktopUpdateOpen>().complete()"));
     assert!(!source.contains("updater::check(webview.app_handle().clone(), true)"));
@@ -1352,7 +1354,7 @@ fn updates_have_one_native_owner_and_one_scoped_workbench_control_path() {
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));
     assert!(!updater.contains("MessageDialogButtons::YesNoCancelCustom"));
     assert!(!updater.contains("confirm_install("));
-    assert!(updater.contains("set_available(&app, manifest)"));
+    assert!(updater.contains("settle_discovered_update(&app, manifest)"));
     assert!(updater.contains("settle_update(&app, None, Settlement::Completed)"));
     assert!(updater.contains("update::install_verified(download, &artifact, KEY"));
     assert!(!include_str!("../capabilities/bootstrap.json").contains("updater:"));

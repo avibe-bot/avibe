@@ -248,6 +248,29 @@ fn publish_status(app: &AppHandle) {
     }
 }
 
+fn publish_check(app: &AppHandle) {
+    let updater = app.state::<Updater>();
+    let state = updater.state.lock().expect("updater state");
+    let Some(record) = check_record(&state, &app.package_info().version.to_string(), SystemTime::now()) else {
+        return;
+    };
+    let record = record
+        .with_remote(true, state.remote_request.clone())
+        .with_auto_update(Some(state.auto_update))
+        .with_control(state.control_request.clone());
+    if let Err(error) = updater.status.write(&record) {
+        eprintln!("desktop update status: {error}");
+    }
+}
+
+fn settle_discovered_update(app: &AppHandle, manifest: Manifest) {
+    set_available(app, manifest);
+    publish_check(app);
+    // Discovery has no native presentation side effect. The unified panel reads
+    // the published offer, while this check releases only its own busy gate.
+    settle_update(app, None, Settlement::Completed);
+}
+
 /// All terminal receipt writes and gate releases happen together under the state
 /// mutex. Local checks share the gate but never own a remote receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -758,10 +781,26 @@ fn workbench_ready(app: &AppHandle) -> bool {
         .is_some_and(|window| super::pet::is_workbench(&window))
 }
 
+fn apply_available(state: &mut State, manifest: Manifest) {
+    state.latest = Some(manifest.version.clone());
+    state.phase = Phase::Available;
+    state.manifest = Some(manifest);
+}
+
 fn set_available(app: &AppHandle, manifest: Manifest) {
-    let latest = manifest.version.clone();
-    set_state(app, Phase::Available, Some(latest));
-    app.state::<Updater>().state.lock().expect("updater state").manifest = Some(manifest);
+    {
+        let updater = app.state::<Updater>();
+        let mut state = updater.state.lock().expect("updater state");
+        apply_available(&mut state, manifest);
+    }
+    let latest = app
+        .state::<Updater>()
+        .state
+        .lock()
+        .expect("updater state")
+        .latest
+        .clone();
+    set_state(app, Phase::Available, latest);
     emit_state(app);
 }
 fn persist_channel(path: &Path, channel: Channel) -> io::Result<()> {
@@ -1124,14 +1163,7 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
     set_state(&app, Phase::Checking, None);
     tauri::async_runtime::spawn(async move {
         match find_update(&app, channel).await {
-            Ok(Some((manifest, _silent))) => {
-                set_available(&app, manifest);
-                publish_check(&app);
-                // Discovery is deliberately presentation-free. Startup only
-                // publishes the signed offer; the unified panel owns every
-                // interactive presentation and installation decision.
-                settle_update(&app, None, Settlement::Completed);
-            }
+            Ok(Some((manifest, _silent))) => settle_discovered_update(&app, manifest),
             Ok(None) => {
                 set_state(&app, Phase::Current, None);
                 publish_check(&app);
@@ -1848,15 +1880,29 @@ mod tests {
         }
     }
 
+    fn discovered_manifest(version: &str) -> Manifest {
+        Manifest {
+            schema_version: 1,
+            repository: REPOSITORY.to_owned(),
+            tag: format!("v{version}"),
+            source_sha: "0".repeat(40),
+            channel: Channel::Stable,
+            version: version.to_owned(),
+            target: TARGET.to_owned(),
+            platforms: std::collections::BTreeMap::new(),
+        }
+    }
+
     #[test]
-    fn startup_and_interactive_discovery_share_available_state_even_when_version_was_skipped() {
+    fn discovery_marks_and_settles_the_signed_offer_without_native_prompt() {
+        let skipped = "1.2.3";
         for auto_update in [false, true] {
             for availability_interactive in [false, true] {
                 let mut state = State {
                     control_request: None,
                     active_request: None,
-                    phase: Phase::Available,
-                    latest: Some("1.2.3".to_owned()),
+                    phase: Phase::Checking,
+                    latest: None,
                     channel: Channel::Stable,
                     manifest: None,
                     availability_interactive,
@@ -1864,10 +1910,11 @@ mod tests {
                     remote_request: None,
                 };
                 let busy = AtomicBool::new(true);
-                assert_eq!(
-                    check_record(&state, "1.2.2", SystemTime::UNIX_EPOCH).unwrap().phase,
-                    UpdateStatusPhase::Available
-                );
+                let manifest = discovered_manifest(skipped);
+                apply_available(&mut state, manifest);
+                assert_eq!(state.phase, Phase::Available);
+                assert_eq!(state.latest.as_deref(), Some(skipped));
+                assert!(state.manifest.is_some());
                 assert!(settle(
                     &mut state,
                     &busy,
@@ -1878,8 +1925,13 @@ mod tests {
                 assert!(!busy.load(Ordering::SeqCst));
             }
         }
-        // The persisted skip remains data for automatic-install safety; it no
-        // longer hides the signed offer from the unified panel.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-skipped.json");
+        persist_skipped_version(&path, skipped).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<String>(&std::fs::read(path).unwrap()).unwrap(),
+            skipped
+        );
     }
 
     #[test]
