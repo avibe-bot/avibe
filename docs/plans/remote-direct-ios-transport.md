@@ -1,8 +1,8 @@
 # Remote direct paths: the App's iroh transport (A2)
 
-Status: **Core and its join to the proxy seam written; inactive, not registered, not qualified.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The core and its tests against stand-ins for the iroh binding came with #3659; the join to the proxy seam (section 8, item 2) came after #3537 merged. The published Apple artifact is pinned (#3662); linking it into the App is tracked separately, in #3685. Nothing in the App creates the transport, and `AvibeApp` registers none.
+Status: **Core, seam, adapter, hosted interop consumer, and registration source are written; the registered transport is inactive until a runtime is ready, and device qualification remains outstanding.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The core and its tests against stand-ins for the iroh binding came with #3659; the join to the proxy seam (section 8, item 2) came after #3537 merged. The published Apple artifact is pinned (#3662), and the binding-backed registration is now in `AvibeApp`; no production enablement or device action is implied.
 
-This is not the whole of A2. The binding adapter, the registration, and everything that runs real iroh are still to be implemented and qualified (section 8). A build that registers a transport is a separate gate with its own approval and evidence; nothing here grants it.
+This is not the whole of A2. Registration source is in this PR; everything that runs real iroh has now been qualified in the hosted merged-master run, while device behavior and enablement remain separate gates. A build that registers a transport is a separate gate with its own approval and evidence; this source change grants neither production enablement nor device qualification.
 
 Statements below are **rule** (what the code does), **read** (taken from the pinned source, not run), or **proposal** (a bound to be set from measurement).
 
@@ -194,7 +194,7 @@ In `ios-shell`, on the simulator:
 
 **Not shown by any of this:**
 
-- Anything about the real binding. The stand-ins copy the properties in section 2 from reading the source; no test here runs iroh. The engine over the generated types is compiled and tested for the first time with A1.
+- The stand-in suite does not qualify the real binding. Separate hosted `DirectIrohBindingTests` now exercise the published adapter over loopback (section 8); they do not qualify a device or the sidecar.
 - Interoperability with the instance's sidecar, and the dead-path timings, which only the real sidecar's idle timeout produces.
 - Devices: the Local Network prompt and its denial, real Wi-Fi, IPv6 and cellular, suspension, battery, and iOS 17; and that a WebView there has no service worker container either.
 - A real service worker. The refusal is tested against a stand-in only (section 4).
@@ -202,12 +202,12 @@ In `ios-shell`, on the simulator:
 
 ## 8. Still to implement and qualify
 
-Item 2 is done; items 1 and 3 are not. Each follows its dependency.
+The adapter and seam are merged. The App-side interop consumer below is test-only; registration follows actual combined evidence and its exact-head merge decision.
 
-1. **After A1 links the gated binary:** `DirectIrohBinding`, the `DirectIrohEngine` over the generated types. A1 compiles the unmodified generated wrapper in its own Swift module, `IrohLib`; the adapter imports it and qualifies every generated name, so none enters the App's namespace. With the adapter:
+1. **Adapter merged (#3736):** `DirectIrohBinding`, the `DirectIrohEngine` over the generated types. A1 compiles the unmodified generated wrapper in its own Swift module, `IrohLib`; the adapter imports it and qualifies every generated name, so none enters the App's namespace. With the adapter:
    - tests with two real endpoints in one process over loopback: bind (no relay, the ID from the key equals `endpoint.id()`), a wrong identity, and the stream mapping;
    - **resource bounds against the real binding**, which the stand-ins cannot show: repeated cancellation of `connect`, `openBi`, `read`, and `writeAll`; a stream that opens late; both halves blocked on a live connection; and the end of a session. Each must show that the binding's leftover calls end and that their number is bounded. If a cancelled stream on a live connection cannot be bounded without closing the connection, that trade-off goes to a decision with these measurements; it is not accepted here.
-   - the interoperability test against the published sidecar.
+   - the interoperability test against the published sidecar, with staging below.
 2. **The seam, done (#3537 is merged).** `DirectIrohTransport.swift` ends with the whole mapping: `DirectIrohSelection(_: DirectTarget)`, `DirectIrohStreamTag(_: DirectStreamTag)`, `DirectPathReport(_: DirectIrohReport)`, `extension DirectIrohByteStream: DirectByteStream {}`, and `extension DirectIrohTransport: DirectTransporting`.
    - **Which target is current has one authority, the path controller.** It exposes it read only as `selectedTarget`.
    - **The rendezvous request runs in `AppModel.directRendezvousWebView(for:)`.** That is the runtime controller's live primary WebView, handed out only if all of these hold:
@@ -229,11 +229,67 @@ Item 2 is done; items 1 and 3 are not. Each follows its dependency.
      - So a relay that the App or the path ended is counted once per host for the event, and never as one that ended on its own. The listener still drains the relays asynchronously and keeps their slots until their tasks end.
      - Lease run-out still closes nothing. Closes for a stopped runtime or an account change still count nothing.
      - The background loss is reported as `lostToBackground`. If the transport hears the background before the controller does, the controller enters its own background handling on that report, so the closure stays pending until the listener is ready again on the return (`remote-direct-ios.md` sections 9 and 10). Its own observer then finds the background already entered. In the other order the late report belongs to an ended selection and changes nothing.
-   - **Still nothing creates the transport,** and #3537's shipped-App test is unchanged.
-3. **Registration, with its own approval and the evidence of item 1:**
-   - `NSLocalNetworkUsageDescription` in both locales, using the approved copy;
-   - in `AvibeApp`: `DirectIrohTransport(engine: DirectIrohBinding(), fetchRendezvous: source.fetch)` passed to `AppModel`, then `source.appModel = model`. This is the line that makes a build use a transport. `source.fetch` holds the source weakly, so the App must keep the source for as long as the transport lives; otherwise every request is `pageNotReady`;
-   - #3537's shipped-App test flipped to its positive control.
+3. **Registration source (this PR), with its own approval and the evidence of item 1:**
+   - `NSLocalNetworkUsageDescription` is already present in both locales under the separately owned copy lane; this PR does not touch those resources.
+   - `AvibeApp` retains one `DirectRendezvousWebViewSource`, creates `DirectIrohTransport(engine: DirectIrohBinding(), fetchRendezvous: source.fetch)`, passes it to `AppModel`, and then binds `source.appModel = model`. This is the line that makes a build use a transport. The source's weak model link is intentional; the App's strong source property keeps rendezvous requests live for the transport's lifetime; otherwise every request is `pageNotReady`.
+   - The existing `DirectPathAppTests` positive composition test remains the stand-in control, while no-transport tests continue to cover the compatibility path.
+
+`DirectIrohInteropTests` owns two explicit XCTest entries, engine and transport.
+Both are compiled and linked by ordinary `ios-shell`; without the host fixture
+they report **skipped: real interoperability not run**, not a native pass.
+`DirectIrohInteropProtocolTests` separately covers the Swift control parser,
+exact setup acknowledgment, preservation of result objects, and rejection of
+local timeout/shutdown as negative peer evidence. These are protocol tests, not
+sidecar evidence.
+
+The host wire contract and runner remain owned by
+`docs/testing/ios-direct-interop.md`. The consumer uses schema 2, the exact six
+cases and 24-byte payload, and waits for the host's exact-case `setup_done`
+acknowledgment before any case dial. Setup attempts use their own deadline;
+negative cases never run setup or retry. Negative observations separate actual
+`local_streams` (successful local bidi opens, including a probe) from
+`payload_streams` (zero) and `usable` (false). There is no negative `case_streams`
+field: only the host can independently prove zero ingress, both before and after
+cleanup. An unadmitted peer may finish TLS then be refused by the sidecar's
+post-handshake admission hook; the App observes a qualified native peer failure
+from connect/open/read/write before fixture cleanup. Wrong-identity connect
+success remains a hard failure even if no local stream opens. Error recognition
+follows the pinned FFI conversion: outer ConnectError uses n0-error's
+Display-based report; ConnectionError and stream errors use their derived Debug
+forms. Timeout, local shutdown and unknown failures never count as rejection.
+Test-owned forwarding observers record
+native calls, probe bytes and cleanup; the transport tier uses the actual
+`DirectIrohTransport` and rendezvous validator, with no production hooks. Its
+only coverage skip is an empty admissible-address list on the first `admitted`
+offer. Later address loss, rejection, local deadlines, malformed control, and
+contradicted host verdicts fail. The test does not use the WebView/listener path.
+
+Each App result case is retained unchanged in `engine.json` or `transport.json`;
+only `type`/`schema` are added on the control channel. The independent host
+verdict and reconciliation hash are required; the App cannot declare the host
+passed. Evidence excludes endpoint/account identifiers and raw foreign errors.
+Owned streams, connections, endpoints and the control socket are closed on both
+success and failure. Native settlement and cleanup have explicit test budgets;
+no App foreground deadline is changed.
+
+Staging is deliberate: the merged host runner only executes native interop on a
+clean, freshly fetched exact **merged master**. Therefore this source PR's gates
+are full review, Codex, `ios-shell` compilation/unit tests and applicable lint,
+not a fabricated premerge combined pass. After Product's source-only exact-head
+go and lead merge, the coordinator/lead starts the existing merged-master hosted
+dispatch; A2 inspects its provenance, both independent verdicts and artifacts.
+Registration remains blocked until that real run succeeds. Runner queue, run,
+artifact inspection and any corrective review are an explicit additional wait.
+No host workflow or clean-master fence is weakened.
+
+Adapter evidence already obtained in hosted run `43578084117`: 409 XCTest
+cases, zero failures; pending connect settled in 0.00022325 s from close issuance
+and full endpoint drain took 2.999156709 s, measured independently. The fixture
+keeps a <3 s settlement gate and a separate <5 s full-drain allowance. Of 128
+opens, 100 had completed before cancellation; both native halves were still in
+flight before their cancellation exercise, and their calls settled after close.
+These duration checks do not replace a device trial, sidecar interop, or a total
+end-to-end cancellation SLA. Combined interop evidence is still outstanding.
 
 ## 9. Open
 

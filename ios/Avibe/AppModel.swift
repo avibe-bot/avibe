@@ -25,9 +25,7 @@ enum AppRoute: Equatable {
         switch self {
         case .onboarding(let startScreen):
             return startScreen
-        case .accountOverBrowser:
-            return .runtimeAccount
-        case .loading, .browser:
+        case .accountOverBrowser, .loading, .browser:
             return nil
         }
     }
@@ -52,6 +50,9 @@ private struct PendingPushOpened {
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var route: AppRoute = .loading
+    /// Chosen once when the one runtime-preserving sheet opens. Repeated
+    /// presentation requests never replace its document or change its mode.
+    @Published private(set) var accountSheetStartScreen: MobileOnboardingStartScreen = .sheet
     /// Advances each time a runtime opens, so the root builds a new runtime
     /// controller even when the same instance is selected again.
     @Published private(set) var runtimeIdentity = 0
@@ -277,33 +278,56 @@ final class AppModel: ObservableObject {
         pendingRuntimeReleaseBarriers.append(barrier)
     }
 
-    /// Covers the live runtime with the bundled account page, keeping its
-    /// document, history, and scroll position for `returnToRuntime()`.
-    /// A push-management request the App makes on its own (at launch, in the
-    /// background) keeps the runtime selected (`isSelectedRuntime`), so it
-    /// neither closes the runtime here nor keeps the page from returning to
-    /// it; signing out or another account does.
+    /// Covers the live runtime with the bundled instances sheet. The runtime
+    /// remains selected and its document is not released, including when the
+    /// runtime currently shows its native load-failure screen.
     func showAccount() {
+        showRuntimeSheet(startScreen: .sheet, fallback: .account)
+    }
+
+    func showAccountRoot() {
+        showRuntimeSheet(startScreen: .sheetAccount, fallback: .account)
+    }
+
+    func showInstances() {
+        showRuntimeSheet(startScreen: .sheetInstances, fallback: .instances)
+    }
+
+    /// App metadata is read by the Runtime on document load. The catalog,
+    /// rather than the runtime's creation-time snapshot, owns its display name.
+    func selectedInstanceName() -> String? {
+        guard let runtime = route.runtime,
+              sessionCoordinator.isSelectedRuntime(runtime) else { return nil }
+        return sessionCoordinator.currentInstances.first {
+            $0.id == runtime.instance.id
+                && WebOrigin(url: $0.url) == WebOrigin(url: runtime.instance.url)
+        }?.name
+    }
+
+    private func showRuntimeSheet(
+        startScreen: MobileOnboardingStartScreen,
+        fallback: MobileOnboardingStartScreen
+    ) {
         switch route {
         case .accountOverBrowser:
             return
         case .browser(let runtime)
-            where runtimeController != nil
-                && sessionCoordinator.isSelectedRuntime(runtime):
+            where sessionCoordinator.isSelectedRuntime(runtime):
             runtimeController?.prepareForAccountCover()
+            accountSheetStartScreen = startScreen
             route = .accountOverBrowser(runtime)
         default:
             stopRuntime()
-            route = .onboarding(.account)
+            route = .onboarding(fallback)
         }
     }
 
-    /// Shows the runtime the account page covers again, unchanged. Returns
-    /// `false` once a switch or an account transition has released it.
+    /// Shows the runtime the account/instances surface covers again, unchanged.
+    /// A failed runtime may not have a controller, but it is still a valid
+    /// selected route and must return to its failure screen.
     func returnToRuntime() -> Bool {
         guard
             case .accountOverBrowser(let runtime) = route,
-            runtimeController != nil,
             sessionCoordinator.isSelectedRuntime(runtime)
         else {
             return false
@@ -315,6 +339,14 @@ final class AppModel: ObservableObject {
 
     func showInstancePicker() {
         clearPendingPushOpened()
+        if case .browser(let runtime) = route,
+           sessionCoordinator.isSelectedRuntime(runtime) {
+            showAccount()
+            return
+        }
+        if case .accountOverBrowser = route {
+            return
+        }
         stopRuntime()
         route = .onboarding(.instances)
     }

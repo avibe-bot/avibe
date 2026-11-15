@@ -52,6 +52,27 @@ describe('MoreAccountSection', () => {
     await waitFor(() => expect(auth.signOut).toHaveBeenCalledTimes(1));
   });
 
+  it('opens the account sheet on its Account page where the shell presents instances, as before elsewhere', async () => {
+    const call = vi.fn(async () => null);
+    const shell = (capabilities: Record<string, number>) => Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: { contract: 1, platform: 'ios', shellVersion: '1.0 (1)', capabilities, call, on: vi.fn(() => () => undefined) },
+    });
+
+    shell({ accountPresentation: 2, app: 1, instancePresentation: 1 });
+    render(<MoreAccountSection />);
+    fireEvent.click(screen.getByRole('button', { name: 'appShell.openMobileAccount' }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('app.showAccount', { start: 'account' }));
+    cleanup();
+
+    shell({ accountPresentation: 2, app: 1 });
+    render(<MoreAccountSection />);
+    fireEvent.click(screen.getByRole('button', { name: 'appShell.openMobileAccount' }));
+    await waitFor(() => expect(call).toHaveBeenLastCalledWith('app.showAccount', {}));
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(auth.signOut).not.toHaveBeenCalled();
+  });
+
   it('falls back to web sign-out when native presentation rejects', async () => {
     Object.defineProperty(window, 'avibeNative', {
       configurable: true,

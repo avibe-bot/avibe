@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["runtime-host", "src-tauri"]
+members = ["computer-use-windows", "runtime-host", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

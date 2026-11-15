@@ -48,13 +48,13 @@ describe('vaultGenerate', () => {
   });
 
   it('maps every accepted byte to each character equally often', () => {
-    const recipe: GenerateRecipe = { type: 'password', length: 124, digits: true, symbols: false, noLookalikes: false };
+    const recipe: GenerateRecipe = { type: 'password', length: 62, digits: true, symbols: false, noLookalikes: false };
     // Bytes 0..247 once each: exactly 4 of each of the 62 characters, so with the 248+ bytes thrown
     // away every character comes out the same number of times.
     const bytes = Array.from({ length: 256 }, (_, i) => i);
-    const value = generateSecretValue(recipe, fixed(bytes)) + generateSecretValue(recipe, fixed(bytes.slice(124)));
+    const value = [0, 62, 124, 186].map((start) => generateSecretValue(recipe, fixed(bytes.slice(start)))).join('');
     const counts = new Map<string, number>();
-    for (const c of value.slice(0, 248)) counts.set(c, (counts.get(c) ?? 0) + 1);
+    for (const c of value) counts.set(c, (counts.get(c) ?? 0) + 1);
     expect(new Set(counts.values())).toEqual(new Set([4]));
   });
 
@@ -92,20 +92,34 @@ describe('vaultGenerate', () => {
   });
 
   it('holds the limits and refuses anything outside them', () => {
-    expect(withSize(DEFAULT_PASSWORD_RECIPE, 5)).toMatchObject({ length: 12 });
-    expect(withSize(DEFAULT_PASSWORD_RECIPE, 500)).toMatchObject({ length: 128 });
+    // Passwords are 8 to 100 characters; hex and Base64 stay 16 to 64 bytes.
+    const length = (n: number) => ({ ...DEFAULT_PASSWORD_RECIPE, length: n }) as GenerateRecipe;
+    expect([7, 8, 11, 12, 24, 100, 101, 128].map((n) => isValidRecipe(length(n))))
+      .toEqual([false, true, true, true, true, true, false, false]);
+    expect([7, 8, 100, 101, 128].map((n) => withSize(DEFAULT_PASSWORD_RECIPE, n)))
+      .toMatchObject([{ length: 8 }, { length: 8 }, { length: 100 }, { length: 100 }, { length: 100 }]);
+    expect(generateSecretValue(length(8))).toHaveLength(8);
+    expect(generateSecretValue(length(100))).toHaveLength(100);
+    expect(() => generateSecretValue(length(101))).toThrow(RangeError);
     expect(withSize({ type: 'hex', bytes: 32 }, 15.6)).toMatchObject({ bytes: 16 });
-    expect(isValidRecipe({ ...DEFAULT_PASSWORD_RECIPE, length: 11 } as GenerateRecipe)).toBe(false);
+    expect(withSize({ type: 'hex', bytes: 32 }, 100)).toMatchObject({ bytes: 64 });
     expect(() => generateSecretValue({ type: 'base64', bytes: 65 })).toThrow(RangeError);
     expect(recipeBits(DEFAULT_PASSWORD_RECIPE)).toBe(150);
     expect(recipeBits({ type: 'hex', bytes: 32 })).toBe(256);
   });
 
-  it('reads a request hint as a preset only when it is valid', () => {
-    expect(recipeFromSpec({ type: 'hex', bytes: 32, field: 'secret' })).toEqual({ type: 'hex', bytes: 32 });
-    expect(recipeFromSpec({ type: 'password', length: 30, symbols: false, no_lookalikes: true }))
-      .toEqual({ type: 'password', length: 30, digits: true, symbols: false, noLookalikes: true });
-    expect(recipeFromSpec({ type: 'password', length: 400 })).toBeNull();
+  it('reads a request hint as a preset, bringing an older wider password length within the limits', () => {
+    expect(recipeFromSpec({ type: 'hex', bytes: 32, field: 'secret' })).toEqual({ recipe: { type: 'hex', bytes: 32 }, adjusted: false });
+    expect(recipeFromSpec({ type: 'password', length: 30, symbols: false, no_lookalikes: true })).toEqual({
+      recipe: { type: 'password', length: 30, digits: true, symbols: false, noLookalikes: true }, adjusted: false,
+    });
+    expect(recipeFromSpec({ type: 'password' })).toEqual({ recipe: DEFAULT_PASSWORD_RECIPE, adjusted: false });
+    expect(recipeFromSpec({ type: 'password', length: 8 })).toMatchObject({ recipe: { length: 8 }, adjusted: false });
+    // Saved while the range went to 128: kept as an Agent preset, at 100, and marked adjusted.
+    expect(recipeFromSpec({ type: 'password', length: 128, symbols: false }))
+      .toEqual({ recipe: { type: 'password', length: 100, digits: true, symbols: false, noLookalikes: false }, adjusted: true });
+    expect(recipeFromSpec({ type: 'password', length: 12.5 })).toBeNull();
+    expect(recipeFromSpec({ type: 'hex', bytes: 65 })).toBeNull();
     expect(recipeFromSpec({ type: 'base64url', bytes: 32 })).toBeNull();
     expect(recipeFromSpec(null)).toBeNull();
   });

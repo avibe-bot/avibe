@@ -25,11 +25,14 @@ from storage.vault_crypto import Sealed
 from vibe import api, cli
 
 
-@pytest.mark.parametrize("kind", ["password", "hex", "base64"])
-def test_real_file_store_generation_never_returns_values_to_service(monkeypatch, tmp_path, capfd, caplog, kind):
+@pytest.mark.parametrize("kind,length", [
+    ("password", 8), ("password", 11), ("password", 12), ("password", 100),
+    ("hex", None), ("base64", None),
+])
+def test_real_file_store_generation_never_returns_values_to_service(monkeypatch, tmp_path, capfd, caplog, kind, length):
     explicit = os.environ.get("AVIBE_TEST_AVAULT_GENERATE_BINARY")
     if not explicit:
-        pytest.skip("requires explicit merged-contract avault test binary; no installed-runtime fallback")
+        pytest.skip("requires explicit approved released avault >=0.1.14 test binary; no installed-runtime fallback")
     binary = Path(explicit)
     assert binary.is_absolute() and binary.is_file()
     node = shutil.which("node")
@@ -54,7 +57,10 @@ def test_real_file_store_generation_never_returns_values_to_service(monkeypatch,
         assert sentinel not in fixture.stdout.decode() + fixture.stderr.decode()
         with engine.begin() as conn:
             vs.create_secret(conn, name="LOGIN", sealed=Sealed(**json.loads(fixture.stdout)))
-        request = new_request("vault.generate", {"name": "LOGIN", "field": "token", "recipe": {"type": kind}})
+        recipe = {"type": kind}
+        if length is not None:
+            recipe["length"] = length
+        request = new_request("vault.generate", {"name": "LOGIN", "field": "token", "recipe": recipe})
         response = asyncio.run(handle_control_request(SimpleNamespace(), request.to_payload()))
         assert response["exit_code"] == 0, response
         with engine.connect() as conn:
@@ -65,10 +71,14 @@ def test_real_file_store_generation_never_returns_values_to_service(monkeypatch,
             {"name": "LOGIN.token", "env": "GENERATED", "envelope": api._envelope_payload(envelope)},
             {"name": "LOGIN", "env": "KNOWN", "envelope": api._envelope_payload(original)},
         ]
+        assert response["payload"]["secret"]["generated"][0]["length" if kind == "password" else "bytes"] == (length or 32)
+        captured = capfd.readouterr()
+        observed = json.dumps(response) + json.dumps(audits) + captured.out + captured.err + caplog.text
         child = (
             "const v=process.env.GENERATED;const k=" + json.dumps(kind) + ";"
             "let ok=process.env.KNOWN===" + json.dumps(sentinel) + ";"
-            "if(k==='password')ok=ok&&v.length===24;"
+            "ok=ok&&!" + json.dumps(observed) + ".includes(v);"
+            "if(k==='password')ok=ok&&v.length===" + json.dumps(length) + ";"
             "else if(k==='hex')ok=ok&&/^[0-9a-f]{64}$/.test(v);"
             "else ok=ok&&Buffer.from(v,'base64').length===32&&Buffer.from(v,'base64').toString('base64')===v;"
             "process.exit(ok?0:1);"
@@ -77,7 +87,6 @@ def test_real_file_store_generation_never_returns_values_to_service(monkeypatch,
                                    input=json.dumps(entries).encode(), capture_output=True, check=False, timeout=20)
         assert delivered.returncode == 0
         assert delivered.stdout == b"" and delivered.stderr == b""
-        captured = capfd.readouterr()
-        assert sentinel not in json.dumps(response) + json.dumps(audits) + captured.out + captured.err + caplog.text
+        assert sentinel not in observed
     finally:
         engine.dispose()

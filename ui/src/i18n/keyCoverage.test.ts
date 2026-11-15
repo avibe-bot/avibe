@@ -915,10 +915,12 @@ const NON_KEY_LITERALS = [
 
   // Native bridge method names. They are transport identifiers, never copy.
   'app.info',
+  'app.dismiss',
   'app.openExternal',
   'app.returnToInstance',
   'app.setAccountActionAvailable',
   'app.showAccount',
+  'app.showInstances',
   'auth.requestOtp',
   'auth.signInWithPassword',
   'auth.verifyOtp',

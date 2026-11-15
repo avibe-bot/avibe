@@ -21,6 +21,7 @@ struct NativeShellMetadata: Equatable {
         "app": 1,
         "badge": 1,
         "haptics": 1,
+        "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
         "push": 1,
@@ -97,6 +98,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case appOpenExternal = "app.openExternal"
     case appSetAccountActionAvailable = "app.setAccountActionAvailable"
     case appShowAccount = "app.showAccount"
+    case appShowInstances = "app.showInstances"
     case badgeSet = "badge.set"
     case directStatus = "direct.status"
     case hapticsImpact = "haptics.impact"
@@ -110,6 +112,24 @@ enum NativeBridgeMethod: String, CaseIterable {
     case pushOpenedAck = "push.openedAck"
     case viewportSetOuterScrollLocked = "viewport.setOuterScrollLocked"
     case voicePermission = "voice.permission"
+}
+
+/// The parameterized Account root belongs to instancePresentation v1;
+/// an empty object keeps the legacy instances-first Account entry.
+enum NativeAccountPresentation: Equatable {
+    case instances
+    case account
+
+    static func parse(
+        _ params: [String: Any], instancePresentation: Int?
+    ) -> NativeAccountPresentation? {
+        if params.isEmpty { return .instances }
+        guard (instancePresentation ?? 0) >= 1,
+              params.count == 1, params["start"] as? String == "account" else {
+            return nil
+        }
+        return .account
+    }
 }
 
 struct NativeBridgeRequest {
@@ -229,6 +249,9 @@ enum NativeBridgeConfiguration {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        showAccountRoot: @escaping () -> Void = {},
+        showInstances: @escaping () -> Void = {},
+        instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         pushStatus: @escaping @MainActor (
             String?,
@@ -281,6 +304,9 @@ enum NativeBridgeConfiguration {
             historyDidChange: historyDidChange,
             colorSchemeDidChange: colorSchemeDidChange,
             showAccount: showAccount,
+            showAccountRoot: showAccountRoot,
+            showInstances: showInstances,
+            instanceName: instanceName,
             directStatus: directStatus,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
@@ -544,6 +570,9 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let showAccountRoot: () -> Void
+    private let showInstances: () -> Void
+    private let instanceName: () -> String?
     private let directStatus: DirectStatusProvider?
     private let pushStatus: @MainActor (
         String?,
@@ -578,6 +607,9 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         historyDidChange: @escaping (WKWebView) -> Bool,
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool,
         showAccount: @escaping () -> Void,
+        showAccountRoot: @escaping () -> Void,
+        showInstances: @escaping () -> Void,
+        instanceName: @escaping () -> String?,
         directStatus: DirectStatusProvider?,
         pushStatus: @escaping @MainActor (
             String?,
@@ -611,6 +643,9 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.showAccountRoot = showAccountRoot
+        self.showInstances = showInstances
+        self.instanceName = instanceName
         self.directStatus = directStatus
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
@@ -829,7 +864,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             }
             reply(replyHandler, result: NSNull())
         case .appInfo:
-            reply(replyHandler, result: metadata.jsonObject)
+            var info = metadata.jsonObject
+            let name = instanceName()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            info["instance"] = ["name": name.isEmpty ? "Avibe" : name]
+            reply(replyHandler, result: info)
         case .appOpenExternal:
             guard
                 let rawURL = request.params["url"] as? String,
@@ -865,9 +903,28 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             }
             reply(replyHandler, result: NSNull())
         case .appShowAccount:
+            guard let presentation = NativeAccountPresentation.parse(
+                request.params,
+                instancePresentation: metadata.capabilities["instancePresentation"]
+            ) else {
+                reply(replyHandler, error: .invalidArgument(
+                    "app.showAccount accepts no parameters or exactly {start: account} with instancePresentation."
+                ))
+                return
+            }
+            let present = presentation == .account ? showAccountRoot : showAccount
             reply(replyHandler, result: NSNull())
-            DispatchQueue.main.async { [showAccount] in
-                showAccount()
+            DispatchQueue.main.async { present() }
+        case .appShowInstances:
+            guard request.params.isEmpty else {
+                reply(replyHandler, error: .invalidArgument(
+                    "app.showInstances does not accept parameters."
+                ))
+                return
+            }
+            reply(replyHandler, result: NSNull())
+            DispatchQueue.main.async { [showInstances] in
+                showInstances()
             }
         case .badgeSet:
             guard let count = NativeBadgeCount.parse(request.params) else {

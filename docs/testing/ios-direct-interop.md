@@ -43,6 +43,54 @@ It does not install anything, enable
 transport, modify pairing, use the owner's live runtime, provision certificates,
 perform public DNS/backend calls, or authorize device/TestFlight qualification.
 
+## Hosted simulator readiness
+
+Before XCTest or any interoperability case starts, the runner rechecks the
+hosted-only and exact merged-source fences and performs one simulator inventory
+command with a **120-second** limit. It still selects the lexicographically first
+available **iPhone 17 Pro** UDID under exactly **iOS 26.5**. Availability must be a
+Boolean (only `true` is selectable), and matching device IDs must have UUID
+shape. A missing target or invalid inventory fails; no alternate device/runtime,
+retry or daemon restart is allowed. The selected device's existing
+`simctl bootstatus <UDID> -b` readiness operation then has a **600-second** limit.
+An absolute monotonic deadline starts before synchronous `Popen` creation;
+launching after it has expired fails rather than resetting the budget. The
+remaining budget covers asynchronous pipe attachment and execution/output.
+PID/process-group ownership is recorded before any pipe-attachment await, so
+cancellation during attachment still retires the already-created group. Only
+successful completion prints the UDID to stdout for the workflow. There is no
+second, unbounded shell boot command.
+
+Known by design: Python cannot interrupt an arbitrary kernel-stalled synchronous
+spawn. That exceptional path remains subject to the existing 35-minute hosted
+job limit and runner teardown, not a claimed hard-interruptible spawn guarantee.
+No extra launcher or general process supervisor is introduced.
+
+Both commands have recorded fresh process groups and use the same cancellation-
+safe TERM/KILL/reap path as xcodebuild (up to 5 seconds for TERM, 3 for KILL and
+3 for leader reap, in addition to the command limit). Cleanup never targets the
+shared simulator service by name. Timeout, cancellation, nonzero exit, invalid
+inventory, missing target or cleanup failure cannot produce readiness success.
+
+`simulator-readiness/` under the isolated runner artifact directory contains the
+source identity, selected UDID when available, each command/stage/PID, elapsed
+time, exit/failure status, and separate stdout/stderr files capped at **1 MiB
+each**. Pipes continue draining through cleanup, but exceeding either output cap
+fails rather than trusting truncated inventory. The workflow uploads this
+folder on success and failure, including failures before any App/host result
+exists. These are bounded diagnostic/readiness limits, not proof that a cold
+simulator-service delay was the cause or that native interoperability works.
+Actual qualification still requires a new authorized current-master hosted run.
+
+This reuses the same pinned image/toolchain, selection and `bootstatus -b`
+primitive as `ios-shell` and `ios-mobile-captures`, not their unbounded waits.
+Successful same-image `ios-shell` boots took about 345 and 361 seconds; 600
+seconds is a bounded empirical ceiling, while the outer workflow remains 35
+minutes. The earlier sheet document-readiness and tap-receipt fixes run inside
+an already launched App and do not supply a pre-simulator readiness mechanism.
+`ios-shell` builds for the generic Simulator SDK before inventory; that sequence
+difference is not proof that a redundant build would fix this inventory stall.
+
 ## Frozen v2 control contract
 
 A test method opens one loopback control TCP connection. Every NDJSON record,
@@ -127,7 +175,41 @@ Negative evidence contains only sidecar events actually emitted. The pinned
 sidecar may reject a peer before any client-specific `peer_closed` event. Zero
 ingress is mandatory; a nonexistent rejection event must never be invented.
 Observed reason strings may include `admission_ended`, `idle_timeout`, `stopped`,
-or `connection_closed`. A local deadline is not a successful negative result.
+or `connection_closed`. A local deadline or local shutdown is not a successful
+negative result.
+
+### Negative App observations
+
+For `not_admitted` and `wrong_identity`, the App's `observed` object has exactly
+these five keys (no legacy `case_streams`, `setup_attempts`, or other fields):
+
+```json
+{"control_tcp":true,"failure":"handshake","local_streams":0,"payload_streams":0,"usable":false}
+```
+
+`control_tcp` must be exactly Boolean `true` and `usable` exactly Boolean
+`false`. Both counts must be nonnegative integers, not Booleans, floats or
+strings. `local_streams` counts actual successful local `openStream` returns,
+including probe opens; it does not count successful connects. `payload_streams`
+counts streams on which the fixed payload write was attempted and must be zero.
+Do not force local counts to zero to satisfy a verdict.
+
+For `not_admitted`, `failure` is either `handshake` from an actual qualified
+peer/crypto error thrown by connect, or `closed_by_peer` from an actual native
+post-connect open/write/read error with the pinned peer-close wording. Admission
+rejection can occur after handshake: the transport may successfully open its
+local CONNECT probe before refusal. Such a local open is not host ingress and
+is allowed, but no payload or usable transport is allowed. Timeout, local
+shutdown and cleanup cannot supply the rejection observation.
+
+For `wrong_identity`, `failure` must be `handshake` and `local_streams` must be
+zero. The App additionally fails the case on **any successful connect**, even
+if it never opens a stream; no extra connect-count field is sent. The host still
+requires the App's case to pass and independently requires **zero ingress
+connections**, including malformed and late ingress, for both negative cases
+before and after cleanup. Host `observed.case_streams` remains its independently
+measured ingress count, not an alias for App `local_streams`. Positive App
+observations, the six-case inventory and the v2 control messages are unchanged.
 
 ## Evidence and reconciliation
 

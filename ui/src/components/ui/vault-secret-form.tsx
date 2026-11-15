@@ -51,7 +51,7 @@ import {
   checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
 } from '@/lib/vaultHdWallet';
 import { useProtectedVault } from '@/lib/useProtectedVault';
-import { useAskTurnOff } from '@/lib/useAskTurnOff';
+import { askTurnOffNoteShown, useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { DEFAULT_PASSWORD_RECIPE, recipeFromSpec, type GenerateRecipe } from '@/lib/vaultGenerate';
@@ -69,6 +69,7 @@ import { TagInput } from './tag-input';
 import { Textarea } from './textarea';
 import {
   VaultFieldList,
+  VaultFieldNameRule,
   VaultFieldReferences,
   VaultFieldRemoveConfirm,
   VaultFieldRow,
@@ -82,7 +83,7 @@ import {
 } from './vault-hd-wallet-steps';
 import { AskTurnOffNote } from './vault-ask-turn-off-note';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
-import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
+import { VaultSecretFieldsEditor, type VaultFieldsCommit } from './vault-secret-fields-editor';
 import { VaultSolanaKeyFields } from './vault-solana-key-fields';
 import { VaultGenerateControl, VaultGeneratedBadge } from './vault-generate';
 
@@ -221,6 +222,9 @@ export const VaultSecretForm: React.FC<{
   const [focusField, setFocusField] = useState<{ id: number; part: 'name' | 'value' } | null>(null);
   const [focusedNameId, setFocusedNameId] = useState<number | null>(null);
   const [fieldEditBusy, setFieldEditBusy] = useState(false);
+  // The edit dialog's field changes, committed by its Save (one atomic request), or dropped.
+  const fieldsCommitRef = useRef<VaultFieldsCommit | null>(null);
+  const [fieldsState, setFieldsState] = useState({ dirty: false, valid: true });
   const staticValueRef = useRef('');
   const setStaticValue = useCallback((next: string) => {
     staticValueRef.current = next;
@@ -295,12 +299,15 @@ export const VaultSecretForm: React.FC<{
   // only sets the options, never a value. `valueFromGenerator` marks the field as generated until it
   // is typed over; it holds no copy of the value, so clearing the field (as sealing does) clears
   // everything. Both tiers alike: the value is in this form like a typed one, sealed only at Save.
-  const specRecipe = useMemo(
+  const specPreset = useMemo(
     () => recipeFromSpec((requestSpec as { generate?: unknown } | null | undefined)?.generate),
     [requestSpec],
   );
+  const specRecipe = specPreset?.recipe ?? null;
   const specRecipeField = (requestSpec as { generate?: { field?: unknown } } | null | undefined)?.generate?.field;
   const [recipe, setRecipe] = useState<GenerateRecipe>(specRecipe ?? DEFAULT_PASSWORD_RECIPE);
+  // The single value still uses the request's preset as it came (not yet changed by the user).
+  const [recipeChanged, setRecipeChanged] = useState(false);
   const [valueFromGenerator, setValueFromGenerator] = useState(false);
   // Which generator popup is open: the single value ('value') or a field row (its id).
   const [generatorOpen, setGeneratorOpen] = useState<'value' | number | null>(null);
@@ -532,7 +539,7 @@ export const VaultSecretForm: React.FC<{
         : signingKey != null
     : staticValueReady;
   const canSubmit = isEdit
-    ? !submitting && !fieldEditBusy
+    ? !submitting && !fieldEditBusy && fieldsState.valid
     : Boolean(secretNameValid && valueReady) &&
       !submitting &&
       (isHd
@@ -842,6 +849,9 @@ export const VaultSecretForm: React.FC<{
         return;
       }
       if (isEdit && editSecret) {
+        // Field changes first, in one atomic request; if they aren't written the dialog stays open
+        // with them (the editor shows why) and the metadata isn't sent either.
+        if (fieldsCommitRef.current?.dirty() && !(await fieldsCommitRef.current.commit())) return;
         // Value-free metadata edit: the shared validation above already ran; PATCH
         // description / tags / policy. Only the visible fetch policy (allowed_hosts + auth) is
         // sent; the backend preserves internal keys such as always_ask.
@@ -1114,7 +1124,10 @@ export const VaultSecretForm: React.FC<{
           <div className="flex items-start gap-2">
             <VaultGenerateControl
               recipe={recipe}
-              onRecipeChange={setRecipe}
+              onRecipeChange={(next) => {
+                setRecipe(next);
+                setRecipeChanged(true);
+              }}
               onValue={(next) => {
                 setValueFromGenerator(true);
                 setStaticValue(next);
@@ -1124,6 +1137,7 @@ export const VaultSecretForm: React.FC<{
               labelled
               showLabel={!value}
               suggested={Boolean(specRecipe) && !specRecipeField}
+              suggestionAdjusted={Boolean(specPreset?.adjusted) && !recipeChanged}
               disabled={submitting}
             >
               {showValue && generatorOpen !== 'value' ? (
@@ -1138,7 +1152,7 @@ export const VaultSecretForm: React.FC<{
                   required
                   spellCheck={false}
                   autoComplete="off"
-                  className={cn('min-h-[76px] min-w-0 flex-1 resize-y pr-12 font-mono text-xs leading-relaxed', valueGenerated && 'border-mint/40 bg-mint-soft/40')}
+                  className={cn('min-h-[76px] min-w-0 flex-1 resize-y font-mono text-xs leading-relaxed', valueGenerated && 'border-mint/40 bg-mint-soft/40')}
                 />
               ) : (
                 <Input
@@ -1155,11 +1169,7 @@ export const VaultSecretForm: React.FC<{
                   spellCheck={false}
                   autoComplete="off"
                   aria-label={t('vaults.dialog.value')}
-                  className={cn(
-                    'min-w-0 flex-1 pr-12 font-mono text-xs md:group-focus-within/gen:pr-36',
-                    !value && 'max-md:pr-36',
-                    valueGenerated && 'border-mint/40 bg-mint-soft/40',
-                  )}
+                  className={cn('min-w-0 flex-1 font-mono text-xs', valueGenerated && 'border-mint/40 bg-mint-soft/40')}
                 />
               )}
             </VaultGenerateControl>
@@ -1307,6 +1317,7 @@ export const VaultSecretForm: React.FC<{
                   onOpenChange={(open) => setGeneratorOpen(open ? row.id : null)}
                   triggerOutside
                   suggested={!row.recipe && Boolean(specRecipe) && rowPreset(row, index) === specRecipe}
+                  suggestionAdjusted={!row.recipe && Boolean(specPreset?.adjusted) && rowPreset(row, index) === specRecipe}
                   disabled={submitting}
                 >
                   {input}
@@ -1326,7 +1337,7 @@ export const VaultSecretForm: React.FC<{
           );
         })}
       </VaultFieldList>
-      {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
+      <VaultFieldNameRule shown={showNameRule} />
       <VaultFieldReferences
         secretName={secretName}
         fields={fieldNames.filter((_, index) => fieldNameIssues[index] === null)}
@@ -1338,16 +1349,17 @@ export const VaultSecretForm: React.FC<{
       <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
       {valueField}
       <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
-        <Button type="button" variant="ghost" size="xs" className="px-2.5 text-[13px] text-muted hover:text-foreground"
-          disabled={submitting || staticSource === 'file'} onClick={addFieldRow}>
-          <Plus />
-          {t('vaults.fields.add')}
-        </Button>
+        <span className="mr-1.5 flex items-center">
+          <Button type="button" variant="ghost" size="xs" className="px-2.5 text-[13px] text-muted hover:text-foreground"
+            disabled={submitting || staticSource === 'file'} onClick={addFieldRow}>
+            <Plus />
+            {t('vaults.fields.add')}
+          </Button>
+          <InfoHint hover content={t('vaults.fields.multiHint')} label={t('vaults.dialog.moreInfo')} />
+        </span>
         <VaultFieldTemplateMenu disabled={submitting || staticSource === 'file'} onApply={applyFieldTemplate} />
       </div>
-      <span className="text-[11px] text-muted">
-        {staticSource === 'file' ? t('vaults.fields.singleFile') : t('vaults.fields.multiHint')}
-      </span>
+      {staticSource === 'file' ? <span className="text-[11px] text-muted">{t('vaults.fields.singleFile')}</span> : null}
     </div>
   );
 
@@ -1575,7 +1587,8 @@ export const VaultSecretForm: React.FC<{
           <Lock className="size-3 shrink-0" />
           {t('vaults.edit.lockedHint')}
         </p>
-        {!isKeypair && <VaultSecretFieldsEditor key={editSecret.name} secret={editSecret} disabled={submitting} onBusyChange={setFieldEditBusy} />}
+        {!isKeypair && <VaultSecretFieldsEditor key={editSecret.name} secret={editSecret} disabled={submitting} onBusyChange={setFieldEditBusy}
+          commitRef={fieldsCommitRef} onChange={setFieldsState} />}
 
         <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
@@ -1605,11 +1618,9 @@ export const VaultSecretForm: React.FC<{
                 label={t('vaults.dialog.alwaysAskSign')}
               />
             </div>
-            {editAskWasOn && askOff.state.phase === 'working' ? (
-              <AskTurnOffNote state={askOff.state} />
-            ) : editAskWasOn && canTurnAskOff ? (
-              askOff.state.phase === 'ready' && askOff.state.failure && askOff.state.failure !== 'cancelled'
-                ? <AskTurnOffNote state={askOff.state} />
+            {editAskWasOn && (askOff.state.phase === 'working' || canTurnAskOff) ? (
+              askTurnOffNoteShown(askOff.state)
+                ? <AskTurnOffNote state={askOff.state} onSetup={askOff.setup} />
                 : <span className="text-[11px] text-muted">{t('vaults.askOff.offHintEdit')}</span>
             ) : editAskWasOn && askOff.state.phase === 'unavailable' ? (
               <span className="text-[11px] text-muted">{t('vaults.dialog.alwaysAskSignLocked')}</span>

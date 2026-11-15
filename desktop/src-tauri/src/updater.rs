@@ -26,7 +26,7 @@ use tauri::{
     menu::{CheckMenuItem, MenuItem},
     AppHandle, Emitter, Manager, WebviewWindow,
 };
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 pub const MENU_ID: &str = "desktop-update";
 pub const CHANNEL_ID: &str = "desktop-update-test";
@@ -88,7 +88,6 @@ pub struct Catalog {
     checking: String,
     up_to_date: String,
     available: String,
-    confirm: String,
     downloading: String,
     installing: String,
     installed: String,
@@ -97,9 +96,6 @@ pub struct Catalog {
     error: String,
     check_failed: String,
     pub(super) install_failed: String,
-    install: String,
-    skip: String,
-    cancel: String,
 }
 fn catalog() -> Catalog {
     super::native_catalog_for_locales(sys_locale::get_locales()).updater
@@ -250,6 +246,29 @@ fn publish_status(app: &AppHandle) {
     if let Err(error) = updater.status.write(&record) {
         eprintln!("desktop update status: {error}");
     }
+}
+
+fn publish_check(app: &AppHandle) {
+    let updater = app.state::<Updater>();
+    let state = updater.state.lock().expect("updater state");
+    let Some(record) = check_record(&state, &app.package_info().version.to_string(), SystemTime::now()) else {
+        return;
+    };
+    let record = record
+        .with_remote(true, state.remote_request.clone())
+        .with_auto_update(Some(state.auto_update))
+        .with_control(state.control_request.clone());
+    if let Err(error) = updater.status.write(&record) {
+        eprintln!("desktop update status: {error}");
+    }
+}
+
+fn settle_discovered_update(app: &AppHandle, manifest: Manifest) {
+    set_available(app, manifest);
+    publish_check(app);
+    // Discovery has no native presentation side effect. The unified panel reads
+    // the published offer, while this check releases only its own busy gate.
+    settle_update(app, None, Settlement::Completed);
 }
 
 /// All terminal receipt writes and gate releases happen together under the state
@@ -762,10 +781,26 @@ fn workbench_ready(app: &AppHandle) -> bool {
         .is_some_and(|window| super::pet::is_workbench(&window))
 }
 
+fn apply_available(state: &mut State, manifest: Manifest) {
+    state.latest = Some(manifest.version.clone());
+    state.phase = Phase::Available;
+    state.manifest = Some(manifest);
+}
+
 fn set_available(app: &AppHandle, manifest: Manifest) {
-    let latest = manifest.version.clone();
-    set_state(app, Phase::Available, Some(latest));
-    app.state::<Updater>().state.lock().expect("updater state").manifest = Some(manifest);
+    {
+        let updater = app.state::<Updater>();
+        let mut state = updater.state.lock().expect("updater state");
+        apply_available(&mut state, manifest);
+    }
+    let latest = app
+        .state::<Updater>()
+        .state
+        .lock()
+        .expect("updater state")
+        .latest
+        .clone();
+    set_state(app, Phase::Available, latest);
     emit_state(app);
 }
 fn persist_channel(path: &Path, channel: Channel) -> io::Result<()> {
@@ -823,26 +858,6 @@ fn show(app: &AppHandle, message: &str, latest: Option<&str>) {
     app.dialog().message(text).title(c.title).show(|_| {});
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Choice {
-    Install,
-    Skip,
-    Later,
-}
-/// Closing the dialog (Esc, window close) is never an implicit install or skip.
-fn choice(result: &MessageDialogResult, c: &Catalog) -> Choice {
-    match result {
-        MessageDialogResult::Custom(label) if *label == c.install => Choice::Install,
-        MessageDialogResult::Custom(label) if *label == c.skip => Choice::Skip,
-        _ => Choice::Later,
-    }
-}
-/// Only the automatic startup check honours a skipped version or a silent
-/// release; an explicit menu check always offers it, and any newer announced
-/// release prompts again. A silent release still shows as available.
-fn should_prompt(interactive: bool, silent: bool, skipped: Option<&str>, version: &str) -> bool {
-    interactive || (!silent && skipped != Some(version))
-}
 fn skipped_version(updater: &Updater) -> Option<String> {
     std::fs::read(&updater.skipped_path)
         .ok()
@@ -1108,66 +1123,6 @@ fn decision_current(app: &AppHandle, presentation: CheckPresentation) -> bool {
         _ => true,
     }
 }
-fn handoff_to_workbench(presentation: CheckPresentation, ready: bool) -> bool {
-    matches!(presentation, CheckPresentation::TrustedPanel(_)) || ready
-}
-fn confirm_install(
-    app: AppHandle,
-    manifest: Manifest,
-    presentation: CheckPresentation,
-    remote: Option<RemoteInstallContext>,
-) {
-    let c = catalog();
-    let confirmation = app.clone();
-    let dialog = app
-        .dialog()
-        .message(format!(
-            "{}: {}\n{}: {}\n\n{}",
-            c.current,
-            app.package_info().version,
-            c.latest,
-            manifest.version,
-            c.confirm
-        ))
-        .title(c.title.clone())
-        // The dialog plugin reports Esc/close as the third label, so
-        // that slot must be the harmless "Later", never "Skip".
-        .buttons(if remote.is_some() {
-            MessageDialogButtons::OkCancelCustom(c.install.clone(), c.cancel.clone())
-        } else {
-            MessageDialogButtons::YesNoCancelCustom(c.install.clone(), c.skip.clone(), c.cancel.clone())
-        });
-    dialog.show_with_result(move |result| {
-        if !decision_current(&confirmation, presentation) {
-            if remote.is_none() {
-                settle_update(&confirmation, None, Settlement::Completed);
-            }
-            return;
-        }
-        if let Some(remote) = remote {
-            // Later/close leaves the original ticket and expiry owner intact. The
-            // install owner atomically claims and revalidates this exact ticket.
-            if choice(&result, &c) == Choice::Install {
-                let generation = match presentation {
-                    CheckPresentation::TrustedPanel(generation) => Some(generation),
-                    _ => None,
-                };
-                install_in_generation(confirmation, manifest, Some(remote), generation, false);
-            }
-            return;
-        }
-        match choice(&result, &c) {
-            Choice::Install => install(confirmation, manifest, presentation),
-            Choice::Skip => {
-                skip_version(&confirmation, &manifest.version);
-                settle_update(&confirmation, None, Settlement::Completed);
-            }
-            Choice::Later => {
-                settle_update(&confirmation, None, Settlement::Completed);
-            }
-        }
-    });
-}
 fn check_with_presentation(app: AppHandle, interactive: bool, presentation: CheckPresentation) -> Result<(), String> {
     // Install progress and outcomes stay in memory: a failed install keeps
     // the last `Available`, and the new app's startup check publishes
@@ -1208,27 +1163,7 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
     set_state(&app, Phase::Checking, None);
     tauri::async_runtime::spawn(async move {
         match find_update(&app, channel).await {
-            Ok(Some((manifest, silent))) => {
-                set_available(&app, manifest.clone());
-                publish_check(&app);
-                let skipped = skipped_version(&app.state::<Updater>());
-                if !should_prompt(interactive, silent, skipped.as_deref(), &manifest.version) {
-                    settle_update(&app, None, Settlement::Completed);
-                    return;
-                }
-                if !decision_current(&app, presentation) {
-                    settle_update(&app, None, Settlement::Completed);
-                    return;
-                }
-                if handoff_to_workbench(presentation, workbench_ready(&app)) {
-                    // The Workbench owns the confirmation UI. Keep the signed
-                    // manifest in native state, but release the check lock so
-                    // closing the popover cannot strand the updater as busy.
-                    settle_update(&app, None, Settlement::Completed);
-                    return;
-                }
-                confirm_install(app, manifest, presentation, None);
-            }
+            Ok(Some((manifest, _silent))) => settle_discovered_update(&app, manifest),
             Ok(None) => {
                 set_state(&app, Phase::Current, None);
                 publish_check(&app);
@@ -1565,16 +1500,6 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
     }
 }
 
-fn install(app: AppHandle, manifest: Manifest, presentation: CheckPresentation) {
-    let generation = match presentation {
-        CheckPresentation::TrustedPanel(generation) => Some(generation),
-        _ => None,
-    };
-    install_in_generation(app, manifest, None, generation, false);
-}
-
-/// Claim the install transition before a timer/Ignore can settle the prompt.
-/// Only one host action may start downloading the accepted request.
 fn begin_remote_download(state: &mut State, remote: &RemoteInstallContext, now: SystemTime) -> bool {
     if !state.remote_request.as_ref().is_some_and(|request| {
         request.request_id == remote.request_id
@@ -1955,50 +1880,58 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dialog_buttons_map_to_one_choice_and_dismissal_is_later() {
-        for locale in ["en", "zh"] {
-            let c = super::super::native_catalog_for_locales([locale.to_owned()]).updater;
-            let labels = [&c.install, &c.skip, &c.cancel];
-            assert_eq!(
-                labels.iter().collect::<std::collections::HashSet<_>>().len(),
-                3,
-                "button labels identify the choice"
-            );
-            assert_eq!(
-                choice(&MessageDialogResult::Custom(c.install.clone()), &c),
-                Choice::Install
-            );
-            assert_eq!(choice(&MessageDialogResult::Custom(c.skip.clone()), &c), Choice::Skip);
-            assert_eq!(
-                choice(&MessageDialogResult::Custom(c.cancel.clone()), &c),
-                Choice::Later
-            );
-            for dismissed in [
-                MessageDialogResult::Cancel,
-                MessageDialogResult::Ok,
-                MessageDialogResult::Yes,
-                MessageDialogResult::No,
-            ] {
-                assert_eq!(choice(&dismissed, &c), Choice::Later);
-            }
+    fn discovered_manifest(version: &str) -> Manifest {
+        Manifest {
+            schema_version: 1,
+            repository: REPOSITORY.to_owned(),
+            tag: format!("v{version}"),
+            source_sha: "0".repeat(40),
+            channel: Channel::Stable,
+            version: version.to_owned(),
+            target: TARGET.to_owned(),
+            platforms: std::collections::BTreeMap::new(),
         }
     }
 
     #[test]
-    fn only_the_startup_check_honours_a_skipped_version() {
-        assert!(!should_prompt(false, false, Some("1.2.3"), "1.2.3"));
-        assert!(should_prompt(false, false, Some("1.2.3"), "1.2.4"));
-        assert!(should_prompt(false, false, None, "1.2.3"));
-        assert!(should_prompt(true, false, Some("1.2.3"), "1.2.3"));
-    }
-
-    #[test]
-    fn a_silent_release_never_prompts_at_startup_but_an_explicit_check_offers_it() {
-        assert!(!should_prompt(false, true, None, "1.2.4"));
-        assert!(!should_prompt(false, true, Some("1.2.3"), "1.2.4"));
-        assert!(should_prompt(true, true, None, "1.2.4"));
-        assert!(should_prompt(true, true, Some("1.2.4"), "1.2.4"));
+    fn discovery_marks_and_settles_the_signed_offer_without_native_prompt() {
+        let skipped = "1.2.3";
+        for auto_update in [false, true] {
+            for availability_interactive in [false, true] {
+                let mut state = State {
+                    control_request: None,
+                    active_request: None,
+                    phase: Phase::Checking,
+                    latest: None,
+                    channel: Channel::Stable,
+                    manifest: None,
+                    availability_interactive,
+                    auto_update,
+                    remote_request: None,
+                };
+                let busy = AtomicBool::new(true);
+                let manifest = discovered_manifest(skipped);
+                apply_available(&mut state, manifest);
+                assert_eq!(state.phase, Phase::Available);
+                assert_eq!(state.latest.as_deref(), Some(skipped));
+                assert!(state.manifest.is_some());
+                assert!(settle(
+                    &mut state,
+                    &busy,
+                    None,
+                    Settlement::Completed,
+                    SystemTime::UNIX_EPOCH
+                ));
+                assert!(!busy.load(Ordering::SeqCst));
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-skipped.json");
+        persist_skipped_version(&path, skipped).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<String>(&std::fs::read(path).unwrap()).unwrap(),
+            skipped
+        );
     }
 
     #[test]
@@ -2041,11 +1974,6 @@ mod tests {
             CheckPresentation::TrustedPanel(7),
             false
         ));
-        assert!(handoff_to_workbench(CheckPresentation::TrustedPanel(7), true));
-        assert!(handoff_to_workbench(CheckPresentation::TrustedPanel(7), false));
-        assert!(handoff_to_workbench(CheckPresentation::Native, true));
-        assert!(handoff_to_workbench(CheckPresentation::Workbench, true));
-        assert!(!handoff_to_workbench(CheckPresentation::Workbench, false));
     }
 
     #[test]
@@ -2244,16 +2172,15 @@ mod tests {
     }
 
     #[test]
-    fn remote_explicit_check_bypasses_a_saved_skip_without_rewriting_it() {
+    fn remote_explicit_check_preserves_a_saved_skip_without_rewriting_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("update-skipped.json");
         persist_skipped_version(&path, "3.2.3").unwrap();
 
-        assert!(should_prompt(true, false, Some("3.2.3"), "3.2.3"));
         assert_eq!(
             serde_json::from_slice::<String>(&std::fs::read(path).unwrap()).unwrap(),
             "3.2.3",
-            "a remote explicit check must not mutate the global skip preference"
+            "an explicit panel check must not mutate the global skip preference"
         );
     }
 

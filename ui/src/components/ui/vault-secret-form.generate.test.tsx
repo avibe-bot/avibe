@@ -90,6 +90,9 @@ it('keeps the value when the popup closes, masked and marked, and typing makes i
   expect(valueInput().value).toBe(generated);
   expect(valueInput().type).toBe('password');
   expect(screen.getByText(en.vaults.generate.generated)).toBeTruthy();
+  // Pressing the control again leaves focus put: Safari doesn't focus a pressed button, so focus
+  // left the field, the control's name hid and it shrank out from under the press.
+  expect(fireEvent.mouseDown(screen.getByRole('button', { name: en.vaults.generate.password }))).toBe(false);
 
   fireEvent.change(valueInput(), { target: { value: `${generated}x` } });
   expect(screen.queryByText(en.vaults.generate.generated)).toBeNull();
@@ -99,7 +102,7 @@ it('keeps the size box exact: out-of-range typing is not applied and snaps back'
   render(form(<VaultSecretForm fixedName="DB_PASSWORD" onCancel={vi.fn()} onCreated={vi.fn()} />));
   openGenerator();
   const box = screen.getByRole('textbox', { name: en.vaults.generate.length }) as HTMLInputElement;
-  fireEvent.change(box, { target: { value: '9' } });
+  fireEvent.change(box, { target: { value: '7' } });
   expect(box.getAttribute('aria-invalid')).toBe('true');
   expect(valueInput().value).toHaveLength(24);
   fireEvent.blur(box);
@@ -154,6 +157,21 @@ it('starts from the Agent’s suggestion, which only presets the options', () =>
   expect(api.createVaultSecret).not.toHaveBeenCalled();
 });
 
+it('keeps an older request’s 128-character preset as a 100-character one and says so', () => {
+  const spec = { generate: { type: 'password', length: 128, symbols: false } } as unknown as VaultRequestSpec;
+  const props = { fixedName: 'DB_PASSWORD', provisionRequestId: 'request', onCancel: vi.fn(), onCreated: vi.fn() };
+  const { rerender } = render(form(<VaultSecretForm {...props} requestSpec={spec} />));
+  // The pending-request list refreshes: the same request arrives as a new object.
+  rerender(form(<VaultSecretForm {...props} requestSpec={{ ...spec }} />));
+  openGenerator();
+  expect(valueInput().value).toMatch(/^[A-Za-z0-9]{100}$/);
+  expect(screen.getByText(i18n.t('vaults.generate.suggestedAdjusted', { min: 8, max: 100 }))).toBeTruthy();
+  // Once the user picks a length, the note about the Agent's length no longer applies.
+  fireEvent.change(screen.getByRole('slider', { name: en.vaults.generate.length }), { target: { value: '40' } });
+  expect(screen.queryByText(i18n.t('vaults.generate.suggestedAdjusted', { min: 8, max: 100 }))).toBeNull();
+  expect(screen.getByText(en.vaults.generate.suggested)).toBeTruthy();
+});
+
 it('generates one field row at a time and carries a generated single value into the default row', () => {
   render(form(<VaultSecretForm fixedName="APP_ADMIN" onCancel={vi.fn()} onCreated={vi.fn()} />));
   openGenerator();
@@ -198,10 +216,14 @@ it('lets the length be typed digit by digit in the same box', () => {
   openGenerator();
   const box = screen.getByRole('textbox', { name: en.vaults.generate.length }) as HTMLInputElement;
   box.focus();
-  for (const text of ['', '1', '12', '128']) fireEvent.change(box, { target: { value: text } });
+  for (const text of ['', '1', '10', '100']) fireEvent.change(box, { target: { value: text } });
   expect(screen.getByRole('textbox', { name: en.vaults.generate.length })).toBe(box);
-  expect(box.value).toBe('128');
-  expect(valueInput().value).toHaveLength(128);
+  expect(box.value).toBe('100');
+  expect(valueInput().value).toHaveLength(100);
+  // Passing through 10 on the way applied it; 101 is past the end and is not applied.
+  fireEvent.change(box, { target: { value: '101' } });
+  expect(box.getAttribute('aria-invalid')).toBe('true');
+  expect(valueInput().value).toHaveLength(100);
 });
 
 it('keeps no copy of a protected generated value once sealing clears the field, even when saving fails', async () => {

@@ -9852,16 +9852,16 @@ AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION = "0.1.8"
 # Developer ID signed release (identifier bot.avibe.avault, Team 68B2SQ6YK3): a
 # master key an ad-hoc release created needs one "Authorize avault" after the
 # upgrade, and later signed releases read it without asking again.
-AVAULT_VERSION = "0.1.13"
+AVAULT_VERSION = "0.1.14"
 # (sha256, size) of each AVAULT_VERSION archive by target: digests verified against
 # the published manifest.json, sizes checked against the downloaded release assets.
 _AVAULT_ARCHIVES = {
-    "linux-arm64": ("9009ae1ded3db7f3e21042ca19ed44f2447eaed5011daf81a039a343190acc76", 3351088),
-    "linux-x64": ("93952b9473dd7d2a01340ef058eb15ff78bb0d2593bd1a9622ea1979d5c40133", 3684649),
-    "macos-arm64": ("a573c598676e2e4409c4504df130a2f144e31307e0cec8d7dba0fd61658458d2", 1595277),
-    "macos-x64": ("81dbaae2188eb9432e145d32cbc020f10d3da83aca942a4bc601954a2bdf2666", 1725987),
-    "windows-arm64": ("f0f9f5d12cb8c96e5242e733fd95825fb42cdb1b1d7faf0cf51f7c0766c8e072", 1404416),
-    "windows-x64": ("d21affba004748936899f95279bd06f91a2571daf1844cd14b5dd48b336b85af", 1491895),
+    "linux-arm64": ("845580bd22626692f70a5a83e609f014d3a122b7685f12243581c196d11d39e0", 3350081),
+    "linux-x64": ("a6a63b399f06401021e37739abee88edbfd86e0359af85a87acefaa8f0d76ca4", 3684886),
+    "macos-arm64": ("f54aee138183d8d1650b6e1b23f1d05275140399b1f8385e67e2943f243af123", 1595296),
+    "macos-x64": ("9967f8336a771b6947e8f407814b8886c73f944fae58912407ebb1d480c17223", 1724789),
+    "windows-arm64": ("aa3c2e930143a2bd90dbc333644be13dc017c7f60ce539e368576305450e0f19", 1404861),
+    "windows-x64": ("4a46a6c9e13e6db37e2f25df933d761a8261eca99901e5e6df749ea49c820461", 1490789),
 }
 
 
@@ -10830,7 +10830,9 @@ def avault_agent_pubkey() -> dict:
     return {"public_key": public_key, "fingerprint": fingerprint}
 
 
-AVAULT_GENERATE_SECRET_MIN_VERSION = "0.1.13"
+# All generation recipes require the unified password contract, not only 8..11.
+# Avibe uses the shared 8..100 admission range; avault 0.1.14 accepts 8..=128.
+AVAULT_GENERATE_SECRET_MIN_VERSION = "0.1.14"
 
 
 def avault_generate_secret(name: str, recipe: dict):

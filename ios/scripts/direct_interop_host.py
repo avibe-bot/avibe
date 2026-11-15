@@ -105,6 +105,27 @@ async def finish_cleanup(task: asyncio.Task) -> None:
         raise asyncio.CancelledError
 
 
+def require_nonnegative_int(value: object, detail: str) -> None:
+    require(type(value) is int and value >= 0, detail)
+
+
+def validate_negative_observed(name: str, app: dict) -> None:
+    """Keep actual local opens distinct from independently measured ingress."""
+    expected_keys = {"control_tcp", "failure", "local_streams", "payload_streams", "usable"}
+    require(set(app) == expected_keys, "negative observed fields do not match the v2 contract")
+    require(app.get("control_tcp") is True, "negative control_tcp must be exactly true")
+    require(app.get("usable") is False, "negative case must report usable:false")
+    require_nonnegative_int(app.get("local_streams"), "negative local_streams must be a nonnegative integer")
+    require_nonnegative_int(app.get("payload_streams"), "negative payload_streams must be a nonnegative integer")
+    require(app["payload_streams"] == 0, "negative case attempted a payload stream")
+    if name == "wrong_identity":
+        require(app.get("failure") == "handshake" and app["local_streams"] == 0,
+                "wrong_identity must fail during handshake before any local stream")
+    else:
+        require(app.get("failure") in ("handshake", "closed_by_peer"),
+                "not_admitted did not report a qualified peer/handshake failure")
+
+
 class Journal:
     """Host monotonic order only; no comparison to the App's clock."""
 
@@ -540,11 +561,8 @@ class Case:
         case = [s for s in self.ingress.streams if s["phase"] == "case"]
         if self.name in NEGATIVE_CASES:
             require(not self.ingress.streams, "negative case reached ingress")
-            expected = {"handshake"} if self.name == "wrong_identity" else {"handshake", "closed_by_peer"}
-            require(app.get("failure") in expected and app.get("case_streams") == 0,
-                    "negative case did not observe peer/handshake rejection")
-            require("setup_attempts" not in app, "negative case retried setup")
-            # No invented peer_closed: the pre-handshake hook can emit none.
+            validate_negative_observed(self.name, app)
+            # Rejection may emit no client-specific peer_closed event.
             return observed
         require(self.ingress.phase == "case", "missing setup phase barrier")
         require(type(app.get("setup_attempts")) is int and app["setup_attempts"] >= 1, "invalid setup attempts")

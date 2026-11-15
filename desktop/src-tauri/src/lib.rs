@@ -15,7 +15,7 @@
 //!   and [`ensure_shell_ui`] rejects the call a second time regardless. Only
 //!   the two built-in window drag commands are granted to the Workbench.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,12 @@ pub mod updater;
 
 #[cfg(target_os = "macos")]
 mod computer_use;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+#[path = "computer_use/windows.rs"]
+mod computer_use;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+#[path = "computer_use/windows_process.rs"]
+mod computer_use_process;
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
 #[cfg(target_os = "macos")]
@@ -92,7 +98,7 @@ const STOP_MENU_ID: &str = "stop-runtime";
 const QUIT_MENU_ID: &str = "quit-avibe";
 const LOGIN_MENU_ID: &str = "start-at-login";
 const SETTINGS_MENU_ID: &str = "open-settings";
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 const COMPUTER_USE_MENU_ID: &str = "computer-use";
 /// Where Settings leads: the Workbench deep link, whose destination
 /// `parse_deep_link` owns. It is delivered as a page load only when the window
@@ -104,10 +110,8 @@ const SHORTCUT_SETTINGS_DEEP_LINK: &str = "avibe://settings/shortcuts";
 /// loading the deep link's destination.
 const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
 const OPEN_SHORTCUT_SETTINGS_EVENT: &str = "avibe:desktop-open-shortcut-settings";
-/// The in-page request to open the Version popover, read by
-/// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to the
-/// native updater dialog when the Workbench cannot receive it.
-const OPEN_UPDATES_EVENT: &str = "avibe:desktop-open-updates";
+/// Fixed update-event delivery shared with executable Workbench listener tests.
+const OPEN_UPDATES_SCRIPT: &str = include_str!("open_updates.js");
 /// Internal shell-only target used when an adopted Workbench has no listener
 /// for `OPEN_UPDATES_EVENT`. It is intercepted before any page can navigate.
 pub(crate) const OPEN_UPDATES_FALLBACK_URL: &str = "avibe://updates-fallback";
@@ -124,15 +128,35 @@ const EN_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/en.json");
 const ZH_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/zh.json");
 
 #[derive(Default)]
-struct PendingDesktopUpdateOpen(AtomicBool);
+struct PendingDesktopUpdateOpen(Mutex<PendingUpdateRequest>);
+
+#[derive(Default)]
+struct PendingUpdateRequest {
+    serial: u64,
+    pending: Option<u64>,
+}
 
 impl PendingDesktopUpdateOpen {
-    fn request(&self) {
-        self.0.store(true, Ordering::SeqCst);
+    fn request(&self) -> u64 {
+        let mut state = self.0.lock().expect("pending update request");
+        if let Some(id) = state.pending {
+            return id;
+        }
+        state.serial = state.serial.wrapping_add(1).max(1);
+        let id = state.serial;
+        state.pending = Some(id);
+        id
     }
 
-    fn take(&self) -> bool {
-        self.0.swap(false, Ordering::SeqCst)
+    fn current(&self) -> Option<u64> {
+        self.0.lock().expect("pending update request").pending
+    }
+
+    fn finish_delivery(&self, id: u64, handled: bool) {
+        let mut state = self.0.lock().expect("pending update request");
+        if handled && state.pending == Some(id) {
+            state.pending = None;
+        }
     }
 }
 
@@ -145,7 +169,7 @@ struct ProductCatalog {
 #[derive(Deserialize)]
 struct DesktopBootstrapCatalog {
     tray: NativeTrayCatalog,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     #[serde(rename = "computerUse")]
     computer_use: NativeComputerUseCatalog,
     updater: updater::Catalog,
@@ -182,7 +206,7 @@ struct NativeTrayCatalog {
     login_failure: String,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeComputerUseCatalog {
@@ -193,7 +217,9 @@ struct NativeComputerUseCatalog {
     needs_permission: String,
     needs_permission_accessibility: String,
     needs_permission_screen_recording: String,
+    #[cfg(target_os = "macos")]
     screen_recording_title: String,
+    #[cfg(target_os = "macos")]
     screen_recording_guide: String,
     needs_runtime: String,
     runtime_unavailable: String,
@@ -257,7 +283,7 @@ fn native_tray_catalog() -> NativeTrayCatalog {
     native_catalog_for_locales(sys_locale::get_locales()).tray
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::MenuView) -> String {
     if view.save_failed {
         return catalog.save_failed.clone();
@@ -269,6 +295,10 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
         return catalog.initialization_failed.clone();
     }
     if view.asset_error {
+        return catalog.unavailable.clone();
+    }
+    #[cfg(target_os = "windows")]
+    if !view.available {
         return catalog.unavailable.clone();
     }
     if view.runtime_refused || view.phase == avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime {
@@ -304,12 +334,18 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_control_enabled(view: &computer_use::MenuView) -> bool {
+    #[cfg(target_os = "windows")]
+    if !view.available || (!view.enabled && (view.asset_error || view.save_failed)) {
+        return false;
+    }
+    // An enabled feature must keep its OFF route even if assets/state fail.
+    // A recovered invalid record is already rewritten off and may be enabled.
     !view.initialization_error
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_menu_state(view: &computer_use::MenuView) -> (bool, bool) {
     (computer_use_control_enabled(view), view.enabled)
 }
@@ -458,7 +494,7 @@ struct NativeMenus {
     notifications: CheckMenuItem<tauri::Wry>,
     auxiliary_note: Option<MenuItem<tauri::Wry>>,
     auxiliary_visible: AtomicBool,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     computer_use: CheckMenuItem<tauri::Wry>,
     stop_present: AtomicBool,
     displayed: Mutex<Option<(TrayRuntimeState, bool, bool)>>,
@@ -493,11 +529,11 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let (pet_toggle, pet_shortcut_settings) = pet::tray_items(app)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let computer_use_view = app.state::<computer_use::Controller>().view();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let (computer_use_enabled, computer_use_checked) = computer_use_menu_state(&computer_use_view);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let computer_use = CheckMenuItem::with_id(
         app,
         COMPUTER_USE_MENU_ID,
@@ -510,7 +546,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let updater = app.state::<updater::Updater>();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let tray = Menu::with_items(
         app,
         &[
@@ -529,7 +565,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &quit,
         ],
     )?;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64"))))]
     let tray = Menu::with_items(
         app,
         &[
@@ -559,7 +595,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         let settings_position = if cfg!(target_os = "macos") { 2 } else { 0 };
         submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)?;
         submenu.insert_items(&[&updater.menu, &updater.channel_menu], settings_position + 1)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
         submenu.insert(&computer_use, 0)?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
     }
@@ -599,7 +635,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         notifications,
         auxiliary_note,
         auxiliary_visible: AtomicBool::new(false),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
         computer_use,
         stop_present: AtomicBool::new(false),
         displayed: Mutex::new(None),
@@ -694,38 +730,72 @@ fn open_settings_script() -> String {
     )
 }
 
-fn open_updates_script() -> String {
-    format!(
-        "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
-         window.dispatchEvent(new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }})); \
-         if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('{OPEN_UPDATES_FALLBACK_URL}');"
-    )
+fn open_updates_script(request_id: u64, legacy_fallback: bool) -> String {
+    // Decimal strings keep request identity exact in JavaScript beyond 2^53.
+    format!("({})(\"{}\", {});", OPEN_UPDATES_SCRIPT, request_id, legacy_fallback)
 }
 
-/// Ask the current Workbench to open its desktop update popover. Returning
-/// `false` is the documented fallback boundary: the shell has no reachable
-/// Workbench window, or the page rejected the script.
+/// A user action owns focus. Deferred delivery never calls this entry point.
 fn open_desktop_updates(app: &AppHandle) -> bool {
+    request_desktop_updates(app);
+    focus_or_restore_main_window(app);
+    present_pending_desktop_updates(app)
+}
+
+/// Existing non-Workbench presentation remains owned by its guarded route.
+/// A local bootstrap page is not a receiver: wait for the Workbench handshake.
+fn present_pending_desktop_updates(app: &AppHandle) -> bool {
+    let pending = app.state::<PendingDesktopUpdateOpen>();
+    let Some(id) = pending.current() else {
+        return true;
+    };
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
         return false;
     };
     if !pet::is_workbench(&window) {
+        if ensure_shell_ui(&window).is_ok() {
+            return false;
+        }
         if instance_client::present_guarded(app, "updates") {
-            focus_or_restore_main_window(app);
+            // The existing guarded presentation queue now owns this intent.
+            pending.finish_delivery(id, true);
             return true;
         }
         return false;
     }
-    focus_or_restore_main_window(app);
-    window.eval(open_updates_script()).is_ok()
+    deliver_desktop_update_request(&window, true)
+}
+
+/// Submission is not consumption. Only the listener's synchronous receipt can
+/// complete the matching request; failures await another real readiness signal.
+fn deliver_desktop_update_request(window: &WebviewWindow, legacy_fallback: bool) -> bool {
+    let app = window.app_handle();
+    let Some(id) = app.state::<PendingDesktopUpdateOpen>().current() else {
+        return true;
+    };
+    let handle = app.clone();
+    window
+        .eval_with_callback(open_updates_script(id, legacy_fallback), move |result| {
+            handle
+                .state::<PendingDesktopUpdateOpen>()
+                .finish_delivery(id, result.trim() == "\"handled\"");
+        })
+        .is_ok()
+}
+
+/// A local Workbench calls this only after its update listener and native state
+/// are usable. It grants no navigation, installation, or window-focus authority.
+#[tauri::command]
+fn desktop_update_panel_ready(window: WebviewWindow) -> Result<(), String> {
+    if !pet::is_workbench(&window) {
+        return Err("This command is only available to the Avibe Workbench.".to_owned());
+    }
+    let _ = deliver_desktop_update_request(&window, false);
+    Ok(())
 }
 
 fn request_desktop_updates(app: &AppHandle) {
     app.state::<PendingDesktopUpdateOpen>().request();
-}
-
-fn take_desktop_update_request(app: &AppHandle) -> bool {
-    app.state::<PendingDesktopUpdateOpen>().take()
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -815,7 +885,7 @@ fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>)
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn refresh_computer_use_control(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -909,7 +979,7 @@ fn exit_shell(app: &AppHandle) {
         return;
     }
     authorize_exit(app);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -917,7 +987,7 @@ fn exit_shell(app: &AppHandle) {
             app.exit(0);
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64"))))]
     app.exit(0);
 }
 
@@ -944,7 +1014,7 @@ fn authorize_exit(app: &AppHandle) {
     app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 pub(crate) async fn shutdown_computer_use(app: &AppHandle) {
     if let Some(controller) = app.try_state::<computer_use::Controller>() {
         controller.shutdown().await;
@@ -1120,7 +1190,7 @@ fn stop_runtime(app: AppHandle, quit: bool) {
     }
     refresh_runtime_tray(&app, TrayRuntimeState::Stopping);
     notifications::stop(&app);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     if let Some(controller) = app.try_state::<computer_use::Controller>() {
         controller.runtime_stopped();
     }
@@ -1406,11 +1476,11 @@ fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
 /// The Computer Use guide's "Turn on": the tray toggle's on half.
 #[tauri::command]
 fn computer_use_enable(window: WebviewWindow) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     {
         computer_use_guide_controller(&window)?.turn_on()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64"))))]
     {
         let _ = window;
         Err(COMPUTER_USE_UNSUPPORTED.to_owned())
@@ -1435,12 +1505,12 @@ fn computer_use_open_permission(window: WebviewWindow, pane: String) -> Result<(
 }
 
 #[cfg(not(target_os = "macos"))]
-const COMPUTER_USE_UNSUPPORTED: &str = "Computer Use is only available on macOS.";
+const COMPUTER_USE_UNSUPPORTED: &str = "This Computer Use action is unavailable on this platform.";
 
 /// The capability (`main-computer-use.json`) limits these commands to the main
 /// window on a loopback page; this also requires the Runtime the shell adopted,
 /// so a same-window page on another loopback port cannot drive them.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_guide_controller(window: &WebviewWindow) -> Result<tauri::State<'_, computer_use::Controller>, String> {
     if !pet::is_workbench(window) {
         return Err("This command is only available to the Avibe Workbench.".to_owned());
@@ -1597,7 +1667,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
             WorkbenchHandoff::Monitor => {
                 commit_deep_link_navigation(app, &navigation, true, observed_generation);
                 apply_pending_deep_link(app);
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
                 if let Some(controller) = app.try_state::<computer_use::Controller>() {
                     controller.runtime_ready(origin.clone(), true);
                 }
@@ -1663,7 +1733,7 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                 },
             );
             if readiness_loss.begin_recovery(ready, &host, &activity, &generation, observed_generation) {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
                 if let Some(controller) = app.try_state::<computer_use::Controller>() {
                     controller.runtime_lost();
                 }
@@ -1683,7 +1753,7 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                 if let Some(client) = app.try_state::<instance_client::Client>() {
                     client.coordinator.refresh_local().await;
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
                 if let Some(controller) = app.try_state::<computer_use::Controller>() {
                     controller.runtime_ready(origin.clone(), false);
                 }
@@ -1841,9 +1911,9 @@ fn build_main_window(
     };
     // macOS draws the page under a transparent native title bar (`tauri.conf.json`).
     #[cfg(target_os = "macos")]
-    let builder = builder
-        .initialization_script(macos_title_bar::inset_script())
-        .initialization_script(DESKTOP_COMPUTER_USE_MARKER);
+    let builder = builder.initialization_script(macos_title_bar::inset_script());
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
+    let builder = builder.initialization_script(DESKTOP_COMPUTER_USE_MARKER);
     let window = builder.build().ok()?;
     #[cfg(windows)]
     if instance_downloads::install(&window).is_err() {
@@ -1906,7 +1976,7 @@ const DESKTOP_APP_WINDOWS_MARKER: &str =
 /// Tells the Workbench that this shell answers the Computer Use guide's
 /// actions (`computer_use_enable`, `computer_use_open_permission`). Read by
 /// `ui/src/lib/desktopShell.ts`; a shell without it leaves the guide read-only.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 const DESKTOP_COMPUTER_USE_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE__', { value: true });";
 
@@ -2030,8 +2100,16 @@ fn main_document_finished(webview: &tauri::Webview) {
     macos_title_bar::sync(webview);
     instance_client::page_loaded(webview.app_handle());
     apply_pending_deep_link(webview.app_handle());
-    if take_desktop_update_request(webview.app_handle()) && !open_desktop_updates(webview.app_handle()) {
-        updater::check(webview.app_handle().clone(), true);
+    // Document completion is not update-panel readiness. VersionBadge reports
+    // readiness after its listener and updater state are both available.
+    // Preserve the existing guarded account/remote route, whose native owner
+    // handles its own admission; never replay into a loading local Workbench.
+    if webview
+        .app_handle()
+        .get_webview_window(MAIN_WINDOW)
+        .is_some_and(|window| !pet::is_workbench(&window))
+    {
+        let _ = present_pending_desktop_updates(webview.app_handle());
     }
     // Settings become available the moment a Workbench is on
     // screen, not at the monitor's first tick. The shared
@@ -2060,8 +2138,8 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
         return;
     }
     focus_or_restore_main_window(app);
-    if updates_requested && open_desktop_updates(app) {
-        let _ = take_desktop_update_request(app);
+    if updates_requested {
+        let _ = present_pending_desktop_updates(app);
     }
     apply_pending_deep_link(app);
 }
@@ -2472,9 +2550,7 @@ pub fn run() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
                 updater::MENU_ID => {
-                    if !open_desktop_updates(app) {
-                        updater::check(app.clone(), true);
-                    }
+                    let _ = open_desktop_updates(app);
                 }
                 updater::CHANNEL_ID => updater::toggle_channel(app),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
@@ -2487,7 +2563,7 @@ pub fn run() {
                 pet::MENU_ID => pet::toggle(app),
                 pet::SHORTCUT_SETTINGS_MENU_ID => open_workbench_shortcut_settings(app),
                 pet::HIDE_MENU_ID => pet::toggle(app),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
                 COMPUTER_USE_MENU_ID => {
                     app.state::<computer_use::Controller>().toggle();
                 }
@@ -2526,9 +2602,7 @@ pub fn run() {
                         }
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
-                        if !open_desktop_updates(webview.app_handle()) {
-                            updater::check(webview.app_handle().clone(), true);
-                        }
+                        let _ = open_desktop_updates(webview.app_handle());
                         return false;
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == OPEN_UPDATES_FALLBACK_URL {
@@ -2612,6 +2686,7 @@ pub fn run() {
             open_app_window,
             computer_use_enable,
             computer_use_open_permission,
+            desktop_update_panel_ready,
             updater::desktop_update_state,
             updater::desktop_update_check,
             updater::desktop_update_install,
@@ -2659,7 +2734,7 @@ pub fn run() {
             #[cfg(not(feature = "bundled-runtime"))]
             let bootstrap_log = BootstrapLog::disabled();
             app.manage(Shell::new(host, bootstrap_log.clone()));
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
             app.manage(computer_use::Controller::start(app.handle()));
             app.manage(notifications::Notifications::new(
                 app.path().app_local_data_dir()?.join("notifications.json"),
@@ -2699,7 +2774,7 @@ pub fn run() {
 
             install_native_tray(app.handle())?;
             pet::apply_shortcuts(app.handle());
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
             refresh_computer_use_control(app.handle());
             #[cfg(feature = "bundled-runtime")]
             start_bootstrap_when_shell_url_ready(app.handle().clone(), window, bootstrap_log);
@@ -2741,22 +2816,37 @@ mod tests {
     }
 
     #[test]
-    fn the_updates_request_is_a_cancelable_workbench_event() {
-        assert_eq!(
-            open_updates_script(),
-            "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
-             window.dispatchEvent(new Event('avibe:desktop-open-updates', { cancelable: true })); \
-             if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('avibe://updates-fallback');"
-        );
+    fn the_updates_request_keeps_its_exact_identity_and_fallback_mode() {
+        let script = open_updates_script(u64::MAX, false);
+        assert!(script.ends_with("(\"18446744073709551615\", false);"));
+        assert!(open_updates_script(1, true).ends_with("(\"1\", true);"));
+        assert!(OPEN_UPDATES_SCRIPT.contains("avibe:desktop-open-updates"));
+        assert!(OPEN_UPDATES_SCRIPT.contains(OPEN_UPDATES_FALLBACK_URL));
     }
 
     #[test]
-    fn a_pending_update_open_survives_until_a_workbench_takes_it() {
+    fn a_pending_update_open_survives_unhandled_delivery_until_the_listener_accepts_it() {
         let pending = PendingDesktopUpdateOpen::default();
-        assert!(!pending.take());
-        pending.request();
-        assert!(pending.take());
-        assert!(!pending.take());
+        assert_eq!(pending.current(), None);
+        let first = pending.request();
+        assert_ne!(first, 0);
+        assert_eq!(pending.request(), first, "repeated requests coalesce while pending");
+        pending.finish_delivery(first, false);
+        assert_eq!(pending.current(), Some(first), "loading is not consumption");
+        pending.finish_delivery(first, true);
+        assert_eq!(pending.current(), None);
+
+        let next = pending.request();
+        assert_ne!(next, first);
+        pending.finish_delivery(first, true);
+        assert_eq!(
+            pending.current(),
+            Some(next),
+            "a stale callback cannot consume a new request"
+        );
+        pending.finish_delivery(next, true);
+        pending.finish_delivery(next, true);
+        assert_eq!(pending.current(), None);
     }
 
     #[test]

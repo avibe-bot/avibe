@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Awaitable, Callable
 import contextlib
 import hashlib
 import io
@@ -20,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import tarfile
+import time
 
 import direct_interop_host as host
 import prepare_iroh_app as apple
@@ -297,27 +299,177 @@ async def wait_group_empty(group: int, seconds: float) -> None:
             await asyncio.sleep(0.05)
 
 
+async def wait_process(process: asyncio.subprocess.Process | subprocess.Popen) -> int:
+    if isinstance(process, asyncio.subprocess.Process):
+        return await process.wait()
+    # Popen.poll caches/reaps the status; concurrent execution/cleanup waits
+    # cannot double-reap it and do not depend on descendant-held output pipes.
+    while process.poll() is None:
+        await asyncio.sleep(0.05)
+    return process.returncode
+
+
+async def close_process_group(process: asyncio.subprocess.Process | subprocess.Popen | None) -> None:
+    """Retire only the recorded fresh-session group, including residual children."""
+    if process is not None:
+        group = process.pid
+        reaped = asyncio.create_task(wait_process(process))
+        try:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(group, signal.SIGTERM)
+            try:
+                await wait_group_empty(group, 5)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(group, signal.SIGKILL)
+                await wait_group_empty(group, 3)
+        finally:
+            async with asyncio.timeout(3):
+                await reaped
+
+
 async def close_run(process: asyncio.subprocess.Process | None, fixture_host: host.Host) -> None:
     try:
-        if process is not None:
-            # start_new_session=True makes the recorded PID the owned PGID.
-            # A leader exiting on TERM (or before cleanup begins) says nothing
-            # about its descendants. Escalate based on the group's liveness.
-            group = process.pid
-            try:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(group, signal.SIGTERM)
-                try:
-                    await wait_group_empty(group, 5)
-                except TimeoutError:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(group, signal.SIGKILL)
-                    await wait_group_empty(group, 3)
-            finally:
-                async with asyncio.timeout(3):
-                    await process.wait()
+        await close_process_group(process)
     finally:
         await fixture_host.close()
+
+
+async def capture_simulator_output(reader: asyncio.StreamReader, output) -> bool:
+    """Keep at most 1 MiB, but drain pipes through cleanup so reaping cannot stall."""
+    remaining = 1024 * 1024
+    truncated = False
+    while chunk := await reader.read(65536):
+        output.write(chunk[:remaining])
+        output.flush()
+        truncated |= len(chunk) > remaining
+        remaining = max(0, remaining - len(chunk))
+    return truncated
+
+
+async def capture_simulator_pipe(pipe, output) -> bool:
+    """Attach only after PID ownership; a cancelled attachment still closes its FD."""
+    transport = None
+    try:
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(lambda: protocol, pipe)
+        return await capture_simulator_output(reader, output)
+    finally:
+        if transport is not None:
+            transport.close()
+        else:
+            pipe.close()
+
+
+async def simulator_command(directory: Path, stage: str, command: list[str], timeout: float) -> None:
+    """One bounded command and owned-group cleanup on every exit, no retries."""
+    started = time.monotonic()
+    deadline = asyncio.get_running_loop().time() + timeout
+    process = None
+    tasks = []
+    failure = None
+    receipt = {"stage": stage, "command": command, "timeout_seconds": timeout,
+               "pid": None, "process_group": None, "status": "starting"}
+    path = directory / f"{stage}.json"
+
+    async def cleanup() -> None:
+        try:
+            await close_process_group(process)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if process is not None:
+                process.stdout.close()
+                process.stderr.close()
+
+    host.write_json(path, receipt)
+    with (directory / f"{stage}.stdout").open("wb") as out, (directory / f"{stage}.stderr").open("wb") as err:
+        try:
+            # Popen establishes PID/PGID synchronously, before pipe attachment
+            # can suspend. Never delegate pre-return ownership to asyncio.
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       start_new_session=True, bufsize=0)
+            receipt.update(pid=process.pid, process_group=process.pid, status="running")
+            host.write_json(path, receipt)
+            # Kernel-stalled synchronous creation cannot be interrupted here;
+            # reject an overdue return instead of resetting the stage budget.
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError("simulator launch exceeded stage deadline")
+            async with asyncio.timeout_at(deadline):
+                tasks = [asyncio.create_task(wait_process(process)),
+                         asyncio.create_task(capture_simulator_pipe(process.stdout, out)),
+                         asyncio.create_task(capture_simulator_pipe(process.stderr, err))]
+                pending = asyncio.gather(*tasks)
+                try:
+                    code, stdout_truncated, stderr_truncated = await asyncio.shield(pending)
+                    host.require(code == 0, f"simulator {stage} exited {code}")
+                    host.require(not stdout_truncated and not stderr_truncated, "simulator output exceeded 1 MiB per stream")
+                finally:
+                    # Retrieve any exception even when timeout/cancellation ended the wait.
+                    pending.add_done_callback(lambda result: result.exception() if not result.cancelled() else None)
+        except (Exception, asyncio.CancelledError) as error:
+            failure = error
+        finally:
+            try:
+                await host.finish_cleanup(asyncio.create_task(cleanup()))
+            except (Exception, asyncio.CancelledError) as error:
+                receipt["cleanup_error"] = f"{type(error).__name__}: {error}"
+                failure = failure or error
+            receipt.update(stdout_bytes=out.tell(), stderr_bytes=err.tell(),
+                           elapsed_seconds=round(time.monotonic() - started, 3),
+                           exit_code=process.returncode if process else None,
+                           status="passed" if failure is None else "failed")
+            if failure is not None:
+                receipt["failure"] = type(failure).__name__
+                receipt["detail"] = str(failure)
+            host.write_json(path, receipt)
+    if isinstance(failure, asyncio.CancelledError):
+        raise failure
+    if failure is not None:
+        raise host.HostFault(f"simulator {stage} failed ({type(failure).__name__}); "
+                             f"bound={timeout}s; diagnostics: {directory}") from failure
+
+
+def select_simulator(listing: object) -> str:
+    host.require(isinstance(listing, dict) and isinstance(listing.get("devices"), dict),
+                 "invalid simulator inventory devices")
+    devices = listing["devices"].get("com.apple.CoreSimulator.SimRuntime.iOS-26-5", [])
+    host.require(isinstance(devices, list) and all(isinstance(d, dict) for d in devices),
+                 "invalid pinned simulator inventory")
+    host.require(all(type(d.get("isAvailable")) is bool for d in devices),
+                 "simulator availability must be Boolean")
+    matches = [d.get("udid") for d in devices if d["isAvailable"] is True and d.get("name") == "iPhone 17 Pro"]
+    host.require(bool(matches), "pinned iPhone 17 Pro/iOS 26.5 simulator is missing")
+    host.require(all(isinstance(value, str) and re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) for value in matches),
+        "invalid simulator UDID")
+    return sorted(matches)[0]
+
+
+async def ready_simulator() -> str:
+    root = hosted_root()
+    source = merged_source()
+    directory = root / "simulator-readiness"
+    directory.mkdir(parents=True, exist_ok=False)
+    started = time.monotonic()
+    receipt = {**source, "status": "starting", "stage": "inventory"}
+    try:
+        await simulator_command(directory, "inventory",
+                                ["xcrun", "simctl", "list", "devices", "available", "--json"], 120)
+        receipt["stage"] = "selection"
+        selected = select_simulator(json.loads((directory / "inventory.stdout").read_bytes()))
+        receipt.update(simulator=selected, stage="boot")
+        await simulator_command(directory, "boot", ["xcrun", "simctl", "bootstatus", selected, "-b"], 600)
+        receipt["status"] = "ready"
+        return selected
+    except (Exception, asyncio.CancelledError) as error:
+        receipt.update(status="failed", failure=f"{type(error).__name__}: {error}")
+        raise
+    finally:
+        receipt["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        host.write_json(directory / "readiness.json", receipt)
 
 
 def main() -> None:
@@ -334,17 +486,12 @@ def main() -> None:
     elif arguments.command == "prepare":
         prepare()
     elif arguments.command == "simulator":
-        hosted_root()
-        listing = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "--json"], timeout=30))
-        devices = listing["devices"].get("com.apple.CoreSimulator.SimRuntime.iOS-26-5", [])
-        matches = sorted(d["udid"] for d in devices if d.get("isAvailable") and d.get("name") == "iPhone 17 Pro")
-        host.require(bool(matches), "pinned iPhone 17 Pro/iOS 26.5 simulator is missing")
-        print(matches[0])
+        print(asyncio.run(run_with_signals(ready_simulator)))
     else:
-        asyncio.run(run_with_signals(arguments.simulator))
+        asyncio.run(run_with_signals(lambda: run(arguments.simulator)))
 
 
-async def run_with_signals(simulator: str) -> None:
+async def run_with_signals(operation: Callable[[], Awaitable[object]]) -> object:
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     assert task is not None
@@ -359,7 +506,7 @@ async def run_with_signals(simulator: str) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, cancel_once)
     try:
-        await run(simulator)
+        return await operation()
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(sig)

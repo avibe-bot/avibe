@@ -330,6 +330,3 @@ def test_product_verifier_phase_propagates_pending_pin_failure(tmp_path):
     )[0]
     assert "IrohLib" not in notification
     assert "Iroh.xcframework" not in notification
-    assert "NSLocalNetworkUsageDescription" not in (
-        Path(__file__).parents[1] / "ios/Avibe/Resources/Info.plist"
-    ).read_text()

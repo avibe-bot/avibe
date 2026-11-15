@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FC, ReactNode } from 'react';
-import { Check, CircleAlert, CircleCheck, ExternalLink, Info, LoaderCircle, Monitor, Power, RotateCw, ShieldAlert } from 'lucide-react';
+import { AppWindow, Check, Hand, CircleAlert, CircleCheck, CircleStop, ExternalLink, Info, LoaderCircle, Monitor, Power, RotateCw, ShieldAlert, ShieldX } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -41,6 +42,28 @@ const STEP_COPY: Record<ComputerUseGuideStep, { title: TranslationKey; detail: T
 const STEP_PANE: Partial<Record<ComputerUseGuideStep, ComputerUsePermissionPane>> = {
   accessibility: 'accessibility',
   screenRecording: 'screen_recording',
+};
+
+/**
+ * Windows grants no per-app privacy permissions, so its guide is the switch
+ * alone. The macOS Accessibility and Screen Recording steps never appear there.
+ */
+const WINDOWS_GUIDE_STEPS: readonly ComputerUseGuideStep[] = ['enable'];
+
+const WINDOWS_NOTES: { testId: string; icon: LucideIcon; text: TranslationKey }[] = [
+  { testId: 'computer-use-windows-apps', icon: AppWindow, text: 'settings.computerUse.windows.apps' },
+  { testId: 'computer-use-windows-elevated', icon: ShieldX, text: 'settings.computerUse.windows.elevated' },
+  { testId: 'computer-use-windows-launch', icon: Hand, text: 'settings.computerUse.windows.launch' },
+  { testId: 'computer-use-windows-stop', icon: CircleStop, text: 'settings.computerUse.windows.stop' },
+];
+
+const PreviewBadge: FC = () => {
+  const { t } = useTranslation();
+  return (
+    <Badge variant="warning" data-testid="computer-use-preview-badge">
+      {t('settings.computerUse.windows.previewBadge')}
+    </Badge>
+  );
 };
 
 const STEP_STATE_LABEL: Record<ComputerUseGuideStepState, TranslationKey> = {
@@ -97,6 +120,8 @@ const GuideNote: FC<{ testId: string; tone?: 'muted' | 'destructive'; children: 
  * whose progress is read from the desktop status endpoint while the page is
  * visible. Inside the desktop shell incomplete permission steps can open their
  * settings even while the driver is unavailable; other hosts follow read-only.
+ * A Windows host (the server's `host_platform`, in the shell or any browser)
+ * shows the Preview notes and the switch alone, without macOS permission steps.
  */
 export const SettingsComputerUsePage: FC = () => {
   const { t } = useTranslation();
@@ -196,22 +221,30 @@ export const SettingsComputerUsePage: FC = () => {
       });
   };
 
+  // The Runtime host's OS, as the server reports it. The desktop shell only
+  // decides whether this page can run the native actions, never the host.
+  const host = read?.host ?? 'macos';
+  const windows = host === 'windows';
+
   if (read?.kind === 'unsupported') {
     return (
       <SettingsPageShell
         activeTab="computer-use"
         title={t('settings.computerUse.title')}
-        subtitle={t('settings.computerUse.subtitle')}
+        subtitle={windows ? t('settings.computerUse.windows.subtitle') : t('settings.computerUse.subtitle')}
       >
         <SettingsPanel variant="preference">
           <div className="flex items-start gap-3" data-testid="computer-use-unsupported">
             <Monitor className="mt-0.5 size-5 shrink-0 text-muted" aria-hidden="true" />
             <div className="flex min-w-0 flex-col gap-1">
-              <p className="text-[14px] font-semibold text-foreground">
+              <p className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
                 {t('settings.computerUse.unsupportedTitle')}
+                {windows && <PreviewBadge />}
               </p>
               <p className="text-[12px] leading-relaxed text-muted">
-                {t('settings.computerUse.unsupportedDetail')}
+                {windows
+                  ? t('settings.computerUse.windows.unsupportedDetail')
+                  : t('settings.computerUse.unsupportedDetail')}
               </p>
             </div>
           </div>
@@ -221,14 +254,15 @@ export const SettingsComputerUsePage: FC = () => {
   }
 
   const status = read?.kind === 'status' ? read.status : null;
-  const copy = status ? computerUseStatusCopy(status, (key: ComputerUseCopyKey) => t(key)) : null;
+  const copy = status ? computerUseStatusCopy(status, (key: ComputerUseCopyKey) => t(key), host) : null;
   const progress = status ? computerUseGuideProgress(status) : null;
+  const steps = windows ? WINDOWS_GUIDE_STEPS : COMPUTER_USE_GUIDE_STEPS;
 
   return (
     <SettingsPageShell
       activeTab="computer-use"
       title={t('settings.computerUse.title')}
-      subtitle={t('settings.computerUse.subtitle')}
+      subtitle={windows ? t('settings.computerUse.windows.subtitle') : t('settings.computerUse.subtitle')}
       actions={
         <Button
           type="button"
@@ -246,8 +280,35 @@ export const SettingsComputerUsePage: FC = () => {
         <SettingsPanel variant="preference">
           <div className="flex items-start gap-3" data-testid="computer-use-remote-notice">
             <Monitor className="mt-0.5 size-5 shrink-0 text-muted" aria-hidden="true" />
-            <p className="text-[13px] font-medium text-foreground">{t('settings.computerUse.remoteNotice')}</p>
+            <p className="text-[13px] font-medium text-foreground">
+              {windows ? t('settings.computerUse.windows.remoteNotice') : t('settings.computerUse.remoteNotice')}
+            </p>
           </div>
+        </SettingsPanel>
+      )}
+
+      {windows && (
+        <SettingsPanel
+          title={(
+            <span className="flex items-center gap-2">
+              {t('settings.computerUse.windows.title')}
+              <PreviewBadge />
+            </span>
+          )}
+          description={t('settings.computerUse.windows.previewDetail')}
+        >
+          <ul className="flex flex-col gap-2.5 px-5 py-4" data-testid="computer-use-windows-notes">
+            {WINDOWS_NOTES.map(({ testId, icon: Icon, text }) => (
+              <li
+                key={testId}
+                data-testid={testId}
+                className="flex max-w-2xl items-start gap-2 text-[12px] leading-relaxed text-foreground"
+              >
+                <Icon className="mt-0.5 size-3.5 shrink-0 text-muted" aria-hidden="true" />
+                <span>{t(text)}</span>
+              </li>
+            ))}
+          </ul>
         </SettingsPanel>
       )}
 
@@ -272,7 +333,7 @@ export const SettingsComputerUsePage: FC = () => {
 
       <SettingsPanel title={t('settings.computerUse.stepsTitle')}>
         <ol className="flex flex-col" data-testid="computer-use-steps">
-          {COMPUTER_USE_GUIDE_STEPS.map((step, index) => {
+          {steps.map((step, index) => {
             const state = progress?.[step] ?? 'pending';
             const actionable = actions !== null && progress !== null
               && (step === 'enable' ? state === 'current' : state !== 'complete');
@@ -303,11 +364,15 @@ export const SettingsComputerUsePage: FC = () => {
                     <span className="sr-only">{` — ${t(STEP_STATE_LABEL[state])}`}</span>
                   </p>
                   <p className="max-w-2xl text-[12px] leading-relaxed text-muted">
-                    {t(STEP_COPY[step].detail)}
+                    {windows && step === 'enable'
+                      ? t('settings.computerUse.windows.enableDetail')
+                      : t(STEP_COPY[step].detail)}
                   </p>
                   {actionable && failedStep === step && (
                     <GuideNote testId="computer-use-action-failed" tone="destructive">
-                      {t('settings.computerUse.actionFailed')}
+                      {windows
+                        ? t('settings.computerUse.windows.actionFailed')
+                        : t('settings.computerUse.actionFailed')}
                     </GuideNote>
                   )}
                   {step === 'screenRecording' && screenRecordingRequested && state !== 'complete' && (

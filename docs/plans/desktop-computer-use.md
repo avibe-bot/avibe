@@ -10,17 +10,40 @@
 - Companion docs: `desktop-tray-lifecycle.md` (native toggle pattern),
   `desktop-auto-update.md` (signing), `desktop-product-gaps.md`
 
-## Windows x64 Preview interface contract (2026-11-14, 3.2.7)
+## Windows x64 Preview activation (2026-11-15, 3.2.7)
 
-This amendment defines the cross-process boundary before the Windows shell and
-Runtime consumers are wired. It keeps `schema_version: 1` and adds no fields.
-**Inactive foundation:** Windows `ready` records are unconditionally refused by
-Runtime admission (`unavailable / pipe_unverified`, or
-`unsupported_architecture` for non-x64), including when the snapshot is valid,
-the shell lock is held, and an injected connectivity check succeeds. No pipe
-is opened and no PID/session-only result is treated as authenticated readiness.
-The requirements below describe the future integrated contract, not implemented
-Windows readiness. macOS admission remains unchanged.
+Windows is opt-in and off by default. The activation integrates the existing
+schema-v1 state/lock and owned-process foundations rather than changing their
+wire contract. macOS admission, lifecycle and snapshot pins are unchanged.
+The Windows adapter is `desktop/src-tauri/src/computer_use/windows.rs`; native
+private-object and interactive checks are in
+`desktop/computer-use-windows/src/lib.rs`; Runtime admission is in
+`core/computer_windows.py`. The small Windows-only FFI crate exposes safe owned
+file/borrowed-handle APIs and leaves `runtime-host`'s `forbid(unsafe_code)` intact.
+
+The single availability guard is
+`core/computer_use.py:COMPUTER_USE_WINDOWS_SCHEMA_VERSION = 1`. Its ordinary
+public capability is `computer_use_windows_schema`; schema-v1 JSON support
+alone never authorizes a Windows shell. Setting the constant to `0` is the
+one-line rollback: Windows status returns `supported: false`, existing and new
+JS kernels are refused/retired, action admission refuses even an existing ready
+record, and the shell's five-second capability re-probe publishes non-ready
+state and tears down an already-running driver. The native check item is then
+disabled, and Settings exposes no activation action. Saved opt-in is preserved.
+There is no hidden environment variable, hidden setting or second gate-removal
+PR.
+
+Product's 2026-11-15 decision separates release gates: activation may merge only
+after exact-head Codex, independent security review, normal CI and Product go;
+the lead owns merge. The resulting RC is signed through the existing master-tag
+Stage 2 workflow. Signed-installer CLI/JS acceptance gates **stable 3.2.7**, not
+this activation merge. If acceptance cannot be fixed in time, stable rolls back
+the single availability constant. Locked desktop, a true second interactive
+session and a real Agent Turn are explicitly **NOT RUN** by hosted acceptance;
+the real Agent Turn belongs to the owner's machine check before Preview removal.
+No model credentials belong on hosted runners.
+
+### Admission and ownership invariants
 
 - `socket_path` remains the endpoint field. On macOS/Linux it is an absolute
   Unix-domain socket path. On Windows it is an absolute named-pipe path of the
@@ -39,14 +62,24 @@ Windows readiness. macOS admission remains unchanged.
   means “probably live”. The probe verifies the opened regular-file identity,
   current-user owner, and DACL permitting only that user and optionally SYSTEM.
   State and lock artifacts must both be owner-private; the probe never repairs
-  ACLs, creates a missing lock, or accepts a reparse point.
-- Future ready Runtime admission requires: valid state and approved snapshot;
+  ACLs, creates a missing lock, or accepts a reparse point. Python state reads
+  use read-only `OPEN_EXISTING` with read/write/delete sharing. The Rust writer
+  publishes its still-open private staging file using `FileRenameInfoEx` with
+  `REPLACE_IF_EXISTS | POSIX_SEMANTICS`; old readers retain the previous record
+  and subsequent opens see the next generation. Delete sharing alone does not
+  make legacy rename replace an open destination. Native regressions separately
+  prove Python delete sharing and the actual Rust StateStore held-reader
+  publication; neither a mock publisher nor a local cross-build proves this.
+- Windows ready Runtime admission requires: valid state and the Windows snapshot;
   enabled/ready state; the shell lock is held; the exact published named pipe
   opens; the pipe server has a live PID in the same nonzero interactive session
   as the Runtime, matching current-user SID, and a verified owner-private pipe
   DACL; and the current Runtime is x64, non-elevated, and not in a
   disconnected/locked session. Unknown security or session evidence fails
-  closed with a stable unavailable reason.
+  closed with a stable unavailable reason. Token-query storage remains pointer
+  aligned, but `TokenInformationLength` is the API-reported byte count, not the
+  rounded allocation capacity; native DWORD positive controls cover both
+  elevation and UIAccess before the full admission path.
 - The shell must retain the owned driver process HANDLE/PID for the daemon
   generation and, before publishing `state: ready`, verify
   `GetNamedPipeServerProcessId` is that exact live driver PID. With v1 fields
@@ -56,17 +89,17 @@ Windows readiness. macOS admission remains unchanged.
   not publish ready when this check is unknown or fails.
 - The pipe's owner-only DACL (with SYSTEM only if the host proves it is needed)
   plus the exact private state/lock/generation is the trust boundary. The
-  readiness probe additionally checks the server PID and session. **PROPOSED,
-  pending independent security review and Product approval:** a same-user process
-  can read same-user state and launch the same binary; distinguishing that
-  process after the shell's pre-publication PID check would require an
-  authenticated pipe handshake or a new state field.
-  This is consistent with the existing SECURITY.md same-user local-process
-  boundary, but is not a waived foreign-endpoint guarantee until those gates
-  approve it. Opaque names and `host_bundle_id` are not authentication. A
+  readiness probe additionally checks the server PID and session. A same-user
+  process can read same-user state and launch the same binary; distinguishing
+  that process after the shell's pre-publication PID check would require an
+  authenticated pipe handshake or a new state field. The v1 contract deliberately
+  retains the existing SECURITY.md same-user local-process boundary: it does not
+  promise isolation from a malicious process running as the same user.
+  Independent exact-head security review must assess this reliance explicitly,
+  rather than treating a PID or opaque pipe name as authentication. A
   missing, dead, wrong-session, ACL-unsafe, or otherwise unverifiable endpoint
   is refused rather than accepted.
-- Future interactive-session checks must repeat at ready admission and prove
+- Interactive-session checks repeat at ready admission and prove
   WTS active connectivity as well as an unlocked input desktop. On the action
   path, the component that owns driver dispatch must recheck lock/disconnect
   state and reject or stop input; shell supervisory cleanup alone is not a
@@ -75,15 +108,36 @@ Windows readiness. macOS admission remains unchanged.
   ordinary target from the shell token. Elevated-target refusal is a
   driver/driver-host action-path rule; this lane does not claim to enforce it
   from `shell_pid` or `host_bundle_id`.
-- Before removing the unconditional Windows admission refusal, implement and
-  independently review: shell-held exact child HANDLE/PID generation binding;
-  Runtime peer SID and connected-handle pipe owner/DACL verification; a reviewed
-  decision on same-user stale/reclaimed endpoint binding; ordinary Runtime and
-  shell token enforcement; WTS/locked-session admission; final driver action-path
-  session and target-privilege guards; and the actual final patched Windows
-  snapshot pin from packaging evidence. These are missing implementation
-  obligations, not merely acceptance tests. Native end-to-end evidence and
-  Product go are also required. This foundation adds no Windows snapshot pin.
+- Enabling logic integrates shell-held exact child HANDLE/PID generation binding,
+  connected-handle owner/DACL and peer SID checks, ordinary Runtime/shell tokens,
+  WTS-active/default input and thread desktops, and the already-pinned source
+  driver's action-time target-token/desktop guards. The Windows snapshot pin is
+  `0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293`;
+  the Mac snapshot is not accepted as Windows readiness evidence.
+- Driver/helper processes are atomically Job-owned from suspended creation.
+  Production Job limits include `KILL_ON_JOB_CLOSE | BREAKAWAY_OK`, never
+  `SILENT_BREAKAWAY_OK`: ordinary helpers remain in the Job; only the source
+  driver's explicit target launch uses `CREATE_BREAKAWAY_FROM_JOB`. Off, Quit,
+  capability rollback and failed ready publication close stdin and perform bounded
+  Job cleanup. Shell crash closes the non-inherited Job handle in the OS.
+  User-launched apps are outside that cleanup Job and must survive.
+  The foundation's earlier target-survival fixture enabled breakaway only in the
+  test; activation removes that test-only setup. Its old PASS is **not** evidence
+  that the previously shipped production Job flags supported target survival.
+- Startup checks the complete eight-entry Windows health report (version/platform,
+  core reachability, UIA and D3D11 pass; bundle/TCC entries explicitly skip with
+  `not applicable on Windows`), then an in-memory bounded desktop capture, and
+  rechecks the exact
+  live driver's pipe before publishing ready. Idle health does not capture.
+  Shell health uses the pinned driver's authenticated named-pipe `call` protocol,
+  without a separate health-proxy child. No screenshot is saved by these probes.
+- Focused tests cover the owning status/admission/JS boundaries, capability
+  forwarding, Windows health parsing and private file creation. The existing
+  disposable ordinary-user process harness additionally exercises the production
+  state-write/teardown transition for rollback, off, quit and write failure; the
+  existing helper/crash and explicit-target tests run with production Job flags.
+  Native CI and signed acceptance remain distinct evidence from Mac unit tests
+  or a Windows-target Rust type-check.
 - Stable Windows refusal reasons reserved by the integration contract are `unsupported_architecture`,
   `elevated_runtime`, `session_unavailable`, `session_locked`,
   `session_mismatch`, `shell_not_running`, `state_unverified`,
@@ -94,6 +148,46 @@ Windows readiness. macOS admission remains unchanged.
   capability rather than infer support from schema v1. macOS lock, Unix-socket,
   and health behavior is unchanged.
 
+
+## Windows literal executable launch contract (2026-11-14)
+
+The Controller/SDK contract is integrated with the Windows admission above.
+The public SDK target is
+`computer.app({path})`, with exact wire descriptor `{kind: "app_path", path}`.
+It is launch-only, never an existing-app selector or a nested window identity.
+Each launch requests a new process; the created PID must never be replaced by
+a same-name process. Existing running apps keep ordinary name/bundle handles.
+The SDK keeps existing-name attach separate from this launch-only handle; after
+launch it makes one metadata lookup for exactly the source-created PID.
+
+Windows `launch_app` accepts only `path`, optional `additional_arguments`
+(string array) and `start_minimized` (boolean), plus the Controller-owned
+session. Mixed name/bundle/path selectors, caller environment and cwd are
+rejected. macOS name/bundle launch behavior is unchanged; path launch is
+explicitly Windows-only.
+
+The Controller accepts a literal absolute drive-letter `.exe` path, without
+NUL, alternate data streams, UNC or device namespaces. It opens the file once
+with ordinary read/write/delete sharing, follows normal Windows resolution,
+checks a regular disk file on a local fixed drive, and obtains the final DOS
+path from that handle. The OS-added verbatim prefix is removed only when no
+final component ends in an ASCII dot or space: otherwise ordinary Win32
+normalization could select a different executable, so admission refuses the
+path. This is a final-string representability check, not an input or ancestry
+policy. Spelling and case are preserved. That same canonical string is forwarded and used as
+the sole launch lock key. Dot components, short names and reparse paths are
+resolved by Windows rather than a separate ancestry policy. The handle closes
+before dispatch. There are no file-ID alias locks, directory walks, case-policy
+refusals, retained file guards, process-image attestation or attachment checks;
+this is ordinary same-user launch admission, not same-user TOCTOU isolation.
+
+The source driver owns new-process creation, OS-created environment with
+inheritance disabled, executable-parent cwd, no inherited handles,
+target-only breakaway and elevated-launch refusal. The Controller does not
+synthesize a replacement PID or alter source launch metadata. Native admission
+coverage runs in the existing Windows Computer Use CI step: seven foundation
+cases plus four path cases, exactly eleven executed with no skips. SDK/source
+creation semantics and Windows end-to-end acceptance remain separate gates.
 
 Foreground input and window activation are ordinary Computer Use operations.
 The Controller forwards `delivery_mode: "foreground"` and focus-changing

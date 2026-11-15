@@ -4,6 +4,7 @@ import { vaultErrorMessage } from './vaultErrors';
 
 import {
   useApi,
+  type ApiContextType,
   type VaultSignedOperationContext,
   type VaultWebAuthnRegistrationPayload,
   type VaultWebAuthnSerializedCredential,
@@ -227,6 +228,87 @@ function registrationFromSandbox(value: unknown): VaultWebAuthnRegistrationPaylo
   return null;
 }
 
+type SetupApi = Pick<ApiContextType, 'createVaultAuthzWebAuthnOptions' | 'getVaultSandboxRootMetadata'>;
+
+/** The sandbox setup ceremony: a new Passkey and Vault root, held in this tab until something
+ *  persists it (the first protected key, or {@link setupVaultDurably}). */
+async function runPasskeySetup(api: SetupApi, options: { onlyFirstFactor?: boolean } = {}): Promise<void> {
+  const sandbox = await getVaultSandboxClient();
+  const [authzOptions, rootMetadata] = await Promise.all([
+    api.createVaultAuthzWebAuthnOptions(),
+    api.getVaultSandboxRootMetadata(),
+  ]);
+  if (!authzOptions?.ok) throw new Error(authzOptions?.code || 'passkey-registration-options-failed');
+  if (!rootMetadata?.ok) throw new Error(rootMetadata?.code || 'sandbox-root-metadata-failed');
+  // The server already has a Passkey (set up in another tab meanwhile, or a commit whose reply was
+  // lost): never create a second credential behind it.
+  if (options.onlyFirstFactor && authzOptions.requires_existing_factor) {
+    throw Object.assign(new Error('vault-already-initialized'), { code: 'vault_already_initialized' });
+  }
+  const result = await sandbox.setup({
+    vaultUserHandle: 'avibe-vault',
+    displayName: 'Avibe Vault',
+    existingProtectedVault: Boolean(sessionVault.wrapMeta),
+    authzCreationOptions: authzOptions,
+    rootMetadata: rootMetadata.root_metadata,
+  });
+  const authzRegistration = registrationFromSandbox(result.authzRegistration);
+  commitUnlocked(result.wrapMeta, true, result.expiresAt, authzRegistration);
+}
+
+/**
+ * Set up a Passkey without adding a protected key (contract v1.1 §G): the sandbox ceremony, then
+ * `POST /api/vault/setup` commits the root and its authorization factor durably. Afterwards this
+ * tab is an ordinary set-up Vault: the first protected key reuses that root and sends no
+ * registration again (the server matches the root and its active factor), and locking keeps it.
+ * Setting up is not consent to anything else; turning a confirmation off still asks separately.
+ */
+export async function setupVaultDurably(
+  api: SetupApi & Pick<ApiContextType, 'completeVaultSetup'>,
+): Promise<{ ok: true } | { ok: false; code: string }> {
+  // Only after the server said this instance was never set up (`vault_policy_setup_required`): a
+  // root or factor that exists must never get a second credential enrolled behind it. A setup this
+  // tab made but could not commit yet is committed again as it is: no second ceremony.
+  const pendingFresh = sessionVault.freshSetup && sessionVault.wrapMeta && sessionVault.authzFactorRegistration;
+  if (sessionVault.wrapMeta && !pendingFresh) return { ok: false, code: 'vault_already_initialized' };
+  if (!pendingFresh) {
+    try {
+      await runPasskeySetup(api, { onlyFirstFactor: true });
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'vault_already_initialized') return { ok: false, code: 'vault_already_initialized' };
+      throw error;
+    }
+  }
+  const wrapMeta = sessionVault.wrapMeta;
+  const registration = sessionVault.authzFactorRegistration;
+  if (!wrapMeta || !registration) {
+    clearUnlockState();
+    notifyVaultLockChange();
+    return { ok: false, code: 'setup_incomplete' };
+  }
+  const committed = await api.completeVaultSetup({ wrap_meta: wrapMeta, authz_factor_registration: registration })
+    .catch(() => ({ ok: false as const, code: 'network_error' }));
+  if (!committed.ok) {
+    // No answer (network) or no reason given: it may still have landed, so a retry posts this same
+    // setup again (no second ceremony). Any reason the server gives is final for this setup: another
+    // tab committed first, or this registration is refused (expired after 2 minutes, invalid). Then
+    // drop the uncommitted root, here and in the sandbox (its iframe still holds it unlocked), so the
+    // next attempt starts a fresh ceremony and discovery finds whatever root is durable.
+    const final = typeof committed.code === 'string' && committed.code !== 'network_error';
+    if (final) {
+      resetVaultSandboxClient();
+      clearUnlockState();
+      notifyVaultLockChange();
+    }
+    return { ok: false, code: committed.code || 'setup_failed' };
+  }
+  sessionVault.freshSetup = false;
+  sessionVault.authzFactorRegistration = null;
+  if (typeof committed.wrap_meta === 'string') sessionVault.wrapMeta = baseVmkWrapMeta(committed.wrap_meta);
+  notifyVaultLockChange();
+  return { ok: true };
+}
+
 export function useProtectedVault() {
   const api = useApi();
   const { t } = useTranslation();
@@ -299,22 +381,7 @@ export function useProtectedVault() {
   }, [api, t]);
 
   const setupPasskey = useCallback(async () => {
-    const sandbox = await getVaultSandboxClient();
-    const [authzOptions, rootMetadata] = await Promise.all([
-      api.createVaultAuthzWebAuthnOptions(),
-      api.getVaultSandboxRootMetadata(),
-    ]);
-    if (!authzOptions?.ok) throw new Error(authzOptions?.code || 'passkey-registration-options-failed');
-    if (!rootMetadata?.ok) throw new Error(rootMetadata?.code || 'sandbox-root-metadata-failed');
-    const result = await sandbox.setup({
-      vaultUserHandle: 'avibe-vault',
-      displayName: 'Avibe Vault',
-      existingProtectedVault: Boolean(sessionVault.wrapMeta),
-      authzCreationOptions: authzOptions,
-      rootMetadata: rootMetadata.root_metadata,
-    });
-    const authzRegistration = registrationFromSandbox(result.authzRegistration);
-    commitUnlocked(result.wrapMeta, true, result.expiresAt, authzRegistration);
+    await runPasskeySetup(api);
     setStatus('unlocked');
     setError(null);
   }, [api]);

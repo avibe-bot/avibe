@@ -3040,9 +3040,11 @@ async def test_upstream_request_deadline_covers_queued_writers(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform_name", ["posix", "nt"])
 async def test_proxy_command_disables_telemetry_updates_and_window_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    platform_name: str,
 ) -> None:
     """Every proxy child receives the fixed embedded environment contract."""
 
@@ -3092,6 +3094,12 @@ async def test_proxy_command_disables_telemetry_updates_and_window_timeout(
     ) -> None:
         return None
 
+    import os
+    from types import SimpleNamespace
+    import core.computer_server as server_module
+
+    monkeypatch.setattr(server_module, "os", SimpleNamespace(name=platform_name, environ=os.environ))
+    monkeypatch.setenv("SystemRoot", r"C:\WindowsFixture")
     monkeypatch.setenv("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-secret-sentinel")
     monkeypatch.setenv("AVIBE_CALLER_AUTHORIZATION", "caller-secret-sentinel")
@@ -3101,6 +3109,12 @@ async def test_proxy_command_disables_telemetry_updates_and_window_timeout(
 
     upstream = await JsonRpcUpstream.start(state)
     env = captured["kwargs"]["env"]
+    if platform_name == "nt":
+        assert captured["kwargs"]["creationflags"] == 0x08000000
+        assert env["SystemRoot"] == r"C:\WindowsFixture"
+        assert "PATH" not in env
+    else:
+        assert "creationflags" not in captured["kwargs"]
     assert captured["args"] == (
         state.proxy_executable,
         "mcp",
@@ -3117,7 +3131,7 @@ async def test_proxy_command_disables_telemetry_updates_and_window_timeout(
     assert "ANTHROPIC_API_KEY" not in env
     assert "AVIBE_CALLER_AUTHORIZATION" not in env
     assert set(env).issubset(
-        {
+        ({"SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA"} if platform_name == "nt" else set()) | {
             "CUA_DRIVER_EMBEDDED",
             "CUA_DRIVER_RS_TELEMETRY_ENABLED",
             "CUA_DRIVER_RS_UPDATE_CHECK",

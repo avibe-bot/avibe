@@ -78,12 +78,14 @@ function SizeBox({ recipe, onChange }: { recipe: GenerateRecipe; onChange: (next
 }
 
 /** The popup's settings. Every change goes straight to `onChange`; the caller regenerates. */
-export function VaultGeneratePanel({ recipe, onChange, onRegenerate, suggested = false }: {
+export function VaultGeneratePanel({ recipe, onChange, onRegenerate, suggested = false, suggestionAdjusted = false }: {
   recipe: GenerateRecipe;
   onChange: (next: GenerateRecipe) => void;
   onRegenerate: () => void;
   /** The recipe came from the Agent's request. */
   suggested?: boolean;
+  /** The request's length was outside today's limits and was brought within them. */
+  suggestionAdjusted?: boolean;
 }) {
   const { t } = useTranslation();
   const { min, max } = sizeLimits(recipe.type);
@@ -99,10 +101,10 @@ export function VaultGeneratePanel({ recipe, onChange, onRegenerate, suggested =
           <RefreshCw className="size-4" />
         </Button>
       </div>
-      {suggested ? (
+      {suggested || suggestionAdjusted ? (
         <span className="mb-2 flex items-center gap-1.5 rounded-md bg-violet-soft px-2.5 py-1.5 text-[11.5px] text-violet-ink">
           <WandSparkles className="size-3.5 shrink-0" />
-          {t('vaults.generate.suggested')}
+          {suggestionAdjusted ? t('vaults.generate.suggestedAdjusted', { min, max }) : t('vaults.generate.suggested')}
         </span>
       ) : null}
       <Row label={t('vaults.generate.type')}>
@@ -164,6 +166,11 @@ export function VaultGeneratePanel({ recipe, onChange, onRegenerate, suggested =
  * protected value is sealed at Save like a typed one. The popup is modal inside the modal dialog
  * (its sliders and switches need the pointer), and on a phone it is the same anchored popup, with
  * the field scrolled into view, so the value stays visible while it changes.
+ *
+ * Inside the field, the control covers the field's right end, and how wide it is depends on the
+ * language and on whether its name shows (on focus, or on an empty phone field). The control
+ * measures itself and pads the field (its `input` or `textarea` child) by that width, so a long
+ * value, masked or not, scrolls or wraps short of it instead of running underneath.
  */
 export function VaultGenerateControl({
   children,
@@ -175,6 +182,7 @@ export function VaultGenerateControl({
   labelled = false,
   showLabel = false,
   suggested = false,
+  suggestionAdjusted = false,
   disabled = false,
   triggerOutside = false,
 }: {
@@ -190,6 +198,7 @@ export function VaultGenerateControl({
   /** Show the name even without focus (an empty field on a phone). */
   showLabel?: boolean;
   suggested?: boolean;
+  suggestionAdjusted?: boolean;
   disabled?: boolean;
   /** Put the control beside the field instead of inside it (a field row, whose input has its eye). */
   triggerOutside?: boolean;
@@ -197,6 +206,19 @@ export function VaultGenerateControl({
   const { t } = useTranslation();
   const isMobile = useIsMobile();
   const anchorRef = React.useRef<HTMLDivElement>(null);
+  const suffixRef = React.useRef<HTMLDivElement>(null);
+  React.useLayoutEffect(() => {
+    const anchor = anchorRef.current;
+    const suffix = suffixRef.current;
+    if (!anchor || !suffix) return;
+    // right-1 offset + the control + a gap before it.
+    const update = () => anchor.style.setProperty('--vault-gen-inset', `${suffix.offsetWidth + 8}px`);
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(update);
+    observer.observe(suffix);
+    return () => observer.disconnect();
+  }, [triggerOutside]);
   const name = recipe.type === 'password' ? t('vaults.generate.password') : t('vaults.generate.key');
   const generate = (next: GenerateRecipe) => onValue(generateSecretValue(next));
   const trigger = (
@@ -205,6 +227,10 @@ export function VaultGenerateControl({
         type="button"
         disabled={disabled}
         aria-label={name}
+        // Pressing keeps focus where it is. The name shows while focus is in the field, and Safari
+        // doesn't focus a pressed button: focus left the field, the name hid, the control shrank out
+        // from under the pointer, and the press was lost (every other press, after closing).
+        onMouseDown={(event) => event.preventDefault()}
         className={cn(
           'flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-mint-ink transition-colors hover:bg-mint-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50',
           open && 'bg-mint-soft',
@@ -244,9 +270,12 @@ export function VaultGenerateControl({
         </PopoverAnchor>
       ) : (
         <PopoverAnchor asChild>
-          <div ref={anchorRef} className="group/gen relative min-w-0 flex-1 scroll-mt-4">
+          <div
+            ref={anchorRef}
+            className="group/gen relative min-w-0 flex-1 scroll-mt-4 [&>input]:pr-[var(--vault-gen-inset,3rem)] [&>textarea]:pr-[var(--vault-gen-inset,3rem)]"
+          >
             {children}
-            <div className="absolute inset-y-0 right-1 flex items-center">{trigger}</div>
+            <div ref={suffixRef} className="absolute inset-y-0 right-1 flex items-center">{trigger}</div>
           </div>
         </PopoverAnchor>
       )}
@@ -257,7 +286,13 @@ export function VaultGenerateControl({
         collisionPadding={12}
         className="w-[340px] max-w-[calc(100vw-1.5rem)] p-0 max-md:w-[var(--radix-popper-anchor-width)]"
       >
-        <VaultGeneratePanel recipe={recipe} onChange={change} onRegenerate={() => generate(recipe)} suggested={suggested} />
+        <VaultGeneratePanel
+          recipe={recipe}
+          onChange={change}
+          onRegenerate={() => generate(recipe)}
+          suggested={suggested}
+          suggestionAdjusted={suggestionAdjusted}
+        />
       </PopoverContent>
     </Popover>
   );

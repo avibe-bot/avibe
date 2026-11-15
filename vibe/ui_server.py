@@ -152,6 +152,16 @@ def _configure_ui_logging(level: str = "INFO") -> None:
     )
 
 
+def _desktop_host_platform() -> str:
+    if sys.platform == "darwin":
+        return "macos"
+    if os.name == "nt":
+        return "windows"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return "unknown"
+
+
 def _desktop_computer_use_supported() -> bool:
     return desktop_computer_use_shell_is_live()
 
@@ -3714,12 +3724,14 @@ async def desktop_computer_use_status():
 
     from vibe import internal_client
 
+    host_platform = _desktop_host_platform()
     if not _desktop_computer_use_supported():
         response_payload = jsonify(
             {
                 "supported": False,
                 "status": "unavailable",
                 "reason": "unsupported_host",
+                "host_platform": host_platform,
             }
         )
         response_payload.headers["Cache-Control"] = "no-store"
@@ -3733,6 +3745,7 @@ async def desktop_computer_use_status():
             "supported": True,
             "status": status.status,
             "reason": status.reason,
+            "host_platform": host_platform,
         }
     )
     response_payload.headers["Cache-Control"] = "no-store"

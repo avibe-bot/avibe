@@ -297,14 +297,14 @@
       "title": "Bring your work along.",
       "subtitle": "Run on your computer. Connect from your phone.",
       "body": "No instances yet. Install Avibe on your computer and pair this account.",
-      "desktopTitle": "Install on your computer",
-      "desktopBody": "Finish setup, then pair in Remote Access",
+      "desktopTitle": "Install on a Mac or Windows PC",
+      "desktopBody": "Download the Avibe desktop app from avibe.bot, finish setup, then pair in Remote Access",
       "commandTitle": "Use the command line",
-      "commandBody": "Install the CLI, then run vibe remote",
+      "commandBody": "For Linux and servers: install the CLI, then run vibe remote",
       "refresh": "I have paired · Refresh",
       "cliTitle": "Install and pair",
       "cliSubtitle": "Run on your computer. Connect from your phone.",
-      "cliBody": "Run in Terminal on macOS or Linux. On Windows, follow the guide for WSL.",
+      "cliBody": "Run this in a terminal on Linux or a server. On a Mac or Windows PC, download the Avibe desktop app from avibe.bot.",
       "stepInstall": "1. Install and finish setup",
       "installCommand": "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'",
       "stepPair": "2. Pair your account",
@@ -374,6 +374,34 @@
       "crate": "{{name}} {{version}}",
       "withAuthors": "{{crate}} ({{authors}})",
       "separator": ", "
+    },
+    "sheet": {
+      "title": "Instances",
+      "close": "Close and return to {{name}}",
+      "returnTo": "{{name}}, current instance. Return to it",
+      "youreIn": "You’re in",
+      "others": "Other instances",
+      "recent": "Recently used first",
+      "updating": "Updating…",
+      "opening": "Opening…",
+      "openFailed": "Couldn’t open {{name}}. Try again.",
+      "openFailedOffline": "{{name}} is offline.",
+      "openFailedGone": "This instance is no longer in your list.",
+      "offlineLine": "Offline · {{host}}",
+      "sharedLine": "Shared by {{owner}} · {{host}}",
+      "offlineBody": "{{name}} is offline. Open Avibe on that computer and connect it to the internet, and it shows as online.",
+      "refreshList": "Refresh the list",
+      "stale": "Couldn’t update the list. This is the last result; online status may have changed.",
+      "noOthers": "No other instances yet",
+      "noOthersBody": "Install Avibe on another computer and pair it with this account, and it appears here.",
+      "add": "Add an instance",
+      "addBody": "Install Avibe on a computer or server",
+      "accountBody": "Sign out, open-source licenses",
+      "firstRunSubtitle": "Pick an instance to open. You can switch later from the top of the screen.",
+      "pullToRefresh": "Pull to refresh",
+      "releaseToRefresh": "Release to refresh",
+      "loadFailed": "Couldn’t load your instances",
+      "loadFailedBody": "Try again. If it keeps happening, check your connection."
     }
   },
   "common": {
@@ -771,6 +799,20 @@
           "title": "Allow Screen & System Audio Recording",
           "detail": "In System Settings → Privacy & Security → Screen & System Audio Recording, authorize the running Avibe Desktop app: click +, or drag Avibe into the list, then turn it on."
         }
+      },
+      "windows": {
+        "subtitle": "Let Avibe agents see and operate this Windows PC.",
+        "title": "Computer Use on Windows",
+        "previewBadge": "Preview",
+        "previewDetail": "Computer Use on Windows is in Preview. Display scaling, multiple monitors, and input methods are still being verified.",
+        "apps": "Agents can operate ordinary apps running under your Windows account. No Accessibility or Screen Recording setting is needed.",
+        "elevated": "App windows running as administrator are refused. Avibe never raises its own rights; the Agent tells you it cannot control that window. To let it help, reopen the app without “Run as administrator”.",
+        "launch": "The Agent starts desktop apps it can reliably locate on this PC. Store apps, and apps it cannot reliably locate, need you to open them first: the Agent asks, then continues in that window.",
+        "stop": "Turning Computer Use off, quitting Avibe, or Avibe closing unexpectedly stops the driver and ends any action in progress.",
+        "enableDetail": "Turns on Computer Use for this PC. It stays off until you turn it on.",
+        "actionFailed": "The desktop app did not respond. Try again, or quit and reopen Avibe.",
+        "unsupportedDetail": "Computer Use is set up from the Avibe desktop app on this Windows PC. Open the desktop app to continue.",
+        "remoteNotice": "Complete this step in the Avibe desktop app on the Windows PC. This page shows its progress."
       }
     },
     "diagnosticsTab": "Diagnostics",
@@ -3594,6 +3636,7 @@
     "versionLabel": "Version",
     "accountMenuLabel": "Account ({{email}})",
     "signedInAs": "Signed in as",
+    "switchInstanceLabel": "{{name}}, current instance. Switch instance",
     "openMobileAccount": "Account and Avibes",
     "signOut": "Sign out",
     "signingOut": "Signing out…",
@@ -3635,6 +3678,11 @@
           "title": "Allow Computer Use",
           "why": "Grant Accessibility and Screen Recording.",
           "action": "Grant"
+        },
+        "computer_use_windows": {
+          "title": "Turn on Computer Use (Preview)",
+          "why": "Let {{name}} operate ordinary apps on this Windows PC.",
+          "action": "Turn on"
         },
         "chat_apps": {
           "title": "Connect a chat app",
@@ -3744,7 +3792,15 @@
         "shellNotRunningDetail": "Open or reopen the Avibe desktop app to make Computer Use available.",
         "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats.",
         "controllerUnavailableDetail": "The Avibe Controller is not reachable. Wait for the service to recover before using the Computer Use CLI.",
-        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app."
+        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app.",
+        "unsupportedArchitectureDetail": "Computer Use on Windows needs an x64 PC. This device is not supported in the Preview.",
+        "elevatedRuntimeDetail": "The Avibe service is running as administrator, so Computer Use stays unavailable. Quit Avibe and reopen it normally, without “Run as administrator”.",
+        "sessionUnavailableDetail": "Computer Use needs a signed-in Windows desktop. Sign in to this PC's desktop, then reopen Avibe.",
+        "sessionLockedDetail": "This PC is locked or its remote session is disconnected. Unlock it or reconnect, then check again.",
+        "sessionMismatchDetail": "The Avibe service and the desktop app are running in different Windows sessions. Quit Avibe, then open it again from the desktop you are using.",
+        "pipeUnverifiedDetail": "Avibe could not verify its connection to the Computer Use driver and refused it. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "stateUnverifiedDetail": "Avibe could not verify the Computer Use state on this PC and refused it. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "lockUnverifiedDetail": "Avibe could not confirm that its desktop app owns Computer Use and refused it. Quit and reopen the Avibe desktop app."
       }
     },
     "openControlPanel": "Open Control Panel",
@@ -6226,11 +6282,8 @@
       "defaultNotRemovable": "The default field can't be removed. Set another field as default first.",
       "extraNotRenamable": "Extra fields can't be renamed",
       "discardNew": "Discard new field",
-      "save": "Save",
-      "saveNamed": "Save {{field}}",
-      "saveNew": "Save new field",
       "saved": "Field saved",
-      "draftsDropped": "Drafts for fields removed elsewhere were dropped: {{fields}}.",
+      "draftsDropped": "Drafts for fields removed or moved to a different record elsewhere were dropped: {{fields}}.",
       "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
       "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
       "replacePlaceholder": "Saved · type to replace",
@@ -6244,7 +6297,9 @@
       "referenceName": "NAME",
       "referenceDefault": "<name/> alone resolves to the default field, <field/>.",
       "singleFile": "File upload supports one value. Switch to Text before adding fields.",
-      "editHelp": "Save each row after editing · blank values stay unchanged"
+      "editHelp": "Changes apply together when you click Save · blank keeps the saved value",
+      "removeOnSave": "Removed when you save: {{fields}}",
+      "undoRemove": "Undo"
     },
     "entry": {
       "addressTitle": "Protected Vault is unavailable at this address",
@@ -6483,12 +6538,17 @@
       "empty": "No activity yet."
     },
     "askOff": {
+      "setupFailed": "The Passkey couldn’t be set up. Try again.",
+      "setupConflict": "A Passkey was just set up elsewhere. Try turning this off again.",
+      "setupDone": "Your Passkey is set up. Turn this off again to finish.",
+      "settingUp": "Setting up your Passkey…",
+      "setupAction": "Set up a Passkey",
       "turnedOff": "Turned off with your Passkey; in effect now.",
       "offHintEdit": "Turning this off needs your Passkey and takes effect right away; you don’t need to Save.",
       "legacyRegistration": "Your Passkey was set up in a very early preview, and this Avibe didn’t keep what it needs to confirm turning this off. The switch stays on.",
       "waiting": "Waiting for your Passkey…",
       "popupBlocked": "Your browser blocked the confirmation window. Allow pop-ups and turn it off again.",
-      "setupRequired": "Turning this off needs a Passkey. You set one up when you add a protected key; after that you can turn it off here.",
+      "setupRequired": "Turning this off needs a Passkey, and this Avibe doesn’t have one yet. Set one up now; then you can turn this off here.",
       "factorUnavailable": "The Passkey on record isn’t available to this Avibe, so it can’t confirm turning this off. The switch stays on.",
       "expired": "The confirmation timed out, so nothing changed. Turn it off again.",
       "clockSkew": "This device’s clock is off, so nothing changed. Fix the time and try again.",
@@ -6619,8 +6679,9 @@
       "password": "Random password",
       "key": "Random key",
       "regenerate": "Regenerate",
-      "bits": "About {{bits}} bits of randomness · any change makes a new one",
+      "bits": "About {{bits}} bits of randomness",
       "suggested": "Preset from the Agent’s suggestion",
+      "suggestedAdjusted": "Preset from the Agent’s suggestion, with the length brought within {{min}}–{{max}}",
       "type": "Type",
       "typePassword": "Password",
       "typeHex": "Hex",
@@ -6637,6 +6698,19 @@
       "base64Note": "Standard Base64 (with + / =), the same as openssl rand -base64 prints.",
       "generated": "Generated · not saved",
       "generatedHint": "Kept only when you save; type to use your own instead."
+    },
+    "generatedBy": {
+      "agent": "Generated by an Agent",
+      "cli": "Generated from the CLI",
+      "agentInSession": "Generated by an Agent in “{{session}}”",
+      "cliLong": "Generated from the command line",
+      "password": "{{count}}-character password",
+      "hex": "Hex, {{count}} bytes",
+      "base64": "Base64, {{count}} bytes",
+      "agentNote": "The Agent never saw this value; it can use it like any other Standard secret.",
+      "badge": "{{who}} · {{detail}}",
+      "line": "{{who}} · {{when}} · <recipe>{{recipe}}</recipe>",
+      "openSession": "Open session"
     }
   },
   "permissions": {

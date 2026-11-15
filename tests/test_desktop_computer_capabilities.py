@@ -13,18 +13,29 @@ from vibe import desktop_runtime, internal_client, ui_server
 from vibe.ui_server import app
 
 
-def test_controller_ipc_owns_desktop_capability_and_identity() -> None:
+@pytest.fixture(params=["macos", "windows", "linux", "unknown"])
+def host_platform(request, monkeypatch):
+    """Make API expectations explicit, independent of the test runner OS."""
+    monkeypatch.setattr(ui_server, "_desktop_host_platform", lambda: request.param)
+    return request.param
+
+
+@pytest.mark.parametrize("os_name,windows_schema", [("posix", 0), ("posix", 1), ("nt", 0), ("nt", 1)])
+def test_controller_ipc_owns_desktop_capability_and_identity(monkeypatch, os_name, windows_schema) -> None:
     """The UI process must not infer support from its own package version."""
+    from core import computer_use
 
     controller = SimpleNamespace(controller_id="controller-test")
-    response = TestClient(internal_server.create_app(controller)).get(
-        "/internal/desktop/capabilities"
-    )
+    client = TestClient(internal_server.create_app(controller))
+    monkeypatch.setattr(internal_server, "os", SimpleNamespace(name=os_name))
+    monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", windows_schema)
+    monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
+    response = client.get("/internal/desktop/capabilities")
     assert response.status_code == 200
-    assert response.json() == {
-        "computer_use_schema": 1,
-        "controller_id": "controller-test",
-    }
+    expected = {"computer_use_schema": 1, "controller_id": "controller-test"}
+    if os_name == "nt":
+        expected["computer_use_windows_schema"] = windows_schema
+    assert response.json() == expected
 
 
 def test_old_controller_unknown_endpoint_maps_to_schema_zero(monkeypatch) -> None:
@@ -52,6 +63,27 @@ def test_old_controller_unknown_endpoint_maps_to_schema_zero(monkeypatch) -> Non
         "computer_use_schema": 0,
         "controller_id": "legacy",
     }
+
+
+@pytest.mark.parametrize("windows_schema", [None, 0, 1, True, "1", -1])
+def test_internal_client_preserves_valid_windows_capability_and_refuses_malformed(monkeypatch, windows_schema):
+    endpoint = SimpleNamespace(base_url="http://controller", headers={}, descriptor=None)
+
+    async def resolve(_socket_path):
+        return endpoint
+
+    payload = {"computer_use_schema": 1, "controller_id": "test"}
+    if windows_schema is not None:
+        payload["computer_use_windows_schema"] = windows_schema
+    monkeypatch.setattr(internal_client, "_resolve_endpoint_async", resolve)
+    monkeypatch.setattr(internal_client, "_async_transport", lambda _endpoint: httpx.MockTransport(
+        lambda _request: httpx.Response(200, json=payload)
+    ))
+    if windows_schema is True or windows_schema == "1" or windows_schema == -1:
+        with pytest.raises(internal_client.InternalServerUnavailable):
+            asyncio.run(internal_client.desktop_capabilities())
+    else:
+        assert asyncio.run(internal_client.desktop_capabilities()) == payload
 
 
 def test_ui_desktop_capabilities_are_forwarded_from_controller(monkeypatch) -> None:
@@ -109,7 +141,7 @@ def test_ui_desktop_capabilities_classify_transient_controller_failures(
 
 
 def test_workbench_status_supports_adopted_runtime_when_native_shell_is_live(
-    monkeypatch,
+    monkeypatch, host_platform,
 ) -> None:
     """An untagged adopted Runtime still consumes the live shell state."""
 
@@ -137,6 +169,7 @@ def test_workbench_status_supports_adopted_runtime_when_native_shell_is_live(
         "supported": True,
         "status": "needs_permission",
         "reason": "screen_recording",
+        "host_platform": host_platform,
     }
     assert response.headers["Cache-Control"] == "no-store"
 
@@ -146,7 +179,7 @@ def test_workbench_status_supports_adopted_runtime_when_native_shell_is_live(
     [("off", "never_enabled"), ("unavailable", "invalid_state_file")],
 )
 def test_workbench_keeps_first_install_and_recovery_visible_for_live_shell(
-    monkeypatch, status, reason
+    monkeypatch, status, reason, host_platform
 ):
     monkeypatch.setattr(ui_server, "desktop_computer_use_shell_is_live", lambda: True)
     monkeypatch.setattr(
@@ -165,11 +198,12 @@ def test_workbench_keeps_first_install_and_recovery_visible_for_live_shell(
         "supported": True,
         "status": status,
         "reason": reason,
+        "host_platform": host_platform,
     }
 
 
 def test_workbench_status_supports_shell_started_runtime_from_the_same_state_source(
-    monkeypatch,
+    monkeypatch, host_platform,
 ) -> None:
     monkeypatch.setattr(
         desktop_runtime,
@@ -195,6 +229,7 @@ def test_workbench_status_supports_shell_started_runtime_from_the_same_state_sou
         "supported": True,
         "status": "off",
         "reason": "toggle_off",
+        "host_platform": host_platform,
     }
     assert response.headers["Cache-Control"] == "no-store"
 
@@ -211,6 +246,7 @@ def test_workbench_ready_status_reflects_controller_ipc_health(
     controller_identity,
     expected_status,
     expected_reason,
+    host_platform,
 ) -> None:
     monkeypatch.setattr(ui_server, "desktop_computer_use_shell_is_live", lambda: True)
     monkeypatch.setattr(
@@ -238,12 +274,13 @@ def test_workbench_ready_status_reflects_controller_ipc_health(
         "supported": True,
         "status": expected_status,
         "reason": expected_reason,
+        "host_platform": host_platform,
     }
     assert response.headers["Cache-Control"] == "no-store"
 
 
 def test_workbench_status_hides_computer_use_without_live_native_shell(
-    monkeypatch,
+    monkeypatch, host_platform,
 ) -> None:
     monkeypatch.setattr(
         desktop_runtime,
@@ -264,5 +301,42 @@ def test_workbench_status_hides_computer_use_without_live_native_shell(
         "supported": False,
         "status": "unavailable",
         "reason": "unsupported_host",
+        "host_platform": host_platform,
     }
     assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    ("platform", "os_name", "expected"),
+    [("darwin", "posix", "macos"), ("win32", "nt", "windows"),
+     ("linux", "posix", "linux"), ("freebsd14", "posix", "unknown")],
+)
+def test_host_platform_is_derived_from_server_process(monkeypatch, platform, os_name, expected):
+    monkeypatch.setattr(ui_server, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(ui_server, "os", SimpleNamespace(name=os_name))
+    assert ui_server._desktop_host_platform() == expected
+
+
+def test_workbench_status_reports_server_host_platform_for_unsupported_windows_host(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ui_server, "_desktop_host_platform", lambda: "windows")
+    # Exercise the actual Windows rollback guard, not a fake supported result.
+    from core import computer_use
+
+    monkeypatch.setattr(computer_use, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
+    monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 0)
+
+    response = app.test_client().get(
+        "/api/desktop/computer-use/status",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "supported": False,
+        "status": "unavailable",
+        "reason": "unsupported_host",
+        "host_platform": "windows",
+    }

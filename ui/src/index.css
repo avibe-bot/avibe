@@ -1057,6 +1057,20 @@ body {
   }
 }
 
+/* The App's instance sheet (ui/src/mobile, `#sheet`) scrolls its document: native registers the
+   WebView's own scroll view with the sheet, so a pull at the top dismisses it. */
+@media (max-width: 767px) {
+  html[data-document-scroll],
+  html[data-document-scroll] body {
+    height: auto;
+    overflow: visible;
+    overscroll-behavior: auto;
+  }
+  html[data-document-scroll] #root {
+    height: auto;
+  }
+}
+
 h1,
 h2,
 h3,

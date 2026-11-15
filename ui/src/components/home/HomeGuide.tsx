@@ -112,6 +112,7 @@ export function HomeGuide({
         <GettingStarted
           pending={pending}
           name={name}
+          computerUseHost={gaps.computerUseHost}
           onAction={(item) => {
             const path = FIX_PATH[item];
             if (path) open(path);

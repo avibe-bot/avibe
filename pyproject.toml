@@ -4,9 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "avibe-os"
-dynamic = ["version"]
-description = "Local-first Agent OS for Web and IM agent workflows"
-readme = "README.md"
+dynamic = ["version", "readme"]
+description = "The local-first Agent OS: desktop apps for Mac and Windows, an iPhone app, and a command line for Linux"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
@@ -40,7 +39,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Communications :: Chat",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Office/Business",
 ]
 dependencies = [
     # 0.2.162 bundles Claude Code 2.1.285, the first CLI that runs Sonnet 5.5.
@@ -111,9 +110,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/avibe-bot/avibe"
+Homepage = "https://avibe.bot"
 Repository = "https://github.com/avibe-bot/avibe"
-Documentation = "https://github.com/avibe-bot/avibe#readme"
+Documentation = "https://docs.avibe.bot"
 Issues = "https://github.com/avibe-bot/avibe/issues"
 
 [project.scripts]
@@ -138,6 +137,8 @@ artifacts = [
     "vibe/direct_transport_runtime_manifest.json",
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
 ]
+
+[tool.hatch.metadata.hooks.custom]
 
 [tool.hatch.build.hooks.custom]
 
