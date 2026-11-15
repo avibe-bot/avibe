@@ -24,7 +24,7 @@ env:
   RELEASE_TAG: gh-v3.2.7rc4
   # Security-only follow-up: one dry gate before the separately authorized
   # security mode. Never restore enabled (survival) or select update here.
-  ACCEPTANCE_MODE: dry
+  ACCEPTANCE_MODE: security
   HELPER_IDENTITY_OPTIONAL: 'true'
   CANDIDATE_SOURCE_SHA: bcc71bc8d6430fc72697eb4695caef5d15da55ba
   CANDIDATE_DRIVER_SHA256: 931310cd70e4c571af416c77cdce56719bda3e1e1240ba4128ce913610b0294e
