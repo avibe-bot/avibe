@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { vaultErrorMessage } from './vaultErrors';
 
@@ -17,6 +17,7 @@ import {
   type VaultSandboxSealResult,
   type VaultSandboxSignScheme,
   type VaultSandboxSigningContext,
+  type VaultSandboxStatusResult,
   type VaultStateEvent,
 } from './vaultSandboxClient';
 import { type BlindBox, type ProtectedRecordEnvelope, type SignatureResult } from './vaultCrypto';
@@ -55,6 +56,50 @@ const sessionVault: {
   authzFactorRegistration: null,
   durableSetupPending: false,
 };
+
+// Reads finish in any order, and every surface in this tab shares the state above. An async read
+// notes these counters when it starts and applies its answer only if nothing newer was learned
+// meanwhile: `rootEpoch` moves when what this tab knows about the Vault root changes (a setup, a
+// commit, a discovered or discarded root), `lockEpoch` when the lock mirror changes.
+let rootEpoch = 0;
+let lockEpoch = 0;
+
+// The root whose key this tab's sandbox client may hold (it set up or unlocked under it). The
+// sandbox answers `status` unlocked for any root while it holds a key, so a different root must
+// never be asked about on that client: a seal there would label a record with a root it cannot open.
+let sandboxRoot: string | null = null;
+
+function dropSandboxClient(): void {
+  sandboxRoot = null;
+  resetVaultSandboxClient();
+}
+
+/** The sandbox client to ask about `root`: a fresh one if the current one may hold another root's key. */
+function sandboxClientFor(root: string) {
+  if (sandboxRoot !== null && !sameRoot(sandboxRoot, root)) dropSandboxClient();
+  return getVaultSandboxClient();
+}
+
+/** Every change to what this tab knows about the Vault root goes through here. */
+function writeRoot(
+  wrapMeta: string | null,
+  freshSetup = false,
+  authzFactorRegistration: VaultWebAuthnRegistrationPayload | null = null,
+  durableSetupPending = false,
+): void {
+  if (
+    !sameRoot(sessionVault.wrapMeta, wrapMeta)
+    || sessionVault.freshSetup !== freshSetup
+    || sessionVault.authzFactorRegistration !== authzFactorRegistration
+    || sessionVault.durableSetupPending !== durableSetupPending
+  ) {
+    rootEpoch += 1;
+  }
+  sessionVault.wrapMeta = wrapMeta;
+  sessionVault.freshSetup = freshSetup;
+  sessionVault.authzFactorRegistration = authzFactorRegistration;
+  sessionVault.durableSetupPending = durableSetupPending;
+}
 
 // The unlock-window deadline (ms epoch) is now owned by the sandbox — the parent only *mirrors*
 // the value it receives from `vault.state` events and `status` results (protocol v2 §6.4/§8).
@@ -125,21 +170,20 @@ function hasPendingSetupProof(): boolean {
 
 function clearUnlockState(options: { discardPendingSetup?: boolean } = {}): void {
   vaultLockExpiresAt = null;
+  lockEpoch += 1;
   // Ordinary sandbox lock/unload events must not destroy the exact tuple needed to retry an
   // unresolved setup POST. Explicit abandonment or a final server refusal opts into discard.
   if (hasPendingSetupProof() && !options.discardPendingSetup) {
     sessionVault.status = 'needs-setup';
     return;
   }
-  sessionVault.durableSetupPending = false;
   if (sessionVault.freshSetup) {
     // A fresh setup that never persisted a secret: locking reverts to needs-setup (the daemon has
     // no wrap_meta yet), so drop the in-memory handle rather than pretend a vault exists.
-    sessionVault.wrapMeta = null;
-    sessionVault.freshSetup = false;
-    sessionVault.authzFactorRegistration = null;
+    writeRoot(null);
     sessionVault.status = 'needs-setup';
   } else {
+    writeRoot(sessionVault.wrapMeta);
     sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
   }
 }
@@ -153,6 +197,8 @@ function applyVaultStateEvent(event: VaultStateEvent): void {
     // The sandbox only unlocks material the parent handed it, so wrapMeta should already be known;
     // guard anyway so a stray event can't flip us to a wrapMeta-less "unlocked".
     if (!sessionVault.wrapMeta) return;
+    lockEpoch += 1;
+    sandboxRoot = sessionVault.wrapMeta;
     sessionVault.status = 'unlocked';
     if (typeof event.expiresAt === 'number' && Number.isFinite(event.expiresAt)) vaultLockExpiresAt = event.expiresAt;
     if (!sessionVault.durableSetupPending) notifyVaultLockChange();
@@ -184,7 +230,7 @@ function applyPolicyResetLock(): void {
   // Invalidate the parent policy mirror too: the reset is a tightening, so if the next handshake's
   // settings fetch fails we must fail closed (strict) rather than re-pin the old confirmed policy.
   invalidateVaultSandboxPolicy();
-  resetVaultSandboxClient();
+  dropSandboxClient();
 }
 
 // Broadcast a policy reset to every tab (including this one): all drop their pinned sandbox client
@@ -193,6 +239,37 @@ function applyPolicyResetLock(): void {
 function lockAndResetAllTabs(): void {
   getVaultLockChannel()?.postMessage('reset');
   applyPolicyResetLock();
+}
+
+// Root identity as the server's durable root and the sandbox's `reusableRootIdentity` see it: a
+// record's wrap_meta is its root plus `scheme` and its own DEK fields, none of which name the root.
+const RECORD_ONLY_FIELDS = ['scheme', 'record_meta', 'dek_nonce', 'wrapped_dek'];
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function rootIdentity(wrapMeta: string): string {
+  try {
+    const parsed = JSON.parse(wrapMeta) as unknown;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return wrapMeta;
+    const root = { ...(parsed as Record<string, unknown>) };
+    for (const key of RECORD_ONLY_FIELDS) delete root[key];
+    return canonicalJson(root);
+  } catch {
+    return wrapMeta;
+  }
+}
+
+/** Whether two wrap_metas name the same Vault root (key order and record-only fields aside). */
+function sameRoot(left: string | null, right: string | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left === right || rootIdentity(left) === rootIdentity(right);
 }
 
 function baseVmkWrapMeta(wrapMeta: string): string {
@@ -220,11 +297,10 @@ function commitUnlocked(
   authzFactorRegistration: VaultWebAuthnRegistrationPayload | null = null,
   options: { deferNotification?: boolean } = {},
 ): void {
-  sessionVault.wrapMeta = baseVmkWrapMeta(wrapMeta);
+  writeRoot(baseVmkWrapMeta(wrapMeta), freshSetup, authzFactorRegistration, Boolean(options.deferNotification));
   sessionVault.status = 'unlocked';
-  sessionVault.freshSetup = freshSetup;
-  sessionVault.authzFactorRegistration = authzFactorRegistration;
-  sessionVault.durableSetupPending = Boolean(options.deferNotification);
+  sandboxRoot = sessionVault.wrapMeta;
+  lockEpoch += 1;
   // A setup root is not usable by the create flow until its root+factor POST has answered. Keep the
   // sandbox material for a same-proof retry, but do not notify hooks or expose an unlocked state.
   // Mirror the sandbox-provided deadline directly; the event stream keeps it fresh on renewal.
@@ -233,14 +309,85 @@ function commitUnlocked(
   if (!options.deferNotification) notifyVaultLockChange();
 }
 
-function commitLocked(wrapMeta: string): void {
-  vaultLockExpiresAt = null;
-  sessionVault.wrapMeta = baseVmkWrapMeta(wrapMeta);
-  sessionVault.status = 'locked';
-  sessionVault.freshSetup = false;
-  sessionVault.authzFactorRegistration = null;
-  sessionVault.durableSetupPending = false;
-  notifyVaultLockChange();
+/**
+ * Mirror a sandbox `status` answer for the known durable root. A lock transition after the question
+ * was asked is newer, so it stays; no answer (the sandbox did not reply) is locked, never unlocked.
+ */
+function mirrorSandboxStatus(answer: VaultSandboxStatusResult | null, askedAt: number): void {
+  if (askedAt !== lockEpoch) {
+    if (sessionVault.status === 'needs-setup') sessionVault.status = 'locked';
+    return;
+  }
+  lockEpoch += 1;
+  if (answer?.state === 'unlocked') {
+    sessionVault.status = 'unlocked';
+    sandboxRoot = sessionVault.wrapMeta;
+    vaultLockExpiresAt = typeof answer.expiresAt === 'number' && Number.isFinite(answer.expiresAt) ? answer.expiresAt : null;
+  } else {
+    sessionVault.status = 'locked';
+    vaultLockExpiresAt = null;
+  }
+}
+
+type DiscoveryApi = Pick<ApiContextType, 'getVaultVmk'>;
+type Discovery = { outcome: 'applied' | 'superseded' } | { outcome: 'failed'; error: unknown };
+
+/**
+ * Ask the server which root is durable and the sandbox whether it is unlocked, then apply both, unless
+ * this tab learned something newer about the root meanwhile (then the answer is dropped: it is older).
+ */
+async function discoverVaultRoot(api: DiscoveryApi): Promise<Discovery> {
+  const rootAt = rootEpoch;
+  try {
+    const res = await api.getVaultVmk();
+    if (!res?.ok) throw new Error('vmk-discovery-failed');
+    await getVaultSandboxClient();
+    // A sandbox client now exists for this tab (even while locked); make sure the cross-tab lock
+    // channel is live so a policy `reset` broadcast reaches this tab and drops its pinned client.
+    getVaultLockChannel();
+    if (rootAt !== rootEpoch) return { outcome: 'superseded' };
+    if (res.exists && res.wrap_meta) {
+      const root = baseVmkWrapMeta(res.wrap_meta);
+      const askedAt = lockEpoch;
+      let answer: VaultSandboxStatusResult | null = null;
+      let statusError: unknown = null;
+      try {
+        answer = await (await sandboxClientFor(root)).status(root);
+      } catch (error) {
+        statusError = error ?? new Error('vmk-discovery-failed');
+      }
+      if (rootAt !== rootEpoch) return { outcome: 'superseded' };
+      // The server's root is durable (an unknown setup response may have committed it): it is no
+      // longer a transient setup, and it stays known (locked) even if the sandbox did not answer.
+      writeRoot(root);
+      mirrorSandboxStatus(answer, askedAt);
+      notifyVaultLockChange();
+      return statusError ? { outcome: 'failed', error: statusError } : { outcome: 'applied' };
+    }
+    // A setup POST may still be retryable after an unknown response: keep its exact root and
+    // registration rather than discard them because discovery ran before the commit landed.
+    if (!hasPendingSetupProof()) {
+      writeRoot(null);
+      sessionVault.status = 'needs-setup';
+      vaultLockExpiresAt = null;
+      lockEpoch += 1;
+    }
+    // Wake every `subscribeVaultLock` listener (e.g. sibling VaultLockIndicators), not just the
+    // caller: the shared state is what changed.
+    notifyVaultLockChange();
+    return { outcome: 'applied' };
+  } catch (error) {
+    if (rootAt !== rootEpoch) return { outcome: 'superseded' };
+    sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
+    lockEpoch += 1;
+    return { outcome: 'failed', error };
+  }
+}
+
+/** A setup lost to a root that is already durable: adopt that root, so this page offers unlock. */
+async function adoptCommittedRoot(api: DiscoveryApi): Promise<{ ok: false; code: string }> {
+  await discoverVaultRoot(api);
+  return { ok: false, code: 'vault_already_initialized' };
 }
 
 function isSerializedCredential(value: unknown): value is VaultWebAuthnSerializedCredential {
@@ -295,7 +442,7 @@ async function runPasskeySetup(
  * Setting up is not consent to anything else; turning a confirmation off still asks separately.
  */
 export async function setupVaultDurably(
-  api: SetupApi & Pick<ApiContextType, 'completeVaultSetup'>,
+  api: SetupApi & DiscoveryApi & Pick<ApiContextType, 'completeVaultSetup'>,
 ): Promise<{ ok: true } | { ok: false; code: string }> {
   // Only after the server said this instance was never set up (`vault_policy_setup_required`): a
   // root or factor that exists must never get a second credential enrolled behind it. A setup this
@@ -306,7 +453,8 @@ export async function setupVaultDurably(
     try {
       await runPasskeySetup(api, { onlyFirstFactor: true, deferNotification: true });
     } catch (error) {
-      if ((error as { code?: unknown } | null)?.code === 'vault_already_initialized') return { ok: false, code: 'vault_already_initialized' };
+      // The server already has a Passkey: adopt its root, for every caller of this helper.
+      if ((error as { code?: unknown } | null)?.code === 'vault_already_initialized') return adoptCommittedRoot(api);
       throw error;
     }
   }
@@ -319,6 +467,11 @@ export async function setupVaultDurably(
   }
   const committed = await api.completeVaultSetup({ wrap_meta: wrapMeta, authz_factor_registration: registration })
     .catch(() => ({ ok: false as const, code: 'network_error' }));
+  // Whether this tab still holds exactly the setup it posted (an explicit discard may have dropped it).
+  // (The exact tuple it posted, not merely the same root: the registration must be that one too.)
+  const stillPosted = sessionVault.durableSetupPending
+    && sessionVault.wrapMeta === wrapMeta
+    && sessionVault.authzFactorRegistration === registration;
   if (!committed.ok) {
     // No answer (network) or no reason given: it may still have landed, so a retry posts this same
     // setup again (no second ceremony). Any reason the server gives is final for this setup: another
@@ -327,33 +480,35 @@ export async function setupVaultDurably(
     // next attempt starts a fresh ceremony and discovery finds whatever root is durable.
     const final = typeof committed.code === 'string' && committed.code !== 'network_error';
     if (final) {
-      resetVaultSandboxClient();
-      clearUnlockState({ discardPendingSetup: true });
+      // The sandbox still holds the refused root's VMK unlocked, even if this page has meanwhile
+      // learned another root (its `status` does not tell roots apart): always drop that client, so
+      // nothing is sealed under the refused key, and lock the mirror. The page's setup is discarded
+      // only if it is still the one that was posted.
+      dropSandboxClient();
+      clearUnlockState({ discardPendingSetup: stillPosted });
       notifyVaultLockChange();
     }
+    // Another tab committed first: adopt the root it committed, for every caller of this helper.
+    if (committed.code === 'vault_already_initialized') return adoptCommittedRoot(api);
     return { ok: false, code: committed.code || 'setup_failed' };
   }
-  sessionVault.freshSetup = false;
-  sessionVault.authzFactorRegistration = null;
-  sessionVault.durableSetupPending = false;
-  if (typeof committed.wrap_meta === 'string') sessionVault.wrapMeta = baseVmkWrapMeta(committed.wrap_meta);
-  if (sessionVault.wrapMeta && sessionVault.status !== 'unlocked') {
-    try {
-      const sandboxStatus = await (await getVaultSandboxClient()).status(sessionVault.wrapMeta);
-      if (sandboxStatus.state === 'unlocked') {
-        sessionVault.status = 'unlocked';
-        vaultLockExpiresAt =
-          typeof sandboxStatus.expiresAt === 'number' && Number.isFinite(sandboxStatus.expiresAt) ? sandboxStatus.expiresAt : null;
-      } else {
-        sessionVault.status = 'locked';
-        vaultLockExpiresAt = null;
-      }
-    } catch {
-      // The root is durable even if status reconciliation is unavailable; fail closed and let the
-      // normal unlock path re-query the sandbox rather than claiming the VMK is available.
-      sessionVault.status = 'locked';
-      vaultLockExpiresAt = null;
-    }
+  // Durable now. This answer is newer than any discovery read that started before it, and adopting
+  // it moves the root epoch, so such a read can no longer apply its older answer.
+  const root = typeof committed.wrap_meta === 'string' ? baseVmkWrapMeta(committed.wrap_meta) : wrapMeta;
+  const sandboxUnlocked = stillPosted && sameRoot(root, wrapMeta) && sessionVault.status === 'unlocked';
+  writeRoot(root);
+  if (!sandboxUnlocked) {
+    // The root is durable even if status reconciliation is unavailable; fail closed and let the
+    // normal unlock path re-query the sandbox rather than claiming the VMK is available.
+    sessionVault.status = 'locked';
+    vaultLockExpiresAt = null;
+    lockEpoch += 1;
+    const rootAt = rootEpoch;
+    const askedAt = lockEpoch;
+    const answer = await sandboxClientFor(root)
+      .then((sandbox) => sandbox.status(root))
+      .catch(() => null);
+    if (rootAt === rootEpoch) mirrorSandboxStatus(answer, askedAt);
   }
   notifyVaultLockChange();
   return { ok: true };
@@ -364,6 +519,8 @@ export function useProtectedVault() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<ProtectedVaultStatus>(vaultStatusNow());
   const [error, setError] = useState<string | null>(null);
+  // Only this hook's newest refresh settles its own status and error.
+  const latestRefresh = useRef(0);
 
   useEffect(() => {
     // Initialize the cross-tab lock channel as soon as any vault UI mounts, so this tab receives
@@ -376,6 +533,7 @@ export function useProtectedVault() {
   }, []);
 
   const refresh = useCallback(async () => {
+    const call = ++latestRefresh.current;
     // Even direct hook callers must stop before discovery/preparation, including
     // a stale mirrored unlocked state left by another surface.
     try {
@@ -393,70 +551,26 @@ export function useProtectedVault() {
     }
     setStatus('checking');
     setError(null);
-    try {
-      const res = await api.getVaultVmk();
-      if (!res?.ok) throw new Error('vmk-discovery-failed');
-      const sandbox = await getVaultSandboxClient();
-      // A sandbox client now exists for this tab (even while locked); make sure the cross-tab lock
-      // channel is live so a policy `reset` broadcast reaches this tab and drops its pinned client.
-      getVaultLockChannel();
-      if (res.exists && res.wrap_meta) {
-        // An unknown setup response may have committed on the server. Discovery is authoritative
-        // in that case: stop treating the sandbox root as transient and allow normal unlock state.
-        sessionVault.durableSetupPending = false;
-        sessionVault.freshSetup = false;
-        sessionVault.authzFactorRegistration = null;
-        sessionVault.wrapMeta = baseVmkWrapMeta(res.wrap_meta);
-        const sandboxStatus = await sandbox.status(sessionVault.wrapMeta);
-        if (sandboxStatus.state === 'unlocked') {
-          sessionVault.status = 'unlocked';
-          vaultLockExpiresAt =
-            typeof sandboxStatus.expiresAt === 'number' && Number.isFinite(sandboxStatus.expiresAt) ? sandboxStatus.expiresAt : null;
-        } else {
-          sessionVault.status = 'locked';
-          vaultLockExpiresAt = null;
-        }
-      } else if (hasPendingSetupProof()) {
-        // The setup POST may still be retryable after an unknown response. Do not discard the
-        // exact root + registration proof merely because discovery raced before the commit landed.
-        sessionVault.status = 'needs-setup';
-      } else {
-        sessionVault.wrapMeta = null;
-        sessionVault.freshSetup = false;
-        sessionVault.authzFactorRegistration = null;
-        sessionVault.durableSetupPending = false;
-        sessionVault.status = 'needs-setup';
-        vaultLockExpiresAt = null;
-      }
-      // Reconciling an existing sandbox session mutates the shared module state, so wake every
-      // `subscribeVaultLock` listener (e.g. sibling VaultLockIndicators) — not just this hook's
-      // `setStatus` below. The deleted `armVaultAutoLock()` path used to do this; without it a
-      // remount that finds an already-unlocked session leaves siblings on stale lock state until
-      // the next `vault.state` event.
-      notifyVaultLockChange();
-      setStatus(vaultStatusNow());
-    } catch (err) {
-      sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
+    const discovery = await discoverVaultRoot(api);
+    // A newer refresh of this hook settles it instead. A superseded one resolves quietly: rejecting
+    // would surface an outdated error through its caller.
+    if (call !== latestRefresh.current) return;
+    if (discovery.outcome === 'failed') {
       setStatus('error');
-      setError(vaultErrorMessage(t, err, 'vmk-discovery-failed'));
+      setError(vaultErrorMessage(t, discovery.error, 'vmk-discovery-failed'));
+      return;
     }
+    setStatus(vaultStatusNow());
   }, [api, t]);
 
   const setupPasskey = useCallback(async () => {
+    // A conflict has already adopted the committed root (in the shared helper), so the open dialog
+    // offers unlock instead of a setup that can only conflict again.
     const result = await setupVaultDurably(api);
-    if (!result.ok) {
-      // A concurrent tab may have established the root between options discovery and this
-      // ceremony. Reconcile the committed root immediately so the open dialog offers unlock
-      // instead of leaving the user in a repeatable setup conflict.
-      if (result.code === 'vault_already_initialized') {
-        await refresh();
-        setStatus(vaultStatusNow());
-      }
-      throw Object.assign(new Error(result.code), { code: result.code });
-    }
     setStatus(vaultStatusNow());
+    if (!result.ok) throw Object.assign(new Error(result.code), { code: result.code });
     setError(null);
-  }, [api, refresh]);
+  }, [api]);
 
   const unlockPasskey = useCallback(async () => {
     assertDurableSetupReady();
@@ -514,23 +628,29 @@ export function useProtectedVault() {
 
   const afterCreated = useCallback(() => {
     if (sessionVault.durableSetupPending) return;
-    sessionVault.freshSetup = false;
-    sessionVault.authzFactorRegistration = null;
+    writeRoot(sessionVault.wrapMeta);
   }, []);
 
   const syncProtectedOperationStatus = useCallback(async (wrapMeta: string) => {
     if (sessionVault.durableSetupPending) return;
+    const rootAt = rootEpoch;
+    const askedAt = lockEpoch;
+    // The sandbox has just opened this record, so a key it holds is this record's root's.
     const sandbox = await getVaultSandboxClient();
     const baseWrapMeta = baseVmkWrapMeta(wrapMeta);
-    const sandboxStatus = await sandbox.status(baseWrapMeta);
-    if (sandboxStatus.state === 'unlocked') {
-      commitUnlocked(baseWrapMeta, false, sandboxStatus.expiresAt);
-      setStatus('unlocked');
-      setError(null);
+    const answer = await sandbox.status(baseWrapMeta);
+    // A root learned or dropped since this operation started (a new setup, a discard) is newer.
+    if (rootAt !== rootEpoch) {
+      setStatus(vaultStatusNow());
       return;
     }
-    commitLocked(wrapMeta);
-    setStatus('locked');
+    // A record names its root with record-only fields: keep the shape this tab already holds.
+    writeRoot(sameRoot(sessionVault.wrapMeta, baseWrapMeta) ? sessionVault.wrapMeta : baseWrapMeta);
+    mirrorSandboxStatus(answer, askedAt);
+    getVaultLockChannel();
+    notifyVaultLockChange();
+    setStatus(vaultStatusNow());
+    if (vaultUnlocked()) setError(null);
   }, []);
 
   const signProtectedRequest = useCallback(
@@ -613,12 +733,19 @@ export function useProtectedVault() {
     setStatus(vaultStatusNow());
   }, []);
 
-  const discardAndRefresh = useCallback(async () => {
-    clearUnlockState({ discardPendingSetup: true });
-    sessionVault.wrapMeta = null;
-    sessionVault.freshSetup = false;
-    sessionVault.authzFactorRegistration = null;
-    notifyVaultLockChange();
+  /**
+   * A protected save was refused because the Vault was set up elsewhere: drop the root that save
+   * used (`rejectedRoot`, else whatever this tab holds) and discover the durable one. A root this
+   * tab learned since that save is kept. Either way, no read that started earlier can apply.
+   */
+  const discardAndRefresh = useCallback(async (rejectedRoot?: string) => {
+    if (!rejectedRoot || sameRoot(rejectedRoot, sessionVault.wrapMeta)) {
+      clearUnlockState({ discardPendingSetup: true });
+      writeRoot(null);
+      sessionVault.status = 'needs-setup';
+      notifyVaultLockChange();
+    }
+    rootEpoch += 1;
     await refresh();
   }, [refresh]);
 
