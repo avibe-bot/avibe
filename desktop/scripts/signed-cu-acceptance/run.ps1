@@ -52,7 +52,10 @@ function Assert-ReleaseIdle {
             $uri = "https://api.github.com/repos/avibe-bot/avibe/actions/runs?status=$status&per_page=100&page=$page"
             $data = Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 30
             foreach ($run in $data.workflow_runs) {
-                if ([string]$run.id -ne $env:GITHUB_RUN_ID -and $run.name -match '(?i)release|desktop-self-contained-package|acceptance') {
+                # Match the release-producing workflows, not every workflow
+                # whose name contains "release" (mirror schedules are unrelated).
+                $releaseWorkflow = $run.path -match '^\.github/workflows/(release_ai|publish|publish_npm|desktop-release|desktop-package|desktop-native-update-acceptance)\.yml$'
+                if ([string]$run.id -ne $env:GITHUB_RUN_ID -and $releaseWorkflow) {
                     throw 'release_priority_yield'
                 }
             }
@@ -170,7 +173,8 @@ try {
     # Only harness-owned reason codes escape; never serialize an exception,
     # credential-bearing HTTP request, process environment or native output.
     $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'harness_operation_failed' }
-    Verdict $stage 'FAIL' $reason
+    $verdict = if ($reason -eq 'release_priority_yield') { 'NOT RUN' } else { 'FAIL' }
+    Verdict $stage $verdict $reason
 } finally {
     if ($worker) { if (-not $worker.HasExited) { $worker.Kill(); $null = $worker.WaitForExit(10000) }; $worker.Dispose() }
     try {
