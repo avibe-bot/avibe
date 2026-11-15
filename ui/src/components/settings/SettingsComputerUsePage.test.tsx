@@ -753,9 +753,11 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(screen.queryByTestId('computer-use-switch-failed')).toBeNull();
   });
 
-  it('ignores the late answer of a change that already timed out', async () => {
-    const calls: { resolve: () => void }[] = [];
-    enterSwitchShell(vi.fn(() => new Promise<undefined>((resolve) => { calls.push({ resolve: () => resolve(undefined) }); })));
+  it.each(['resolves', 'rejects'] as const)('ignores a timed-out change whose call later %s', async (outcome) => {
+    const calls: { resolve: () => void; reject: () => void }[] = [];
+    enterSwitchShell(vi.fn(() => new Promise<undefined>((resolve, reject) => {
+      calls.push({ resolve: () => resolve(undefined), reject: () => reject(new Error('late')) });
+    })));
     statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
@@ -769,10 +771,11 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     await act(async () => { fireEvent.click(control); });
     expect(calls).toHaveLength(2);
     statusSequence({ ...windowsHost, enabled: true, status: 'starting', reason: null });
-    await act(async () => calls[0].resolve());
+    await act(async () => calls[0][outcome === 'resolves' ? 'resolve' : 'reject']());
     await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
-    // Only the second call's own answer may let a read confirm it.
+    // The second change is untouched: still in flight, no failure, until its own call answers.
     expect(control.getAttribute('data-switch-state')).toBe('pending');
+    expect(screen.queryByTestId('computer-use-switch-failed')).toBeNull();
     await act(async () => calls[1].resolve());
     await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
     expect(control.getAttribute('data-switch-state')).toBe('on');
