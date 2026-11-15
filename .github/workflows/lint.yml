@@ -294,6 +294,7 @@ jobs:
           - lane: 1
             suites: |
               # Chromium and WebKit (the macOS shell's engine).
+              npm run test:safe-browser
               npm run test:pet-mini
               npm run test:chat-interactions
               npm run test:inbox-return
