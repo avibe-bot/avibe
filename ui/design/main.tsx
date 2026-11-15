@@ -56,6 +56,17 @@ async function boot() {
   if (shown?.fixtures?.localSnapshotReader) setLocalSnapshotPrincipal(shown.fixtures.localSnapshotReader);
   // The desktop app marks its own window before any page script runs (`isDesktopShell()`).
   if (shown?.fixtures?.desktopShell) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+  // The shell's Computer Use markers and IPC, as it injects them; a call never settles.
+  if (shown?.fixtures?.desktopComputerUse) {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE__', { configurable: true, value: true });
+    if (shown.fixtures.desktopComputerUse === 'on-off') {
+      Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE_DISABLE__', { configurable: true, value: true });
+    }
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      configurable: true,
+      value: { invoke: () => new Promise(() => {}) },
+    });
+  }
   // The phone app defines its bridge at document start, before any page script (`src/lib/native.ts`).
   if (shown?.fixtures?.nativeShell) {
     const capabilities = shown.fixtures.nativeShell;
