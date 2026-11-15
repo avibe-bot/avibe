@@ -195,3 +195,13 @@ it('applies a preparation answer even when the page rerenders with a new handler
   expect(api.prepareVaultBitcoinAddressTypes).toHaveBeenCalledOnce();
   expect(second).toHaveBeenCalledWith(prepared);
 });
+
+it('a protected wallet: every account approves every signature, with no switch, a plain Taproot label and nothing to prepare', () => {
+  const secret = { ...wallet([account(0, { always_ask: true, bitcoin_address_types: ['p2tr'] }), account(1, { always_ask: true, bitcoin_address_types: ['p2tr'] })]), protection: 'protected' as const };
+  open(secret);
+  expect(screen.queryAllByRole('switch')).toHaveLength(0);
+  expect(screen.getAllByText(en.vaults.hd.protected.approveEvery)).toHaveLength(2);
+  expect(screen.queryByRole('button', { name: en.vaults.dialog.moreInfo })).toBeNull();
+  expect(api.prepareVaultBitcoinAddressTypes).not.toHaveBeenCalled();
+  for (const text of ['bc1pBTC0', 'bc1pBTC1']) expect(screen.getByText(text)).toBeTruthy();
+});

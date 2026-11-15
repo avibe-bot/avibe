@@ -314,3 +314,44 @@ describe('VaultSandboxClient signing-policy downgrade (contract v1.1 §B)', () =
     expect(request.mock.calls[0][0]).toBe('reveal');
   });
 });
+
+describe('VaultSandboxClient protected seed-phrase wallet (contract rev0.7 §4)', () => {
+  const sealed = {
+    envelope: { ciphertext: 'Y2lwaGVy', nonce: 'bm9uY2U=', wrap_meta: '{"v":1}' },
+    accounts: Array.from({ length: 20 }, (_v, account) => ({
+      account, evm: `02${'1'.repeat(64)}`, bitcoin: `03${'2'.repeat(64)}`, bitcoin_p2pkh: `02${'3'.repeat(64)}`, bitcoin_p2wpkh: `03${'4'.repeat(64)}`, solana: '5'.repeat(64),
+    })),
+    expectedAccount0: { eth: '0xAbC', btc_legacy: '1Abc', btc_segwit: 'bc1qabc', btc_taproot: 'bc1pabc', solana: 'Sol' },
+    establishingVmk: false,
+  };
+  const client = (operations: string[], result?: unknown) => {
+    const instance = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient;
+    instance.readyPromise = Promise.resolve({ type: 'ready', capabilities: { operations } });
+    const request = vi.spyOn(instance, 'request').mockResolvedValue(result as never);
+    return { instance: instance as unknown as VaultSandboxClient, request };
+  };
+  const withHd = ['status', 'setup', 'unlock', 'lock', 'seal', 'reveal', 'sign', 'approveRelease', 'sealHdWallet'];
+
+  it('sends exactly {name, mode, wrapMeta}, the window id in the envelope, and returns the checked result', async () => {
+    const { instance, request } = client(withHd, sealed);
+    await expect(instance.sealHdWallet({ name: 'COLD', mode: 'import', wrapMeta: '{"v":1}' }, 'win1')).resolves.toEqual(sealed);
+    expect(request).toHaveBeenCalledExactlyOnceWith('sealHdWallet', { name: 'COLD', mode: 'import', wrapMeta: '{"v":1}' }, {
+      timeoutMs: 305_000, interactive: true, authorizationWindow: 'win1',
+    });
+  });
+
+  it('is unavailable on a build without the operation, and tries nothing else', async () => {
+    const { instance, request } = client(withHd.slice(0, -1));
+    await expect(instance.sealHdWallet({ name: 'COLD', mode: 'create', wrapMeta: '{}' }, 'win1')).rejects.toMatchObject({ code: 'protected_hd_unavailable' });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['the internal popup kind', { ...sealed, kind: 'sealed-hd-wallet' }],
+    ['a short table', { ...sealed, accounts: sealed.accounts.slice(1) }],
+    ['a missing setup flag', { envelope: sealed.envelope, accounts: sealed.accounts, expectedAccount0: sealed.expectedAccount0 }],
+  ])('refuses %s', async (_label, result) => {
+    const { instance } = client(withHd, result);
+    await expect(instance.sealHdWallet({ name: 'COLD', mode: 'create', wrapMeta: '{}' }, 'win1')).rejects.toMatchObject({ code: 'protected_hd_result_invalid' });
+  });
+});

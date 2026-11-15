@@ -509,6 +509,8 @@ export type VaultCreatePayload = {
     | { eth: string; btc_legacy: string; btc_segwit: string; btc_taproot: string; solana: string };
   /** Seed-phrase wallets: account #0 asks before every signature from the moment it is saved. */
   account0_always_ask?: boolean;
+  /** Protected seed-phrase wallets: the sandbox's complete 20-row public table, sent as returned. */
+  accounts?: Array<{ account: number; evm: string; bitcoin: string; bitcoin_p2pkh: string; bitcoin_p2wpkh: string; solana: string }>;
   /**
    * A Solana signing key, which avault creates: it generates the key, or imports the secret key
    * sealed in `blind_box`. Standard tier only, and sent without `public_meta`.
@@ -1099,7 +1101,11 @@ export type ApiContextType = {
   registerVaultAuthzWebAuthnFactor: (
     payload: VaultWebAuthnRegistrationPayload,
   ) => Promise<{ ok: boolean; factor?: Record<string, unknown>; code?: string; message?: string }>;
-  createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  /** `reconciliation` comes back only for a protected seed-phrase wallet (contract rev0.7); it is
+   *  parsed and compared by lib/vaultProtectedHd, never trusted as is. */
+  createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; reconciliation?: unknown; code?: string; message?: string }>;
+  /** A protected seed-phrase wallet's value-free identity, looked up by its exact name (rev0.7). */
+  getVaultHdReconciliation: (name: string) => Promise<{ ok: boolean; reconciliation?: unknown; code?: string; message?: string }>;
   updateVaultSecret: (name: string, payload: VaultMetadataUpdatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   /** Turns on a seed-phrase wallet's next account (no words needed: avault derived all 20 at import). */
   enableVaultHdAccount: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
@@ -1123,6 +1129,9 @@ export type ApiContextType = {
   ) => Promise<{ ok: boolean; request: VaultRequest | null; ambiguous?: boolean }>;
   getVaultProvisionRequestById: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number; session?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
+  /** One request in full, uncached (protected Bitcoin contract rev0.4 §4.3): a list may carry a
+   *  proof-free summary, and every approval decision is made from this read instead. */
+  getVaultRequest: (requestId: string, opts?: { signal?: AbortSignal }) => Promise<{ ok?: boolean; request?: VaultRequest; code?: string; message?: string }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
   approveVaultDeleteRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; removed?: boolean; name?: string; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
@@ -4835,6 +4844,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createVaultAuthzWebAuthnOptions: () => postJson('/api/vault/authz/factors/webauthn/options', {}),
     registerVaultAuthzWebAuthnFactor: (payload) => postJson('/api/vault/authz/factors/webauthn', payload),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
+    getVaultHdReconciliation: (name) => getJson(`/api/vault/secrets/${encodeURIComponent(name)}/hd-reconciliation`, { handleError: false }),
     updateVaultSecret: (name, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}`, payload, opts),
     enableVaultHdAccount: (name, opts) => postJson(`/api/vault/secrets/${encodeURIComponent(name)}/accounts`, {}, opts),
     updateVaultHdAccount: (name, account, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}/accounts/${account}`, payload, opts),
@@ -4871,6 +4881,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),
     getVaultProvisionRequestById: (requestId, opts) =>
       getCachedJson(`/api/vault/provision-requests/by-id/${encodeURIComponent(requestId)}`, 1500, opts),
+    getVaultRequest: (requestId, opts) => getJson(`/api/vault/requests/${encodeURIComponent(requestId)}`, { handleError: false, signal: opts?.signal }),
     getVaultRequests: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);

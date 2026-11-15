@@ -138,6 +138,32 @@ before public-key registrations were stored cannot authorize this and is not
 re-registered; there is no repair path. Source/fixture checks do not establish a
 real ceremony; the joint browser exercise is a separate gate.
 
+## Protected-HD secure-window release selection
+
+The current packaged pin and paired release fixture select sandbox #43's build
+`f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5`,
+from merged commit `8f1ac62b11ab6a133e7874b0520aeed1d00c44d4` (tree-equal
+reviewed head `df64d4361454b3875c7d0d2c52fa1384f6d1f801`, source-input snapshot
+from `ece87517d341a682cf6c5037f67b4285943ec253`). The owning release tool derives
+the complete pin from that reviewed Git tree and retained snapshot. Deployment
+observations only confirm equality to those bytes; they never select authority.
+The same JSON remains the Web verifier and Python frame-CSP authority.
+
+This selects the reviewed secure-window/HD runtime while leaving the parent
+consumer scope unchanged: the pin does not implement protected-HD API/storage,
+creation UI, purpose selection or reconciliation. Those are separate changes,
+not prerequisites copied into this pin-only update. It adds no protected Bitcoin
+Legacy/Native input support. Existing ordinary operations, signing-policy v1.1,
+RP ID/origin, root metadata, credential and encrypted-record formats retain their
+existing contracts; no migration, custody fallback or feature flag is introduced.
+The frozen compatibility root is unchanged and earlier versioned releases remain
+retained by the sandbox owner.
+
+Focused source/fixture checks and publication equality do not prove a real
+passkey ceremony or the composed HD flow. Authorized composed regression remains
+a separate gate before the coordinated merge/rollout decision. This pin-only
+change does not authorize installation, a service restart or feature enablement.
+
 ## Evidence and scope
 
 - `vaultSandboxIntegrity.test.ts`: actual pinned fixture hashes, malformed/stale/

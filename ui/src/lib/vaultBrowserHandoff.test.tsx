@@ -27,6 +27,7 @@ const api = vi.hoisted(() => ({
   getAvaultAuthorization: vi.fn(async () => ({ ok: true, required: false, detected_at: null, attempt: null })),
   getVaultGrants: vi.fn(),
   getVaultRequests: vi.fn(),
+  getVaultRequest: vi.fn(),
   getVaultSettings: vi.fn(),
   listDependencies: vi.fn(),
   listSkills: vi.fn(),
@@ -56,6 +57,7 @@ vi.mock('@/lib/useProtectedVault', () => ({
   useProtectedVault: () => vault,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
   useVaultSandboxWarm,
+  useProtectedHdSupported: () => null,
 }));
 // Workbench navigation, not part of the Vaults step (and it scrolls, which jsdom lacks).
 vi.mock('@/components/workbench/CapabilityTabs', () => ({ CapabilityTabs: () => null }));
@@ -181,11 +183,19 @@ const expectRevealReady = async (field = 'value') => {
   expect(useVaultSandboxWarm).toHaveBeenCalledWith(true);
 };
 
+// A new Bitcoin signing request as a list carries it (rev0.4 §4.3): no name, card, delivery or session.
+const signSummary = {
+  ...protectedSign,
+  secret_name: null, requester: null, delivery: null, message_id: null, card: null, session: null,
+} as unknown as VaultRequest;
+
 const cases: Array<{
   surface: string;
   desktop: () => ReactElement;
   clicks: Click[];
   requests?: VaultRequest[];
+  /** What the full read by id returns, when it differs from the listed request. */
+  full?: VaultRequest[];
   secrets?: VaultSecret[];
   vaultStatus?: string;
   role?: 'editor' | 'member';
@@ -203,6 +213,16 @@ const cases: Array<{
     desktop: () => <VaultApprovalCard request={protectedSign} onResolved={vi.fn()} onCancel={vi.fn()} />,
     clicks: [approve],
     requests: [protectedSign],
+    resumed: () => expectApprovalButton(/^sign$/i),
+  },
+  {
+    // The summary itself says nothing about protection: Review reads it in full, and only then
+    // does the dialog hand the protected request to the browser.
+    surface: 'chat card for a proof-free signing summary',
+    desktop: () => <VaultRequestCard request={signSummary} onResolved={vi.fn()} />,
+    clicks: [{ role: 'button', name: /^review$/i }, { role: 'button', name: /^review in browser/i }],
+    requests: [signSummary],
+    full: [protectedSign as unknown as VaultRequest],
     resumed: () => expectApprovalButton(/^sign$/i),
   },
   {
@@ -371,6 +391,11 @@ describe('desktop shell protected-vault browser handoff', () => {
     const user = userEvent.setup();
     vault.status = c.vaultStatus ?? 'needs-setup';
     api.getVaultRequests.mockResolvedValue({ requests: c.requests ?? [] });
+    // A handed-off request is read in full by its id (rev0.4 §4.3).
+    api.getVaultRequest.mockImplementation(async (id: string) => {
+      const request = (c.full ?? c.requests ?? []).find((r: { id: string }) => r.id === id);
+      return request ? { ok: true, request } : { ok: false, code: 'request_not_found' };
+    });
     api.listVaultSecrets.mockResolvedValue({ secrets: c.secrets ?? [] });
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
 

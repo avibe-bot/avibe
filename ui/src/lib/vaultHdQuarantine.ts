@@ -5,7 +5,9 @@
 // Defense in depth only: the server-side pre-commit check is the real boundary.
 const KEY = 'avibe.vault.hdAddressCheckFailed';
 
-type Block = { name: string; at: number };
+// `pending`: a protected wallet whose save is still in flight (it may not be listed yet). Pruning
+// keeps it; it becomes an ordinary block, or is lifted, once that save resolves.
+type Block = { name: string; at: number; pending?: boolean };
 
 // Kept in memory as well, so a browser that refuses storage still blocks for this page's life.
 let memory: Block[] = [];
@@ -17,7 +19,8 @@ const read = (): Block[] => {
     if (Array.isArray(value)) {
       stored = value.flatMap((entry): Block[] => (
         typeof entry === 'string' ? [{ name: entry, at: 0 }]
-          : entry && typeof entry.name === 'string' && typeof entry.at === 'number' ? [{ name: entry.name, at: entry.at }] : []
+          : entry && typeof entry.name === 'string' && typeof entry.at === 'number'
+            ? [{ name: entry.name, at: entry.at, ...(entry.pending === true ? { pending: true } : {}) }] : []
       ));
     }
   } catch { /* unavailable: memory still holds */ }
@@ -34,12 +37,16 @@ const write = (blocks: Block[]) => {
 };
 
 export const isHdWalletBlocked = (name: string) => read().some((block) => block.name === name);
-export const blockHdWallet = (name: string, now = Date.now()) => {
-  write([...read().filter((block) => block.name !== name), { name, at: now }]);
+export const blockHdWallet = (name: string, now = Date.now(), pending = false) => {
+  write([...read().filter((block) => block.name !== name), { name, at: now, ...(pending ? { pending: true } : {}) }]);
 };
 export const unblockHdWallet = (name: string) => write(read().filter((block) => block.name !== name));
 /** Forget wallets a list no longer shows, but only blocks made before that list was requested: a
  *  list begun earlier says nothing about a wallet created (and blocked) after it started. */
+// A pending block outlives its page only if that page was closed mid-save; after the longest a save
+// can take (the 305 s window plus the request), it is an ordinary block: kept while the wallet is
+// listed, pruned once a later list shows no such wallet.
+const PENDING_MS = 15 * 60_000;
 export const pruneHdWalletBlocks = (listed: readonly string[], requestedAt: number) => write(
-  read().filter((block) => listed.includes(block.name) || block.at >= requestedAt),
+  read().filter((block) => (block.pending && requestedAt - block.at < PENDING_MS) || listed.includes(block.name) || block.at >= requestedAt),
 );
