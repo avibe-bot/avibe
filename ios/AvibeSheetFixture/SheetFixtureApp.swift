@@ -32,6 +32,9 @@ private final class SheetFixtureRootViewController: UIViewController {
     private var selectionReceiptObserver: FixtureSelectionReceiptObserver?
     private var selectionEvidence: [String: Any] = ["bridgeStage": "selection-none"]
     private var selectionDisplayLink: CADisplayLink?
+    private var geometryDisplayLink: CADisplayLink?
+    private var lastGeometrySignature: String?
+    private var geometrySequence = 0
     private var lastDisplayTick: TimeInterval?
     private var maximumDisplayGap: TimeInterval = 0
     private var readinessJavaScriptPending = false
@@ -186,6 +189,8 @@ private final class SheetFixtureRootViewController: UIViewController {
                 controller.view.addSubview(arm)
             }
         }
+        geometryDisplayLink = CADisplayLink(target: self, selector: #selector(recordGeometryTick))
+        geometryDisplayLink?.add(to: .main, forMode: .common)
         controller.modalPresentationStyle = .pageSheet
         sheetController = controller
         publishReadiness()
@@ -313,6 +318,30 @@ private final class SheetFixtureRootViewController: UIViewController {
         }
     }
 
+    @objc private func recordGeometryTick() {
+        guard let controller = sheetController,
+              let webView = controller.view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
+        let frame = controller.view.convert(controller.view.bounds, to: nil)
+        let detent = controller.sheetPresentationController?.selectedDetentIdentifier?.rawValue ?? "none"
+        let orientation = frame.width > frame.height ? "landscape" : "portrait"
+        let signature = "\(orientation)|\(frame.integral)|\(detent)"
+        guard signature != lastGeometrySignature else { return }
+        lastGeometrySignature = signature
+        geometrySequence += 1
+        selectionEvidence["geometry"] = [
+            "stage": "native-geometry",
+            "sequence": geometrySequence,
+            "orientation": orientation,
+            "sheetWindowFrame": frameEvidence(frame),
+            "webViewWindowFrame": frameEvidence(webView.convert(webView.bounds, to: nil)),
+            "detent": detent,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: selectionEvidence, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            controller.view.accessibilityLabel = text
+        }
+    }
+
     @objc private func recordDisplayTick() {
         let now = ProcessInfo.processInfo.systemUptime
         defer { lastDisplayTick = now }
@@ -369,6 +398,9 @@ private final class SheetFixtureRootViewController: UIViewController {
     private func dismissFixtureSheet() -> Bool {
         selectionDisplayLink?.invalidate()
         selectionDisplayLink = nil
+        geometryDisplayLink?.invalidate()
+        geometryDisplayLink = nil
+        lastGeometrySignature = nil
         runtimeRouteTask?.cancel()
         runtimeWebView?.removeFromSuperview()
         runtimeWebView = nil
@@ -402,6 +434,22 @@ private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHa
       const handler = window.webkit.messageHandlers.avibeMobile;
       const original = handler.postMessage.bind(handler);
       const receipt = (stage) => window.webkit.messageHandlers.fixtureSelectionReceipt.postMessage({kind: "bridge", stage});
+      let rowErrorReported = false;
+      const reportRowError = () => {
+        if (rowErrorReported) return;
+        const row = [...document.querySelectorAll("button")].find(button => button.textContent.includes("Lab"));
+        const alert = [...document.querySelectorAll('[role="alert"]')].find(element =>
+          element.textContent.includes("Lab")
+        );
+        if (!row || !alert) return;
+        rowErrorReported = true;
+        receipt("row-error-rendered");
+      };
+      const observerRoot = document.documentElement || document;
+      new MutationObserver(reportRowError).observe(observerRoot, {
+        subtree: true, childList: true, characterData: true, attributes: true
+      });
+      reportRowError();
       for (const kind of ["pointerdown", "pointerup", "pointercancel", "click"]) {
         document.addEventListener(kind, (event) => {
           if (!event.isTrusted) return;

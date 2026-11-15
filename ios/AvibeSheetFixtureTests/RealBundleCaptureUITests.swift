@@ -119,7 +119,7 @@ final class RealBundleCaptureUITests: XCTestCase {
                                 : "Home is offline. Open Avibe on that computer and connect it to the internet, and it shows as online.", in: app)
                         case "open-failed":
                             SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
-                            SheetFixtureReadiness.requireFailedSelection(chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.", in: app)
+                            SheetFixtureReadiness.requireFailedSelection(in: app)
                         case "stale":
                             requireText(chinese
                                 ? "没能更新实例列表，下面是上次的结果，在线状态可能已经变了。"

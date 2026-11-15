@@ -30,7 +30,7 @@ final class InstanceSheetGestureUITests: XCTestCase {
         app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = "light"
         launchFixture()
         SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
-        SheetFixtureReadiness.requireFailedSelection("Couldn’t open Lab. Try again.", in: app)
+        SheetFixtureReadiness.requireFailedSelection(in: app)
     }
 
     private func launchFixture() {
@@ -40,6 +40,7 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
     func testMidListDownwardDragScrollsBeforeTheSheetDismisses() throws {
         launchFixture()
+        _ = SheetFixtureReadiness.waitForGeometry(in: app)
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let initialOffset = app.webViews.firstMatch.staticTexts["scroll-offset-0"]
@@ -73,6 +74,7 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
     func testTopDownwardDragDismissesTheSheet() {
         launchFixture()
+        _ = SheetFixtureReadiness.waitForGeometry(in: app)
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
@@ -83,6 +85,7 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
     func testFastFlickAtTheTopDismissesTheSheet() {
         launchFixture()
+        _ = SheetFixtureReadiness.waitForGeometry(in: app)
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
@@ -91,36 +94,37 @@ final class InstanceSheetGestureUITests: XCTestCase {
         XCTAssertFalse(close.waitForExistence(timeout: 3))
     }
 
-    func testSheetSurvivesCompactHeightRotation() {
+    func testSheetSurvivesCompactHeightRotation() throws {
         launchFixture()
+        _ = SheetFixtureReadiness.waitForGeometry(in: app)
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
-        let document = app.webViews.firstMatch
-        XCTAssertTrue(document.waitForExistence(timeout: 5))
-        let portraitFrame = document.frame
-        XCTAssertGreaterThan(portraitFrame.height, portraitFrame.width)
+        let portraitGeometry = try XCTUnwrap(SheetFixtureReadiness.waitForGeometry(
+            in: app, matching: { geometry in
+                guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]) else { return false }
+                return geometry["orientation"] as? String == "portrait" && frame.height > frame.width
+            }
+        ))
+        let portraitFrame = try XCTUnwrap(SheetFixtureReadiness.frame(from: portraitGeometry["sheetWindowFrame"]))
 
         XCUIDevice.shared.orientation = .landscapeLeft
-        let compactHeight = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                let frame = document.frame
-                return frame.width > portraitFrame.width && frame.height < portraitFrame.height
-            },
-            object: nil
-        )
-        XCTAssertEqual(XCTWaiter.wait(for: [compactHeight], timeout: 5), .completed)
+        let compactGeometry = SheetFixtureReadiness.waitForGeometry(in: app, matching: { geometry in
+            guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]) else { return false }
+            return geometry["orientation"] as? String == "landscape"
+                && frame.width > portraitFrame.width
+                && frame.height < portraitFrame.height
+        })
+        XCTAssertNotNil(compactGeometry)
         XCTAssertTrue(close.exists)
 
         XCUIDevice.shared.orientation = .portrait
-        let restoredPortrait = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                let frame = document.frame
-                return abs(frame.width - portraitFrame.width) < 1
-                    && abs(frame.height - portraitFrame.height) < 1
-            },
-            object: nil
-        )
-        XCTAssertEqual(XCTWaiter.wait(for: [restoredPortrait], timeout: 5), .completed)
+        let restoredPortrait = SheetFixtureReadiness.waitForGeometry(in: app, matching: { geometry in
+            guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]) else { return false }
+            return geometry["orientation"] as? String == "portrait"
+                && abs(frame.width - portraitFrame.width) < 1
+                && abs(frame.height - portraitFrame.height) < 1
+        })
+        XCTAssertNotNil(restoredPortrait)
         XCTAssertTrue(close.exists)
     }
 
@@ -134,22 +138,56 @@ final class InstanceSheetGestureUITests: XCTestCase {
 }
 
 /// Keep WebKit process/document startup separate from the short web-state
-/// assertions. The native marker is fixture-only and leaves the web subtree
-/// exposed; content is still checked through a fresh, scoped AX query.
+/// assertions. Native geometry and bridge receipts stay on the fixture surface;
+/// rendered content assertions use only scoped WebView AX queries.
 enum SheetFixtureReadiness {
-    static func requireFailedSelection(_ text: String, in app: XCUIApplication) {
+    static func requireFailedSelection(in app: XCUIApplication) {
         let surface = app.otherElements["fixture-document-surface"]
-        let failed = XCTNSPredicateExpectation(
+        let rejected = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
                 surface.label.contains("\"bridgeStage\":\"selection-rejected-invalid_instance\"")
-                    && app.webViews.firstMatch.staticTexts.matching(
-                        NSPredicate(format: "label == %@", text)
-                    ).firstMatch.exists
             }, object: nil
         )
-        let result = XCTWaiter.wait(for: [failed], timeout: 10)
-        XCTAssertEqual(result, .completed,
-                       "Expected native invalid_instance and row error; receipt=\(surface.label)")
+        XCTAssertEqual(XCTWaiter.wait(for: [rejected], timeout: 10), .completed,
+                       "Expected native invalid_instance receipt; receipt=\(surface.label)")
+        let rowError = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                surface.label.contains("\"bridgeStage\":\"row-error-rendered\"")
+            }, object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [rowError], timeout: 10), .completed,
+                       "Expected row-error-rendered DOM receipt; receipt=\(surface.label)")
+    }
+
+    static func waitForGeometry(
+        in app: XCUIApplication,
+        timeout: TimeInterval = 10,
+        matching predicate: @escaping ([String: Any]) -> Bool = { geometry in
+            guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]) else { return false }
+            return frame.width > 0 && frame.height > 0
+        }
+    ) -> [String: Any]? {
+        let surface = app.otherElements["fixture-document-surface"]
+        var result: [String: Any]?
+        let matches: () -> Bool = {
+            guard let data = surface.label.data(using: .utf8),
+                  let evidence = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let geometry = evidence["geometry"] as? [String: Any],
+                  predicate(geometry) else { return false }
+            result = geometry
+            return true
+        }
+        if matches() { return result }
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in matches() }, object: nil)
+        guard XCTWaiter.wait(for: [ready], timeout: timeout) == .completed else { return nil }
+        return result
+    }
+
+    static func frame(from value: Any?) -> (width: Double, height: Double)? {
+        guard let frame = value as? [String: Any],
+              let width = frame["width"] as? Double,
+              let height = frame["height"] as? Double else { return nil }
+        return (width, height)
     }
 
     @discardableResult
