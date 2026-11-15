@@ -181,6 +181,8 @@ async function harness(context: BrowserContext, page: Page, origin: string, requ
         '/api/session': { remote: false, instance_kind: 'personal' },
         '/api/vault/secrets': { ok: true, secrets: [secret] },
         '/api/vault/requests': { ok: true, requests: [request] },
+        // A focused or handed-off request is read in full by its id before any decision (rev0.4 §4.3).
+        [`/api/vault/requests/${request.id}`]: { ok: true, request },
         '/api/vault/grants': { ok: true, grants: [] },
         '/api/vault/settings': { ok: true, settings: {} },
         '/api/vault/avault-authorization': { ok: true, required: false, supported: false, attempt: null },
