@@ -706,8 +706,8 @@ try {
   out.control.hwnd = win?.windowId ?? null;
   out.control.phase = 'observe';
   await win.observe({include_screenshot: false});
-  out.control.phase = 'activate';
-  await win.activate();
+  // No activate(): like the lifecycle typing, the control uses default
+  // background delivery (rc7 43766745164: activate() was foreground_unavailable).
   out.control.phase = 'type';
   try { await win.type('control-ok'); out.control.type_ok = true; }
   catch (error) { out.control.type_ok = false; out.control.type_code = code(error); }
