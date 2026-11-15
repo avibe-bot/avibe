@@ -6,6 +6,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -51,7 +52,15 @@ class RefusalAssertionsTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             MODULE["check_refusal"](self.result, folded=False)
 
-    @unittest.skipIf(sys.platform == "win32", "host-guard probe is for non-Windows hosts")
+    def test_cleanup_removes_private_state_before_parent_fixture_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            state = work / "state"
+            state.mkdir()
+            (state / "computer-use.json").write_text("{}", encoding="utf-8")
+            MODULE["remove_owned_state"](work)
+            self.assertFalse(state.exists())
+
     def test_non_windows_entrypoint_refuses_before_import_or_side_effect(self):
         # Nonexistent paths prove no fixture/dependency imports or file creation
         # precede the host guard. Never launch a driver, editor or SDK locally.

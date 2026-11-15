@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -53,6 +54,14 @@ async def stop_child(process: asyncio.subprocess.Process | None) -> None:
     except asyncio.TimeoutError:
         process.kill()  # Exact retained child, never a process-name search.
         await asyncio.wait_for(process.wait(), 10)
+
+
+def remove_owned_state(work: Path) -> None:
+    state = work / "state"
+    if state.exists():
+        shutil.rmtree(state)
+    if state.exists():
+        raise RuntimeError("owned Computer Use state directory survived cleanup")
 
 
 async def exercise(args: argparse.Namespace, job: int) -> None:
@@ -226,6 +235,10 @@ async def exercise(args: argparse.Namespace, job: int) -> None:
             if time.monotonic() >= deadline:
                 raise RuntimeError("owned worker job still contains child processes after cleanup")
             await asyncio.sleep(0.1)
+        # The state directory has the ordinary worker's private ACL. Remove it
+        # while that identity still owns the process; the elevated parent cannot
+        # delete it merely because it created the surrounding fixture root.
+        remove_owned_state(work)
 
 
 def main() -> None:
