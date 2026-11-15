@@ -222,8 +222,8 @@ describe('desktop version ownership', () => {
     await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
-  it('suppresses a skipped release for automatic checks but offers it after an explicit refresh', async () => {
-    let state = {
+  it('shows a previously skipped release as available in the unified panel', async () => {
+    const state = {
       phase: 'available',
       latest: '3.2.3',
       channel: 'stable',
@@ -232,9 +232,6 @@ describe('desktop version ownership', () => {
     };
     desktopInvoke.mockImplementation(async (command: string) => {
       if (command === 'desktop_update_state') return state;
-      if (command === 'desktop_update_check') {
-        state = { ...state, interactive: true };
-      }
       return undefined;
     });
     renderInShell('3.2.2-rc.13', '3.2.2rc13', null, true, {
@@ -245,12 +242,10 @@ describe('desktop version ownership', () => {
     });
 
     const entry = await screen.findByTitle('v3.2.2-rc.13');
-    expect(entry.className).not.toContain('text-gold-ink');
+    await vi.waitFor(() => expect(entry.className).toContain('text-gold-ink'));
 
     fireEvent.click(entry);
-    fireEvent.click(await screen.findByRole('button', { name: i18n.t('update.action.check') }));
     expect(await screen.findByText(i18n.t('update.status.available'))).toBeTruthy();
-    expect(entry.className).toContain('text-gold-ink');
   });
 
   it('falls back to Runtime version reads when an older shell lacks the updater command', async () => {

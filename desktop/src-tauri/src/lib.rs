@@ -111,8 +111,8 @@ const SHORTCUT_SETTINGS_DEEP_LINK: &str = "avibe://settings/shortcuts";
 const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
 const OPEN_SHORTCUT_SETTINGS_EVENT: &str = "avibe:desktop-open-shortcut-settings";
 /// The in-page request to open the Version popover, read by
-/// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to the
-/// native updater dialog when the Workbench cannot receive it.
+/// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to a
+/// native-owned discovery check without an installer dialog.
 const OPEN_UPDATES_EVENT: &str = "avibe:desktop-open-updates";
 /// Internal shell-only target used when an adopted Workbench has no listener
 /// for `OPEN_UPDATES_EVENT`. It is intercepted before any page can navigate.

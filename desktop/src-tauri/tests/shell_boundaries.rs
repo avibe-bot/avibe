@@ -1349,7 +1349,10 @@ fn updates_have_one_native_owner_and_one_scoped_workbench_control_path() {
     assert!(source.contains("updater::check(app.clone(), false)"));
     assert!(source.contains("updater::MENU_ID =>"));
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));
-    assert!(updater.contains("MessageDialogButtons::YesNoCancelCustom"));
+    assert!(!updater.contains("MessageDialogButtons::YesNoCancelCustom"));
+    assert!(!updater.contains("confirm_install("));
+    assert!(updater.contains("settle_discovered_update(&app, manifest)"));
+    assert!(updater.contains("settle_update(&app, None, Settlement::Completed)"));
     assert!(updater.contains("update::install_verified(download, &artifact, KEY"));
     assert!(!include_str!("../capabilities/bootstrap.json").contains("updater:"));
     assert!(include_str!("../build.rs").contains("desktop_update_install"));

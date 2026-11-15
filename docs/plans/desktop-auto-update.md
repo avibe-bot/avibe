@@ -3,10 +3,15 @@
 ## Outcome and boundaries
 
 From baseline `2a8ce221283f81cdd37cf375c92a977669a3b540`, add one native desktop
-update owner. Startup checks only; installation requires confirmation in the
-Workbench popover once it is reachable, with a native fallback during startup
-or when the popover event cannot be dispatched. The Web version entry routes to
-that owner without receiving updater IPC powers.
+update owner. Startup checks publish availability only; they never open a native
+installer dialog. The Workbench popover is the single user-facing update panel,
+and the menu item and `avibe://updates` deep link open it when the Workbench is
+ready. Reliable delivery of an explicit request made before its listeners are
+ready is a separate follow-up: remember one request, deliver once on readiness,
+and focus only for the user's action, without a timed retry worker. Installation
+requires the panel's explicit action, while unattended installation remains an
+independent policy path. The Web version entry routes to that owner without
+receiving updater IPC powers.
 Current version comes from Tauri package metadata stamped by the release build.
 Stable builds default to stable; prerelease builds default to TEST. Channel choice
 is local to the shell. No downgrade, Python in-place upgrade, backend update, or
@@ -14,11 +19,12 @@ mutation of `~/.avibe` / private Runtime slots is part of application replacemen
 
 ## Skip this version
 
-The update prompt offers Install, Skip This Version, and Later. Skip records only
-that exact version in the shell's local data directory; the automatic startup
-check stays silent for it, while an explicit menu check and any newer release
-prompt again. Closing the popover without choosing an action means Later. There
-is no silent auto-install option: installation keeps its confirmation step.
+The update panel may record **Skip this version** for one exact release in the
+shell's local data directory. That persisted value still prevents unattended
+installation of the exact release, while the same signed offer remains visible
+as available in the unified panel. A newer release is available normally. There
+is no new skip feature and no native startup prompt; closing the panel without
+choosing an action leaves the offer available.
 
 ## Distribution contract
 
