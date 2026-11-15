@@ -21,6 +21,15 @@ class MemoryStorage {
   }
 }
 
+class FlakyStorage extends MemoryStorage {
+  failWrites = true;
+
+  override setItem(key: string, value: string): void {
+    if (this.failWrites) throw new Error('full');
+    super.setItem(key, value);
+  }
+}
+
 const attachment: SessionDraftAttachment = {
   token: 'media-token',
   name: 'image.png',
@@ -40,7 +49,7 @@ describe('SessionDraftAttachmentsCache', () => {
     first.write('session-a', [attachment]);
 
     const stored = storage.getItem(`${SESSION_DRAFT_ATTACHMENTS_STORAGE_PREFIX}session-a`);
-    expect(stored).toBe(JSON.stringify({ version: 1, attachments: [attachment] }));
+    expect(stored).toBe(JSON.stringify({ version: 1, generation: 1, attachments: [attachment] }));
     expect(new SessionDraftAttachmentsCache(storage).read('session-a')).toEqual([attachment]);
   });
 
@@ -79,5 +88,39 @@ describe('SessionDraftAttachmentsCache', () => {
     storage.removeItem(`${SESSION_DRAFT_ATTACHMENTS_STORAGE_PREFIX}session-a`);
 
     expect(cache.read('session-a')).toEqual([]);
+  });
+
+  it('keeps memory authoritative after a storage write fails until a later write succeeds', () => {
+    const storage = new FlakyStorage();
+    const cache = new SessionDraftAttachmentsCache(storage);
+
+    cache.write('session-a', [attachment]);
+    expect(cache.read('session-a')).toEqual([attachment]);
+
+    storage.failWrites = false;
+    cache.write('session-a', [attachment]);
+    expect(cache.read('session-a')).toEqual([attachment]);
+  });
+
+  it('only recovers a rejected send when its generation is still current', () => {
+    const cache = new SessionDraftAttachmentsCache(new MemoryStorage());
+    const sendGeneration = cache.clear('session-a');
+    expect(cache.write('session-a', [])).toBe(sendGeneration);
+    expect(cache.writeIfGeneration('session-a', sendGeneration, [attachment])).toBe(true);
+
+    const newer = { ...attachment, token: 'newer-token', url: '/api/media/newer-token' };
+    const newerGeneration = cache.write('session-a', [newer]);
+    expect(cache.writeIfGeneration('session-a', sendGeneration, [attachment])).toBe(false);
+    expect(cache.read('session-a')).toEqual([newer]);
+    expect(cache.writeIfGeneration('session-a', newerGeneration, [attachment])).toBe(true);
+    expect(cache.read('session-a')).toEqual([attachment]);
+  });
+
+  it('does not change generation for an identical empty write after clear', () => {
+    const cache = new SessionDraftAttachmentsCache(new MemoryStorage());
+    const generation = cache.clear('session-a');
+
+    expect(cache.write('session-a', [])).toBe(generation);
+    expect(cache.clear('session-a')).toBe(generation + 1);
   });
 });

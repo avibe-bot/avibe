@@ -122,6 +122,40 @@ describe('Composer draft attachments', () => {
     expect(sessionDraftAttachmentsCache.read('session-a')).toEqual([]);
   });
 
+  it('does not recover rejected attachments over a newer draft after remount', async () => {
+    let resolveSend!: (value: boolean | undefined) => void;
+    sessionDraftAttachmentsCache.write('session-a', [readyAttachment]);
+    const onSend = vi.fn(() => new Promise<boolean | undefined>((resolve) => {
+      resolveSend = resolve;
+    }));
+    const view = render(providers(
+      <Composer sessionId="session-a" initialDraft="send this" onSend={onSend} />,
+    ));
+
+    await waitFor(() => expect(screen.getByText('image.png')).toBeTruthy());
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    view.unmount();
+
+    uploadWorkbenchAttachment.mockResolvedValue({
+      token: 'new-token',
+      name: 'new.txt',
+      mime: 'text/plain',
+      size: 3,
+      kind: 'file',
+      url: '/api/media/new-token',
+    });
+    const ref = createRef<ComposerHandle>();
+    render(providers(<Composer ref={ref} sessionId="session-a" onSend={vi.fn()} />));
+    act(() => ref.current?.addFiles([new File(['new'], 'new.txt', { type: 'text/plain' })]));
+    await waitFor(() => expect(screen.getByText('new.txt')).toBeTruthy());
+
+    await act(async () => resolveSend(false));
+    expect(sessionDraftAttachmentsCache.read('session-a').map(({ token }) => token)).toEqual(['new-token']);
+    expect(screen.getByText('new.txt')).toBeTruthy();
+    expect(screen.queryByText('image.png')).toBeNull();
+  });
+
   it('keeps attachments scoped to the session and supports attachment-only drafts', async () => {
     sessionDraftAttachmentsCache.write('session-a', [readyAttachment]);
     const onSend = vi.fn(async () => undefined);

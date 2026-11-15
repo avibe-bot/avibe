@@ -840,7 +840,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Attachment persistence is independent from text draft CAS. It also covers
   // image-only/file-only drafts, where the text callback never fires.
   useEffect(() => {
-    if (!sessionId || !attachmentsHydratedRef.current || pendingRef.current) return;
+    if (!sessionId || !attachmentsHydratedRef.current) return;
     sessionDraftAttachmentsCache.write(sessionId, readySessionDraftAttachments(attachments));
   }, [attachments, sessionId]);
 
@@ -1684,7 +1684,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (pendingRef.current) return false;
       pendingRef.current = true;
       const sent = readyAttachments;
-      if (sessionId) sessionDraftAttachmentsCache.clear(sessionId);
+      const sendGeneration = sessionId
+        ? sessionDraftAttachmentsCache.clear(sessionId)
+        : undefined;
       let started: boolean | void;
       try {
         started = await onSend(text, sent, undefined, metadata);
@@ -1694,8 +1696,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         pendingRef.current = false;
       }
       if (started === false) {
-        if (sessionId) {
-          sessionDraftAttachmentsCache.write(sessionId, sent.map(toSessionDraftAttachment));
+        if (sessionId && sendGeneration !== undefined) {
+          sessionDraftAttachmentsCache.writeIfGeneration(
+            sessionId,
+            sendGeneration,
+            sent.map(toSessionDraftAttachment),
+          );
         }
         // Here, the take keeps the words (interrupted, send again). If the user has since left this
         // conversation, the take went with the composer: the words go to this session's draft,
@@ -1706,7 +1712,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         }
         return false;
       }
-      if (sessionId) sessionDraftAttachmentsCache.clear(sessionId);
       // The staged files went with the message.
       const sentIds = new Set(sent.map((attachment) => attachment.localId));
       for (const attachment of sent) {
@@ -2038,7 +2043,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const sentRefs = referencesRef.current;
     pendingRef.current = true;
     draftEditedRef.current = true;
-    if (sessionId) sessionDraftAttachmentsCache.clear(sessionId);
+    const sendGeneration = sessionId
+      ? sessionDraftAttachmentsCache.clear(sessionId)
+      : undefined;
     // Clear optimistically so the box can't be re-submitted and a slow send can't
     // wipe text typed in the meantime.
     valueRef.current = '';
@@ -2065,9 +2072,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         started = false;
       }
       if (started === false) {
-        if (sessionId) {
-          const retained = sent.map(toSessionDraftAttachment);
-          sessionDraftAttachmentsCache.write(sessionId, retained);
+        if (sessionId && sendGeneration !== undefined) {
+          sessionDraftAttachmentsCache.writeIfGeneration(
+            sessionId,
+            sendGeneration,
+            sent.map(toSessionDraftAttachment),
+          );
         }
         if (!unmountedRef.current) {
           setAttachments((cur) => (cur.length ? cur : sent));

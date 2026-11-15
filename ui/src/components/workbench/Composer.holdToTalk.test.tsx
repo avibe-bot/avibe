@@ -23,6 +23,7 @@ vi.hoisted(() => {
 
 const apiFetch = vi.hoisted(() => vi.fn());
 const nativeHapticImpact = vi.hoisted(() => vi.fn());
+const uploadWorkbenchAttachment = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/apiFetch', () => ({ apiFetch }));
 vi.mock('../../lib/native', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/native')>()),
@@ -31,6 +32,10 @@ vi.mock('../../lib/native', async (importOriginal) => ({
 vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/avibeFetch')>(),
   primeCloudToken: vi.fn(),
+}));
+vi.mock('../../lib/workbenchUpload', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../lib/workbenchUpload')>(),
+  uploadWorkbenchAttachment,
 }));
 
 type Phase = 'idle' | 'pressing' | 'listening' | 'recording' | 'armed' | 'settling' | 'interrupted';
@@ -78,6 +83,7 @@ vi.mock('../voice/useHoldToTalk', async (importOriginal) => ({
 
 import { ToastProvider } from '../../context/ToastProvider';
 import en from '../../i18n/en.json';
+import { sessionDraftAttachmentsCache } from '../../lib/sessionDraftAttachmentsCache';
 import { VOICE_MESSAGE_METADATA } from '../../lib/voiceMessage';
 import { Composer, type ComposerAttachment } from './Composer';
 
@@ -118,6 +124,15 @@ beforeEach(() => {
     return new Response('{}', { status: 200 });
   });
   nativeHapticImpact.mockReset().mockResolvedValue(true);
+  uploadWorkbenchAttachment.mockReset().mockResolvedValue({
+    token: 'media-token',
+    name: 'attachment',
+    mime: 'application/octet-stream',
+    size: 3,
+    kind: 'file',
+    url: '/api/media/media-token',
+  });
+  sessionDraftAttachmentsCache.clear('ses_hold');
 });
 
 afterEach(() => {
@@ -282,6 +297,54 @@ describe('sending what was said', () => {
     renderComposer({ onSend: () => { throw new Error('offline'); } });
     await asrAvailable();
     await expect(hookMock.options!.send('Hello', VOICE_MESSAGE_METADATA)).resolves.toBe(false);
+  });
+
+  it('keeps a newer attachment after an earlier hold send succeeds', async () => {
+    const oldAttachment = {
+      token: 'old-token',
+      name: 'old.txt',
+      mime: 'text/plain',
+      size: 3,
+      kind: 'file' as const,
+      url: '/api/media/old-token',
+    };
+    sessionDraftAttachmentsCache.write('ses_hold', [oldAttachment]);
+    let release!: (value: boolean) => void;
+    const firstSend = vi.fn(() => new Promise<boolean>((resolve) => {
+      release = resolve;
+    }));
+    const first = renderComposer({ onSend: firstSend });
+    await asrAvailable();
+
+    let sendPromise!: Promise<boolean>;
+    act(() => {
+      sendPromise = hookMock.options!.send('spoken', VOICE_MESSAGE_METADATA);
+    });
+    await waitFor(() => expect(firstSend).toHaveBeenCalledTimes(1));
+    first.unmount();
+
+    uploadWorkbenchAttachment.mockResolvedValue({
+      token: 'new-token',
+      name: 'new.txt',
+      mime: 'text/plain',
+      size: 3,
+      kind: 'file',
+      url: '/api/media/new-token',
+    });
+    const second = renderComposer({ onSend: vi.fn() });
+    await asrAvailable();
+    fireEvent.change(
+      second.container.querySelector<HTMLInputElement>('input[type="file"]')!,
+      { target: { files: [new File(['new'], 'new.txt', { type: 'text/plain' })] } },
+    );
+    await screen.findByText('new.txt');
+
+    await act(async () => {
+      release(true);
+      await sendPromise;
+    });
+    expect(sessionDraftAttachmentsCache.read('ses_hold').map(({ token }) => token)).toEqual(['new-token']);
+    expect(screen.getByText('new.txt')).toBeTruthy();
   });
 });
 
