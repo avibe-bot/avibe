@@ -208,14 +208,18 @@ try {
     }
     if ($worker.ExitCode -ne 0) { $failed = $true }
     if ($cases.elevated_target_query_preflight.verdict -eq 'PASS') {
-        if (-not $security.ElevatedApp -or $security.ElevatedApp.HasExited -or -not [AcceptanceNative]::IsElevated($security.ElevatedApp.Id) -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) {
-            Verdict 'elevated_target_query_preflight' 'FAIL' 'original_elevated_target_not_preserved'
+        try {
+            if (-not $security.ElevatedApp -or $security.ElevatedApp.HasExited -or -not [AcceptanceNative]::IsElevated($security.ElevatedApp.Id) -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) { throw 'original_elevated_target_not_preserved' }
+        } catch {
+            Verdict 'elevated_target_query_preflight' 'FAIL' 'original_elevated_target_postcheck_failed'
             $failed = $true
         }
     }
-    if ($security.ElevatedApp -and $cases.elevated_app_refused.verdict -eq 'PASS') {
-        if ($security.ElevatedApp.HasExited -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) {
-            Verdict 'elevated_app_refused' 'FAIL' 'elevated_notepad_did_not_preserve_empty_document'
+    if ($cases.elevated_app_refused.verdict -eq 'PASS') {
+        try {
+            if (-not $security.ElevatedApp -or $security.ElevatedApp.HasExited -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) { throw 'elevated_document_changed' }
+        } catch {
+            Verdict 'elevated_app_refused' 'FAIL' 'elevated_notepad_empty_document_postcheck_failed'
             $failed = $true
         }
     }
