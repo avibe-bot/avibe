@@ -11,6 +11,7 @@ using System.Security.Principal;
 public static class AcceptanceNative {
     private delegate bool EnumProc(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr window, EnumProc callback, IntPtr parameter);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int max);
@@ -133,16 +134,19 @@ public static class AcceptanceNative {
     }
     public static bool UnsavedTextEquals(IntPtr window, string expected) {
         bool found = false;
+        int editors = 0;
         bool readFailed = false;
         EnumChildWindows(window, (child, unused) => {
             var type = new StringBuilder(128); GetClassName(child, type, type.Capacity);
-            if (type.ToString() != "Edit" && !type.ToString().StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase)) return true;
+            if (!IsWindowVisible(child)) return true;
+            if (type.ToString() != "Scintilla" && type.ToString() != "Edit" && !type.ToString().StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase)) return true;
+            editors++;
             var text = new StringBuilder(16384); UIntPtr count;
             if (SendMessageTimeout(child, 0xD, new IntPtr(text.Capacity), text, 2, 2000, out count) == IntPtr.Zero) { readFailed = true; return false; }
             if (text.ToString() == expected) found = true;
             return true;
         }, IntPtr.Zero);
         if (readFailed) throw new InvalidOperationException("native_edit_text_read_failed");
-        return found;
+        return found && editors == 1;
     }
 }

@@ -186,6 +186,36 @@ try {
     # Requiring JS success here incorrectly treats the safe guard as a failure.
     if ($probe['ok'] -ne $false -or $probe['code'] -ne 'computer_use_unavailable' -or $probe['details']['error']['params']['status'] -ne 'off') { throw 'shipped_cli_default_off_guard_not_proven' }
     Verdict 'model_stub_tool_path' 'PASS' 'real_controller_turn_shipped_cli_reached_default_off_guard_deterministic_stub_not_llm_js_not_executed'
+    $stage = 'real_win32_fixture_preflight'
+    Add-Type -Path (Join-Path $Root 'Native.cs')
+    if ((Get-FileHash -LiteralPath $inputData.target_app -Algorithm SHA256).Hash.ToLowerInvariant() -ne $inputData.target_app_hash) { throw 'target_fixture_executable_changed' }
+    $writeHandle = $null
+    try {
+        $writeHandle = [IO.File]::Open($inputData.target_app, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        throw 'target_fixture_binary_writable_by_standard_user'
+    } catch [UnauthorizedAccessException] { } finally { if ($writeHandle) { $writeHandle.Dispose() } }
+    $targetSettings = Join-Path $work 'editor-preflight-settings'
+    New-Item -ItemType Directory -Path $targetSettings -Force | Out-Null
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $inputData.target_app; $psi.UseShellExecute = $false
+    foreach ($arg in @('-multiInst', '-nosession', '-noPlugin', ('-settingsDir=' + $targetSettings))) { $psi.ArgumentList.Add($arg) }
+    $realEditor = [Diagnostics.Process]::Start($psi)
+    $null = $realEditor.SafeHandle
+    try {
+        $deadline = (Get-Date).AddSeconds(20)
+        do {
+            $realEditor.Refresh()
+            if ($realEditor.HasExited) { throw 'real_editor_was_launcher_stub' }
+            if ($realEditor.MainWindowHandle -ne 0) { break }
+            Start-Sleep -Milliseconds 100
+        } while ((Get-Date) -lt $deadline)
+        if ($realEditor.MainWindowHandle -eq 0 -or $realEditor.MainModule.FileName -ne $inputData.target_app -or [AcceptanceNative]::IsElevated($realEditor.Id)) { throw 'created_standard_editor_identity_unproven' }
+        if (-not [AcceptanceNative]::UnsavedTextEquals($realEditor.MainWindowHandle, '')) { throw 'visible_unsaved_editor_readback_unproven' }
+        Verdict 'real_win32_fixture_preflight' 'PASS' 'exact_created_standard_editor_pid_window_and_blank_unsaved_document_readable_not_cu_launch_acceptance'
+    } finally {
+        if (-not $realEditor.HasExited) { $realEditor.Kill(); $null = $realEditor.WaitForExit(10000) }
+        $realEditor.Dispose()
+    }
     if ($inputData.mode -eq 'preparation') {
         # Fixture feasibility only, NOT elevated-app control acceptance.
         try {

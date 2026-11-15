@@ -24,7 +24,8 @@ release, and never receives release/model credentials.
 
 ## Required enabled cases
 
-1. Launch real system Notepad by `computer.app({path})`, attach, type synthetic
+1. Launch the pinned official portable Notepad++ Win32 editor by
+   `computer.app({path})`, attach, type synthetic
    unsaved text, then independently exercise CU off, Desktop quit and Desktop
    crash. In each case the original app and its unsaved text survive while the
    driver and owned helpers exit.
@@ -79,10 +80,25 @@ port and work-root steps and verifies account/profile removal.
 The elevated-target fixture additionally needs a positive control from the
 actual Users-only caller, reopening the target process/token by PID. A narrow
 candidate grants that SID only process-query and token-query object rights on
-the freshly created elevated Notepad. Existing ACEs, integrity, identity and
+the freshly created elevated editor. Existing ACEs, integrity, identity and
 privileges stay unchanged; shared target/runner token objects are refused.
 Native sufficiency is not yet proven. Until it is, report
 `elevated_target_query_access_unproven`, not a protected-window PASS.
+
+Run `43678884845` found that Server 2025's System32 Notepad exited/rebrokered;
+the query-ACL positive control was therefore **NOT RUN**, not disproved or
+passed. Additional real-editor fixture preparation started at 13:06 UTC+08 on
+November 15, independently of the already-completed model-stub timebox. The
+replacement fixture pins official portable Notepad++ **8.9.9.1** (archive SHA256
+`cbcefa34677e10fe6dd19802f7d6b3b9860cd6de62afeaae7680e09c51b47779`). Native runs
+record its public source, actual executable hash/version, Authenticode signer
+identity and validation. The executable directory is read/execute-only to the
+ordinary account; each launch uses separate test-owned settings with plugins
+and session reuse disabled. No name/descendant fallback may replace the exact
+created PID. A prep-only ordinary-process/blank-document readback and an
+elevated query positive control are separate from actual CU typing/refusal.
+The observer reads one visible Edit/RichEdit/Scintilla document control with
+`WM_GETTEXT`; it never writes document contents.
 
 Settings is an on-only **Turn on button**, not a switch. The native menu owns
 Off and Quit. Settings automation must click the shipped button in the actual

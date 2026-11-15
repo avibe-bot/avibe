@@ -121,9 +121,11 @@ function Initialize-ElevatedQueryTarget([hashtable] $Context) {
     if ($Context.ElevatedApp) { throw 'elevated_fixture_already_created' }
     $securityRoot = Join-Path $Context.Root 'security'
     New-Item -ItemType Directory -Path $securityRoot -Force | Out-Null
-    # A real elevated system Win32 app, no shim, model key, or inherited GH_TOKEN.
+    # A real signed Win32 editor, no broker, model key, or inherited GH_TOKEN.
+    if ((Get-FileHash -LiteralPath $Context.TargetApp -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Context.TargetHash) { throw 'target_fixture_executable_changed' }
     $psi = [Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = Join-Path $env:SystemRoot 'System32\notepad.exe'; $psi.UseShellExecute = $false
+    $psi.FileName = $Context.TargetApp; $psi.UseShellExecute = $false
+    foreach ($arg in @('-multiInst', '-nosession', '-noPlugin', ('-settingsDir=' + $securityRoot))) { $psi.ArgumentList.Add($arg) }
     $psi.Environment.Clear()
     foreach ($key in @('SystemRoot', 'SystemDrive', 'COMPUTERNAME', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData')) { $psi.Environment[$key] = [Environment]::GetEnvironmentVariable($key) }
     foreach ($key in @('HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')) { $psi.Environment[$key] = $securityRoot }
@@ -132,11 +134,11 @@ function Initialize-ElevatedQueryTarget([hashtable] $Context) {
     $deadline = (Get-Date).AddSeconds(15)
     do {
         $Context.ElevatedApp.Refresh()
-        if ($Context.ElevatedApp.HasExited) { throw 'system_notepad_was_launcher_stub' }
+        if ($Context.ElevatedApp.HasExited) { throw 'real_editor_was_launcher_stub' }
         if ($Context.ElevatedApp.MainWindowHandle -ne 0) { break }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
-    if ($Context.ElevatedApp.MainWindowHandle -eq 0 -or -not [AcceptanceNative]::IsElevated($Context.ElevatedApp.Id)) { throw 'elevated_notepad_identity_unproven' }
+    if ($Context.ElevatedApp.MainWindowHandle -eq 0 -or $Context.ElevatedApp.MainModule.FileName -ne $Context.TargetApp -or -not [AcceptanceNative]::IsElevated($Context.ElevatedApp.Id)) { throw 'elevated_notepad_identity_unproven' }
     if (-not [AcceptanceNative]::UnsavedTextEquals($Context.ElevatedApp.MainWindowHandle, '')) { throw 'elevated_notepad_not_blank' }
     [AcceptanceNative]::GrantFixtureTargetQuery($Context.ElevatedApp.SafeHandle.DangerousGetHandle(), $Context.User.SID.Value)
     if ($Context.ElevatedApp.HasExited) { throw 'elevated_target_exited_during_query_setup' }

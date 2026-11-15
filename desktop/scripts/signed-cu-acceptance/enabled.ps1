@@ -2,7 +2,7 @@
 # under test. This file never patches it or manufactures a Turn/session token.
 function Invoke-EnabledCases([hashtable] $Context) {
     Add-Type -Path (Join-Path $Root 'Native.cs')
-    $targetPath = Join-Path $env:SystemRoot 'System32\notepad.exe'
+    $targetPath = $inputData.target_app
     $driverPath = Join-Path $install 'computer-use\cua-driver.exe'
     $currentCase = 'settings_enable'
     function Status {
@@ -94,9 +94,12 @@ function Invoke-EnabledCases([hashtable] $Context) {
             $currentCase = @{off='survival_cu_off'; quit='survival_desktop_quit'; crash='survival_desktop_crash'}[$operation]
             Enable-FromSettings
             $text = 'Avibe signed acceptance unsaved draft ' + $operation
+            $targetSettings = Join-Path $work ("editor-$operation-settings")
+            New-Item -ItemType Directory -Path $targetSettings -Force | Out-Null
+            $targetArguments = @('-multiInst', '-nosession', '-noPlugin', ('-settingsDir=' + $targetSettings))
             $source = @"
 const target = await computer.app({path: $(ConvertTo-Json -InputObject $targetPath -Compress)});
-const started = await target.launch();
+const started = await target.launch({additional_arguments: $(ConvertTo-Json -InputObject $targetArguments -Compress)});
 const win = await started.app.waitFor({onScreen: true}, {timeout: 15000});
 await win.observe({include_screenshot: false});
 await win.type($(ConvertTo-Json -InputObject $text -Compress));
@@ -109,7 +112,7 @@ await win.observe({include_screenshot: false});
             $null = $target.SafeHandle
             $helpers = $null
             try {
-                if ($target.HasExited -or $target.MainModule.FileName -ne $targetPath -or [AcceptanceNative]::IsElevated($target.Id)) { throw 'real_created_standard_notepad_not_proven' }
+                if ($target.HasExited -or $target.MainModule.FileName -ne $targetPath -or [AcceptanceNative]::IsElevated($target.Id)) { throw 'real_created_standard_editor_not_proven' }
                 $window = [IntPtr][long]$appResult.hwnd
                 if (-not [AcceptanceNative]::UnsavedTextEquals($window, $text)) { throw 'shipped_type_did_not_create_unsaved_text' }
                 $helpers = Driver-Handles $target.Id
@@ -174,7 +177,7 @@ await win.observe({include_screenshot: false});
         } catch { throw 'elevated_target_query_access_unproven' }
         $currentCase = 'elevated_app_refused'
         $elevatedScript = @"
-const app = await computer.app({nameContains: 'notepad'});
+const app = await computer.app({nameContains: 'notepad++'});
 if (app.pid !== $($securityResult.elevated_pid)) throw new Error('wrong_elevated_target');
 const win = await app.window({windowId: $($securityResult.elevated_hwnd)});
 await win.observe({include_screenshot: false});

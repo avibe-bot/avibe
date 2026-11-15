@@ -12,7 +12,7 @@ $root = Join-Path $env:RUNNER_TEMP ('signed-cu-' + [guid]::NewGuid().ToString('N
 $work = Join-Path $root 'work'
 New-Item -ItemType Directory -Path $evidence, $root, $work -Force | Out-Null
 $cases = [ordered]@{}
-foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'elevated_target_query_preflight', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
+foreach ($id in @('release_integrity', 'target_fixture_integrity', 'real_win32_fixture_preflight', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'model_stub_tool_path', 'native_menu_quit_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture', 'elevated_target_query_preflight', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
     $cases[$id] = @{ verdict = 'NOT RUN'; reason = 'prerequisite_not_reached' }
 }
 $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_desktop'
@@ -125,6 +125,27 @@ try {
     Verdict 'release_integrity' 'PASS' 'sha256sums_and_timestamped_certum_authenticode_valid'
     Save-Report
 
+    $stage = 'target_fixture_integrity'
+    # A pinned real Win32 editor, not Windows' brokered Notepad launcher.
+    # Binary files remain read/execute-only for the ordinary account; each
+    # launch has its own settings directory and disables plugin/session reuse.
+    $targetUrl = 'https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.9.1/npp.8.9.9.1.portable.x64.zip'
+    $targetArchiveHash = 'cbcefa34677e10fe6dd19802f7d6b3b9860cd6de62afeaae7680e09c51b47779'
+    $targetArchive = Join-Path $root 'real-editor.zip'
+    Invoke-WebRequest -Uri $targetUrl -OutFile $targetArchive -TimeoutSec 180
+    if ((Get-FileHash -LiteralPath $targetArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $targetArchiveHash) { throw 'target_fixture_archive_hash_mismatch' }
+    $targetDirectory = Join-Path $root 'real-editor'
+    Expand-Archive -LiteralPath $targetArchive -DestinationPath $targetDirectory
+    $targetApp = Join-Path $targetDirectory 'notepad++.exe'
+    $targetSignature = Get-AuthenticodeSignature -LiteralPath $targetApp
+    if ($targetSignature.Status -ne 'Valid' -or -not $targetSignature.SignerCertificate -or -not $targetSignature.TimeStamperCertificate) { throw 'target_fixture_signature_invalid' }
+    $targetHash = (Get-FileHash -LiteralPath $targetApp -Algorithm SHA256).Hash.ToLowerInvariant()
+    $targetVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($targetApp).ProductVersion
+    if ($targetVersion -ne '8.9.9.1') { throw 'target_fixture_version_mismatch' }
+    $record.target_fixture = @{ name = 'Notepad++'; version = $targetVersion; source = $targetUrl; archive_sha256 = $targetArchiveHash; executable_sha256 = $targetHash; signature_valid = $true; signer_subject = $targetSignature.SignerCertificate.Subject; signer_thumbprint = $targetSignature.SignerCertificate.Thumbprint }
+    Verdict 'target_fixture_integrity' 'PASS' 'pinned_official_portable_editor_archive_hash_and_timestamped_authenticode_valid'
+    Save-Report
+
     $stage = 'standard_user'
     $password = [Security.SecureString]::new()
     foreach ($character in 'aA1!'.ToCharArray()) { $password.AppendChar($character) }
@@ -141,7 +162,7 @@ try {
     }
     Set-FixtureAccess $root 'ReadAndExecute'
     Set-FixtureAccess $work 'Modify'
-    $config = @{ installer = $installer; driver_hash = $hash; mode = $Mode; expected_sid = $user.SID.Value }
+    $config = @{ installer = $installer; driver_hash = $hash; mode = $Mode; expected_sid = $user.SID.Value; target_app = $targetApp; target_app_hash = $targetHash }
     $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'input.json')
     Assert-ReleaseIdle
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -161,7 +182,7 @@ try {
     $deadline = (Get-Date).AddMinutes(32)
     $nextAdmission = (Get-Date).AddSeconds(180)
     . (Join-Path $PSScriptRoot 'security.ps1')
-    $security = @{ Root = $root; User = $user; SecondUser = $null; DriverHash = $hash; ElevatedApp = $null; Completed = $false; QueryPrepared = $false; Stage = 'security_fixture'; Cases = @{} }
+    $security = @{ Root = $root; User = $user; SecondUser = $null; TargetApp = $targetApp; TargetHash = $targetHash; DriverHash = $hash; ElevatedApp = $null; Completed = $false; QueryPrepared = $false; Stage = 'security_fixture'; Cases = @{} }
     while (-not $worker.WaitForExit(1000)) {
         $queryRequest = Join-Path $work 'query-fixture-request.json'
         if ($Mode -eq 'preparation' -and -not $security.QueryPrepared -and (Test-Path -LiteralPath $queryRequest)) {
