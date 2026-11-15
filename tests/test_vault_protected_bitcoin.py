@@ -243,6 +243,27 @@ def test_release_must_match_initial_capture_at_storage_completion(capable_cohort
         assert _state(conn, request["id"]) == ("pending", 0, 0)
 
 
+def test_packaged_f861_pin_preserves_existing_taproot_receive_metadata():
+    """A reviewed pin update must not erase the existing ordinary receive type.
+
+    No capable-cohort injection: bind the full actually packaged f861 pin, then
+    exercise the storage metadata owner with a public never-fund ordinary key.
+    """
+    _create()
+    support = release.current_support()
+    assert support is not None
+    assert support.pin_id == "9f1264cb022625f1d3880c16019cc4ddcf515fce252193ad482714fe30ad046a"
+    assert support.build_hash == "f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5"
+    assert (support.ordinary_input_types, support.hd_input_types, support.ecdsa_return_types) == (("p2tr",), (), ())
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "PUBLIC_TEST_BTC")
+        assert meta["bitcoin_address_types"] == ["p2tr"]
+        assert meta["signing_addresses"]["btc_taproot"]
+        assert meta["signing_addresses"]["btc_legacy"] is None
+        assert meta["signing_addresses"]["btc_segwit"] is None
+        assert conn.execute(select(func.count()).select_from(vault_requests)).scalar_one() == 0
+
+
 def test_current_legacy_pin_cannot_advertise_or_admit_new_inputs():
     _create()
     context = _case()

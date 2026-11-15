@@ -497,7 +497,7 @@
     "src/components/workbench/VaultsPage.tsx": {
       "avibe/localized-user-text": 8,
       "react-hooks/immutability": 1,
-      "react-hooks/set-state-in-effect": 4
+      "react-hooks/set-state-in-effect": 3
     },
     "src/components/workbench/WebPushControl.tsx": {
       "react-hooks/set-state-in-effect": 1

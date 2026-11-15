@@ -6431,7 +6431,7 @@
       "solanaImportHint": "Its address appears after you create it. Recovery phrases aren’t supported yet.",
       "solanaImportInfo": "The pasted key is encrypted in your browser, then avault on this computer checks it and stores it.",
       "protectedKeyInfo": "The key is made and encrypted inside an isolated sandbox. The private key never leaves it; Avibe receives only the encrypted key and its address.",
-      "protectedBitcoinInfo": "Protected Bitcoin keys can approve spending only from a Taproot address, in a compatible sandbox. Legacy and SegWit addresses can’t be spent from.",
+      "protectedBitcoinInfo": "A protected Bitcoin key can spend only from the address types shown for that key, in a compatible secure window.",
       "moreInfo": "More info",
       "keySource": "Key source",
       "signingImportHint": "Its addresses appear as soon as you paste it, so you can check them before you create it."
@@ -6450,7 +6450,11 @@
       "provision": "Provide secret",
       "approved": "Access approved",
       "signed": "Signed",
-      "denied": "Request denied"
+      "denied": "Request denied",
+      "loadingFull": "Loading the request…",
+      "loadFullFailed": "Couldn’t load this request. Check your connection and try again.",
+      "retry": "Try again",
+      "detailsOnReview": "Signing request · details on Review"
     },
     "approval": {
       "accessTitle": "Agent wants to use a secret",
