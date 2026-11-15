@@ -22,6 +22,8 @@ export const shellApi = {
   // The Show Pages inventory the search and the Library read; a page frame overrides it.
   '/api/show-pages': { pages: [] },
   '/api/workbench/prefs': { ok: true, background_work_banner_enabled: true, fast_mode_default: false },
+  // Nothing waits on the reader: the shell reads this for the Inbox and its badge.
+  '/api/vault/requests': { ok: true, requests: [] },
   // The composer's voice input and the desktop-only Computer Use line, as a browser install answers them.
   '/api/asr/status': { available: false },
   '/api/desktop/computer-use/status': { supported: false },

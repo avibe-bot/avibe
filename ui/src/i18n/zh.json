@@ -3939,6 +3939,8 @@
         "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
       },
       "navUnread": "收件箱，{{count}} 条未读",
+      "navRequests": "收件箱，{{count}} 个待处理请求",
+      "navUnreadAndRequests": "收件箱，{{count}} 条未读，{{requests}} 个待处理请求",
       "sections": {
         "bots": "伙伴",
         "sessions": "会话",
@@ -6503,7 +6505,7 @@
       "grantDuration": "Agent 授权时长",
       "grantOneTime": "一次性",
       "grantMinutes": "{{count}} 分钟",
-      "grantDurationHelp": "批准后 Agent 可以使用该保护档的时长。",
+      "grantDurationHelp": "批准后 Agent 可以使用这个密钥多久。",
       "grantOneTimeHelp": "Agent 完成这一次投递后,访问即结束。",
       "grantOneShotHelp": "此请求为一次性——Agent 只获得单次投递,时长固定。",
       "thisSessionOnly": "仅限本会话",

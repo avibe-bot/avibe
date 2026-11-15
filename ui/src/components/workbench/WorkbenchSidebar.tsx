@@ -30,6 +30,7 @@ import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
+import { usePendingVaultRequestsList } from '../../context/PendingVaultRequestsContext';
 import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
@@ -756,10 +757,15 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   // The number counts only categories whose notifications are on; unread that
   // is all in muted categories shows as a grey dot instead, so it is there to
   // find but asks for nothing (docs/plans/workbench-refinements.md §1).
+  // A Vault request waiting on the reader counts too, whatever the switches: it blocks an Agent until
+  // answered (ui/design: inbox/inbox-page/approvals).
+  const { requests: pendingVaultRequests } = usePendingVaultRequestsList();
+  const waitingRequests = pendingVaultRequests.length;
+  const badgeCount = badgeTotal + waitingRequests;
   const badge = useMemo(() => {
-    if (badgeTotal <= 0) return null;
-    return badgeTotal > 99 ? '99+' : String(badgeTotal);
-  }, [badgeTotal]);
+    if (badgeCount <= 0) return null;
+    return badgeCount > 99 ? '99+' : String(badgeCount);
+  }, [badgeCount]);
   const quietUnread = !badge && totalUnread > 0;
 
   // Fill the sidebar column and cap its height so the project list (and only the
@@ -799,7 +805,11 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               <NavLink
                 to="/inbox"
                 aria-label={
-                  badge
+                  waitingRequests > 0
+                    ? badgeTotal > 0
+                      ? t('workbench.inbox.navUnreadAndRequests', { count: badgeTotal, requests: waitingRequests })
+                      : t('workbench.inbox.navRequests', { count: waitingRequests })
+                    : badge
                     ? t('workbench.inbox.navUnread', { count: badgeTotal })
                     : quietUnread
                       ? t('workbench.inbox.navQuiet')
@@ -845,6 +855,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             unreadBySession={unreadBySession}
             unreadSessions={unreadSessions}
             totalUnread={totalUnread}
+            pendingRequests={waitingRequests}
             canMarkRead={canChat}
             feedStatus={inboxFeedStatus}
             onRetry={() => void refreshInbox()}

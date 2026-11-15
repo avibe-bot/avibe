@@ -12,6 +12,9 @@ import { useBotRoster } from '../../context/BotRosterContext';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import type { InboxSession } from '../../context/ApiContext';
 import { InboxCard } from './InboxCard';
+import { usePendingVaultRequestsList } from '../../context/PendingVaultRequestsContext';
+import { liveVaultRequests } from '../../lib/vaultPendingRequests';
+import { VaultPendingRequests } from '../ui/vault-pending-requests';
 import { useMinute } from '../../lib/useMinute';
 import { Button } from '../ui/button';
 import { NotificationMenu } from './NotificationMenu';
@@ -162,6 +165,19 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   // A card draws again only when what it shows changed (`InboxCard`); the minute is
   // what moves its "3 minutes ago" on, rather than any re-render of the page.
   const minute = useMinute();
+
+  // The Vault requests waiting on the reader, above the conversations and outside the tabs: they are
+  // answered here with the same rows and dialog as on Vaults (ui/design: inbox/inbox-page/approvals).
+  // Entering the Inbox reads them again, so one that expired meanwhile leaves the list and the badge.
+  const { requests: pendingRequests, refresh: refreshPendingRequests, forget: forgetPendingRequest } = usePendingVaultRequestsList();
+  const waitingRequests = useMemo(() => liveVaultRequests(pendingRequests, minute * 60_000), [pendingRequests, minute]);
+  useEffect(() => {
+    refreshPendingRequests();
+  }, [location.key, refreshPendingRequests]);
+  const onRequestSettled = useCallback((requestId: string) => {
+    forgetPendingRequest(requestId);
+    refreshPendingRequests();
+  }, [forgetPendingRequest, refreshPendingRequests]);
   const renderCard = (s: InboxSession, quiet: boolean, inBotSection: boolean) => {
     const bot = botForSession(s.session_id);
     return (
@@ -288,6 +304,8 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
           {t('workbench.search.entryAll')}
         </span>
       </Button>
+
+      <VaultPendingRequests requests={waitingRequests} onSettled={onRequestSettled} />
 
       {/* Toolbar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-2">

@@ -3939,6 +3939,8 @@
         "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
       },
       "navUnread": "Inbox, {{count}} unread",
+      "navRequests": "Inbox, {{count}} pending requests",
+      "navUnreadAndRequests": "Inbox, {{count}} unread, {{requests}} pending requests",
       "sections": {
         "bots": "Bots",
         "sessions": "Sessions",

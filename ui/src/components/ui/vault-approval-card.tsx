@@ -766,7 +766,7 @@ export const VaultApprovalCard: React.FC<{
         ) : null}
         {requestSession ? (
           <DetailRow label={t('vaults.approval.session')}>
-            <VaultRequestSessionLink session={requestSession} className="text-foreground" textClassName="text-[13px]" />
+            <VaultRequestSessionLink session={requestSession} textClassName="text-[13px]" />
           </DetailRow>
         ) : null}
         {!isSign && !isDelete && card.command ? (

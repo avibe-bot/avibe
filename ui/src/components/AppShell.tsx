@@ -16,6 +16,7 @@ import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
 import { useApi, type MacOSLoginSessionStatus } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
+import { PendingVaultRequestsContext, usePendingVaultRequestsSource } from '../context/PendingVaultRequestsContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
@@ -178,6 +179,9 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
   const { status } = useStatus();
   // Badge only — the shell is mounted on every route and renders no feed.
   const { totalUnread } = useWorkbenchInbox({ feed: false });
+  // The Vault requests waiting on this reader: the Inbox lists them, and its entry counts them with
+  // unread (ui/design: inbox/inbox-page/approvals). One read for the whole shell.
+  const pendingVaultRequests = usePendingVaultRequestsSource();
   // The sidebar's own <aside> is hidden below md by CSS, which hides it without
   // unmounting it — so its inbox-feed and project-tree consumers would still
   // fetch on a phone. A demand gate keyed on mounting is only honest if mounting
@@ -415,7 +419,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
   // (WorkbenchMobileTabBar). Capabilities routes to Agents and stays active
   // across the four capability pages.
   const workbenchTabs: ShellNavItem[] = [
-    { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
+    { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread + pendingVaultRequests.requests.length },
     { to: '/projects', label: t('nav.workbench'), icon: FolderTree },
     ...(capabilities.can_use_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets ? [{
       to: capabilities.can_use_agents ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
@@ -463,6 +467,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
+    <PendingVaultRequestsContext.Provider value={pendingVaultRequests}>
     <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <WebPushReconciler />
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
@@ -733,5 +738,6 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     </SettingsFocusHandoffContext.Provider>
     </SettingsOverlayNavigationBoundary>
     </ShellSidebarContext.Provider>
+    </PendingVaultRequestsContext.Provider>
   );
 };

@@ -1,7 +1,7 @@
 import { Suspense, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, MessageSquareReply, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Inbox, MessageSquareReply, RefreshCw } from 'lucide-react';
 import clsx from 'clsx';
 
 import type { InboxSession } from '../../context/ApiContext';
@@ -13,6 +13,7 @@ import { useBotRoster } from '../../context/BotRosterContext';
 import { writeInboxFilter } from '../../lib/inboxFilterMemory';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { Badge } from '../ui/badge';
 import { BotAvatar } from '../ui/bot-avatar';
 import { PopoverContent } from '../ui/popover';
 import { NotificationMenu } from './NotificationMenu';
@@ -159,6 +160,8 @@ export const InboxHoverPopover: React.FC<{
   unreadBySession: Record<string, number>;
   unreadSessions: number;
   totalUnread: number;
+  /** Vault requests waiting on the reader: the full Inbox lists them, so the peek points there. */
+  pendingRequests?: number;
   canMarkRead: boolean;
   /** The feed's first read: before it answers the peek draws skeleton rows, and a
    *  failed one says so with a retry, rather than "no conversations". */
@@ -175,6 +178,7 @@ export const InboxHoverPopover: React.FC<{
   unreadBySession,
   unreadSessions,
   totalUnread,
+  pendingRequests = 0,
   canMarkRead,
   feedStatus = 'loaded',
   onRetry,
@@ -307,6 +311,21 @@ export const InboxHoverPopover: React.FC<{
               {t('workbench.inbox.markAllRead')}
             </button>}
           </div>
+
+          {/* What waits on the reader comes first; it is answered on the full Inbox (ui/design:
+              inbox/inbox-page/approvals-popover). */}
+          {pendingRequests > 0 && (
+            <button
+              type="button"
+              onClick={() => openFullInbox()}
+              className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.06] px-3 py-2 text-left transition hover:bg-gold/[0.1]"
+            >
+              <Inbox className="size-3.5 shrink-0 text-gold-ink" />
+              <span className="text-[12px] font-semibold text-foreground">{t('vaults.requests.title')}</span>
+              <Badge variant="warning">{pendingRequests}</Badge>
+              <ArrowRight className="ml-auto size-3 text-muted" />
+            </button>
+          )}
 
           {showSkeleton ? (
             <InboxPopoverRowsSkeleton rows={3} />
