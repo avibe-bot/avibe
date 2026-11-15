@@ -249,10 +249,10 @@ refusal, second-user isolation and the security fixture PASS. The administrator
 window was refused with `protected_window` + `reason=administrator` and its document
 stayed empty. The same-run ordinary-window control failed at its extra
 `activate()` (`foreground_unavailable` on the hosted runner) before typing. Product
-decision: `elevated_app_refused` is recorded as passing on its product assertions.
-Note: ordinary-window background typing was proven natively by the Off case
-earlier in the same run (before the Off → re-enable generation change); a
-same-generation control was not proven. The control no longer calls
+decision: refusal proven; same-generation ordinary-window control not proven
+(`activate()` returned `foreground_unavailable` after the elevated attempt).
+Ordinary-window background typing was proven natively by the Off case earlier in
+the same run, before the Off → re-enable generation change. The control no longer calls
 `activate()`.
 
 ## Unified update panel (signed rc5 → rc6, outcome-only)
