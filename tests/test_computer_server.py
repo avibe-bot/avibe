@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import threading
@@ -21,7 +22,7 @@ from core.computer_server import (
     _fold_tool_result,
     _validate_input,
 )
-from core.private_fs import make_private_file
+from core.private_fs import make_private_file, windows_security
 from core.computer_use import (
     COMPUTER_USE_TOOL_NAMES,
     ComputerUseState,
@@ -81,10 +82,17 @@ def _state(
         "host_bundle_id": state.host_bundle_id,
     }
     state_path = tmp_path / "computer-use.json"
-    state_path.write_text(json.dumps(payload), encoding="utf-8")
-    # Match the shell's owner-private state publication on Windows as well as
-    # POSIX; inherited temp-directory ACLs are not a trusted saved opt-in.
-    make_private_file(state_path)
+    if os.name == "nt":
+        # Elevated Windows runners default new files to the Administrators
+        # owner. DACL repair cannot change that: create with explicit user
+        # ownership, as the shell does, before publishing this fixture.
+        fd, temporary = windows_security().create_private_temporary_file(state_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+        os.replace(temporary, state_path)
+    else:
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+        make_private_file(state_path)
     return state_path, state
 
 
