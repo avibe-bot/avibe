@@ -317,7 +317,7 @@ async fn failed_start_and_suspended_stop_leave_no_running_child() {
         directory.path(),
     )
     .is_err());
-    let child = suspended("hold", directory.path());
+    let mut child = suspended("hold", directory.path());
     let handle = process_handle(child.id());
     child.stop(Duration::from_secs(60)).await.unwrap();
     assert_exits(&handle);
@@ -329,7 +329,7 @@ async fn failed_start_and_suspended_stop_leave_no_running_child() {
 async fn stop_is_graceful_for_eof_and_forceful_for_remaining_descendants() {
     for mode in ["eof", "tree"] {
         let directory = tempfile::tempdir().unwrap();
-        let child = suspended(mode, directory.path()).resume().unwrap();
+        let mut child = suspended(mode, directory.path()).resume().unwrap();
         let root = process_handle(child.id());
         wait_for_file(&directory.path().join("started"));
         let descendant = (mode == "tree").then(|| {
@@ -353,14 +353,14 @@ async fn stop_is_graceful_for_eof_and_forceful_for_remaining_descendants() {
 #[ignore = "acceptance: run as a non-elevated Windows x64 user"]
 async fn cancelled_stop_terminates_owned_child_and_allows_fresh_start() {
     let directory = tempfile::tempdir().unwrap();
-    let child = suspended("hold", directory.path()).resume().unwrap();
+    let mut child = suspended("hold", directory.path()).resume().unwrap();
     let handle = process_handle(child.id());
-    let task = tokio::spawn(child.stop(Duration::from_secs(60)));
+    let task = tokio::spawn(async move { child.stop(Duration::from_secs(60)).await });
     tokio::task::yield_now().await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     assert_exits(&handle);
-    let next = suspended("eof", directory.path()).resume().unwrap();
+    let mut next = suspended("eof", directory.path()).resume().unwrap();
     next.stop(Duration::from_secs(3)).await.unwrap();
 }
 
@@ -419,7 +419,7 @@ async fn explicit_parent_attribute_inherits_parent_job_not_driver_job() {
     let mut launcher_env = fixture_env("attribute_launcher", target_directory.path());
     launcher_env.push(("AVIBE_PARENT_PID".into(), anchor.id().to_string().into()));
     let launcher = suspended_with_env("attribute_launcher", target_directory.path(), launcher_env);
-    let launcher = launcher.resume().unwrap();
+    let mut launcher = launcher.resume().unwrap();
     let mut anchor_in_driver_job = 0;
     check(unsafe {
         IsProcessInJob(
@@ -470,7 +470,7 @@ async fn explicit_breakaway_target_survives_driver_job_termination() {
     let mut launcher_env = fixture_env("breakaway_launcher", directory.path());
     launcher_env.push(("AVIBE_SENTINEL_CREDENTIAL".into(), "test-secret-sentinel".into()));
     let launcher = suspended_with_env("breakaway_launcher", directory.path(), launcher_env);
-    let launcher = launcher.resume().unwrap();
+    let mut launcher = launcher.resume().unwrap();
     let target_pid = wait_for_file(&directory.path().join("target-pid"))
         .parse::<u32>()
         .unwrap();

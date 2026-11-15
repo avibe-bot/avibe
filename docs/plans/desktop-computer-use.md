@@ -484,12 +484,21 @@ arguments are unchanged.
   Windows lifecycle stays off in memory, so later capability/recovery ticks do
   not restart it. **Disk is not claimed off on a failed write**: status can still
   report the old saved `enabled:true`; restarting the shell can restore that old
-  opt-in. Retry Off to persist it. No second persistent recovery state is added.
+  opt-in. While this shell remains alive, its existing five-second tick retries
+  the pending Off publication/teardown; repeated Off also retries it. Pending is
+  memory-only, and successful persistence/teardown clears it without spawning.
+  No second persistent recovery state is added.
+  Teardown failure retains the waitable driver/job owner, so a repeated Off
+  cannot mistake a dropped handle for an observed exit. A failed macOS probe
+  join remains unconfirmed rather than acknowledging a later Off.
   Teardown failure also rejects even if the off record was successfully written;
   the UI must retain the invocation failure rather than treating the matching
   saved value alone as proof of success.
 - `/api/desktop/computer-use/status` adds `enabled: true | false | null`, read
-  from the existing validated native record independently of readiness. Readable
+  from the existing validated native record independently of readiness. Windows
+  verifies owner/DACL and non-reparse regular-file identity on the same opened
+  descriptor before and after reading either saved value, without repairing it.
+  Readable
   first install (`off/never_enabled`) is false; unreadable, malformed,
   unsupported-schema or unverified state is null. Unsupported hosts return
   `supported:false, enabled:null`. Missing `enabled` means an old server and
@@ -500,8 +509,9 @@ arguments are unchanged.
 Validation uses hermetic Controller request/reply tests, saved-state/API tests,
 capability/caller tests and the existing ordinary-user Windows hosted process
 harness. That harness covers off publication before teardown, helper completion,
-failed off publication, repeated Off, no automatic respawn and old-record restart
-semantics. These are source/CI checks, not installed-app or owner-desktop acceptance.
+failed off publication, repeated failed teardown retaining the same owner,
+repeated Off, no automatic respawn, eventual pending-write recovery and old-record
+restart semantics. These are source/CI checks, not installed-app or owner-desktop acceptance.
 
 ### Shell (`desktop/src-tauri`, `desktop/runtime-host`)
 

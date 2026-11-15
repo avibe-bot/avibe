@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -71,18 +73,72 @@ def test_first_install_is_off_but_unreadable_state_is_unknown(tmp_path, monkeypa
     assert path.is_dir()
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_windows_untrusted_opened_state_is_unknown_even_when_off(tmp_path, monkeypatch, enabled):
-    # Exercise the production trusted-reader error path, not a phase inference.
+@pytest.fixture
+def windows_opened_reader(monkeypatch):
     from core import computer_windows
 
+    opens = []
+
+    def create(name, access, sharing, security, disposition, flags, template):
+        opens.append((access, sharing, disposition, flags))
+        return os.open(name, os.O_RDONLY)
+
+    kernel = SimpleNamespace(CreateFileW=create, CloseHandle=os.close)
+    monkeypatch.setattr(computer_windows, "windows_security", lambda: SimpleNamespace(kernel32=kernel))
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(open_osfhandle=lambda handle, flags: handle))
+    monkeypatch.setattr(os, "O_BINARY", 0, raising=False)
+    monkeypatch.setattr(cu, "os", SimpleNamespace(name="nt"))
+    return opens
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("verdicts", [(False,), (True, False)])
+def test_windows_readable_but_untrusted_opened_state_is_unknown(
+    tmp_path, monkeypatch, enabled, verdicts, windows_opened_reader,
+):
     path = tmp_path / "computer-use.json"
     path.write_text(json.dumps({"enabled": enabled}))
+    checked = []
+    verdict = iter(verdicts)
 
-    def refuse(_path):
-        raise PermissionError("untrusted opened object")
+    def verify(_path, *, fd=None):
+        assert fd is not None, "trust must be checked on the opened record"
+        assert os.fstat(fd).st_size > 0
+        checked.append(fd)
+        return next(verdict)
 
-    monkeypatch.setattr(cu, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(computer_windows, "read_state_text", refuse)
-    assert cu.effective_computer_use_status(state_path=path).enabled is None
+    monkeypatch.setattr(cu, "_windows_private_artifact_is_safe", verify)
+    status = cu.effective_computer_use_status(state_path=path)
+    assert (status.reason, status.enabled) == ("state_unverified", None)
+    assert len(checked) == len(verdicts)
+    assert len(set(checked)) == 1
+    with pytest.raises(OSError):
+        os.fstat(checked[0])
+    assert windows_opened_reader == [(0x80000000, 7, 3, 0x00200080)]
     assert json.loads(path.read_text())["enabled"] is enabled
+
+
+@pytest.mark.skipif(os.name == "nt", reason="portable descriptor/path-race simulation; native sharing is tested separately")
+def test_windows_reader_validates_same_open_object_across_path_replacement(
+    tmp_path, monkeypatch, windows_opened_reader,
+):
+    from core.computer_windows import read_state_text
+
+    path = tmp_path / "computer-use.json"
+    path.write_text("trusted original bytes")
+    identity = path.stat().st_ino
+    checked = []
+
+    def verify(_path, *, fd=None):
+        assert fd is not None
+        checked.append(os.fstat(fd).st_ino)
+        if len(checked) == 1:
+            replacement = tmp_path / "replacement"
+            replacement.write_text("untrusted replacement bytes")
+            os.replace(replacement, path)
+        return os.fstat(fd).st_ino == identity
+
+    monkeypatch.setattr(cu, "_windows_private_artifact_is_safe", verify)
+    assert read_state_text(path) == "trusted original bytes"
+    assert checked == [identity, identity]
+    assert path.read_text() == "untrusted replacement bytes"

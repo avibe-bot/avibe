@@ -205,6 +205,14 @@ def test_windows_native_state_read_allows_delete_sharing(tmp_path, monkeypatch):
     original_open = io.open
     checked = []
     security = windows_security()
+    # The state writer supplies a private owner/DACL, unlike an ordinary file
+    # created in the hosted runner's temp directory (which inherits broad ACLs).
+    contents = state.read_bytes()
+    fd, private = security.create_private_temporary_file(state)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(contents)
+    os.replace(private, state)
+    assert cu._windows_private_artifact_is_safe(state)
 
     def overlapping_open(file, *args, **kwargs):
         stream = original_open(file, *args, **kwargs)
@@ -228,6 +236,24 @@ def test_windows_native_state_read_allows_delete_sharing(tmp_path, monkeypatch):
         observed = cu.read_computer_use_state(state)
     assert checked == [True]
     assert observed.instance_id == "test"
+
+    # Readable is not trusted, for BOTH saved values. Do not mock a reader
+    # PermissionError: exercise the actual opened-handle security check.
+    for enabled in (False, True):
+        payload = json.loads(state.read_text())
+        payload["enabled"] = enabled
+        payload["state"] = "needs_runtime" if enabled else "off"
+        payload["reason"] = "runtime_unavailable" if enabled else None
+        state.write_text(json.dumps(payload))
+        security.secure_existing_owned_path(
+            state, sddl=f"O:{security.current_user_sid}D:P(A;;FA;;;{security.current_user_sid})(A;;FR;;;WD)",
+        )
+        assert json.loads(state.read_text())["enabled"] is enabled
+        assert not cu._windows_private_artifact_is_safe(state)
+        refused = cu.effective_computer_use_status(state_path=state)
+        assert (refused.reason, refused.enabled) == ("state_unverified", None)
+        security.secure_existing_owned_path(state)
+        assert cu.read_computer_use_state(state).enabled is enabled
 
 
 def private_lock(path: Path) -> None:

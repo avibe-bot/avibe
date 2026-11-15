@@ -395,12 +395,33 @@ struct Daemon {
     child: Child,
     stdin: Option<ChildStdin>,
     stderr_tail: JoinHandle<Vec<u8>>,
+    #[cfg(test)]
+    stop_failures: u8,
 }
 
 struct PermissionProbe {
     id: u64,
-    cancel: oneshot::Sender<()>,
+    cancel: Option<oneshot::Sender<()>>,
     task: tauri::async_runtime::JoinHandle<()>,
+    stop_failed: bool,
+}
+
+impl PermissionProbe {
+    async fn stop(&mut self) -> bool {
+        if self.stop_failed {
+            return false;
+        }
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if (&mut self.task).await.is_err() {
+            // A panicked/aborted task cannot prove child cleanup. Keep that
+            // uncertainty across repeated Off rather than polling it twice.
+            self.stop_failed = true;
+            return false;
+        }
+        true
+    }
 }
 
 struct RuntimeState {
@@ -835,14 +856,20 @@ impl RuntimeState {
     }
 
     async fn stop_daemon(&mut self) -> bool {
-        let Some(daemon) = self.daemon.take() else {
+        let Some(daemon) = self.daemon.as_mut() else {
             return true;
         };
-        stop_daemon_process(daemon, &self.paths.socket, &self.diagnostics, PROCESS_STOP_TIMEOUT).await
+        if !stop_daemon_retaining(daemon, &self.paths.socket, &self.diagnostics, PROCESS_STOP_TIMEOUT).await {
+            return false;
+        }
+        self.daemon = None;
+        true
     }
 
     async fn start_permission_probe(&mut self) {
-        self.stop_permission_probe().await;
+        if !self.stop_permission_probe().await {
+            return;
+        }
         self.next_permission_probe_id = self.next_permission_probe_id.saturating_add(1);
         let id = self.next_permission_probe_id;
         let (cancel, cancelled) = oneshot::channel();
@@ -863,13 +890,20 @@ impl RuntimeState {
             .await;
             let _ = events.send(Event::PermissionProbeFinished { id, result });
         });
-        self.permission_probe = Some(PermissionProbe { id, cancel, task });
+        self.permission_probe = Some(PermissionProbe {
+            id,
+            cancel: Some(cancel),
+            task,
+            stop_failed: false,
+        });
     }
 
     async fn stop_permission_probe(&mut self) -> bool {
-        if let Some(probe) = self.permission_probe.take() {
-            let _ = probe.cancel.send(());
-            return probe.task.await.is_ok();
+        if let Some(probe) = self.permission_probe.as_mut() {
+            if !probe.stop().await {
+                return false;
+            }
+            self.permission_probe = None;
         }
         true
     }
@@ -1094,8 +1128,11 @@ async fn start_driver_once(
     if shutdown_requested.load(Ordering::SeqCst) {
         return HealthResult::Unhealthy("shutdown_requested".to_owned());
     }
-    if let Some(previous) = daemon.take() {
-        stop_daemon_process(previous, &paths.socket, diagnostics, PROCESS_STOP_TIMEOUT).await;
+    if let Some(previous) = daemon.as_mut() {
+        if !stop_daemon_retaining(previous, &paths.socket, diagnostics, PROCESS_STOP_TIMEOUT).await {
+            return HealthResult::Unhealthy("health_failed".to_owned());
+        }
+        *daemon = None;
     }
     if let Err(reason) = socket_path_preflight(&paths.socket) {
         diagnostics.record(
@@ -1256,12 +1293,27 @@ async fn request_daemon_shutdown(socket: &Path, pid: u32) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 async fn stop_daemon_process(
     mut daemon: Daemon,
     socket: &Path,
     diagnostics: &BootstrapLog,
     stop_timeout: Duration,
 ) -> bool {
+    stop_daemon_retaining(&mut daemon, socket, diagnostics, stop_timeout).await
+}
+
+async fn stop_daemon_retaining(
+    daemon: &mut Daemon,
+    socket: &Path,
+    diagnostics: &BootstrapLog,
+    stop_timeout: Duration,
+) -> bool {
+    #[cfg(test)]
+    if daemon.stop_failures > 0 {
+        daemon.stop_failures -= 1;
+        return false;
+    }
     let deadline = tokio::time::Instant::from_std(Instant::now() + stop_timeout);
     let graceful_shutdown_requested = match daemon.child.id() {
         Some(pid) => timeout_at(deadline, request_daemon_shutdown(socket, pid))
@@ -1279,8 +1331,11 @@ async fn stop_daemon_process(
             daemon.child.wait().await.is_ok()
         }
     };
+    if !stopped {
+        return false;
+    }
     drop(daemon.stdin.take());
-    if let Ok(Ok(stderr_tail)) = timeout(stop_timeout, daemon.stderr_tail).await {
+    if let Ok(Ok(stderr_tail)) = timeout(stop_timeout, &mut daemon.stderr_tail).await {
         record_daemon_stderr(diagnostics, &stderr_tail);
     }
     let _ = std::fs::remove_file(socket);
@@ -1324,6 +1379,8 @@ fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Pat
         child,
         stdin,
         stderr_tail,
+        #[cfg(test)]
+        stop_failures: 0,
     })
 }
 
@@ -2746,7 +2803,7 @@ esac
         let policy = temporary.path().join("policy.yaml");
         std::fs::write(&policy, "version: 1\n").expect("policy fixture");
         let driver = write_graceful_daemon_driver(temporary.path(), &socket, &request_path);
-        let daemon =
+        let mut daemon =
             spawn_daemon(&driver, &socket, "bot.avibe.desktop.test", &policy).expect("spawn graceful daemon fixture");
         let daemon_pid = daemon.child.id().expect("spawned daemon pid");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2756,7 +2813,13 @@ esac
         }
 
         let diagnostics = BootstrapLog::at(temporary.path().join(BOOTSTRAP_LOG_NAME));
-        stop_daemon_process(daemon, &socket, &diagnostics, Duration::from_secs(3)).await;
+        daemon.stop_failures = 2;
+        for _ in 0..2 {
+            assert!(!stop_daemon_retaining(&mut daemon, &socket, &diagnostics, Duration::from_secs(3)).await);
+            assert_eq!(daemon.child.id(), Some(daemon_pid));
+            assert!(daemon.child.try_wait().unwrap().is_none());
+        }
+        assert!(stop_daemon_process(daemon, &socket, &diagnostics, Duration::from_secs(3)).await);
 
         let request: Value = serde_json::from_slice(&std::fs::read(&request_path).expect("graceful shutdown request"))
             .expect("recorded request");
@@ -3704,6 +3767,24 @@ esac
         );
         let _ = restarting.capabilities(RuntimeSupport::Unknown, Grants::all());
         assert!(!retry_is_current(7, 8, &restarting));
+    }
+
+    #[tokio::test]
+    async fn failed_permission_probe_join_cannot_be_acknowledged_by_repeated_off() {
+        let (cancel, cancelled) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async move {
+            let _ = cancelled.await;
+        });
+        task.abort();
+        let mut probe = PermissionProbe {
+            id: 1,
+            cancel: Some(cancel),
+            task,
+            stop_failed: false,
+        };
+        assert!(!probe.stop().await);
+        assert!(!probe.stop().await);
+        assert!(probe.stop_failed);
     }
 
     #[tokio::test]

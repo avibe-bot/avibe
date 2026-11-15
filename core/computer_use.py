@@ -124,6 +124,10 @@ class ComputerUseStateError(ValueError):
     """The desktop state file does not satisfy the versioned contract."""
 
 
+class ComputerUseStateUnverified(ComputerUseStateError):
+    """The opened record is not a trusted source of saved opt-in."""
+
+
 @dataclass(frozen=True)
 class ToolSnapshot:
     path: Path
@@ -367,9 +371,12 @@ def read_computer_use_state(path: Path | None = None) -> ComputerUseState | None
     target = path or computer_use_state_path()
     try:
         if os.name == "nt":
-            from core.computer_windows import read_state_text
+            from core.computer_windows import AdmissionRefused, read_state_text
 
-            raw = read_state_text(target)
+            try:
+                raw = read_state_text(target)
+            except AdmissionRefused as exc:
+                raise ComputerUseStateUnverified("state_unverified") from exc
         else:
             raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -604,6 +611,8 @@ def effective_computer_use_status(
     checker = verifier or _snapshot_verifier
     try:
         state = read_computer_use_state(target)
+    except ComputerUseStateUnverified:
+        return ComputerUseStatus("unavailable", "state_unverified")
     except ComputerUseStateError:
         return ComputerUseStatus("unavailable", "invalid_state_file")
     if state is None:

@@ -48,6 +48,8 @@ pub(crate) struct OwnedDriver {
     initial_thread: Option<OwnedHandle>,
     stdin: Option<OwnedHandle>,
     pid: u32,
+    #[cfg(test)]
+    stop_failures: u8,
 }
 
 impl OwnedDriver {
@@ -119,6 +121,8 @@ impl OwnedDriver {
             initial_thread: Some(unsafe { OwnedHandle::from_raw_handle(info.hThread) }),
             stdin: Some(stdin_write),
             pid: info.dwProcessId,
+            #[cfg(test)]
+            stop_failures: 0,
         };
         let mut in_job = 0;
         check(unsafe { IsProcessInJob(child.process.as_raw_handle(), child.job.as_raw_handle(), &mut in_job) })?;
@@ -158,13 +162,28 @@ impl OwnedDriver {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_stops(&mut self, count: u8) {
+        self.stop_failures = count;
+    }
+
     /// Close parent-liveness stdin, then allow a bounded graceful exit. Always
     /// terminate remaining descendants, even if the direct child already exited.
-    /// Cancellation drops this owner and triggers the same job-wide cleanup.
+    /// The caller retains this owner on an error or cancelled wait so a later
+    /// Off can verify the SAME job instead of treating a missing owner as done.
+    /// Dropping the owner still triggers job-wide cleanup on shell exit.
     /// Success means the job has no active processes, not merely that a kill was
     /// requested. A timeout/error must not be treated as a successful restart.
-    pub(crate) async fn stop(mut self, grace: Duration) -> io::Result<()> {
+    pub(crate) async fn stop(&mut self, grace: Duration) -> io::Result<()> {
         drop(self.stdin.take());
+        #[cfg(test)]
+        if self.stop_failures > 0 {
+            self.stop_failures -= 1;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "injected unconfirmed job teardown",
+            ));
+        }
         // A suspended child's stdin cannot be read, so do not delay its abort.
         if self.initial_thread.is_none() && self.wait_empty(grace).await? {
             return Ok(());

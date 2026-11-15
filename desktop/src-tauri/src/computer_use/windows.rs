@@ -187,6 +187,7 @@ struct RuntimeState {
     endpoint: PathBuf,
     assets_valid: bool,
     retry_start: bool,
+    pending_off: bool,
     started: Instant,
 }
 impl RuntimeState {
@@ -226,6 +227,7 @@ impl RuntimeState {
             endpoint: PathBuf::new(),
             assets_valid,
             retry_start: false,
+            pending_off: false,
             started: Instant::now(),
         };
         // A stale ready record must not survive a new shell lifetime. A first
@@ -322,6 +324,12 @@ impl RuntimeState {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return;
         }
+        // Like macOS pending_write, this is process-local retry state, not a
+        // second persisted opt-in. Retry Off before any capability work and
+        // never turn a failed Off into an automatic On.
+        if self.pending_off {
+            let _ = self.disable().await;
+        }
         // Re-probe even while ready: a Runtime rollback must retire an already
         // running driver, not merely hide the next toggle.
         self.reprobe().await;
@@ -385,7 +393,15 @@ impl RuntimeState {
     async fn apply_state(&mut self, directive: LifecycleDirective) -> bool {
         let record = self.current_record();
         let write_state = directive.write_state;
-        let result = apply_transition(&self.store, &record, directive, &mut self.daemon, &mut self.lifecycle).await;
+        let result = apply_transition(
+            &self.store,
+            &record,
+            directive,
+            &mut self.daemon,
+            &mut self.lifecycle,
+            &mut self.pending_off,
+        )
+        .await;
         if result.is_err() {
             if self.lifecycle.enabled() {
                 let _ = self.write_state();
@@ -485,8 +501,14 @@ impl RuntimeState {
     }
 
     async fn stop_driver(&mut self) -> bool {
-        match self.daemon.take() {
-            Some(driver) => driver.stop(STOP_GRACE).await.is_ok(),
+        match self.daemon.as_mut() {
+            Some(driver) => {
+                if driver.stop(STOP_GRACE).await.is_err() {
+                    return false;
+                }
+                self.daemon = None;
+                true
+            }
             None => true,
         }
     }
@@ -540,6 +562,7 @@ async fn apply_transition(
     directive: LifecycleDirective,
     daemon: &mut Option<OwnedDriver>,
     lifecycle: &mut ComputerUseLifecycle,
+    pending_off: &mut bool,
 ) -> io::Result<()> {
     // Publish non-ready BEFORE stopping. A failed ready write also retires the
     // child; no unadvertised generation or stale ready record may stay live.
@@ -549,11 +572,14 @@ async fn apply_transition(
         Ok(())
     };
     let stopped = if directive.stop_daemon || written.is_err() {
-        match daemon.take() {
-            Some(driver) => driver
-                .stop(STOP_GRACE)
-                .await
-                .map_err(|_| io::Error::other("daemon_stop_failed")),
+        match daemon.as_mut() {
+            Some(driver) => match driver.stop(STOP_GRACE).await {
+                Ok(()) => {
+                    *daemon = None;
+                    Ok(())
+                }
+                Err(_) => Err(io::Error::other("daemon_stop_failed")),
+            },
             None => Ok(()),
         }
     } else {
@@ -566,6 +592,9 @@ async fn apply_transition(
         if lifecycle.enabled() {
             lifecycle.set_error(stable_error(error, "state_unwritable"));
         }
+    }
+    if directive.write_state {
+        *pending_off = !lifecycle.enabled() && result.is_err();
     }
     result
 }
