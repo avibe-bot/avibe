@@ -1,0 +1,70 @@
+name: Windows signed CU acceptance (draft only)
+
+# Deliberately never merge this PR. No dispatch, push, release, signing or secrets.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [master]
+    paths:
+      - '.github/workflows/windows-signed-cu-acceptance.yml'
+      - 'desktop/scripts/signed-cu-acceptance/**'
+      - 'docs/plans/windows-signed-acceptance.md'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-signed-cu-acceptance-3785
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: gh-v3.2.7rc3
+  ACCEPTANCE_MODE: preparation
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  signed-installer:
+    if: >-
+      github.repository == 'avibe-bot/avibe' &&
+      github.event.pull_request.number == 3785 &&
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.head.ref == 'test/windows-signed-acceptance' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    name: Signed installer / Windows Server 2025 x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Parse all harness PowerShell before execution
+        shell: pwsh
+        run: |
+          Get-ChildItem desktop/scripts/signed-cu-acceptance -Filter '*.ps1' | ForEach-Object {
+            $tokens = $null; $errors = $null
+            $null = [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors.Message -join '; ') }
+          }
+      - name: Verify and exercise the signed release as an ordinary user
+        shell: pwsh
+        env:
+          # Read-only, ephemeral admission token, never passed to the test user.
+          GH_TOKEN: ${{ github.token }}
+        run: ./desktop/scripts/signed-cu-acceptance/run.ps1 -ReleaseTag $env:RELEASE_TAG -Mode $env:ACCEPTANCE_MODE
+      - name: Publish value-free verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'signed-cu-evidence/verdict.md'
+          if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: windows-server-2025-signed-cu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/signed-cu-evidence/verdict.json
+            ${{ runner.temp }}/signed-cu-evidence/verdict.md
+          if-no-files-found: error
+          retention-days: 7
