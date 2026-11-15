@@ -111,9 +111,8 @@ const SHORTCUT_SETTINGS_DEEP_LINK: &str = "avibe://settings/shortcuts";
 const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
 const OPEN_SHORTCUT_SETTINGS_EVENT: &str = "avibe:desktop-open-shortcut-settings";
 /// The in-page request to open the Version popover, read by
-/// `ui/src/lib/desktopShell.ts`. An uncancelled request is handled by the
-/// shell's guarded, delayed account presentation; it never opens a native
-/// installer dialog.
+/// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to a
+/// native-owned discovery check without an installer dialog.
 const OPEN_UPDATES_EVENT: &str = "avibe:desktop-open-updates";
 /// Internal shell-only target used when an adopted Workbench has no listener
 /// for `OPEN_UPDATES_EVENT`. It is intercepted before any page can navigate.
@@ -131,46 +130,15 @@ const EN_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/en.json");
 const ZH_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/zh.json");
 
 #[derive(Default)]
-struct PendingDesktopUpdateOpen {
-    requested: AtomicBool,
-    opening: AtomicBool,
-    retrying: AtomicBool,
-}
+struct PendingDesktopUpdateOpen(AtomicBool);
 
 impl PendingDesktopUpdateOpen {
     fn request(&self) {
-        self.requested.store(true, Ordering::SeqCst);
+        self.0.store(true, Ordering::SeqCst);
     }
 
-    fn complete(&self) {
-        self.requested.store(false, Ordering::SeqCst);
-    }
-
-    fn requested(&self) -> bool {
-        self.requested.load(Ordering::SeqCst)
-    }
-
-    fn begin_attempt(&self) -> bool {
-        self.opening
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
-
-    fn finish_attempt(&self, handled: bool) {
-        if handled {
-            self.complete();
-        }
-        self.opening.store(false, Ordering::SeqCst);
-    }
-
-    fn begin_retry(&self) -> bool {
-        self.retrying
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
-
-    fn finish_retry(&self) {
-        self.retrying.store(false, Ordering::SeqCst);
+    fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -734,96 +702,36 @@ fn open_settings_script() -> String {
 
 fn open_updates_script() -> String {
     format!(
-        "(() => {{ window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
-         const event = new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }}); \
-         window.dispatchEvent(event); \
-         if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('{OPEN_UPDATES_FALLBACK_URL}'); \
-         return window.__AVIBE_DESKTOP_UPDATES_HANDLED__ ? 'handled' : 'unhandled'; }})()"
+        "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
+         window.dispatchEvent(new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }})); \
+         if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('{OPEN_UPDATES_FALLBACK_URL}');"
     )
 }
 
 /// Ask the current Workbench to open its desktop update popover. Returning
 /// `false` is the documented fallback boundary: the shell has no reachable
 /// Workbench window, or the page rejected the script.
-fn open_desktop_updates(app: &AppHandle, focus: bool) -> bool {
-    let Some(pending) = app.try_state::<PendingDesktopUpdateOpen>() else {
-        return false;
-    };
-    if !pending.begin_attempt() {
-        return true;
-    }
+fn open_desktop_updates(app: &AppHandle) -> bool {
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
-        pending.finish_attempt(false);
         return false;
     };
     if !pet::is_workbench(&window) {
-        let accepted = instance_client::present_guarded(app, "updates");
-        pending.finish_attempt(accepted);
-        if accepted && focus {
+        if instance_client::present_guarded(app, "updates") {
             focus_or_restore_main_window(app);
+            return true;
         }
-        return accepted;
-    }
-    if focus {
-        focus_or_restore_main_window(app);
-    }
-    let handle = app.clone();
-    if window
-        .eval_with_callback(open_updates_script(), move |result| {
-            let pending = handle.state::<PendingDesktopUpdateOpen>();
-            pending.finish_attempt(result.trim() == "\"handled\"");
-        })
-        .is_err()
-    {
-        pending.finish_attempt(false);
         return false;
     }
-    true
+    focus_or_restore_main_window(app);
+    window.eval(open_updates_script()).is_ok()
 }
 
 fn request_desktop_updates(app: &AppHandle) {
     app.state::<PendingDesktopUpdateOpen>().request();
 }
 
-fn request_and_open_desktop_updates(app: &AppHandle) {
-    request_desktop_updates(app);
-    ensure_pending_update_retry(app);
-    let _ = open_desktop_updates(app, true);
-}
-
-fn ensure_pending_update_retry(app: &AppHandle) {
-    let Some(pending) = app.try_state::<PendingDesktopUpdateOpen>() else {
-        return;
-    };
-    if !pending.begin_retry() {
-        return;
-    }
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let pending = app.state::<PendingDesktopUpdateOpen>();
-        let mut delay = std::time::Duration::from_millis(100);
-        loop {
-            tokio::time::sleep(delay).await;
-            if !pending.requested() {
-                pending.finish_retry();
-                return;
-            }
-            let _ = open_desktop_updates(&app, false);
-            delay = (delay * 2).min(std::time::Duration::from_secs(2));
-        }
-    });
-}
-
-fn open_updates_fallback(app: &AppHandle) {
-    let Some(pending) = app.try_state::<PendingDesktopUpdateOpen>() else {
-        return;
-    };
-    if instance_client::present_guarded(app, "updates") {
-        pending.complete();
-        return;
-    }
-    pending.request();
-    ensure_pending_update_retry(app);
+fn take_desktop_update_request(app: &AppHandle) -> bool {
+    app.state::<PendingDesktopUpdateOpen>().take()
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -2128,9 +2036,8 @@ fn main_document_finished(webview: &tauri::Webview) {
     macos_title_bar::sync(webview);
     instance_client::page_loaded(webview.app_handle());
     apply_pending_deep_link(webview.app_handle());
-    if webview.app_handle().state::<PendingDesktopUpdateOpen>().requested() {
-        ensure_pending_update_retry(webview.app_handle());
-        let _ = open_desktop_updates(webview.app_handle(), false);
+    if take_desktop_update_request(webview.app_handle()) && !open_desktop_updates(webview.app_handle()) {
+        updater::check(webview.app_handle().clone(), true);
     }
     // Settings become available the moment a Workbench is on
     // screen, not at the monitor's first tick. The shared
@@ -2150,7 +2057,7 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
         }
     }
     if updates_requested {
-        request_and_open_desktop_updates(app);
+        request_desktop_updates(app);
     }
     if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
         links.receive_owned(workbench_arguments, instance_client::presentation_owner(app));
@@ -2159,6 +2066,9 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
         return;
     }
     focus_or_restore_main_window(app);
+    if updates_requested && open_desktop_updates(app) {
+        let _ = take_desktop_update_request(app);
+    }
     apply_pending_deep_link(app);
 }
 
@@ -2567,7 +2477,11 @@ pub fn run() {
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
-                updater::MENU_ID => request_and_open_desktop_updates(app),
+                updater::MENU_ID => {
+                    if !open_desktop_updates(app) {
+                        updater::check(app.clone(), true);
+                    }
+                }
                 updater::CHANNEL_ID => updater::toggle_channel(app),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
                 "desktop-client-account" => instance_client::menu_present(app, "account"),
@@ -2618,11 +2532,13 @@ pub fn run() {
                         }
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
-                        request_and_open_desktop_updates(webview.app_handle());
+                        if !open_desktop_updates(webview.app_handle()) {
+                            updater::check(webview.app_handle().clone(), true);
+                        }
                         return false;
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == OPEN_UPDATES_FALLBACK_URL {
-                        open_updates_fallback(webview.app_handle());
+                        updater::check(webview.app_handle().clone(), true);
                         return false;
                     }
                     let active_origin = webview
@@ -2834,37 +2750,19 @@ mod tests {
     fn the_updates_request_is_a_cancelable_workbench_event() {
         assert_eq!(
             open_updates_script(),
-            "(() => { window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
-             const event = new Event('avibe:desktop-open-updates', { cancelable: true }); \
-             window.dispatchEvent(event); \
-             if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('avibe://updates-fallback'); \
-             return window.__AVIBE_DESKTOP_UPDATES_HANDLED__ ? 'handled' : 'unhandled'; })()"
+            "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
+             window.dispatchEvent(new Event('avibe:desktop-open-updates', { cancelable: true })); \
+             if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('avibe://updates-fallback');"
         );
     }
 
     #[test]
     fn a_pending_update_open_survives_until_a_workbench_takes_it() {
         let pending = PendingDesktopUpdateOpen::default();
-        assert!(!pending.requested());
+        assert!(!pending.take());
         pending.request();
-        assert!(pending.requested());
-        assert!(pending.begin_attempt());
-        assert!(!pending.begin_attempt());
-        pending.finish_attempt(false);
-        assert!(pending.requested());
-        assert!(pending.begin_retry());
-        assert!(!pending.begin_retry());
-        pending.finish_retry();
-        assert!(pending.begin_attempt());
-        pending.finish_attempt(true);
-        assert!(!pending.requested());
-    }
-
-    #[test]
-    fn a_pending_update_open_is_retained_when_the_workbench_is_not_ready() {
-        let pending = PendingDesktopUpdateOpen::default();
-        pending.request();
-        assert!(pending.requested(), "a failed presentation must remain queued");
+        assert!(pending.take());
+        assert!(!pending.take());
     }
 
     #[test]

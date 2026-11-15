@@ -5,11 +5,13 @@
 From baseline `2a8ce221283f81cdd37cf375c92a977669a3b540`, add one native desktop
 update owner. Startup checks publish availability only; they never open a native
 installer dialog. The Workbench popover is the single user-facing update panel,
-and the menu item and `avibe://updates` deep link use its guarded delayed
-presentation when the Workbench is not ready. Installation requires the panel's
-explicit action, while unattended installation remains an independent policy
-path. The Web version entry routes to that owner without receiving updater IPC
-powers.
+and the menu item and `avibe://updates` deep link open it when the Workbench is
+ready. Reliable delivery of an explicit request made before its listeners are
+ready is a separate follow-up: remember one request, deliver once on readiness,
+and focus only for the user's action, without a timed retry worker. Installation
+requires the panel's explicit action, while unattended installation remains an
+independent policy path. The Web version entry routes to that owner without
+receiving updater IPC powers.
 Current version comes from Tauri package metadata stamped by the release build.
 Stable builds default to stable; prerelease builds default to TEST. Channel choice
 is local to the shell. No downgrade, Python in-place upgrade, backend update, or

@@ -697,11 +697,12 @@ The native updater remains the sole update owner, while the Workbench version
 badge is its user interface. In a desktop window the badge turns yellow when a
 signed release is available and opens the Workbench popover. The native
 **Check for Desktop Updates…** menu item and `avibe://updates` deep link open the
-same popover; if the Workbench is not ready, the existing guarded presentation
-keeps the request pending until it is. Startup checks only publish the signed
-availability result and never open the legacy native installer dialog, whether
-the Workbench is ready or whether unattended updates are enabled. The popover
-owns explicit checking, download, replacement, and **Skip this version**.
+same popover when the Workbench is ready. Delivery of an explicit request made
+before the Workbench's listeners are ready is a separate follow-up; this change
+does not add a retry worker or a readiness protocol. Startup checks only publish
+the signed availability result and never open the legacy native installer dialog,
+whether the Workbench is ready or whether unattended updates are enabled. The
+popover owns explicit checking, download, replacement, and **Skip this version**.
 Native state changes are pushed to the Workbench, including checks started by
 the **Get Pre-release Updates** menu item. A previously skipped release remains
 visible as available in the unified panel; the saved skip is still enforced by
