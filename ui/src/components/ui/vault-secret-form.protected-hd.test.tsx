@@ -191,12 +191,13 @@ it('a lost save reply is checked, never retried: unconfirmed until the exact wal
   expect(vault.sealHdWallet).toHaveBeenCalledOnce();
 });
 
-it('a refusal is shown, but the wallet stays unconfirmed and blocked: never "not saved", never a new one', async () => {
-  await openProtected();
+it('an import refused for its name, where the same words may already be saved: unconfirmed, never "not saved"', async () => {
+  await openProtected('import');
   api.createVaultSecret.mockResolvedValue({ ok: false, code: 'secret_exists', message: 'raw server text' });
-  // Another wallet holds the name: its snapshot does not match, so nothing is offered.
+  // An earlier import of these words holds the name (same addresses, another envelope): it may be
+  // this wallet, so nothing is offered and nothing is called unsaved.
   api.getVaultHdReconciliation.mockResolvedValue({ ok: true, reconciliation: snapshot({ secret_id: 'vlt_other', envelope_sha256: wallet.reordered_envelope_sha256 }) });
-  await launch();
+  await launch('import');
   expect(await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }))).toBeTruthy();
   // A known refusal reads in the UI's language (en here), not as the server's raw text.
   expect(screen.getByText(fill(p.notice.refusal, { message: p.refusals.secret_exists }))).toBeTruthy();
@@ -275,7 +276,7 @@ it('keeps an unconfirmed or mismatched wallet blocked outside the dialog, but no
   api.createVaultSecret.mockResolvedValue({ ok: false, code: 'secret_exists', message: 'exists' });
   api.getVaultHdReconciliation.mockResolvedValue({ ok: false, code: 'invalid_hd_wallet' });
   await launch();
-  await screen.findByText(fill(p.notice.unconfirmed, { name: NAME }));
+  await screen.findByText(p.nameTakenCreate);
   expect(isHdWalletBlocked(NAME)).toBe(false);
 });
 
