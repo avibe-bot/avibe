@@ -10,7 +10,7 @@ const origin = new URL(values.origin);
 if (origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1' || origin.username || origin.password) {
   throw new Error('fixture_loopback_origin_required');
 }
-if (!['inspect', 'enable', 'update-inspect', 'update-start', 'update-verify'].includes(values.action)) throw new Error('fixture_action_required');
+if (!['inspect', 'enable', 'disable', 'update-inspect', 'update-start', 'update-verify'].includes(values.action)) throw new Error('fixture_action_required');
 const updateAction = values.action.startsWith('update-');
 if (updateAction && !/^3\.2\.7rc\d+$/.test(values['current-version'] ?? '')) throw new Error('update_current_version_required');
 if (values.action === 'update-start' && !/^3\.2\.7rc\d+$/.test(values['target-version'] ?? '')) throw new Error('update_target_version_required');
@@ -44,6 +44,28 @@ async function navigateTo(url) {
     await pause(100);
   }
   throw new Error('cdp_navigation_not_complete');
+}
+// The #3815 Windows switch: click the real control and wait for the page's
+// own confirmation (it changes only when a later status read reports the
+// target). The caller separately requires the status endpoint to agree.
+async function settingsSwitch(target, state, stateExpression, deadline) {
+  if (!target && state.switch_tray_only) throw new Error('settings_switch_tray_only');
+  const from = target ? 'off' : 'on';
+  if (state.switch_state !== from || state.switch_disabled) throw new Error(target ? 'settings_switch_not_off' : 'settings_switch_not_on');
+  const clicked = await evaluate(`(() => {
+    const e = document.querySelector('[data-testid="computer-use-switch"]');
+    if (!e || e.disabled || !e.getClientRects().length) return false;
+    e.click(); return true;
+  })()`);
+  if (!clicked) throw new Error('settings_switch_not_clicked');
+  const done = target ? 'ready' : 'off';
+  while (Date.now() < deadline) {
+    state = await evaluate(stateExpression);
+    if (state.switch_failed) throw new Error('settings_switch_change_failed');
+    if (state.switch_state === (target ? 'on' : 'off') && state.status === done) return state;
+    await pause(250);
+  }
+  throw new Error(target ? 'settings_enable_not_ready' : 'settings_disable_not_confirmed');
 }
 async function updatePanel() {
   const current = values['current-version'];
@@ -212,7 +234,12 @@ try {
       preview: !!document.querySelector('[data-testid="computer-use-preview-badge"]'),
       enable: !!button && !button.disabled,
       failed: !!document.querySelector('[data-testid="computer-use-action-failed"]'),
-      shell: !!window.__AVIBE_DESKTOP_COMPUTER_USE__
+      shell: !!window.__AVIBE_DESKTOP_COMPUTER_USE__,
+      // #3815 Windows switch: shows only the server's authoritative opt-in.
+      switch_state: document.querySelector('[data-testid="computer-use-switch"]')?.getAttribute('data-switch-state') ?? null,
+      switch_disabled: document.querySelector('[data-testid="computer-use-switch"]')?.disabled ?? null,
+      switch_failed: !!document.querySelector('[data-testid="computer-use-switch-failed"]'),
+      switch_tray_only: !!document.querySelector('[data-testid="computer-use-switch-tray-only"]')
     };
   })()`;
   let state;
@@ -227,17 +254,23 @@ try {
     throw new Error(onRoute ? 'settings_page_not_ready' : 'settings_navigation_not_current');
   }
   if (values.action === 'enable') {
-    if (state.status !== 'off' || !state.preview || !state.enable || !state.shell) throw new Error('settings_default_off_preview_not_proven');
-    const clicked = await evaluate(`(() => { const b = document.querySelector('[data-testid="computer-use-action-enable"]'); if (!b || b.disabled) return false; b.click(); return true; })()`);
-    if (!clicked) throw new Error('settings_button_not_clicked');
-    while (Date.now() < deadline) {
-      state = await evaluate(stateExpression);
-      if (state.failed) throw new Error('settings_enable_action_failed');
-      if (state.status === 'ready' && !state.enable) break;
-      await pause(250);
+    if (state.status !== 'off' || !state.preview || !state.shell) throw new Error('settings_default_off_preview_not_proven');
+    if (state.switch_state !== null) {
+      state = await settingsSwitch(true, state, stateExpression, deadline);
+    } else {
+      if (!state.enable) throw new Error('settings_default_off_preview_not_proven');
+      const clicked = await evaluate(`(() => { const b = document.querySelector('[data-testid="computer-use-action-enable"]'); if (!b || b.disabled) return false; b.click(); return true; })()`);
+      if (!clicked) throw new Error('settings_button_not_clicked');
+      while (Date.now() < deadline) {
+        state = await evaluate(stateExpression);
+        if (state.failed) throw new Error('settings_enable_action_failed');
+        if (state.status === 'ready' && !state.enable) break;
+        await pause(250);
+      }
+      if (state.status !== 'ready' || state.enable) throw new Error('settings_enable_not_ready');
     }
-    if (state.status !== 'ready' || state.enable) throw new Error('settings_enable_not_ready');
   }
+  if (values.action === 'disable') state = await settingsSwitch(false, state, stateExpression, deadline);
   console.log(JSON.stringify({ ok: true, navigation_clicked: navigationClicked, ...state }));
   }
 } catch (error) {

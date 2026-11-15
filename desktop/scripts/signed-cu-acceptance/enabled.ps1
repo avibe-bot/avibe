@@ -35,6 +35,16 @@ function Invoke-EnabledCases([hashtable] $Context) {
         Set-CasePhase 'settings_enable_click'
         $null = Run-Process $node @((Join-Path $Root 'cdp.mjs'), '--port', [string]$cdpPort, '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--action', 'enable') 90
         Wait-Status 'ready'
+        # The authoritative opt-in, not readiness alone (#3815 switch contract).
+        if ((Status).enabled -ne $true) { throw 'settings_enabled_not_confirmed' }
+    }
+    # Off through the real Settings switch: the page shows the change only once
+    # a later status read reports enabled=false; then the endpoint must agree.
+    function Disable-FromSettings {
+        Set-CasePhase 'settings_disable_click'
+        $null = Run-Process $node @((Join-Path $Root 'cdp.mjs'), '--port', [string]$cdpPort, '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--action', 'disable') 90
+        Wait-Status 'off' 30
+        if ((Status).enabled -ne $false) { throw 'settings_disabled_not_confirmed' }
     }
     function Run-CaseTurn([string] $Case) {
         if (-not $Case.StartsWith('launch-')) {
@@ -185,8 +195,11 @@ function Invoke-EnabledCases([hashtable] $Context) {
         $elevated = $Evidence.elevated
         if ($elevated.type_ok -eq $true) { return @{verdict='FAIL'; reason='elevated_type_accepted_product_failure'} }
         if (-not ($Evidence.control.type_ok -eq $true -and $Evidence.control_text_verified)) { return @{verdict='FAIL'; reason='ordinary_control_window_unproven'} }
-        if ($elevated.pid_match -eq $true -and ($elevated.type_code -eq 'protected_window' -or $elevated.error_code -eq 'protected_window')) {
-            return @{verdict='PASS'; reason='real_elevated_notepad_control_refused_with_protected_window'}
+        # #3817 contract: code protected_window with params.reason=administrator.
+        $refused = ($elevated.type_code -eq 'protected_window' -and $elevated.type_reason -eq 'administrator') -or
+            ($elevated.error_code -eq 'protected_window' -and $elevated.error_reason -eq 'administrator')
+        if ($elevated.pid_match -eq $true -and $refused) {
+            return @{verdict='PASS'; reason='real_elevated_notepad_refused_with_protected_window_administrator'}
         }
         return @{verdict='FAIL'; reason='explicit_protected_window_refusal_missing'}
     }
@@ -203,16 +216,20 @@ function Invoke-EnabledCases([hashtable] $Context) {
         if ($initial.supported -ne $true -or $initial.status -ne 'off' -or $initial.host_platform -ne 'windows') { throw 'activation_default_off_not_proven' }
         Set-CasePhase 'settings_enable'
         Enable-FromSettings
-        Verdict 'settings_enable' 'PASS' 'real_settings_preview_turn_on_button_reached_ready'
+        Verdict 'settings_enable' 'PASS' 'real_settings_switch_turned_on_enabled_true_and_ready'
         $inputOnly = $Context.ContainsKey('InputOnly') -and $Context.InputOnly
-        if (-not $inputOnly) { Verdict 'survival_cu_off' 'NOT RUN' 'tray_off_unproven_independent_cases_continue' }
         $securityOnly = $Context.ContainsKey('SecurityOnly') -and $Context.SecurityOnly
         if ($securityOnly) {
             foreach ($id in @('survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash')) {
                 Verdict $id 'NOT RUN' 'security_only_scope'
             }
         }
-        $operations = if ($inputOnly) { @('off') } elseif ($securityOnly) { @() } else { @('quit', 'crash') }
+        # rc7 scope (Product): Off via the Settings switch, then the security
+        # cases. Quit and crash survival were proven on signed rc4 (43731926013).
+        if (-not $inputOnly -and -not $securityOnly) {
+            foreach ($id in @('survival_desktop_quit', 'survival_desktop_crash')) { Verdict $id 'NOT RUN' 'proven_on_signed_rc4_43731926013_outside_rc7_scope' }
+        }
+        $operations = if ($securityOnly) { @() } else { @('off') }
         foreach ($operation in $operations) {
             $currentCase = @{off='survival_cu_off'; quit='survival_desktop_quit'; crash='survival_desktop_crash'}[$operation]
             # Safety is established by owned-target cleanup, not by reaching a catch.
@@ -521,9 +538,7 @@ try {
                 }
                 Set-CasePhase ('lifecycle_' + $operation)
                 if ($operation -eq 'off') {
-                    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-                    $null = Run-Process $powershell @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $Root 'tray-off.ps1')) 30
-                    Wait-Status 'off' 30
+                    Disable-FromSettings
                 } elseif ($operation -eq 'quit') {
                     $Context.Desktop.Refresh()
                     [AcceptanceNative]::InvokeMenu($Context.Desktop.MainWindowHandle, 'Quit', $false)
@@ -644,8 +659,9 @@ try {
         $controlArguments = @('-multiInst', '-nosession', '-noPlugin', ('-settingsDir=' + $controlSettings))
         $elevatedScript = @"
 const code = (error) => typeof error?.code === 'string' && /^[a-z_]{1,64}$/.test(error.code) ? error.code : 'js_exception';
+const reasonOf = (error) => typeof error?.params?.reason === 'string' && /^[a-z_]{1,64}$/.test(error.params.reason) ? error.params.reason : null;
 const out = {
-  elevated: {phase: 'lookup', pid_match: null, type_attempted: false, type_ok: null, type_code: null, error_code: null},
+  elevated: {phase: 'lookup', pid_match: null, type_attempted: false, type_ok: null, type_code: null, type_reason: null, error_code: null, error_reason: null},
   control: {phase: 'app', pid: null, hwnd: null, type_ok: null, type_code: null, error_code: null},
 };
 try {
@@ -659,9 +675,9 @@ try {
   out.elevated.phase = 'type';
   out.elevated.type_attempted = true;
   try { await win.type('must-not-be-inserted'); out.elevated.type_ok = true; }
-  catch (error) { out.elevated.type_ok = false; out.elevated.type_code = code(error); }
+  catch (error) { out.elevated.type_ok = false; out.elevated.type_code = code(error); out.elevated.type_reason = reasonOf(error); }
   out.elevated.phase = 'done';
-} catch (error) { out.elevated.error_code = code(error); }
+} catch (error) { out.elevated.error_code = code(error); out.elevated.error_reason = reasonOf(error); }
 try {
   const target = await computer.app({path: $(ConvertTo-Json -InputObject $targetPath -Compress)});
   out.control.phase = 'launch';

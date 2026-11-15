@@ -22,14 +22,6 @@ function Run-Process([string] $File, [string[]] $Arguments, [int] $Seconds = 180
         if (-not $p.WaitForExit($Seconds * 1000)) { throw 'child_process_timeout' }
         $text = $stdout.GetAwaiter().GetResult(); $errors = $stderr.GetAwaiter().GetResult()
         if ($p.ExitCode -ne 0) {
-            if ($Arguments -contains (Join-Path $Root 'tray-off.ps1')) {
-                try {
-                    $detail = $text | ConvertFrom-Json
-                    if ($detail.reason -eq 'native_tray_off_unproven' -and $detail.phase -match '^[a-z_]+$' -and $detail.error_class -match '^[A-Za-z0-9_.]+$') {
-                        $result.native_tray_off = @{reason=$detail.reason; phase=$detail.phase; error_class=$detail.error_class; exit_code=$p.ExitCode}
-                    }
-                } catch { }
-            }
             if ($Arguments -contains (Join-Path $Root 'cdp.mjs')) {
                 try {
                     $detail = $text | ConvertFrom-Json -AsHashtable

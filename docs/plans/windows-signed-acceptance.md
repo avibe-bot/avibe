@@ -226,11 +226,23 @@ timestamped `NOTEPAD++` signature. Additional fixture preparation took about
 NOT RUN on rc3. That run's Settings DOM readiness timed out; the earlier CDP
 proof is not substituted for a fresh per-run prerequisite.
 
-Settings is an on-only **Turn on button**, not a switch. The native menu owns
-Off and Quit. Settings automation must click the shipped button in the actual
-installed WebView; the harness may not substitute a direct native invoke or a
-configuration write. Native menu automation discovers visible menu items and
-uses their normal Windows menu-command route. No screenshots are written.
+On rc3–rc6, Settings is an on-only **Turn on button** and the native menu owns
+Off and Quit. From rc7 (#3815), Windows Settings has an on/off **switch**
+(`computer-use-switch`). It shows only the server's authoritative `enabled`, and
+a change counts only once a later status read reports the target. The harness
+turns Computer Use on and off by clicking that switch in the installed WebView.
+It then requires the status endpoint to agree: `enabled=true` and `ready`, or
+`enabled=false` and `off`. A rejected, tray-only, disabled or unconfirmed change
+never passes. If no switch is present, the older on-only button is used.
+The harness never substitutes a direct native invoke or a configuration write.
+Quit still uses the native menu. No screenshots are written.
+
+rc7 scope (Product): one signed run with Off through the Settings switch, then the
+security cases. Quit and crash survival were proven on signed rc4 (`43731926013`)
+and are recorded NOT RUN out of scope. `elevated_app_refused` passes only on
+`protected_window` with `params.reason=administrator` (#3817), the parent's
+independent read showing the administrator document still empty, and a
+natively verified ordinary-window control.
 
 ## Unified update panel (signed rc5 → rc6, outcome-only)
 

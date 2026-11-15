@@ -146,7 +146,8 @@ else:
     $cdpPort = 1
     $result = @{cases = [ordered]@{}}
     $script:dryStatus = 'off'
-    function Invoke-RestMethod { return @{supported=$true; host_platform='windows'; status=$script:dryStatus} }
+    # Mirrors the endpoint's authoritative opt-in (#3815): enabled tracks the switch.
+    function Invoke-RestMethod { return @{supported=$true; host_platform='windows'; status=$script:dryStatus; enabled=($script:dryStatus -eq 'ready')} }
     function Verdict([string] $Id, [string] $Verdict, [string] $Reason) {
         $result.cases[$Id] = @{verdict=$Verdict; reason=$Reason}
         Write-AcceptanceEvidence $result (Join-Path $work 'result.json')

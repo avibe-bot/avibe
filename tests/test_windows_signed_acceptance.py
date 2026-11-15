@@ -100,6 +100,25 @@ def test_update_panel_oracle_rejects_stale_check_and_changed_offer(tmp_path):
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
 
 
+def test_settings_switch_oracle_requires_the_pages_own_confirmation(tmp_path):
+    # Execute the real settingsSwitch() against a fake #3815 switch: a change
+    # counts only once the page shows the server's new value; a rejected,
+    # tray-only, disabled or never-confirmed change must not pass.
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required for the hermetic switch oracle")
+    env = {key: value for key, value in os.environ.items() if key in {"PATH", "SystemRoot", "WINDIR"}}
+    for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        env[key] = str(tmp_path)
+    outcome = subprocess.run(
+        [node, str(ROOT / "tests/windows_signed_acceptance_switch.mjs"),
+         "--source", str(ROOT / "desktop/scripts/signed-cu-acceptance/cdp.mjs")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert "settings_switch_oracle_cases_passed" in outcome.stdout
+
+
 def test_enabled_generated_pipeline_preserves_faults_and_final_verdict(tmp_path):
     # Execute the same generator, tool command, wrapper, JS, receipt reader,
     # serializer and final gate. Only OS/CLI/desktop boundaries are inert. This

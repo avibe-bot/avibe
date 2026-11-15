@@ -61,10 +61,11 @@ if ($restored.security_fixture_receipt.diagnostics.security_fixture.failure.call
 $tokens=$null; $errors=$null
 $enabledAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $Source) 'enabled.ps1'),[ref]$tokens,[ref]$errors)
 $selection=$enabledAst.Find({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$operations'},$true)
-foreach ($shape in @(@($false,$true,0),@($false,$false,2),@($true,$false,1))) {
+# rc7 scope: security-only runs no lifecycle; enabled and the input dry gate run Off only.
+foreach ($shape in @(@($false,$true,''),@($false,$false,'off'),@($true,$false,'off'))) {
     $inputOnly=$shape[0]; $securityOnly=$shape[1]
     . ([scriptblock]::Create($selection.Extent.Text))
-    if (@($operations).Count -ne $shape[2]) { throw 'security_scope_selection_wrong' }
+    if ((@($operations) -join ',') -ne $shape[2]) { throw 'security_scope_selection_wrong' }
 }
 # Execute the real worker failure recorder: its generic failure cannot erase
 # the parent's concrete case verdict.
@@ -80,15 +81,21 @@ $cases += @{phase='security_only_selection_and_preserved_case';passed=$true}
 # classify. PASS only for the product's protected_window plus a verified control.
 $decisionFunction=$enabledAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Resolve-ElevatedAppVerdict'},$true)
 . ([scriptblock]::Create($decisionFunction.Extent.Text))
-function Shape($TypeOk,$TypeCode,$ErrorCode,$PidMatch,$ControlOk,$Verified) {
+function Shape($TypeOk,$TypeCode,$ErrorCode,$PidMatch,$ControlOk,$Verified,$Reason='administrator') {
     [pscustomobject]@{
-        elevated=[pscustomobject]@{pid_match=$PidMatch; type_ok=$TypeOk; type_code=$TypeCode; error_code=$ErrorCode}
+        elevated=[pscustomobject]@{pid_match=$PidMatch; type_ok=$TypeOk; type_code=$TypeCode; error_code=$ErrorCode
+            type_reason=$(if ($TypeCode) { $Reason } else { $null }); error_reason=$(if ($ErrorCode) { $Reason } else { $null })}
         control=[pscustomobject]@{type_ok=$ControlOk}; control_text_verified=$Verified
     }
 }
+$pass='real_elevated_notepad_refused_with_protected_window_administrator'
 foreach ($expected in @(
-    @((Shape $false 'protected_window' $null $true $true $true), 'PASS', 'real_elevated_notepad_control_refused_with_protected_window'),
-    @((Shape $null $null 'protected_window' $true $true $true), 'PASS', 'real_elevated_notepad_control_refused_with_protected_window'),
+    @((Shape $false 'protected_window' $null $true $true $true), 'PASS', $pass),
+    @((Shape $null $null 'protected_window' $true $true $true), 'PASS', $pass),
+    # #3817: the code alone is not enough; the reason must be administrator.
+    @((Shape $false 'protected_window' $null $true $true $true 'higher_integrity'), 'FAIL', 'explicit_protected_window_refusal_missing'),
+    @((Shape $false 'protected_window' $null $true $true $true $null), 'FAIL', 'explicit_protected_window_refusal_missing'),
+    @((Shape $false 'tool_invocation_failed' $null $true $true $true $null), 'FAIL', 'explicit_protected_window_refusal_missing'),
     @((Shape $true $null $null $true $true $true), 'FAIL', 'elevated_type_accepted_product_failure'),
     @((Shape $false 'protected_window' $null $true $true $false), 'FAIL', 'ordinary_control_window_unproven'),
     @((Shape $false 'protected_window' $null $true $false $false), 'FAIL', 'ordinary_control_window_unproven'),

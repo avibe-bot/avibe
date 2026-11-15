@@ -1,6 +1,6 @@
 # Shared value-free evidence path for the real harness and inert dry runner.
 function Copy-AcceptanceHarness([string] $Source, [string] $Destination) {
-    foreach ($file in @('user.ps1', 'evidence.ps1', 'inventory.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1', 'update.ps1', 'release.ps1')) {
+    foreach ($file in @('user.ps1', 'evidence.ps1', 'inventory.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'update.ps1', 'release.ps1')) {
         Copy-Item -LiteralPath (Join-Path $Source $file) -Destination (Join-Path $Destination $file) -ErrorAction Stop
     }
 }
@@ -44,7 +44,7 @@ function Merge-AcceptanceWorker([Collections.IDictionary] $Record, [Collections.
         if ($Worker.cases[$id].verdict -notin @('PASS', 'FAIL', 'NOT RUN')) { throw 'input_worker_verdict_invalid' }
         $Record.cases[$id] = $Worker.cases[$id]
     }
-    foreach ($field in @('update_outcome', 'elevated_app_evidence', 'security_fixture_diagnostics', 'native_tray_off', 'helper_identity_verified', 'failure', 'cleanup_errors', 'secondary_errors', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'default_off_probe_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified', 'installed_driver_sha256')) {
+    foreach ($field in @('update_outcome', 'elevated_app_evidence', 'security_fixture_diagnostics', 'helper_identity_verified', 'failure', 'cleanup_errors', 'secondary_errors', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'default_off_probe_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified', 'installed_driver_sha256')) {
         if ($Worker.Contains($field)) { $Record[$field] = $Worker[$field] }
     }
     $Record.worker_exit_code = $ExitCode

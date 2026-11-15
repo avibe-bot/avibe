@@ -26,7 +26,10 @@ $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_de
 $cases.second_interactive_session.reason = 'second_local_account_is_not_a_second_interactive_session'
 $cases.real_agent_turn.reason = 'no_model_credentials_owner_real_machine_check_required'
 $requiredCases = @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'uninstall', 'cleanup')
-if ($Mode -in @('enabled', 'security')) { $requiredCases += @('webview_cdp_preflight', 'model_stub_tool_path', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture') }
+# rc7 enabled scope (Product): Off via the Settings switch + security. Quit and
+# crash survival were proven on signed rc4 (43731926013); security mode omits Off.
+if ($Mode -eq 'enabled') { $requiredCases += @('webview_cdp_preflight', 'model_stub_tool_path', 'settings_enable', 'survival_cu_off', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture') }
+elseif ($Mode -eq 'security') { $requiredCases += @('webview_cdp_preflight', 'model_stub_tool_path', 'settings_enable', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture') }
 # Outcome-only update (Product 03:51): the installer is deliberately not observed.
 elseif ($Mode -eq 'update') { $requiredCases += @('webview_cdp_preflight', 'update_release_integrity', 'update_panel_start', 'update_relaunch', 'update_versions') }
 else { $requiredCases += 'feature_disabled' }
