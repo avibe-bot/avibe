@@ -81,7 +81,8 @@ async function updatePanel() {
     const state = element => element?.getAttribute('aria-checked') === 'true' ? true : element?.getAttribute('aria-checked') === 'false' ? false : null;
     const check = panel.querySelector('button[aria-label="Check for updates"]');
     return { panel_view: trusted ? 'trusted_shell' : 'workbench', current: current ? normalize(current) : null, offered: offered ? normalize(offered) : null,
-      status: panel.getAttribute('data-update-status'), auto_update: state(setting('Update automatically')),
+      status: panel.getAttribute('data-update-status'), checked_at: panel.querySelector('time[datetime]')?.getAttribute('datetime') ?? null,
+      bridge_error: trusted && !!document.querySelector('[role="alert"]'), auto_update: state(setting('Update automatically')),
       prereleases: state(setting('Get pre-release updates')), check_enabled: !!check && !check.disabled };
   })()`;
   let state;
@@ -92,6 +93,7 @@ async function updatePanel() {
   }
   if (state?.current !== current) throw new Error('update_current_version_row_unproven');
   if (typeof state.auto_update !== 'boolean' || typeof state.prereleases !== 'boolean') throw new Error('update_settings_unreadable');
+  if (state.bridge_error) throw new Error('update_bridge_request_failed');
   const automatic = state.auto_update;
   if (values.action === 'update-verify') return { ok: true, badge_clicked: true, current_row_verified: true, ...state };
   if (values.action === 'update-start' && !state.prereleases) {
@@ -109,6 +111,10 @@ async function updatePanel() {
   }
   if (!state?.check_enabled) throw new Error('update_check_button_unavailable');
   if (state.auto_update !== automatic) throw new Error('update_auto_setting_changed');
+  const previousReceipt = state.checked_at;
+  // A timestamp may have only second precision (including the channel-change
+  // check). Keep the explicit Check distinguishable from that previous receipt.
+  await pause(1100);
   const checked = await evaluate(`(() => {
     const e = document.querySelector('[data-update-panel] button[aria-label="Check for updates"]');
     if (!e || e.disabled || !e.getClientRects().length) return false;
@@ -118,22 +124,30 @@ async function updatePanel() {
   await pause(250);
   while (Date.now() < deadline) {
     state = await evaluate(panelExpression);
-    if (state && state.status !== 'checking' && state.check_enabled) break;
+    if (state?.bridge_error) throw new Error('update_bridge_request_failed');
+    if (state && ['check-failed', 'update-failed', 'disabled', 'unknown'].includes(state.status)) throw new Error('update_check_failed');
+    if (state?.check_enabled && ['current', 'available'].includes(state.status) && state.checked_at && state.checked_at !== previousReceipt) break;
     await pause(250);
   }
-  if (!state || state.status === 'checking' || !state.check_enabled) throw new Error('update_check_did_not_settle');
+  if (!state?.check_enabled || !['current', 'available'].includes(state.status) || !state.checked_at || state.checked_at === previousReceipt) throw new Error('update_fresh_check_receipt_unproven');
   if (state.auto_update !== automatic) throw new Error('update_auto_setting_changed');
-  if (['check-failed', 'update-failed', 'disabled', 'unknown'].includes(state.status)) throw new Error('update_check_failed');
-  if (values.action === 'update-inspect') return { ok: true, badge_clicked: true, check_clicked: true, ...state };
+  if (values.action === 'update-inspect') return { ok: true, badge_clicked: true, check_clicked: true, fresh_check: true, ...state };
   if (state.status !== 'available' || state.offered !== targetVersion) throw new Error('update_target_not_discoverable');
-  const clicked = await evaluate(`(() => {
-    const buttons = [...document.querySelectorAll('[data-update-panel] button')]
+  const receipt = await evaluate(`(() => {
+    // No asynchronous gap between reading this offer and clicking its handler.
+    const fresh = ${panelExpression};
+    if (!fresh || fresh.bridge_error || fresh.current !== ${JSON.stringify(current)} ||
+        fresh.offered !== ${JSON.stringify(targetVersion)} || fresh.status !== 'available' ||
+        fresh.auto_update !== ${JSON.stringify(automatic)}) return {clicked: false, reason: 'update_offer_changed_before_click'};
+    const panels = [...document.querySelectorAll('[data-update-panel]')].filter(e => e.getClientRects().length);
+    if (panels.length !== 1) return {clicked: false, reason: 'update_button_click_unproven'};
+    const buttons = [...panels[0].querySelectorAll('button')]
       .filter(e => e.textContent.trim() === 'Update' && !e.disabled && e.getClientRects().length);
-    if (buttons.length !== 1) return false;
-    buttons[0].click(); return true;
+    if (buttons.length !== 1) return {clicked: false, reason: 'update_button_click_unproven'};
+    buttons[0].click(); return {clicked: true, state: fresh};
   })()`);
-  if (!clicked) throw new Error('update_button_click_unproven');
-  return { ok: true, badge_clicked: true, check_clicked: true, update_clicked: true, ...state };
+  if (!receipt.clicked) throw new Error(receipt.reason);
+  return { ok: true, badge_clicked: true, check_clicked: true, fresh_check: true, update_clicked: true, ...receipt.state };
 }
 try {
   const response = await fetch(`http://127.0.0.1:${Number(values.port)}/json/list`, { signal: AbortSignal.timeout(5000) });

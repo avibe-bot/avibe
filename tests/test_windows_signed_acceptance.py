@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 from threading import Thread
 from urllib.request import Request, urlopen
 
@@ -46,6 +49,21 @@ def test_draft_workflow_cannot_dispatch_or_receive_release_write_authority():
         "${{ runner.temp }}/signed-cu-evidence/verdict.json",
         "${{ runner.temp }}/signed-cu-evidence/verdict.md",
     ]
+
+
+def test_update_panel_oracle_rejects_stale_check_and_changed_offer(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required for the hermetic CDP-oracle VM")
+    env = {key: value for key, value in os.environ.items() if key in {"PATH", "SystemRoot", "WINDIR"}}
+    for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        env[key] = str(tmp_path)
+    outcome = subprocess.run(
+        [node, str(ROOT / "tests/windows_signed_acceptance_oracle.mjs"),
+         "--source", str(ROOT / "desktop/scripts/signed-cu-acceptance/cdp.mjs")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
 
 
 def request(marker="launch-off", tool="powershell"):

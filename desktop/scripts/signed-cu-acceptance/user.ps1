@@ -234,17 +234,17 @@ try {
         } catch { Verdict 'elevated_target_query_preflight' 'NOT RUN' 'elevated_target_query_access_unproven' }
         # Follow-on preparation only, after the CU/shared fixture prerequisites.
         # No Update click occurs until an explicitly selected public candidate.
-        if ($result.cases.webview_cdp_preflight.verdict -eq 'PASS') {
+        if ($result.cases.webview_cdp_preflight.verdict -eq 'PASS' -and $result.cases.real_win32_fixture_preflight.verdict -eq 'PASS' -and $result.cases.elevated_target_query_preflight.verdict -eq 'PASS') {
             try {
                 $panel = Run-Process $node @((Join-Path $Root 'cdp.mjs'), '--port', [string]$cdpPort, '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--action', 'update-inspect', '--current-version', $inputData.release_version) 90 | ConvertFrom-Json
-                if (-not ($panel.ok -and $panel.badge_clicked -and $panel.check_clicked) -or $panel.current -ne $inputData.release_version) { throw 'update_panel_preflight_unproven' }
-                $result.update_panel_preflight = @{ current = $panel.current; panel_view = $panel.panel_view; auto_update = $panel.auto_update; prereleases = $panel.prereleases }
-                Verdict 'unified_update_panel_preflight' 'PASS' 'real_version_badge_and_check_clicked_current_row_verified_no_update_attempt'
+                if (-not ($panel.ok -and $panel.badge_clicked -and $panel.check_clicked -and $panel.fresh_check) -or $panel.current -ne $inputData.release_version) { throw 'update_panel_preflight_unproven' }
+                $result.update_panel_preflight = @{ current = $panel.current; fresh_check = $panel.fresh_check; panel_view = $panel.panel_view; auto_update = $panel.auto_update; prereleases = $panel.prereleases }
+                Verdict 'unified_update_panel_preflight' 'PASS' 'real_version_badge_and_check_clicked_fresh_terminal_receipt_and_current_row_verified_no_update_attempt'
             } catch {
                 $reason = if ($result.Contains('cdp_detail') -and $result.cdp_detail -match '^update_[a-z_]+$') { $result.cdp_detail } else { 'unified_update_panel_click_unproven' }
                 Verdict 'unified_update_panel_preflight' 'NOT RUN' $reason
             }
-        } else { Verdict 'unified_update_panel_preflight' 'NOT RUN' 'shared_cdp_prerequisite_not_proven_on_this_run' }
+        } else { Verdict 'unified_update_panel_preflight' 'NOT RUN' 'shared_cu_fixture_prerequisite_not_proven_on_this_run' }
     }
     if ($inputData.mode -eq 'enabled') {
         $stage = 'settings_enable'
