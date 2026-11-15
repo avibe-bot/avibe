@@ -329,7 +329,15 @@ export const SettingsComputerUsePage: FC = () => {
           : <LoaderCircle className="size-4 shrink-0 animate-spin" aria-hidden="true" />}
         <div className="min-w-0">
           <p className="font-semibold">{copy?.label ?? t('settings.computerUse.loading')}</p>
-          {copy && <p className="mt-0.5 text-[11px] opacity-80">{copy.detail}</p>}
+          {copy && (
+            <p className="mt-0.5 text-[11px] opacity-80">
+              {/* The shared "off" detail points at the native control; a Windows page that can
+                  switch it here points at its own switch instead. Older shells keep the shared text. */}
+              {windows && status?.status === 'off' && actions?.enable
+                ? t('settings.computerUse.windows.switch.offDetail')
+                : copy.detail}
+            </p>
+          )}
         </div>
       </div>
 

@@ -578,6 +578,9 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(screen.getByText('settings.computerUse.windows.subtitle')).toBeTruthy();
     expect(screen.getByText('settings.computerUse.windows.switch.description')).toBeTruthy();
     expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.stateOff');
+    // The status band points at this switch, not only the native control.
+    expect(screen.getByTestId('computer-use-guide-status').textContent).toContain('settings.computerUse.windows.switch.offDetail');
+    expect(screen.queryByText('workbench.home.computerUse.offDetail')).toBeNull();
     for (const note of ['apps', 'elevated', 'launch', 'stop']) {
       expect(screen.getByTestId(`computer-use-windows-${note}`).textContent)
         .toBe(`settings.computerUse.windows.${note}`);
@@ -740,6 +743,15 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'toggle_off' });
     await user.click(screen.getByRole('button', { name: /settings\.computerUse\.recheck/ }));
     await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'));
+  });
+
+  it('keeps the shared off detail where this page cannot switch it', async () => {
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
+
+    render(<SettingsComputerUsePage />);
+
+    expect(await screen.findByText('workbench.home.computerUse.offDetail')).toBeTruthy();
+    expect(screen.queryByText('settings.computerUse.windows.switch.offDetail')).toBeNull();
   });
 
   it('never offers an Off an older shell cannot perform', async () => {

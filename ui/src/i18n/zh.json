@@ -821,7 +821,8 @@
           "turningOn": "正在开启…",
           "turningOff": "正在关闭…",
           "failed": "未能更改电脑操作状态。请查看上方状态提示后重试。",
-          "trayOnly": "请从 Avibe 托盘菜单中关闭。"
+          "trayOnly": "请从 Avibe 托盘菜单中关闭。",
+          "offDetail": "使用下方开关开启电脑操作。"
         }
       }
     },

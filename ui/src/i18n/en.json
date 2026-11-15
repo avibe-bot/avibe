@@ -821,7 +821,8 @@
           "turningOn": "Turning on…",
           "turningOff": "Turning off…",
           "failed": "Could not change Computer Use. Check the status above and try again.",
-          "trayOnly": "Turn it off from the Avibe tray menu."
+          "trayOnly": "Turn it off from the Avibe tray menu.",
+          "offDetail": "Use the switch below to turn on Computer Use."
         }
       }
     },
