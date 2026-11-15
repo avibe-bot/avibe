@@ -16,8 +16,9 @@ import { availableParallelism } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { chromium } from '@playwright/test';
 import { createServer } from 'vite';
+
+import { launchSafeBrowser, assertSafePage } from './safe-browser.mjs';
 
 import { parseShotShard, selectShotTasks } from './design-shot-selection.mjs';
 
@@ -37,14 +38,21 @@ const canvas = option('canvas', 'canvas');
 const jobs = Math.max(1, Number(option('jobs', String(Math.min(4, Math.max(1, availableParallelism() - 1))))));
 const shard = parseShotShard(option('shard', null));
 if (shard && manifestPath) throw new Error('--shard cannot be combined with --manifest; use independent CI outputs');
+if (args.some((arg) => arg.startsWith('--'))) throw new Error('Unknown design-shot option; headed/focus/debug modes are not supported');
 const prefixes = args;
 const started = Date.now();
 
 const server = await createServer({ root: uiRoot, logLevel: 'error', server: { port: 0, strictPort: false } });
 await server.listen();
 const base = server.resolvedUrls.local[0];
-const browser = await chromium.launch();
-const context = await browser.newContext({ deviceScaleFactor: 2 });
+let browser;
+try {
+  browser = await launchSafeBrowser({ contextOptions: { deviceScaleFactor: 2 } });
+} catch (error) {
+  await server.close();
+  throw error;
+}
+const { context } = browser;
 
 // Each frame gets a fresh page. One page navigated from frame to frame for the whole run
 // occasionally stopped evaluating a frame's modules after a hundred or so navigations: the
@@ -124,6 +132,7 @@ async function shoot(frame, t) {
     const file = join(out, `${frame.id}.${t}.png`);
     await mkdir(dirname(file), { recursive: true });
     // The viewport is the frame, so popovers and dialogs portaled to <body> are captured too.
+    await assertSafePage(page);
     const png = await page.screenshot({ path: file, animations: 'disabled', clip: { x: 0, y: 0, width: frame.width, height: frame.height } });
     const unfixtured = await page.evaluate(() => window.__DESIGN__.unfixtured());
     return {
