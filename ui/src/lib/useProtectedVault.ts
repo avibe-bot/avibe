@@ -67,6 +67,22 @@ const sessionVault: {
 let rootEpoch = 0;
 let lockEpoch = 0;
 
+// The root whose key this tab's sandbox client may hold (it set up or unlocked under it). The
+// sandbox answers `status` unlocked for any root while it holds a key, so a different root must
+// never be asked about on that client: a seal there would label a record with a root it cannot open.
+let sandboxRoot: string | null = null;
+
+function dropSandboxClient(): void {
+  sandboxRoot = null;
+  resetVaultSandboxClient();
+}
+
+/** The sandbox client to ask about `root`: a fresh one if the current one may hold another root's key. */
+function sandboxClientFor(root: string) {
+  if (sandboxRoot !== null && sandboxRoot !== root) dropSandboxClient();
+  return getVaultSandboxClient();
+}
+
 /** Every change to what this tab knows about the Vault root goes through here. */
 function writeRoot(
   wrapMeta: string | null,
@@ -185,6 +201,7 @@ function applyVaultStateEvent(event: VaultStateEvent): void {
     // guard anyway so a stray event can't flip us to a wrapMeta-less "unlocked".
     if (!sessionVault.wrapMeta) return;
     lockEpoch += 1;
+    sandboxRoot = sessionVault.wrapMeta;
     sessionVault.status = 'unlocked';
     if (typeof event.expiresAt === 'number' && Number.isFinite(event.expiresAt)) vaultLockExpiresAt = event.expiresAt;
     if (!sessionVault.durableSetupPending) notifyVaultLockChange();
@@ -216,7 +233,7 @@ function applyPolicyResetLock(): void {
   // Invalidate the parent policy mirror too: the reset is a tightening, so if the next handshake's
   // settings fetch fails we must fail closed (strict) rather than re-pin the old confirmed policy.
   invalidateVaultSandboxPolicy();
-  resetVaultSandboxClient();
+  dropSandboxClient();
 }
 
 // Broadcast a policy reset to every tab (including this one): all drop their pinned sandbox client
@@ -254,6 +271,7 @@ function commitUnlocked(
 ): void {
   writeRoot(baseVmkWrapMeta(wrapMeta), freshSetup, authzFactorRegistration, Boolean(options.deferNotification));
   sessionVault.status = 'unlocked';
+  sandboxRoot = sessionVault.wrapMeta;
   lockEpoch += 1;
   // A setup root is not usable by the create flow until its root+factor POST has answered. Keep the
   // sandbox material for a same-proof retry, but do not notify hooks or expose an unlocked state.
@@ -275,6 +293,7 @@ function mirrorSandboxStatus(answer: VaultSandboxStatusResult | null, askedAt: n
   lockEpoch += 1;
   if (answer?.state === 'unlocked') {
     sessionVault.status = 'unlocked';
+    sandboxRoot = sessionVault.wrapMeta;
     vaultLockExpiresAt = typeof answer.expiresAt === 'number' && Number.isFinite(answer.expiresAt) ? answer.expiresAt : null;
   } else {
     sessionVault.status = 'locked';
@@ -294,7 +313,7 @@ async function discoverVaultRoot(api: DiscoveryApi): Promise<Discovery> {
   try {
     const res = await api.getVaultVmk();
     if (!res?.ok) throw new Error('vmk-discovery-failed');
-    const sandbox = await getVaultSandboxClient();
+    await getVaultSandboxClient();
     // A sandbox client now exists for this tab (even while locked); make sure the cross-tab lock
     // channel is live so a policy `reset` broadcast reaches this tab and drops its pinned client.
     getVaultLockChannel();
@@ -305,7 +324,7 @@ async function discoverVaultRoot(api: DiscoveryApi): Promise<Discovery> {
       let answer: VaultSandboxStatusResult | null = null;
       let statusError: unknown = null;
       try {
-        answer = await sandbox.status(root);
+        answer = await (await sandboxClientFor(root)).status(root);
       } catch (error) {
         statusError = error ?? new Error('vmk-discovery-failed');
       }
@@ -436,7 +455,7 @@ export async function setupVaultDurably(
       // learned another root (its `status` does not tell roots apart): always drop that client, so
       // nothing is sealed under the refused key, and lock the mirror. The page's setup is discarded
       // only if it is still the one that was posted.
-      resetVaultSandboxClient();
+      dropSandboxClient();
       clearUnlockState({ discardPendingSetup: stillPosted });
       notifyVaultLockChange();
     }
@@ -457,7 +476,7 @@ export async function setupVaultDurably(
     lockEpoch += 1;
     const rootAt = rootEpoch;
     const askedAt = lockEpoch;
-    const answer = await getVaultSandboxClient()
+    const answer = await sandboxClientFor(root)
       .then((sandbox) => sandbox.status(root))
       .catch(() => null);
     if (rootAt === rootEpoch) mirrorSandboxStatus(answer, askedAt);
@@ -619,6 +638,7 @@ export function useProtectedVault() {
     if (sessionVault.durableSetupPending) return;
     const rootAt = rootEpoch;
     const askedAt = lockEpoch;
+    // The sandbox has just opened this record, so a key it holds is this record's root's.
     const sandbox = await getVaultSandboxClient();
     const baseWrapMeta = baseVmkWrapMeta(wrapMeta);
     const answer = await sandbox.status(baseWrapMeta);

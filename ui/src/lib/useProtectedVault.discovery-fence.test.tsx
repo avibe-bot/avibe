@@ -195,12 +195,38 @@ it('drops the refused setup key from the sandbox even when the server root was a
   const surface = renderHook(() => vault.useProtectedVault());
   await act(async () => { await surface.result.current.refresh(); });
 
+  const resetsBefore = resetClient.mock.calls.length;
   commit.resolve({ ok: false, code: 'vault_already_initialized' });
   await act(async () => { await expect(setup).rejects.toMatchObject({ code: 'vault_already_initialized' }); });
-  expect(resetClient).toHaveBeenCalledOnce();
+  expect(resetClient).toHaveBeenCalledTimes(resetsBefore + 1);
   expect(vault.vaultUnlocked()).toBe(false);
   expect(surface.result.current.status).toBe('locked');
   expect(surface.result.current.hasPasskey()).toBe(true);
+});
+
+describe('discovery after an unanswered setup commit', () => {
+  // The commit got no answer, so this tab keeps its setup and the sandbox keeps that root's key
+  // unlocked. The sandbox `status` answers unlocked for any root while it holds a key.
+  it.each([
+    { found: 'another root committed elsewhere', serverRoot: SERVER_ROOT, resets: 1, unlocked: false, status: 'locked' },
+    { found: 'this setup, committed after all', serverRoot: LOSING_ROOT, resets: 0, unlocked: true, status: 'unlocked' },
+  ])('finding $found', async ({ serverRoot, resets, unlocked, status }) => {
+    sandbox.setup.mockResolvedValue({ wrapMeta: LOSING_ROOT, authzRegistration: registration, state: 'unlocked' });
+    api.completeVaultSetup.mockRejectedValueOnce(new Error('offline'));
+    sandbox.status.mockResolvedValue({ state: 'unlocked', expiresAt: Date.now() + 60_000 });
+    const hook = renderHook(() => vault.useProtectedVault());
+    await act(async () => {
+      await expect(hook.result.current.setupPasskey()).rejects.toMatchObject({ code: 'network_error' });
+    });
+
+    api.getVaultVmk.mockResolvedValue({ ok: true, exists: true, wrap_meta: serverRoot });
+    await act(async () => { await hook.result.current.refresh(); });
+    // A key for another root is never treated as this root's: nothing could open what it seals.
+    expect(resetClient).toHaveBeenCalledTimes(resets);
+    expect(vault.vaultUnlocked()).toBe(unlocked);
+    expect(hook.result.current.status).toBe(status);
+    expect(vault.vaultFreshSetup()).toBe(false);
+  });
 });
 
 it('keeps an unanswered setup for an identical retry when an older empty read lands', async () => {
