@@ -444,10 +444,19 @@ export function useProtectedVault() {
 
   const setupPasskey = useCallback(async () => {
     const result = await setupVaultDurably(api);
-    if (!result.ok) throw Object.assign(new Error(result.code), { code: result.code });
+    if (!result.ok) {
+      // A concurrent tab may have established the root between options discovery and this
+      // ceremony. Reconcile the committed root immediately so the open dialog offers unlock
+      // instead of leaving the user in a repeatable setup conflict.
+      if (result.code === 'vault_already_initialized') {
+        await refresh();
+        setStatus(vaultStatusNow());
+      }
+      throw Object.assign(new Error(result.code), { code: result.code });
+    }
     setStatus(vaultStatusNow());
     setError(null);
-  }, [api]);
+  }, [api, refresh]);
 
   const unlockPasskey = useCallback(async () => {
     assertDurableSetupReady();
