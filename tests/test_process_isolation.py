@@ -170,6 +170,51 @@ def test_probe_tells_an_empty_pid_apart_from_one_it_cannot_read(
     assert probe_process_liveness(12345) == "unknown"
 
 
+@pytest.mark.parametrize("exit_error", [psutil.NoSuchProcess(12345), ProcessLookupError()])
+def test_reap_does_not_count_exit_during_identity_read_as_termination(
+    monkeypatch: pytest.MonkeyPatch, exit_error: BaseException,
+) -> None:
+    """Creation time can still be readable when the environment says it exited.
+
+    In particular, Windows can retain an exited process object after Popen.wait.
+    Recovery must not turn that exit into an unreadable live identity, then
+    mistake the termination helper's already-gone success for a fresh reap.
+    """
+    reads = []
+
+    def exited_environment():
+        raise exit_error
+
+    def open_process(pid):
+        reads.append(pid)
+        if len(reads) == 1:
+            return SimpleNamespace(create_time=lambda: 123.0, environ=exited_environment)
+        raise psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr(process_isolation.psutil, "Process", open_process)
+    monkeypatch.setattr(process_isolation, "process_group_exists", lambda *_args: False)
+
+    assert reap_orphaned_process_tree(
+        logging.getLogger(__name__), "already stopped worker", expected_identity=_persisted_identity(),
+    ) == "gone"
+    assert reads == [12345], "a conclusively exited leader must not enter PID termination"
+
+
+def test_identity_keeps_an_unreadable_environment_distinct_from_an_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied_environment():
+        raise psutil.AccessDenied(12345)
+
+    process = SimpleNamespace(create_time=lambda: 123.0, environ=denied_environment)
+    monkeypatch.setattr(process_isolation.psutil, "Process", lambda _pid: process)
+
+    assert probe_process_liveness(12345) == "alive"
+    assert inspect_process_identity(12345) == ProcessIdentity(
+        pid=12345, create_time=123.0, worker_fingerprint=None, marker_readable=False,
+    )
+
+
 _LEADER_THAT_LEAVES_A_CHILD = (
     "import os, subprocess, sys, time\n"
     "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3600)'])\n"

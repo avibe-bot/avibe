@@ -107,9 +107,13 @@ def test_native_launch_witness_recovery_reports_the_reaped_engine(tmp_path, monk
         assert first.poll() is not None
         assert "Reaped a Model Hub engine left running by an earlier service" in caplog.text
         owner.ensure_running()
-        assert supervisor._process.pid != first.pid
+        second = supervisor._process
+        assert second.pid != first.pid
         caplog.clear()
         supervisor.stop_for_activation()
+        assert second.poll() is not None
+        assert not supervisor._engine_record_path.exists()
+        assert "Reaped a Model Hub engine left running by an earlier service" not in caplog.text
         owner.recover()
         assert "Reaped a Model Hub engine left running by an earlier service" not in caplog.text
     finally:
