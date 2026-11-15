@@ -6442,7 +6442,7 @@
       "nameRequiredWallet": "Enter a name to create the wallet.",
       "createNeedsValue": "Enter a value to create the secret.",
       "createNeedsWords": "Paste the recovery words to import the wallet.",
-      "createNeedsKey": "Paste or choose the key to import.",
+      "createNeedsKey": "Paste the private key to import.",
       "createNeedsProtected": "Set up or unlock Protected above first.",
       "createNeedsAvault": "Install or update avault as shown above first."
     },

@@ -6442,7 +6442,7 @@
       "nameRequiredWallet": "请先填写名称，再创建钱包。",
       "createNeedsValue": "请先填写值，再创建密钥。",
       "createNeedsWords": "请先粘贴助记词，再导入钱包。",
-      "createNeedsKey": "请先粘贴或选择要导入的私钥。",
+      "createNeedsKey": "请先粘贴要导入的私钥。",
       "createNeedsProtected": "请先在上方设置或解锁保护档。",
       "createNeedsAvault": "请先按上方提示安装或更新 avault。"
     },

@@ -604,24 +604,34 @@ export const VaultSecretForm: React.FC<{
         : (protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   // Why Create is disabled, one reason at a time and in the order the form is filled in: the name,
-  // then what the key needs, then the tier's readiness. Problems already said by a field (a bad name,
-  // a wrong word, a passphrase that doesn't match) are not repeated here.
+  // then what the key needs, then the tier's readiness. A reason is shown only when the user can act
+  // on it right here and no field or notice already says it (a bad name or word, a field row's name,
+  // a key that doesn't parse, a vault still loading or in error): then nothing is added.
+  const fieldRowsNamed = !fieldRows || (fieldRows.every((field) => VAULT_FIELD_PATTERN.test(field.name))
+    && new Set(fieldRows.map((field) => field.name)).size === fieldRows.length);
   const createBlockedReason = (() => {
     if (isEdit || canSubmit || submitting) return null;
     if (isProtectedHd && (protectedHdBusy(protectedHd.phase) || protectedHdSubmitted(protectedHd.phase))) return null;
     if (!fixedName && !secretName) return t(isHd ? 'vaults.dialog.nameRequiredWallet' : 'vaults.dialog.nameRequired');
     if (nameInvalid || currentNameIssue) return null;
     if (!valueReady) {
-      if (!isKeypair) return t('vaults.dialog.createNeedsValue');
+      if (!isKeypair) {
+        if (fieldRows) return fieldRowsNamed && fieldRows.some((field) => !field.value) ? t('vaults.dialog.createNeedsValue') : null;
+        return staticSource === 'text' && !value ? t('vaults.dialog.createNeedsValue') : null;
+      }
       if (isHd) return signingSource === 'import' && !hdImport.trim() ? t('vaults.dialog.createNeedsWords') : null;
-      return t('vaults.dialog.createNeedsKey');
+      return (isSolanaKey ? solanaImport : importHex).trim() ? null : t('vaults.dialog.createNeedsKey');
     }
     if (entryIssue || checkingAvault) return null;
     if (protection === 'protected') {
-      if (isHd ? protectedHdSupported !== false && !protectedHdReady : !protectedCreateReady) return t('vaults.dialog.createNeedsProtected');
-      return null;
+      // Only where the panel above offers the step: setting up (and, for a key, unlocking).
+      const status = protectedVaultStatus;
+      const actionable = isHd ? protectedHdSupported !== false && status === 'needs-setup' : status === 'needs-setup' || status === 'locked';
+      return actionable ? t('vaults.dialog.createNeedsProtected') : null;
     }
-    return (isHd ? !hdReady : !p2Ready) ? t('vaults.dialog.createNeedsAvault') : null;
+    // On a seed wallet the avault notice is drawn only once avault was read.
+    if (isHd) return !hdReady && avaultDep ? t('vaults.dialog.createNeedsAvault') : null;
+    return !p2Ready ? t('vaults.dialog.createNeedsAvault') : null;
   })();
 
   const clearSelectedFile = useCallback(() => {

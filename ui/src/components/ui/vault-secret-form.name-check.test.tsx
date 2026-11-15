@@ -44,8 +44,9 @@ const vault = vi.hoisted(() => ({
   sealHdWallet: vi.fn(),
 }));
 const popup = vi.hoisted(() => ({ opened: 0, close: vi.fn() }));
+const sandbox = vi.hoisted(() => ({ supported: true as boolean | null, warm: true }));
 vi.mock('@/context/ApiContext', async (original) => ({ ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api }));
-vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, useProtectedHdSupported: () => true, useVaultSandboxWarm: () => true }));
+vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, useProtectedHdSupported: () => sandbox.supported, useVaultSandboxWarm: () => sandbox.warm }));
 vi.mock('@/lib/vaultSandboxClient', async (original) => ({
   ...await original<typeof import('@/lib/vaultSandboxClient')>(),
   openVaultAuthorizationWindow: () => {
@@ -91,6 +92,9 @@ const openWallet = async (source: 'generate' | 'import' = 'generate', tier: 'pro
 beforeEach(() => {
   vi.stubGlobal('isSecureContext', true);
   sessionStorage.clear();
+  vault.status = 'locked';
+  sandbox.supported = true;
+  sandbox.warm = true;
   taken();
   api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.12' }] });
   popup.opened = 0;
@@ -329,4 +333,54 @@ it('a handoff that asks for Protected is not lowered by a tier chosen before', a
   render(<I18nextProvider i18n={i18n}><AsOwner><VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} defaultProtection="protected" /></AsOwner></I18nextProvider>);
   await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
   expect(protectedCard().getAttribute('aria-pressed')).toBe('true');
+});
+
+it('adds no reason where a field already says what is wrong, or where nothing can be done yet', async () => {
+  mount();
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.change(nameBox(), { target: { value: 'API_TOKEN' } });
+  // A file source with no file: the file picker is the step, not "enter a value".
+  fireEvent.click(screen.getByRole('radio', { name: 'File' }));
+  expect(screen.queryByText(d.createNeedsValue)).toBeNull();
+  // Field rows: a row whose name is wrong says so itself, even with a value left empty.
+  fireEvent.click(screen.getByRole('radio', { name: 'Text' }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.add }));
+  fireEvent.change(screen.getByLabelText('Field 1 name'), { target: { value: '1bad' } });
+  expect(screen.queryByText(d.createNeedsValue)).toBeNull();
+  fireEvent.change(screen.getByLabelText('Field 1 name'), { target: { value: 'username' } });
+  screen.queryAllByLabelText(/^Field \d+ name$/).slice(1).forEach((input, index) => fireEvent.change(input, { target: { value: `field_${index + 2}` } }));
+  expect(screen.getByText(d.createNeedsValue)).toBeTruthy();
+  cleanup();
+
+  // A pasted key that doesn't parse: the key box says so; no "paste the key" beside Create.
+  mount();
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.change(nameBox(), { target: { value: 'SIGNER' } });
+  fireEvent.click(screen.getByRole('radio', { name: d.kindKeypair }));
+  fireEvent.click(screen.getByRole('radio', { name: d.signingImport }));
+  expect(screen.getByText(d.createNeedsKey)).toBeTruthy();
+  fireEvent.change(screen.getByRole('textbox', { name: d.signingImport }), { target: { value: 'not-a-key' } });
+  expect(screen.getByText(en.vaults.dialog.errors.invalidPrivateKey)).toBeTruthy();
+  expect(screen.queryByText(d.createNeedsKey)).toBeNull();
+  cleanup();
+
+  // A protected seed wallet while the secure window's code still loads, a locked vault being enough.
+  sandbox.supported = null;
+  sandbox.warm = false;
+  await openWallet('generate');
+  expect(screen.queryByText(d.createNeedsProtected)).toBeNull();
+  cleanup();
+  // ...or while the vault is still being checked, or in error (its panel speaks).
+  for (const status of ['checking', 'error']) {
+    vault.status = status;
+    await openWallet('generate');
+    expect(screen.queryByText(d.createNeedsProtected)).toBeNull();
+    cleanup();
+  }
+  // No vault yet: the panel above sets one up, and the reason points there.
+  vault.status = 'needs-setup';
+  sandbox.supported = true;
+  sandbox.warm = true;
+  await openWallet('generate');
+  expect(screen.getByText(d.createNeedsProtected)).toBeTruthy();
 });
