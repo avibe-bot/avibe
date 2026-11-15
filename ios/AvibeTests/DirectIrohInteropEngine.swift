@@ -7,8 +7,10 @@ import IrohLib
 final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
     struct Snapshot: Sendable {
         var streams = 0
+        var successfulConnects = 0
         var probes: [Int] = []
         var connectFailure: String?
+        var peerFailure: String?
         var nativeCalls = 0
         var connectionsClosed = 0
     }
@@ -36,22 +38,39 @@ final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
     }
 
     static func rejection(kind: IrohLib.IrohErrorKind, debug: String) -> String? {
-        // Fail closed on unfamiliar native failures. In particular the outer
-        // .connect category also wraps local deadlines and local shutdown.
-        let description = debug.lowercased().filter { $0.isLetter || $0.isNumber }
-        guard !["timeout", "timedout", "locallyclosed", "locallyrejected", "localclosed"].contains(where: description.contains) else { return nil }
-        let peerFailure = ["handshakefailure", "transporterror", "connectionclosed", "applicationclosed", "connectionreset", "resetbythepeer"]
-            .contains(where: description.contains)
-        guard peerFailure else { return nil }
+        // Pinned n0-error ordinary Debug uses Display-based reports, not
+        // Rust enum names (FFI error.rs from_debug -> report(self).full()).
+        let text = debug.lowercased()
         switch kind {
-        case .connect: return "handshake"
-        case .connection: return "closed_by_peer"
+        case .connect:
+            // ConnectError is n0-error StackError: normal Debug renders the
+            // Display chain. Never infer rejection from its outer kind alone.
+            guard !["timed out", "timeout", "connection was rejected locally"].contains(where: text.contains) else { return nil }
+            let peer = ["closed by peer:", "aborted by peer:", "reset by peer"].contains(where: text.contains)
+            let handshake = ["the cryptographic handshake failed:", "failure finalizing the handshake"].contains(where: text.contains)
+            return peer || handshake ? "handshake" : nil
+        case .connection:
+            // open_bi returns noq ConnectionError (derived Debug, not StackError).
+            return text.hasPrefix("applicationclosed(") || text.hasPrefix("connectionclosed(") || text == "reset"
+                ? "closed_by_peer" : nil
+        case .stream:
+            // read/write return noq ReadError/WriteError, also derived Debug.
+            return text.hasPrefix("connectionlost(applicationclosed(") || text.hasPrefix("connectionlost(connectionclosed(")
+                || text == "connectionlost(reset)" ? "closed_by_peer" : nil
         default: return nil
         }
     }
 
     func failedConnect(_ error: Error) {
-        lock.withLock { state.connectFailure = Self.rejection(error) ?? "unqualified_failure" }
+        let failure = Self.rejection(error)
+        lock.withLock {
+            state.connectFailure = failure ?? "unqualified_failure"
+            if !stopping, let failure { state.peerFailure = failure }
+        }
+    }
+    func failedStream(_ error: Error) {
+        guard let failure = Self.rejection(error) else { return }
+        lock.withLock { if !stopping { state.peerFailure = failure } }
     }
 
     func bind(secretKey: Data) async throws -> any DirectIrohEndpoint {
@@ -69,6 +88,7 @@ final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
 
     func connected(_ connection: any DirectIrohConnection) throws {
         let stopped = lock.withLock {
+            state.successfulConnects += 1
             if !stopping { connections.append(connection) }
             return stopping
         }
@@ -135,7 +155,9 @@ final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
         func openStream() async throws -> DirectIrohStreamHalves {
             owner.begin()
             defer { owner.end() }
-            let halves = try await base.openStream()
+            let halves: DirectIrohStreamHalves
+            do { halves = try await base.openStream() }
+            catch { owner.failedStream(error); throw error }
             if owner.isStopping {
                 DirectIrohByteStream.abort(halves)
                 throw DirectIrohError.cancelled
@@ -153,7 +175,8 @@ final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
         init(base: any DirectIrohSendHalf, owner: InteropEngine) { self.base = base; self.owner = owner }
         func writeAll(_ data: Data) async throws {
             owner.begin(); defer { owner.end() }
-            try await base.writeAll(data)
+            do { try await base.writeAll(data) }
+            catch { owner.failedStream(error); throw error }
         }
         func finish() async throws {
             owner.begin(); defer { owner.end() }
@@ -175,7 +198,9 @@ final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
         func read(sizeLimit: Int) async throws -> Data {
             owner.begin()
             defer { owner.end() }
-            let bytes = try await base.read(sizeLimit: sizeLimit)
+            let bytes: Data
+            do { bytes = try await base.read(sizeLimit: sizeLimit) }
+            catch { owner.failedStream(error); throw error }
             let status: Int? = lock.withLock {
                 guard !recorded, head.count < 4096 else { return nil }
                 head.append(bytes)

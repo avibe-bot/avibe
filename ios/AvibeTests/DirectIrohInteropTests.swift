@@ -171,6 +171,7 @@ final class DirectIrohInteropTests: XCTestCase {
         var transport: DirectIrohTransport?
         var stream: DirectIrohByteStream?
         var reports: [DirectIrohReport] = []
+        var payloadStreams = 0
         var connectionWatch: Task<Void, Never>?
         init(key: DirectIrohLaunchKey) { self.key = key; engine = InteropEngine(key: key) }
 
@@ -215,8 +216,16 @@ final class DirectIrohInteropTests: XCTestCase {
                     let connection = try await budget.run { try await endpoint.connect(to: offer.endpoint, addresses: offer.addresses, alpn: Data("avibe-direct/1".utf8)) }
                     try interopRequire(connection.remoteEndpointID == offer.endpoint, "case identity mismatch")
                     connectionWatch = Task { await connection.closed() }
-                    // An unexpected successful negative handshake is never a pass.
-                    try interopRequire(!offer.negative, "negative handshake succeeded")
+                    // Wrong identity must never establish. Admission is checked
+                    // remotely after TLS, so not_admitted may establish and then
+                    // close. Observe a native peer reason without sending bytes.
+                    try interopRequire(offer.name != "wrong_identity", "wrong-identity handshake succeeded")
+                    if offer.name == "not_admitted" {
+                        let halves = try await budget.run { try await connection.openStream() }
+                        defer { DirectIrohByteStream.abort(halves) }
+                        _ = try await budget.run { try await halves.receive.read(sizeLimit: 1) }
+                        throw InteropFault.invalid("admission rejection lacked a native peer failure")
+                    }
                     let lease = DirectIrohLeaseDeadline(deadline: ProcessInfo.processInfo.systemUptime + budget.remaining,
                                                       clock: { ProcessInfo.processInfo.systemUptime })
                     do {
@@ -233,11 +242,12 @@ final class DirectIrohInteropTests: XCTestCase {
                 }
             }
             if offer.negative {
-                try await wait(budget) { self.engine.snapshot.connectFailure != nil }
+                try await wait(budget) { self.engine.snapshot.peerFailure != nil }
                 let snapshot = engine.snapshot
-                let allowed = offer.name == "wrong_identity" ? ["handshake"] : ["handshake", "closed_by_peer"]
-                try interopRequire(allowed.contains(snapshot.connectFailure ?? "") && snapshot.streams == 0 && reports.isEmpty, "unqualified negative result")
-                return ["failure": .string(snapshot.connectFailure!), "case_streams": .integer(0)]
+                let usable = reports.contains { if case .usable = $0 { return true }; return false }
+                return try InteropWire.negativeObservation(name: offer.name, failure: snapshot.peerFailure,
+                                                          localStreams: snapshot.streams, successfulConnects: snapshot.successfulConnects,
+                                                          payloadStreams: payloadStreams, usable: usable)
             }
             if offer.name == "refused_connect" {
                 try await wait(budget) { self.engine.snapshot.probes == [403] }
@@ -252,6 +262,7 @@ final class DirectIrohInteropTests: XCTestCase {
             }
             guard let stream else { throw InteropFault.invalid("payload stream missing") }
             try interopRequire(engine.snapshot.probes == [200], "case probe not independently observed")
+            payloadStreams += 1
             try await budget.run { try await stream.write(InteropWire.payload) }
             var echoed = Data()
             while echoed.count < InteropWire.payload.count {
@@ -292,7 +303,7 @@ final class DirectIrohInteropTests: XCTestCase {
                 case .success(let bytes): try interopRequire(bytes == nil, "closure delivered extra payload")
                 case .failure(let error):
                     let lostByTransport = tier == "transport" && reports.contains(.lost) && error as? DirectIrohError == .cancelled
-                    try interopRequire(lostByTransport || InteropEngine.rejection(error) != nil || (error as? IrohLib.IrohError)?.kind() == .stream,
+                    try interopRequire(lostByTransport || InteropEngine.rejection(error) != nil,
                                        "closure was a local failure, not peer/transport loss")
                 }
                 observed["armed_alive"] = .bool(true)

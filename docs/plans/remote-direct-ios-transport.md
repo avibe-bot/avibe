@@ -249,7 +249,18 @@ The host wire contract and runner remain owned by
 `docs/testing/ios-direct-interop.md`. The consumer uses schema 2, the exact six
 cases and 24-byte payload, and waits for the host's exact-case `setup_done`
 acknowledgment before any case dial. Setup attempts use their own deadline;
-negative cases never run setup or retry. Test-owned forwarding observers record
+negative cases never run setup or retry. Negative observations separate actual
+`local_streams` (successful local bidi opens, including a probe) from
+`payload_streams` (zero) and `usable` (false). There is no negative `case_streams`
+field: only the host can independently prove zero ingress, both before and after
+cleanup. An unadmitted peer may finish TLS then be refused by the sidecar's
+post-handshake admission hook; the App observes a qualified native peer failure
+from connect/open/read/write before fixture cleanup. Wrong-identity connect
+success remains a hard failure even if no local stream opens. Error recognition
+follows the pinned FFI conversion: outer ConnectError uses n0-error's
+Display-based report; ConnectionError and stream errors use their derived Debug
+forms. Timeout, local shutdown and unknown failures never count as rejection.
+Test-owned forwarding observers record
 native calls, probe bytes and cleanup; the transport tier uses the actual
 `DirectIrohTransport` and rendezvous validator, with no production hooks. Its
 only coverage skip is an empty admissible-address list on the first `admitted`

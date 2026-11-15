@@ -53,14 +53,47 @@ final class DirectIrohInteropProtocolTests: XCTestCase {
     }
 
     func testLocalNativeTimeoutOrCloseNeverCountsAsPeerRejection() {
-        for text in ["Connect { source: TimedOut }", "Connecting: connection timed out", "ConnectionError::LocallyClosed",
-                     "Connection was rejected locally", "no address available", "internal consistency error"] {
+        // Source-derived Display strings from pinned noq-proto 1.4.0 and
+        // iroh 1.4.1; these are NOT captured native execution evidence.
+        for text in ["timed out", "connect failed: timed out", "closed", "connection lost: closed",
+                     "Connection was rejected locally", "no address available", "internal consistency error", "ConnectError"] {
             XCTAssertNil(InteropEngine.rejection(kind: .connect, debug: text))
+            XCTAssertNil(InteropEngine.rejection(kind: .stream, debug: text))
         }
-        XCTAssertEqual(InteropEngine.rejection(kind: .connect, debug: "Connecting { source: HandshakeFailure }"), "handshake")
-        XCTAssertEqual(InteropEngine.rejection(kind: .connection, debug: "ApplicationClosed"), "closed_by_peer")
-        XCTAssertNil(InteropEngine.rejection(kind: .timeout, debug: "ConnectionClosed"))
-        XCTAssertNil(InteropEngine.rejection(kind: .invalidInput, debug: "TransportError"))
+        for text in ["closed by peer: admission refused (code 1)", "aborted by peer: the server refused to accept a new connection",
+                     "the cryptographic handshake failed: error 42", "Failure finalizing the handshake"] {
+            XCTAssertEqual(InteropEngine.rejection(kind: .connect, debug: text), "handshake")
+        }
+        let applicationClose = "ApplicationClosed(ApplicationClose { error_code: 1, reason: b\"admission refused\" })"
+        XCTAssertEqual(InteropEngine.rejection(kind: .connection, debug: applicationClose), "closed_by_peer")
+        XCTAssertEqual(InteropEngine.rejection(kind: .stream, debug: "ConnectionLost(\(applicationClose))"), "closed_by_peer")
+        for text in ["TimedOut", "LocallyClosed", "ConnectionLost(TimedOut)", "ConnectionLost(LocallyClosed)", "ClosedStream"] {
+            XCTAssertNil(InteropEngine.rejection(kind: .connection, debug: text))
+            XCTAssertNil(InteropEngine.rejection(kind: .stream, debug: text))
+        }
+        XCTAssertNil(InteropEngine.rejection(kind: .connect, debug: "Connecting { source: HandshakeFailure }"))
+        XCTAssertNil(InteropEngine.rejection(kind: .timeout, debug: "closed by peer: admission refused (code 1)"))
+        XCTAssertNil(InteropEngine.rejection(kind: .invalidInput, debug: "the cryptographic handshake failed: error 42"))
+    }
+
+    func testNegativeEvidenceDistinguishesLocalOpensFromIngress() throws {
+        let postHandshake = try InteropWire.negativeObservation(name: "not_admitted", failure: "closed_by_peer",
+                                                              localStreams: 1, successfulConnects: 1, payloadStreams: 0, usable: false)
+        XCTAssertEqual(postHandshake, ["failure": .string("closed_by_peer"), "local_streams": .integer(1),
+                                       "payload_streams": .integer(0), "usable": .bool(false)])
+        XCTAssertNil(postHandshake["case_streams"])
+        XCTAssertThrowsError(try InteropWire.negativeObservation(name: "wrong_identity", failure: "handshake",
+                                                               localStreams: 0, successfulConnects: 1, payloadStreams: 0, usable: false))
+        XCTAssertThrowsError(try InteropWire.negativeObservation(name: "wrong_identity", failure: "closed_by_peer",
+                                                               localStreams: 1, successfulConnects: 1, payloadStreams: 0, usable: false))
+        for failure in [nil, "timeout", "unqualified_failure", "local_close"] {
+            XCTAssertThrowsError(try InteropWire.negativeObservation(name: "not_admitted", failure: failure,
+                                                                   localStreams: 1, successfulConnects: 1, payloadStreams: 0, usable: false))
+        }
+        XCTAssertThrowsError(try InteropWire.negativeObservation(name: "not_admitted", failure: "closed_by_peer",
+                                                               localStreams: 1, successfulConnects: 1, payloadStreams: 1, usable: false))
+        XCTAssertThrowsError(try InteropWire.negativeObservation(name: "not_admitted", failure: "closed_by_peer",
+                                                               localStreams: 1, successfulConnects: 1, payloadStreams: 0, usable: true))
     }
 
     @MainActor

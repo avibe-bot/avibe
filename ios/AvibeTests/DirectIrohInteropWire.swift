@@ -58,6 +58,19 @@ enum InteropWire {
         try interopRequire(name == "admitted" && completedCases == 0, "addresses lost after transport coverage began")
     }
 
+    static func negativeObservation(name: String, failure: String?, localStreams: Int,
+                                    successfulConnects: Int, payloadStreams: Int, usable: Bool) throws -> [String: InteropJSON] {
+        let allowed = name == "wrong_identity" ? ["handshake"] : ["handshake", "closed_by_peer"]
+        try interopRequire(["wrong_identity", "not_admitted"].contains(name)
+            && allowed.contains(failure ?? "") && localStreams >= 0 && payloadStreams == 0 && !usable,
+            "unqualified negative observation")
+        if name == "wrong_identity" {
+            try interopRequire(successfulConnects == 0 && localStreams == 0, "wrong identity established or opened a stream")
+        }
+        return ["failure": .string(failure!), "local_streams": .integer(localStreams),
+                "payload_streams": .integer(payloadStreams), "usable": .bool(usable)]
+    }
+
     static func message(_ type: String, name: String? = nil) -> [String: InteropJSON] {
         var fields: [String: InteropJSON] = ["type": .string(type), "schema": .integer(2)]
         if let name { fields["name"] = .string(name) }
