@@ -155,7 +155,8 @@ appear there. The page also states that:
   and files that open in their default app are opened by the user; the Agent
   asks, then continues in that window.
 - Turning Computer Use off, quitting Avibe, or Avibe closing unexpectedly
-  stops the driver and ends any action in progress.
+  stops the driver and ends any action in progress; apps the user opened stay
+  open.
 
 The host comes from the server: the status endpoint reports `host_platform`
 (`macos`, `windows`, `linux`, or `unknown`). A browser on any OS therefore
