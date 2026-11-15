@@ -303,6 +303,12 @@ export const VaultSecretForm: React.FC<{
   );
   // Whether the typed name is free (checked on leaving the field and again before anything is made).
   const [nameIssue, setNameIssue] = useState<{ name: string; issue: NameIssue; afterSave?: 'standard-hd' } | null>(null);
+  // A submit that awaited the name check must not go on to save once the dialog has closed.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   // Standard signing keys sign headlessly; this opt-in writes `policy.always_ask` to force
   // per-use browser approval instead. Only meaningful for a standard keypair (see onSubmit).
   const [alwaysAsk, setAlwaysAsk] = useState(false);
@@ -857,7 +863,21 @@ export const VaultSecretForm: React.FC<{
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
-    if (!isProtectedHd && !isEdit && (await checkName(secretName, true))) return;
+    if (!isProtectedHd && checksName) {
+      // The form is busy while the name is checked: Create and Cancel wait, so one click saves once.
+      setSubmitting(true);
+      const issue = await checkName(secretName, true);
+      if (!mounted.current) return;
+      setSubmitting(false);
+      if (issue) {
+        // Taken after the words were made: back to the first step with them, only the name to change.
+        if (isHd && hdStep !== 'setup') {
+          setNameIssue({ name: secretName, issue, afterSave: 'standard-hd' });
+          setHdStep('setup');
+        }
+        return;
+      }
+    }
     if (isProtectedHd) {
       // The click opens the sandbox window before anything is awaited (protocol v2 §6.6).
       const mergedTags = mergeTags(tags, []);

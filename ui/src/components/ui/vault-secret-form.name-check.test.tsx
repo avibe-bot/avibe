@@ -16,7 +16,6 @@ import en from '@/i18n/en.json';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { isHdWalletBlocked, unblockHdWallet } from '@/lib/vaultHdQuarantine';
-import { forgetAddTier } from '@/lib/vaultNameCheck';
 
 import { VaultSecretForm } from './vault-secret-form';
 
@@ -91,7 +90,7 @@ const openWallet = async (source: 'generate' | 'import' = 'generate', tier: 'pro
 
 beforeEach(() => {
   vi.stubGlobal('isSecureContext', true);
-  forgetAddTier();
+  sessionStorage.clear();
   taken();
   popup.opened = 0;
   vault.sealHdWallet.mockResolvedValue(sealed);
@@ -220,7 +219,7 @@ it('remembers Standard too, and a dialog for an Agent request keeps the tier it 
   await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
   expect(protectedCard().getAttribute('aria-pressed')).toBe('false');
   cleanup();
-  forgetAddTier();
+  sessionStorage.clear();
   await openWallet('generate');
   cleanup();
   render(<I18nextProvider i18n={i18n}><AsOwner><VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} requestSpec={{ protection: 'standard' }} /></AsOwner></I18nextProvider>);
@@ -237,4 +236,45 @@ it('says when only the name is missing, by Create', async () => {
   expect(screen.getByText(d.nameRequiredWallet)).toBeTruthy();
   fireEvent.change(nameBox(), { target: { value: NAME } });
   expect(screen.queryByText(d.nameRequiredWallet)).toBeNull();
+});
+
+it('a name taken while the words were being backed up: the last Create returns to the first step with the same words', async () => {
+  await openWallet('generate', 'standard');
+  fireEvent.click(screen.getByRole('button', { name: hd.generateCta }));
+  fireEvent.click(await screen.findByRole('button', { name: hd.backup.show.replace('{{count}}', '12') }));
+  const readWords = () => Array.from(screen.getByRole('list', { name: hd.steps.backup }).querySelectorAll('li')).map((item) => item.querySelectorAll('span')[1].textContent ?? '');
+  const words = readWords();
+  fireEvent.click(screen.getByRole('button', { name: hd.backup.done }));
+  for (const group of screen.getAllByRole('radiogroup')) {
+    const position = Number(/\d+/.exec(group.getAttribute('aria-label') ?? '')![0]);
+    fireEvent.click(screen.getAllByRole('radio', { name: words[position - 1] }).find((radio) => group.contains(radio))!);
+  }
+  taken(NAME);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.createCta })); });
+  expect(await screen.findByText(hd.nameTakenAfterSave)).toBeTruthy();
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+  fireEvent.change(nameBox(), { target: { value: 'COLD_WALLET_2' } });
+  fireEvent.click(screen.getByRole('button', { name: hd.generateCta }));
+  fireEvent.click(await screen.findByRole('button', { name: hd.backup.show.replace('{{count}}', '12') }));
+  expect(readWords()).toEqual(words);
+});
+
+it('is busy while the name is checked: Create and Cancel wait, and a closed dialog saves nothing', async () => {
+  let answer: (value: { ok: boolean; secrets: Array<{ name: string }> }) => void = () => {};
+  mount();
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.change(nameBox(), { target: { value: 'API_TOKEN' } });
+  fireEvent.change(screen.getByPlaceholderText(d.valuePlaceholder), { target: { value: 'token' } });
+  api.listVaultSecrets.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  const readsBefore = api.listVaultSecrets.mock.calls.length;
+  const create = screen.getByRole('button', { name: d.createSecret }) as HTMLButtonElement;
+  await act(async () => { fireEvent.click(create); });
+  expect(create.disabled).toBe(true);
+  expect((screen.getByRole('button', { name: d.cancel }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(create);
+  cleanup();
+  await act(async () => { answer({ ok: true, secrets: [] }); });
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+  // The second click did not start another check (or save).
+  expect(api.listVaultSecrets.mock.calls.length - readsBefore).toBe(1);
 });

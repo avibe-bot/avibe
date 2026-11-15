@@ -15,10 +15,21 @@ export function nameIssueAmong(name: string, existing: readonly string[]): NameI
   return other ? { kind: 'case', existing: other } : null;
 }
 
-// The Add key dialog remembers the tier last chosen in it for this page's life, so reopening it after
-// a failed protected save does not quietly start over on Standard (owner, 2026-11-15).
-let rememberedTier: 'standard' | 'protected' | null = null;
-export const rememberAddTier = (tier: 'standard' | 'protected') => { rememberedTier = tier; };
-export const rememberedAddTier = () => rememberedTier;
-/** For tests: forget the remembered tier. */
-export const forgetAddTier = () => { rememberedTier = null; };
+// The Add key dialog remembers the tier last chosen in it for this browser tab's session, so reopening
+// it after a failed protected save does not quietly start over on Standard (owner, 2026-11-15).
+const TIER_KEY = 'avibe.vault.addTier';
+export const rememberAddTier = (tier: 'standard' | 'protected') => {
+  try {
+    sessionStorage.setItem(TIER_KEY, tier);
+  } catch {
+    // Storage unavailable: the dialog opens on its default tier.
+  }
+};
+export const rememberedAddTier = (): 'standard' | 'protected' | null => {
+  try {
+    const tier = sessionStorage.getItem(TIER_KEY);
+    return tier === 'standard' || tier === 'protected' ? tier : null;
+  } catch {
+    return null;
+  }
+};
