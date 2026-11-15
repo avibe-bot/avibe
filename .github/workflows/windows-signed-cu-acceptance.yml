@@ -24,7 +24,7 @@ env:
   # rc7 (lead 05:46): Off through the Settings switch, then the security cases.
   # One dry gate on these pins, then one explicitly selected enabled run.
   RELEASE_TAG: gh-v3.2.7rc7
-  ACCEPTANCE_MODE: enabled
+  ACCEPTANCE_MODE: dry
   HELPER_IDENTITY_OPTIONAL: 'true'
   # rc7 pins, verified from the published SOURCE.json (in SHA256SUMS) and the
   # Stage 2 43762679337 driver packaging artifact (prepared == packaged ==
