@@ -6340,7 +6340,7 @@
         "wrongFactor": "无法用这个 passkey 解锁。",
         "discoveryFailed": "加载保护层失败。请检查网络后重试——不要重新设置,否则会把保护层主密钥分裂。",
         "alreadyInitialized": "这个保护层刚在别处完成了设置。请刷新,用你已有的 passkey 解锁。",
-        "prfUnavailableUnlock": "这个浏览器没有从你的 Passkey 拿到解锁需要的加密，保护档仍处于锁定状态。请在最新版 Chrome 或 Safari 中、在保存了这个 Passkey 的设备上再试一次。"
+        "prfUnavailableUnlock": "这个浏览器没能用你的 Passkey 解锁保护档，保护档仍是锁定的。请换用最新版 Chrome 或 Safari，并在保存了这个 Passkey 的设备上再试一次。"
       }
     },
     "dialog": {

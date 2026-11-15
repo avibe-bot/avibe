@@ -6340,7 +6340,7 @@
         "wrongFactor": "Couldn't unlock with this passkey.",
         "discoveryFailed": "Couldn't load your protected vault. Check your connection and retry — don't set up a new one, or you'll split your vault keys.",
         "alreadyInitialized": "This vault was just set up elsewhere. Reload and unlock with your existing passkey.",
-        "prfUnavailableUnlock": "This browser didn’t get the encryption it needs from your passkey, so the vault is still locked. Try again in a current Chrome or Safari, on a device where this passkey is saved."
+        "prfUnavailableUnlock": "This browser couldn't unlock Protected with your passkey, so it is still locked. Try again in a current Chrome or Safari, on a device where this passkey is saved."
       }
     },
     "dialog": {
