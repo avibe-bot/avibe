@@ -38,6 +38,16 @@ final class InstanceSheetGestureUITests: XCTestCase {
         SheetFixtureReadiness.waitForDocument(in: app)
     }
 
+    func testReadinessMutationGuardsRejectMissingReceipts() {
+        let rejectedOnly = "{\"bridgeStage\":\"selection-rejected-invalid_instance\"}"
+        XCTAssertFalse(SheetFixtureReadiness.hasBridgeStage("row-error-rendered", in: rejectedOnly))
+
+        let portrait = "{\"geometry\":{\"sequence\":1,\"orientation\":\"portrait\",\"sheetWindowFrame\":{\"width\":390,\"height\":844}}}"
+        XCTAssertFalse(SheetFixtureReadiness.geometryChanged(from: portrait, to: portrait))
+        let landscape = "{\"geometry\":{\"sequence\":2,\"orientation\":\"landscape\",\"sheetWindowFrame\":{\"width\":844,\"height\":390}}}"
+        XCTAssertTrue(SheetFixtureReadiness.geometryChanged(from: portrait, to: landscape))
+    }
+
     func testMidListDownwardDragScrollsBeforeTheSheetDismisses() throws {
         launchFixture()
         _ = SheetFixtureReadiness.waitForGeometry(in: app)
@@ -109,8 +119,11 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
         XCUIDevice.shared.orientation = .landscapeLeft
         let compactGeometry = SheetFixtureReadiness.waitForGeometry(in: app, matching: { geometry in
-            guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]) else { return false }
-            return geometry["orientation"] as? String == "landscape"
+            guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]),
+                  let sequence = geometry["sequence"] as? Int,
+                  let portraitSequence = portraitGeometry["sequence"] as? Int else { return false }
+            return sequence != portraitSequence
+                && geometry["orientation"] as? String == "landscape"
                 && frame.width > portraitFrame.width
                 && frame.height < portraitFrame.height
         })
@@ -145,18 +158,40 @@ enum SheetFixtureReadiness {
         let surface = app.otherElements["fixture-document-surface"]
         let rejected = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                surface.label.contains("\"bridgeStage\":\"selection-rejected-invalid_instance\"")
+                SheetFixtureReadiness.hasBridgeStage("selection-rejected-invalid_instance", in: surface.label)
             }, object: nil
         )
         XCTAssertEqual(XCTWaiter.wait(for: [rejected], timeout: 10), .completed,
                        "Expected native invalid_instance receipt; receipt=\(surface.label)")
         let rowError = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                surface.label.contains("\"bridgeStage\":\"row-error-rendered\"")
+                SheetFixtureReadiness.hasBridgeStage("row-error-rendered", in: surface.label)
             }, object: nil
         )
         XCTAssertEqual(XCTWaiter.wait(for: [rowError], timeout: 10), .completed,
                        "Expected row-error-rendered DOM receipt; receipt=\(surface.label)")
+    }
+
+    static func hasBridgeStage(_ stage: String, in label: String) -> Bool {
+        guard let data = label.data(using: .utf8),
+              let evidence = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        if let stages = evidence["bridgeStages"] as? [String], stages.contains(stage) { return true }
+        return evidence["bridgeStage"] as? String == stage
+    }
+
+    static func geometryChanged(from oldLabel: String, to newLabel: String) -> Bool {
+        guard let oldData = oldLabel.data(using: .utf8),
+              let newData = newLabel.data(using: .utf8),
+              let oldEvidence = try? JSONSerialization.jsonObject(with: oldData) as? [String: Any],
+              let newEvidence = try? JSONSerialization.jsonObject(with: newData) as? [String: Any],
+              let oldGeometry = oldEvidence["geometry"] as? [String: Any],
+              let newGeometry = newEvidence["geometry"] as? [String: Any] else { return false }
+        let oldFrame = frame(from: oldGeometry["sheetWindowFrame"])
+        let newFrame = frame(from: newGeometry["sheetWindowFrame"])
+        return (oldGeometry["sequence"] as? Int) != (newGeometry["sequence"] as? Int)
+            || (oldGeometry["orientation"] as? String) != (newGeometry["orientation"] as? String)
+            || oldFrame?.width != newFrame?.width
+            || oldFrame?.height != newFrame?.height
     }
 
     static func waitForGeometry(

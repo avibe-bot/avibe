@@ -367,6 +367,9 @@ private final class SheetFixtureRootViewController: UIViewController {
         let kind = event["kind"] as? String ?? "unknown"
         if kind == "bridge", let stage = event["stage"] as? String {
             selectionEvidence["bridgeStage"] = stage
+            var stages = selectionEvidence["bridgeStages"] as? [String] ?? []
+            if !stages.contains(stage) { stages.append(stage) }
+            selectionEvidence["bridgeStages"] = stages
         }
         var events = selectionEvidence["events"] as? [[String: Any]] ?? []
         var observation = event
