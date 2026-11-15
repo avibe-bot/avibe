@@ -90,6 +90,27 @@ def handler(python: str, work: Path):
                 request = json.loads(self.rfile.read(length))
                 delta, finish = scripted_reply(request, python=python, work=work)
                 receipt = {"received": True, "finish": finish, "shell_tool_called": bool(delta.get("tool_calls"))}
+                tool_messages = [row for row in request.get("messages", []) if row.get("role") == "tool"]
+                if tool_messages:
+                    content = json.dumps(tool_messages[-1].get("content", "")).lower()
+                    receipt["tool_result_classes"] = [label for text, label in (
+                        ("working directory does not exist", "cwd_missing"),
+                        ("working directory is not accessible", "cwd_inaccessible"),
+                        ("cannot run in this turn", "turn_disallows_commands"),
+                        ("could not start", "command_start_failed"),
+                        ("access is denied", "access_denied"),
+                        ("permission denied", "permission_denied"),
+                        ("not recognized", "command_not_found"),
+                        ("active_turn_required", "active_turn_required"),
+                        ("missing_caller_session", "missing_caller_session"),
+                        ("command exited with code", "command_nonzero"),
+                        ("command timed out", "command_timeout"),
+                        ("command aborted", "command_aborted"),
+                        ("cannot find path", "path_missing"),
+                        ("cannot bind", "powershell_binding_failed"),
+                        ("no output", "no_output"),
+                    ) if text in content]
+                    receipt["tool_result_characters"] = len(content)
                 (work / "stub-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
                 envelope = {"id": "chatcmpl-cu-fixture", "object": "chat.completion.chunk", "created": int(time.time()), "model": MODEL}
                 frames = []

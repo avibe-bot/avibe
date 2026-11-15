@@ -135,7 +135,7 @@ try {
     if (-not (Get-LocalGroupMember -Group $group | Where-Object { $_.SID -eq $user.SID })) { Add-LocalGroupMember -Group $group -Member $user }
     $groups = @(Get-LocalGroup | Where-Object { @(Get-LocalGroupMember -Group $_ | Where-Object { $_.SID -eq $user.SID }).Count -gt 0 })
     if ($groups.Count -ne 1 -or $groups[0].SID.Value -ne 'S-1-5-32-545') { throw 'account_not_users_only' }
-    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py')) {
+    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $root $file)
     }
     Set-FixtureAccess $root 'ReadAndExecute'

@@ -91,6 +91,7 @@ try {
     $manifest = Get-Content -LiteralPath (Join-Path $install 'runtime\runtime-manifest.json') -Raw | ConvertFrom-Json
     $runtimeSlot = Join-Path (Join-Path $runtime $manifest.runtime_version) $manifest.archive_sha256.Substring(0, 16)
     $python = Join-Path $runtimeSlot $manifest.python_entrypoint
+    $node = Join-Path $runtimeSlot $manifest.node_entrypoint
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'manifest_runtime_interpreter_missing' }
     $descriptor = Run-Process $python @('-I', '-B', '-m', 'vibe', 'desktop', 'endpoint', '--json') 180 | ConvertFrom-Json
     $origin = [uri]$descriptor.origin
@@ -108,9 +109,14 @@ try {
     Verdict 'desktop_launch' 'PASS' 'installed_desktop_window_and_its_runtime_status_ready_under_standard_user'
     $cdpPhase = 'http'
     try {
-        $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$cdpPort/json/list" -TimeoutSec 5
-        $cdpPhase = 'workbench_target'
-        $workbench = @($targets | Where-Object { $_.type -eq 'page' -and $_.url.StartsWith($origin.AbsoluteUri.TrimEnd('/') + '/') })
+        $cdpDeadline = (Get-Date).AddSeconds(45)
+        do {
+            $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$cdpPort/json/list" -TimeoutSec 5
+            $cdpPhase = 'workbench_target'
+            $workbench = @($targets | Where-Object { $_.type -eq 'page' -and $_.url.StartsWith($origin.AbsoluteUri.TrimEnd('/') + '/') })
+            if ($workbench.Count) { break }
+            Start-Sleep -Milliseconds 500
+        } while ((Get-Date) -lt $cdpDeadline)
         $result.cdp_diagnostics = @{ targets = @($targets).Count; workbench_targets = $workbench.Count; target_metadata = @($targets | ForEach-Object {
             $targetUri = $null
             $validUri = [Uri]::TryCreate([string]$_.url, [UriKind]::Absolute, [ref]$targetUri)
@@ -121,7 +127,10 @@ try {
         if ($workbench.Count -lt 1 -or $listeners.Count -lt 1 -or @($listeners | Where-Object { $_.LocalAddress -notin @('127.0.0.1', '::1') }).Count) {
             throw 'cdp_target_or_loopback_binding_unproven'
         }
-        Verdict 'webview_cdp_preflight' 'PASS' 'installed_webview_exposes_workbench_target_on_loopback_only'
+        $cdpPhase = 'settings_page'
+        $page = Run-Process $node @((Join-Path $Root 'cdp.mjs'), '--port', [string]$cdpPort, '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--action', 'inspect') 90 | ConvertFrom-Json
+        if ($page.ok -ne $true) { throw 'cdp_settings_page_unproven' }
+        Verdict 'webview_cdp_preflight' 'PASS' 'installed_webview_settings_page_automated_over_loopback_cdp'
     } catch {
         $result.cdp_failure = @{ phase = $cdpPhase; exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber }
         Verdict 'webview_cdp_preflight' 'NOT RUN' ('signed_webview_cdp_unproven_' + $cdpPhase)
