@@ -19,8 +19,18 @@ function Run-Process([string] $File, [string[]] $Arguments, [int] $Seconds = 180
     try {
         $stdout = $p.StandardOutput.ReadToEndAsync(); $stderr = $p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit($Seconds * 1000)) { throw 'child_process_timeout' }
-        $text = $stdout.GetAwaiter().GetResult(); $null = $stderr.GetAwaiter().GetResult()
-        if ($p.ExitCode -ne 0) { throw "child_process_exit_$($p.ExitCode)" }
+        $text = $stdout.GetAwaiter().GetResult(); $errors = $stderr.GetAwaiter().GetResult()
+        if ($p.ExitCode -ne 0) {
+            # Classify only known shipped diagnostics; never publish their raw
+            # text, paths, PIDs or arbitrary command output.
+            foreach ($entry in @(
+                @('Avibe service did not stop', 'runtime_service_stop_failed'),
+                @('Avibe UI did not stop', 'runtime_ui_stop_failed'),
+                @('Desktop backend installer processes did not stop', 'runtime_backend_install_stop_failed'),
+                @('remote access tunnel could not be stopped', 'runtime_tunnel_stop_failed')
+            )) { if ($errors.Contains($entry[0])) { throw $entry[1] } }
+            throw "child_process_exit_$($p.ExitCode)"
+        }
         return $text
     } finally {
         if (-not $p.HasExited) { $p.Kill(); $null = $p.WaitForExit(10000) }
@@ -71,6 +81,10 @@ try {
     Verdict 'driver_provenance' 'PASS' 'installed_bytes_equal_prepared_and_packaged_stage2_hashes'
 
     $stage = 'desktop_launch'
+    $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $portProbe.Start(); $cdpPort = $portProbe.LocalEndpoint.Port; $portProbe.Stop()
+    $result.cdp_port = $cdpPort
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$cdpPort --remote-debugging-address=127.0.0.1"
     $desktop = Start-Process -FilePath $apps[0].FullName -PassThru
     $null = $desktop.SafeHandle
     $runtime = Join-Path $env:LOCALAPPDATA 'bot.avibe.desktop\runtime'
@@ -92,6 +106,15 @@ try {
     } while ((Get-Date) -lt $deadline)
     if (-not $status -or $desktop.MainWindowHandle -eq 0) { throw 'desktop_window_or_runtime_not_ready' }
     Verdict 'desktop_launch' 'PASS' 'installed_desktop_window_and_its_runtime_status_ready_under_standard_user'
+    try {
+        $targets = @(Invoke-RestMethod -Uri "http://127.0.0.1:$cdpPort/json/list" -TimeoutSec 5)
+        $workbench = @($targets | Where-Object { $_.type -eq 'page' -and $_.url.StartsWith($origin.AbsoluteUri.TrimEnd('/') + '/') })
+        $listeners = @(Get-NetTCPConnection -LocalPort $cdpPort -State Listen -ErrorAction Stop)
+        if ($workbench.Count -lt 1 -or $listeners.Count -lt 1 -or @($listeners | Where-Object { $_.LocalAddress -notin @('127.0.0.1', '::1') }).Count) {
+            throw 'cdp_target_or_loopback_binding_unproven'
+        }
+        Verdict 'webview_cdp_preflight' 'PASS' 'installed_webview_exposes_workbench_target_on_loopback_only'
+    } catch { Verdict 'webview_cdp_preflight' 'NOT RUN' 'signed_webview_cdp_unavailable_or_unproven' }
 
     if ($inputData.mode -eq 'preparation') {
         $stage = 'feature_disabled'

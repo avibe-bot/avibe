@@ -12,7 +12,7 @@ $root = Join-Path $env:RUNNER_TEMP ('signed-cu-' + [guid]::NewGuid().ToString('N
 $work = Join-Path $root 'work'
 New-Item -ItemType Directory -Path $evidence, $root, $work -Force | Out-Null
 $cases = [ordered]@{}
-foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
+foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
     $cases[$id] = @{ verdict = 'NOT RUN'; reason = 'prerequisite_not_reached' }
 }
 $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_desktop'
@@ -27,7 +27,7 @@ $record = [ordered]@{
     installer_sha256 = $null; installed_driver_sha256 = $null; stage2_driver_sha256 = $null
     cases = $cases
 }
-$user = $null; $password = $null; $worker = $null; $failed = $false; $stage = 'release_integrity'
+$user = $null; $password = $null; $worker = $null; $result = $null; $failed = $false; $stage = 'release_integrity'
 
 function Verdict([string] $Id, [string] $Result, [string] $Reason) {
     $cases[$Id] = @{ verdict = $Result; reason = $Reason }
@@ -182,6 +182,10 @@ try {
     try {
         if ($user) {
             Stop-FixtureProcesses
+            if ($result -and $result.Contains('cdp_port')) {
+                $remaining = @(Get-NetTCPConnection -LocalPort $result.cdp_port -State Listen -ErrorAction SilentlyContinue)
+                if ($remaining.Count) { throw 'test_cdp_port_still_listening' }
+            }
             $deadline = (Get-Date).AddSeconds(30)
             do {
                 $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'"
