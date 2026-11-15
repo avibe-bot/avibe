@@ -1,0 +1,61 @@
+name: Vault integrity WebKit capture
+
+# Explicit, bounded diagnostics only: applying this label does not dispatch lint
+# or repeat unrelated suites. Never turn a failed attempt into a green retry.
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vault-integrity-capture-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    if: github.event.label.name == 'vault-integrity-capture' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --init --ipc=host
+    defaults:
+      run:
+        shell: bash
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - name: Up to six WebKit suite attempts; stop at first failure
+        env:
+          CAPTURE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            echo "VAULT_WEBKIT_CAPTURE attempt=$attempt head=${CAPTURE_HEAD}"
+            if AVIBE_TEST_ARTIFACT_DIR="./e2e/.artifacts/vault-capture-$attempt" \
+              npm run test:vault-integrity -- --project=webkit; then
+              echo "Attempt $attempt: PASS" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Attempt $attempt: FAIL; stopped, no retry" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+      - name: Retain the failing trace and timeline
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: vault-integrity-webkit-capture-${{ github.run_id }}
+          path: ui/e2e/.artifacts
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: true

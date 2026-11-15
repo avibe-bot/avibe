@@ -3,6 +3,7 @@
 // Tab strips are not a shared primitive: each page draws its own (see the page frames).
 import { Checkbox } from '@/components/ui/checkbox';
 import { SegmentedRadio, type SegmentedTone } from '@/components/ui/segmented';
+import { Slider } from '@/components/ui/slider';
 import { Switch, SwitchTrack } from '@/components/ui/switch';
 import { ToggleSwitch } from '@/components/settings/SettingsPrimitives';
 
@@ -65,6 +66,16 @@ const choicesSheet = () => (
         </div>
       </Specimen>
     </Section>
+    <Section title="Slider" note="components/ui/slider：开关的材质（关的底色、开的薄荷绿、开关的拇指），6px 轨道、20px 拇指、44px 触控高度；原生 range 叠在上面管指针、触摸和键盘">
+      <Specimen name="value" className="w-72"><Slider value={24} min={12} max={128} label="长度" onValueChange={noop} /></Specimen>
+      <Specimen name="ends" className="w-72">
+        <div className="flex flex-col">
+          <Slider value={12} min={12} max={128} label="最短" onValueChange={noop} />
+          <Slider value={128} min={12} max={128} label="最长" onValueChange={noop} />
+        </div>
+      </Specimen>
+      <Specimen name="disabled" className="w-72"><Slider value={40} min={12} max={128} label="长度" disabled onValueChange={noop} /></Specimen>
+    </Section>
     <Section title="ToggleSwitch" note="设置页的行内开关：36×20，开启时 mint 轨道带 xs 光晕">
       <Specimen name="enabled" className="w-24"><ToggleSwitch enabled onClick={noop} label="开" /></Specimen>
       <Specimen name="off" className="w-24"><ToggleSwitch enabled={false} onClick={noop} label="关" /></Specimen>
@@ -89,7 +100,9 @@ const choicesSheet = () => (
 );
 
 const designFrames = frames([
-  { name: 'all', title: '选择控件 · 复选、开关、单选组', width: 1280, height: 620, status: 'shipped', fixtures: systemFixtures(), render: choicesSheet },
+  { name: 'all', title: '选择控件 · 复选、开关、滑动条、单选组', width: 1280, height: 780, status: 'shipped', fixtures: systemFixtures(), render: choicesSheet },
+  { name: 'slider-hover', title: '滑动条 · 悬停', width: 1280, height: 780, status: 'shipped', fixtures: systemFixtures(), hover: 'input[type="range"] >> nth=0', render: choicesSheet },
+  { name: 'slider-pressed', title: '滑动条 · 按住拖动', width: 1280, height: 780, status: 'shipped', fixtures: systemFixtures(), press: 'input[type="range"] >> nth=0', render: choicesSheet },
 ]);
 
 export default designFrames;

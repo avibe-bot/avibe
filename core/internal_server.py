@@ -1370,6 +1370,19 @@ def create_app(
             # Preparation failures may contain paths, prompts or signed provider content. Do not log or echo them.
             return JSONResponse({"error": "request_preview_failed"}, status_code=409)
 
+    @app.get("/internal/desktop/update/idle")
+    async def _desktop_update_idle() -> Any:
+        # The native shell asks afresh before discovery and again after payload
+        # verification. The UI process cannot infer this from its own registries.
+        checker = getattr(controller, "update_checker", None)
+        if checker is None:
+            return JSONResponse(status_code=503, content={"idle_seconds": 0})
+        try:
+            seconds = await asyncio.wait_for(checker.desktop_idle_seconds(), timeout=2.0)
+        except Exception:
+            return JSONResponse(status_code=503, content={"idle_seconds": 0})
+        return JSONResponse(content={"idle_seconds": seconds}, headers={"Cache-Control": "no-store"})
+
     @app.get("/internal/running-agents")
     async def _running_agents() -> Any:
         """Read-only snapshot of currently-running agent instances across all

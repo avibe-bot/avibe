@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,8 +59,18 @@ def test_regression_maintenance_commands_accept_env_file(tmp_path: Path) -> None
     )
 
 
-def test_regression_wrapper_forwards_worktree_port_range() -> None:
-    subprocess.run(
+@pytest.fixture
+def wrapper_python(tmp_path, monkeypatch):
+    """Observe wrapper arguments without running the runner's live hold lookup."""
+    python = tmp_path / "fake-python"
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    python.chmod(0o700)
+    monkeypatch.setenv("PYTHON_BIN", str(python))
+    monkeypatch.delenv("REGRESSION_TARGET", raising=False)
+
+
+def test_regression_wrapper_forwards_worktree_port_range(wrapper_python) -> None:
+    result = subprocess.run(
         [
             str(REPO_ROOT / "scripts" / "run_regression.sh"),
             "--worktree",
@@ -73,7 +85,13 @@ def test_regression_wrapper_forwards_worktree_port_range() -> None:
         ],
         check=True,
         cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
+    assert result.stdout.splitlines()[1:] == [
+        "up", "--target", "worktree", "--slug", "demo-branch",
+        "--worktree-port-start", "15240", "--worktree-port-end", "15240", "--dry-run", "--no-build-ui",
+    ]
 
 
 def test_regression_wrapper_forwards_remote_flag() -> None:
@@ -86,7 +104,7 @@ def test_regression_wrapper_forwards_remote_flag() -> None:
     assert 'incus_args+=(--remote "$2")' in script
 
 
-def test_regression_wrapper_accepts_paired_master_reset_override() -> None:
+def test_regression_wrapper_accepts_paired_master_reset_override(wrapper_python) -> None:
     result = subprocess.run(
         [
             str(REPO_ROOT / "scripts" / "run_regression.sh"),
@@ -100,4 +118,6 @@ def test_regression_wrapper_accepts_paired_master_reset_override() -> None:
         text=True,
     )
 
-    assert "prepare_regression.py --output-root /home/avibe/.regression-seed --reset-mode config" in result.stdout
+    assert result.stdout.splitlines()[1:] == [
+        "up", "--target", "master", "--reset-mode", "config", "--allow-reset-paired-master", "--dry-run",
+    ]

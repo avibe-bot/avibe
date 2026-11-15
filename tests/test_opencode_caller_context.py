@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import io
 import json
 import os
+import queue
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import threading
 
 import pytest
@@ -34,6 +37,109 @@ def test_ensure_plugin_installed_writes_global_opencode_plugin(tmp_path: Path, m
     assert "output.system.splice" in source
 
     assert bridge.ensure_plugin_installed().changed is False
+
+
+def _run_node_when_ready(
+    node: str,
+    script: str,
+    *,
+    env: dict[str, str],
+    startup_timeout: float = 60,
+    execution_timeout: float = 10,
+) -> str:
+    # Cold Node/module loading is infrastructure, not the plugin's execution
+    # budget. Start that budget only after imports complete and Node is waiting
+    # for our stdin signal. Bound startup separately so a broken runtime fails.
+    bootstrap = '''
+import { once } from "node:events"
+const start = once(process.stdin, "data")
+process.stdout.write("AVIBE_NODE_READY\\n")
+await start
+process.stdin.pause()
+'''
+    with tempfile.TemporaryFile(mode="w+t") as stderr:
+        with subprocess.Popen(
+            [node, "--input-type=module", "--eval", bootstrap + script],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
+            env=env, text=True,
+        ) as process:
+            ready: queue.Queue[str] = queue.Queue()
+            reader = threading.Thread(target=lambda: ready.put(process.stdout.readline()), daemon=True)
+            reader.start()
+            phase = "startup"
+            try:
+                signal = ready.get(timeout=startup_timeout)
+                reader.join()
+                if signal != "AVIBE_NODE_READY\n":
+                    raise RuntimeError(f"unexpected readiness signal: {signal!r}")
+                phase = "execution"
+                stdout, _ = process.communicate(input="go\n", timeout=execution_timeout)
+                if process.returncode != 0:
+                    raise RuntimeError(f"Node exited with status {process.returncode}")
+                return stdout
+            except (queue.Empty, subprocess.TimeoutExpired, RuntimeError) as exc:
+                process.kill()
+                process.wait()
+                reader.join()
+                stderr.seek(0)
+                pytest.fail(f"Node {phase} failed: {exc}\nNode stderr:\n{stderr.read()}")
+
+
+@pytest.mark.parametrize("outcome", ["success", "startup-exit", "startup-timeout", "execution-exit", "execution-timeout"])
+def test_node_readiness_separates_startup_from_execution_and_reports_stderr(monkeypatch, outcome):
+    events = []
+
+    class Output(io.StringIO):
+        def readline(self):
+            events.append("ready")
+            return super().readline()
+
+    class Process:
+        returncode = 1 if outcome == "execution-exit" else 0
+        stdout = Output("" if outcome == "startup-exit" else "AVIBE_NODE_READY\n")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def communicate(self, *, input, timeout):
+            assert events == ["ready"]
+            assert input == "go\n"
+            assert timeout == 10
+            events.append("execute")
+            if outcome == "execution-timeout":
+                raise subprocess.TimeoutExpired("node", timeout)
+            return ('["result"]', None)
+
+        def kill(self):
+            events.append("kill")
+
+        def wait(self):
+            events.append("wait")
+
+    def popen(command, **kwargs):
+        kwargs["stderr"].write("fixture diagnostic")
+        kwargs["stderr"].flush()
+        return Process()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    if outcome == "startup-timeout":
+        def never_ready(self, *, timeout):
+            assert timeout == 60
+            raise queue.Empty
+
+        monkeypatch.setattr(queue.Queue, "get", never_ready)
+    if outcome == "success":
+        assert _run_node_when_ready("node", "", env={}) == '["result"]'
+        assert events == ["ready", "execute"]
+    else:
+        phase = "startup" if outcome.startswith("startup-") else "execution"
+        with pytest.raises(pytest.fail.Exception, match=f"Node {phase} failed:.*\\nNode stderr:\\nfixture diagnostic"):
+            _run_node_when_ready("node", "", env={})
+        assert events[-2:] == ["kill", "wait"]
+        assert ("execute" in events) == (phase == "execution")
 
 
 def test_plugin_removes_native_catalog_without_touching_managed_catalog(
@@ -65,29 +171,15 @@ process.stdout.write(JSON.stringify(output.system))
 """
     env = os.environ.copy()
     env["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"] = str(tmp_path / "bindings.json")
-    completed = subprocess.run(
-        [node, "--input-type=module", "--eval", script],
-        check=True,
-        capture_output=True,
-        env=env,
-        text=True,
-        timeout=10,
-    )
+    stdout = _run_node_when_ready(node, script, env=env)
 
-    assert json.loads(completed.stdout) == ["before\nafter", managed]
+    assert json.loads(stdout) == ["before\nafter", managed]
 
     direct_env = os.environ.copy()
     direct_env.pop("AVIBE_OPENCODE_CALLER_CONTEXT_PATH", None)
-    direct = subprocess.run(
-        [node, "--input-type=module", "--eval", script],
-        check=True,
-        capture_output=True,
-        env=direct_env,
-        text=True,
-        timeout=10,
-    )
+    stdout = _run_node_when_ready(node, script, env=direct_env)
 
-    assert json.loads(direct.stdout) == [native, managed]
+    assert json.loads(stdout) == [native, managed]
 
 
 @pytest.mark.parametrize("hub_mode", [True, False])
@@ -124,14 +216,13 @@ const config = {json.dumps(native)}
 await hooks.config(config)
 process.stdout.write(JSON.stringify(config))
 """
-    completed = subprocess.run(
-        [node, "--input-type=module", "--eval", script],
-        check=True, capture_output=True, text=True, timeout=10,
+    stdout = _run_node_when_ready(
+        node, script,
         env={**os.environ, "AVIBE_OPENCODE_MODEL_HUB": "1" if hub_mode else "0",
              "OPENCODE_CONFIG_CONTENT": json.dumps(overlay)},
     )
     expected = {**native, "provider": {**native["provider"], **overlay["provider"]}} if hub_mode else native
-    assert json.loads(completed.stdout) == expected
+    assert json.loads(stdout) == expected
 
 
 def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:

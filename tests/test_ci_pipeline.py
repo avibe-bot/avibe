@@ -537,6 +537,31 @@ def test_browser_lanes_check_out_exactly_the_paths_the_classifier_treats_as_thei
     assert sources and all(in_browser_checkout(source) for source in sources), sources
 
 
+def test_ios_mobile_captures_are_on_demand_and_bound_to_the_real_merged_bundle() -> None:
+    # The dispatch/asset-path contract is the owning boundary: a static fixture
+    # or an automatic PR trigger would silently mislabel expensive final captures.
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ios-mobile-captures.yml").read_text(encoding="utf-8")
+    )
+    assert set(workflow[True]) == {"workflow_dispatch"}
+    assert workflow[True]["workflow_dispatch"]["inputs"]["source_sha"]["required"] is True
+    steps = workflow["jobs"]["captures"]["steps"]
+    checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "${{ inputs.source_sha }}"
+    commands = "\n".join(step.get("run", "") for step in steps)
+    assert 'git merge-base --is-ancestor "$SOURCE_SHA" origin/master' in commands
+    assert 'git rev-parse HEAD' in commands
+    assert commands.index("npm run build:mobile") < commands.index("build-for-testing")
+    assert "diff -qr ios/Avibe/Resources/MobileApp" in commands
+    assert "AvibeSheetFixture.app/MobileApp" in commands
+    assert "-only-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests" in commands
+    assert "xcresulttool export attachments" in commands
+    assert "CODE_SIGNING_ALLOWED=NO" in commands
+    shell = yaml.safe_load((ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8"))
+    regular_commands = "\n".join(step.get("run", "") for step in shell["jobs"]["simulator"]["steps"])
+    assert "-skip-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests" in regular_commands
+
+
 def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
@@ -588,7 +613,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         index for index, step in enumerate(steps)
         if "-project ios/Avibe.xcodeproj" in step.get("run", "")
     ]
-    assert len(app_builds) == 2
+    assert len(app_builds) == 4
     assert all(verify_index < index for index in app_builds)
     simulator_build = steps[app_builds[0]]["run"]
     assert '-derivedDataPath "$RUNNER_TEMP/AvibeDerivedData"' in simulator_build
@@ -607,9 +632,11 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     assert "-parallel-testing-enabled NO" in test_step["run"]
     assert '-resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult"' in test_step["run"]
 
-    artifact = steps[-1]
-    assert artifact["name"] == "Upload XCTest failure result bundle"
-    assert artifact["if"] == "${{ failure() }}"
+    artifact, = [
+        step for step in steps
+        if step.get("name") == "Upload XCTest result bundle"
+    ]
+    assert artifact["if"] == "${{ always() }}"
     assert artifact["uses"] == (
         "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
     )
@@ -620,10 +647,101 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         "retention-days": 7,
     }
 
+    fixture_build_index, fixture_build = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("id") == "sheet-fixture-build"
+    )
+    assert fixture_build_index < steps.index(test_step)
+    assert "-scheme AvibeSheetFixture" in fixture_build["run"]
+    assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in fixture_build["run"]
+    assert '-derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData"' in fixture_build["run"]
+    assert "-parallel-testing-enabled NO" in fixture_build["run"]
+    assert fixture_build["run"].splitlines()[-1].strip() == "build-for-testing"
+
+    fixture_index, fixture_step = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Run sheet gesture XCUITest fixture"
+    )
+    assert fixture_step["if"] == (
+        "${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}"
+    )
+    assert not workflow["jobs"]["simulator"].get("continue-on-error")
+    assert not any(step.get("continue-on-error") for step in [test_step, fixture_build, fixture_step])
+    assert fixture_index == app_builds[-1]
+    assert "-scheme AvibeSheetFixture" in fixture_step["run"]
+    assert '-destination "platform=iOS Simulator,id=$SIMULATOR_ID"' in fixture_step["run"]
+    assert '-derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData"' in fixture_step["run"]
+    assert "-parallel-testing-enabled NO" in fixture_step["run"]
+    assert '-resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult"' in fixture_step["run"]
+    assert fixture_step["run"].splitlines()[-1].strip() == "test-without-building"
+    fixture_artifact = steps[fixture_index + 1]
+    assert fixture_artifact["if"] == "${{ always() }}"
+    assert fixture_artifact["uses"] == artifact["uses"]
+    assert fixture_artifact["with"] == {
+        "name": "ios-sheet-fixture-xcresult",
+        "path": "${{ runner.temp }}/AvibeSheetFixtureTests.xcresult",
+        "if-no-files-found": "ignore",
+        "retention-days": 7,
+    }
+
     scheme = (
         ROOT / "ios/Avibe.xcodeproj/xcshareddata/xcschemes/Avibe.xcscheme"
     ).read_text(encoding="utf-8")
     assert 'parallelizable = "NO"' in scheme
+
+
+@pytest.mark.parametrize("inventory", ["ordered", "reversed", "missing-runtime", "wrong-device", "unavailable"])
+def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: str) -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["simulator"]["steps"]
+    selection_index, selection = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Select the pinned iPhone 17 Pro simulator"
+    )
+    boot = steps[selection_index + 1]
+    assert boot["run"] == 'xcrun simctl bootstatus "$SIMULATOR_ID" -b'
+    assert steps[selection_index + 2]["name"] == "Build the sheet gesture XCUITest fixture"
+    assert steps[selection_index + 3]["name"] == "Run XCTest on iPhone Simulator"
+    shell = selection["run"]
+    subprocess.run(["bash", "-n"], input=shell, text=True, check=True)
+    # Execute the actual workflow selector, not a copied implementation.
+    selector = shell.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    pinned = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+    devices = {
+        "com.apple.CoreSimulator.SimRuntime.iOS-26-4-1": [
+            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "old"},
+        ],
+        pinned: [
+            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "z"},
+            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "a"},
+        ],
+    }
+    if inventory == "reversed":
+        devices = dict(reversed(list(devices.items())))
+        devices[pinned].reverse()
+    elif inventory == "missing-runtime":
+        del devices[pinned]
+    elif inventory == "wrong-device":
+        for device in devices[pinned]:
+            device["name"] = "iPhone 17"
+    elif inventory == "unavailable":
+        for device in devices[pinned]:
+            device["isAvailable"] = False
+    source = tmp_path / "simulators.json"
+    source.write_text(json.dumps({"devices": devices}), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-c", selector, str(source)],
+        capture_output=True, text=True, timeout=10,
+    )
+    if inventory in {"ordered", "reversed"}:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "a"
+    else:
+        assert result.returncode != 0
+        assert result.stdout == ""
+        assert f"No available iPhone 17 Pro simulator for {pinned}" in result.stderr
 
 
 @pytest.mark.parametrize("pin_state", ["pending", "published"])

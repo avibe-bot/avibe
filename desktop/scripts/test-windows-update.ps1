@@ -3,7 +3,43 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../src-tauri/src/update_windows.ps1"
 $root = Join-Path ([IO.Path]::GetTempPath()) ('avibe-update-test-' + [Guid]::NewGuid())
 [IO.Directory]::CreateDirectory($root) | Out-Null
+$fixtureProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+$assertionsPassed = $false
+
+# Observe the real supervisor's launches without changing its asynchronous app
+# relaunch or its synchronous installer/ExitCode contract. Retain process handles,
+# not process-name searches (or PIDs looked up later, which could be reused).
+function Start-Process {
+    [CmdletBinding()]
+    param([string]$FilePath, [string[]]$ArgumentList, [switch]$Wait, [switch]$PassThru)
+    $returnProcess = $PassThru
+    $PSBoundParameters['PassThru'] = $true
+    $process = Microsoft.PowerShell.Management\Start-Process @PSBoundParameters
+    $fixtureProcesses.Add($process)
+    if ($returnProcess) { return $process }
+}
+
+# Check literal outputs, including preservation of ordinary paths. No UNC share
+# is accessed: only the production string conversion runs in these cases.
+function Test-PathNormalization {
+    $cases = @(
+        @{ input='\\?\C:\Avibe space 中文\app.exe'; expected='C:\Avibe space 中文\app.exe' },
+        @{ input='\\?\UNC\server\share\Avibe space 中文\app.exe'; expected='\\server\share\Avibe space 中文\app.exe' },
+        @{ input='\\?\unc\server\share\app.exe'; expected='\\server\share\app.exe' },
+        @{ input='C:\Avibe space 中文\app.exe'; expected='C:\Avibe space 中文\app.exe' },
+        @{ input='\\server\share\Avibe space 中文\app.exe'; expected='\\server\share\Avibe space 中文\app.exe' },
+        @{ input=''; expected='' }
+    )
+    foreach ($case in $cases) {
+        $actual = ConvertFrom-AvibeVerbatimPath $case.input
+        if ($actual -cne $case.expected) {
+            throw "Path normalization mismatch for '$($case.input)': '$actual' != '$($case.expected)'"
+        }
+    }
+}
+
 try {
+    Test-PathNormalization
     function Build-App($path, $version, $marker, $class) {
         $source = @"
 using System;
@@ -14,6 +50,9 @@ using System.Reflection;
 public class $class {
     public static void Main() {
         File.WriteAllText(Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "$marker"), "started");
+        // A launch marker is not an exit signal. Keep the executable mapped
+        // briefly so the fixture exercises the cleanup wait rather than racing it.
+        System.Threading.Thread.Sleep(500);
     }
 }
 "@
@@ -52,8 +91,8 @@ public class Installer {
     }
 }
 '@ -OutputAssembly $installer -OutputType ConsoleApplication
-    foreach ($mode in @('success', 'deleted', 'partial', 'wrong-version')) {
-        $failure = $mode -ne 'success'
+    foreach ($mode in @('success', 'verbatim-success', 'deleted', 'partial', 'wrong-version')) {
+        $failure = $mode -notin @('success', 'verbatim-success')
         $directory = Join-Path $root ("installation space 中文 " + $mode)
         $staging = Join-Path $root ("stage-" + $mode)
         [IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -66,8 +105,31 @@ public class Installer {
             installer=$installer; version='3.1.2'; pid=2147483647
         }
         $threw = $false
-        try { Invoke-AvibeReplacement $requestData } catch { $threw = $true }
-        if ($threw -ne $failure) { throw "Unexpected transaction outcome: $threw / $failure" }
+        try {
+            if ($mode -eq 'verbatim-success') {
+                # Exercise JSON parsing and the real entry-point normalization,
+                # not a fixture-normalized call straight into the transaction.
+                foreach ($name in @('directory', 'executable', 'installer', 'staging')) {
+                    if ($requestData.$name -notmatch '^[A-Za-z]:\\') {
+                        throw 'The drive-path fixture requires an absolute local path'
+                    }
+                    $requestData.$name = '\\?\' + $requestData.$name
+                }
+                $requestPath = Join-Path $root 'verbatim-request.json'
+                $requestData | ConvertTo-Json | Set-Content -LiteralPath $requestPath -Encoding UTF8
+                & {
+                    # A regression must fail CI, never wait on a modal dialog.
+                    function Add-Type { throw 'Installer entry attempted a failure dialog' }
+                    & "$PSScriptRoot/../src-tauri/src/update_windows.ps1" -Request $requestPath
+                }
+                if (Test-Path -LiteralPath $staging) {
+                    throw 'The successful entry point did not release its staging directory'
+                }
+            } else {
+                Invoke-AvibeReplacement $requestData
+            }
+        } catch { $threw = $true }
+        if ($threw -ne $failure) { throw "Unexpected transaction outcome for ${mode}: $threw / $failure" }
         $expected = if ($failure) { $old } else { $next }
         if ((Get-FileHash (Join-Path $directory 'app.exe')).Hash -ne (Get-FileHash $expected).Hash) {
             throw 'Application bytes did not match the successful or restored version'
@@ -86,7 +148,32 @@ public class Installer {
             Start-Sleep -Milliseconds 100
         }
     }
-    Write-Output 'Native Windows update success and rollback fixtures passed.'
+    $assertionsPassed = $true
+    Write-Output 'Native Windows update path normalization, success and rollback fixtures passed.'
 } finally {
-    Remove-Item -LiteralPath $root -Recurse -Force
+    $processCleanupErrors = @()
+    foreach ($process in $fixtureProcesses) {
+        try {
+            if (-not $process.WaitForExit(10000)) {
+                Write-Warning "Stopping fixture process PID $($process.Id) after a 10-second exit wait."
+                # Stop only this retained process, never unrelated app.exe instances.
+                Stop-Process -InputObject $process -Force -ErrorAction Stop
+                if (-not $process.WaitForExit(5000)) {
+                    throw "Fixture process PID $($process.Id) did not exit after being stopped."
+                }
+            }
+        } catch {
+            $processCleanupErrors += $_
+        } finally {
+            $process.Dispose()
+        }
+    }
+    # Failure to stop our processes remains fatal, even when assertions passed.
+    if ($processCleanupErrors.Count -gt 0) { throw $processCleanupErrors[0] }
+    try {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    } catch {
+        if (-not $assertionsPassed) { throw }
+        Write-Warning "Fixtures passed, but temporary directory cleanup failed for '${root}': $_"
+    }
 }

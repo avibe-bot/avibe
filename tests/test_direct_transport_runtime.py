@@ -198,11 +198,12 @@ def test_offline_and_unsupported_never_fetch(tmp_path, monkeypatch, published):
     assert not unsupported.runtime_dir.exists() and downloads == []
 
 
-def test_shipped_pending_manifest_ignores_environment_and_leaves_home_alone(tmp_path, monkeypatch):
+def test_shipped_published_manifest_ignores_environment_and_respects_offline_mode(tmp_path, monkeypatch):
     for name in ("VIBE_DIRECT_TRANSPORT_MANIFEST_PATH", "VIBE_DIRECT_TRANSPORT_MANIFEST_URL", "VIBE_DIRECT_TRANSPORT_BIN"):
         monkeypatch.setenv(name, str(tmp_path / "untrusted"))
-    manager = DirectTransportRuntimeManager(runtime_dir=tmp_path / "runtime")
-    assert manager.ensure()["reason"] == "direct-transport_runtime_unpublished"
+    manager = DirectTransportRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    result = manager.ensure()
+    assert result["reason"] == "direct-transport_archive_unavailable_offline"
     assert manager.resolve_binary() is None
-    assert manager.status()["reason"] == "direct-transport_runtime_unpublished"
-    assert not manager.runtime_dir.exists()
+    assert manager.status()["installed"] is False
+    assert not (manager.runtime_dir / "current.json").exists()

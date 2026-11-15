@@ -44,8 +44,8 @@ for (const locale of ['en', 'zh'] as const) {
     });
 
     test(`desktop-managed update popover copy (${locale})`, async ({ page }, testInfo) => {
-      const expectedStatus = locale === 'zh' ? '发现新版本' : 'Update available';
-      expect(copy('dashboard.desktopManagedUpdateAvailable', undefined, locale)).toBe(expectedStatus);
+      const expectedStatus = locale === 'zh' ? '有新版本可以安装' : 'A new version is ready to install';
+      expect(copy('update.status.available', undefined, locale)).toBe(expectedStatus);
       await page.addInitScript(() => {
         if (new URLSearchParams(location.search).get('state') !== 'native-managed-update') return;
         Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });
@@ -77,11 +77,11 @@ for (const locale of ['en', 'zh'] as const) {
           await expect(page.getByText('3.2.5rc6', { exact: true })).toBeVisible();
           if (mode === 'native') {
             await expect(page.getByRole('button', { name: copy('dashboard.skipUpdate', undefined, locale), exact: true })).toBeVisible();
-            await expect(page.getByRole('button', { name: copy('dashboard.upgradeNow', undefined, locale), exact: true })).toBeVisible();
+            await expect(page.getByRole('button', { name: copy('update.action.update', undefined, locale), exact: true })).toBeVisible();
             await expect(page.getByText(copy('dashboard.desktopManagedUpdateMemberHint', undefined, locale), { exact: true })).toHaveCount(0);
           } else {
             await expect(page.getByText(copy('dashboard.desktopManagedUpdateMemberHint', undefined, locale), { exact: true })).toBeVisible();
-            await expect(page.getByRole('button', { name: copy('dashboard.upgradeNow', undefined, locale), exact: true })).toHaveCount(0);
+            await expect(page.getByRole('button', { name: copy('update.action.update', undefined, locale), exact: true })).toHaveCount(0);
           }
           await dialog.screenshot({ path: testInfo.outputPath(`${mode}-update-${locale}-${theme}.png`), scale: 'css', animations: 'disabled' });
         }

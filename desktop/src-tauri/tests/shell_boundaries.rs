@@ -261,8 +261,7 @@ fn desktop_update_commands_are_workbench_scoped() {
             "allow-desktop-update-install",
             "allow-desktop-update-skip",
             "allow-desktop-update-prereleases-set",
-            "allow-desktop-remote-install-allowed",
-            "allow-desktop-remote-install-set",
+            "allow-desktop-update-auto-update-set",
             "allow-desktop-update-remote-decline"
         ])
     );
@@ -273,8 +272,7 @@ fn desktop_update_commands_are_workbench_scoped() {
         "updater::desktop_update_install",
         "updater::desktop_update_skip",
         "updater::desktop_update_prereleases_set",
-        "updater::desktop_remote_install_allowed",
-        "updater::desktop_remote_install_set",
+        "updater::desktop_update_auto_update_set",
         "updater::desktop_update_remote_decline",
     ] {
         assert!(source.contains(command), "missing Workbench updater command {command}");
@@ -609,6 +607,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "desktop_update_install",
         "desktop_update_skip",
         "desktop_update_prereleases_set",
+        "desktop_update_auto_update_set",
         "desktop_client_request",
         "pet_settings",
         "pet_set_enabled",
@@ -618,8 +617,6 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_reset_voice_shortcut",
         "desktop_notifications_state",
         "desktop_notifications_set_enabled",
-        "desktop_remote_install_allowed",
-        "desktop_remote_install_set",
         "desktop_update_remote_decline",
         "pet_ready",
         "pet_context_menu",
@@ -1379,12 +1376,47 @@ fn windows_remote_update_refuses_an_unwritable_install_before_shell_exit() {
     let wait_for_marker = windows_installer
         .find("while !staging.path().join(\"ready\").exists() && !requires_host.exists()")
         .expect("Rust waits for ready or requires-host");
+    let handoff_gate = windows_installer
+        .find("if let Err(error) = before_install()")
+        .expect("fresh handoff gate");
     let before_exit = windows_installer.find("before_exit();").expect("pre-exit receipt");
+    assert!(wait_for_marker < handoff_gate && handoff_gate < before_exit);
+    let declined_handoff: String = windows_installer[handoff_gate..before_exit]
+        .split_whitespace()
+        .collect();
+    assert!(declined_handoff.contains("child.kill()") && declined_handoff.contains("child.wait()"));
     assert!(
         wait_for_marker < before_exit,
         "a privileged install must return requires_host before the shell records restart and exits"
     );
     assert!(windows_installer.contains("return Err(\"requires_host\".into());"));
+}
+
+#[test]
+fn automatic_installs_recheck_the_controller_after_verification_and_platform_preparation() {
+    let updater = shipping_source("src/updater.rs");
+    let worker = updater
+        .split("update::install_verified(download, &artifact, KEY, |data|")
+        .nth(1)
+        .unwrap();
+    let calls = worker.split_whitespace().collect::<String>();
+    assert_eq!(
+        calls
+            .matches("install_edge_current(&handle,generation,install_remote.as_ref(),automatic,&install_version")
+            .count(),
+        2,
+    );
+    let gate = updater
+        .split("fn install_edge_current(")
+        .nth(1)
+        .unwrap()
+        .split("fn install_in_generation(")
+        .next()
+        .unwrap();
+    assert!(gate.contains("activity::ready(app)"));
+    assert!(gate.contains("automatic_target_current(app, version)?"));
+    assert!(gate.contains("install_generation_current(app, generation)?"));
+    assert!(gate.contains("reread_remote_request(app, remote)"));
 }
 
 #[test]

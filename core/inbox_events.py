@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+RUNTIME_ACTIVITY_EVENT = "runtime.activity"
 BOTS_CHANGED_EVENT = "bots.changed"
 RUNS_UPDATED_EVENT = "runs.updated"
 VAULTS_UPDATED_EVENT = "vaults.updated"
@@ -147,6 +148,15 @@ class InboxEventBus:
 # Process-wide singleton (Controller process). ``message_mirror`` publishes;
 # ``internal_server`` subscribes.
 bus = InboxEventBus()
+
+
+def publish_runtime_activity() -> None:
+    """Mark a live ownership boundary even when it produces no message/turn.
+
+    Consumers may only use this as recent-activity evidence, never as proof
+    that work ended. They still query the authoritative live owners for idle.
+    """
+    bus.publish(RUNTIME_ACTIVITY_EVENT, {})
 
 
 def run_updated_payload(

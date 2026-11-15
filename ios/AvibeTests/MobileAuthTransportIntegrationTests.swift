@@ -1373,7 +1373,34 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             ),
         ]
 
+        // Establish this transport's own document and session before testing
+        // provider error mapping. A cold-start failure belongs to this stage,
+        // not the first table row. The separate deadline tests stay cold.
+        addTeardownBlock { @MainActor [self] in
+            let barrier = transport.invalidate()
+            let released = await barrier?.waitForRelease() ?? true
+            XCTAssertTrue(released, "Password fixture transport still owns a WebView")
+            server.requests.attach(to: self, name: "password fixture requests")
+        }
+        do {
+            guard case .signedIn(let snapshot) = try await transport.fetchSession(),
+                  snapshot.account.id == "account-1"
+            else {
+                throw FixtureReadinessError(description: "Unexpected fixture session")
+            }
+        } catch {
+            throw FixtureReadinessError(description:
+                "stage=password table prerequisite; \(server.requests.summary()); "
+                    + "errorType=\(type(of: error))"
+            )
+        }
+        print("[iOS fixture] stage=password table ready; \(server.requests.summary())")
+
         for testCase in cases {
+            let requestOffset = server.requests.count
+            defer {
+                print("[iOS fixture] row=\(testCase.name); \(server.requests.summary(since: requestOffset))")
+            }
             fixture.set(
                 token: testCase.token,
                 callback: testCase.callback,
@@ -1411,6 +1438,12 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                     testCase.name
                 )
             }
+            let rowRequests = Array(state.requests().dropFirst(requestOffset))
+            XCTAssertEqual(
+                rowRequests.filter { $0.method == "POST" && $0.path == "/auth/v1/token" }.count,
+                1,
+                "\(testCase.name) did not reach its grant; \(server.requests.summary(since: requestOffset))"
+            )
             let callbacks = state.requests().filter {
                 $0.path == "/auth/callback"
             }.count
@@ -2006,6 +2039,7 @@ final class LocalHTTPServer: @unchecked Sendable {
         }
     }
 
+    let requests = FixtureRequestLog()
     private let listener: NWListener
     private let address: LoopbackAddress
     private let queue = DispatchQueue(label: "bot.avibe.ios.tests.http")
@@ -2081,10 +2115,9 @@ final class LocalHTTPServer: @unchecked Sendable {
                 received.append(data)
             }
             if let request = Self.parseRequest(received) {
-                self.send(
-                    self.handler(request),
-                    through: connection
-                )
+                let response = self.handler(request)
+                self.requests.record(request, status: response.status)
+                self.send(response, through: connection)
                 return
             }
             if isComplete || error != nil {

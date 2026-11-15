@@ -1,12 +1,14 @@
 # Windows Users: Run Avibe with WSL from Scratch
 
+> The recommended way to run Avibe on Windows is the Desktop App: download it from [avibe.bot](https://avibe.bot/#download). This guide is for people who specifically want Avibe inside WSL, for example to keep their code and coding agents in a Linux environment.
+
 This guide is written for Windows users who have never used WSL before.
 
 If someone told you "use WSL" but you do not know where to install it, how to open it, or which window should run the commands, follow this guide step by step.
 
 ## Short Version
 
-If you use Avibe on Windows, the recommended setup is:
+If you run Avibe in WSL, the setup is:
 
 - `Windows`: browser, Slack, Discord, Telegram, WeChat, Lark/Feishu
 - `WSL`: Avibe, Claude Code / Codex / OpenCode, your code repository
@@ -386,13 +388,13 @@ If you want the Microsoft documentation:
 - WSL basic commands: <https://learn.microsoft.com/windows/wsl/basic-commands>
 - WSL development environment: <https://learn.microsoft.com/windows/wsl/setup/environment>
 
-## Final Recommendation
+## In Short
 
-If you are a Windows user and you are not sure whether native Windows will be stable enough for every agent CLI, the safest setup is:
+The WSL setup, start to finish:
 
 - install WSL on Windows
 - open Ubuntu
 - install and run Avibe inside Ubuntu
 - open `http://127.0.0.1:5123` from your Windows browser
 
-That is usually the least painful path.
+If you do not need a Linux environment, use the Desktop App instead.

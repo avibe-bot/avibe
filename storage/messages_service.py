@@ -1198,8 +1198,9 @@ def unread_counts(
 ) -> dict[str, int]:
     """Return ``{scope_id: count}`` for unread agent ``result`` messages.
 
-    Used by the sidebar / hover popover to show per-session unread dots
-    plus the global count without dragging every row through Python.
+    Used for per-scope badges. Rows without a scope (including Bot and
+    unplaced Session replies) cannot be attributed to one and are omitted.
+    They remain in ``unread_counts_by_session`` and its category/global totals.
     Filtered to ``type='result'`` so it agrees with the inbox feed's UNREAD
     count, which is also result-only — otherwise intermediate ``assistant`` /
     process-event rows in ``agent_events`` would inflate the badge past what the
@@ -1214,6 +1215,7 @@ def unread_counts(
 
     query = (
         select(messages.c.scope_id, func.count(messages.c.id))
+        .where(messages.c.scope_id.is_not(None))
         .where(messages.c.author == "agent")
         .where(messages.c.type.in_(_UNREAD_TYPES))
         .where(messages.c.read_at.is_(None))

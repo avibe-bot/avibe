@@ -13,7 +13,10 @@ export function clientState(): DesktopClientState {
       { id: 'team', name: '共享团队', host: 'team-app.avibe.bot', url: 'https://team-app.avibe.bot', relationship: 'shared', owner_email: '周@example.test', available: false },
     ] },
     local: { name: '小麦的 Mac', remote_access: 'off' },
-    desktop: { version: '3.2.6rc9', update: { phase: 'available', latest: '3.2.7', channel: 'test', skippedVersion: null, interactive: false } },
+    desktop: { version: '3.2.6rc9', update: {
+      phase: 'available', latest: '3.2.7', channel: 'test', prereleases: true, autoUpdate: false, checkedAt: '2026-11-13T07:00:00Z',
+      hostActions: ['check', 'prereleases', 'auto_update'], skippedVersion: null, interactive: false,
+    } },
     consent: null, remote_auxiliary: 'local',
   };
 }
@@ -70,9 +73,17 @@ export async function installBridge(page: Page, state: DesktopClientState, optio
   } : state;
   await page.addInitScript(({ initial, projection }) => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', { value: initial.desktop.version });
     Object.defineProperty(window, '__AVIBE_DESKTOP_CLIENT_VERSION__', { value: 1 });
     Object.defineProperty(window, '__AVIBE_DESKTOP_CLIENT_STATE__', { value: initial });
     document.addEventListener('DOMContentLoaded', () => document.documentElement.style.setProperty('--shell-titlebar-inset', '28px'));
+    if (projection && initial.connection.committed.kind === 'local') Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {
+      invoke: async (command: string) => {
+        if (command === 'desktop_update_state') return initial.desktop.update;
+        if (command === 'desktop_update_check') return;
+        throw new Error(`Unexpected updater IPC: ${command}`);
+      },
+    } });
     if (!projection) Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {
       invoke: (command: string, args: { request: DesktopClientRequest }) => {
         if (command !== 'desktop_client_request') throw new Error(`Unexpected IPC: ${command}`);

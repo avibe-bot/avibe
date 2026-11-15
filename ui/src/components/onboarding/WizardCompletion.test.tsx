@@ -1120,6 +1120,9 @@ describe('AUTH-SETUP-170 Desktop completion handoff', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
       button = await screen.findByRole('button', { name: en.onboarding.providers.later });
     }
+    // The provider button can render before the initial async seed request.
+    // Snapshot only after that request, so it cannot look like a completion reseed.
+    await waitFor(() => expect(seeds()).toHaveLength(1));
     const seedCount = seeds().length;
     let confirmRead!: (response: Response) => void;
     mock.api.mutateConfig.mockImplementation(async (mutations) => {

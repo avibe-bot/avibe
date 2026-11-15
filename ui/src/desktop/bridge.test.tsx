@@ -53,6 +53,9 @@ it('AUTH-SETUP-177 only enumerated presentation URLs leave the Workbench', () =>
   expect(presentDesktopClient('updates')).toBe(true);
   expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://updates');
   assign.mockClear();
+  expect(presentDesktopClient('updates', 'native/req 1')).toBe(true);
+  expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/updates?native_request=native%2Freq%201');
+  assign.mockClear();
   expect(presentDesktopClient('sign-out')).toBe(true);
   expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/sign-out');
   assign.mockClear();

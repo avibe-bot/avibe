@@ -58,6 +58,10 @@
 		100000000000000000000133 /* Iroh.xcframework in App Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000131 /* Iroh.xcframework */; };
 		100000000000000000000134 /* libIrohLib.a in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000132 /* libIrohLib.a */; };
 		100000000000000000000135 /* Iroh.xcframework in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000131 /* Iroh.xcframework */; };
+		100000000000000000000136 /* DirectIrohBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000136 /* DirectIrohBinding.swift */; };
+		100000000000000000000139 /* DirectIrohBindingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000139 /* DirectIrohBindingTests.swift */; };
+		100000000000000000000137 /* SystemConfiguration.framework in App Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000137 /* SystemConfiguration.framework */; };
+		100000000000000000000138 /* SystemConfiguration.framework in Test Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000137 /* SystemConfiguration.framework */; };
 		1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A1 /* FormAccessoryBar.swift */; };
 		1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A2 /* NativePushCoordinator.swift */; };
 		1000000000000000000000A3 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
@@ -74,6 +78,21 @@
 		1000000000000000000000AE /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B0 /* NotificationService.swift */; };
 		1000000000000000000000AF /* PushNotificationProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B1 /* PushNotificationProcessor.swift */; };
 			1000000000000000000000C1 /* native-subscription-key.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C1 /* native-subscription-key.json */; };
+		910000000000000000000001 /* SheetFixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000001 /* SheetFixtureApp.swift */; };
+		910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000002 /* FixtureKeyboardViewport.swift */; };
+		910000000000000000000003 /* MobileAccount.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
+		910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
+		910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
+		91000000000000000000000B /* MobileOnboardingContainer.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* MobileOnboardingContainer.swift */; };
+		910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
+		910000000000000000000007 /* WebOrigin.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
+		910000000000000000000008 /* FixtureMobile in Resources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000003 /* FixtureMobile */; };
+		91000000000000000000000D /* NativeBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
+		91000000000000000000000F /* NativeBadge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
+		91000000000000000000000A /* MobileApp in Fixture Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
+		91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000006 /* FixtureNativeBridgeSupport.swift */; };
+		91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000003 /* RealBundleCaptureUITests.swift */; };
+		910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000001 /* InstanceSheetGestureUITests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -104,6 +123,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 500000000000000000000004;
 			remoteInfo = IrohLib;
+		};
+		300000000000000000000005 /* AvibeSheetFixture UI test host proxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 400000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 500000000000000000000005;
+			remoteInfo = AvibeSheetFixture;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -159,6 +185,9 @@
 		200000000000000000000130 /* IrohLib.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IrohLib.swift; sourceTree = "<group>"; };
 		200000000000000000000131 /* Iroh.xcframework */ = {isa = PBXFileReference; explicitFileType = wrapper.xcframework; path = Iroh.xcframework; sourceTree = "<group>"; };
 		200000000000000000000132 /* libIrohLib.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libIrohLib.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000136 /* DirectIrohBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohBinding.swift; sourceTree = "<group>"; };
+		200000000000000000000139 /* DirectIrohBindingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohBindingTests.swift; sourceTree = "<group>"; };
+		200000000000000000000137 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		2000000000000000000000A1 /* FormAccessoryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormAccessoryBar.swift; sourceTree = "<group>"; };
 		2000000000000000000000A2 /* NativePushCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinator.swift; sourceTree = "<group>"; };
 		2000000000000000000000A3 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCrypto.swift; sourceTree = "<group>"; };
@@ -166,6 +195,7 @@
 		200000000000000000000019 /* Avibe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Avibe.entitlements; sourceTree = "<group>"; };
 		2000000000000000000000B0 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Avibe/NotificationService.swift; sourceTree = "<group>"; };
 		2000000000000000000000B1 /* PushNotificationProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Avibe/PushNotificationProcessor.swift; sourceTree = "<group>"; };
+		920000000000000000000006 /* FixtureNativeBridgeSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureNativeBridgeSupport.swift; sourceTree = "<group>"; };
 		2000000000000000000000B2 /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = Localizable.strings; sourceTree = "<group>"; };
 		2000000000000000000000B3 /* PushNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000B4 /* relay-apns-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = relay-apns-envelope.json; sourceTree = "<group>"; };
@@ -174,6 +204,14 @@
 		2000000000000000000000B7 /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
 		2000000000000000000000B8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 			2000000000000000000000C1 /* native-subscription-key.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = native-subscription-key.json; sourceTree = "<group>"; };
+		920000000000000000000001 /* SheetFixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetFixtureApp.swift; sourceTree = "<group>"; };
+		920000000000000000000002 /* FixtureKeyboardViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureKeyboardViewport.swift; sourceTree = "<group>"; };
+		920000000000000000000003 /* FixtureMobile */ = {isa = PBXFileReference; lastKnownFileType = folder; path = FixtureMobile; sourceTree = "<group>"; };
+		920000000000000000000004 /* AvibeSheetFixture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AvibeSheetFixture.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		920000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		930000000000000000000003 /* RealBundleCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealBundleCaptureUITests.swift; sourceTree = "<group>"; };
+		930000000000000000000001 /* InstanceSheetGestureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstanceSheetGestureUITests.swift; sourceTree = "<group>"; };
+		930000000000000000000002 /* AvibeSheetFixtureTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AvibeSheetFixtureTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -183,6 +221,7 @@
 			files = (
 				100000000000000000000132 /* libIrohLib.a in Frameworks */,
 				100000000000000000000133 /* Iroh.xcframework in App Frameworks */,
+				100000000000000000000137 /* SystemConfiguration.framework in App Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -192,6 +231,7 @@
 			files = (
 				100000000000000000000134 /* libIrohLib.a in Test Frameworks */,
 				100000000000000000000135 /* Iroh.xcframework in Test Frameworks */,
+				100000000000000000000138 /* SystemConfiguration.framework in Test Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -210,6 +250,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		600000000000000000000005 /* Fixture Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		600000000000000000000006 /* Fixture UI Test Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -217,6 +271,8 @@
 			isa = PBXGroup;
 			children = (
 				700000000000000000000002 /* Avibe */,
+				700000000000000000000009 /* AvibeSheetFixture */,
+				70000000000000000000000A /* AvibeSheetFixtureTests */,
 				700000000000000000000004 /* AvibeTests */,
 				700000000000000000000006 /* NotificationService */,
 				700000000000000000000007 /* PushFixtures */,
@@ -253,6 +309,7 @@
 				200000000000000000000007 /* WebViewController.swift */,
 				200000000000000000000120 /* DirectIrohByteStream.swift */,
 				200000000000000000000121 /* DirectIrohEngine.swift */,
+				200000000000000000000136 /* DirectIrohBinding.swift */,
 				200000000000000000000122 /* DirectIrohTransport.swift */,
 				200000000000000000000123 /* DirectRendezvous.swift */,
 				200000000000000000000124 /* DirectRendezvousFetcher.swift */,
@@ -292,6 +349,7 @@
 				2000000000000000000000B3 /* PushNotificationTests.swift */,
 				200000000000000000000125 /* DirectIrohByteStreamTests.swift */,
 				200000000000000000000126 /* DirectIrohTestSupport.swift */,
+				200000000000000000000139 /* DirectIrohBindingTests.swift */,
 				200000000000000000000127 /* DirectIrohTransportTests.swift */,
 				200000000000000000000128 /* DirectRendezvousFetcherTests.swift */,
 				200000000000000000000129 /* DirectRendezvousTests.swift */,
@@ -337,8 +395,31 @@
 				20000000000000000000000E /* AvibeTests.xctest */,
 				2000000000000000000000B6 /* NotificationService.appex */,
 				200000000000000000000132 /* libIrohLib.a */,
+				920000000000000000000004 /* AvibeSheetFixture.app */,
+				930000000000000000000002 /* AvibeSheetFixtureTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		700000000000000000000009 /* AvibeSheetFixture */ = {
+			isa = PBXGroup;
+			children = (
+				920000000000000000000001 /* SheetFixtureApp.swift */,
+				920000000000000000000002 /* FixtureKeyboardViewport.swift */,
+				920000000000000000000006 /* FixtureNativeBridgeSupport.swift */,
+				920000000000000000000003 /* FixtureMobile */,
+				920000000000000000000005 /* Info.plist */,
+			);
+			path = AvibeSheetFixture;
+			sourceTree = "<group>";
+		};
+		70000000000000000000000A /* AvibeSheetFixtureTests */ = {
+			isa = PBXGroup;
+			children = (
+				930000000000000000000001 /* InstanceSheetGestureUITests.swift */,
+				930000000000000000000003 /* RealBundleCaptureUITests.swift */,
+			);
+			path = AvibeSheetFixtureTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -419,6 +500,41 @@
 			productReference = 200000000000000000000132 /* libIrohLib.a */;
 			productType = "com.apple.product-type.library.static";
 		};
+		500000000000000000000005 /* AvibeSheetFixture */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000006 /* Build configuration list for PBXNativeTarget "AvibeSheetFixture" */;
+			buildPhases = (
+				900000000000000000000005 /* Fixture Sources */,
+				600000000000000000000005 /* Fixture Frameworks */,
+				A00000000000000000000004 /* Fixture Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AvibeSheetFixture;
+			productName = AvibeSheetFixture;
+			productReference = 920000000000000000000004 /* AvibeSheetFixture.app */;
+			productType = "com.apple.product-type.application";
+		};
+		500000000000000000000006 /* AvibeSheetFixtureTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000007 /* Build configuration list for PBXNativeTarget "AvibeSheetFixtureTests" */;
+			buildPhases = (
+				900000000000000000000006 /* Fixture UI Test Sources */,
+				600000000000000000000006 /* Fixture UI Test Frameworks */,
+				A00000000000000000000005 /* Fixture UI Test Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B00000000000000000000005 /* Fixture UI test host dependency */,
+			);
+			name = AvibeSheetFixtureTests;
+			productName = AvibeSheetFixtureTests;
+			productReference = 930000000000000000000002 /* AvibeSheetFixtureTests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -438,6 +554,13 @@
 					};
 					500000000000000000000003 = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					500000000000000000000005 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					500000000000000000000006 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 500000000000000000000005;
 					};
 				};
 			};
@@ -459,6 +582,8 @@
 				500000000000000000000002 /* AvibeTests */,
 				500000000000000000000003 /* NotificationService */,
 				500000000000000000000004 /* IrohLib */,
+				500000000000000000000005 /* AvibeSheetFixture */,
+				500000000000000000000006 /* AvibeSheetFixtureTests */,
 			);
 		};
 /* End PBXProject section */
@@ -491,6 +616,22 @@
 			buildActionMask = 2147483647;
 			files = (
 				1000000000000000000000A9 /* Localizable.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A00000000000000000000004 /* Fixture Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				910000000000000000000008 /* FixtureMobile in Resources */,
+				91000000000000000000000A /* MobileApp in Fixture Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A00000000000000000000005 /* Fixture UI Test Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -651,6 +792,7 @@
 				100000000000000000000007 /* WebViewController.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
+				100000000000000000000136 /* DirectIrohBinding.swift in Sources */,
 				100000000000000000000122 /* DirectIrohTransport.swift in Sources */,
 				100000000000000000000123 /* DirectRendezvous.swift in Sources */,
 				100000000000000000000124 /* DirectRendezvousFetcher.swift in Sources */,
@@ -675,6 +817,7 @@
 				1000000000000000000000AA /* PushNotificationTests.swift in Sources */,
 				100000000000000000000125 /* DirectIrohByteStreamTests.swift in Sources */,
 				100000000000000000000126 /* DirectIrohTestSupport.swift in Sources */,
+				100000000000000000000139 /* DirectIrohBindingTests.swift in Sources */,
 				100000000000000000000127 /* DirectIrohTransportTests.swift in Sources */,
 				100000000000000000000128 /* DirectRendezvousFetcherTests.swift in Sources */,
 				100000000000000000000129 /* DirectRendezvousTests.swift in Sources */,
@@ -700,6 +843,33 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		900000000000000000000005 /* Fixture Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				910000000000000000000001 /* SheetFixtureApp.swift in Sources */,
+				91000000000000000000000D /* NativeBridge.swift in Fixture Sources */,
+				91000000000000000000000F /* NativeBadge.swift in Fixture Sources */,
+				91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */,
+				910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */,
+				910000000000000000000003 /* MobileAccount.swift in Fixture Sources */,
+				910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */,
+				910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */,
+				91000000000000000000000B /* MobileOnboardingContainer.swift in Fixture Sources */,
+				910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */,
+				910000000000000000000007 /* WebOrigin.swift in Fixture Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		900000000000000000000006 /* Fixture UI Test Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */,
+				91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -722,6 +892,11 @@
 			isa = PBXTargetDependency;
 			target = 500000000000000000000004 /* IrohLib */;
 			targetProxy = 300000000000000000000004 /* IrohLib test dependency proxy */;
+		};
+		B00000000000000000000005 /* Fixture UI test host dependency */ = {
+			isa = PBXTargetDependency;
+			target = 500000000000000000000005 /* AvibeSheetFixture */;
+			targetProxy = 300000000000000000000005 /* AvibeSheetFixture UI test host proxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -974,6 +1149,74 @@
 			};
 			name = Release;
 		};
+		C0000000000000000000000B /* Fixture Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AvibeSheetFixture/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		C0000000000000000000000C /* Fixture Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AvibeSheetFixture/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		C0000000000000000000000D /* Fixture UI Test Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = AvibeSheetFixture;
+			};
+			name = Debug;
+		};
+		C0000000000000000000000E /* Fixture UI Test Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = AvibeSheetFixture;
+			};
+			name = Release;
+		};
 		C00000000000000000000009 /* IrohLib Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1056,7 +1299,24 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-/* End XCConfigurationList section */
+		800000000000000000000006 /* Build configuration list for PBXNativeTarget "AvibeSheetFixture" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0000000000000000000000B /* Fixture Debug */,
+				C0000000000000000000000C /* Fixture Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		800000000000000000000007 /* Build configuration list for PBXNativeTarget "AvibeSheetFixtureTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0000000000000000000000D /* Fixture UI Test Debug */,
+				C0000000000000000000000E /* Fixture UI Test Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 	};
 	rootObject = 400000000000000000000001 /* Project object */;
 }

@@ -158,6 +158,11 @@ def validate_vault_result(value: object, operation: str) -> dict[str, Any]:
             and type(approval.get("timeout")) in {int, float}
             and math.isfinite(approval["timeout"]) and approval["timeout"] > 0
         )
+    elif operation == "vault.generate" and payload.get("kind") == "vault_secret":
+        valid = (
+            response["execution"] == "completed" and payload["ok"] is True and "approval" not in response
+            and isinstance(payload.get("secret"), dict) and isinstance(payload.get("generated"), dict)
+        )
     elif operation == "vault.fetch" and payload.get("kind") == "vault_fetch":
         valid = (
             response["execution"] == "completed" and "approval" not in response

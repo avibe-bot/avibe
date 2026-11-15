@@ -331,9 +331,9 @@ fn main() {
                             emit(json!({"event":"remote_dispatched"}));
                         },
                         "eval"=> { let window=handle.get_webview_window("main").expect("main"); window.eval(command["script"].as_str().unwrap()).unwrap(); },
-                        "present"=>instance_client::present(&handle, match command["view"].as_str().unwrap() {
-                            "instances"=>"instances","sign-out"=>"sign-out","account"=>"account",_=>panic!("unsupported view"),
-                        }),
+                        "present"=> { instance_client::present(&handle, match command["view"].as_str().unwrap() {
+                            "instances"=>"instances","sign-out"=>"sign-out","account"=>"account","updates"=>"updates",_=>panic!("unsupported view"),
+                        }); },
                         "exit"=> {handle.exit(0);break;},
                         _=>panic!("unsupported fixture command"),
                     }

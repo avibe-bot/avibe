@@ -34,6 +34,32 @@ struct RootView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .sheet(
+            isPresented: Binding(
+                get: {
+                    if case .accountOverBrowser = appModel.route {
+                        return true
+                    }
+                    return false
+                },
+                set: { presented in
+                    guard !presented else { return }
+                    _ = appModel.returnToRuntime()
+                }
+            ),
+            onDismiss: {
+                _ = appModel.returnToRuntime()
+            }
+        ) {
+            MobileOnboardingContainer(
+                coordinator: appModel.mobileSessionCoordinator,
+                startScreen: appModel.accountSheetStartScreen,
+                returnToRuntime: appModel.returnToRuntime
+            )
+            .ignoresSafeArea(.container, edges: .all)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
         .background(Color(uiColor: .systemBackground))
     }
 }
@@ -83,6 +109,9 @@ private struct BrowserScreen: View {
                         websiteDataStore: appModel.runtimeWebsiteDataStore,
                         pushCoordinator: appModel.pushCoordinator,
                         showAccount: appModel.showAccount,
+                        showAccountRoot: appModel.showAccountRoot,
+                        showInstances: appModel.showInstances,
+                        instanceName: appModel.selectedInstanceName,
                         directStatus: appModel.directStatusProvider,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,
@@ -142,7 +171,13 @@ private struct BrowserScreen: View {
                     if overlay == .loadFailure {
                         ContentUnavailableView {
                             Label(
-                                "browser.error.title",
+                                String(
+                                    format: NSLocalizedString(
+                                        "browser.error.title.named",
+                                        comment: ""
+                                    ),
+                                    instance.name
+                                ),
                                 systemImage: "wifi.exclamationmark"
                             )
                         } description: {
@@ -166,7 +201,7 @@ private struct BrowserScreen: View {
                                 .buttonStyle(.borderedProminent)
                             }
 
-                            Button("browser.change_instance") {
+                            Button("browser.other_instances") {
                                 appModel.showInstancePicker()
                             }
                         }
@@ -190,11 +225,20 @@ private struct BrowserScreen: View {
             )
         } else {
             ContentUnavailableView {
-                Label("browser.error.title", systemImage: "exclamationmark.triangle")
+                Label(
+                    String(
+                        format: NSLocalizedString(
+                            "browser.error.title.named",
+                            comment: ""
+                        ),
+                        instance.name
+                    ),
+                    systemImage: "exclamationmark.triangle"
+                )
             } description: {
                 Text("browser.error.body")
             } actions: {
-                Button("browser.change_instance") {
+                Button("browser.other_instances") {
                     appModel.showInstancePicker()
                 }
             }

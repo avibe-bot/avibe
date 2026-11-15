@@ -5,7 +5,7 @@ Thanks for your interest in contributing!
 ## Getting Started
 
 - Fork the repo and create a feature branch
-- Install the CLI with `uv tool install vibe`
+- Install the CLI with `uv tool install avibe-os`
 - Run `vibe` to complete the setup UI
 
 ## Development
@@ -22,7 +22,7 @@ Thanks for your interest in contributing!
   the manifest is missing or invalid.
 - Lint before PR: ruff is configured with a minimal safety rule set (E9,F63,F7,F82) and ignores E501. Install hooks with `pip install pre-commit` then `pre-commit install`. Run manually with `pre-commit run --all-files`.
 - Write clear commit messages
-- Agent-specific changes: install the relevant CLI (recommended: OpenCode `opencode`; also supported: Codex), then route one Slack channel via Slack **Agent Settings** to manually test the backend (`opencode` or `codex`).
+- Agent-specific changes: install the relevant CLI (recommended: OpenCode `opencode`; also supported: Codex), enable it in Web UI **Settings → Backends**, then manually test an Agent that uses that backend.
 
 ## Pull Requests
 

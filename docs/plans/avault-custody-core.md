@@ -223,6 +223,18 @@ Through-line legend: 🔓 plaintext · 📦 blind box (sealed to `avault`) · �
 4. `avault`: open 📦 → read master key from store → fresh DEK → AES-256-GCM encrypt (random nonce, **AAD = `name + scheme + version`**) → wrap DEK under master key → zeroize plaintext + DEK → return 🔒 `{ciphertext, nonce, wrap_meta}`.
 5. Daemon writes the row to `vault_secrets` (ciphertext, wrap_meta, `protection=standard`, audit `created`). 🔒 only; no plaintext, no key, and no value-derived data is stored or surfaced in metadata.
 
+**Agent-generated Standard variant (avault >=0.1.13):** `vibe vault generate`
+uses the authenticated local control channel to a service-owned worker. avault's
+`generate-secret --name <record> --type password|hex|base64` creates and seals the
+random value entirely inside Rust; Python receives only the existing `Sealed`
+envelope. The service can add only a new static Standard secret or an explicit
+new field, never replace a value, generate Protected material, or handle a
+keypair. It prechecks the target and repeats the checks under a short commit
+reservation; generated provenance and audit commit atomically with the record.
+There is no Agent-process custody or offline generation fallback. See
+`2026-11-14-vault-agent-generate.md` for recipe, attribution and concurrency
+contracts. Browser blind-box creation remains unchanged.
+
 **Protected tier:** step 2 is the **browser encrypting under the VMK** (it unlocks the VMK with the passkey/password first, or uses an existing VMK session) and the POST body is already 🔒. Python never sees plaintext at all.
 
 ### 7.2 Authorize
@@ -704,6 +716,7 @@ These are starting recommendations, not frozen choices — items #2 (envelope) a
 |---|---|---|---|
 | `pubkey` | — | X25519 public key + fingerprint | one-shot `pubkey` supports blind-box create; protected DEK release uses the resident agent's ephemeral `pubkey` frame |
 | `seal` | blind box (the value) + name/scheme | envelope `{ciphertext, nonce, wrap_meta}` | standard-tier create: open box → wrap DEK under master → return ciphertext (never plaintext) |
+| `generate-secret` (>=0.1.13) | record name + validated password/hex/base64 recipe | existing Sealed envelope only | generate and seal a new Standard static record inside avault; no plaintext input or output |
 | `deliver` | envelope + mode (`run` / `fetch` / `inject`) | exit code / response body | one-shot standard-tier delivery uses the master key; protected delivery uses resident-agent grants, never inline DEK boxes |
 | `sign` | key envelope + digest/tx | signature (public) | one-shot standard-tier signing; protected signing uses resident-agent grants or browser-local signing |
 | `key export` / `key import` | passphrase (stdin) | encrypted backup / ok | back up, migrate, restore the master key |

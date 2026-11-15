@@ -25,6 +25,8 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Generic, Protocol, TypeVar
 
+from core.inbox_events import publish_runtime_activity
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_GENERATION_CAP = 3
@@ -260,6 +262,7 @@ class RuntimeGenerationSet(Generic[_S, _R]):
 
     def _bind(self, generation: RuntimeGeneration[_S, _R]) -> RuntimeBinding[_S, _R]:
         generation.bindings += 1
+        publish_runtime_activity()
         return RuntimeBinding(generation, self)
 
     def _release(self, binding: RuntimeBinding[_S, _R]) -> None:
@@ -268,6 +271,7 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         binding.released = True
         generation = binding.generation
         generation.bindings -= 1
+        publish_runtime_activity()
         if generation.retiring and generation.bindings == 0:
             # Drained now, so its graceful stop deserves another attempt even
             # if this pass already tried one while it was still bound.

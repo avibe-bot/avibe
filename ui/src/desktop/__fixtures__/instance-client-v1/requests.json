@@ -144,5 +144,29 @@
     "action": {
       "type": "sign_out"
     }
+  },
+  {
+    "version": 1,
+    "request_id": "request-18",
+    "expected_generation": 1,
+    "action": { "type": "update_check" }
+  },
+  {
+    "version": 1,
+    "request_id": "request-19",
+    "expected_generation": 1,
+    "action": { "type": "update_set_prereleases", "enabled": true }
+  },
+  {
+    "version": 1,
+    "request_id": "request-20",
+    "expected_generation": 1,
+    "action": { "type": "update_set_auto_update", "enabled": false }
+  },
+  {
+    "version": 1,
+    "request_id": "request-21",
+    "expected_generation": 1,
+    "action": { "type": "update_install", "target_version": "3.2.7" }
   }
 ]

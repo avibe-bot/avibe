@@ -49,7 +49,12 @@ export type DesktopClientAction =
   | { type: 'decide_consent'; approve: boolean }
   | { type: 'cancel' }
   | { type: 'return_local' }
-  | { type: 'sign_out' };
+  | { type: 'sign_out' }
+  // This computer's desktop updater, from the trusted update view (ui/design: update/panel/trusted-view).
+  | { type: 'update_check' }
+  | { type: 'update_set_prereleases'; enabled: boolean }
+  | { type: 'update_set_auto_update'; enabled: boolean }
+  | { type: 'update_install'; target_version: string };
 export type DesktopClientRequest = {
   version: 1; request_id: string; expected_generation: number; action: DesktopClientAction;
 };
@@ -64,7 +69,7 @@ export type DesktopClientReply =
 
 export const DESKTOP_CLIENT_STATE_EVENT = 'avibe:desktop-client-state';
 export const DESKTOP_PRESENT_EVENT = 'avibe:desktop-present';
-export const DESKTOP_CLIENT_VIEWS = ['account', 'instances', 'setup-complete', 'sign-out'] as const;
+export const DESKTOP_CLIENT_VIEWS = ['account', 'instances', 'setup-complete', 'sign-out', 'updates'] as const;
 export type DesktopClientView = typeof DESKTOP_CLIENT_VIEWS[number];
 declare global {
   interface Window {
@@ -91,9 +96,12 @@ export function isNewerClientState(next: DesktopClientProjection, previous: Desk
   return !previous || next.generation > previous.generation
     || (next.generation === previous.generation && next.revision >= previous.revision);
 }
-/** The caller owns the navigation guard. This URL only presents a trusted page. */
-export function presentDesktopClient(view: DesktopClientView | 'updates'): boolean {
+/** The caller owns the navigation guard. This URL only presents a trusted page. A native request
+ *  carries its `presentationToken` back unchanged, so native can match the approval to that request. */
+export function presentDesktopClient(view: DesktopClientView | 'updates', presentationToken?: string): boolean {
   if (!hasDesktopClient() || (view !== 'updates' && !isDesktopClientView(view))) return false;
-  window.location.assign(view === 'updates' ? 'avibe://updates' : `avibe://desktop/${view}`);
+  window.location.assign(presentationToken !== undefined
+    ? `avibe://desktop/${view}?native_request=${encodeURIComponent(presentationToken)}`
+    : view === 'updates' ? 'avibe://updates' : `avibe://desktop/${view}`);
   return true;
 }

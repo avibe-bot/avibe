@@ -227,6 +227,78 @@ def test_mark_read_badge_change_schedules_best_effort_owner_reconciliation(
     assert calls[0][1].subject == "user-editor-alice@example.com"
 
 
+@pytest.mark.asyncio
+async def test_mark_read_publishes_with_unscoped_unread_session(monkeypatch, tmp_path) -> None:
+    """Scope badges omit unplaced replies; session maps and delivery retain them."""
+    import asyncio
+
+    from core import web_push_notifications
+    from vibe import sse_broker
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _config, ids = _setup_state(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        messages_service.append(
+            conn,
+            scope_id=None,
+            session_id=ids["unscoped"],
+            platform="avibe",
+            author="agent",
+            message_type="result",
+            text="Unplaced session reply",
+        )
+        scope_b = conn.execute(
+            scopes.select().where(scopes.c.native_id == ids["project_b"])
+        ).mappings().one()["id"]
+    engine.dispose()
+
+    event_broker = sse_broker.SSEBroker()
+    monkeypatch.setattr(sse_broker, "broker", event_broker)
+    reconciliations = []
+    monkeypatch.setattr(
+        web_push_notifications,
+        "schedule_badge_reconciliation",
+        lambda *args: reconciliations.append(args),
+    )
+    client = app.test_client()
+    sub_id, queue = event_broker.subscribe()
+    try:
+        for session_id, remaining in (
+            (ids["session_a"], {ids["session_b"]: 1, ids["unscoped"]: 1}),
+            (ids["unscoped"], {ids["session_b"]: 1}),
+        ):
+            response = await asyncio.to_thread(
+                client.post,
+                f"/api/sessions/{session_id}/mark-read",
+                headers=csrf_headers(client),
+                json={},
+            )
+            assert response.status_code == 200
+            result = response.get_json()
+            assert result["updated"] == 1
+            assert result["unread_counts"] == {scope_b: 1}
+            assert result["unread_by_session"] == remaining
+            assert result["unread_by_category"] == {"bot": 0, "session": len(remaining)}
+            assert result["badge_total"] == len(remaining)
+            event_type, payload = await asyncio.wait_for(queue.get(), timeout=1)
+            assert event_type == "inbox.unread.changed"
+            data = json.loads(payload)["data"]
+            assert data == {
+                "session_id": session_id,
+                "scope_id": None if session_id == ids["unscoped"] else f"avibe::project::{ids['project_a']}",
+                "delta": -1,
+                **{key: value for key, value in result.items() if key != "updated"},
+            }
+            inbox = await asyncio.to_thread(client.get, "/api/inbox")
+            assert inbox.status_code == 200
+            assert inbox.get_json()["unread_by_session"] == remaining
+            assert inbox.get_json()["badge_total"] == len(remaining)
+        assert len(reconciliations) == 2
+    finally:
+        event_broker.unsubscribe(sub_id)
+
+
 def test_mark_read_without_badge_change_does_not_schedule_reconciliation(
     monkeypatch,
     tmp_path,

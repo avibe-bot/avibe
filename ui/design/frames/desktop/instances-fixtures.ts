@@ -1,5 +1,7 @@
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
+import type { DesktopAccountRowViewProps } from '@/desktop/DesktopAccountRowView';
+import type { AccountLoginViewProps } from '@/desktop/AccountLoginView';
 import type { FrameSpec } from '../../frame';
 import type { DesktopInstanceFixture, DesktopInstanceState } from '../../kit/desktop-instances';
 import { workbenchFixtures, homeFactsApi } from '../workbench/fixtures';
@@ -44,6 +46,38 @@ export const desktopInstanceFrames: (Omit<FrameSpec, 'render'> & { fixture: Desk
     ...homeFactsApi({ model: true, push: true, computerUse: true, chatApps: true, paired: true }),
     '/api/session': { remote: false },
     // Local Runtime matches the rc9 shell shown in the local updater fixture.
-    '/api/version': { current: state === 'signed-out' ? '3.2.6rc9' : '3.2.4', latest: state === 'signed-out' ? '3.2.6rc9' : '3.2.4', has_update: false, error: null },
+    '/api/version': { current: ['signed-out', 'account'].includes(state) ? '3.2.6rc9' : '3.2.4', latest: ['signed-out', 'account'].includes(state) ? '3.2.6rc9' : '3.2.4', has_update: false, error: null },
   }, { copy: copyFor(lang === 'en' ? en : zh) }),
 })));
+
+// Static props for the actual product card. Native lifecycle and credentials are
+// deliberately absent: embedded design documents cannot acquire Desktop IPC.
+export function loginViewProps(fixture: DesktopInstanceFixture): AccountLoginViewProps | null {
+  if (!['email', 'code', 'code-error'].includes(fixture.state)) return null;
+  const verify = fixture.state !== 'email';
+  const noAction = () => {};
+  return {
+    verify, email: 'max@example.test', value: verify ? '123456' : '', busy: false,
+    errorMessage: fixture.state === 'code-error' ? (fixture.lang === 'en' ? en : zh).desktopClient.errors.code : null,
+    onValueChange: noAction, onSubmit: noAction, onChangeEmail: noAction,
+    onResendCode: noAction, onContinueLocal: noAction,
+  };
+}
+
+// Only the shipped canonical footer states consume these display props. Native
+// hooks, navigation and updater IPC remain outside the design canvas.
+export function accountRowViewProps(fixture: DesktopInstanceFixture): Omit<DesktopAccountRowViewProps, 'localUpdater'> | null {
+  if (fixture.state !== 'signed-out' && fixture.state !== 'account') return null;
+  const signedIn = fixture.state === 'account';
+  return {
+    state: {
+      version: 1, revision: 1, generation: 1,
+      account: { status: signedIn ? 'signed_in' : 'signed_out', identity: signedIn ? { id: 'fixture', email: 'max@example.test' } : null },
+      connection: { status: 'local', committed: { kind: 'local', name: '小麦的 Mac', instance_id: null }, pending: null },
+      local: { name: '小麦的 Mac', remote_access: 'off' },
+      desktop: { version: '3.2.6rc9', update: { phase: 'current', latest: null, channel: 'test', skippedVersion: null, interactive: false } },
+      remote_auxiliary: 'disabled_incomplete',
+    },
+    menuOpen: signedIn, onMenuOpenChange: () => {}, onPresent: () => {},
+  };
+}

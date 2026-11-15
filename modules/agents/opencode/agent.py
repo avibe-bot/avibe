@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 import aiohttp
 
+from core.inbox_events import publish_runtime_activity
 from core.backend_failure import emit_backend_failure
 from core.caller_context import (
     AVIBE_CALLER_PLATFORM_ENV,
@@ -908,10 +909,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 break
             self._runtime.outside_turn_acquisitions -= 1
             await agent_service.wait_backend_ready(self.name)
+        publish_runtime_activity()
         try:
             yield
         finally:
             self._runtime.outside_turn_acquisitions -= 1
+            publish_runtime_activity()
 
     @asynccontextmanager
     async def current_server(self) -> AsyncIterator[OpenCodeGeneration]:

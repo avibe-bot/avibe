@@ -79,6 +79,14 @@ function loadCliForUnitTest(overrides = {}) {
   return sandbox.module.exports;
 }
 
+test("uses the public installer URLs for user-facing bootstrap", () => {
+  const source = fs.readFileSync(cliPath, "utf8");
+
+  assert.match(source, /"https:\/\/avibe\.bot\/install\.sh"/);
+  assert.match(source, /"https:\/\/avibe\.bot\/install\.ps1"/);
+  assert.doesNotMatch(source, /raw\.githubusercontent\.com\/avibe-bot\/avibe\/master\/install\.(?:sh|ps1)/);
+});
+
 test("prints wrapper help without installing", () => {
   const temp = makeTempEnv();
   const result = runCli(["--help"], {

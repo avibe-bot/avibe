@@ -5,5 +5,7 @@
   "latest": "3.2.3",
   "channel": "test",
   "has_update": true,
+  "auto_update": true,
+  "host_actions": ["check", "prereleases", "auto_update", "install"],
   "checked_at": "2026-10-21T02:36:00Z"
 }

@@ -14,10 +14,13 @@ For Avibe, bind the action and recheck `MERGED`, then follow this procedure. Oth
    and are readable. Missing state is a blocker, not provisioning/re-seeding
    authority. Use the documented local Lima route on macOS; preserve existing
    bind/port settings explicitly when different from defaults.
-3. For the existing target, run from the verified checkout:
+3. Check the existing target's hold with `status`. If another owner holds it,
+   stop and report who and why; never replace their hold. From the verified
+   checkout, hold it for this Session and pass that owner on the update:
 
    ```bash
-   python3 scripts/incus_regression.py up --target master --reset-mode none --clean --env-file /dev/null
+   python3 scripts/incus_regression.py hold --target master --owner <session-id> --reason "Post-merge regression"
+   python3 scripts/incus_regression.py up --target master --hold-owner <session-id> --reset-mode none --clean --env-file /dev/null
    ```
 
    `--env-file /dev/null` suppresses automatic env discovery and leaves
@@ -30,6 +33,14 @@ For Avibe, bind the action and recheck `MERGED`, then follow this procedure. Oth
    match the intended SHA and the runtime environment is unchanged without
    exposing values, before success or E2E checks. Report environment, deployed
    commit, and actual test results; health alone is not an end-to-end pass.
+5. When verification finishes, release this Session's hold:
+
+   ```bash
+   python3 scripts/incus_regression.py release --target master
+   ```
+
+   If the update fails, keep the hold while investigating and name the owner
+   responsible for recovery; do not leave an unexplained hold behind.
 
 Neither choice authorizes production, a remote tenant, or the running local Avibe
 to be updated or restarted.

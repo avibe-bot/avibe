@@ -240,6 +240,9 @@ class UpdateChecker:
         self._upgrade_lock = asyncio.Lock()  # Prevent concurrent upgrades
         self._post_update_lock = asyncio.Lock()
         self._transport_ready_event = asyncio.Event()
+        from core.update_activity import UpdateActivity
+
+        self._desktop_activity = UpdateActivity(controller)
         self._cached_owner_dm_channel: Optional[str] = None  # Cache DM channel ID (legacy fallback)
 
     def _lang(self) -> str:
@@ -260,6 +263,7 @@ class UpdateChecker:
             self.state.save()
 
         self._running = True
+        self._desktop_activity.start()
         self._check_task = asyncio.create_task(self._check_loop())
         logger.info(
             f"Update checker started (interval={self.config.check_interval_minutes}min, "
@@ -269,6 +273,7 @@ class UpdateChecker:
     def stop(self) -> Optional[asyncio.Task]:
         """Stop the periodic update checker and return the cancelled task, if any."""
         self._running = False
+        self._desktop_activity.stop()
         task = self._check_task
         if task:
             task.cancel()
@@ -287,8 +292,12 @@ class UpdateChecker:
             if self._check_task is task:
                 self._check_task = None
 
+    async def desktop_idle_seconds(self) -> int:
+        return await self._desktop_activity.idle_seconds()
+
     def record_activity(self) -> None:
-        """Record user activity (called when a Slack message is received)."""
+        """Record admitted user activity, including IM before a turn starts."""
+        self._desktop_activity.record()
         self.state.last_activity_at = time.time()
         self.state.save()  # save() has its own try/except, won't raise
 

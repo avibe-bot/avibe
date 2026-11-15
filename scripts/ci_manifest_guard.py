@@ -26,6 +26,7 @@ WORKFLOW_NAMES = {
     "lint.yml",
     "ios-shell.yml",
     "desktop-shell.yml",
+    "desktop-native-update-acceptance.yml",
     "web-fetch-runtime.yml",
     "release_ai.yml",
     "publish.yml",

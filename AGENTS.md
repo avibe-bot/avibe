@@ -115,9 +115,13 @@ exception and runs without that request.
 
 Entry points:
 
-- default: `./scripts/run_regression.sh`
-- direct: `python3 scripts/incus_regression.py up --target master`
-- macOS/Lima: `INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus" ./scripts/run_regression.sh`
+- default (after holding master): `./scripts/run_regression.sh --hold-owner <you>`
+- direct: `python3 scripts/incus_regression.py up --target master --hold-owner <you>`
+- macOS/Lima: `INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus" ./scripts/run_regression.sh --hold-owner <you>`
+
+For an existing master, use `hold --target master --owner <you> --reason <reason>`
+first, update with `--hold-owner <you>`, then `release --target master` after
+verification. See `docs/regression/README.md` for bootstrap and hold semantics.
 
 Hard rules:
 
@@ -135,8 +139,9 @@ Hard rules:
   `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
   when merged, abandoned, or stale
 - before updating, restarting, or deleting any regression environment, check its
-  hold with `status` or `reconcile`, since holds do not stop `up` or `down`; if
-  held, tell the user who holds it and why, and do not proceed or offer a
+  hold with `status` or `reconcile`. `up` and `down` enforce `--hold-owner`
+  matching any hold; existing master updates always require a hold. If another
+  owner holds it, tell the user who and why, and do not proceed or offer a
   one-click delete. Long-running work must hold its environment for as long as
   it runs.
 - `reconcile` reports every worktree environment held by Incus, including

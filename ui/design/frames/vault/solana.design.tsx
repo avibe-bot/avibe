@@ -4,6 +4,7 @@
 // the recipient its test-2 key: published vectors, never a wallet. Protected Solana keys and their
 // approval window live in the sandbox. On the protected tier the dialog first sets up or unlocks the
 // protected vault, as for any protected key; the frames draw the key builder that follows.
+import { VaultApprovalCard } from '@/components/ui/vault-approval-card';
 import { VaultProtectedKeyFields } from '@/components/ui/vault-protected-key-fields';
 import { VaultSecretDialog } from '@/components/ui/vault-secret-dialog';
 import { VaultSolanaKeyFields } from '@/components/ui/vault-solana-key-fields';
@@ -13,6 +14,7 @@ import type { VaultRequest } from '@/context/ApiContext';
 import { frames } from '../../frame';
 import { consolePage, phoneShell } from '../workbench/fixtures';
 import { secret, signRequest, vaultApi, vaultFixtures } from './fixtures';
+import { walletAccounts, walletSecret } from './mnemonic/fixtures';
 
 const noop = () => {};
 const address = 'FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z';
@@ -55,10 +57,36 @@ const sign = (messageHex: string): VaultRequest => ({
   delivery: { scheme: 'ed25519', message_hex: messageHex },
 });
 
+// A legacy message whose first instruction is System AdvanceNonceAccount (its blockhash slot holds the
+// nonce value). The card parses neither kind, so it reads exactly as a recent-blockhash message does.
+const durableNonce =
+  '01000204d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a'
+  + '3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c'
+  + '06a7d517192c568ee08a845f73d29788cf035c3145b21ab344d8062ea9400000'
+  + '0000000000000000000000000000000000000000000000000000000000000000'
+  + '2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a'
+  + '0103030102000404000000';
+
+// The same pending request from a seed-phrase wallet's Solana account (the account as the Agent asked).
+// A protected key's card shows the same hint, but drawing it would start the vault sandbox, which no
+// frame may load; its unit test covers it.
+const hdAccount = walletAccounts[2];
+const hdSign: VaultRequest = {
+  ...sign(transfer),
+  id: 'vrq_solana_hd',
+  secret_name: 'AGENT_WALLET',
+  card: { ...signRequest.card, secret_name: 'AGENT_WALLET', derivation: { chain: 'solana', account: 2 }, account: hdAccount },
+  delivery: { scheme: 'ed25519', message_hex: transfer, derivation: { chain: 'solana', account: 2 }, signing_context: { kind: 'solana-message' } },
+};
+const approvalCard = (request: VaultRequest) => () => (
+  <div className="p-6"><VaultApprovalCard request={request} onResolved={noop} onCancel={noop} /></div>
+);
+
 // An avault new enough to create Solana keys.
 const dependencies = { '/api/dependencies': { deps: [{ id: 'avault', kind: 'tool', required: true, installed: true, version: '0.1.10', status: 'ready' }] } };
 const api = (requests: VaultRequest[] = []) => ({ ...vaultApi({ secrets: [ethKey, solanaKey], grants: [], requests }), ...dependencies });
 const listed = vaultFixtures(api());
+const withWallet = vaultFixtures({ ...vaultApi({ secrets: [ethKey, solanaKey, walletSecret()], grants: [], requests: [] }), ...dependencies });
 const pending = (messageHex: string) => vaultFixtures(api([sign(messageHex)]));
 
 const dialog = () => <VaultSecretDialog open onOpenChange={noop} onCreated={noop} />;
@@ -171,6 +199,24 @@ const designFrames = frames([
     fixtures: pending(transfer),
     click: review,
     render: page,
+  },
+  {
+    name: 'approval-durable-nonce',
+    title: '审批 · 持久 nonce 消息：同一条提示（不解析消息）',
+    width: 640,
+    height: 560,
+    status: 'shipped',
+    fixtures: listed,
+    render: approvalCard(sign(durableNonce)),
+  },
+  {
+    name: 'approval-hd',
+    title: '审批 · 助记词钱包 Solana 账户：同一条提示',
+    width: 640,
+    height: 640,
+    status: 'shipped',
+    fixtures: withWallet,
+    render: approvalCard(hdSign),
   },
   {
     name: 'approval-details',

@@ -1,4 +1,8 @@
 import type { PolicyDowngradeContext } from '../lib/vaultPolicyWire';
+import type { UpdateControlRequest, UpdateSnapshot } from '../components/update/types';
+export type {
+  DesktopRemoteUpdatePhase, DesktopRemoteUpdateRequest, UpdateControlRequest, UpdateHostAction,
+} from '../components/update/types';
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
@@ -144,6 +148,9 @@ export type VaultSecret = {
   fields?: string[];
   /** Present only when the stored extra-field section could not be read safely. */
   fields_state?: 'corrupt';
+  /** Fields whose current value an Agent (`vibe vault generate` from a Session) or the CLI generated
+   *  inside avault. The server drops an entry when the user replaces or removes that value. */
+  generated?: VaultGeneratedField[];
   /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
   tags: string[];
   kind: string;
@@ -169,6 +176,19 @@ export type VaultSecret = {
   use_count: number;
   created_at: string;
   updated_at: string;
+};
+
+/** Who generated one field's current value. `session_title` is the title when it was generated;
+ *  the Session may have been renamed or deleted since. */
+export type VaultGeneratedField = {
+  field: string;
+  by: 'agent' | 'cli';
+  session_id: string | null;
+  session_title: string | null;
+  at: string;
+  type: 'password' | 'hex' | 'base64';
+  length?: number;
+  bytes?: number;
 };
 
 /** A Bitcoin script type the server can sign for: Legacy P2PKH, Native SegWit P2WPKH, Taproot. */
@@ -534,6 +554,16 @@ export type VaultFieldValuePayload = {
   expected_updated_at?: string;
 };
 
+/** One atomic commit of an edit dialog's field changes (POST /api/vault/secrets/{name}/fields).
+ *  `values` use the final labels, after the optional default-field rename; nothing is stored
+ *  unless all of it is. */
+export type VaultFieldsBatchPayload = {
+  expected_updated_at: string;
+  default_field?: string;
+  values?: Array<{ field: string; record: string; blind_box?: VaultBlindBox; sealed?: VaultSealedEnvelope }>;
+  remove?: string[];
+};
+
 export type VaultCreateFieldPayload = {
   name: string;
   /** Canonical record name bound into this extra field's envelope. */
@@ -887,6 +917,8 @@ export type ApiContextType = {
     options?: { confirmInterrupt?: boolean },
   ) => Promise<DesktopRemoteUpdateResult>;
   doUpgrade: (options?: { confirmInterrupt: boolean }) => Promise<UpgradeResult>;
+  /** Ask this host's updater to check now, or to change one of its settings. */
+  requestUpdateControl: (action: UpdateControlRequest['action'], enabled?: boolean) => Promise<UpdateControlResult>;
   browseDirectory: (path: string, showHidden?: boolean) => Promise<{ ok: boolean; path?: string; parent?: string | null; dirs?: { name: string; path: string }[]; error?: string }>;
   browseFavorites: () => Promise<{ ok: boolean; system?: string; favorites?: { key: string; path: string }[]; error?: string }>;
   browseMkdir: (path: string) => Promise<{ path: string }>;
@@ -1080,6 +1112,7 @@ export type ApiContextType = {
   prepareVaultBitcoinAddressTypes: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecretField: (name: string, field: string, payload: { expected_updated_at: string }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  updateVaultSecretFields: (name: string, payload: VaultFieldsBatchPayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (
     name: string,
@@ -2172,42 +2205,14 @@ export type LogSource = {
   logs?: LogEntry[];
 };
 
-export type VersionInfo = {
-  current: string;
-  latest: string | null;
-  has_update: boolean;
-  error: string | null;
-  managed_by?: 'desktop';
-  remote_install_allowed?: boolean;
-  remote_request?: DesktopRemoteUpdateRequest | null;
-  build?: {
-    kind: 'package' | 'source';
-    revision?: string;
-    dirty?: boolean;
-  };
-};
+/** The update snapshot `/api/version` reports, shared with the update panel (components/update/types.ts). */
+export type VersionInfo = UpdateSnapshot;
 
-export type DesktopRemoteUpdatePhase =
-  | 'requested'
-  | 'acknowledged'
-  | 'checking'
-  | 'awaiting_host'
-  | 'downloading'
-  | 'installing'
-  | 'restarting'
-  | 'completed'
-  | 'failed'
-  | 'declined'
-  | 'expired';
+/** `request_id` when a desktop app takes the request; `snapshot` when a standalone Runtime answers at once. */
+export type UpdateControlResult =
+  | { ok: true; request_id?: string; snapshot?: VersionInfo }
+  | { ok: false; error: string };
 
-export type DesktopRemoteUpdateRequest = {
-  request_id: string;
-  target: string;
-  phase: DesktopRemoteUpdatePhase;
-  progress: number | null;
-  error_code: string | null;
-  updated_at: string;
-};
 
 export type DesktopRemoteUpdateErrorCode =
   | 'not_desktop_managed'
@@ -4370,6 +4375,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return payloadJson as UpgradeResult;
     },
+    requestUpdateControl: async (action, enabled) => {
+      const path = action === 'check' ? '/api/update/check'
+        : action === 'prereleases' ? '/api/update/prereleases' : '/api/update/auto-update';
+      const { res, payloadJson } = await requestJson(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(action === 'check' ? {} : { enabled }),
+      }, path, { handleError: false });
+      if (!res.ok && typeof payloadJson?.error !== 'string') {
+        throw new ApiError('Update request failed', res.status, null);
+      }
+      return payloadJson as UpdateControlResult;
+    },
     browseDirectory: (path, showHidden) => postJson('/api/browse', { path, show_hidden: showHidden || false }),
     browseFavorites: () => getJson('/api/browse/favorites'),
     browseMkdir: (path) => postJson('/api/browse/mkdir', { path }),
@@ -4819,6 +4837,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;
       const { payloadJson } = await requestJson(path, {
         method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }, path, opts);
+      return payloadJson;
+    },
+    updateVaultSecretFields: async (name, payload, opts) => {
+      const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields`;
+      const { payloadJson } = await requestJson(path, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       }, path, opts);

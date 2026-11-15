@@ -3,8 +3,19 @@ import SwiftUI
 enum MobileOnboardingStartScreen: String, Equatable {
     case account
     case instances
+    /// The instances sheet over a live runtime. The sheet's Close button and
+    /// native dismissal return to that runtime without reloading it.
+    case sheet
+    /// Variant B's named-instance entry; the bundled page omits Account.
+    case sheetInstances = "sheet-instances"
+    /// Variant B's Home avatar: Account is the panel root, without Back.
+    case sheetAccount = "sheet-account"
     /// Account over a live runtime: Back calls `app.returnToInstance`.
     case runtimeAccount = "runtime-account"
+
+    var isSheet: Bool {
+        self == .sheet || self == .sheetInstances || self == .sheetAccount
+    }
 }
 
 struct MobileOnboardingContainer: UIViewControllerRepresentable {
@@ -18,7 +29,8 @@ struct MobileOnboardingContainer: UIViewControllerRepresentable {
         MobileOnboardingViewController(
             coordinator: coordinator,
             startScreen: startScreen,
-            returnToRuntime: returnToRuntime
+            returnToRuntime: returnToRuntime,
+            dismissSurface: returnToRuntime
         )
     }
 

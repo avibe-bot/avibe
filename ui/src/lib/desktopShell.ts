@@ -232,6 +232,12 @@ export type DesktopUpdateState = {
   prereleases?: boolean;
   skippedVersion: string | null;
   interactive: boolean;
+  /** When the last check finished (RFC 3339); absent from shells that do not report it. */
+  checkedAt?: string | null;
+  /** Install found versions when idle, without asking; absent from shells without the setting. */
+  autoUpdate?: boolean;
+  /** Updater commands this shell takes from the Workbench (`check`, `prereleases`, `auto_update`). */
+  hostActions?: string[];
   remoteInstallAllowed?: boolean;
   remoteRequest?: {
     requestId: string;
@@ -273,11 +279,13 @@ type DesktopUpdateStateListener = (state: DesktopUpdateState) => void;
 export type DesktopUpdateShellActions = {
   getState: () => Promise<DesktopUpdateState>;
   check: () => Promise<void>;
-  install: () => Promise<void>;
+  /** Install exactly the version the panel shows; an older shell ignores the argument. */
+  install: (targetVersion: string) => Promise<void>;
   skip: () => Promise<void>;
   declineRemoteRequest: () => Promise<void>;
   /** Offer pre-releases (the shell's `test` channel) as well as stable releases. */
   setPrereleases: (enabled: boolean) => Promise<void>;
+  setAutoUpdate: (enabled: boolean) => Promise<void>;
 };
 
 export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
@@ -286,10 +294,11 @@ export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
   return {
     getState: async () => (await invoke('desktop_update_state')) as DesktopUpdateState,
     check: async () => { await invoke('desktop_update_check'); },
-    install: async () => { await invoke('desktop_update_install'); },
+    install: async (targetVersion) => { await invoke('desktop_update_install', { targetVersion }); },
     skip: async () => { await invoke('desktop_update_skip'); },
     declineRemoteRequest: async () => { await invoke('desktop_update_remote_decline'); },
     setPrereleases: async (enabled) => { await invoke('desktop_update_prereleases_set', { enabled }); },
+    setAutoUpdate: async (enabled) => { await invoke('desktop_update_auto_update_set', { enabled }); },
   };
 }
 

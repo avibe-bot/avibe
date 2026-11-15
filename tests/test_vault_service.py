@@ -367,7 +367,8 @@ def test_provision_field_spec_contains_only_valid_distinct_labels():
         ({"type": "password"}, {"type": "password", "length": 24, "digits": True, "symbols": True, "no_lookalikes": False}),
         ({"type": "password", "length": 12, "digits": False, "symbols": False, "no_lookalikes": True, "field": "password"},
          {"type": "password", "length": 12, "digits": False, "symbols": False, "no_lookalikes": True, "field": "password"}),
-        ({"type": "password", "length": 128}, {"type": "password", "length": 128, "digits": True, "symbols": True, "no_lookalikes": False}),
+        ({"type": "password", "length": 8}, {"type": "password", "length": 8, "digits": True, "symbols": True, "no_lookalikes": False}),
+        ({"type": "password", "length": 100}, {"type": "password", "length": 100, "digits": True, "symbols": True, "no_lookalikes": False}),
         ({"type": "hex"}, {"type": "hex", "bytes": 32}),
         ({"type": "hex", "bytes": 16}, {"type": "hex", "bytes": 16}),
         ({"type": "base64", "bytes": 64}, {"type": "base64", "bytes": 64}),
@@ -383,7 +384,7 @@ def test_provision_generate_recipe_is_strict_nonsecret_metadata(recipe, normaliz
 
 @pytest.mark.parametrize("recipe", [
     None, [], "password", {}, {"type": "base64url"}, {"type": "Password"},
-    {"type": "password", "length": 11}, {"type": "password", "length": 129},
+    {"type": "password", "length": 7}, {"type": "password", "length": 101}, {"type": "password", "length": 128},
     {"type": "password", "length": True}, {"type": "password", "length": 24.0},
     {"type": "password", "length": "24"}, {"type": "password", "bytes": 32},
     {"type": "password", "digits": 1}, {"type": "password", "symbols": None},

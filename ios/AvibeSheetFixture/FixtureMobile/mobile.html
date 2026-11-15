@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light dark; }
+    html, body { margin: 0; min-height: 100%; font: -apple-system-body; }
+    body { background: Canvas; color: CanvasText; }
+    main { padding: 24px 20px 48px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h1 { font: -apple-system-headline; margin: 0 0 20px; }
+    button { display: block; width: 100%; min-height: 64px; margin: 10px 0; padding: 12px 16px; border: 1px solid GrayText; border-radius: 14px; background: ButtonFace; color: ButtonText; text-align: left; font: -apple-system-body; }
+    #close { width: auto; min-height: 44px; margin: 0; text-align: center; }
+    #scroll-state { position: sticky; top: 0; padding: 6px 0; background: Canvas; color: GrayText; }
+  </style>
+</head>
+<body>
+  <main id="fixture-sheet" aria-label="Instance sheet">
+    <header>
+      <h1>Instances</h1>
+      <button id="close" aria-label="Close">Close</button>
+    </header>
+    <div id="scroll-state" role="status" aria-live="polite">scroll-offset-0</div>
+    <section id="instances" aria-label="Other instances"></section>
+  </main>
+  <script>
+    (() => {
+      const state = document.querySelector('#scroll-state');
+      const list = document.querySelector('#instances');
+      document.querySelector('#close').addEventListener('click', () => {
+        window.avibeMobile.call('app.dismiss');
+      });
+      window.addEventListener('scroll', () => {
+        state.textContent = `scroll-offset-${Math.round(window.scrollY)}`;
+      }, {passive: true});
+      window.avibeMobile.call('session.bootstrap').then((session) => {
+        for (const instance of session.instances) {
+          const button = document.createElement('button');
+          button.textContent = instance.name;
+          button.setAttribute('aria-label', instance.name);
+          button.dataset.instanceID = instance.id;
+          if (!instance.available) button.textContent += ' — Offline';
+          list.append(button);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

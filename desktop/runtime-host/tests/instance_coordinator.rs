@@ -103,11 +103,21 @@ struct View {
     states: Mutex<Vec<ClientState>>,
     committed: Mutex<Vec<ClientTarget>>,
     restored: Mutex<Vec<ClientTarget>>,
+    update_calls: Mutex<Vec<(ClientAction, Epoch)>>,
+    update_failure: Mutex<Option<String>>,
     retirement_failure: AtomicBool,
     invalidation: Mutex<Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 #[async_trait]
 impl ClientView for View {
+    fn desktop_update(&self, action: ClientAction, epoch: Epoch) -> Result<(), ClientError> {
+        epoch.check()?;
+        self.update_calls.lock().unwrap().push((action, epoch));
+        match self.update_failure.lock().unwrap().clone() {
+            Some(code) => Err(ClientError::new(code)),
+            None => Ok(()),
+        }
+    }
     fn changed(&self, state: &ClientState) {
         self.states.lock().unwrap().push(state.clone());
     }
@@ -197,6 +207,128 @@ async fn action(client: &Coordinator, action: ClientAction) -> ClientReply {
         })
         .await
 }
+// AUTH-SETUP-177/178: local updater intents must not become selected-Runtime
+// actions or account transactions. Existing OTP/selection tests do not dispatch
+// these four new bridge actions or fence their delayed native completion.
+#[tokio::test]
+async fn update_actions_keep_local_ownership_and_envelope_generation_guards() {
+    let actions = [
+        json!({"type":"update_check"}),
+        json!({"type":"update_set_prereleases","enabled":true}),
+        json!({"type":"update_set_auto_update","enabled":false}),
+        json!({"type":"update_install","target_version":"3.2.7"}),
+    ];
+    for remote in [false, true] {
+        let f = fixture(vec![]);
+        let mut state = f.client.state();
+        state.generation = 7;
+        state.desktop.update = json!({"phase":"available","latest":"3.2.7"});
+        if remote {
+            state.connection.committed = ClientTarget::Remote {
+                name: "Studio".into(),
+                instance_id: "studio-1".into(),
+                canonical_origin: "https://studio.avibe.bot".into(),
+            };
+        }
+        let client = Coordinator::new(
+            state,
+            f.store.load("Local").unwrap(),
+            f.store.clone(),
+            f.http.clone(),
+            f.private.clone(),
+            Arc::new(NoPasskeys),
+            f.view.clone(),
+        );
+        let original = serde_json::to_value(client.state()).unwrap();
+        for action in &actions {
+            for (version, id, generation, error) in [
+                (2, "invalid", 7, "invalid_request"),
+                (1, "", 7, "invalid_request"),
+                (1, "stale", 6, "stale_generation"),
+                (1, "future", 8, "stale_generation"),
+            ] {
+                let before = f.view.update_calls.lock().unwrap().len();
+                let reply = client
+                    .request(ClientRequest {
+                        version,
+                        request_id: id.into(),
+                        expected_generation: generation,
+                        action: serde_json::from_value(action.clone()).unwrap(),
+                    })
+                    .await;
+                assert_eq!(reply.error.unwrap().code, error);
+                assert_eq!(f.view.update_calls.lock().unwrap().len(), before);
+            }
+            let reply = client
+                .request(ClientRequest {
+                    version: 1,
+                    request_id: "update".into(),
+                    expected_generation: 7,
+                    action: serde_json::from_value(action.clone()).unwrap(),
+                })
+                .await;
+            assert!(reply.ok);
+            assert_eq!(reply.request_id, "update");
+            assert_eq!(serde_json::to_value(reply.state).unwrap(), original);
+            let calls = f.view.update_calls.lock().unwrap();
+            assert_eq!(serde_json::to_value(&calls.last().unwrap().0).unwrap(), *action);
+            assert_eq!(calls.last().unwrap().1.value, 7);
+        }
+        *f.view.update_failure.lock().unwrap() = Some("update_in_progress".into());
+        assert_eq!(
+            action(&client, ClientAction::UpdateCheck {}).await.error.unwrap().code,
+            "update_in_progress"
+        );
+        assert!(f.http.calls.lock().unwrap().is_empty());
+        assert!(f.private.0.lock().unwrap().is_empty());
+        assert_eq!(serde_json::to_value(client.state()).unwrap(), original);
+    }
+}
+
+#[tokio::test]
+async fn update_actions_cannot_overtake_an_account_operation_and_escape_fences_completion() {
+    let (release, waiting) = oneshot::channel();
+    let entered = Arc::new(Notify::new());
+    let f = fixture(vec![
+        ("/api/config/auth", Reply::Held(waiting, entered.clone())),
+        ("/auth/v1/otp", ok(json!({}))),
+    ]);
+    let client = f.client.clone();
+    let pending = tokio::spawn(async move {
+        action(
+            &client,
+            ClientAction::RequestOtp {
+                email: "user@example.test".into(),
+            },
+        )
+        .await
+    });
+    entered.notified().await;
+    assert_eq!(
+        action(&f.client, ClientAction::UpdateCheck {})
+            .await
+            .error
+            .unwrap()
+            .code,
+        "busy"
+    );
+    assert!(f.view.update_calls.lock().unwrap().is_empty());
+    release
+        .send(response(
+            200,
+            json!({"supabase_url":"https://fixture.supabase.test","supabase_anon_key":"public-fixture"}),
+            None,
+        ))
+        .ok()
+        .unwrap();
+    assert!(pending.await.unwrap().ok);
+    assert!(action(&f.client, ClientAction::UpdateCheck {}).await.ok);
+    let epoch = f.view.update_calls.lock().unwrap()[0].1.clone();
+    assert!(epoch.check().is_ok());
+    assert!(action(&f.client, ClientAction::Cancel).await.ok);
+    assert_eq!(epoch.check().unwrap_err().code, "stale_generation");
+}
+
 fn first_factor() -> Vec<(&'static str, Reply)> {
     vec![
         (

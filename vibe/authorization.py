@@ -608,7 +608,9 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/logs$"),
         ("POST", r"^/api/opencode/options$"),
         ("POST", r"^/api/upgrade$"),
+        ("GET", r"^/api/desktop/update/idle$"),
         ("POST", r"^/api/desktop/update/request$"),
+        ("POST", r"^/api/update/(?:check|prereleases|auto-update)$"),
         ("POST", r"^/api/opencode/setup-permission$"),
         ("GET", r"^/api/opencode/permission-status$"),
         ("GET", r"^/api/claude/agents$"),
@@ -755,7 +757,7 @@ def http_authorization_policy(
             return HttpAuthorizationPolicy("member")
         return HttpAuthorizationPolicy("owner")
     if _http_rule_matches(normalized_method, path, _MEMBER_HTTP_RULES):
-        return HttpAuthorizationPolicy("member")
+        return HttpAuthorizationPolicy("member", direct_loopback_only=path == "/api/desktop/update/idle")
 
     # Default deny: an unclassified /api route is Owner-only, so adding the
     # member rank cannot widen a route nobody listed. See _MEMBER_HTTP_RULES.

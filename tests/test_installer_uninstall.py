@@ -1027,6 +1027,6 @@ def test_uninstall_recipes_point_to_the_installer(document, native_windows):
     # Like the install command, a failed download fails the command.
     assert "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'\n" in text
     assert "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'\n" in text
-    powershell = "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall"
+    powershell = "& ([scriptblock]::Create((irm https://avibe.bot/install.ps1))) -Uninstall"
     assert (f"{powershell}\n" in text and f"{powershell} -Purge\n" in text) is native_windows
     assert "uv tool uninstall" not in text and "rm -rf" not in text

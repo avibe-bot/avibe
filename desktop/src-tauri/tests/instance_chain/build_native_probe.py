@@ -66,12 +66,17 @@ def main():
         .redirect(reqwest::redirect::Policy::none())
 '''
     patched = original.replace(needle, replacement)
-    peripheral_calls = [
+    legacy_peripheral_calls = [
         "super::request_and_open_desktop_updates(&app);",
         "notify_remote_request(&app);",
     ]
+    # Frozen host-confirmation heads have both side effects; explicit-click
+    # heads have neither. Reject partial/duplicated drift rather than silently
+    # weakening the archived fixture's boundary or inventing removed effects.
+    counts = tuple(patched.count(call) for call in legacy_peripheral_calls)
+    assert counts in {(0, 0), (1, 1)}, ("unexpected legacy updater side effects", counts)
+    peripheral_calls = legacy_peripheral_calls if counts == (1, 1) else []
     for call in peripheral_calls:
-        assert patched.count(call) == 1
         patched = patched.replace(call, 'eprintln!("fixture: automatic update notification deferred");')
     updater.write_text(patched)
     shell_adaptations = {}

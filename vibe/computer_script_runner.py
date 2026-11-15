@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Any, Iterable
 
+from vibe.computer_process import WindowsProcess
 from vibe.desktop_runtime import private_desktop_node_bin
 from vibe.internal_client import (
     InternalServerTimeout,
@@ -26,6 +27,7 @@ from vibe.internal_client import (
 )
 
 
+_WINDOWS = os.name == "nt"
 DEFAULT_SCRIPT_TIMEOUT_SECONDS = 300.0
 _SCRIPT_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
 _SCRIPT_RESULT_MAX_BYTES = 8 * 1024 * 1024
@@ -200,9 +202,11 @@ def _read_capped_json(path: Path, limit: int) -> _CappedJsonRead:
         return _CappedJsonRead(error="invalid_json")
 
 
-def _terminate_and_reap_process_group(process: subprocess.Popen[Any]) -> None:
+def _terminate_and_reap_process_group(process: subprocess.Popen[Any] | WindowsProcess) -> None:
     try:
-        if os.name == "posix":
+        if isinstance(process, WindowsProcess):
+            process.kill()
+        elif os.name == "posix":
             os.killpg(process.pid, signal.SIGKILL)
         elif process.poll() is None:
             process.kill()
@@ -212,6 +216,9 @@ def _terminate_and_reap_process_group(process: subprocess.Popen[Any]) -> None:
         process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         pass
+    finally:
+        if isinstance(process, WindowsProcess):
+            process.close()
 
 
 @contextmanager
@@ -242,6 +249,7 @@ def _run_node_process(
     timeout_seconds: float,
 ) -> subprocess.CompletedProcess[str]:
     command = [str(node), str(runner)]
+    deadline = time.monotonic() + timeout_seconds
     supervisor_directory = Path(
         tempfile.mkdtemp(prefix=_SUPERVISOR_DIRECTORY_PREFIX)
     ).resolve()
@@ -267,18 +275,21 @@ def _run_node_process(
             _sigterm_as_supervisor_exception(),
             request_path.open("r", encoding="utf-8") as request_input,
         ):
-            process: subprocess.Popen[Any] | None = None
+            process: subprocess.Popen[Any] | WindowsProcess | None = None
             try:
-                process = subprocess.Popen(
-                    command,
-                    stdin=request_input,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=child_environment,
-                    start_new_session=os.name == "posix",
-                )
+                if _WINDOWS:
+                    process = WindowsProcess(command, stdin=request_input, env=child_environment)
+                else:
+                    process = subprocess.Popen(
+                        command,
+                        stdin=request_input,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        env=child_environment,
+                        start_new_session=os.name == "posix",
+                    )
                 try:
-                    returncode = process.wait(timeout=timeout_seconds)
+                    returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired as exc:
                     raise subprocess.TimeoutExpired(
                         command,

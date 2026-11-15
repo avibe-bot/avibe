@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
+from core.inbox_events import publish_runtime_activity
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.session_activities import SessionActivityRegistry
 from core.message_output import (
@@ -55,6 +56,7 @@ class AgentService:
         # Teardowns that must finish even after they failed once, such as a
         # disabled backend's processes; the idle sweep retries them.
         self._pending_operations: Dict[str, tuple[Callable[[], Awaitable[None]], Optional[asyncio.Lock]]] = {}
+        self._running_operations = 0
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
@@ -170,6 +172,15 @@ class AgentService:
         prepare = getattr(agent, "prepare_runtime_restart", None)
         if callable(prepare):
             await prepare()
+
+    def has_retained_runtime_work(self) -> bool:
+        """Work remains owned even after its backend leaves the routing registry."""
+        return bool(
+            self._running_operations
+            or self._pending_operations
+            or any(gate.token or gate.lock.locked() for gate in self._turn_gates.values())
+            or self.activities.has_backend_work(None)
+        )
 
     async def backend_runtime_active(self, backend: str) -> bool:
         agent = self.agents.get(backend)
@@ -311,12 +322,17 @@ class AgentService:
         from core.backend_restart import finish_native_operation
 
         self._pending_operations.pop(key, None)
+        self._running_operations += 1
+        publish_runtime_activity()
         try:
             await finish_native_operation(operation())
         except Exception:
             logger.warning("%s failed; the idle sweep retries it", key, exc_info=True)
             self._pending_operations[key] = (operation, retry_lock)
             return False
+        finally:
+            self._running_operations -= 1
+            publish_runtime_activity()
         return True
 
     async def retry_pending(self) -> None:

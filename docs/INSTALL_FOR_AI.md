@@ -25,9 +25,7 @@ command -v opencode || true
 command -v codex || true
 ```
 
-On Windows, prefer the WSL guide unless the user explicitly wants native PowerShell:
-
-- https://github.com/avibe-bot/avibe/blob/master/docs/WINDOWS_WSL.md
+On a Mac or a Windows PC, the recommended way to run Avibe is the Desktop App, which the user downloads from https://avibe.bot and installs themselves. Tell the user so, and continue with this command-line runbook only if they want a command-line install. On Windows that means native PowerShell; this runbook's `bash` checks do not apply there.
 
 ## Step 2: Install Avibe
 
@@ -42,7 +40,7 @@ Open source — view the [script on GitHub](https://github.com/avibe-bot/avibe/b
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1 | iex
+irm https://avibe.bot/install.ps1 | iex
 ```
 
 Verify:
@@ -203,7 +201,7 @@ bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --unin
 Windows PowerShell:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://avibe.bot/install.ps1))) -Uninstall
 ```
 
 Delete the user's data too only when they explicitly ask for it. It cannot be recovered, so confirm with the user first. It deletes only real directories: for a home reached through a link it removes the link and reports what it points to, which the user can delete by hand. The purge lists everything it deletes and asks on the terminal; without one, as in an agent shell, it refuses unless `--yes` (PowerShell: `-Yes`) is added:
@@ -213,5 +211,5 @@ bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --unin
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall -Purge
+& ([scriptblock]::Create((irm https://avibe.bot/install.ps1))) -Uninstall -Purge
 ```

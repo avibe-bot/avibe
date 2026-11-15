@@ -259,7 +259,7 @@ for (const theme of ['dark', 'light'] as const) {
     await expect(badge).toHaveAttribute('aria-controls', (await popup.getAttribute('id'))!);
     // Both the line that appeared transparent and the header are above every
     // overlapping element, including the Apps button outside the sidebar.
-    for (const text of ['Build & Version', revision, 'Package Version', '0.0.0.dev0']) {
+    for (const text of ['Build & Version', revision, 'Package version', '0.0.0.dev0']) {
       await expect.poll(() => receivesPointer(popup.getByText(text, { exact: true }))).toBe(true);
     }
     const background = await popup.evaluate((element) => getComputedStyle(element).backgroundColor);
@@ -287,7 +287,7 @@ for (const theme of ['dark', 'light'] as const) {
     await expect(badge).toBeFocused();
     await badge.click();
     await expect(popup).toBeVisible();
-    await popup.getByRole('button', { name: 'Refresh Build Information' }).click();
+    await popup.getByRole('button', { name: 'Refresh build information' }).click();
     await expect(popup).toBeVisible();
     await popup.getByRole('button', { name: 'Close', exact: true }).click();
     await expect(popup).toHaveCount(0);

@@ -176,8 +176,15 @@ final class DirectPathAppTests: XCTestCase {
         let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
         XCTAssertFalse(app.directFaultCovers(first))
         var shownWhileMarking: [Bool] = []
-        marker.whileMarking = {
+        // The App owns this spy; its observer must not retain the App back.
+        marker.whileMarking = { [weak app] in
+            guard let app else {
+                return XCTFail("The App was released before the fault was marked")
+            }
             shownWhileMarking.append(app.directListenerFault)
+        }
+        addTeardownBlock { @MainActor [weak app] in
+            XCTAssertNil(app, "The fault-marker observer must not keep the fixture App alive")
         }
 
         // The App's port is taken while it is in the background: the return
@@ -561,21 +568,88 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertEqual(starts, 1)
 
-        // A reload held in the background, and the runtime is replaced
-        // before the return: it is never made.
-        let primary = try XCTUnwrap(
-            controller.view.subviews.compactMap { $0 as? WKWebView }.first
-        )
-        enterBackground()
-        controller.webViewWebContentProcessDidTerminate(primary)
-        app.showInstancePicker()
+        // A replacement selection ends the held runtime before the return.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         enterForeground()
         try await eventually { app.directLoadGate(for: runtime) != .held }
         try await settle()
         XCTAssertEqual(starts, 1)
     }
 
-    /// The gate the runtime's WebView is given is the App's own: held while
+    @MainActor
+    func testFailureInstancePickerCoversTheSelectedRuntimeWithoutStoppingIt()
+        async throws
+    {
+        let app = try await makeApp(directTransport: nil)
+        let runtime = try await select("instance-1", in: app)
+        let identity = app.runtimeIdentity
+
+        // The native failure action uses the same sheet as the avatar and
+        // leaves the selected route available for Close/current-instance.
+        app.showInstancePicker()
+        XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+        XCTAssertEqual(app.runtimeIdentity, identity)
+        XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        XCTAssertTrue(app.returnToRuntime())
+        XCTAssertEqual(app.route, .browser(runtime))
+    }
+
+    /// The named entry and avatar share one presentation owner: repeated
+    /// requests cannot change its mode, reload the runtime or mutate selection.
+    @MainActor
+    func testNamedInstanceEntryKeepsOneSheetAndReadsTheCurrentCatalogName() async throws {
+        for initialMode in [MobileOnboardingStartScreen.sheet, .sheetInstances, .sheetAccount] {
+            let session = SessionAnswerOverride()
+            let app = try await makeApp(directTransport: nil, sessionResponse: { session.response })
+            XCTAssertNil(app.selectedInstanceName())
+            let runtime = try await select("instance-1", in: app)
+            let identity = app.runtimeIdentity
+            XCTAssertEqual(app.selectedInstanceName(), "One")
+
+            let presentations: [(MobileOnboardingStartScreen, () -> Void)] = [
+                (.sheet, app.showAccount), (.sheetInstances, app.showInstances),
+                (.sheetAccount, app.showAccountRoot),
+            ]
+            let initial = try XCTUnwrap(presentations.first { $0.0 == initialMode })
+            initial.1()
+            for (_, present) in presentations { present() }
+            XCTAssertEqual(app.accountSheetStartScreen, initialMode)
+            XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+            XCTAssertEqual(app.runtimeIdentity, identity)
+            XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+
+            session.replace(with: .json(
+                """
+                {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+                  {"id":"instance-1","name":"Renamed One","host":"instance-one.example",
+                   "url":"https://instance-one.example","relationship":"owner","available":true},
+                  {"id":"instance-2","name":"Two","host":"instance-two.example",
+                   "url":"https://instance-two.example","relationship":"owner","available":true}
+                ]}
+                """
+            ))
+            _ = try await app.mobileSessionCoordinator.refresh()
+            XCTAssertEqual(app.selectedInstanceName(), "Renamed One")
+            XCTAssertEqual(runtime.instance.name, "One")
+            XCTAssertEqual(app.runtimeIdentity, identity)
+            XCTAssertTrue(app.returnToRuntime())
+            XCTAssertEqual(app.route, .browser(runtime))
+            XCTAssertFalse(app.returnToRuntime())
+
+            // After dismissal, every entry can choose its own mode; all
+            // other valid entry requests stay quiet while it is presented.
+            for (mode, present) in presentations {
+                present()
+                for (_, duplicate) in presentations { duplicate() }
+                XCTAssertEqual(app.accountSheetStartScreen, mode)
+                XCTAssertEqual(app.route, .accountOverBrowser(runtime))
+                XCTAssertEqual(app.runtimeIdentity, identity)
+                XCTAssertTrue(app.returnToRuntime())
+                XCTAssertEqual(app.route, .browser(runtime))
+            }
+        }
+    }
+
     /// the App is in the background with a route, open again once the
     /// listener serves.
     @MainActor
@@ -814,6 +888,72 @@ final class DirectPathAppTests: XCTestCase {
         withExtendedLifetime(controller) {}
     }
 
+    /// Exercise the real AppModel -> NativePushCoordinator cleanup callback,
+    /// not just the coordinator hook: opening Account in this early window
+    /// must bootstrap signed out rather than leave the new page on bootError.
+    @MainActor
+    func testAccountReopenedDuringRefreshPushCleanupBootstrapsSignedOut() async throws {
+        let session = SessionAnswerOverride()
+        let keychain = InMemoryPushKeychainStore()
+        let marker = InMemoryPushInstallationMarkerStore()
+        let center = HeldCleanupNotificationCenter()
+        let app = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { session.response },
+            pushKeychain: keychain,
+            pushInstallationMarker: marker,
+            pushNotificationCenter: center
+        )
+        let runtime = try await select("instance-1", in: app)
+        let installationID = UUID()
+        marker.installationID = installationID
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 12, count: 32),
+            accountID: "account-1", bindGeneration: 1,
+            providerGeneration: 0, provider: nil,
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        // A retired key is enough for notification cleanup, without enabling
+        // APNs registration, prompting permissions, or recovery networking.
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "fixture-retired-key", instanceOrigin: "https://instance-one.example",
+            accountID: "account-1", accountGeneration: 1, bindGeneration: 1,
+            privateKey: Data(), authSecret: Data(), vapidKeyHash: "fixture",
+            state: .retiring, pendingRevoke: false, replacementRegistrationIDs: [],
+            retirementDeadline: .distantFuture
+        ))
+        let fetched = FixtureEvent(description: "refresh fetch held before 401")
+        let releaseFetch = DispatchSemaphore(value: 0)
+        defer { releaseFetch.signal() }
+        session.holdSignedOut(started: fetched, release: releaseFetch)
+        app.showAccount()
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let refresh = Task { try await app.mobileSessionCoordinator.refresh() }
+        await fulfillment(of: [fetched.expectation], timeout: 30)
+        XCTAssertTrue(app.returnToRuntime())
+        XCTAssertEqual(app.route, .browser(runtime))
+        releaseFetch.signal()
+        await fulfillment(of: [center.cleanupStarted], timeout: 30)
+
+        app.showAccount()
+        XCTAssertEqual(app.route, .onboarding(.account))
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let replacement: Result<MobileSessionState, Error>
+        do {
+            replacement = .success(try await app.mobileSessionCoordinator.bootstrap())
+        } catch {
+            replacement = .failure(error)
+        }
+        center.releaseCleanup()
+        let final = try await refresh.value
+        trackStore(of: app)
+        XCTAssertEqual(try replacement.get(), .signedOut)
+        XCTAssertEqual(final, .signedOut)
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        XCTAssertEqual(app.route, .onboarding(.account))
+    }
+
     // MARK: A runtime abandoned when its WebView registers
 
     @MainActor
@@ -978,9 +1118,13 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(app.directRendezvousWebView(for: selection))
         XCTAssertNil(app.directRendezvousWebView(for: second))
 
-        // The instance picker ends the selection.
+        // The instance picker now opens the instances sheet over the
+        // selected runtime; it does not end the selection by itself.
         app.showInstancePicker()
-        XCTAssertNil(app.directRendezvousWebView(for: second))
+        guard case .accountOverBrowser(let covered) = app.route else {
+            return XCTFail("The instance picker did not open the sheet")
+        }
+        XCTAssertEqual(covered.instance.id, "instance-2")
     }
 
     /// Without a transport there is no target, so no WebView is handed
@@ -1563,6 +1707,7 @@ final class DirectPathAppTests: XCTestCase {
     // MARK: Fixture
 
     private var storeIdentifiers: Set<UUID> = []
+    private var releaseFixtureApps: [@MainActor () -> Void] = []
     /// What `direct.status()` answers for `origin`, through the provider
     /// the App gives its WebViews. `nil` when it answers later or not at all.
     @MainActor
@@ -1675,6 +1820,10 @@ final class DirectPathAppTests: XCTestCase {
         directTransport: DirectTransporting?,
         directFaultMarker: DirectFaultMarkerStoring? = nil,
         pushHolds: [PushHold] = [],
+        sessionResponse: (@Sendable () -> LocalHTTPResponse?)? = nil,
+        pushKeychain: InMemoryPushKeychainStore? = nil,
+        pushInstallationMarker: InMemoryPushInstallationMarkerStore? = nil,
+        pushNotificationCenter: PushNotificationCentering? = nil,
         beforeTheAppExists: () throws -> Void = {}
     ) async throws -> AppModel {
         let server = try LocalHTTPServer { request in
@@ -1687,6 +1836,9 @@ final class DirectPathAppTests: XCTestCase {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
+                if let response = sessionResponse?() {
+                    return response
+                }
                 return .json(
                     """
                     {
@@ -1742,10 +1894,10 @@ final class DirectPathAppTests: XCTestCase {
                 controlPlane: controlPlane,
                 directTransport: directTransport,
                 directFaultMarker: directFaultMarker,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         } else if let directTransport {
@@ -1753,30 +1905,37 @@ final class DirectPathAppTests: XCTestCase {
                 defaults: defaults,
                 controlPlane: controlPlane,
                 directTransport: directTransport,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         } else {
             app = AppModel(
                 defaults: defaults,
                 controlPlane: controlPlane,
-                pushKeychain: InMemoryPushKeychainStore(),
+                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter(),
+                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         }
         trackStore(of: app)
-        try await eventually(timeout: .seconds(30)) {
-            if case .onboarding(.instances) = app.route {
-                return true
-            }
-            return false
+        releaseFixtureApps.append { [weak app] in
+            app?.showInstancePicker()
+            app?.mobileSessionCoordinator.deactivateAccountSurface()
         }
+        addTeardownBlock { @MainActor [self] in
+            server.requests.attach(to: self, name: "direct App bootstrap requests")
+        }
+        try await WebKitReadiness.waitForSignedInFixture(
+            app,
+            accountID: "account-1",
+            instanceIDs: ["instance-1", "instance-2"],
+            requests: server.requests
+        )
         return app
     }
 
@@ -1911,9 +2070,17 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     private func removeTrackedStores() async {
+        // Release every App's runtime/account views before removing any
+        // store (some tests create more than one App). RuntimePage owners
+        // close their windows before this cleanup.
+        for release in releaseFixtureApps { release() }
+        releaseFixtureApps.removeAll()
+        print("[iOS fixture] stage=App views invalidated before store removal")
         for identifier in storeIdentifiers {
+            var removed = false
+            var lastError: Error?
             for _ in 0..<50 {
-                _ = await AccountWebsiteDataStoreOperations.live
+                lastError = await AccountWebsiteDataStoreOperations.live
                     .removeIdentifier(identifier)
                 let registered = await withCheckedContinuation { continuation in
                     WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
@@ -1921,10 +2088,13 @@ final class DirectPathAppTests: XCTestCase {
                     }
                 }
                 if !registered.contains(identifier) {
+                    removed = true
                     break
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
+            XCTAssertTrue(removed, "Fixture store still registered: \(identifier); error=\(String(describing: lastError))")
+            print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=\(removed)")
         }
         storeIdentifiers.removeAll()
     }
@@ -2131,25 +2301,222 @@ private final class RuntimePage {
     }
 }
 
-/// Loads a document and waits for it. The cancellation of a navigation
-/// that was in flight when this one started is not this load's failure.
+/// Script terminal callbacks independently of WebContent timing. Navigation
+/// tokens still come from WebKit: bare WKNavigation() instances lack the native
+/// storage their deallocator requires. Token creation uses only local HTML.
+final class PageLoaderTests: XCTestCase {
+    @MainActor
+    func testUnrelatedCallbacksCannotSettleTheRequestedDocument() async throws {
+        enum Callback: CaseIterable {
+            case staleFinish, staleFailure, staleProvisionalFailure
+            case nilFinish, nilFailure, nilProvisionalFailure
+            case wrongViewFinish, wrongViewFailure, wrongViewProvisionalFailure
+            case wrongViewTermination
+        }
+        let view = makeWebView()
+        let otherView = makeWebView()
+        let loader = PageLoader()
+        let staleNavigation = try view.makeNavigation()
+        let expected = NSError(domain: "PageLoaderTests", code: 123)
+        let unrelated = NSError(domain: "PageLoaderTests", code: 456)
+
+        for callback in Callback.allCases {
+            let navigation = try view.makeNavigation()
+            view.nextNavigation = navigation
+            view.onLoad = {
+                switch callback {
+                case .staleFinish:
+                    loader.webView(view, didFinish: staleNavigation)
+                case .staleFailure:
+                    loader.webView(view, didFail: staleNavigation, withError: unrelated)
+                case .staleProvisionalFailure:
+                    loader.webView(view, didFailProvisionalNavigation: staleNavigation, withError: unrelated)
+                case .nilFinish:
+                    loader.webView(view, didFinish: nil)
+                case .nilFailure:
+                    loader.webView(view, didFail: nil, withError: unrelated)
+                case .nilProvisionalFailure:
+                    loader.webView(view, didFailProvisionalNavigation: nil, withError: unrelated)
+                case .wrongViewFinish:
+                    loader.webView(otherView, didFinish: navigation)
+                case .wrongViewFailure:
+                    loader.webView(otherView, didFail: navigation, withError: unrelated)
+                case .wrongViewProvisionalFailure:
+                    loader.webView(otherView, didFailProvisionalNavigation: navigation, withError: unrelated)
+                case .wrongViewTermination:
+                    loader.webViewWebContentProcessDidTerminate(otherView)
+                }
+                // A terminal fallback makes an incorrectly accepted callback
+                // fail an assertion rather than leave this test hanging.
+                loader.webView(view, didFail: navigation, withError: expected)
+            }
+            do {
+                try await loader.loadHTML("fixture", baseURL: baseURL, in: view)
+                XCTFail("Unrelated callback completed the load: \(callback)")
+            } catch {
+                XCTAssertEqual(error as NSError, expected, "\(callback)")
+            }
+        }
+    }
+
+    @MainActor
+    func testMatchingFailuresIncludingCancellationAreNotIgnored() async throws {
+        let view = makeWebView()
+        let loader = PageLoader()
+        for provisional in [false, true] {
+            for code in [NSURLErrorCancelled, NSURLErrorCannotFindHost] {
+                let navigation = try view.makeNavigation()
+                let expected = NSError(domain: NSURLErrorDomain, code: code)
+                view.nextNavigation = navigation
+                view.onLoad = {
+                    if provisional {
+                        loader.webView(view, didFailProvisionalNavigation: navigation, withError: expected)
+                    } else {
+                        loader.webView(view, didFail: navigation, withError: expected)
+                    }
+                    loader.webView(view, didFinish: navigation)
+                }
+                do {
+                    try await loader.loadHTML("fixture", baseURL: baseURL, in: view)
+                    XCTFail("Matching failure was ignored: \(code), provisional=\(provisional)")
+                } catch {
+                    XCTAssertEqual(error as NSError, expected)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testProcessTerminationFailsOnceAndLoaderCanBeReused() async throws {
+        let view = makeWebView()
+        let loader = PageLoader()
+        let terminatedNavigation = try view.makeNavigation()
+        view.nextNavigation = terminatedNavigation
+        view.onLoad = {
+            loader.webViewWebContentProcessDidTerminate(view)
+            loader.webViewWebContentProcessDidTerminate(view)
+            loader.webView(view, didFinish: terminatedNavigation)
+        }
+        do {
+            try await loader.loadHTML("fixture", baseURL: baseURL, in: view)
+            XCTFail("Process termination must fail, not accept a fallback document")
+        } catch {
+            XCTAssertEqual(error as? PageLoader.LoadError, .webContentProcessTerminated)
+        }
+
+        let nextNavigation = try view.makeNavigation()
+        view.nextNavigation = nextNavigation
+        view.onLoad = {
+            loader.webView(
+                view, didFail: terminatedNavigation,
+                withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+            )
+            loader.webView(view, didFinish: nextNavigation)
+            // Success must also clear the owner before a later termination.
+            loader.webViewWebContentProcessDidTerminate(view)
+        }
+        try await loader.loadHTML("next fixture", baseURL: baseURL, in: view)
+    }
+
+    @MainActor
+    func testMissingNavigationFailsAndClearsThePendingLoad() async throws {
+        let view = makeWebView()
+        let loader = PageLoader()
+        view.nextNavigation = nil
+        // A broken loader must fail an assertion, not suspend this test forever.
+        view.onLoad = { loader.webView(view, didFinish: nil) }
+        do {
+            try await loader.loadHTML("fixture", baseURL: baseURL, in: view)
+            XCTFail("A load without a navigation token cannot be observed")
+        } catch {
+            XCTAssertEqual(error as? PageLoader.LoadError, .navigationNotCreated)
+        }
+        let navigation = try view.makeNavigation()
+        view.nextNavigation = navigation
+        view.onLoad = { loader.webView(view, didFinish: navigation) }
+        try await loader.loadHTML("next fixture", baseURL: baseURL, in: view)
+    }
+
+    private var baseURL: URL { URL(string: "https://fixture.example")! }
+
+    @MainActor
+    private func makeWebView() -> ScriptedPageLoaderWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        return ScriptedPageLoaderWebView(frame: .zero, configuration: configuration)
+    }
+}
+
+@MainActor
+private final class ScriptedPageLoaderWebView: WKWebView {
+    var nextNavigation: WKNavigation?
+    var onLoad: (() -> Void)?
+
+    func makeNavigation() throws -> WKNavigation {
+        // Bypass the scripted override to obtain a fully initialized token.
+        // No navigationDelegate is installed, so WebKit cannot deliver these
+        // real load callbacks to PageLoader; only onLoad does that.
+        let navigation = try XCTUnwrap(super.loadHTMLString("<!doctype html>", baseURL: nil))
+        stopLoading()
+        return navigation
+    }
+
+    override func loadHTMLString(_ string: String, baseURL: URL?) -> WKNavigation? {
+        let callback = onLoad
+        onLoad = nil
+        // Match WebKit's asynchronous delegate delivery: the loader must have
+        // received the navigation token before these callbacks run.
+        Task { @MainActor in callback?() }
+        return nextNavigation
+    }
+}
+
+/// Observes only the synthetic document requested by this loader. A runtime
+/// controller can already have a URL navigation in flight when this delegate
+/// is installed; its callbacks must not complete the synthetic document wait.
 @MainActor
 private final class PageLoader: NSObject, WKNavigationDelegate {
+    enum LoadError: Error, Equatable, LocalizedError {
+        case alreadyLoading
+        case navigationNotCreated
+        case webContentProcessTerminated
+
+        var errorDescription: String? {
+            switch self {
+            case .alreadyLoading:
+                return "PageLoader already has a pending fixture document load"
+            case .navigationNotCreated:
+                return "PageLoader could not create a navigation for the fixture document"
+            case .webContentProcessTerminated:
+                return "PageLoader WebContent process terminated before the fixture document finished loading"
+            }
+        }
+    }
+
     private var continuation: CheckedContinuation<Void, Error>?
+    private var navigation: WKNavigation?
+    private weak var loadingWebView: WKWebView?
 
     func loadHTML(
         _ html: String,
         baseURL: URL,
         in webView: WKWebView
     ) async throws {
+        guard continuation == nil else {
+            throw LoadError.alreadyLoading
+        }
         try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
-            webView.loadHTMLString(html, baseURL: baseURL)
+            loadingWebView = webView
+            navigation = webView.loadHTMLString(html, baseURL: baseURL)
+            if navigation == nil {
+                finish(with: .failure(LoadError.navigationNotCreated))
+            }
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        finish(with: .success(()))
+        finish(in: webView, navigation: navigation, with: .success(()))
     }
 
     func webView(
@@ -2157,7 +2524,7 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
         didFail navigation: WKNavigation?,
         withError error: Error
     ) {
-        finish(with: .failure(error))
+        finish(in: webView, navigation: navigation, with: .failure(error))
     }
 
     func webView(
@@ -2165,19 +2532,93 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation?,
         withError error: Error
     ) {
-        finish(with: .failure(error))
+        finish(in: webView, navigation: navigation, with: .failure(error))
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard webView === loadingWebView else { return }
+        // The HTML document is gone. Do not let WebKit's fallback URL reload
+        // masquerade as the requested fixture or wait for its DNS failure.
+        finish(with: .failure(LoadError.webContentProcessTerminated))
+    }
+
+    private func finish(
+        in webView: WKWebView,
+        navigation: WKNavigation?,
+        with result: Result<Void, Error>
+    ) {
+        guard webView === loadingWebView,
+              let navigation, navigation === self.navigation
+        else { return }
+        // Cancellation of this navigation is a real failure. Only callbacks
+        // for a different navigation are ignored, regardless of error code.
+        finish(with: result)
     }
 
     private func finish(with result: Result<Void, Error>) {
-        if case .failure(let error as NSError) = result,
-           error.domain == NSURLErrorDomain,
-           error.code == NSURLErrorCancelled
-        {
-            return
+        let pending = continuation
+        continuation = nil
+        navigation = nil
+        loadingWebView = nil
+        pending?.resume(with: result)
+    }
+}
+
+/// Only the loopback server reads this from outside the main actor.
+private final class SessionAnswerOverride: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResponse: LocalHTTPResponse?
+    private var heldFetch: (FixtureEvent, DispatchSemaphore)?
+    var response: LocalHTTPResponse? {
+        lock.lock()
+        let response = storedResponse
+        let held = heldFetch
+        heldFetch = nil
+        lock.unlock()
+        // A 401 is consumed at headers, so hold BEFORE responding instead of
+        // holding its body (which would not actually suspend fetchSession).
+        if let (started, release) = held {
+            started.signal()
+            release.wait()
         }
-        continuation?.resume(with: result)
+        return response
+    }
+
+    func replace(with response: LocalHTTPResponse) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedResponse = response
+    }
+
+    func holdSignedOut(started: FixtureEvent, release: DispatchSemaphore) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedResponse = .status(401)
+        heldFetch = (started, release)
+    }
+}
+
+@MainActor
+private final class HeldCleanupNotificationCenter: PushNotificationCentering {
+    let cleanupStarted = XCTestExpectation(description: "native push notification cleanup suspended")
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func deliveredNotifications() async -> [PushNotificationCenterEntry] {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            cleanupStarted.fulfill()
+        }
+        return []
+    }
+
+    func releaseCleanup() {
+        continuation?.resume()
         continuation = nil
     }
+
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry] { [] }
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
 }
 
 @MainActor

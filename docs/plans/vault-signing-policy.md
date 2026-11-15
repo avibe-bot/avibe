@@ -21,6 +21,34 @@ CI and authorized integration before shipment. Its sandbox version/publication
 and Avibe pin are separate gates; this is not part of the RC13 display-only pin.
 An old sandbox must leave lowering unavailable, with no fallback RPC.
 
+## Tier parity
+
+Owner rule, 2026-11-14. New signing capabilities (chains, address formats,
+wallet types) are designed and shipped for the standard and protected tiers
+together by default. If they must split, the plan states why and names the
+version that ships the protected follow-up. The UI never shows an address the
+protected key cannot spend.
+
+A capability is done on the protected tier only with all of:
+
+- typed sandbox decode and review, bound to the signed digest;
+- daemon-side validation of the same request before key use;
+- an independent adversarial review;
+- a sandbox release, its Avibe pin and real acceptance on that pinned release.
+
+Current gaps, target 3.2.7:
+
+- Protected Bitcoin SegWit (P2WPKH) and Legacy (P2PKH) address types (owner
+  decision 2026-11-14). Standard keys sign all three types; protected keys sign
+  Taproot only, and Web offers protected keys only Taproot.
+- The protected seed-phrase wallet (protected HD), contract in
+  `vault-protected-hd-wallets.md`.
+
+The frozen v1.1 downgrade context below carries all four secp addresses as
+identity facts, and the typed popup lists them, including SegWit and Legacy
+addresses of a protected key. The 3.2.7 address-type work must close this:
+enable those types or stop displaying them for protected keys.
+
 ## Metadata editing
 
 - `PATCH /api/vault/secrets/{name}` accepts top-level `always_ask: boolean`

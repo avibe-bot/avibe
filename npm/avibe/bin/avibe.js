@@ -10,10 +10,10 @@ const packageJson = require("../package.json");
 
 const INSTALL_SH_URL =
   process.env.AVIBE_INSTALL_SH_URL ||
-  "https://raw.githubusercontent.com/avibe-bot/avibe/master/install.sh";
+  "https://avibe.bot/install.sh";
 const INSTALL_PS1_URL =
   process.env.AVIBE_INSTALL_PS1_URL ||
-  "https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1";
+  "https://avibe.bot/install.ps1";
 
 function printHelp() {
   console.log(`avibe ${packageJson.version}

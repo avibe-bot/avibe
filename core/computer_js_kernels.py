@@ -33,6 +33,7 @@ import tempfile
 from typing import TYPE_CHECKING, Any, Callable
 
 from core.computer_cli import COMPUTER_JS_CONNECTION_LEASE_SECONDS as _CONNECTION_LEASE_SECONDS
+from vibe.computer_process import AsyncWindowsProcess, WindowsKernelPipe, create_windows_process
 from vibe.computer_script_runner import (
     _failure_envelope,
     _prune_retained_artifact_runs,
@@ -61,7 +62,11 @@ QUEUE_LIMIT = 8
 _MESSAGE_LIMIT_BYTES = 16 * 1024 * 1024
 _ARTIFACT_PREFIX = "avibe-computer-js-"
 _KERNEL_FD_ENV = "AVIBE_COMPUTER_KERNEL_FD"
-_KERNEL_ENV_KEYS = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ")
+_WINDOWS = os.name == "nt"
+_KERNEL_ENV_KEYS = (
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ",
+    "SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE",
+)
 _RESET_MESSAGE = "The JavaScript kernel was reset; all bindings were discarded."
 
 
@@ -123,9 +128,8 @@ def _default_node() -> Path | None:
 
 
 def _kernel_platform_supported() -> bool:
-    # The kernel transport (inherited socketpair, process-group kill) is POSIX.
-    # Computer Use itself is macOS-only in Phase 1; Windows IPC and termination
-    # belong to the future Windows Computer Use lane.
+    # Windows Job/pipe support is a foundation only. Public activation awaits
+    # the separately reviewed runtime admission and driver action guards.
     return os.name == "posix"
 
 
@@ -137,7 +141,7 @@ def _default_status() -> Any:
 
 @dataclass
 class _Kernel:
-    process: asyncio.subprocess.Process
+    process: asyncio.subprocess.Process | AsyncWindowsProcess
     writer: asyncio.StreamWriter
     artifact_directory: Path
     ready: asyncio.Future[None]
@@ -424,8 +428,10 @@ class ComputerJsKernelManager:
         call_id = next(self._call_ids)
         settled: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         kernel.pending[call_id] = settled
+        sending: asyncio.Task[None] | None = None
+        deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
         try:
-            await self._send(
+            sending = asyncio.create_task(self._send(
                 kernel,
                 {
                     "type": "eval",
@@ -433,36 +439,47 @@ class ComputerJsKernelManager:
                     "code": code,
                     "connection_token": token,
                 },
+            ))
+            await asyncio.wait(
+                {sending, cancel}, timeout=max(0, deadline - asyncio.get_running_loop().time()),
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if not sending.done():
+                # A blocked write must not outlive a Turn or its deadline.
+                self._kill_slot(slot, "unsettled")
+                return self._reset_report("unsettled")
+            sending.result()
             await asyncio.wait(
                 {settled, cancel},
-                timeout=timeout_ms / 1000,
+                timeout=max(0, deadline - asyncio.get_running_loop().time()),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not settled.done():
                 reason = cancel.result() if cancel.done() else "js_timeout"
-                await self._send(kernel, {"type": "cancel", "id": call_id, "code": reason})
+                async def cancel_and_settle() -> None:
+                    await self._send(kernel, {"type": "cancel", "id": call_id, "code": reason})
+                    await asyncio.shield(settled)
+
                 try:
-                    await asyncio.wait_for(
-                        asyncio.shield(settled),
-                        self._kill_grace_seconds,
-                    )
+                    await asyncio.wait_for(cancel_and_settle(), self._kill_grace_seconds)
                 except asyncio.TimeoutError:
                     self._kill_slot(slot, "unsettled")
             return self._report(settled.result())
         except _KernelGone as exc:
             return self._reset_report(exc.reason)
         except asyncio.CancelledError:
-            # The CLI request went away; never leave the kernel busy with a
-            # call nobody will collect.
-            if kernel.alive:
-                try:
-                    await self._send(kernel, {"type": "cancel", "id": call_id})
-                except _KernelGone:
-                    pass
+            # A lost request has no collector for a cooperative cancellation.
+            # Reset before releasing the Session lock, including CPU-bound JS
+            # that cannot receive a cancel message on either transport.
+            self._kill_slot(slot, "request_cancelled")
             raise
         finally:
+            if sending is not None:
+                sending.cancel()
+                await asyncio.gather(sending, return_exceptions=True)
             kernel.pending.pop(call_id, None)
+            if settled.done() and not settled.cancelled():
+                settled.exception()
 
     @staticmethod
     def _report(message: dict[str, Any]) -> dict[str, Any]:
@@ -512,6 +529,28 @@ class ComputerJsKernelManager:
     # Kernel process -----------------------------------------------------
 
     async def _spawn(self, cancel: asyncio.Future[str]) -> _Kernel:
+        # The budget includes transport connection and readiness, not just the
+        # final ready message. Cancellation owns cleanup even during Popen.
+        starting = asyncio.create_task(self._start_kernel())
+        try:
+            done, _ = await asyncio.wait(
+                {starting, cancel},
+                timeout=SPAWN_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel in done:
+                raise _KernelGone("startup_cancelled")
+            if starting not in done:
+                raise _KernelGone("startup_timeout")
+            return starting.result()
+        except BaseException:
+            starting.cancel()
+            result = (await asyncio.gather(starting, return_exceptions=True))[0]
+            if isinstance(result, _Kernel):
+                self._kill(result, "startup_cancelled")
+            raise
+
+    async def _start_kernel(self) -> _Kernel:
         node = self._node_resolver()
         kernel_script = _sdk_directory() / "kernel.mjs"
         if node is None or not kernel_script.is_file():
@@ -522,71 +561,98 @@ class ComputerJsKernelManager:
             raise _KernelGone("controller_unavailable") from exc
 
         artifact_directory = Path(tempfile.mkdtemp(prefix=_ARTIFACT_PREFIX)).resolve()
-        os.chmod(artifact_directory, 0o700)
-        (artifact_directory / ".active").touch(mode=0o600)
-        parent, child = socket.socketpair()
+        process = None
+        kernel = None
+        parent = child = None
+        writer = None
+        pipe = None
         environment = {
             key: os.environ[key] for key in _KERNEL_ENV_KEYS if key in os.environ
         }
-        environment[_KERNEL_FD_ENV] = str(child.fileno())
         try:
-            process = await asyncio.create_subprocess_exec(
-                str(node),
-                str(kernel_script),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                pass_fds=(child.fileno(),),
-                start_new_session=True,
-                env=environment,
-                cwd=str(artifact_directory),
-            )
-        except OSError as exc:
-            parent.close()
-            await asyncio.to_thread(self._release_artifacts, artifact_directory)
-            raise _KernelGone("spawn_failed") from exc
-        finally:
-            child.close()
+            os.chmod(artifact_directory, 0o700)
+            (artifact_directory / ".active").touch(mode=0o600)
+            options: dict[str, Any] = {}
+            if _WINDOWS:
+                pipe = WindowsKernelPipe()
+                environment["AVIBE_COMPUTER_KERNEL_PIPE"] = pipe.path
+            else:
+                parent, child = socket.socketpair()
+                environment[_KERNEL_FD_ENV] = str(child.fileno())
+                options = {"pass_fds": (child.fileno(),), "start_new_session": True}
 
-        reader, writer = await asyncio.open_connection(
-            sock=parent,
-            limit=_MESSAGE_LIMIT_BYTES,
-        )
-        kernel = _Kernel(
-            process=process,
-            writer=writer,
-            artifact_directory=artifact_directory,
-            ready=asyncio.get_running_loop().create_future(),
-        )
-        kernel.reader_task = asyncio.create_task(self._read(kernel, reader))
-        try:
-            await self._send(
-                kernel,
-                {
-                    "type": "init",
-                    "endpoint": endpoint,
-                    "artifact_directory": str(artifact_directory),
-                },
+            if _WINDOWS:
+                spawning = asyncio.create_task(create_windows_process(
+                    [str(node), str(kernel_script)],
+                    env=environment, cwd=str(artifact_directory),
+                ))
+            else:
+                spawning = asyncio.create_task(asyncio.create_subprocess_exec(
+                    str(node), str(kernel_script),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=environment, cwd=str(artifact_directory), **options,
+                ))
+            try:
+                process = await asyncio.shield(spawning)
+            except asyncio.CancelledError:
+                # Do not lose the process handle if cancellation lands between
+                # OS creation and asyncio returning ownership to us.
+                process = await spawning
+                raise
+            finally:
+                if child is not None:
+                    child.close()
+
+            if pipe is not None:
+                reader, writer = await pipe.connect(process, limit=_MESSAGE_LIMIT_BYTES)
+            else:
+                reader, writer = await asyncio.open_connection(sock=parent, limit=_MESSAGE_LIMIT_BYTES)
+            kernel = _Kernel(
+                process=process, writer=writer,
+                artifact_directory=artifact_directory,
+                ready=asyncio.get_running_loop().create_future(),
             )
-            # Readiness owns the startup budget; execution has not begun. A
-            # Turn ending or slot invalidation must not wait out that budget.
-            done, _ = await asyncio.wait(
-                {kernel.ready, cancel},
-                timeout=SPAWN_TIMEOUT_SECONDS,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if cancel in done:
-                raise _KernelGone("startup_cancelled")
-            if kernel.ready not in done:
-                raise _KernelGone("startup_timeout")
-            kernel.ready.result()
-        except _KernelGone as exc:
-            self._kill(kernel, exc.reason)
+            kernel.reader_task = asyncio.create_task(self._read(kernel, reader))
+            await self._send(kernel, {
+                "type": "init", "endpoint": endpoint,
+                "artifact_directory": str(artifact_directory),
+            })
+            await kernel.ready
+            return kernel
+        except BaseException as exc:
+            if kernel is not None:
+                self._kill(kernel, "startup_cancelled")
+            else:
+                if process is not None:
+                    try:
+                        if _WINDOWS:
+                            process.kill()
+                        else:
+                            os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(process.wait(), 5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("Computer Use JavaScript startup child was not reaped")
+                    finally:
+                        if isinstance(process, AsyncWindowsProcess):
+                            process.close()
+                if writer is not None:
+                    writer.close()
+                if parent is not None:
+                    parent.close()
+                await asyncio.to_thread(self._release_artifacts, artifact_directory)
+            if isinstance(exc, (OSError, ValueError)):
+                raise _KernelGone("spawn_failed") from exc
             raise
-        except asyncio.CancelledError:
-            self._kill(kernel, "startup_cancelled")
-            raise
-        return kernel
+        finally:
+            if child is not None:
+                child.close()
+            if pipe is not None:
+                pipe.close()
 
     async def _read(self, kernel: _Kernel, reader: asyncio.StreamReader) -> None:
         try:
@@ -622,7 +688,10 @@ class ComputerJsKernelManager:
             return
         kernel.alive = False
         try:
-            os.killpg(kernel.process.pid, signal.SIGKILL)
+            if _WINDOWS:
+                kernel.process.kill()
+            else:
+                os.killpg(kernel.process.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
         kernel.writer.close()
@@ -642,6 +711,9 @@ class ComputerJsKernelManager:
             await asyncio.wait_for(kernel.process.wait(), 5.0)
         except asyncio.TimeoutError:
             logger.warning("Computer Use JavaScript kernel %s was not reaped", kernel.process.pid)
+        finally:
+            if isinstance(kernel.process, AsyncWindowsProcess):
+                kernel.process.close()
         if kernel.reader_task is not None and kernel.reader_task is not asyncio.current_task():
             kernel.reader_task.cancel()
         # Pruning walks the temp directory; keep it off the Controller loop.

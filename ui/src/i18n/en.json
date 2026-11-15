@@ -136,7 +136,7 @@
       "installing": "Installing update…",
       "installed": "Update installed. Restarting…",
       "disabled": "Desktop updates disabled",
-      "checkFailed": "Could not verify an update. Check your connection and try again. This release may require manual installation.",
+      "checkFailed": "Couldn't check for updates. Check your connection and try again.",
       "installFailed": "The update could not be installed. The previous application has been retained. Please retry or reinstall the previous release.",
       "install": "Download and Install",
       "skip": "Skip This Version",
@@ -304,7 +304,7 @@
       "refresh": "I have paired · Refresh",
       "cliTitle": "Install and pair",
       "cliSubtitle": "Run on your computer. Connect from your phone.",
-      "cliBody": "Run in Terminal on macOS or Linux. On Windows, follow the guide for WSL.",
+      "cliBody": "Run in Terminal on macOS or Linux. On Windows, download the Avibe app from avibe.bot instead.",
       "stepInstall": "1. Install and finish setup",
       "installCommand": "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'",
       "stepPair": "2. Pair your account",
@@ -374,6 +374,34 @@
       "crate": "{{name}} {{version}}",
       "withAuthors": "{{crate}} ({{authors}})",
       "separator": ", "
+    },
+    "sheet": {
+      "title": "Instances",
+      "close": "Close and return to {{name}}",
+      "returnTo": "{{name}}, current instance. Return to it",
+      "youreIn": "You’re in",
+      "others": "Other instances",
+      "recent": "Recently used first",
+      "updating": "Updating…",
+      "opening": "Opening…",
+      "openFailed": "Couldn’t open {{name}}. Try again.",
+      "openFailedOffline": "{{name}} is offline.",
+      "openFailedGone": "This instance is no longer in your list.",
+      "offlineLine": "Offline · {{host}}",
+      "sharedLine": "Shared by {{owner}} · {{host}}",
+      "offlineBody": "{{name}} is offline. Open Avibe on that computer and connect it to the internet, and it shows as online.",
+      "refreshList": "Refresh the list",
+      "stale": "Couldn’t update the list. This is the last result; online status may have changed.",
+      "noOthers": "No other instances yet",
+      "noOthersBody": "Install Avibe on another computer and pair it with this account, and it appears here.",
+      "add": "Add an instance",
+      "addBody": "Install Avibe on a computer or server",
+      "accountBody": "Sign out, open-source licenses",
+      "firstRunSubtitle": "Pick an instance to open. You can switch later from the top of the screen.",
+      "pullToRefresh": "Pull to refresh",
+      "releaseToRefresh": "Release to refresh",
+      "loadFailed": "Couldn’t load your instances",
+      "loadFailedBody": "Try again. If it keeps happening, check your connection."
     }
   },
   "common": {
@@ -3594,6 +3622,7 @@
     "versionLabel": "Version",
     "accountMenuLabel": "Account ({{email}})",
     "signedInAs": "Signed in as",
+    "switchInstanceLabel": "{{name}}, current instance. Switch instance",
     "openMobileAccount": "Account and Avibes",
     "signOut": "Sign out",
     "signingOut": "Signing out…",
@@ -4577,69 +4606,27 @@
     "mainServiceRestarted": "Saved. Main service restarted.",
     "versionAndUpdate": "Version & Update",
     "buildAndVersion": "Build & Version",
-    "currentVersion": "Current Version",
     "versionPrefix": "v",
     "versionTitle": "v{{version}}",
     "versionValue": "{{version}}",
-    "packageVersion": "Package Version",
     "sourceRevision": "Source Revision",
     "sourceRevisionTitle": "Source Revision: {{revision}}",
     "sourceRevisionTitleDirty": "Source Revision: {{revision}} (dirty)",
     "sourceRevisionDirty": "{{revision}} (dirty)",
-    "refreshBuildInfo": "Refresh Build Information",
     "unknownRevision": "unknown",
     "dirtySource": "dirty",
-    "latestVersion": "Latest Version",
-    "checkUpdate": "Check for Updates",
-    "checking": "Checking...",
-    "updateAvailable": "Update Available",
-    "upgradeNow": "Upgrade Now",
-    "upgrading": "Upgrading...",
     "skipUpdate": "Skip this version",
-    "upToDate": "You're up to date",
-    "checkFailed": "Check failed",
-    "upgradeSuccess": "Upgrade successful!",
-    "upgradeFailed": "Upgrade failed",
-    "updateHint": "Update from {{from}} to {{to}}",
-    "restarting": "Restarting...",
     "autoUpdate": "Auto Update",
     "autoUpdateHint": "Auto-install when idle",
     "prereleaseUpdates": "Get pre-release updates",
     "prereleaseUpdatesHint": "Also offer release candidates early",
-    "latestStableVersion": "Latest Stable",
     "awaitingStableRelease": "You're on a pre-release. The next stable release will be offered when it's out.",
     "prereleaseBadge": "Pre-release",
     "releaseNotes": "Release notes",
     "releaseNotesFor": "Release notes for {{version}}",
     "desktopManagedUpdate": "Updates come from the Avibe desktop app on the computer running Avibe. Check for updates there.",
-    "desktopManagedUpdateAvailable": "Update available",
-    "desktopManagedUpdateOwnerHint": "Request the update on the host. The desktop app will prompt there or install unattended according to its local setting.",
     "desktopManagedUpdateMemberHint": "Update this host in the Avibe desktop app on the computer running Avibe.",
     "desktopRemoteUpdateLocalRequest": "An update to {{target}} was requested remotely. Install it now or ignore this request.",
-    "desktopRemoteUpdateRequiresHost": "This installation needs someone at the host to grant permission or repair the installation.",
-    "desktopRemoteUpdateVerifying": "The host reported completion. Waiting to confirm the installed version…",
-    "desktopRemoteUpdateDownloadingUnknown": "Downloading the update…",
-    "desktopRemoteUpdateShellUnavailable": "The desktop app did not respond. Open Avibe on the host and try again.",
-    "desktopRemoteUpdateNoUpdate": "This update is no longer available. Refresh the version information.",
-    "desktopRemoteUpdateNotManaged": "This host is no longer managed by the desktop app. Refresh the version information.",
-    "desktopRemoteUpdateInProgress": "Another update is in progress. Wait for the host to finish.",
-    "desktopRemoteUpdateTitle": "Update on host",
-    "desktopRemoteUpdateConfirmDescription": "The request will be delivered as {{delivery}}.",
-    "desktopRemoteUpdateDeliveryPrompt": "a host prompt",
-    "desktopRemoteUpdateDeliveryInstall": "an unattended install",
-    "desktopRemoteUpdateRequesting": "Requesting the host update…",
-    "desktopRemoteUpdateRequested": "The update request was sent to the host.",
-    "desktopRemoteUpdateAwaitingHost": "The host is waiting for someone there to approve the install.",
-    "desktopRemoteUpdateChecking": "The host is checking the signed release.",
-    "desktopRemoteUpdateDownloading": "Downloading the update: {{progress}}%",
-    "desktopRemoteUpdateInstalling": "Installing the update…",
-    "desktopRemoteUpdateRestarting": "Host restarting. Reconnecting automatically…",
-    "desktopRemoteUpdateCompleted": "The host finished updating to {{target}}.",
-    "desktopRemoteUpdateFailed": "The host could not finish the update. Check the desktop app on the host.",
-    "desktopRemoteUpdateDeclined": "The host declined the update.",
-    "desktopRemoteUpdateExpired": "The host update request expired.",
-    "desktopRemoteUpdateTimedOut": "Completion was not confirmed. Check the desktop app on the host.",
-    "desktopRemoteUpdateError": "The host could not accept the update request.",
     "desktopRemoteUpdateIgnore": "Ignore this request",
     "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
   },
@@ -6268,11 +6255,8 @@
       "defaultNotRemovable": "The default field can't be removed. Set another field as default first.",
       "extraNotRenamable": "Extra fields can't be renamed",
       "discardNew": "Discard new field",
-      "save": "Save",
-      "saveNamed": "Save {{field}}",
-      "saveNew": "Save new field",
       "saved": "Field saved",
-      "draftsDropped": "Drafts for fields removed elsewhere were dropped: {{fields}}.",
+      "draftsDropped": "Drafts for fields removed or moved to a different record elsewhere were dropped: {{fields}}.",
       "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
       "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
       "replacePlaceholder": "Saved · type to replace",
@@ -6286,7 +6270,9 @@
       "referenceName": "NAME",
       "referenceDefault": "<name/> alone resolves to the default field, <field/>.",
       "singleFile": "File upload supports one value. Switch to Text before adding fields.",
-      "editHelp": "Save each row after editing · blank values stay unchanged"
+      "editHelp": "Changes apply together when you click Save · blank keeps the saved value",
+      "removeOnSave": "Removed when you save: {{fields}}",
+      "undoRemove": "Undo"
     },
     "entry": {
       "addressTitle": "Protected Vault is unavailable at this address",
@@ -6502,7 +6488,8 @@
       },
       "account": "Account",
       "path": "Derivation path {{path}}",
-      "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise."
+      "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise.",
+      "solanaBlockhashHint": "Solana transactions are usually valid for only a minute or two. If you approve later, this one may have expired and will need to be requested again. Transactions that use a durable nonce are not affected."
     },
     "request": {
       "provide": "provide",
@@ -6655,6 +6642,43 @@
         "recovery": "If this computer is lost, only these words plus the passphrase you set (exactly) can recover the funds. A database backup alone cannot restore signing.",
         "set": "Set"
       }
+    },
+    "generate": {
+      "password": "Random password",
+      "key": "Random key",
+      "regenerate": "Regenerate",
+      "bits": "About {{bits}} bits of randomness",
+      "suggested": "Preset from the Agent’s suggestion",
+      "suggestedAdjusted": "Preset from the Agent’s suggestion, with the length brought within {{min}}–{{max}}",
+      "type": "Type",
+      "typePassword": "Password",
+      "typeHex": "Hex",
+      "typeBase64": "Base64",
+      "length": "Length",
+      "unitChars": "characters",
+      "unitBytes": "bytes · {{chars}} chars",
+      "chars": "{{count}} characters",
+      "bytes": "{{count}} bytes, {{chars}} characters",
+      "digits": "Digits",
+      "symbols": "Symbols",
+      "noLookalikes": "No look-alikes",
+      "noLookalikesHint": "Leaves out 0 O 1 l I",
+      "base64Note": "Standard Base64 (with + / =), the same as openssl rand -base64 prints.",
+      "generated": "Generated · not saved",
+      "generatedHint": "Kept only when you save; type to use your own instead."
+    },
+    "generatedBy": {
+      "agent": "Generated by an Agent",
+      "cli": "Generated from the CLI",
+      "agentInSession": "Generated by an Agent in “{{session}}”",
+      "cliLong": "Generated from the command line",
+      "password": "{{count}}-character password",
+      "hex": "Hex, {{count}} bytes",
+      "base64": "Base64, {{count}} bytes",
+      "agentNote": "The Agent never saw this value; it can use it like any other Standard secret.",
+      "badge": "{{who}} · {{detail}}",
+      "line": "{{who}} · {{when}} · <recipe>{{recipe}}</recipe>",
+      "openSession": "Open session"
     }
   },
   "permissions": {
@@ -7448,11 +7472,6 @@
     "signOut": "Sign out",
     "signOutBody": "Sign out on this Desktop and return to this Mac. Registration, remote access preferences and running tasks are kept.",
     "localVersion": "Local Desktop version {{version}}",
-    "updateAvailable": "Desktop update available",
-    "desktopVersion": "Desktop version",
-    "updateScope": "This is Avibe Desktop on this Mac. Updates are managed locally, independently of the connected Runtime.",
-    "reviewUpdate": "Review and install update",
-    "checkUpdates": "Check for updates",
     "continueLocal": "Continue on this Mac",
     "loading": "Loading…",
     "setupReady": "This Mac is ready",
@@ -7491,7 +7510,12 @@
     "changeEmail": "Change email",
     "resendCode": "Resend code",
     "consentTitle": "Connect to {{name}}?",
-    "consentBody": "Allow this instance to verify your account and open your workspace.",
+    "consentBody": "{{name}} isn't one of your instances. If you continue, it will receive your account email to sign you in.",
+    "consentAlsoReceives": "It will also receive: {{items}}",
+    "consentAlsoOther": "And also: {{items}}",
+    "consentScopes": {
+      "profile": "your profile name"
+    },
     "allow": "Allow and connect",
     "deny": "Decline",
     "connectingTo": "Connecting to {{name}}",
@@ -7542,7 +7566,104 @@
       "code": "Invalid or expired code. Try again or resend.",
       "upgrade": "This instance needs an Avibe update before Desktop can connect. You can still use this Mac."
     },
-    "localStatus": "{{name}} · {{status}}",
-    "versionTransition": "{{current}} → {{latest}}"
+    "localStatus": "{{name}} · {{status}}"
+  },
+  "update": {
+    "row": {
+      "current": "Current version",
+      "offered": "Update to",
+      "latestStable": "Latest stable",
+      "checkedAt": "Last checked",
+      "package": "Package version"
+    },
+    "status": {
+      "checking": "Checking for updates…",
+      "current": "You're up to date",
+      "available": "A new version is ready to install",
+      "availableDetail": "Avibe restarts to finish. Your sessions and settings are kept.",
+      "notChecked": "Not checked for updates yet",
+      "disabled": "This version can't update itself",
+      "disabledDetail": "Download and install a newer version to update.",
+      "checkFailed": "Couldn't check for updates",
+      "checkFailedDetail": "Check your connection and try again.",
+      "requesting": "Asking the computer running Avibe to update…",
+      "awaitingHost": "Waiting for someone at the computer running Avibe to approve",
+      "awaitingHostDetail": "Its desktop app is an older version that asks before installing.",
+      "downloading": "Downloading the update…",
+      "downloadingProgress": "Downloading the update: {{progress}}%",
+      "installing": "Installing the update…",
+      "restarting": "Restarting Avibe…",
+      "restartingHost": "The computer running Avibe is restarting it. Reconnecting automatically…",
+      "verifying": "Confirming the new version…",
+      "updated": "Update installed",
+      "updatedTo": "Updated to {{version}}"
+    },
+    "failure": {
+      "failed": {
+        "title": "The update didn't finish",
+        "detail": "Your current version still works. You can try again."
+      },
+      "install": {
+        "title": "The update didn't finish",
+        "detail": "Your current version still works. You can try again."
+      },
+      "requires-host": {
+        "title": "The update didn't finish",
+        "detail": "Someone at the computer running Avibe needs to grant permission or repair the installation."
+      },
+      "declined": {
+        "title": "The update was declined on the computer running Avibe",
+        "detail": "Your current version still works."
+      },
+      "expired": {
+        "title": "The update request expired",
+        "detail": "The computer running Avibe didn't respond in time. You can try again."
+      },
+      "timeout": {
+        "title": "Couldn't confirm the update finished",
+        "detail": "Check the desktop app on the computer running Avibe."
+      },
+      "unreachable": {
+        "title": "The desktop app on the computer running Avibe didn't respond",
+        "detail": "Make sure the desktop app is open on the computer running Avibe, then try again."
+      },
+      "busy": {
+        "title": "Another update is in progress",
+        "detail": "Wait for it to finish."
+      },
+      "gone": {
+        "title": "This version is no longer available",
+        "detail": "Refresh to see what's available now."
+      },
+      "not-managed": {
+        "title": "The computer running Avibe no longer uses the desktop app for updates",
+        "detail": "Refresh to see its current status."
+      },
+      "rejected": {
+        "title": "The computer running Avibe didn't accept the update request",
+        "detail": "You can try again."
+      },
+      "setting": {
+        "title": "Couldn't change the setting",
+        "detail": "The computer running Avibe didn't accept the change. You can try again."
+      }
+    },
+    "action": {
+      "update": "Update",
+      "retry": "Try again",
+      "check": "Check for updates",
+      "refreshBuild": "Refresh build information"
+    },
+    "setting": {
+      "prereleases": "Get pre-release updates",
+      "prereleasesHint": "Also offer release candidates early",
+      "autoUpdate": "Update automatically",
+      "autoUpdateHint": "Install new versions when Avibe is idle, without asking"
+    },
+    "legacyHost": "The desktop app on the computer running Avibe is too old to check for updates or change these settings from here. Update it to the latest version first.",
+    "trustedView": {
+      "title": "Avibe Desktop on this computer",
+      "body": "You are using Avibe on another computer. This updates the desktop app on this one."
+    }
   }
 }

@@ -44,6 +44,9 @@ def test_source_sync_identity_refreshes_without_package_reinstall(monkeypatch, t
         "latest": None,
         "has_update": False,
         "error": None,
+        "prereleases": False,
+        "auto_update": True,
+        "host_actions": ["check", "prereleases", "auto_update"],
         "build": {"kind": "source", "revision": first_revision, "dirty": False},
     }
     assert second["current"] == first["current"]
@@ -98,7 +101,13 @@ def test_packaged_install_keeps_semantic_update_behavior(monkeypatch) -> None:
         lambda current, *, prereleases: expected if (current, prereleases) == ("3.0.6", False) else None,
     )
 
-    assert api.get_version_info() == {**expected, "build": {"kind": "package"}}
+    assert api.get_version_info() == {
+        **expected,
+        "prereleases": False,
+        "auto_update": True,
+        "host_actions": ["check", "prereleases", "auto_update", "install"],
+        "build": {"kind": "package"},
+    }
 
 
 def _desktop_managed(monkeypatch, state_dir: Path) -> None:
@@ -124,7 +133,10 @@ DESKTOP_NO_CONCLUSION = {
     "prereleases": None,
     "checked_at": None,
     "remote_install_allowed": False,
+    "auto_update": None,
     "remote_request": None,
+    "host_actions": [],
+    "control_request": None,
     "build": {"kind": "package"},
     "managed_by": "desktop",
 }
@@ -135,6 +147,8 @@ DESKTOP_FIXTURE_CHECK = {
     "desktop_version": "3.2.2-rc.13",
     "prereleases": True,
     "checked_at": "2026-10-21T02:36:00Z",
+    "auto_update": True,
+    "host_actions": ["check", "prereleases", "auto_update", "install"],
 }
 
 

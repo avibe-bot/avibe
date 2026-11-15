@@ -445,6 +445,27 @@ final class NavigationPolicyTests: XCTestCase {
         )
     }
 
+    func testAccountRootArgumentsRequireTheDeclaredCapabilityAndExactShape() {
+        for capability in [nil, 0, 1] as [Int?] {
+            XCTAssertEqual(
+                NativeAccountPresentation.parse([:], instancePresentation: capability), .instances
+            )
+            XCTAssertEqual(
+                NativeAccountPresentation.parse(["start": "account"], instancePresentation: capability),
+                capability == 1 ? .account : nil
+            )
+        }
+        let invalid: [[String: Any]] = [
+            ["start": "instances"], ["start": "Account"], ["start": ""],
+            ["start": NSNull()], ["start": true], ["start": 1],
+            ["start": ["account"]], ["start": ["page": "account"]],
+            ["page": "account"], ["start": "account", "extra": true],
+        ]
+        for params in invalid {
+            XCTAssertNil(NativeAccountPresentation.parse(params, instancePresentation: 1))
+        }
+    }
+
     func testNativeExternalURLRequiresAnAbsoluteSupportedTarget() {
         XCTAssertEqual(
             NativeExternalURL.parse(" https://example.com/path?q=1 ")?.absoluteString,
@@ -789,6 +810,20 @@ final class NavigationPolicyTests: XCTestCase {
         appModel.didFinishRuntimeLoading()
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(switchedAckCount, 0)
+    }
+
+    @MainActor
+    func testSignedInFixtureRejectsBootstrapFailureOnThePickerRoute() async throws {
+        do {
+            _ = try await makePushTapAppModel(sessionResponse: .status(503))
+            XCTFail("A failed bootstrap must not admit a signed-in fixture")
+        } catch let error as FixtureReadinessError {
+            // A readiness timeout must not satisfy this regression: prove the
+            // fixture reached the deliberately failed session response.
+            XCTAssertTrue(error.description.contains("bootstrap settled"))
+            XCTAssertTrue(error.description.contains("account=nil"))
+            XCTAssertTrue(error.description.contains("GET /api/mobile/session -> 503"))
+        }
     }
 
     @MainActor
@@ -1941,17 +1976,69 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertNil(runtimeController.pageColorScheme)
         XCTAssertEqual(runtimeController.preferredStatusBarStyle, .default)
 
-        // Account covers the runtime and takes the status bar, then hands it
-        // back to the same runtime.
+        // Account covers the runtime in a native sheet and takes the status
+        // bar, then hands it back to the same runtime.
         appModel.showAccount()
+        var coveredOnboarding: MobileOnboardingViewController?
         try await waitUntil {
-            hostingController.childForStatusBarStyle
-                is MobileOnboardingViewController
+            coveredOnboarding = self.mobileOnboardingController(
+                in: hostingController
+            )
+            return coveredOnboarding != nil
         }
+        XCTAssertEqual(coveredOnboarding?.preferredStatusBarStyle, .default)
         XCTAssertTrue(appModel.route.coversRuntime)
         XCTAssertTrue(appModel.returnToRuntime())
         try await waitUntil {
-            hostingController.childForStatusBarStyle === runtimeController
+            hostingController.presentedViewController == nil
+                && hostingController.childForStatusBarStyle === runtimeController
+        }
+
+        // Consume B through the actual SwiftUI root, not just AppModel's mode.
+        appModel.showInstances()
+        var namedSheet: MobileOnboardingViewController?
+        try await waitUntil {
+            namedSheet = self.mobileOnboardingController(in: hostingController)
+            let page = namedSheet?.viewIfLoaded?.subviews.compactMap { $0 as? WKWebView }.first
+            return page?.url?.fragment == "sheet-instances"
+        }
+        appModel.showInstances()
+        appModel.showAccount()
+        XCTAssertTrue(self.mobileOnboardingController(in: hostingController) === namedSheet)
+        XCTAssertTrue(appModel.returnToRuntime())
+        try await waitUntil {
+            hostingController.presentedViewController == nil
+                && hostingController.childForStatusBarStyle === runtimeController
+        }
+        // Consume the parameterized call through RootView's real Runtime
+        // bridge wiring, including factory/container callbacks.
+        let runtimePage = try XCTUnwrap(runtimeController.livePrimaryWebView)
+        let rootProbe = WebViewLoadProbe()
+        runtimePage.navigationDelegate = rootProbe
+        try await rootProbe.loadHTML(
+            "<!doctype html><title>Selected runtime</title>",
+            baseURL: URL(string: "https://status-bar.invalid")!, in: runtimePage
+        )
+        runtimePage.navigationDelegate = runtimeController
+        let accountRootResult = try await runtimePage.callAsyncJavaScript(
+            "return JSON.stringify(await window.avibeNative.call('app.showAccount', {start: 'account'}));",
+            arguments: [:], in: nil, contentWorld: .page
+        )
+        XCTAssertEqual(accountRootResult as? String, "null")
+        var accountRoot: MobileOnboardingViewController?
+        try await waitUntil {
+            accountRoot = self.mobileOnboardingController(in: hostingController)
+            let page = accountRoot?.viewIfLoaded?.subviews.compactMap { $0 as? WKWebView }.first
+            return page?.url?.fragment == "sheet-account"
+        }
+        appModel.showAccount()
+        appModel.showInstances()
+        appModel.showAccountRoot()
+        XCTAssertTrue(self.mobileOnboardingController(in: hostingController) === accountRoot)
+        XCTAssertTrue(appModel.returnToRuntime())
+        try await waitUntil {
+            hostingController.presentedViewController == nil
+                && hostingController.childForStatusBarStyle === runtimeController
         }
     }
 
@@ -1966,6 +2053,10 @@ final class NavigationPolicyTests: XCTestCase {
         var historyChangeRequests = 0
         weak var primaryWebView: WKWebView?
         let accountShown = expectation(description: "runtime bridge opens account surface")
+        let instancesShown = expectation(description: "runtime bridge opens named instances surface")
+        let accountRootShown = expectation(description: "runtime bridge opens Account root")
+        var accountRootRequestCount = 0
+        var nativeName: String? = "Studio"
         let webView = WKWebView(
             frame: .zero,
             configuration: NativeBridgeConfiguration.make(
@@ -1991,7 +2082,15 @@ final class NavigationPolicyTests: XCTestCase {
                 },
                 showAccount: {
                     accountShown.fulfill()
-                }
+                },
+                showAccountRoot: {
+                    accountRootRequestCount += 1
+                    accountRootShown.fulfill()
+                },
+                showInstances: {
+                    instancesShown.fulfill()
+                },
+                instanceName: { nativeName }
             )
         )
         primaryWebView = webView
@@ -2028,7 +2127,29 @@ final class NavigationPolicyTests: XCTestCase {
             } catch (error) {
               invalidHistory = error.code;
             }
-            await window.avibeNative.call("app.showAccount");
+            const legacyAccountResult = await window.avibeNative.call("app.showAccount");
+            const invalidAccountArguments = [];
+            for (const params of [
+              {start: "instances"}, {start: "Account"}, {start: ""},
+              {start: null}, {start: true}, {start: 1},
+              {start: ["account"]}, {start: {page: "account"}},
+              {page: "account"}, {start: "account", extra: true}
+            ]) {
+              try {
+                await window.avibeNative.call("app.showAccount", params);
+                invalidAccountArguments.push("accepted");
+              } catch (error) {
+                invalidAccountArguments.push(error.code);
+              }
+            }
+            const accountRootResult = await window.avibeNative.call("app.showAccount", {start: "account"});
+            let invalidInstances = null;
+            try {
+              await window.avibeNative.call("app.showInstances", {url: "https://example.com"});
+            } catch (error) {
+              invalidInstances = error.code;
+            }
+            const instancesResult = await window.avibeNative.call("app.showInstances");
             let unsupported = null;
             try {
               await window.avibeNative.call("app.instances");
@@ -2041,6 +2162,13 @@ final class NavigationPolicyTests: XCTestCase {
               platform: info.platform,
               shellVersion: info.shellVersion,
               accountPresentationCapability: info.capabilities.accountPresentation,
+              instancePresentationCapability: info.capabilities.instancePresentation,
+              instanceInfo: info.instance,
+              legacyAccountResult,
+              accountRootResult,
+              invalidAccountArguments,
+              instancesResult,
+              invalidInstances,
               appCapability: info.capabilities.app,
               keyboardResizesViewport: info.capabilities.keyboardResizesViewport,
               viewportCapability: info.capabilities.viewport,
@@ -2064,6 +2192,14 @@ final class NavigationPolicyTests: XCTestCase {
             instancePayload["accountPresentationCapability"] as? Int,
             2
         )
+        XCTAssertEqual(instancePayload["instancePresentationCapability"] as? Int, 1)
+        XCTAssertEqual(instancePayload["instanceInfo"] as? [String: String], ["name": "Studio"])
+        XCTAssertTrue(instancePayload["legacyAccountResult"] is NSNull)
+        XCTAssertTrue(instancePayload["accountRootResult"] is NSNull)
+        XCTAssertEqual(instancePayload["invalidAccountArguments"] as? [String],
+                       Array(repeating: "invalid_argument", count: 10))
+        XCTAssertTrue(instancePayload["instancesResult"] is NSNull)
+        XCTAssertEqual(instancePayload["invalidInstances"] as? String, "invalid_argument")
         XCTAssertEqual(instancePayload["appCapability"] as? Int, 1)
         XCTAssertEqual(instancePayload["keyboardResizesViewport"] as? Int, 1)
         XCTAssertEqual(instancePayload["viewportCapability"] as? Int, 1)
@@ -2074,7 +2210,20 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(instancePayload["invalidHistory"] as? String, "invalid_argument")
         XCTAssertEqual(instancePayload["unsupported"] as? String, "unsupported")
         assertForbiddenReply(instancePayload["subframeTransport"])
-        await fulfillment(of: [accountShown], timeout: 2)
+        await fulfillment(of: [accountShown, accountRootShown, instancesShown], timeout: 2)
+        XCTAssertEqual(accountRootRequestCount, 1)
+
+        // The Runtime reads app.info on document load; no rename event or
+        // caller-supplied identity is involved. Empty/missing names are safe.
+        for (name, expected) in [("Renamed Studio" as String?, "Renamed Studio"), (nil, "Avibe"), (" \n", "Avibe")] {
+            nativeName = name
+            try await probe.loadHTML("<!doctype html><title>Reloaded</title>", baseURL: instance.url, in: webView)
+            let info = try await webView.callAsyncJavaScript(
+                "return JSON.stringify((await window.avibeNative.call('app.info')).instance);",
+                arguments: [:], in: nil, contentWorld: .page
+            )
+            XCTAssertEqual(try jsonObject(from: info) as? [String: String], ["name": expected])
+        }
 
         try await probe.loadHTML(
             "<!doctype html><title>External</title>",
@@ -2302,20 +2451,34 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     func testAccountBridgeTransitionDoesNotRecreateReleasedRuntimeWebView() async throws {
-        let accountShown = expectation(description: "account bridge requested")
+        for (method, params) in [
+            ("app.showAccount", "{}"),
+            ("app.showAccount", #"{"start":"account"}"#),
+            ("app.showInstances", "{}"),
+        ] {
+            try await exerciseReleasedRuntimeSurfaceCallback(method, params: params)
+        }
+    }
+
+    @MainActor
+    private func exerciseReleasedRuntimeSurfaceCallback(_ method: String, params: String) async throws {
+        let accountShown = expectation(description: "runtime surface bridge requested")
         var accountRequestCount = 0
         var loadingStarted = 0
         var loadingFinished = 0
         var loadingFailed = 0
         var controller: WebViewController!
+        let showSurface: () -> Void = {
+            accountRequestCount += 1
+            accountShown.fulfill()
+            _ = controller.invalidateForAccountTransition()
+        }
         controller = WebViewController(
             instanceOrigin: instance,
             websiteDataStore: .nonPersistent(),
-            showAccount: {
-                accountRequestCount += 1
-                accountShown.fulfill()
-                _ = controller.invalidateForAccountTransition()
-            },
+            showAccount: showSurface,
+            showAccountRoot: showSurface,
+            showInstances: showSurface,
             didStartLoading: {
                 loadingStarted += 1
             },
@@ -2338,9 +2501,12 @@ final class NavigationPolicyTests: XCTestCase {
         try await probe.loadHTML(
             """
             <!doctype html>
-            <button id="account" onclick="window.avibeNative.call('app.showAccount')">
-              Account
-            </button>
+            <button id="account">Account</button>
+            <script>
+              document.querySelector('#account').addEventListener('click', () => {
+                window.avibeNative.call('\(method)', \(params));
+              });
+            </script>
             """,
             baseURL: instance.url,
             in: webView
@@ -2357,7 +2523,7 @@ final class NavigationPolicyTests: XCTestCase {
         let lateBridgeResult = try await webView.callAsyncJavaScript(
             """
             const result = {};
-            await window.avibeNative.call("app.showAccount");
+            await window.avibeNative.call("\(method)", \(params));
             try {
               await window.avibeNative.call(
                 "app.setAccountActionAvailable",
@@ -2477,7 +2643,8 @@ final class NavigationPolicyTests: XCTestCase {
         try await exerciseAppModelAccountTransition(
             defaults: defaults,
             controlPlaneURL: baseURL,
-            storeCleanups: storeCleanups
+            storeCleanups: storeCleanups,
+            requests: server.requests
         )
         for storeCleanup in storeCleanups {
             let removalError = await storeCleanup.remove()
@@ -2904,7 +3071,8 @@ final class NavigationPolicyTests: XCTestCase {
     private func exerciseAppModelAccountTransition(
         defaults: UserDefaults,
         controlPlaneURL: URL,
-        storeCleanups: [NamedDataStoreCleanup]
+        storeCleanups: [NamedDataStoreCleanup],
+        requests: FixtureRequestLog
     ) async throws {
         var appModel: AppModel? = makeTestAppModel(
             defaults: defaults,
@@ -2917,7 +3085,8 @@ final class NavigationPolicyTests: XCTestCase {
         )
         try await exerciseRuntimeAccountTransition(
             appModel: try XCTUnwrap(appModel),
-            storeCleanups: storeCleanups
+            storeCleanups: storeCleanups,
+            requests: requests
         )
         appModel = nil
         try? await Task.sleep(for: .milliseconds(100))
@@ -2926,9 +3095,13 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     private func exerciseRuntimeAccountTransition(
         appModel: AppModel,
-        storeCleanups: [NamedDataStoreCleanup]
+        storeCleanups: [NamedDataStoreCleanup],
+        requests: FixtureRequestLog
     ) async throws {
-        try await waitForSignedInInstances(appModel)
+        try await waitForSignedInInstances(
+            appModel, accountID: "account", instanceIDs: ["instance", "instance-2"],
+            requests: requests
+        )
         _ = try appModel.mobileSessionCoordinator.selectInstance(id: "instance")
 
         guard case .browser(let runtime) = appModel.route else {
@@ -3129,14 +3302,15 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     private func makePushTapAppModel(
-        pushOpenedNow: @escaping () -> Date = Date.init
+        pushOpenedNow: @escaping () -> Date = Date.init,
+        sessionResponse: LocalHTTPResponse? = nil
     ) async throws -> AppModel {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
-                return .json(
+                return sessionResponse ?? .json(
                     """
                     {
                       "account": {
@@ -3186,40 +3360,31 @@ final class NavigationPolicyTests: XCTestCase {
             ),
             pushOpenedNow: pushOpenedNow
         )
-        try await waitForSignedInInstances(appModel)
+        let storeCleanup = NamedDataStoreCleanup()
+        storeCleanup.identifier = appModel.websiteDataStore.identifier
+        addTeardownBlock { @MainActor [weak appModel, self] in
+            appModel?.showInstancePicker()
+            appModel?.mobileSessionCoordinator.deactivateAccountSurface()
+            print("[iOS fixture] stage=push App views invalidated before store removal")
+            let error = await storeCleanup.remove()
+            XCTAssertNil(error, "Push fixture named-store cleanup failed")
+            server.requests.attach(to: self, name: "push App bootstrap requests")
+        }
+        try await waitForSignedInInstances(appModel, requests: server.requests)
         return appModel
     }
 
-    /// Waits for the App's launch to settle, then expects the signed-in
-    /// instance list. The launch reads the session through a WebView, so it
-    /// is bounded by the App's own deadlines for that read
-    /// (`WebKitReadiness.standardTransportOperation`), and a launch that
-    /// settles elsewhere fails with the route it reached.
+    /// A settled picker is not enough: bootstrap errors also land there.
     @MainActor
     private func waitForSignedInInstances(
         _ appModel: AppModel,
-        file: StaticString = #filePath,
-        line: UInt = #line
+        accountID: String = "account-1",
+        instanceIDs: Set<String> = ["instance-1", "instance-2"],
+        requests: FixtureRequestLog
     ) async throws {
-        try await waitUntil(
-            "The App's launch",
-            timeout: WebKitReadiness.standardTransportOperation,
-            file: file,
-            line: line
-        ) {
-            if case .loading = appModel.route {
-                return false
-            }
-            return true
-        }
-        guard case .onboarding(.instances) = appModel.route else {
-            XCTFail(
-                "The App's launch settled on \(appModel.route), not the instance list.",
-                file: file,
-                line: line
-            )
-            throw TestWaitError.unexpectedRoute
-        }
+        try await WebKitReadiness.waitForSignedInFixture(
+            appModel, accountID: accountID, instanceIDs: instanceIDs, requests: requests
+        )
     }
 
     @MainActor
@@ -3277,6 +3442,24 @@ final class NavigationPolicyTests: XCTestCase {
         )
     }
 
+    @MainActor
+    private func mobileOnboardingController(
+        in controller: UIViewController
+    ) -> MobileOnboardingViewController? {
+        if let onboarding = controller as? MobileOnboardingViewController {
+            return onboarding
+        }
+        if let presented = controller.presentedViewController,
+           let onboarding = mobileOnboardingController(in: presented) {
+            return onboarding
+        }
+        for child in controller.children {
+            if let onboarding = mobileOnboardingController(in: child) {
+                return onboarding
+            }
+        }
+        return nil
+    }
     @MainActor
     private func host(_ controller: UIViewController) -> UIWindow {
         let window = UIWindow(
@@ -3800,7 +3983,6 @@ private final class KeyboardViewportFixture {
 
 private enum TestWaitError: Error {
     case timedOut
-    case unexpectedRoute
 }
 
 @MainActor
