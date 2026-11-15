@@ -5,12 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const api = vi.hoisted(() => ({
   createVaultAuthzWebAuthnOptions: vi.fn(),
   getVaultSandboxRootMetadata: vi.fn(),
+  getVaultVmk: vi.fn(),
   completeVaultSetup: vi.fn(),
 }));
-const sandbox = vi.hoisted(() => ({ setup: vi.fn() }));
+const sandbox = vi.hoisted(() => ({ setup: vi.fn(), status: vi.fn() }));
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
+vi.mock('./vaultEntry', () => ({ assertVaultEntryAvailable: vi.fn(), vaultEntryIssue: () => null }));
 vi.mock('./vaultSandboxClient', async (original) => ({
   ...await original<typeof import('./vaultSandboxClient')>(),
   getVaultSandboxClient: async () => sandbox,
@@ -37,6 +39,7 @@ describe('protected setup failure from the create/unlock hook', () => {
   beforeEach(() => {
     api.createVaultAuthzWebAuthnOptions.mockReset().mockResolvedValue({ ok: true });
     api.getVaultSandboxRootMetadata.mockReset().mockResolvedValue({ ok: true, root_metadata: {} });
+    api.getVaultVmk.mockReset().mockResolvedValue({ ok: true, exists: false });
     api.completeVaultSetup.mockReset().mockResolvedValue({ ok: false, code: 'invalid_protected_authz' });
     sandbox.setup.mockReset().mockResolvedValue({
       wrapMeta,
@@ -45,6 +48,7 @@ describe('protected setup failure from the create/unlock hook', () => {
       authzRegistration: registration,
       state: 'unlocked',
     });
+    sandbox.status.mockReset();
   });
 
   afterEach(() => {
@@ -52,7 +56,7 @@ describe('protected setup failure from the create/unlock hook', () => {
     vi.clearAllMocks();
   });
 
-  it('does not report the Vault unlocked when durable setup returns an unknown refusal', async () => {
+  it('does not report the Vault unlocked and preserves the same-proof retry across discovery refresh', async () => {
     api.completeVaultSetup.mockResolvedValue({ ok: false });
     const { result } = renderHook(() => useProtectedVault());
 
@@ -62,5 +66,16 @@ describe('protected setup failure from the create/unlock hook', () => {
     expect(result.current.status).not.toBe('unlocked');
     expect(vaultUnlocked()).toBe(false);
     expect(vaultFreshSetup()).toBe(true);
+
+    await act(async () => result.current.refresh());
+    expect(result.current.status).toBe('needs-setup');
+    expect(vaultUnlocked()).toBe(false);
+    expect(vaultFreshSetup()).toBe(true);
+
+    api.completeVaultSetup.mockResolvedValue({ ok: true, exists: true, wrap_meta: wrapMeta });
+    await act(async () => result.current.setupPasskey());
+    expect(sandbox.setup).toHaveBeenCalledOnce();
+    expect(api.completeVaultSetup).toHaveBeenCalledTimes(2);
+    expect(vaultFreshSetup()).toBe(false);
   });
 });

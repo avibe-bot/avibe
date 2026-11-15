@@ -364,6 +364,11 @@ export function useProtectedVault() {
       // channel is live so a policy `reset` broadcast reaches this tab and drops its pinned client.
       getVaultLockChannel();
       if (res.exists && res.wrap_meta) {
+        // An unknown setup response may have committed on the server. Discovery is authoritative
+        // in that case: stop treating the sandbox root as transient and allow normal unlock state.
+        sessionVault.durableSetupPending = false;
+        sessionVault.freshSetup = false;
+        sessionVault.authzFactorRegistration = null;
         sessionVault.wrapMeta = baseVmkWrapMeta(res.wrap_meta);
         const sandboxStatus = await sandbox.status(sessionVault.wrapMeta);
         if (sandboxStatus.state === 'unlocked') {
@@ -374,8 +379,20 @@ export function useProtectedVault() {
           sessionVault.status = 'locked';
           vaultLockExpiresAt = null;
         }
+      } else if (
+        sessionVault.durableSetupPending
+        && sessionVault.freshSetup
+        && sessionVault.wrapMeta
+        && sessionVault.authzFactorRegistration
+      ) {
+        // The setup POST may still be retryable after an unknown response. Do not discard the
+        // exact root + registration proof merely because discovery raced before the commit landed.
+        sessionVault.status = 'needs-setup';
       } else {
         sessionVault.wrapMeta = null;
+        sessionVault.freshSetup = false;
+        sessionVault.authzFactorRegistration = null;
+        sessionVault.durableSetupPending = false;
         sessionVault.status = 'needs-setup';
         vaultLockExpiresAt = null;
       }
@@ -385,7 +402,7 @@ export function useProtectedVault() {
       // remount that finds an already-unlocked session leaves siblings on stale lock state until
       // the next `vault.state` event.
       notifyVaultLockChange();
-      setStatus(sessionVault.status);
+      setStatus(vaultStatusNow());
     } catch (err) {
       sessionVault.status = sessionVault.wrapMeta ? 'locked' : 'needs-setup';
       setStatus('error');
