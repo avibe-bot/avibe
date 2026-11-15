@@ -241,9 +241,43 @@ def windows_button(window, label, *, version=False):
     return sorted(candidates, key=lambda c: c.rectangle().top)[0]
 
 
+FIRST_RUN_BUTTONS = ("Get started", "Set up later", "Start using this Mac", "Continue on this Mac")
+
+
+def windows_first_run(app):
+    clicked = set()
+    def ready():
+        window = app.top_window()
+        rows = windows_tree(window)
+        save("first-run-windows.json", rows)
+        if windows_button(window, SOURCE_SHORT, version=True):
+            return True
+        # The startup offer is not the unified panel. Dismiss, never install here.
+        if window.window_text() == "Avibe Desktop Updates":
+            later = windows_button(window, "Later")
+            if later:
+                later.click_input()
+                record("dismiss-startup-native-offer", platform="windows", label="Later")
+                return False
+        for label in FIRST_RUN_BUTTONS:
+            button = windows_button(window, label)
+            if button and label not in clicked:
+                button.click_input()
+                clicked.add(label)
+                record("first-run-click", platform="windows", label=label)
+                return False
+        return False
+    try:
+        wait_for(ready, 300, "Windows first-run did not reach the version trigger")
+    finally:
+        app.top_window().capture_as_image().save(str(EVIDENCE / "first-run-windows.png"))
+
+
 def windows_panel(pid: int, version: str, stage: str):
     from pywinauto import Application
     app = Application(backend="uia").connect(process=pid)
+    if stage == "rc2":
+        windows_first_run(app)
     def trigger():
         window = app.top_window()
         save(f"{stage}-accessibility.json", windows_tree(window))
@@ -319,9 +353,10 @@ def install_macos(installer: Path) -> tuple[Path, int]:
     binary = app / "Contents/MacOS/avibe-desktop"
     if normalize_version(mac_version(app)) != normalize_version(SOURCE_VERSION):
         raise RuntimeError("installed macOS source version mismatch")
-    process = subprocess.Popen([str(binary)], cwd=str(app.parent), env=os.environ.copy())
-    OWNED_CHILDREN[process.pid] = process
-    original = wait_for(lambda: psutil.Process(process.pid) if psutil.pid_exists(process.pid) else None, 180, "rc2 macOS process did not start")
+    # Launch the installed bundle through LaunchServices, as a user opening it
+    # in Finder would, so activation/window lifecycle is not bypassed.
+    run(["open", "-n", str(app)], timeout=60)
+    original = wait_for(lambda: find_process(binary, exclude=set()), 180, "rc2 macOS process did not start")
     save("source-signature.json", {"dmg": signature, "app": "spctl --assess passed"})
     save("source-install.json", {"app": str(app), "executable": str(binary), "pid": original.pid, "version": mac_version(app)})
     return app, original.pid
@@ -339,7 +374,7 @@ def apple_script(script: str, *args: str) -> str:
 
 # Only public accessibility actions; no JS injection, deep links or updater IPC.
 MAC_AX = r'''on run argv
-local dumpText, candidateControls
+local dumpText, candidateControls, allControls
 set targetPid to (item 1 of argv) as integer
 set operation to item 2 of argv
 set needle to item 3 of argv
@@ -347,9 +382,14 @@ set needle to item 3 of argv
   set p to first application process whose unix id is targetPid
   tell p
    set frontmost to true
-   set dumpText to ""
+   set dumpText to "AXWindowCount" & tab & (count of windows) & linefeed
    set candidateControls to {}
-   repeat with e in entire contents
+   set allControls to {}
+   repeat with appWindow in windows
+    set end of allControls to appWindow
+    set allControls to allControls & (entire contents of appWindow)
+   end repeat
+   repeat with e in allControls
     set elementRole to ""
     set elementName to ""
     set elementValue to ""
@@ -405,12 +445,43 @@ def mac_has_version(text, version):
                for row in text.splitlines() for field in row.split("\t"))
 
 
+def mac_first_run(pid):
+    clicked = set()
+    def ready():
+        text = mac_snapshot(pid, "first-run-macos")
+        if mac_has_version(text, SOURCE_SHORT):
+            # Do not mistake the startup dialog's Current-version text for a badge.
+            if "Download and Install" not in text:
+                return True
+        labels = ("Later",) if "Download and Install" in text else FIRST_RUN_BUTTONS
+        for label in labels:
+            if label not in text or (label in clicked and label != "Later"):
+                continue
+            try:
+                mac_ax(pid, "available", label)
+            except subprocess.CalledProcessError:
+                continue
+            receipt = mac_ax(pid, "click", label)
+            clicked.add(label)
+            record("dismiss-startup-native-offer" if label == "Later" else "first-run-click",
+                   platform="macos", label=label, receipt=receipt)
+            return False
+        return False
+    try:
+        wait_for(ready, 300, "macOS first-run did not reach the version trigger")
+    finally:
+        run(["screencapture", "-x", str(EVIDENCE / "first-run-macos.png")], timeout=60, check=False)
+
+
 def mac_panel(pid: int, version: str, stage: str):
+    if stage == "rc2":
+        mac_first_run(pid)
     def loaded():
         text = mac_snapshot(pid, stage + "-before")
         return mac_has_version(text, version)
     wait_for(loaded, 300, f"{stage}: macOS version trigger unavailable after cold start")
-    receipt = mac_ax(pid, "version", version)
+    native_version = SOURCE_VERSION if normalize_version(version) == normalize_version(SOURCE_VERSION) else TARGET_VERSION
+    receipt = mac_ax(pid, "version", native_version)
     record("click-version", version=version, platform="macos", receipt=receipt)
     def current():
         text = mac_snapshot(pid, stage)

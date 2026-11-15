@@ -92,6 +92,35 @@ def test_powershell_preserves_env_and_fails_closed(observer):
         observer.powershell('throw')
 
 
+def test_first_run_dismisses_offer_then_completes_no_key_setup(observer):
+    from unittest.mock import Mock
+    labels = ['Later', 'Get started', 'Set up later', observer.SOURCE_SHORT]
+    phase = [0]
+    clicked = []
+    window = Mock()
+    window.window_text.side_effect = lambda: 'Avibe Desktop Updates' if phase[0] == 0 else 'Avibe'
+    app = Mock()
+    app.top_window.return_value = window
+    def button(_window, label, **_kwargs):
+        if label != labels[phase[0]]:
+            return None
+        value = Mock()
+        def click():
+            clicked.append(label)
+            phase[0] += 1
+        value.click_input.side_effect = click
+        return value
+    def poll(callback, *_args):
+        for _ in range(5):
+            if callback():
+                return True
+        raise AssertionError('first-run flow did not finish')
+    with patch.object(observer, 'windows_button', side_effect=button), patch.object(observer, 'windows_tree', return_value=[]), patch.object(observer, 'wait_for', side_effect=poll):
+        observer.windows_first_run(app)
+    assert clicked == ['Later', 'Get started', 'Set up later']
+    assert all(a['action'] != 'click-update' for a in observer.ACTIONS)
+
+
 def test_mac_version_requires_exact_field(observer):
     assert observer.mac_has_version('AXStaticText\t\t3.2.7rc3\t', observer.TARGET_SHORT)
     assert not observer.mac_has_version('AXStaticText\t\t3.2.7rc30\t', observer.TARGET_SHORT)
