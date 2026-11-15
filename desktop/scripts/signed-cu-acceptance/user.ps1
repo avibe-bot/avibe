@@ -20,7 +20,7 @@ function Run-Process([string] $File, [string[]] $Arguments, [int] $Seconds = 180
         $stdout = $p.StandardOutput.ReadToEndAsync(); $stderr = $p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit($Seconds * 1000)) { throw 'child_process_timeout' }
         $text = $stdout.GetAwaiter().GetResult(); $null = $stderr.GetAwaiter().GetResult()
-        if ($p.ExitCode -ne 0) { throw 'child_process_nonzero_exit' }
+        if ($p.ExitCode -ne 0) { throw "child_process_exit_$($p.ExitCode)" }
         return $text
     } finally {
         if (-not $p.HasExited) { $p.Kill(); $null = $p.WaitForExit(10000) }
@@ -118,7 +118,11 @@ try {
         # This is preparation teardown, NOT the Desktop-quit acceptance case.
         if ($desktop -and -not $desktop.HasExited) { $desktop.Kill(); $null = $desktop.WaitForExit(10000) }
         if ($desktop) { $desktop.Dispose() }
-        if ($python) { $null = Run-Process $python @('-I', '-B', '-m', 'vibe', 'stop') 120 }
+        if ($python) {
+            $stage = 'teardown_stop_runtime'
+            $null = Run-Process $python @('-I', '-B', '-m', 'vibe', 'stop') 120
+        }
+        $stage = 'uninstall'
         if ($install -and (Test-Path -LiteralPath $install)) {
             $uninstallers = @(Get-ChildItem -LiteralPath $install -File -Filter '*uninstall*.exe')
             if ($uninstallers.Count -ne 1) { throw 'uninstaller_missing_or_ambiguous' }
@@ -134,7 +138,12 @@ try {
             if (Test-Path -LiteralPath (Join-Path $install 'computer-use\cua-driver.exe')) { throw 'uninstall_left_driver' }
             Verdict 'uninstall' 'PASS' 'standard_user_silent_uninstall_removed_installed_driver'
         }
-    } catch { Verdict 'uninstall' 'FAIL' 'ordinary_user_uninstall_failed'; $failed = $true }
+    } catch {
+        $result.failure = @{ phase = $stage; exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
+        $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'ordinary_user_uninstall_failed' }
+        Verdict 'uninstall' 'FAIL' $reason
+        $failed = $true
+    }
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $work 'result.json') -Encoding utf8
 }
 if ($failed) { exit 1 }
