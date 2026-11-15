@@ -6339,7 +6339,8 @@
         "noPasskey": "这个保护层保险库没有配置 passkey。",
         "wrongFactor": "无法用这个 passkey 解锁。",
         "discoveryFailed": "加载保护层失败。请检查网络后重试——不要重新设置,否则会把保护层主密钥分裂。",
-        "alreadyInitialized": "这个保护层刚在别处完成了设置。请刷新,用你已有的 passkey 解锁。"
+        "alreadyInitialized": "这个保护层刚在别处完成了设置。请刷新,用你已有的 passkey 解锁。",
+        "prfUnavailableUnlock": "这个浏览器没有从你的 Passkey 拿到解锁需要的加密，保护档仍处于锁定状态。请在最新版 Chrome 或 Safari 中、在保存了这个 Passkey 的设备上再试一次。"
       }
     },
     "dialog": {
@@ -6438,7 +6439,12 @@
       "nameTaken": "这个名称已被其他密钥使用，请换一个名称。",
       "nameCaseConflict": "已有一个叫 {{name}} 的密钥，名称不能只靠大小写区分。请换一个名称。",
       "nameRequired": "请先填写名称，再创建密钥。",
-      "nameRequiredWallet": "请先填写名称，再创建钱包。"
+      "nameRequiredWallet": "请先填写名称，再创建钱包。",
+      "createNeedsValue": "请先填写值，再创建密钥。",
+      "createNeedsWords": "请先粘贴助记词，再导入钱包。",
+      "createNeedsKey": "请先粘贴或选择要导入的私钥。",
+      "createNeedsProtected": "请先在上方设置或解锁保护档。",
+      "createNeedsAvault": "请先按上方提示安装或更新 avault。"
     },
     "requests": {
       "title": "待处理请求",

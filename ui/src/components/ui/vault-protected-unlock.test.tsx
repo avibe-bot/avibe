@@ -117,3 +117,20 @@ describe.each(['needs-setup', 'locked'] as const)('protected vault %s entry guid
     expect(vault.setupPasskey).not.toHaveBeenCalled();
   });
 });
+
+describe('a passkey without the encryption Protected needs', () => {
+  it.each([
+    ['en', en, 'needs-setup', en.vaults.protectedUnlock.errors.prfUnavailable],
+    ['en', en, 'locked', en.vaults.protectedUnlock.errors.prfUnavailableUnlock],
+    ['zh', zh, 'needs-setup', zh.vaults.protectedUnlock.errors.prfUnavailable],
+    ['zh', zh, 'locked', zh.vaults.protectedUnlock.errors.prfUnavailableUnlock],
+  ] as const)('(%s, %s): setup says where to save a new passkey; unlock says the vault is still locked', async (lng, translation, status, expected) => {
+    vi.stubGlobal('location', new URL('http://127.0.0.1:5123'));
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('crypto', webcrypto);
+    const i18n = createInstance();
+    await i18n.use(initReactI18next).init({ lng, resources: { [lng]: { translation } } });
+    render(<I18nextProvider i18n={i18n}><VaultProtectedUnlock vault={{ ...lockedVault(status), error: 'passkey-prf-unavailable' }} /></I18nextProvider>);
+    expect(screen.getByText(expected)).toBeTruthy();
+  });
+});

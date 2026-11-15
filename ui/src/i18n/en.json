@@ -6339,7 +6339,8 @@
         "noPasskey": "No passkey is configured for this protected vault.",
         "wrongFactor": "Couldn't unlock with this passkey.",
         "discoveryFailed": "Couldn't load your protected vault. Check your connection and retry — don't set up a new one, or you'll split your vault keys.",
-        "alreadyInitialized": "This vault was just set up elsewhere. Reload and unlock with your existing passkey."
+        "alreadyInitialized": "This vault was just set up elsewhere. Reload and unlock with your existing passkey.",
+        "prfUnavailableUnlock": "This browser didn’t get the encryption it needs from your passkey, so the vault is still locked. Try again in a current Chrome or Safari, on a device where this passkey is saved."
       }
     },
     "dialog": {
@@ -6438,7 +6439,12 @@
       "nameTaken": "Another key already uses this name. Choose a different name.",
       "nameCaseConflict": "A key named {{name}} already exists; names can't differ only in letter case. Choose a different name.",
       "nameRequired": "Enter a name to create the secret.",
-      "nameRequiredWallet": "Enter a name to create the wallet."
+      "nameRequiredWallet": "Enter a name to create the wallet.",
+      "createNeedsValue": "Enter a value to create the secret.",
+      "createNeedsWords": "Paste the recovery words to import the wallet.",
+      "createNeedsKey": "Paste or choose the key to import.",
+      "createNeedsProtected": "Set up or unlock Protected above first.",
+      "createNeedsAvault": "Install or update avault as shown above first."
     },
     "requests": {
       "title": "Pending requests",

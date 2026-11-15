@@ -297,12 +297,14 @@ export const VaultSecretForm: React.FC<{
   const [hostsPending, setHostsPending] = useState(false);
   // A plain Add keeps the tier last chosen in this page's life (a reopened dialog after a failed
   // protected save stays Protected); a request's spec, a provision or an edit say their own tier.
-  const plainAdd = !requestSpec && !fixedName && !editSecret;
+  // A handoff that asks for Protected (defaultProtection) is never lowered by what was chosen before.
+  const plainAdd = !requestSpec && !fixedName && !editSecret && defaultProtection !== 'protected';
   const [protection, setProtection] = useState<VaultProtection>(
     requestSpec?.protection ?? (plainAdd ? rememberedAddTier() ?? defaultProtection : defaultProtection),
   );
   // Whether the typed name is free (checked on leaving the field and again before anything is made).
   const [nameIssue, setNameIssue] = useState<{ name: string; issue: NameIssue; afterSave?: 'standard-hd' } | null>(null);
+  const nameCheckSeq = useRef(0);
   // A submit that awaited the name check must not go on to save once the dialog has closed.
   const mounted = useRef(true);
   useEffect(() => {
@@ -460,10 +462,12 @@ export const VaultSecretForm: React.FC<{
    *  A failed read blocks nothing: the server refuses a taken name at save. */
   const checkName = async (candidate: string, fresh: boolean): Promise<NameIssue | null> => {
     if (!checksName || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(candidate)) return null;
+    // Only the latest check speaks: a slower, older answer must not clear or replace a newer one.
+    const seq = ++nameCheckSeq.current;
     try {
       const listed = await api.listVaultSecrets(fresh ? { cache: false } : undefined);
       const issue = nameIssueAmong(candidate, (listed?.secrets ?? []).map((secret) => secret.name));
-      setNameIssue(issue ? { name: candidate, issue } : null);
+      if (seq === nameCheckSeq.current) setNameIssue(issue ? { name: candidate, issue } : null);
       return issue;
     } catch {
       return null;
@@ -598,6 +602,27 @@ export const VaultSecretForm: React.FC<{
       (isHd
         ? (protection === 'standard' && hdReady) || (protectedHdReady && !protectedHdBusy(protectedHd.phase) && !protectedHdSubmitted(protectedHd.phase))
         : (protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
+
+  // Why Create is disabled, one reason at a time and in the order the form is filled in: the name,
+  // then what the key needs, then the tier's readiness. Problems already said by a field (a bad name,
+  // a wrong word, a passphrase that doesn't match) are not repeated here.
+  const createBlockedReason = (() => {
+    if (isEdit || canSubmit || submitting) return null;
+    if (isProtectedHd && (protectedHdBusy(protectedHd.phase) || protectedHdSubmitted(protectedHd.phase))) return null;
+    if (!fixedName && !secretName) return t(isHd ? 'vaults.dialog.nameRequiredWallet' : 'vaults.dialog.nameRequired');
+    if (nameInvalid || currentNameIssue) return null;
+    if (!valueReady) {
+      if (!isKeypair) return t('vaults.dialog.createNeedsValue');
+      if (isHd) return signingSource === 'import' && !hdImport.trim() ? t('vaults.dialog.createNeedsWords') : null;
+      return t('vaults.dialog.createNeedsKey');
+    }
+    if (entryIssue || checkingAvault) return null;
+    if (protection === 'protected') {
+      if (isHd ? protectedHdSupported !== false && !protectedHdReady : !protectedCreateReady) return t('vaults.dialog.createNeedsProtected');
+      return null;
+    }
+    return (isHd ? !hdReady : !p2Ready) ? t('vaults.dialog.createNeedsAvault') : null;
+  })();
 
   const clearSelectedFile = useCallback(() => {
     setSelectedFile(null);
@@ -2186,9 +2211,8 @@ export const VaultSecretForm: React.FC<{
       {isHd && error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
 
       <div className="mt-1 flex justify-end gap-2">
-        {!isEdit && !fixedName && !secretName ? (
-          // Why Create is disabled, when it is only the name that is missing.
-          <span className="mr-auto self-center text-[11.5px] text-muted">{t(isHd ? 'vaults.dialog.nameRequiredWallet' : 'vaults.dialog.nameRequired')}</span>
+        {createBlockedReason ? (
+          <span className="mr-auto self-center text-[11.5px] text-muted">{createBlockedReason}</span>
         ) : null}
         <Button type="button" variant={isProtectedHd && protectedHd.phase.kind === 'mismatch' ? 'secondary' : 'ghost'} onClick={onCancel}
           disabled={submitting || (isProtectedHd && protectedHdBusy(protectedHd.phase))}>

@@ -92,6 +92,7 @@ beforeEach(() => {
   vi.stubGlobal('isSecureContext', true);
   sessionStorage.clear();
   taken();
+  api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.12' }] });
   popup.opened = 0;
   vault.sealHdWallet.mockResolvedValue(sealed);
 });
@@ -277,4 +278,55 @@ it('is busy while the name is checked: Create and Cancel wait, and a closed dial
   expect(api.createVaultSecret).not.toHaveBeenCalled();
   // The second click did not start another check (or save).
   expect(api.listVaultSecrets.mock.calls.length - readsBefore).toBe(1);
+});
+
+it('says one reason by a disabled Create at a time, in the order the form is filled in', async () => {
+  mount();
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  // A static secret: the name, then the value.
+  expect(screen.getByText(d.nameRequired)).toBeTruthy();
+  fireEvent.change(nameBox(), { target: { value: 'API_TOKEN' } });
+  expect(screen.queryByText(d.nameRequired)).toBeNull();
+  expect(screen.getByText(d.createNeedsValue)).toBeTruthy();
+  fireEvent.change(screen.getByPlaceholderText(d.valuePlaceholder), { target: { value: 'token' } });
+  expect(screen.queryByText(d.createNeedsValue)).toBeNull();
+  // Protected, locked: the tier must be unlocked first.
+  fireEvent.click(protectedCard());
+  expect(screen.getByText(d.createNeedsProtected)).toBeTruthy();
+  // A signing key to import: the key.
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${d.standardProtection}`) }));
+  fireEvent.click(screen.getByRole('radio', { name: d.kindKeypair }));
+  fireEvent.click(screen.getByRole('radio', { name: d.signingImport }));
+  expect(screen.getByText(d.createNeedsKey)).toBeTruthy();
+  // A seed wallet to import on Standard: the words; a word problem is said by the words box, not here.
+  fireEvent.click(screen.getByRole('radio', { name: hd.chainMnemonic }));
+  fireEvent.click(screen.getByRole('radio', { name: d.signingImport }));
+  expect(screen.getByText(d.createNeedsWords)).toBeTruthy();
+  fireEvent.change(screen.getByRole('textbox', { name: hd.import.label }), { target: { value: 'abandon abandon' } });
+  expect(screen.queryByText(d.createNeedsWords)).toBeNull();
+});
+
+it('says to update avault when it is what Create waits for', async () => {
+  api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'avault', status: 'ready', version: '0.1.0' }] });
+  await openWallet('generate', 'standard');
+  expect(await screen.findByText(d.createNeedsAvault)).toBeTruthy();
+});
+
+it('an older, slower name check does not clear a newer one', async () => {
+  await openWallet('generate', 'standard');
+  let late: (value: { ok: boolean; secrets: Array<{ name: string }> }) => void = () => {};
+  api.listVaultSecrets.mockImplementationOnce(() => new Promise((resolve) => { late = resolve; }));
+  await act(async () => { fireEvent.blur(nameBox()); });
+  taken(NAME);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.generateCta })); });
+  expect(await screen.findByText(d.nameTaken)).toBeTruthy();
+  await act(async () => { late({ ok: true, secrets: [] }); });
+  expect(screen.getByText(d.nameTaken)).toBeTruthy();
+});
+
+it('a handoff that asks for Protected is not lowered by a tier chosen before', async () => {
+  sessionStorage.setItem('avibe.vault.addTier', 'standard');
+  render(<I18nextProvider i18n={i18n}><AsOwner><VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} defaultProtection="protected" /></AsOwner></I18nextProvider>);
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  expect(protectedCard().getAttribute('aria-pressed')).toBe('true');
 });
