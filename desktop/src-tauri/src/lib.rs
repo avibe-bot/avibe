@@ -742,7 +742,7 @@ fn open_updates_script() -> String {
 /// Ask the current Workbench to open its desktop update popover. Returning
 /// `false` is the documented fallback boundary: the shell has no reachable
 /// Workbench window, or the page rejected the script.
-fn open_desktop_updates(app: &AppHandle) -> bool {
+fn open_desktop_updates(app: &AppHandle, focus: bool) -> bool {
     let Some(pending) = app.try_state::<PendingDesktopUpdateOpen>() else {
         return false;
     };
@@ -757,12 +757,16 @@ fn open_desktop_updates(app: &AppHandle) -> bool {
         let accepted = instance_client::present_guarded(app, "updates");
         pending.finish_attempt();
         if accepted {
-            focus_or_restore_main_window(app);
+            if focus {
+                focus_or_restore_main_window(app);
+            }
             pending.complete();
         }
         return accepted;
     }
-    focus_or_restore_main_window(app);
+    if focus {
+        focus_or_restore_main_window(app);
+    }
     let handle = app.clone();
     if window
         .eval_with_callback(open_updates_script(), move |result| {
@@ -787,7 +791,7 @@ fn request_desktop_updates(app: &AppHandle) {
 fn request_and_open_desktop_updates(app: &AppHandle) {
     request_desktop_updates(app);
     ensure_pending_update_retry(app);
-    let _ = open_desktop_updates(app);
+    let _ = open_desktop_updates(app, true);
 }
 
 fn ensure_pending_update_retry(app: &AppHandle) {
@@ -807,7 +811,7 @@ fn ensure_pending_update_retry(app: &AppHandle) {
                 pending.finish_retry();
                 return;
             }
-            let _ = open_desktop_updates(&app);
+            let _ = open_desktop_updates(&app, false);
             delay = (delay * 2).min(std::time::Duration::from_secs(2));
         }
     });
@@ -2122,7 +2126,7 @@ fn main_document_finished(webview: &tauri::Webview) {
     apply_pending_deep_link(webview.app_handle());
     if webview.app_handle().state::<PendingDesktopUpdateOpen>().requested() {
         ensure_pending_update_retry(webview.app_handle());
-        let _ = open_desktop_updates(webview.app_handle());
+        let _ = open_desktop_updates(webview.app_handle(), false);
     }
     // Settings become available the moment a Workbench is on
     // screen, not at the monitor's first tick. The shared
