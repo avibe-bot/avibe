@@ -10,6 +10,11 @@ from storage import vault_policy
 from vibe import vault_sandbox_release as release
 
 
+def test_retained_fc013_registry_entry_stays_taproot_only():
+    support = release.CAPABILITIES_BY_PIN_ID["7f320bc014c0a2ee7d65f9c48c8b91b7e0c0fcc0effbfb3a36d3a3c30fa7c08b"]
+    assert dict(support) == {"ordinary_input_types": ("p2tr",), "hd_input_types": (), "ecdsa_return_types": ()}
+
+
 def test_exact_packaged_legacy_pin_advertises_only_implemented_input_class():
     pin = release.load_packaged_pin()
     support = release.support_for_pin(pin)

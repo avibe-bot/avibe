@@ -68,6 +68,9 @@ DEFAULT_GRANT_TTL_SECONDS = 300
 GRANT_TTL_OPTIONS_SECONDS = (300, 900)
 LAST_GRANT_TTL_OPTIONS = (GRANT_DURATION_ONE_TIME, *GRANT_TTL_OPTIONS_SECONDS)
 DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS = 120
+# A first-time setup opens a browser Passkey ceremony before the root/factor POST. Keep that
+# registration proof alive for the whole setup flow without changing fresh-UV authorization windows.
+FIRST_SETUP_REGISTRATION_TTL_SECONDS = 30 * 60
 DEFAULT_REQUEST_TTL_SECONDS = 30 * 60
 AUTH_FACTOR_REGISTRATION_AUTHZ_OPERATION = "authorize_webauthn_factor_registration"
 GRANT_PURPOSES = {"run", "fetch", "inject"}
@@ -3787,14 +3790,23 @@ def create_webauthn_registration_options(
     *,
     rp_id: str,
     origin: str,
-    ttl_seconds: int = DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS,
+    ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     webauthn_user_handle = _load_or_create_webauthn_user_handle(conn)
+    existing_factors = _usable_webauthn_factor_rows(conn, rp_id=rp_id)
+    # A fresh setup has no existing factor to authorize a second-factor enrollment. Its
+    # registration proof must survive the browser setup window; all authorization proofs remain
+    # on the ordinary short window. Explicit ttl_seconds is retained for focused callers/tests.
+    registration_ttl_seconds = (
+        ttl_seconds
+        if ttl_seconds is not None
+        else (FIRST_SETUP_REGISTRATION_TTL_SECONDS if not existing_factors else DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS)
+    )
+    authorization_ttl_seconds = ttl_seconds if ttl_seconds is not None else DEFAULT_AUTHZ_CHALLENGE_TTL_SECONDS
     challenge, challenge_digest = _new_challenge()
     challenge_id = _id("vop")
-    expires_at = _challenge_expiry(ttl_seconds)
+    expires_at = _challenge_expiry(registration_ttl_seconds)
     now = _now()
-    existing_factors = _usable_webauthn_factor_rows(conn, rp_id=rp_id)
     conn.execute(
         vault_operation_challenges.insert().values(
             id=challenge_id,
@@ -3839,7 +3851,7 @@ def create_webauthn_registration_options(
             rp_id=rp_id,
             origin=origin,
             factors=existing_factors,
-            ttl_seconds=ttl_seconds,
+            ttl_seconds=authorization_ttl_seconds,
         )
     return response
 
