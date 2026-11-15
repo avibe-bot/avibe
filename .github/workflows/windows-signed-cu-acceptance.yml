@@ -22,7 +22,9 @@ concurrency:
 
 env:
   RELEASE_TAG: gh-v3.2.7rc4
-  ACCEPTANCE_MODE: enabled
+  # Stop-loss: signed execution stays disabled until hosted dry evidence and
+  # independent review are complete; changing this is an explicit lane gate.
+  ACCEPTANCE_MODE: dry
   CANDIDATE_SOURCE_SHA: bcc71bc8d6430fc72697eb4695caef5d15da55ba
   CANDIDATE_DRIVER_SHA256: 931310cd70e4c571af416c77cdce56719bda3e1e1240ba4128ce913610b0294e
   CANDIDATE_DRIVER_SIZE: '34074624'
@@ -55,7 +57,12 @@ jobs:
             $null = [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
             if ($errors.Count) { throw ($errors.Message -join '; ') }
           }
+      - name: Exercise the exact generated harness with inert Windows boundaries
+        if: env.ACCEPTANCE_MODE == 'dry'
+        shell: pwsh
+        run: ./tests/windows_signed_acceptance_enabled.ps1 -SourceRoot "$pwd/desktop/scripts/signed-cu-acceptance" -Work "$env:RUNNER_TEMP/signed-cu-dry" -Evidence "$env:RUNNER_TEMP/signed-cu-evidence"
       - name: Verify and exercise the signed release as an ordinary user
+        if: env.ACCEPTANCE_MODE != 'dry'
         shell: pwsh
         env:
           # Read-only, ephemeral admission token, never passed to the test user.

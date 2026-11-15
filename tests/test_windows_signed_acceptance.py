@@ -60,6 +60,7 @@ def test_draft_workflow_cannot_dispatch_or_receive_release_write_authority():
 @pytest.mark.parametrize(("fixture", "script", "receipt"), [
     ("release", "release", "release_proof_fixture_cases_passed"),
     ("observer", "update-observer", "update_observer_fixture_cases_passed"),
+    ("evidence", "evidence", "evidence_fixture_cases_passed"),
 ])
 def test_powershell_acceptance_oracles_fail_closed(tmp_path, fixture, script, receipt):
     # Real helpers, hermetic boundary substitutes: reject bad release proof,
@@ -97,24 +98,36 @@ def test_update_panel_oracle_rejects_stale_check_and_changed_offer(tmp_path):
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
 
 
-def test_enabled_fixture_observes_ready_exact_window_and_type_effect_before_native_readback() -> None:
-    source = (ROOT / "desktop/scripts/signed-cu-acceptance/enabled.ps1").read_text(encoding="utf-8")
-    assert "const stableProjection = (observation) =>" in source
-    assert "const sameProjection = (left, right)" in source
-    assert "ready_usable: readySummary.has_tree || readySummary.element_count > 0" in source
-    assert "launch-$operation-type.js" in source
-    assert "IsExactWindowVisibleAndForeground" in source
-    assert "const effectSummary = (effect) =>" in source
-    assert "const activation = await win.activate();" in source
-    assert "native_focus_before_type" in source
-    assert "type_error" in source
-    assert "observation_changed" in source
-    assert "if (-not $diagnostics.typed_attempted)" in source
-    assert "shipped_type_not_attempted_readiness_or_focus_unproven" in source
-    assert "IsExactWindowOwnedByProcess" in source
-    assert source.index("const ready = await observeStable();") < source.index("IsExactWindowVisibleAndForeground")
-    assert source.index("const effectSummary = (effect) =>") < source.index("typed = await win.type")
-    assert source.index("typed = await win.type") < source.index("UnsavedTextEquals")
+def test_enabled_generated_pipeline_preserves_faults_and_final_verdict(tmp_path):
+    # Execute the same generator, tool command, wrapper, JS, receipt reader,
+    # serializer and final gate. Only OS/CLI/desktop boundaries are inert. This
+    # catches bypassed readiness/focus and pre-diagnostic exceptions which the
+    # prior source-text assertions could never detect.
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is required for the generated pipeline oracle")
+    work = tmp_path / "acceptance work's Unicode-测试"
+    env = {key: value for key, value in os.environ.items() if key in {"PATH", "SystemRoot", "WINDIR"}}
+    for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        env[key] = str(tmp_path)
+    outcome = subprocess.run(
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+         str(ROOT / "tests/windows_signed_acceptance_enabled.ps1"),
+         "-SourceRoot", str(ROOT / "desktop/scripts/signed-cu-acceptance"),
+         "-Work", str(work), "-Evidence", str(tmp_path / "evidence")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    assert "enabled_input_dry_cases_passed" in outcome.stdout
+    verdict = json.loads((tmp_path / "evidence/verdict.json").read_text(encoding="utf-8-sig"))
+    assert verdict["product_acceptance"] is False
+    assert len(verdict["cases"]) >= 22
+    assert all(case["passed"] for case in verdict["cases"])
+
+
+def prepare_context(work: Path, marker="launch-off"):
+    work.mkdir(parents=True, exist_ok=True)
+    (work / f"{marker}-context.json").write_text(json.dumps({"operation_id": "a" * 32}))
 
 
 def request(marker="launch-off", tool="powershell"):
@@ -125,12 +138,14 @@ def request(marker="launch-off", tool="powershell"):
 
 
 def test_windows_tool_and_real_cli_command_are_bound_to_fixture_marker(tmp_path):
-    reply, finish = stub.scripted_reply(request(), python="C:/installed python.exe", work=Path("C:/acceptance work"))
+    work = tmp_path / 'acceptance work'
+    prepare_context(work)
+    reply, finish = stub.scripted_reply(request(), python="C:/installed python.exe", work=work)
     call = reply["tool_calls"][0]
     assert finish == "tool_calls"
     assert call["function"]["name"] == "powershell"
     args = json.loads(call["function"]["arguments"])
-    assert '-File "C:/acceptance work/launch-off.ps1"' in args["command"]
+    assert f'-File "{work / "launch-off.ps1"}"' in args["command"]
     assert '-Python "C:/installed python.exe"' in args["command"]
     assert "-File '" not in args["command"]
     assert "launch-off.js" in args["command"]
@@ -138,7 +153,7 @@ def test_windows_tool_and_real_cli_command_are_bound_to_fixture_marker(tmp_path)
     assert "WindowsPowerShell" in args["command"]
     assert "AVIBE_SESSION_ID" not in args["command"]
     assert args["watch"] is False
-    assert args["timeout"] == 90
+    assert args["timeout"] == 150
 
 
 def test_launch_wrapper_uses_native_windows_argv_handoff(tmp_path):
@@ -148,7 +163,7 @@ def test_launch_wrapper_uses_native_windows_argv_handoff(tmp_path):
     if pwsh is None:
         pytest.skip("PowerShell is required for the argv handoff oracle")
     work = tmp_path / "acceptance work"
-    work.mkdir()
+    prepare_context(work)
     fake_root = tmp_path / "system root"
     fake = fake_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     fake.parent.mkdir(parents=True)
@@ -200,6 +215,7 @@ def test_actual_tool_result_finishes_without_reexecuting_or_claiming_acceptance(
 
 
 def test_actual_loopback_wire_has_tool_call_finish_and_done(tmp_path):
+    prepare_context(tmp_path)
     server = stub.ThreadingHTTPServer(("127.0.0.1", 0), stub.handler("python.exe", tmp_path))
     thread = Thread(target=server.serve_forever)
     thread.start()

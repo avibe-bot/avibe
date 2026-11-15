@@ -8,6 +8,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'evidence.ps1')
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
     throw 'Only a disposable GitHub-hosted Windows runner is permitted.'
 }
@@ -45,7 +46,7 @@ function Verdict([string] $Id, [string] $Result, [string] $Reason) {
     $cases[$Id] = @{ verdict = $Result; reason = $Reason }
 }
 function Save-Report {
-    $record | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidence 'verdict.json') -Encoding utf8
+    Write-AcceptanceEvidence $record (Join-Path $evidence 'verdict.json')
     $lines = @('# Signed Windows Computer Use acceptance', '', "Release: $ReleaseTag; mode: $Mode.", '',
         'GitHub-hosted **Windows Server 2025 x64** (`windows-latest`); not Windows 11.', '',
         'No screenshots, clipboard capture, secrets, raw process logs or LLM Turn. Preparation PASS is not enabled-feature acceptance.', '',
@@ -231,19 +232,13 @@ try {
         if ((Get-Date) -ge $nextAdmission) { Assert-ReleaseIdle; $nextAdmission = (Get-Date).AddSeconds(180) }
     }
     $result = Get-Content -LiteralPath (Join-Path $work 'result.json') -Raw | ConvertFrom-Json -AsHashtable
-    foreach ($id in $result.cases.Keys) {
-        if (-not $cases.Contains($id)) { throw 'unexpected_worker_case' }
-        $cases[$id] = $result.cases[$id]
-    }
-    $record.installed_driver_sha256 = $result.installed_driver_sha256
-    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified')) {
-        if ($result.Contains($field)) { $record[$field] = $result[$field] }
-    }
+    Merge-AcceptanceWorker $record $result $worker.ExitCode
     if ($worker.ExitCode -ne 0) { $failed = $true }
     if ($cases.elevated_target_query_preflight.verdict -eq 'PASS') {
         try {
             if (-not $security.ElevatedApp -or $security.ElevatedApp.HasExited -or -not [AcceptanceNative]::IsElevated($security.ElevatedApp.Id) -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) { throw 'original_elevated_target_not_preserved' }
         } catch {
+            Add-AcceptanceFailure $record 'elevated_target_query_postcheck' $_
             Verdict 'elevated_target_query_preflight' 'FAIL' 'original_elevated_target_postcheck_failed'
             $failed = $true
         }
@@ -252,6 +247,7 @@ try {
         try {
             if (-not $security.ElevatedApp -or $security.ElevatedApp.HasExited -or -not [AcceptanceNative]::UnsavedTextEquals($security.ElevatedApp.MainWindowHandle, '')) { throw 'elevated_document_changed' }
         } catch {
+            Add-AcceptanceFailure $record 'elevated_document_postcheck' $_
             Verdict 'elevated_app_refused' 'FAIL' 'elevated_notepad_empty_document_postcheck_failed'
             $failed = $true
         }
@@ -260,24 +256,24 @@ try {
     $failed = $true
     # Only harness-owned reason codes escape; never serialize an exception,
     # credential-bearing HTTP request, process environment or native output.
-    $record.failure = @{ exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
+    Add-AcceptanceFailure $record $stage $_
     $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'harness_operation_failed' }
     $verdict = if ($reason -eq 'release_priority_yield') { 'NOT RUN' } else { 'FAIL' }
     Verdict $stage $verdict $reason
 } finally {
     $cleanupFailed = $false
-    try { if ($worker) { if (-not $worker.HasExited) { $worker.Kill(); $null = $worker.WaitForExit(10000) }; $worker.Dispose() } } catch { $cleanupFailed = $true }
+    try { if ($worker) { if (-not $worker.HasExited) { $worker.Kill(); $null = $worker.WaitForExit(10000) }; $worker.Dispose() } } catch { Add-AcceptanceFailure $record 'worker_cleanup' $_ -Cleanup; $cleanupFailed = $true }
     try {
         if ($security -and $security.ElevatedApp) {
             if (-not $security.ElevatedApp.HasExited) { $security.ElevatedApp.Kill(); $null = $security.ElevatedApp.WaitForExit(10000) }
             $security.ElevatedApp.Dispose()
         }
-    } catch { $cleanupFailed = $true }
+    } catch { Add-AcceptanceFailure $record 'security_target_cleanup' $_ -Cleanup; $cleanupFailed = $true }
     $accounts = @($user)
     if ($security -and $security.SecondUser) { $accounts += $security.SecondUser }
     foreach ($account in $accounts) {
         if (-not $account) { continue }
-        try { Stop-FixtureProcesses $account.SID.Value } catch { $cleanupFailed = $true }
+        try { Stop-FixtureProcesses $account.SID.Value } catch { Add-AcceptanceFailure $record 'fixture_process_cleanup' $_ -Cleanup; $cleanupFailed = $true }
         try {
             $deadline = (Get-Date).AddSeconds(30)
             do {
@@ -287,11 +283,11 @@ try {
             } while ((Get-Date) -lt $deadline)
             if ($profile -and $profile.Loaded) { throw 'profile_still_loaded' }
             if ($profile) { $profile | Remove-CimInstance }
-        } catch { $cleanupFailed = $true }
+        } catch { Add-AcceptanceFailure $record 'fixture_profile_cleanup' $_ -Cleanup; $cleanupFailed = $true }
         try {
             if (Get-LocalUser -SID $account.SID -ErrorAction SilentlyContinue) { Remove-LocalUser -SID $account.SID }
             if ((Get-LocalUser -SID $account.SID -ErrorAction SilentlyContinue) -or (Get-CimInstance Win32_UserProfile -Filter "SID='$($account.SID.Value)'")) { throw 'fixture_identity_remains' }
-        } catch { $cleanupFailed = $true }
+        } catch { Add-AcceptanceFailure $record 'fixture_account_cleanup' $_ -Cleanup; $cleanupFailed = $true }
     }
     try {
         foreach ($portField in @('cdp_port', 'stub_port')) {
@@ -300,13 +296,12 @@ try {
                 if ($remaining.Count) { throw 'test_port_still_listening' }
             }
         }
-    } catch { $cleanupFailed = $true }
-    try { Remove-Item -LiteralPath $root -Recurse -Force } catch { $cleanupFailed = $true }
+    } catch { Add-AcceptanceFailure $record 'fixture_listener_cleanup' $_ -Cleanup; $cleanupFailed = $true }
+    try { Remove-Item -LiteralPath $root -Recurse -Force } catch { Add-AcceptanceFailure $record 'fixture_files_cleanup' $_ -Cleanup; $cleanupFailed = $true }
     if ($cleanupFailed) { Verdict 'cleanup' 'FAIL' 'fixture_cleanup_failed'; $failed = $true }
     else { Verdict 'cleanup' 'PASS' 'owned_processes_profiles_accounts_and_work_removed' }
     if ($password) { $password.Dispose() }
-    $record.missing_required_cases = @($requiredCases | Where-Object { $cases[$_].verdict -ne 'PASS' })
-    $record.required_cases_passed = $record.missing_required_cases.Count -eq 0
+    Complete-AcceptanceGate $record
     if (-not $record.required_cases_passed) { $failed = $true }
     Save-Report
 }

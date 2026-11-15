@@ -23,8 +23,7 @@ def ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str]:
-    """Select a fixture command from genuine conversation/tool history."""
+def fixture_case(request: dict) -> str:
     messages = request.get("messages", [])
     marker = None
     for message in reversed(messages):
@@ -41,6 +40,13 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
             break
     if marker not in CASES:
         raise ValueError("fixture_marker_required")
+    return marker
+
+
+def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str]:
+    """Select a fixture command from genuine conversation/tool history."""
+    messages = request.get("messages", [])
+    marker = fixture_case(request)
     call_id = "call_cu_" + marker.replace("-", "_")
     if any(item.get("role") == "tool" and item.get("tool_call_id") == call_id for item in messages):
         return {"content": "Deterministic fixture tool returned. The external observer determines the verdict."}, "stop"
@@ -48,6 +54,12 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
     if "powershell" not in functions:
         raise ValueError("shipped_windows_powershell_tool_required")
     launch_case = marker.startswith("launch-")
+    operation_id = None
+    if marker != "probe-context":
+        context = json.loads((work / f"{marker}-context.json").read_text(encoding="utf-8-sig"))
+        operation_id = context["operation_id"]
+        if not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+            raise ValueError("invalid_operation_id")
     script = work / f"{marker}.js"
     output = work / f"{marker}.json"
     # Explicit pipe capture also works when the installed interpreter has no
@@ -55,9 +67,14 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
     if launch_case:
         wrapper = work / f"{marker}.ps1"
         type_script = work / f"{marker}-type.js"
+        budget_ms = context.get("operation_budget_ms", 110000)
+        if not isinstance(budget_ms, int) or not 1 <= budget_ms <= 110000:
+            raise ValueError("invalid_operation_budget")
         arguments = subprocess.list2cmdline([
             "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
             str(wrapper), "-Python", python, "-LaunchScript", str(script), "-TypeScript", str(type_script),
+            "-OperationId", operation_id, "-ReceiptPath", str(work / f"input-{operation_id}.json"),
+            "-BudgetMs", str(budget_ms),
         ])
         file_line = "$p.FileName = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'"
     else:
@@ -81,10 +98,51 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
         "  if ($child.ExitCode -ne 0) { throw ('fixture_cli_exit_' + $child.ExitCode) }",
         "} finally { if (-not $child.HasExited) { $child.Kill(); $null = $child.WaitForExit(5000) }; $child.Dispose() }",
     ])
+    if operation_id:
+        # One writer for the operation result. The dispatch receipt is distinct
+        # from the wrapper receipt, so even startup/parse failures are retained.
+        command = "\n".join([
+            "$ErrorActionPreference = 'Stop'", "Set-StrictMode -Version Latest",
+            f"$operationId = {ps_quote(operation_id)}",
+            f"$resultPath = {ps_quote(str(output))}",
+            f"$receiptPath = {ps_quote(str(work / f'dispatch-{operation_id}.json'))}",
+            "$receipt = [ordered]@{operation_id=$operationId; phase='dispatch_start'; exit_code=$null; first_error=$null; cleanup_errors=@()}",
+            "$child=$null; $envelope=$null",
+            "function Save-Dispatch { $receipt | ConvertTo-Json -Depth 10 -Compress | Set-Content -LiteralPath ($receiptPath + '.tmp') -Encoding utf8; Move-Item -LiteralPath ($receiptPath + '.tmp') -Destination $receiptPath -Force }",
+            "try {",
+            "  Save-Dispatch",
+            "  $p = New-Object System.Diagnostics.ProcessStartInfo", file_line,
+            f"  $p.Arguments = {ps_quote(arguments)}",
+            "  $p.UseShellExecute=$false; $p.CreateNoWindow=$true; $p.RedirectStandardOutput=$true; $p.RedirectStandardError=$true",
+            "  $child=[Diagnostics.Process]::Start($p); $null=$child.SafeHandle",
+            "  $out=$child.StandardOutput.ReadToEndAsync(); $err=$child.StandardError.ReadToEndAsync()",
+            "  $receipt.phase='dispatch_wait'; Save-Dispatch",
+            "  if (-not $child.WaitForExit(135000)) { throw 'input_dispatch_timeout' }",
+            "  $receipt.exit_code=$child.ExitCode; $receipt.phase='dispatch_drain'; Save-Dispatch",
+            "  if (-not $out.Wait(5000) -or -not $err.Wait(5000)) { throw 'input_dispatch_drain_timeout' }",
+            "  if ($child.ExitCode -ne 0) { throw 'input_dispatch_nonzero' }",
+            "  $receipt.phase='dispatch_parse'; Save-Dispatch",
+            "  $envelope=$out.GetAwaiter().GetResult() | ConvertFrom-Json",
+            "  if ($envelope.kind -ne 'computer_js') { throw 'input_dispatch_envelope_invalid' }",
+            ("  if ($envelope.operation_id -ne $operationId) { throw 'input_dispatch_identity_mismatch' }" if launch_case else "  $envelope | Add-Member -NotePropertyName operation_id -NotePropertyValue $operationId"),
+            "  $receipt.phase='dispatch_complete'",
+            "} catch {",
+            "  $receipt.first_error=@{call=$receipt.phase; exit_code=$receipt.exit_code; error_class=$_.Exception.GetType().FullName; code=if ($_.Exception.Message -match '^input_[a-z_]+$') {$_.Exception.Message} else {'input_dispatch_exception'}}",
+            "  $envelope=[ordered]@{ok=$false; kind='computer_js'; operation_id=$operationId; result=$null}",
+            "} finally {",
+            "  if ($child) { try { if (-not $child.HasExited) {$child.Kill(); $null=$child.WaitForExit(5000)}; $child.Dispose() } catch {$receipt.cleanup_errors+=@{call='dispatch_cleanup'; error_class=$_.Exception.GetType().FullName; exit_code=$null}} }",
+            "  if ($receipt.cleanup_errors.Count -gt 0) { $envelope.ok=$false }",
+            "  Save-Dispatch",
+            "  $encoded=$envelope | ConvertTo-Json -Depth 20 -Compress",
+            "  [IO.File]::WriteAllText(($resultPath + '.tmp'), $encoded, (New-Object Text.UTF8Encoding $false))",
+            "  Move-Item -LiteralPath ($resultPath + '.tmp') -Destination $resultPath -Force",
+            "  [Console]::Out.Write($encoded)",
+            "}",
+        ])
     return {
         "role": "assistant",
         "tool_calls": [{"index": 0, "id": call_id, "type": "function", "function": {
-            "name": "powershell", "arguments": json.dumps({"command": command, "timeout": 90, "watch": False}),
+            "name": "powershell", "arguments": json.dumps({"command": command, "timeout": 150 if operation_id else 90, "watch": False}),
         }}],
     }, "tool_calls"
 
@@ -116,22 +174,22 @@ def handler(python: str, work: Path):
                     raise ValueError("invalid_fixture_request")
                 request = json.loads(self.rfile.read(length))
                 delta, finish = scripted_reply(request, python=python, work=work)
-                receipt = {"received": True, "finish": finish, "shell_tool_called": bool(delta.get("tool_calls"))}
+                marker = fixture_case(request)
+                context_path = work / f"{marker}-context.json"
+                operation_id = None
+                if context_path.is_file():
+                    operation_id = json.loads(context_path.read_text(encoding="utf-8-sig")).get("operation_id")
+                    if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+                        raise ValueError("invalid_operation_id")
+                receipt = {"case": marker, "operation_id": operation_id, "received": True, "finish": finish, "shell_tool_called": bool(delta.get("tool_calls"))}
                 tool_messages = [row for row in request.get("messages", []) if row.get("role") == "tool"]
                 if tool_messages:
                     raw_content = tool_messages[-1].get("content", "")
                     if isinstance(raw_content, list):
                         raw_content = "\n".join(str(item.get("text", "")) for item in raw_content if isinstance(item, dict))
                     content = str(raw_content).lower()
-                    # Preserve the actual shipped CLI result for the external
-                    # observer, not a verdict invented by the model fixture.
-                    matching_case = next((case for case in CASES if tool_messages[-1].get("tool_call_id") == "call_cu_" + case.replace("-", "_")), None)
-                    try:
-                        cli_result = json.loads(str(raw_content))
-                    except ValueError:
-                        cli_result = None
-                    if matching_case and isinstance(cli_result, dict) and cli_result.get("kind") == "computer_js":
-                        (work / f"{matching_case}.json").write_text(json.dumps(cli_result), encoding="utf-8")
+                    # Case results have one writer: the actual generated tool
+                    # command. Never rewrite them from provider/tool history.
                     receipt["exit_codes"] = re.findall(r"command exited with code (-?\d+)", content)
                     receipt["powershell_error_ids"] = re.findall(r"fullyqualifiederrorid\s*:\s*([a-z0-9_,.]+)", content)
                     receipt["cli_error_codes"] = re.findall(r'"code"\s*:\s*"([a-z_]+)"', content)
@@ -160,7 +218,10 @@ def handler(python: str, work: Path):
                         ("erroractionpreference", "powershell_action_preference"),
                     ) if text in content]
                     receipt["tool_result_characters"] = len(content)
-                (work / "stub-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+                receipt_path = work / (f"stub-{operation_id}.json" if operation_id else "stub-receipt.json")
+                temporary = receipt_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(receipt), encoding="utf-8")
+                temporary.replace(receipt_path)
                 envelope = {"id": "chatcmpl-cu-fixture", "object": "chat.completion.chunk", "created": int(time.time()), "model": MODEL}
                 frames = []
                 for payload, reason in ((delta, None), ({}, finish)):
@@ -170,7 +231,7 @@ def handler(python: str, work: Path):
                 self.respond(200, "text/event-stream", "".join(frames).encode())
             except (ValueError, TypeError, KeyError) as error:
                 reason = str(error) if str(error) in {"fixture_marker_required", "shipped_windows_powershell_tool_required", "invalid_fixture_request"} else "malformed_fixture_request"
-                (work / "stub-receipt.json").write_text(json.dumps({"received": True, "refused": reason}), encoding="utf-8")
+                (work / "stub-refused.json").write_text(json.dumps({"received": True, "refused": reason}), encoding="utf-8")
                 self.respond(400, "application/json", b'{"error":"invalid_fixture_request"}')
     return Handler
 

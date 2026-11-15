@@ -1,13 +1,14 @@
 param([Parameter(Mandatory)][string] $Root)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $Root 'evidence.ps1')
 $inputData = Get-Content -LiteralPath (Join-Path $Root 'input.json') -Raw | ConvertFrom-Json
 $work = Join-Path $Root 'work'
 $result = @{ installed_driver_sha256 = $null; cases = [ordered]@{} }
 $stage = 'standard_user'; $failed = $false; $desktop = $null; $install = $null; $python = $null; $stub = $null; $caseContext = $null; $updateContext = $null
 function Verdict([string] $Id, [string] $Verdict, [string] $Reason) {
     $result.cases[$Id] = @{ verdict = $Verdict; reason = $Reason }
-    $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $work 'result.json') -Encoding utf8
+    Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
 }
 function Run-Process([string] $File, [string[]] $Arguments, [int] $Seconds = 180) {
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -38,9 +39,17 @@ function Run-Process([string] $File, [string[]] $Arguments, [int] $Seconds = 180
             throw "child_process_exit_$($p.ExitCode)"
         }
         return $text
+    } catch {
+        Add-AcceptanceFailure $result $stage $_
+        throw
     } finally {
-        if (-not $p.HasExited) { $p.Kill(); $null = $p.WaitForExit(10000) }
-        $p.Dispose()
+        try {
+            if (-not $p.HasExited) { $p.Kill(); $null = $p.WaitForExit(10000) }
+            $p.Dispose()
+        } catch {
+            Add-AcceptanceFailure $result 'child_process_cleanup' $_ -Cleanup
+            if (-not $result.ContainsKey('failure')) { throw 'input_cleanup_failed' }
+        }
     }
 }
 try {
@@ -187,7 +196,7 @@ try {
         $result.stub_turn_diagnostics.run_fields = @($turn.run.Keys)
     }
     $receiptPath = Join-Path $work 'stub-receipt.json'
-    if (Test-Path -LiteralPath $receiptPath) { $result.stub_receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json -AsHashtable }
+    if (Test-Path -LiteralPath $receiptPath) { $result.default_off_probe_receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json -AsHashtable }
     $probe = Get-Content -LiteralPath (Join-Path $work 'probe-context.json') -Raw | ConvertFrom-Json -AsHashtable
     # This is deliberately BEFORE Settings enable. The genuine live Turn is
     # admitted first, then the shipped JS endpoint refuses its default-off state.
@@ -263,7 +272,7 @@ try {
     }
 } catch {
     $failed = $true
-    $result.failure = @{ exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
+    Add-AcceptanceFailure $result $stage $_
     $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'ordinary_user_operation_failed' }
     if ($reason -notin @('enabled_acceptance_case_failed', 'update_acceptance_case_failed')) { Verdict $stage 'FAIL' $reason }
 } finally {
@@ -313,11 +322,11 @@ try {
             Verdict 'uninstall' 'PASS' 'standard_user_silent_uninstall_removed_installed_driver'
         }
     } catch {
-        $result.failure = @{ phase = $stage; exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
+        Add-AcceptanceFailure $result $stage $_ -Cleanup
         $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'ordinary_user_uninstall_failed' }
         Verdict 'uninstall' 'FAIL' $reason
         $failed = $true
     }
-    $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $work 'result.json') -Encoding utf8
+    Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
 }
 if ($failed) { exit 1 }

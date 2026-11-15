@@ -42,6 +42,46 @@ runners, deferred to the owner's ten-minute real-machine check before Preview
 can be removed. The activation RC must be explicitly selected only after its
 activation PR has landed and its installer/Stage 2 provenance are published.
 
+## Signed-run stop-loss and dry gate
+
+The two enabled attempts (`43701888417`, `43706480357`) did not retain the
+originating enabled-operation result. They establish a harness observability
+failure, **not** a product failure or product pass. The enabled product outcome
+remains **UNKNOWN**. The workflow is now explicitly **dry-only**; no third signed
+attempt is permitted until hosted Windows dry evidence and the same independent
+reviewer's delta review have passed. Changing back to enabled is a separate,
+explicit lane decision, followed by fresh release admission. This PR never merges.
+
+The dry fixture invokes `Invoke-EnabledCases` from the actual `enabled.ps1`,
+generates its launch/type JS and Windows PowerShell wrapper, obtains the outer
+tool command from the actual `model_stub.py`, and executes that command. On
+Windows the wrapper runs in Windows PowerShell 5.1 and an inert compiled console
+executable provides real argv/stdout/stderr/exit boundaries. The generated JS
+runs in a persistent, test-owned V8 evaluator with inert computer/window methods.
+The same case reader, diagnostic persistence, worker merger and required-case
+gate produce the final JSON. `InputOnly` returns a **dry-only** verdict before
+any target-process/native lifecycle acceptance; no dry result is product proof.
+The real `Native.cs` is compiled separately under PS5.1, never invoked by dry tests.
+
+Evidence boundaries and fault ownership:
+
+| Boundary | Evidence before advancing | Fault treatment |
+| --- | --- | --- |
+| Settings / script generation | fresh operation ID and initialized nullable diagnostic schema | preserve original call/class/line before outer abort |
+| Genuine Turn / generated tool dispatch | operation-bound dispatch receipt and envelope | numeric exit, start/wait/parse error; no raw stderr |
+| Wrapper / native observer load | wrapper receipt before Add-Type | no missing field interpreted as success |
+| CLI launch and type calls | separate call records, actual exit and sanitized CLI code | empty/malformed/wrong envelope fail closed |
+| JS app/launch/wait/observe/activate/type | fixed stage, first error, attempt count | no retries; post-observe cannot mask type failure |
+| Exact-HWND native focus | nullable observation, then single background attempt | false/error suppresses typing; lost CLI output means attempt unknown |
+| Receipt/result handoff | matching operation ID, atomic files, one result writer | missing/stale/mismatched evidence cannot satisfy the gate |
+| Native identity/readback/lifecycle/security | named stages and original failure retained | product behavior remains unproven in dry mode |
+| Worker/parent cleanup and aggregation | immutable original error plus separate cleanup errors | failed worker or missing required case cannot become green |
+
+The earlier source-string readiness test was insufficient and has been replaced
+with an executable behavioral fixture. Local portable-PowerShell runs are useful
+regression evidence, but **do not** satisfy the hosted-Windows stop-loss gate.
+No owner Desktop, clipboard or keychain is accessed; no screenshots are saved.
+
 ## Selected enabled candidate
 
 The authorized enabled run selects `gh-v3.2.7rc4`, source
