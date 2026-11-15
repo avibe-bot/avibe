@@ -79,6 +79,7 @@
   "GET /api/vault/requests/example": "editor",
   "GET /api/vault/sandbox/root-metadata": "editor",
   "GET /api/vault/secrets": "editor",
+  "GET /api/vault/secrets/example/hd-reconciliation": "editor",
   "GET /api/vault/settings": "editor",
   "GET /api/vault/tags": "editor",
   "GET /api/vault/vmk": "editor",
