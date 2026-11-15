@@ -165,13 +165,37 @@ fn windows_driver_environment_does_not_inherit_arbitrary_parent_values() {
 #[ignore = "child entrypoint for isolated ordinary-user activation test"]
 fn owned_child() {
     let root = PathBuf::from(std::env::var_os("AVIBE_ACTIVATION_FIXTURE").expect("test-owned root"));
+    if std::env::var_os("AVIBE_OFF_COMPLETION_BARRIER").is_some() {
+        // A helper that ignores EOF forces the production Job stop fallback.
+        // Never an external/user process: this is another entrypoint of this
+        // isolated test executable, under the same owned Job.
+        let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "computer_use::tests::off_helper", "--ignored", "--nocapture"])
+            .spawn()
+            .unwrap();
+        std::fs::write(root.join("helper-pid"), helper.id().to_string()).unwrap();
+        // Job owns cleanup; retain the child handle without waiting here.
+        let _ = helper.try_wait();
+    }
     std::fs::write(root.join("started"), "started").unwrap();
     std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
+    if std::env::var_os("AVIBE_OFF_COMPLETION_BARRIER").is_some() {
+        while !root.join("release-stop").exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     if std::env::var_os("AVIBE_EXPECT_NON_READY").is_some() {
         let state: Value = serde_json::from_slice(&std::fs::read(root.join("computer-use.json")).unwrap()).unwrap();
         assert_ne!(state["state"], "ready", "non-ready must be published before driver EOF");
     }
     std::fs::write(root.join("retired"), "retired").unwrap();
+}
+
+#[test]
+#[ignore = "helper entrypoint owned by the native Off fixture's Job"]
+fn off_helper() {
+    assert!(std::env::var_os("AVIBE_OFF_COMPLETION_BARRIER").is_some());
+    std::thread::sleep(Duration::from_secs(30));
 }
 
 /// The ordinary-user hosted harness runs this against the production transition
@@ -180,7 +204,7 @@ fn owned_child() {
 #[ignore = "requires disposable standard-user account; run by hosted process harness"]
 async fn rollback_off_quit_and_failed_publication_retire_owned_driver() {
     require_ordinary_user().unwrap();
-    for cause in ["rollback", "off", "quit", "write_failure"] {
+    for cause in ["rollback", "off", "quit", "write_failure", "off_write_failure"] {
         let root = tempfile::tempdir().unwrap();
         let executable = std::env::current_exe().unwrap();
         let store = ComputerUseStateStore::new(root.path().join("computer-use.json"));
@@ -206,8 +230,11 @@ async fn rollback_off_quit_and_failed_publication_retire_owned_driver() {
         };
         store.write(&record).unwrap();
         let mut env = vec![("AVIBE_ACTIVATION_FIXTURE".into(), root.path().as_os_str().to_owned())];
-        if cause != "write_failure" {
+        if !cause.ends_with("write_failure") {
             env.push(("AVIBE_EXPECT_NON_READY".into(), "1".into()));
+        }
+        if cause == "off" {
+            env.push(("AVIBE_OFF_COMPLETION_BARRIER".into(), "1".into()));
         }
         if let Some(system_root) = std::env::var_os("SystemRoot") {
             env.push(("SystemRoot".into(), system_root));
@@ -250,7 +277,7 @@ async fn rollback_off_quit_and_failed_publication_retire_owned_driver() {
                 ));
                 lifecycle.capabilities(support, Grants::all())
             }
-            "off" => lifecycle.toggle_off(),
+            "off" | "off_write_failure" => lifecycle.toggle_off(),
             "quit" => lifecycle.quit(),
             _ => LifecycleDirective {
                 write_state: true,
@@ -260,13 +287,46 @@ async fn rollback_off_quit_and_failed_publication_retire_owned_driver() {
         record.state = lifecycle.phase();
         record.enabled = lifecycle.enabled();
         record.reason = lifecycle.reason().map(str::to_owned);
-        if cause == "write_failure" {
+        if cause.ends_with("write_failure") {
             let unwritable = ComputerUseStateStore::new(root.path().to_owned()); // file cannot replace a directory
-            assert!(apply_transition(&unwritable, &record, directive, &mut driver)
-                .await
-                .is_err());
+            assert!(
+                apply_transition(&unwritable, &record, directive, &mut driver, &mut lifecycle)
+                    .await
+                    .is_err()
+            );
+        } else if cause == "off" {
+            let helper_pid: u32 = std::fs::read_to_string(root.path().join("helper-pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let helper = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, helper_pid) };
+            assert!(!helper.is_null());
+            let helper = unsafe { OwnedHandle::from_raw_handle(helper) };
+            let mut transition = Box::pin(apply_transition(
+                &store,
+                &record,
+                directive,
+                &mut driver,
+                &mut lifecycle,
+            ));
+            assert!(timeout(Duration::from_millis(50), &mut transition).await.is_err());
+            let StoredComputerUseState::Current(saved) = store.read() else {
+                panic!("off was not written first")
+            };
+            assert!(!saved.enabled);
+            assert_ne!(unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) }, WAIT_OBJECT_0);
+            assert_ne!(unsafe { WaitForSingleObject(helper.as_raw_handle(), 0) }, WAIT_OBJECT_0);
+            std::fs::write(root.path().join("release-stop"), "release").unwrap();
+            transition.await.unwrap();
+            assert_eq!(
+                unsafe { WaitForSingleObject(helper.as_raw_handle(), 0) },
+                WAIT_OBJECT_0,
+                "Off cannot complete with an owned helper still alive"
+            );
         } else {
-            apply_transition(&store, &record, directive, &mut driver).await.unwrap();
+            apply_transition(&store, &record, directive, &mut driver, &mut lifecycle)
+                .await
+                .unwrap();
         }
         assert!(driver.is_none());
         assert_eq!(unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) }, WAIT_OBJECT_0);
@@ -274,5 +334,51 @@ async fn rollback_off_quit_and_failed_publication_retire_owned_driver() {
             root.path().join("retired").is_file(),
             "child did not observe graceful EOF for {cause}"
         );
+        if cause.starts_with("off") {
+            assert!(!lifecycle.enabled());
+            // The production post-failure lifecycle cannot silently respawn on
+            // later capability/health ticks. Only a subsequent explicit On can.
+            for tick in 1..=5 {
+                assert!(
+                    !lifecycle
+                        .capabilities(RuntimeSupport::Supported, Grants::all())
+                        .spawn_daemon
+                );
+                assert!(
+                    !lifecycle
+                        .retry_recovery(
+                            RuntimeSupport::Supported,
+                            Grants::all(),
+                            Duration::from_secs(tick * 5),
+                            true
+                        )
+                        .spawn_daemon
+                );
+                assert!(!lifecycle.enabled());
+            }
+            if cause == "off_write_failure" {
+                let StoredComputerUseState::Current(saved) = store.read() else {
+                    panic!("saved record disappeared")
+                };
+                assert!(saved.enabled, "failed write must not pretend disk is off");
+                assert!(
+                    ComputerUseLifecycle::from_record(&saved).enabled(),
+                    "restart still honors old opt-in"
+                );
+            }
+            // A repeated Disable retries persistence, remains Off, and has no
+            // owned process to kill; no toggle-back-to-On semantics.
+            for _ in 0..2 {
+                let off = lifecycle.toggle_off();
+                apply_transition(&store, &record, off, &mut driver, &mut lifecycle)
+                    .await
+                    .unwrap();
+                let StoredComputerUseState::Current(saved) = store.read() else {
+                    panic!("off not persisted")
+                };
+                assert!(!saved.enabled);
+                assert!(!ComputerUseLifecycle::from_record(&saved).enabled());
+            }
+        }
     }
 }

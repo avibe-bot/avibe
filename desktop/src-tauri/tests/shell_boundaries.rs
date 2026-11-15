@@ -620,6 +620,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "open_install_docs",
         "open_app_window",
         "computer_use_enable",
+        "computer_use_disable",
         "computer_use_open_permission",
         "desktop_update_panel_ready",
         "desktop_update_state",
@@ -1078,8 +1079,8 @@ fn native_lifecycle_controls_never_add_a_webview_permission() {
         assert!(source.contains(required), "native lifecycle wiring missing {required}");
     }
     // The three bootstrap commands, the native app window command, the
-    // two Computer Use guide actions, and the update-panel readiness signal.
-    assert_eq!(source.matches("#[tauri::command]").count(), 7);
+    // three narrow Computer Use actions, and the update-panel readiness signal.
+    assert_eq!(source.matches("#[tauri::command]").count(), 8);
     for permission in capability()["permissions"].as_array().expect("capability permissions") {
         let permission = permission.as_str().expect("string permission");
         assert!(!permission.contains("autostart") && !permission.contains("tray") && !permission.contains("dialog"));
@@ -1499,12 +1500,16 @@ fn the_workbench_gets_only_platform_specific_computer_use_actions_on_loopback_pa
         (
             "main-computer-use.json",
             "macOS",
-            serde_json::json!(["allow-computer-use-enable", "allow-computer-use-open-permission"]),
+            serde_json::json!([
+                "allow-computer-use-enable",
+                "allow-computer-use-disable",
+                "allow-computer-use-open-permission"
+            ]),
         ),
         (
             "main-computer-use-windows.json",
             "windows",
-            serde_json::json!(["allow-computer-use-enable"]),
+            serde_json::json!(["allow-computer-use-enable", "allow-computer-use-disable"]),
         ),
     ] {
         let grant = read_json(crate_dir().join("capabilities").join(file));
@@ -1551,6 +1556,36 @@ fn the_workbench_gets_only_platform_specific_computer_use_actions_on_loopback_pa
     assert!(command.contains("PermissionPane::parse(&pane)"));
     assert!(!command.contains("open_url"));
     assert!(source.contains("if !pet::is_workbench(window)"));
+    let off = source
+        .split("async fn computer_use_disable(")
+        .nth(1)
+        .unwrap()
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    assert!(
+        off.starts_with("window: WebviewWindow)"),
+        "Off has no caller-supplied state or target"
+    );
+    assert!(off.contains("computer_use_guide_controller(&window)?.disable().await"));
+    assert!(source.contains("'__AVIBE_DESKTOP_COMPUTER_USE_DISABLE__', { value: true }"));
+    for adapter in ["src/computer_use.rs", "src/computer_use/windows.rs"] {
+        let adapter = shipping_source(adapter);
+        assert!(adapter.contains("let _ = self.disable().await;"), "tray must share Off");
+        assert!(
+            adapter.contains("reply.send(self.disable().await)"),
+            "reply is after transition, not enqueue"
+        );
+        let disable = adapter
+            .split("async fn disable(&mut self)")
+            .nth(1)
+            .unwrap()
+            .split("\n    }\n")
+            .next()
+            .unwrap();
+        assert!(disable.contains("self.lifecycle.toggle_off()"));
+        assert!(disable.contains("self.apply_state(directive).await"));
+    }
 }
 
 #[test]

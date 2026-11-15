@@ -15,6 +15,7 @@ fn main() {
         "open_install_docs",
         "open_app_window",
         "computer_use_enable",
+        "computer_use_disable",
         "computer_use_open_permission",
         "desktop_update_panel_ready",
         "desktop_update_state",

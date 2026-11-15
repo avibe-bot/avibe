@@ -156,12 +156,22 @@ class ComputerUseStatus:
     reason: str | None
     state: ComputerUseState | None = None
 
+    @property
+    def enabled(self) -> bool | None:
+        """Saved opt-in, independent of readiness; None is not an Off value."""
+        if self.reason in {"invalid_state_file", "state_unverified"}:
+            return None
+        if self.state is not None:
+            return self.state.enabled
+        if self.status == "off" and self.reason == "never_enabled":
+            return False
+        return None
+
     def as_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"status": self.status, "reason": self.reason}
+        payload: dict[str, Any] = {"status": self.status, "reason": self.reason, "enabled": self.enabled}
         if self.state is not None:
             payload.update(
                 {
-                    "enabled": self.state.enabled,
                     "state": self.state.state,
                     "instance_id": self.state.instance_id,
                     "generation": self.state.generation,

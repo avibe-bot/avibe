@@ -1487,6 +1487,21 @@ fn computer_use_enable(window: WebviewWindow) -> Result<(), String> {
     }
 }
 
+/// Turns Computer Use off through the tray's lifecycle owner. Unlike Enable,
+/// completion acknowledges state publication AND owned-process teardown.
+#[tauri::command]
+async fn computer_use_disable(window: WebviewWindow) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
+    {
+        computer_use_guide_controller(&window)?.disable().await
+    }
+    #[cfg(not(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64"))))]
+    {
+        let _ = window;
+        Err(COMPUTER_USE_UNSUPPORTED.to_owned())
+    }
+}
+
 /// The Computer Use guide's "Open Settings" for one privacy pane, named by
 /// `pane` (`accessibility` or `screen_recording`). The page never supplies a
 /// URL, so this cannot become a general System Settings opener.
@@ -1974,11 +1989,12 @@ const DESKTOP_APP_WINDOWS_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_APP_WINDOWS__', { value: true });";
 
 /// Tells the Workbench that this shell answers the Computer Use guide's
-/// actions (`computer_use_enable`, `computer_use_open_permission`). Read by
-/// `ui/src/lib/desktopShell.ts`; a shell without it leaves the guide read-only.
+/// actions (`computer_use_enable`, `computer_use_open_permission`). The separate
+/// disable marker is present only when `computer_use_disable` is implemented.
+/// Read by `ui/src/lib/desktopShell.ts`; older shells never advertise Off.
 #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 const DESKTOP_COMPUTER_USE_MARKER: &str =
-    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE__', { value: true });";
+    "if (window.self === window.top) { Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE__', { value: true }); Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE_DISABLE__', { value: true }); }";
 
 /// What happens to a browsing context the page asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -2685,6 +2701,7 @@ pub fn run() {
             open_install_docs,
             open_app_window,
             computer_use_enable,
+            computer_use_disable,
             computer_use_open_permission,
             desktop_update_panel_ready,
             updater::desktop_update_state,

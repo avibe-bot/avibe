@@ -169,6 +169,7 @@ def test_workbench_status_supports_adopted_runtime_when_native_shell_is_live(
         "supported": True,
         "status": "needs_permission",
         "reason": "screen_recording",
+        "enabled": None,
         "host_platform": host_platform,
     }
     assert response.headers["Cache-Control"] == "no-store"
@@ -198,6 +199,7 @@ def test_workbench_keeps_first_install_and_recovery_visible_for_live_shell(
         "supported": True,
         "status": status,
         "reason": reason,
+        "enabled": False if reason == "never_enabled" else None,
         "host_platform": host_platform,
     }
 
@@ -229,6 +231,7 @@ def test_workbench_status_supports_shell_started_runtime_from_the_same_state_sou
         "supported": True,
         "status": "off",
         "reason": "toggle_off",
+        "enabled": None,  # phase alone is not a readable state record
         "host_platform": host_platform,
     }
     assert response.headers["Cache-Control"] == "no-store"
@@ -274,6 +277,7 @@ def test_workbench_ready_status_reflects_controller_ipc_health(
         "supported": True,
         "status": expected_status,
         "reason": expected_reason,
+        "enabled": None,
         "host_platform": host_platform,
     }
     assert response.headers["Cache-Control"] == "no-store"
@@ -301,6 +305,7 @@ def test_workbench_status_hides_computer_use_without_live_native_shell(
         "supported": False,
         "status": "unavailable",
         "reason": "unsupported_host",
+        "enabled": None,
         "host_platform": host_platform,
     }
     assert response.headers["Cache-Control"] == "no-store"
@@ -338,5 +343,6 @@ def test_workbench_status_reports_server_host_platform_for_unsupported_windows_h
         "supported": False,
         "status": "unavailable",
         "reason": "unsupported_host",
+        "enabled": None,
         "host_platform": "windows",
     }

@@ -169,6 +169,7 @@ impl PermissionPane {
 enum Event {
     Toggle,
     Enable,
+    Disable(oneshot::Sender<Result<(), String>>),
     OpenPermission(PermissionPane),
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
@@ -223,6 +224,14 @@ impl Controller {
     /// off.
     pub(crate) fn turn_on(&self) -> Result<(), String> {
         self.request(Event::Enable)
+    }
+
+    pub(crate) async fn disable(&self) -> Result<(), String> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Event::Disable(sender))
+            .map_err(|_| "Computer Use is unavailable.".to_owned())?;
+        receiver.await.map_err(|_| "Computer Use is unavailable.".to_owned())?
     }
 
     /// Asks macOS for `pane`'s grant where it allows a prompt, then opens the
@@ -491,6 +500,9 @@ impl RuntimeState {
                                 self.toggle().await;
                             }
                         }
+                        Event::Disable(reply) => {
+                            let _ = reply.send(self.disable().await);
+                        }
                         Event::OpenPermission(pane) => self.open_permission(pane).await,
                         Event::RuntimeReady { origin, adoption } => {
                             self.runtime_ready(origin, adoption).await;
@@ -524,9 +536,7 @@ impl RuntimeState {
             view.invalid_state = false;
         });
         if self.lifecycle.enabled() {
-            self.invalidate_start_retry();
-            let directive = self.lifecycle.toggle_off();
-            self.apply(directive).await;
+            let _ = self.disable().await;
             return;
         }
         self.invalidate_start_retry();
@@ -546,6 +556,16 @@ impl RuntimeState {
         }
         let directive = self.lifecycle.toggle_on(self.capabilities.current(), grants);
         self.apply(directive).await;
+    }
+
+    async fn disable(&mut self) -> Result<(), String> {
+        self.invalidate_start_retry();
+        let directive = self.lifecycle.toggle_off();
+        if self.apply_state(directive).await {
+            Ok(())
+        } else {
+            Err("Computer Use could not be disabled. Check its status and try again.".to_owned())
+        }
     }
 
     async fn open_permission(&mut self, pane: PermissionPane) {
@@ -752,12 +772,8 @@ impl RuntimeState {
         } else {
             true
         };
-        if directive.stop_daemon {
-            self.stop_daemon().await;
-        }
-        if directive.stop_permission_probe {
-            self.stop_permission_probe().await;
-        }
+        let daemon_stopped = !directive.stop_daemon || self.stop_daemon().await;
+        let probe_stopped = !directive.stop_permission_probe || self.stop_permission_probe().await;
         if !state_written {
             if self.lifecycle.enabled()
                 && matches!(
@@ -778,7 +794,7 @@ impl RuntimeState {
         if directive.spawn_permission_probe {
             self.start_permission_probe().await;
         }
-        true
+        daemon_stopped && probe_stopped
     }
 
     /// Once Screen Recording has been confirmed or Computer Use has been
@@ -818,11 +834,11 @@ impl RuntimeState {
         });
     }
 
-    async fn stop_daemon(&mut self) {
+    async fn stop_daemon(&mut self) -> bool {
         let Some(daemon) = self.daemon.take() else {
-            return;
+            return true;
         };
-        stop_daemon_process(daemon, &self.paths.socket, &self.diagnostics, PROCESS_STOP_TIMEOUT).await;
+        stop_daemon_process(daemon, &self.paths.socket, &self.diagnostics, PROCESS_STOP_TIMEOUT).await
     }
 
     async fn start_permission_probe(&mut self) {
@@ -850,11 +866,12 @@ impl RuntimeState {
         self.permission_probe = Some(PermissionProbe { id, cancel, task });
     }
 
-    async fn stop_permission_probe(&mut self) {
+    async fn stop_permission_probe(&mut self) -> bool {
         if let Some(probe) = self.permission_probe.take() {
             let _ = probe.cancel.send(());
-            let _ = probe.task.await;
+            return probe.task.await.is_ok();
         }
+        true
     }
 
     fn permission_probe_finished(&mut self, id: u64, result: PermissionChildRun) {
@@ -1239,7 +1256,12 @@ async fn request_daemon_shutdown(socket: &Path, pid: u32) -> io::Result<()> {
     Ok(())
 }
 
-async fn stop_daemon_process(mut daemon: Daemon, socket: &Path, diagnostics: &BootstrapLog, stop_timeout: Duration) {
+async fn stop_daemon_process(
+    mut daemon: Daemon,
+    socket: &Path,
+    diagnostics: &BootstrapLog,
+    stop_timeout: Duration,
+) -> bool {
     let deadline = tokio::time::Instant::from_std(Instant::now() + stop_timeout);
     let graceful_shutdown_requested = match daemon.child.id() {
         Some(pid) => timeout_at(deadline, request_daemon_shutdown(socket, pid))
@@ -1250,15 +1272,19 @@ async fn stop_daemon_process(mut daemon: Daemon, socket: &Path, diagnostics: &Bo
     if !graceful_shutdown_requested {
         drop(daemon.stdin.take());
     }
-    if timeout_at(deadline, daemon.child.wait()).await.is_err() {
-        let _ = daemon.child.kill().await;
-        let _ = daemon.child.wait().await;
-    }
+    let stopped = match timeout_at(deadline, daemon.child.wait()).await {
+        Ok(result) => result.is_ok(),
+        Err(_) => {
+            let _ = daemon.child.kill().await;
+            daemon.child.wait().await.is_ok()
+        }
+    };
     drop(daemon.stdin.take());
     if let Ok(Ok(stderr_tail)) = timeout(stop_timeout, daemon.stderr_tail).await {
         record_daemon_stderr(diagnostics, &stderr_tail);
     }
     let _ = std::fs::remove_file(socket);
+    stopped
 }
 
 fn daemon_command(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> Command {
@@ -2354,6 +2380,10 @@ pub(crate) fn activation_plugin() -> TauriPlugin<tauri::Wry> {
         })
         .build()
 }
+
+#[cfg(test)]
+#[path = "computer_use/disable_tests.rs"]
+mod disable_tests;
 
 #[cfg(test)]
 mod tests {
