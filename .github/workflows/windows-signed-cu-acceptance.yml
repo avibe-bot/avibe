@@ -25,7 +25,7 @@ env:
   # the real unified panel. One dry gate, then one explicitly selected update
   # run. CU cases are not run in this mode.
   RELEASE_TAG: gh-v3.2.7rc5
-  ACCEPTANCE_MODE: dry
+  ACCEPTANCE_MODE: update
   HELPER_IDENTITY_OPTIONAL: 'true'
   # Candidate pins describe the TARGET rc6 (SOURCE.json + Stage 2 43740000488
   # driver packaging: prepared == packaged == installed hash, exact size).
