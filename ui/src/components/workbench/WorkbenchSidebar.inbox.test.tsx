@@ -7,6 +7,8 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
+import type { VaultRequest } from '../../context/ApiContext';
+import { PendingVaultRequestsContext } from '../../context/PendingVaultRequestsContext';
 
 const inbox = vi.hoisted(() => ({
   totalUnread: 0,
@@ -167,6 +169,32 @@ describe('Workbench sidebar inbox counter', () => {
     const link = screen.getByRole('link', { name: en.workbench.inbox.navUnread.replace('{{count}}', '2') });
     expect(link.textContent).toBe('2');
     expect(inboxIcon().getAttribute('class')).toContain('text-cyan-ink');
+  });
+
+  // ui/design: inbox/inbox-page/approvals. A request blocks an Agent until answered, so it counts
+  // whatever the notification switches, and the entry names both what is unread and what waits.
+  it('counts the Vault requests waiting on the reader with unread', () => {
+    inbox.totalUnread = 4;
+    inbox.badgeTotal = 3;
+    const waiting = [{ id: 'vrq_a' }, { id: 'vrq_b' }] as VaultRequest[];
+    render(
+      <PendingVaultRequestsContext.Provider value={{ requests: waiting, refresh: vi.fn(), forget: vi.fn() }}>
+        {sidebarElement(true)}
+      </PendingVaultRequestsContext.Provider>,
+    );
+
+    const name = en.workbench.inbox.navUnreadAndRequests.replace('{{count}}', '3').replace('{{requests}}', '2');
+    expect(screen.getByRole('link', { name }).textContent).toBe('5');
+    cleanup();
+
+    // Nothing loud unread: the requests alone still raise the number.
+    inbox.badgeTotal = 0;
+    render(
+      <PendingVaultRequestsContext.Provider value={{ requests: waiting, refresh: vi.fn(), forget: vi.fn() }}>
+        {sidebarElement(true)}
+      </PendingVaultRequestsContext.Provider>,
+    );
+    expect(screen.getByRole('link', { name: en.workbench.inbox.navRequests.replace('{{count}}', '2') }).textContent).toBe('2');
   });
 
   it('marks muted unread with a grey dot instead of a number', () => {

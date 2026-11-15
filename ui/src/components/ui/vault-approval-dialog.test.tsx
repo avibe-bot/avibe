@@ -7,6 +7,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 
 import en from '@/i18n/en.json';
 import type { VaultRequest } from '@/context/ApiContext';
@@ -21,6 +22,7 @@ vi.mock('@/lib/vaultBrowserHandoff', () => ({
   openVaultsInBrowser: (step: unknown) => { shell.opened.push(step); },
 }));
 vi.mock('./vault-approval-card', () => ({
+  DetailRow: ({ label, children }: { label: string; children: React.ReactNode }) => <div>{label}{children}</div>,
   VaultApprovalCard: ({ request }: { request: VaultRequest }) => <div data-testid="card">{`card:${request.id}:${request.secret_name}`}</div>,
 }));
 
@@ -40,6 +42,7 @@ const full = (over: Partial<VaultRequest> = {}): VaultRequest => ({
 });
 const show = (request: VaultRequest | null) => render(
   <I18nextProvider i18n={i18n}><VaultApprovalDialog request={request} onResolved={vi.fn()} onClose={vi.fn()} /></I18nextProvider>,
+  { wrapper: MemoryRouter },
 );
 
 beforeEach(() => { shell.desktop = false; shell.opened = []; });
@@ -68,6 +71,19 @@ it('decides the browser hand-off from the full request, after the read', async (
   expect(screen.queryByTestId('card')).toBeNull();
   fireEvent.click(button);
   expect(shell.opened).toEqual([{ kind: 'request', requestId: 'vrq_btc' }]);
+});
+
+// The desktop app sends a Protected approval to the browser; the Session that asked still opens here.
+it('names the asking Session as a link on the browser hand-off', async () => {
+  shell.desktop = true;
+  api.getVaultRequest.mockResolvedValue({
+    ok: true,
+    request: full({ session: { id: 'ses_promote', title: 'Promote the build', label: null, platform: 'avibe', scope_kind: 'project', is_workbench: true } }),
+  });
+  show(summary);
+  const link = await screen.findByRole('link', { name: /Promote the build/ });
+  expect(link.getAttribute('href')).toBe('/chat/ses_promote');
+  expect(screen.getByText(en.vaults.approval.session)).toBeTruthy();
 });
 
 it('a standard request read in full is approved here even in the desktop app', async () => {

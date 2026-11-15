@@ -6450,7 +6450,7 @@
     },
     "requests": {
       "title": "待处理请求",
-      "subtitle": "有 Agent 正在等待——在本设备上批准或拒绝。",
+      "subtitle": "Agent 在等你批准。",
       "reviewTitle": "审阅请求",
       "review": "审阅",
       "reviewInBrowser": "在浏览器中审阅",

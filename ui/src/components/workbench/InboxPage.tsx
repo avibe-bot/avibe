@@ -305,7 +305,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
         </span>
       </Button>
 
-      <VaultPendingRequests requests={waitingRequests} onSettled={onRequestSettled} />
+      {waitingRequests.length > 0 && <VaultPendingRequests requests={waitingRequests} onSettled={onRequestSettled} />}
 
       {/* Toolbar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-2">

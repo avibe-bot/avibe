@@ -6450,7 +6450,7 @@
     },
     "requests": {
       "title": "Pending requests",
-      "subtitle": "An agent is waiting — approve or deny from this device.",
+      "subtitle": "Agents are waiting for your approval.",
       "reviewTitle": "Review request",
       "review": "Review",
       "reviewInBrowser": "Review in browser",

@@ -52,6 +52,9 @@ const api = vi.hoisted(() => ({
   getMacOSLoginSessionStatus: vi.fn(),
   getAuthSession: vi.fn(),
   signOut: vi.fn(),
+  // The shell's read of the Vault requests waiting on the reader: none here.
+  getVaultRequests: async () => ({ ok: true, requests: [] }),
+  connectWorkbenchEvents: () => () => {},
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
