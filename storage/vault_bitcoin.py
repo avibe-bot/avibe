@@ -265,6 +265,31 @@ def _same_key_legacy_scripts(compressed_public_key: bytes) -> set[bytes]:
     return {p2pkh, p2wpkh, p2sh_p2wpkh}
 
 
+def hd_account_return_scripts(account: Any) -> dict[str, bytes]:
+    """Project the three public BTC purpose points of an already-validated HD row.
+
+    The protected-HD owner must first authenticate the full table/envelope and
+    select the enabled account. This projection neither derives from a seed nor
+    attests sibling derivation, and must never replace that owner's validation.
+    Unlike an ordinary key, an HD receiving index has distinct P44/P84/P86 keys.
+    """
+    from storage import vault_hd
+
+    if (not isinstance(account, dict) or type(account.get("account")) is not int
+            or not 0 <= account["account"] < vault_hd.ACCOUNT_LIMIT):
+        _fail("HD Bitcoin scripts require a selected account from 0 to 19")
+    try:
+        points = {kind: vault_hd._public_key(account.get(field), field)
+                  for kind, field in vault_hd.BITCOIN_KEYS.items()}
+        return {
+            "p2pkh": b"\x76\xa9\x14" + _hash160(bytes.fromhex(points["p2pkh"])) + b"\x88\xac",
+            "p2wpkh": b"\x00\x14" + _hash160(bytes.fromhex(points["p2wpkh"])),
+            "p2tr": b"\x51\x20" + taproot_output_key_xonly(points["p2tr"]).to_bytes(32, "big"),
+        }
+    except (ValueError, TypeError) as exc:
+        raise BitcoinContextError("HD Bitcoin return scripts require all three valid purpose points") from exc
+
+
 def validate_context_shape(context: Any, *, expected_digest: str) -> dict[str, Any]:
     if not isinstance(context, dict):
         _fail("signing_context must be an object")
