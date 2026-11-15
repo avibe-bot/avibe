@@ -327,6 +327,11 @@ private final class SheetFixtureRootViewController: UIViewController {
         }
     }
 
+    private func frameEvidence(_ rect: CGRect) -> [String: Double] {
+        ["x": Double(rect.origin.x), "y": Double(rect.origin.y),
+         "width": Double(rect.size.width), "height": Double(rect.size.height)]
+    }
+
     private func recordSelectionEvidence(
         _ event: [String: Any], in controller: MobileOnboardingViewController, webView: WKWebView
     ) {
@@ -337,14 +342,14 @@ private final class SheetFixtureRootViewController: UIViewController {
         var events = selectionEvidence["events"] as? [[String: Any]] ?? []
         var observation = event
         observation["receivedUptime"] = ProcessInfo.processInfo.systemUptime
-        observation["sheetWindowFrame"] = NSStringFromCGRect(controller.view.convert(controller.view.bounds, to: nil))
-        observation["sheetLayerFrame"] = NSStringFromCGRect(controller.view.layer.frame)
-        observation["presentationLayerFrame"] = controller.view.layer.presentation().map { NSStringFromCGRect($0.frame) } ?? "none"
+        observation["sheetWindowFrame"] = frameEvidence(controller.view.convert(controller.view.bounds, to: nil))
+        observation["sheetLayerFrame"] = frameEvidence(controller.view.layer.frame)
+        observation["presentationLayerFrame"] = controller.view.layer.presentation().map { frameEvidence($0.frame) } ?? [:]
         observation["transitionCoordinator"] = controller.transitionCoordinator != nil
         observation["presenterTransitionCoordinator"] = controller.presentingViewController?.transitionCoordinator != nil
         observation["isBeingPresented"] = controller.isBeingPresented
         observation["detent"] = controller.sheetPresentationController?.selectedDetentIdentifier?.rawValue ?? "none"
-        observation["webViewWindowFrame"] = NSStringFromCGRect(webView.convert(webView.bounds, to: nil))
+        observation["webViewWindowFrame"] = frameEvidence(webView.convert(webView.bounds, to: nil))
         observation["readinessJavaScriptPending"] = readinessJavaScriptPending
         observation["documentReady"] = documentReady
         observation["fetchCount"] = fetchCount
