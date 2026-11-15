@@ -295,7 +295,7 @@ def test_packaged_pin_metadata_admission_and_settlement_without_capability_injec
     monkeypatch.setattr(api, "_publish_vaults_updated", lambda *a, **k: None)
     support = release.current_support()
     assert support is not None
-    assert support.pin_id == "f61475075c1657f92a9bc6c2b57471ace39dcce876a9152eaeb752d6111eeefb"
+    assert support.pin_id == "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"
     _create()
     with api._vault_engine().connect() as conn:
         meta = vault_service.get_secret_meta(conn, "PUBLIC_TEST_BTC")

@@ -22,7 +22,7 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 _SRI = re.compile(r"sha256-[A-Za-z0-9+/]{43}=")
 
 # Retained fc013b7 and f861216 cohorts stay ordinary-Taproot-only here.
-# The reviewed 1993fbae cohort implements all three ordinary and HD inputs,
+# The reviewed 18570864 cohort implements all three ordinary and HD inputs,
 # including all three ECDSA return forms. Parent HD admission stays separately
 # constrained by its owning consumer; this registry describes sandbox support.
 # The full pin digest uses the existing lossless C codec; changing ANY resource,
@@ -38,7 +38,7 @@ CAPABILITIES_BY_PIN_ID = MappingProxyType({
         "hd_input_types": (),
         "ecdsa_return_types": (),
     }),
-    "f61475075c1657f92a9bc6c2b57471ace39dcce876a9152eaeb752d6111eeefb": MappingProxyType({
+    "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9": MappingProxyType({
         "ordinary_input_types": _TYPES,
         "hd_input_types": _TYPES,
         "ecdsa_return_types": _TYPES,

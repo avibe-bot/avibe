@@ -28,10 +28,10 @@ def test_exact_packaged_pin_advertises_only_implemented_input_classes():
     pin = release.load_packaged_pin()
     support = release.support_for_pin(pin)
     assert support is not None
-    assert support.pin_id == "f61475075c1657f92a9bc6c2b57471ace39dcce876a9152eaeb752d6111eeefb"
+    assert support.pin_id == "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"
     assert support.pin_id == hashlib.sha256(vault_policy.canonical_json(pin).encode()).hexdigest()
-    assert support.build_hash == "1993fbae7b558e60cb80427fcc80ff5760a5d6676f4fffed261308d2d359a523"
-    assert support.manifest_hash == "sha256-RndUSI/wFH26vMo8FrUPu8JkQkaRcfqKGzmIAx3mjNc="
+    assert support.build_hash == "185708641db830f2a02fa2f2d7169eff9aec0d3ec0564e2a4216761300ee3d67"
+    assert support.manifest_hash == "sha256-PaxdZJ+2/lUAeszQgR/BCSXNa5TKL/5kxDAI5CqMUlQ="
     assert support.ordinary_input_types == support.hd_input_types == support.ecdsa_return_types == ("p2pkh", "p2wpkh", "p2tr")
     assert support.cohort == {"pin_id": support.pin_id, "buildHash": pin["buildHash"], "manifestHash": pin["manifestHash"]}
 
