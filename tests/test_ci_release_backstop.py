@@ -408,6 +408,19 @@ def test_rc_gate_treats_a_context_with_only_post_merge_runs_as_missing() -> None
         gate.prove_release(_rc_api(check_runs=checks), tag=RC_TAG, rc_pull_request_gate=True)
 
 
+def test_rc_gate_judges_by_the_newest_run_not_the_last_to_finish_before_the_merge() -> None:
+    # The superseded run is cancelled after its replacement already passed; both settle before the merge.
+    checks = [
+        _check("ruff", 1),
+        _check("unit-tests", 2, conclusion="cancelled", completed_at="2026-11-11T02:41:00Z"),
+        _check("unit-tests", 3, completed_at="2026-11-11T02:40:00Z"),
+    ]
+
+    proof = gate.prove_release(_rc_api(check_runs=checks), tag=RC_TAG, rc_pull_request_gate=True)
+
+    assert isinstance(proof, gate.PullRequestProof)
+
+
 def test_rc_gate_accepts_a_context_skipped_before_the_merge_as_the_ruleset_does() -> None:
     checks = [_check("ruff", 1), _check("unit-tests", 2, conclusion="skipped")]
 

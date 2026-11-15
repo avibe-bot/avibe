@@ -331,7 +331,9 @@ def _require_green_checks(api: GitHubApi, *, pull_number: int, head_sha: str, me
                 problems.append(f"{context} (missing)")
             continue
         # As the ruleset did at merge, judge a context by its newest settled run.
-        newest = max(settled, key=lambda run: (_timestamp(run["completed_at"], context="check-run completion time"), run["id"]))
+        # Newest means most recently created, not last to finish: a superseded
+        # run cancelled after its replacement completed must not decide.
+        newest = max(settled, key=lambda run: run["id"])
         if newest.get("conclusion") not in PASSING_CHECK_CONCLUSIONS:
             problems.append(f"{context} ({newest.get('conclusion')})")
     if problems:
