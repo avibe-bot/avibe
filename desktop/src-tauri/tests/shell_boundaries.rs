@@ -416,7 +416,7 @@ fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     assert!(source.contains("ensure_pending_update_retry"));
     assert!(source.contains("return window.__AVIBE_DESKTOP_UPDATES_HANDLED__ ? 'handled' : 'unhandled';"));
     assert!(source.contains("PendingDesktopUpdateOpen>().requested()"));
-    assert!(source.contains("PendingDesktopUpdateOpen>().complete()"));
+    assert!(source.contains("pending.complete()"));
     assert!(!source.contains("updater::check(webview.app_handle().clone(), true)"));
     assert!(!source.contains("updater::check(app.clone(), true)"));
     assert!(source.contains("avibe://updates-fallback"));
