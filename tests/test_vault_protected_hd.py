@@ -1072,3 +1072,36 @@ def test_fresh_hd_create_establishes_one_shared_root_and_factor_atomically():
             "authz_factor_registration": setup["authz_factor_registration"]}, origin=ORIGIN)
     assert error.value.code == "secret_exists"
     assert (rows(vault_auth_factors), rows(vault_audit), rows(state_meta), rows(vault_secrets)) == before
+
+
+@pytest.mark.parametrize("address_type", ["p2pkh", "p2wpkh"])
+@pytest.mark.parametrize("entrypoint", ["sign", "request", "storage", "cli"])
+def test_ordinary_bitcoin_merge_does_not_enable_hd_new_types(address_type, entrypoint, capfd):
+    """Keep both merged owners: ordinary DER is not protected-HD capability.
+
+    The existing three-chain positive/completion/rollback tests exercise the HD
+    owner; this seam must refuse before any request, custody discovery or use.
+    """
+    from tests.test_vault_bitcoin_ecdsa_context import _case
+
+    signing, _, _ = signing_wallet()
+    context = _case(address_type)
+    selection = {"chain": "bitcoin", "account": 1, "address_type": address_type}
+    signing = {**signing, **selection, "scheme": "ecdsa-secp256k1-der",
+               "digest": context["digest"], "signing_context": context}
+    if entrypoint == "storage":
+        with api._vault_engine().begin() as conn:
+            with pytest.raises(vault_service.InvalidSigningContextError, match="only explicit p2tr"):
+                vault_service.create_sign_request(conn, signing["name"], scheme=signing["scheme"],
+                    digest=context["digest"], signing_context=context, derivation=selection)
+    elif entrypoint == "cli":
+        args = cli.build_parser().parse_args(["vault", "sign", signing["name"], "--chain", "bitcoin",
+            "--account", "1", "--address-type", address_type, "--digest", context["digest"],
+            "--signing-context-json", json.dumps(context)])
+        assert cli.cmd_vault_sign(args) != 0
+        assert "only explicit p2tr" in capfd.readouterr().err
+    else:
+        with pytest.raises(api.VaultApiError, match="only explicit p2tr"):
+            (api.vault_sign if entrypoint == "sign" else api.request_vault_sign)(signing)
+    assert rows(vault_requests) == [] and stored()["use_count"] == 0
+    assert not any(item["event"] == "signed" for item in rows(vault_audit))

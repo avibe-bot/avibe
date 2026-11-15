@@ -1,0 +1,53 @@
+{
+  "contract": "protected-btc-types-rev04-policy-v1-cohort",
+  "status": "public-serialization-oracle-only-not-custody-or-release-evidence",
+  "base_fixture": "tests/fixtures/vault_signing/policy-downgrade-v1.json",
+  "base_fixture_sha256": "eab3a1b98a74c3471f2151a92a16b49669661a7ac3ab62976a476875bb25d541",
+  "base_vector_id": "ordinary-secp-protected",
+  "construction": "For each vector deep-copy the base identity_snapshot, replace only v with 2 and add sandboxCohort equal to cohort. Canonicalize with the existing UTF-16-key-sorted lossless compact UTF-8 JSON codec. Set context to a deep copy of the base context with ONLY target.identitySha256 replaced by SHA256(identity canonical UTF-8). Public context.v remains 1. Challenge = SHA256(UTF8(domain + canonical context)); stored challenge hash = SHA256(challenge bytes).",
+  "domain": "avibe:vault:signing-policy-downgrade:v1\n",
+  "warning": "Repeated build values and synthetic SRI digests are TEST COHORTS, not actual builds, pins, eligible registry entries or credentials. Base opaque envelope strings are copied from a public serialization fixture; they are not legal ordinary custody-import material. Dates are fixed public test bytes, not current valid challenges.",
+  "unchanged_baselines": [
+    {
+      "id": "hd-unicode",
+      "challenge_hex": "39701221d19e6a2a77ae85293b34279d4299213c962127b9a8c803dd9d097f97"
+    },
+    {
+      "id": "ordinary-solana",
+      "challenge_hex": "fd21eeb4387855a2a95087a4fbbee4eaad6b406d51779ab8f7be6d57067348d1"
+    }
+  ],
+  "old_protected_context_rejected_on_new_server": {
+    "identity_sha256": "87c445883ec3e70a90664f7ae474b361fe0b52fbe5cbe3e42365d785819834f4",
+    "challenge_hex": "813d0872fe3c6e67442f7f43956fc70c14b16570022f147cd2100efd82847e37",
+    "expected_completion_code": "vault_policy_state_changed",
+    "reason": "Its old internal preimage lacks the protected-secp cohort binding. Never reinterpret or adopt it; reissue if current all-three eligibility holds."
+  },
+  "vectors": [
+    {
+      "id": "cohort-0",
+      "cohort": {
+        "buildHash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "manifestHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "identity_canonical_json": "{\"envelope\":{\"ciphertext\":\"JeOTy/N91Qr9HvLPj7t3TenAz6W3KWuTvqdEZUo3aQrbBbrmYS01aqrQ4duMyeDVfBVjbzvmts5UXBY+Dj7zyemqUr+5Q9WbuSQrXW9CzX0=\",\"nonce\":\"xqdqO2mLqv7DG4WP\",\"revision\":\"2026-11-12T16:00:00.000Z\",\"wrapMeta\":\"{\\\"v\\\":1,\\\"scheme\\\":\\\"machine-hd-seed-aesgcm-v1\\\",\\\"wrapped_dek\\\":\\\"j5McQFYPR5Fu3ICepTVDhUJxORumrD0Y/1iivEqvl5Ui7eE6JPaIlxjsWed029AG\\\",\\\"dek_nonce\\\":\\\"8In+1YMQLQQXQPfn\\\"}\"},\"keys\":{\"signing\":{\"curve\":\"secp256k1\",\"publicKey\":\"0237b0bb7a8288d38ed49a524b5dc98cff3eb5ca824c9f9dc0dfdb3d9cd600f299\"}},\"kind\":\"keypair\",\"protection\":\"protected\",\"sandboxCohort\":{\"buildHash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"manifestHash\":\"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"signerKind\":\"local\",\"v\":2}",
+      "identity_sha256": "814e1afacbb4e244df51c7d1330ce99c87fae67043db6122a6086109acaa2449",
+      "context_canonical_json": "{\"challengeId\":\"vop_public_secp_vector\",\"change\":{\"field\":\"always_ask\",\"from\":true,\"revision\":\"22222222222222222222222222222222\",\"to\":false},\"expiresAt\":\"2026-11-13T00:02:00.000Z\",\"factors\":[{\"credentialId\":\"UFVCTElDLUNSRURFTlRJQUwtSUQtTk9ULUEtUkVBTC1DUkVERU5USUFM\",\"factorId\":\"vaf_public_wire_vector\"}],\"nonce\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"origin\":\"https://sandbox.avibe.bot\",\"purpose\":\"vault-signing-policy-downgrade\",\"rpId\":\"sandbox.avibe.bot\",\"target\":{\"account\":null,\"accountName\":null,\"addresses\":{\"btc_legacy\":\"17D4gErm7cqDznM4EstEfnP6y91MWADXm8\",\"btc_segwit\":\"bc1qgsvdpdxec8hsu57lhxg5xem7refr233z2ttx7e\",\"btc_taproot\":\"bc1p08q6wdgnqe0gwpp4ygs0y8lwgxlpv2l4uc0zq5qjnagwtg92fussqdhm72\",\"eth\":\"0x9858EfFD232B4033E47d90003D41EC34EcaEda94\",\"solana\":null},\"identitySha256\":\"814e1afacbb4e244df51c7d1330ce99c87fae67043db6122a6086109acaa2449\",\"name\":\"PUBLIC_SECP_VECTOR\",\"protection\":\"protected\",\"secretId\":\"vlt_public_secp_vector\",\"signerKind\":\"local\"},\"v\":1}",
+      "challenge_hex": "3454fe2423e079e9e325a6a0d3a50f28d03004d5f4aa1ff2db39044cdf6e7f78",
+      "challenge_base64url": "NFT-JCPgeenjJaag06UPKNAwBNX0qh_y2zkETN9uf3g",
+      "stored_challenge_hash": "dada862bdac7183f815c428d568431abf86729ef144f8b20b5b6eb41713ecefe"
+    },
+    {
+      "id": "cohort-1-same-build-different-manifest",
+      "cohort": {
+        "buildHash": "1111111111111111111111111111111111111111111111111111111111111111",
+        "manifestHash": "sha256-AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+      },
+      "identity_sha256": "8c9ead8d3e16efe99ef5a5b2a1e9eee6525f171ae1ca0616c588723f09403744",
+      "challenge_hex": "73a23c033290597c035962e05dc6acd147f95aacff40f0e472cd64b449f1b65b",
+      "challenge_base64url": "c6I8AzKQWXwDWWLgXcas0Uf5Wqz_QPDkcs1ktEnxtls",
+      "stored_challenge_hash": "ad4e5b69a8edf1ed7ea9f21a54cd81a0b0099822d297d4593488fe004e108045",
+      "cross_cohort_completion_code": "vault_policy_state_changed"
+    }
+  ]
+}

@@ -89,8 +89,22 @@ def stored_settings(snapshot, account=None):
     return json.loads(row["policy"] or "{}") if account is None else json.loads(row["public_meta"])["hd_accounts"][account]
 
 
+@pytest.fixture
+def capable_policy_sandbox(monkeypatch):
+    # Test-only registry entry; no shipped pin or browser capability is asserted.
+    from vibe import vault_sandbox_release as release
+
+    current = release.current_support()
+    assert current is not None
+    monkeypatch.setattr(release, "CAPABILITIES_BY_PIN_ID", {current.pin_id: {
+        "ordinary_input_types": ("p2pkh", "p2wpkh", "p2tr"),
+        "hd_input_types": (), "ecdsa_return_types": ("p2pkh", "p2wpkh", "p2tr"),
+    }})
+    return release.current_support()
+
+
 @pytest.mark.parametrize("kind,protection", [("local", "standard"), ("local", "protected"), ("hd-seed", "standard")])
-def test_real_assertion_lowers_only_bound_flag_and_consumes_everything_together(kind, protection):
+def test_real_assertion_lowers_only_bound_flag_and_consumes_everything_together(kind, protection, capable_policy_sandbox):
     create_target(kind, protection)
     credential, factor_id = enroll()
     account = 0 if kind == "hd-seed" else None
