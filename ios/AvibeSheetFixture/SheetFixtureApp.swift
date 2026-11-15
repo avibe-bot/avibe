@@ -441,20 +441,25 @@ private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHa
       let rowErrorReported = false;
       const reportRowError = () => {
         if (rowErrorReported) return;
-        const chinese = navigator.language.toLowerCase().startsWith("zh");
-        const expectedError = chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.";
-        const expectedRetry = chinese ? "重试" : "Try again";
-        const alert = [...document.querySelectorAll('[role="alert"]')].find(element => {
-          const style = getComputedStyle(element);
+        const isVisible = (element) => {
+          for (let node = element; node; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0"
+                || node.getAttribute("aria-hidden") === "true") return false;
+          }
           const rect = element.getBoundingClientRect();
-          const visible = style.display !== "none" && style.visibility !== "hidden"
-            && rect.width > 0 && rect.height > 0 && element.getAttribute("aria-hidden") !== "true";
+          return rect.width > 0 && rect.height > 0;
+        };
+        const alert = [...document.querySelectorAll('[role="alert"]')].find(element => {
+          const chinese = navigator.language.toLowerCase().startsWith("zh");
+          const expectedError = chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.";
+          const expectedRetry = chinese ? "重试" : "Try again";
           const row = element.closest("div");
           const buttons = row ? [...row.querySelectorAll("button")] : [];
           const retry = buttons.find(button => button.textContent.trim() === expectedRetry);
           const hasLabButton = buttons.some(button => button.textContent.includes("Lab"));
-          return visible && element.textContent.trim() === expectedError && buttons.length === 1
-            && !!retry && !hasLabButton;
+          return isVisible(element) && element.textContent.trim() === expectedError && buttons.length === 1
+            && !!retry && isVisible(retry) && !hasLabButton;
         });
         if (!alert) return;
         rowErrorReported = true;
