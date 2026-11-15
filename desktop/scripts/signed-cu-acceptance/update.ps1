@@ -1,24 +1,6 @@
 # One authorized RC -> RC transition (run.ps1 pins the pair), through the real
 # unified panel only.
 # Public target bytes are a reference, never an installation fallback.
-function Open-UpdateProcess($Row, [datetime] $Since) {
-    if ($Row.CreationDate -lt $Since) { return $null }
-    $process = $null
-    try {
-        $process = [Diagnostics.Process]::GetProcessById([int]$Row.ProcessId)
-        $null = $process.SafeHandle
-        if ($process.HasExited) { $process.Dispose(); return $null }
-        # Owner from this account's own query-limited token read, not CIM.
-        $observed = [AcceptanceNative]::ObserveProcess($process.Id)
-        try { $owner = $observed.OwnerSid() } finally { $observed.Dispose() }
-        if ($owner -ne $inputData.expected_sid) { $process.Dispose(); return $null }
-        $created = $process.StartTime.ToUniversalTime()
-        $created = $created.AddTicks(-($created.Ticks % 10))
-        if ($created -ne $Row.CreationDate -or $process.MainModule.FileName -ne $Row.ExecutablePath) { throw 'update_process_identity_changed' }
-        return $process
-    } catch [ArgumentException] { if ($process) { $process.Dispose() }; return $null }
-    catch { if ($process) { $process.Dispose() }; throw }
-}
 # Outcome-only second half (Product 03:51): after the Update click, judge only
 # what a user would see. No supervisor/installer inspection, token or module
 # reads of updater processes; the rc6 installer bytes were verified before the

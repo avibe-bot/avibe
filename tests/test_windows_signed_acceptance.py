@@ -61,7 +61,7 @@ def test_draft_workflow_cannot_dispatch_or_receive_release_write_authority():
     ("security", "security", "security_fixture_cases_passed"),
     ('inventory', 'inventory', 'inventory_fixture_cases_passed'),
     ("release", "release", "release_proof_fixture_cases_passed"),
-    ("observer", "update-observer", "update_observer_fixture_cases_passed"),
+    ("observer", "update", "update_outcome_fixture_cases_passed"),
     ("evidence", "evidence", "evidence_fixture_cases_passed"),
 ])
 def test_powershell_acceptance_oracles_fail_closed(tmp_path, fixture, script, receipt):

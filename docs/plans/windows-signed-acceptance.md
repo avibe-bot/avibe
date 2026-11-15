@@ -232,43 +232,35 @@ installed WebView; the harness may not substitute a direct native invoke or a
 configuration write. Native menu automation discovers visible menu items and
 uses their normal Windows menu-command route. No screenshots are written.
 
-## Authorized follow-on: unified update panel (not yet executed)
+## Unified update panel (signed rc5 → rc6, outcome-only)
 
-Only after the shared real DOM click prerequisite, and strictly behind CU work,
-this same harness may add one rc3 → rc4 case with the same CDP client. Click the
-real VersionBadge → `[data-update-panel]` → Check → Update, require that rc4 is
-actually offered by the public updater feed, observe the installer and real
-relaunch, then verify Desktop/runtime versions and installed helper hash against
-rc4 provenance. Preserve the existing auto-update setting; use the actual
-pre-release switch if necessary. Reacquire the CDP target after relaunch and
-check **Current version**, not the offered-version link. No direct update API,
-patched feed, or second GUI automation stack.
+The explicit `update` mode installs the signed base release under the ordinary
+account and updates it through the real unified panel only: VersionBadge →
+`[data-update-panel]` → Check → the exact public offer → Update. Only the pair
+selected in `run.ps1` is allowed (rc5 → rc6). Both releases pass the same
+checksum/Certum/provenance verifier; the target installer is reference-only and
+is **never executed by the harness**. The pre-release switch is clicked only if
+it is off; auto-update must not change. CU/model/editor fixtures are skipped.
 
-The explicit `update` mode is scaffolded separately from `preparation` and
-`enabled`, restricted to the authorized rc3 → rc4 pair. The sole writer selects
-it only after CU work has priority and the public candidate exists. It does not
-interrupt another run; workflow concurrency has cancellation disabled. It skips
-CU/model/editor fixtures rather than reporting them as update acceptance.
-Both releases pass the same checksum/Certum/provenance verifier; the downloaded
-target is reference-only and is **never executed by the harness**.
+After the click, the case judges only user-visible outcomes (Product decision
+after two process-observer attempts). It does not inspect the update supervisor
+or installer (`update_installer` is NOT RUN by design and not required):
+1. within 3 minutes a new same-user Desktop window at the installed path, started
+   after the click, appears;
+2. 60 seconds later exactly one installed-path Desktop runs, it is that new
+   windowed process, and the original has exited; two running is
+   `update_product_double_launch`, and the original still running is
+   `update_original_desktop_not_exited`;
+3. the Desktop file version, runtime version and installed driver
+   (hash, size, provenance) equal the target;
+4. the panel reopened through the badge shows the target as current, with
+   auto-update and pre-release unchanged.
 
-The observer runs concurrently with the same CDP Update client. It retains an
-actual standard-user `avibe-update-*/update.exe` process handle, verifies its
-bytes against the target reference and its exit status, and retains its real
-PowerShell transaction supervisor until a successful exit. Failure cleanup
-stops producers and the supervisor before its installer; if quiescence cannot
-be proved, ordinary worker Quit/uninstall is suppressed and the parent owns
-account-wide teardown. It requires the original
-Desktop to exit and a distinct exact-path owned Desktop window to appear, and
-resolves the new installed runtime manifest. It then checks Desktop and runtime
-versions, the installed driver hash, and the relaunched panel's Current version
-and unchanged settings. Debugger listeners must belong to that retained live
-replacement's process lineage, with pinned listener handles across the proof;
-stale/ambiguous generations and an exited replacement are rejected. A click
-or an offered-version link alone cannot pass.
-Target not discoverable/shared CDP missing is a named NOT RUN blocker; required
-update cases that are NOT RUN or FAIL fail the run. No transition is claimed
-until this mode has run against the published candidate.
+Plain same-user process listing (`Get-Process` path/start time) is used; there
+are no token or module reads of updater processes. Any exception keeps its
+original class and line, and the observations are written in `finally`. On
+failure, worker uninstall is suppressed and the parent removes the account.
+Signed run `43756149490` passed this case.
 
 Downloads recheck release admission and have at most 180-second timeouts. A
 40-minute operation deadline and a bounded worker leave room under the
