@@ -71,6 +71,7 @@ import {
   type SessionDraftServerState,
   type SessionDraftWrite,
 } from '../lib/sessionDraftPersistence';
+import { sessionDraftAttachmentsCache } from '../lib/sessionDraftAttachmentsCache';
 import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
 import { useLatestRef } from '../lib/useLatestRef';
 import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
@@ -2830,8 +2831,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
   const sessionDraftPersistence = useMemo(() => new SessionDraftPersistence(), []);
 
-  const convergeSessionArchived = (sessionId: string) => {
+  const clearSessionDraftCaches = (sessionId: string) => {
     sessionDraftPersistence.clearSession(sessionId);
+    sessionDraftAttachmentsCache.clear(sessionId);
+  };
+
+  const convergeSessionArchived = (sessionId: string) => {
+    clearSessionDraftCaches(sessionId);
     void forgetLocalStoreSession(sessionId);
     for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
       try {
@@ -3470,7 +3476,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (envelope.data.session_id) {
         clearSessionReadCache(envelope.data.session_id);
         if (envelope.data.event === 'archived') {
-          sessionDraftPersistence.clearSession(envelope.data.session_id);
+          clearSessionDraftCaches(envelope.data.session_id);
         }
         // A Session that leaves the reader's Inbox takes its history in the local
         // message store with it (docs/plans/local-sync-store.md section 6.2).
@@ -4539,7 +4545,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // whole when it is opened again (lib/chatSnapshots).
         void recordLocalStorePage(stored, { kind: 'tail' }, payload, payload?.session, payload ? chatChromeFromBootstrap(payload) : undefined);
         if (payload?.session?.status === 'archived') {
-          sessionDraftPersistence.clearSession(sessionId);
+          clearSessionDraftCaches(sessionId);
           return payload;
         }
         const server = sessionDraftServerState(payload?.draft);
@@ -4566,7 +4572,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     archiveSession: async (sessionId) => {
       const payload = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
-      sessionDraftPersistence.clearSession(sessionId);
+      clearSessionDraftCaches(sessionId);
       return payload;
     },
     convergeSessionArchived,
