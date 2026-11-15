@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -10,18 +12,27 @@ from storage import vault_policy
 from vibe import vault_sandbox_release as release
 
 
-def test_retained_fc013_registry_entry_stays_taproot_only():
-    support = release.CAPABILITIES_BY_PIN_ID["7f320bc014c0a2ee7d65f9c48c8b91b7e0c0fcc0effbfb3a36d3a3c30fa7c08b"]
-    assert dict(support) == {"ordinary_input_types": ("p2tr",), "hd_input_types": (), "ecdsa_return_types": ()}
+@pytest.mark.parametrize("pin_id", [
+    "7f320bc014c0a2ee7d65f9c48c8b91b7e0c0fcc0effbfb3a36d3a3c30fa7c08b",
+    "9f1264cb022625f1d3880c16019cc4ddcf515fce252193ad482714fe30ad046a",
+])
+def test_retained_legacy_full_pins_stay_taproot_only(pin_id):
+    pins = json.loads((Path(__file__).parent / "fixtures" / "vault-sandbox-legacy-pins.json").read_text())
+    support = release.support_for_pin(pins[pin_id])
+    assert support is not None and support.pin_id == pin_id
+    assert support.ordinary_input_types == ("p2tr",)
+    assert support.hd_input_types == support.ecdsa_return_types == ()
 
 
-def test_exact_packaged_legacy_pin_advertises_only_implemented_input_class():
+def test_exact_packaged_pin_advertises_only_implemented_input_classes():
     pin = release.load_packaged_pin()
     support = release.support_for_pin(pin)
     assert support is not None
+    assert support.pin_id == "f61475075c1657f92a9bc6c2b57471ace39dcce876a9152eaeb752d6111eeefb"
     assert support.pin_id == hashlib.sha256(vault_policy.canonical_json(pin).encode()).hexdigest()
-    assert support.ordinary_input_types == ("p2tr",) and support.hd_input_types == ()
-    assert support.ecdsa_return_types == ()
+    assert support.build_hash == "1993fbae7b558e60cb80427fcc80ff5760a5d6676f4fffed261308d2d359a523"
+    assert support.manifest_hash == "sha256-RndUSI/wFH26vMo8FrUPu8JkQkaRcfqKGzmIAx3mjNc="
+    assert support.ordinary_input_types == support.hd_input_types == support.ecdsa_return_types == ("p2pkh", "p2wpkh", "p2tr")
     assert support.cohort == {"pin_id": support.pin_id, "buildHash": pin["buildHash"], "manifestHash": pin["manifestHash"]}
 
 
@@ -45,6 +56,8 @@ def test_every_full_pin_field_participates_in_authority(field):
     {"ordinary_input_types": ("p2pkh", "p2wpkh")},
     {"ordinary_input_types": ("p2pkh", "p2wpkh", "p2tr"), "ecdsa_return_types": ("p2pkh",)},
     {"hd_input_types": ("p2wpkh", "p2tr")},
+    {"hd_input_types": ("p2pkh", "p2wpkh", "p2tr")},
+    {"hd_input_types": ("p2pkh", "p2wpkh", "p2tr"), "ecdsa_return_types": ("p2wpkh", "p2tr")},
     {"ordinary_input_types": ("p2tr", "p2tr")},
     {"ordinary_input_types": ("p2tr", "p2wpkh", "p2pkh")},
     {"ordinary_input_types": ("unknown",)},

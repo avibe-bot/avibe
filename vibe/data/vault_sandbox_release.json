@@ -3,11 +3,11 @@
   "algorithm": "sha256",
   "sandboxOrigin": "https://sandbox.avibe.bot",
   "sandboxVersion": "0.1.0",
-  "buildHash": "f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5",
+  "buildHash": "1993fbae7b558e60cb80427fcc80ff5760a5d6676f4fffed261308d2d359a523",
   "resources": {
-    "/v/f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5/assets/avibe-vault-sandbox.qvFo3r2z.css": "sha256-msq7FnLQzKXQ4EZqxUDWPgoq2jWD1DugUCYesW9/Le4=",
-    "/v/f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5/assets/main.B_ZqF_Yd.js": "sha256-cmqDK1o5hxLMBEGUEc4342ZqAneFn2Duj8fmgbr5Rkk=",
-    "/v/f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5/index.html": "sha256-hxmg//IY1a2OJsoufbEQtHB78xI6eN5NU2zik76Co6M="
+    "/v/1993fbae7b558e60cb80427fcc80ff5760a5d6676f4fffed261308d2d359a523/assets/avibe-vault-sandbox.qvFo3r2z.css": "sha256-msq7FnLQzKXQ4EZqxUDWPgoq2jWD1DugUCYesW9/Le4=",
+    "/v/1993fbae7b558e60cb80427fcc80ff5760a5d6676f4fffed261308d2d359a523/assets/main.D4BtzE6C.js": "sha256-ZUyCynOnKEjm1O8L5bYkVM1tvS7OWr+23OFmMTkE39I=",
+    "/v/1993fbae7b558e60cb80427fcc80ff5760a5d6676f4fffed261308d2d359a523/index.html": "sha256-CqSrvoV4DkX/ezTwKsfLw3TYkFmKPSFMXFm0DhtjHp8="
   },
-  "manifestHash": "sha256-A+ACXdwhO8oyJqJQf0IA9OmrTvoAa3QsULOb7/WoTVQ="
+  "manifestHash": "sha256-RndUSI/wFH26vMo8FrUPu8JkQkaRcfqKGzmIAx3mjNc="
 }
