@@ -131,9 +131,11 @@ class WindowsAdmission:
         self.advapi.GetTokenInformation(token, kind, None, 0, ctypes.byref(size))
         if not 0 < size.value <= 65536:
             raise AdmissionRefused("pipe_unverified") from ctypes.WinError(ctypes.get_last_error())
-        # Win32 structures contain pointers; use pointer-aligned storage.
-        buffer = (ctypes.c_size_t * ((size.value + ctypes.sizeof(ctypes.c_size_t) - 1) // ctypes.sizeof(ctypes.c_size_t)))()
-        if not self.advapi.GetTokenInformation(token, kind, buffer, ctypes.sizeof(buffer), ctypes.byref(size)):
+        # Alignment affects allocation capacity, not the Win32 information
+        # length: TokenElevation rejects padded lengths with ERROR_BAD_LENGTH.
+        required = size.value
+        buffer = (ctypes.c_size_t * ((required + ctypes.sizeof(ctypes.c_size_t) - 1) // ctypes.sizeof(ctypes.c_size_t)))()
+        if not self.advapi.GetTokenInformation(token, kind, buffer, required, ctypes.byref(size)):
             raise AdmissionRefused("pipe_unverified") from ctypes.WinError(ctypes.get_last_error())
         return buffer
 

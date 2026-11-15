@@ -76,7 +76,10 @@ No model credentials belong on hosted runners.
   as the Runtime, matching current-user SID, and a verified owner-private pipe
   DACL; and the current Runtime is x64, non-elevated, and not in a
   disconnected/locked session. Unknown security or session evidence fails
-  closed with a stable unavailable reason.
+  closed with a stable unavailable reason. Token-query storage remains pointer
+  aligned, but `TokenInformationLength` is the API-reported byte count, not the
+  rounded allocation capacity; native DWORD positive controls cover both
+  elevation and UIAccess before the full admission path.
 - The shell must retain the owned driver process HANDLE/PID for the daemon
   generation and, before publishing `state: ready`, verify
   `GetNamedPipeServerProcessId` is that exact live driver PID. With v1 fields

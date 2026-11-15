@@ -157,6 +157,27 @@ def test_peer_is_live_same_session_and_token_checked_while_handle_retained(admis
     assert admission.closed == [77]
 
 
+@pytest.mark.parametrize("required", [4, 28])
+def test_token_information_keeps_alignment_but_passes_exact_native_length(admission, required):
+    calls = []
+
+    def query(token, kind, buffer, length, size):
+        calls.append((token, kind, length))
+        size._obj.value = required
+        if buffer is None:
+            assert length == 0
+            return 0
+        assert length == required  # never allocation capacity (8 or 32)
+        assert ctypes.addressof(buffer) % ctypes.alignment(ctypes.c_size_t) == 0
+        assert ctypes.sizeof(buffer) >= required
+        ctypes.memset(buffer, 0, length)
+        return 1
+
+    admission.advapi.GetTokenInformation = query
+    admission._token_information(44, 20)
+    assert calls == [(44, 20, 0), (44, 20, required)]
+
+
 def test_verify_keeps_shell_and_server_evidence_and_rechecks_desktop(admission):
     events = []
     admission.kernel.GetCurrentProcess = lambda: 8

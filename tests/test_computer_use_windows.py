@@ -271,6 +271,31 @@ def test_windows_native_lock_free_and_missing(tmp_path):
 
 
 @native
+def test_windows_native_token_information_matches_exact_dword_oracle():
+    from ctypes import wintypes
+    from core.computer_windows import WindowsAdmission
+
+    admission = WindowsAdmission()
+    token = wintypes.HANDLE()
+    assert admission.advapi.OpenProcessToken(admission.kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token))
+    try:
+        for kind in (20, 26):  # TokenElevation and TokenUIAccess are DWORDs.
+            expected, returned = wintypes.DWORD(), wintypes.DWORD()
+            assert ctypes.sizeof(expected) == 4
+            # Independent fixed-size call, not the production sizing/allocation
+            # helper. This succeeds on the runner that rejected padded length8.
+            if not admission.advapi.GetTokenInformation(
+                token, kind, ctypes.byref(expected), 4, ctypes.byref(returned),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            assert returned.value == 4
+            observed = admission._token_information(token, kind)
+            assert ctypes.cast(observed, ctypes.POINTER(wintypes.DWORD))[0] == expected.value
+    finally:
+        admission.kernel.CloseHandle(token)
+
+
+@native
 def test_windows_native_lock_contention_and_ready_refusal(tmp_path):
     from core.computer_windows import AdmissionRefused, WindowsAdmission
 

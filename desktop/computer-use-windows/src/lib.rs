@@ -362,20 +362,23 @@ mod tests {
         let (mut present, mut defaulted, mut dacl) = (0, 0, null_mut());
         check(unsafe { GetSecurityDescriptorDacl(unsafe_sd.0, &mut present, &mut dacl, &mut defaulted) }).unwrap();
         assert_ne!(present, 0);
-        assert_eq!(
-            unsafe {
-                SetSecurityInfo(
-                    file.as_raw_handle(),
-                    SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                    null_mut(),
-                    null_mut(),
-                    dacl,
-                    null_mut(),
-                )
-            },
-            0
-        );
+        let set_dacl = |handle| unsafe {
+            SetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                dacl,
+                null_mut(),
+            )
+        };
+        // The production lock handle deliberately lacks WRITE_DAC. Establish
+        // that negative control, then mutate only through a test-owned handle.
+        assert_eq!(set_dacl(file.as_raw_handle()), 5); // ERROR_ACCESS_DENIED
+        let mutation = open_private(&path, OPEN_EXISTING, 0x80000000 | 0x00040000).unwrap();
+        assert_eq!(set_dacl(mutation.as_raw_handle()), 0);
+        drop(mutation);
         assert!(require_private_handle(file.as_raw_handle()).is_err());
         drop(file);
         assert!(open_private_file(&path, false).is_err());
