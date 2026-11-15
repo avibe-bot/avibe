@@ -127,7 +127,41 @@ Negative evidence contains only sidecar events actually emitted. The pinned
 sidecar may reject a peer before any client-specific `peer_closed` event. Zero
 ingress is mandatory; a nonexistent rejection event must never be invented.
 Observed reason strings may include `admission_ended`, `idle_timeout`, `stopped`,
-or `connection_closed`. A local deadline is not a successful negative result.
+or `connection_closed`. A local deadline or local shutdown is not a successful
+negative result.
+
+### Negative App observations
+
+For `not_admitted` and `wrong_identity`, the App's `observed` object has exactly
+these five keys (no legacy `case_streams`, `setup_attempts`, or other fields):
+
+```json
+{"control_tcp":true,"failure":"handshake","local_streams":0,"payload_streams":0,"usable":false}
+```
+
+`control_tcp` must be exactly Boolean `true` and `usable` exactly Boolean
+`false`. Both counts must be nonnegative integers, not Booleans, floats or
+strings. `local_streams` counts actual successful local `openStream` returns,
+including probe opens; it does not count successful connects. `payload_streams`
+counts streams on which the fixed payload write was attempted and must be zero.
+Do not force local counts to zero to satisfy a verdict.
+
+For `not_admitted`, `failure` is either `handshake` from an actual qualified
+peer/crypto error thrown by connect, or `closed_by_peer` from an actual native
+post-connect open/write/read error with the pinned peer-close wording. Admission
+rejection can occur after handshake: the transport may successfully open its
+local CONNECT probe before refusal. Such a local open is not host ingress and
+is allowed, but no payload or usable transport is allowed. Timeout, local
+shutdown and cleanup cannot supply the rejection observation.
+
+For `wrong_identity`, `failure` must be `handshake` and `local_streams` must be
+zero. The App additionally fails the case on **any successful connect**, even
+if it never opens a stream; no extra connect-count field is sent. The host still
+requires the App's case to pass and independently requires **zero ingress
+connections**, including malformed and late ingress, for both negative cases
+before and after cleanup. Host `observed.case_streams` remains its independently
+measured ingress count, not an alias for App `local_streams`. Positive App
+observations, the six-case inventory and the v2 control messages are unchanged.
 
 ## Evidence and reconciliation
 
