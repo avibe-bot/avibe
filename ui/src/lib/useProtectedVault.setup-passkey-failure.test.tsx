@@ -48,7 +48,7 @@ describe('protected setup failure from the create/unlock hook', () => {
       authzRegistration: registration,
       state: 'unlocked',
     });
-    sandbox.status.mockReset();
+    sandbox.status.mockReset().mockResolvedValue({ state: 'unlocked', expiresAt: 123456 });
   });
 
   afterEach(() => {
@@ -77,5 +77,6 @@ describe('protected setup failure from the create/unlock hook', () => {
     expect(sandbox.setup).toHaveBeenCalledOnce();
     expect(api.completeVaultSetup).toHaveBeenCalledTimes(2);
     expect(vaultFreshSetup()).toBe(false);
+    expect(result.current.status).toBe('unlocked');
   });
 });

@@ -1,5 +1,6 @@
 import asyncio
 import errno
+from datetime import datetime, timedelta, timezone
 import ipaddress
 import json
 import os
@@ -6122,7 +6123,7 @@ def test_vault_shared_setup_reload_policy_confirmation_and_last_delete_close_loo
         assert factor["disabled_at"] is None and factor["sign_count"] == 3
 
 
-def test_vault_guided_setup_recovery_lost_reply_and_expired_registration_close_loop(monkeypatch):
+def test_vault_guided_setup_recovery_lost_reply_expired_registration_and_protected_create_close_loop(monkeypatch):
     """AUTH-SETUP-406: guided setup recovery -> same-setup retry after a lost reply; a refused
     (expired) registration persists nothing and a fresh ceremony then succeeds.
 
@@ -6144,8 +6145,12 @@ def test_vault_guided_setup_recovery_lost_reply_and_expired_registration_close_l
         with api._vault_engine().connect() as conn:
             return conn.execute(select(func.count()).select_from(vault_auth_factors)).scalar_one()
 
-    # Refused: the registration challenge expired (2 minutes) before the commit. Nothing persists.
+    # Refused: the registration challenge is expired before the commit. Nothing persists.
     options = client.post("/api/vault/authz/factors/webauthn/options", json={}, headers=headers).get_json()
+    # The first-time setup registration has its dedicated 30-minute window; do not regress it to
+    # the 120-second fresh-authorization window used by existing-factor operations.
+    expires_at = datetime.fromisoformat(options["expires_at"].replace("Z", "+00:00"))
+    assert expires_at - datetime.now(timezone.utc) >= timedelta(seconds=1790)
     stale = credential.registration_payload(challenge_id=options["challenge_id"], challenge_b64=options["webauthn"]["challenge"])
     with api._vault_engine().begin() as conn:
         conn.execute(update(vault_operation_challenges).where(vault_operation_challenges.c.id == options["challenge_id"])
@@ -6166,6 +6171,17 @@ def test_vault_guided_setup_recovery_lost_reply_and_expired_registration_close_l
     assert first.status_code == 200
     retried = client.post("/api/vault/setup", json=payload, headers=headers)
     assert retried.status_code == 200 and retried.get_json() == first.get_json()
+    assert factors() == 1
+    # The durable setup is now complete: the first protected create reuses the root and sends no
+    # registration proof, even though this scenario only models the opaque browser seal payload.
+    created = client.post("/api/vault/secrets", json={
+        "name": "AFTER_SETUP",
+        "protection": "protected",
+        "sealed": {"ciphertext": "synthetic", "nonce": "record-nonce", "wrap_meta": {
+            **credential.wrap_meta(), "wrapped_dek": "synthetic-dek", "dek_nonce": "record-dek-nonce",
+        }},
+    }, headers=headers)
+    assert created.status_code == 200, created.get_json()
     assert factors() == 1
     # Another tab's different setup after that is refused as already initialized.
     other = WebAuthnTestCredential(rp_id="sandbox.avibe.bot", origin="https://sandbox.avibe.bot")

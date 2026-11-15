@@ -318,6 +318,24 @@ export async function setupVaultDurably(
   sessionVault.authzFactorRegistration = null;
   sessionVault.durableSetupPending = false;
   if (typeof committed.wrap_meta === 'string') sessionVault.wrapMeta = baseVmkWrapMeta(committed.wrap_meta);
+  if (sessionVault.wrapMeta && sessionVault.status !== 'unlocked') {
+    try {
+      const sandboxStatus = await (await getVaultSandboxClient()).status(sessionVault.wrapMeta);
+      if (sandboxStatus.state === 'unlocked') {
+        sessionVault.status = 'unlocked';
+        vaultLockExpiresAt =
+          typeof sandboxStatus.expiresAt === 'number' && Number.isFinite(sandboxStatus.expiresAt) ? sandboxStatus.expiresAt : null;
+      } else {
+        sessionVault.status = 'locked';
+        vaultLockExpiresAt = null;
+      }
+    } catch {
+      // The root is durable even if status reconciliation is unavailable; fail closed and let the
+      // normal unlock path re-query the sandbox rather than claiming the VMK is available.
+      sessionVault.status = 'locked';
+      vaultLockExpiresAt = null;
+    }
+  }
   notifyVaultLockChange();
   return { ok: true };
 }
