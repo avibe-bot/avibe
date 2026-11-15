@@ -141,7 +141,7 @@ enum SheetFixtureReadiness {
         let surface = app.otherElements["fixture-document-surface"]
         let failed = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                surface.label == "selection-rejected-invalid_instance"
+                surface.label.contains("\"bridgeStage\":\"selection-rejected-invalid_instance\"")
                     && app.webViews.firstMatch.staticTexts.matching(
                         NSPredicate(format: "label == %@", text)
                     ).firstMatch.exists
@@ -153,20 +153,25 @@ enum SheetFixtureReadiness {
     }
 
     static func tapRow(containing name: String, in app: XCUIApplication) {
-        let deadline = ProcessInfo.processInfo.systemUptime + 10
         let row = app.webViews.firstMatch.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         if !row.isHittable { app.swipeUp(velocity: .slow) }
-        // Existence is not actionability. Re-resolve after the existing scroll,
-        // using the remainder of the original ten-second row budget.
-        let actionable = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                row.exists && row.isEnabled && row.isHittable
-            }, object: nil
-        )
-        XCTAssertEqual(XCTWaiter.wait(
-            for: [actionable], timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime)
-        ), .completed, "Row must be enabled and hittable before the single tap: \(name)")
+        // Assert at the existing press point. Do not wait for a stalled/covered
+        // target to become actionable and thereby hide the missed-input defect.
+        let enabled = row.isEnabled
+        let hittable = row.isHittable
+        let frame = row.frame
+        let evidence = XCTAttachment(string: """
+        Intended XCTest row.tap center (window points): \(frame.midX), \(frame.midY)
+        XCUI row frame: \(frame); enabled: \(enabled); hittable: \(hittable)
+        Pre-press uptime: \(ProcessInfo.processInfo.systemUptime)
+        Native evidence (observed asynchronously): \(app.otherElements["fixture-document-surface"].label)
+        Actual synthesized coordinates remain in XCTest's Synthesized Event attachment.
+        """)
+        evidence.name = "\(name)-pre-press"
+        evidence.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Record \(name) press geometry") { $0.add(evidence) }
+        XCTAssertTrue(enabled && hittable, "Row not actionable at the intended press; no settling wait: \(name)")
         row.tap()
     }
 

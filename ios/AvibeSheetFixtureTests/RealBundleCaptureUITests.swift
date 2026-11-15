@@ -3,6 +3,19 @@ import XCTest
 /// On-demand only: ios-shell skips this class; ios-mobile-captures selects it.
 /// All state comes from the fixture's native fake transport and real user taps.
 final class RealBundleCaptureUITests: XCTestCase {
+    private var bDiagnosticApp: XCUIApplication?
+    private var bDiagnosticName: String?
+
+    override func record(_ issue: XCTIssue) {
+        if let app = bDiagnosticApp, let name = bDiagnosticName {
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "\(name)-accessibility-tree"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        super.record(issue)
+    }
+
     func testRealBundledPageCaptureMatrix() {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
@@ -13,6 +26,11 @@ final class RealBundleCaptureUITests: XCTestCase {
                     let name = "mobile-\(state)-\(language)-\(theme)"
                     XCTContext.runActivity(named: name) { _ in
                         let app = XCUIApplication()
+                        let isBRoute = state == "instances-named" || state == "account-root"
+                        if isBRoute {
+                            bDiagnosticApp = app
+                            bDiagnosticName = name
+                        }
                         app.launchArguments = [
                             "-AppleLanguages", "(\(language))",
                             "-AppleLocale", language == "zh" ? "zh_CN" : "en_US",
@@ -20,10 +38,13 @@ final class RealBundleCaptureUITests: XCTestCase {
                         app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_STATE"] = state
                         app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = theme
                         app.launch()
-                        defer { app.terminate() }
+                        defer {
+                            app.terminate()
+                            bDiagnosticApp = nil
+                            bDiagnosticName = nil
+                        }
                         let chinese = language == "zh"
                         SheetFixtureReadiness.waitForDocument(in: app)
-                        let isBRoute = state == "instances-named" || state == "account-root"
                         if state != "first-run" {
                             let refreshed = XCTNSPredicateExpectation(
                                 predicate: NSPredicate(format: "value == %@", "document-ready;fetch-2"),
@@ -53,17 +74,41 @@ final class RealBundleCaptureUITests: XCTestCase {
                         }
                         switch state {
                         case "instances-named":
-                            requireText("Studio", in: app)
-                            XCTAssertTrue(app.webViews.firstMatch.buttons[
-                                chinese ? "关闭，回到 Studio" : "Close and return to Studio"
-                            ].waitForExistence(timeout: 10))
-                            XCTAssertFalse(app.webViews.firstMatch.staticTexts[chinese ? "账号" : "Account"].exists)
+                            requireBState("Named instance sheet must expose its current-instance button") {
+                                app.webViews.firstMatch.staticTexts.matching(NSPredicate(
+                                    format: "label == %@", chinese ? "正在使用" : "You’re in"
+                                )).firstMatch.exists
+                                    && app.webViews.firstMatch.buttons.matching(NSPredicate(
+                                        format: "label CONTAINS %@ AND label != %@", "Studio",
+                                        chinese ? "关闭，回到 Studio" : "Close and return to Studio"
+                                    )).firstMatch.exists
+                                    && app.webViews.firstMatch.buttons.matching(NSPredicate(
+                                        format: "label == %@", chinese ? "关闭，回到 Studio" : "Close and return to Studio"
+                                    )).firstMatch.exists
+                            }
+                            XCTAssertFalse(app.webViews.firstMatch.staticTexts.matching(NSPredicate(
+                                format: "label == %@", chinese ? "账号" : "Account"
+                            )).firstMatch.exists)
                             XCTAssertFalse(app.webViews.firstMatch.buttons.matching(NSPredicate(
                                 format: "label CONTAINS %@", "alex@example.invalid"
                             )).firstMatch.exists)
                         case "account-root":
-                            requireText(chinese ? "账号" : "Account", in: app)
-                            XCTAssertTrue(app.webViews.firstMatch.buttons[chinese ? "关闭" : "Close"].waitForExistence(timeout: 10))
+                            // These are the same AX roles exercised by the A Account cell:
+                            // sign-out/Close are buttons; the email is static text.
+                            requireBState("Account root must expose sign-out, email and Close") {
+                                app.webViews.firstMatch.buttons.matching(NSPredicate(
+                                    format: "label == %@", chinese ? "在此设备退出" : "Sign out on this device"
+                                )).firstMatch.exists
+                                    && app.webViews.firstMatch.staticTexts.matching(NSPredicate(
+                                        format: "label == %@", "alex@example.invalid"
+                                    )).firstMatch.exists
+                                    && app.webViews.firstMatch.buttons.matching(NSPredicate(
+                                        format: "label == %@", chinese ? "关闭" : "Close"
+                                    )).firstMatch.exists
+                            }
+                            XCTAssertFalse(app.webViews.firstMatch.buttons.matching(NSPredicate(
+                                format: "label == %@", chinese ? "实例" : "Instances"
+                            )).firstMatch.exists)
                             XCTAssertFalse(app.webViews.firstMatch.buttons.matching(NSPredicate(
                                 format: "label CONTAINS %@", chinese ? "返回" : "Back"
                             )).firstMatch.exists)
@@ -101,6 +146,61 @@ final class RealBundleCaptureUITests: XCTestCase {
                 }
             }
         }
+    }
+
+    /// Informational only: selected explicitly by the on-demand workflow, never
+    /// by ordinary ios-shell or the normal capture-matrix selector.
+    func testInformationalMainThreadStallInputReceipts() {
+        continueAfterFailure = true
+        var trials: [[String: Any]] = []
+        for trial in 1...10 {
+            let app = XCUIApplication()
+            app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+            app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_STATE"] = "open-failed"
+            app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = "light"
+            app.launchEnvironment["AVIBE_FIXTURE_STALL_DIAGNOSTIC"] = "1"
+            app.launch()
+            SheetFixtureReadiness.waitForDocument(in: app)
+            let arm = app.buttons["fixture-arm-stall"]
+            let armed = arm.waitForExistence(timeout: 10)
+            if armed {
+                arm.tap()
+                SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
+            }
+            let surface = app.otherElements["fixture-document-surface"]
+            let replied = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    surface.label.contains("\"bridgeStage\":\"selection-rejected-invalid_instance\"")
+                }, object: nil
+            )
+            _ = XCTWaiter.wait(for: [replied], timeout: 10)
+            let data = surface.label.data(using: .utf8) ?? Data()
+            let evidence = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            let events = evidence["events"] as? [[String: Any]] ?? []
+            trials.append([
+                "trial": trial, "armed": armed,
+                "nativeTouch": events.contains { ($0["kind"] as? String) == "native-touch-began" },
+                "rowPointerdown": events.contains { ($0["kind"] as? String) == "pointerdown" && ($0["onLab"] as? Bool) == true },
+                "rowClick": events.contains { ($0["kind"] as? String) == "click" && ($0["onLab"] as? Bool) == true },
+                "bridgeStage": evidence["bridgeStage"] ?? "unobserved",
+                "evidence": evidence,
+            ])
+            app.terminate()
+        }
+        let data = try! JSONSerialization.data(withJSONObject: trials, options: [.prettyPrinted, .sortedKeys])
+        let report = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        report.name = "informational-stall-input-10-trials"
+        report.lifetime = .keepAlways
+        add(report)
+        // XCTest quiescence may defer the tap until AFTER the stall. The recorded
+        // actual event times, not the requested schedule, determine any overlap.
+    }
+
+    private func requireBState(_ description: String, matching matches: @escaping () -> Bool) {
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in matches() }, object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed, description)
     }
 
     private func requireText(_ text: String, in app: XCUIApplication) {
