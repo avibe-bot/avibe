@@ -40,12 +40,40 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
     func testReadinessMutationGuardsRejectMissingReceipts() {
         let rejectedOnly = "{\"bridgeStage\":\"selection-rejected-invalid_instance\"}"
-        XCTAssertFalse(SheetFixtureReadiness.hasBridgeStage("row-error-rendered", in: rejectedOnly))
+        XCTAssertFalse(SheetFixtureReadiness.hasBridgeStages(
+            ["selection-rejected-invalid_instance", "row-error-rendered"], in: rejectedOnly
+        ))
+        let missingHistory = "{\"bridgeStage\":\"row-error-rendered\",\"bridgeStages\":[\"row-error-rendered\"]}"
+        XCTAssertFalse(SheetFixtureReadiness.hasBridgeStages(
+            ["selection-rejected-invalid_instance", "row-error-rendered"], in: missingHistory
+        ))
 
-        let portrait = "{\"geometry\":{\"sequence\":1,\"orientation\":\"portrait\",\"sheetWindowFrame\":{\"width\":390,\"height\":844}}}"
-        XCTAssertFalse(SheetFixtureReadiness.geometryChanged(from: portrait, to: portrait))
-        let landscape = "{\"geometry\":{\"sequence\":2,\"orientation\":\"landscape\",\"sheetWindowFrame\":{\"width\":844,\"height\":390}}}"
-        XCTAssertTrue(SheetFixtureReadiness.geometryChanged(from: portrait, to: landscape))
+        let portrait = [
+            "sequence": 1, "orientation": "portrait",
+            "sheetWindowFrame": ["x": 0.0, "y": 0.0, "width": 390.0, "height": 844.0],
+            "webViewWindowFrame": ["x": 0.0, "y": 100.0, "width": 390.0, "height": 744.0],
+        ] as [String: Any]
+        let unchanged = portrait
+        let sequenceOnly = [
+            "sequence": 2, "orientation": "portrait",
+            "sheetWindowFrame": portrait["sheetWindowFrame"]!,
+            "webViewWindowFrame": portrait["webViewWindowFrame"]!,
+        ] as [String: Any]
+        let orientationOnly = [
+            "sequence": 2, "orientation": "landscape",
+            "sheetWindowFrame": portrait["sheetWindowFrame"]!,
+            "webViewWindowFrame": portrait["webViewWindowFrame"]!,
+        ] as [String: Any]
+        let landscape = [
+            "sequence": 2, "orientation": "landscape",
+            "sheetWindowFrame": ["x": 0.0, "y": 0.0, "width": 844.0, "height": 390.0],
+            "webViewWindowFrame": ["x": 100.0, "y": 0.0, "width": 744.0, "height": 390.0],
+        ] as [String: Any]
+        XCTAssertFalse(SheetFixtureReadiness.isLandscapeTransition(unchanged, from: portrait))
+        XCTAssertFalse(SheetFixtureReadiness.isLandscapeTransition(sequenceOnly, from: portrait))
+        XCTAssertFalse(SheetFixtureReadiness.isLandscapeTransition(orientationOnly, from: portrait))
+        XCTAssertTrue(SheetFixtureReadiness.isLandscapeTransition(landscape, from: portrait))
+        XCTAssertFalse(SheetFixtureReadiness.isRestoredPortrait(unchanged, from: portrait))
     }
 
     func testMidListDownwardDragScrollsBeforeTheSheetDismisses() throws {
@@ -115,36 +143,24 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
     func testSheetSurvivesCompactHeightRotation() throws {
         launchFixture()
-        _ = SheetFixtureReadiness.waitForGeometry(in: app)
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let portraitGeometry = try XCTUnwrap(SheetFixtureReadiness.waitForGeometry(
-            in: app, matching: { geometry in
-                guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]) else { return false }
-                return geometry["orientation"] as? String == "portrait" && frame.height > frame.width
+            in: app, timeout: 5, matching: { geometry in
+                SheetFixtureReadiness.isPortraitGeometry(geometry)
             }
         ))
-        let portraitFrame = try XCTUnwrap(SheetFixtureReadiness.frame(from: portraitGeometry["sheetWindowFrame"]))
 
         XCUIDevice.shared.orientation = .landscapeLeft
-        let compactGeometry = SheetFixtureReadiness.waitForGeometry(in: app, matching: { geometry in
-            guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]),
-                  let sequence = geometry["sequence"] as? Int,
-                  let portraitSequence = portraitGeometry["sequence"] as? Int else { return false }
-            return sequence != portraitSequence
-                && geometry["orientation"] as? String == "landscape"
-                && frame.width > portraitFrame.width
-                && frame.height < portraitFrame.height
+        let compactGeometry = SheetFixtureReadiness.waitForGeometry(in: app, timeout: 5, matching: { geometry in
+            SheetFixtureReadiness.isLandscapeTransition(geometry, from: portraitGeometry)
         })
         XCTAssertNotNil(compactGeometry)
         XCTAssertTrue(close.exists)
 
         XCUIDevice.shared.orientation = .portrait
-        let restoredPortrait = SheetFixtureReadiness.waitForGeometry(in: app, matching: { geometry in
-            guard let frame = SheetFixtureReadiness.frame(from: geometry["sheetWindowFrame"]) else { return false }
-            return geometry["orientation"] as? String == "portrait"
-                && abs(frame.width - portraitFrame.width) < 1
-                && abs(frame.height - portraitFrame.height) < 1
+        let restoredPortrait = SheetFixtureReadiness.waitForGeometry(in: app, timeout: 5, matching: { geometry in
+            SheetFixtureReadiness.isRestoredPortrait(geometry, from: portraitGeometry)
         })
         XCTAssertNotNil(restoredPortrait)
         XCTAssertTrue(close.exists)
@@ -165,42 +181,72 @@ final class InstanceSheetGestureUITests: XCTestCase {
 enum SheetFixtureReadiness {
     static func requireFailedSelection(in app: XCUIApplication) {
         let surface = app.otherElements["fixture-document-surface"]
-        let rejected = XCTNSPredicateExpectation(
+        let requiredStages = [
+            "selection-rejected-invalid_instance",
+            "row-error-rendered",
+        ]
+        let receipt = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                SheetFixtureReadiness.hasBridgeStage("selection-rejected-invalid_instance", in: surface.label)
+                SheetFixtureReadiness.hasBridgeStages(requiredStages, in: surface.label)
             }, object: nil
         )
-        XCTAssertEqual(XCTWaiter.wait(for: [rejected], timeout: 10), .completed,
-                       "Expected native invalid_instance receipt; receipt=\(surface.label)")
-        let rowError = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                SheetFixtureReadiness.hasBridgeStage("row-error-rendered", in: surface.label)
-            }, object: nil
-        )
-        XCTAssertEqual(XCTWaiter.wait(for: [rowError], timeout: 10), .completed,
-                       "Expected row-error-rendered DOM receipt; receipt=\(surface.label)")
+        XCTAssertEqual(XCTWaiter.wait(for: [receipt], timeout: 10), .completed,
+                       "Expected native rejection and rendered row error receipts; receipt=\(surface.label)")
     }
 
-    static func hasBridgeStage(_ stage: String, in label: String) -> Bool {
+    static func hasBridgeStages(_ stages: [String], in label: String) -> Bool {
         guard let data = label.data(using: .utf8),
-              let evidence = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-        if let stages = evidence["bridgeStages"] as? [String], stages.contains(stage) { return true }
-        return evidence["bridgeStage"] as? String == stage
+              let evidence = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let recorded = evidence["bridgeStages"] as? [String] else { return false }
+        return stages.allSatisfy { stage in
+            recorded.firstIndex(of: stage) != nil
+        } && stages == recorded.filter { stages.contains($0) }
     }
 
-    static func geometryChanged(from oldLabel: String, to newLabel: String) -> Bool {
-        guard let oldData = oldLabel.data(using: .utf8),
-              let newData = newLabel.data(using: .utf8),
-              let oldEvidence = try? JSONSerialization.jsonObject(with: oldData) as? [String: Any],
-              let newEvidence = try? JSONSerialization.jsonObject(with: newData) as? [String: Any],
-              let oldGeometry = oldEvidence["geometry"] as? [String: Any],
-              let newGeometry = newEvidence["geometry"] as? [String: Any] else { return false }
-        let oldFrame = frame(from: oldGeometry["sheetWindowFrame"])
-        let newFrame = frame(from: newGeometry["sheetWindowFrame"])
-        return (oldGeometry["sequence"] as? Int) != (newGeometry["sequence"] as? Int)
-            || (oldGeometry["orientation"] as? String) != (newGeometry["orientation"] as? String)
-            || oldFrame?.width != newFrame?.width
-            || oldFrame?.height != newFrame?.height
+    static func isPortraitGeometry(_ geometry: [String: Any]) -> Bool {
+        guard let sheet = frame(from: geometry["sheetWindowFrame"]),
+              let web = frame(from: geometry["webViewWindowFrame"]) else { return false }
+        return geometry["orientation"] as? String == "portrait"
+            && sheet.height > sheet.width
+            && web.height > web.width
+    }
+
+    static func isLandscapeTransition(_ geometry: [String: Any], from portrait: [String: Any]) -> Bool {
+        guard let sheet = frame(from: geometry["sheetWindowFrame"]),
+              let web = frame(from: geometry["webViewWindowFrame"]),
+              let oldSheet = frame(from: portrait["sheetWindowFrame"]),
+              let oldWeb = frame(from: portrait["webViewWindowFrame"]),
+              let sequence = geometry["sequence"] as? Int,
+              let oldSequence = portrait["sequence"] as? Int else { return false }
+        return sequence > oldSequence
+            && geometry["orientation"] as? String == "landscape"
+            && sheet.width > oldSheet.width
+            && sheet.height < oldSheet.height
+            && web.width > oldWeb.width
+            && web.height < oldWeb.height
+    }
+
+    static func isRestoredPortrait(_ geometry: [String: Any], from portrait: [String: Any]) -> Bool {
+        guard let sheet = frame(from: geometry["sheetWindowFrame"]),
+              let web = frame(from: geometry["webViewWindowFrame"]),
+              let oldSheet = frame(from: portrait["sheetWindowFrame"]),
+              let oldWeb = frame(from: portrait["webViewWindowFrame"]),
+              let sequence = geometry["sequence"] as? Int,
+              let oldSequence = portrait["sequence"] as? Int else { return false }
+        return sequence > oldSequence
+            && geometry["orientation"] as? String == "portrait"
+            && framesMatch(sheet, oldSheet)
+            && framesMatch(web, oldWeb)
+    }
+
+    private static func framesMatch(
+        _ lhs: (x: Double, y: Double, width: Double, height: Double),
+        _ rhs: (x: Double, y: Double, width: Double, height: Double)
+    ) -> Bool {
+        abs(lhs.x - rhs.x) < 1
+            && abs(lhs.y - rhs.y) < 1
+            && abs(lhs.width - rhs.width) < 1
+            && abs(lhs.height - rhs.height) < 1
     }
 
     static func waitForGeometry(
@@ -227,11 +273,13 @@ enum SheetFixtureReadiness {
         return result
     }
 
-    static func frame(from value: Any?) -> (width: Double, height: Double)? {
+    static func frame(from value: Any?) -> (x: Double, y: Double, width: Double, height: Double)? {
         guard let frame = value as? [String: Any],
+              let x = frame["x"] as? Double,
+              let y = frame["y"] as? Double,
               let width = frame["width"] as? Double,
               let height = frame["height"] as? Double else { return nil }
-        return (width, height)
+        return (x, y, width, height)
     }
 
     @discardableResult

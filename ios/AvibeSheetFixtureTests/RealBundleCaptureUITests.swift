@@ -171,7 +171,9 @@ final class RealBundleCaptureUITests: XCTestCase {
             let surface = app.otherElements["fixture-document-surface"]
             let replied = XCTNSPredicateExpectation(
                 predicate: NSPredicate { _, _ in
-                    surface.label.contains("\"bridgeStage\":\"selection-rejected-invalid_instance\"")
+                    SheetFixtureReadiness.hasBridgeStages(
+                        ["selection-rejected-invalid_instance"], in: surface.label
+                    )
                 }, object: nil
             )
             _ = XCTWaiter.wait(for: [replied], timeout: 10)
@@ -184,6 +186,7 @@ final class RealBundleCaptureUITests: XCTestCase {
                 "rowPointerdown": events.contains { ($0["kind"] as? String) == "pointerdown" && ($0["onLab"] as? Bool) == true },
                 "rowClick": events.contains { ($0["kind"] as? String) == "click" && ($0["onLab"] as? Bool) == true },
                 "bridgeStage": evidence["bridgeStage"] ?? "unobserved",
+                "bridgeStages": evidence["bridgeStages"] ?? [],
                 "evidence": evidence,
             ])
             app.terminate()

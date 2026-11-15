@@ -322,9 +322,10 @@ private final class SheetFixtureRootViewController: UIViewController {
         guard let controller = sheetController,
               let webView = controller.view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
         let frame = controller.view.convert(controller.view.bounds, to: nil)
+        let webFrame = webView.convert(webView.bounds, to: nil)
         let detent = controller.sheetPresentationController?.selectedDetentIdentifier?.rawValue ?? "none"
         let orientation = frame.width > frame.height ? "landscape" : "portrait"
-        let signature = "\(orientation)|\(frame.integral)|\(detent)"
+        let signature = "\(orientation)|\(frame.integral)|\(webFrame.integral)|\(detent)"
         guard signature != lastGeometrySignature else { return }
         lastGeometrySignature = signature
         geometrySequence += 1
@@ -333,7 +334,7 @@ private final class SheetFixtureRootViewController: UIViewController {
             "sequence": geometrySequence,
             "orientation": orientation,
             "sheetWindowFrame": frameEvidence(frame),
-            "webViewWindowFrame": frameEvidence(webView.convert(webView.bounds, to: nil)),
+            "webViewWindowFrame": frameEvidence(webFrame),
             "detent": detent,
         ]
         if let data = try? JSONSerialization.data(withJSONObject: selectionEvidence, options: [.sortedKeys]),
@@ -440,9 +441,21 @@ private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHa
       let rowErrorReported = false;
       const reportRowError = () => {
         if (rowErrorReported) return;
-        const alert = [...document.querySelectorAll('[role="alert"]')].find(element =>
-          element.textContent.includes("Lab")
-        );
+        const chinese = navigator.language.toLowerCase().startsWith("zh");
+        const expectedError = chinese ? "没能打开 Lab，再试一次。" : "Couldn’t open Lab. Try again.";
+        const expectedRetry = chinese ? "重试" : "Try again";
+        const alert = [...document.querySelectorAll('[role="alert"]')].find(element => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          const visible = style.display !== "none" && style.visibility !== "hidden"
+            && rect.width > 0 && rect.height > 0 && element.getAttribute("aria-hidden") !== "true";
+          const row = element.closest("div");
+          const buttons = row ? [...row.querySelectorAll("button")] : [];
+          const retry = buttons.find(button => button.textContent.trim() === expectedRetry);
+          const hasLabButton = buttons.some(button => button.textContent.includes("Lab"));
+          return visible && element.textContent.trim() === expectedError && buttons.length === 1
+            && !!retry && !hasLabButton;
+        });
         if (!alert) return;
         rowErrorReported = true;
         receipt("row-error-rendered");
