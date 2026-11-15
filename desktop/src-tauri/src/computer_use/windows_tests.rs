@@ -315,6 +315,7 @@ async fn rollback_off_quit_and_failed_publication_retire_owned_driver() {
             let helper = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, helper_pid) };
             assert!(!helper.is_null());
             let helper = unsafe { OwnedHandle::from_raw_handle(helper) };
+            driver.as_ref().unwrap().assert_member(helper.as_handle());
             if cause == "off_stop_failure" {
                 let original_pid = driver.as_ref().unwrap().id();
                 driver.as_mut().unwrap().fail_stops(2);

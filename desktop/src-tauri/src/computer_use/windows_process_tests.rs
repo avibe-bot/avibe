@@ -145,7 +145,11 @@ fn fixture_child() {
             std::io::stdin().read_to_end(&mut input).unwrap();
             std::fs::write(directory.join("eof"), "yes").unwrap();
         }
-        "tree" => {
+        "tree" | "late_tree" => {
+            if mode == "late_tree" {
+                std::fs::write(directory.join("started"), "yes").unwrap();
+                std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
+            }
             // Intentionally outlives this fixture, but remains in the owned
             // job; the parent test waits its OS handle after stopping that job.
             #[allow(clippy::zombie_processes)]
@@ -336,17 +340,57 @@ async fn stop_is_graceful_for_eof_and_forceful_for_remaining_descendants() {
             let pid = wait_for_file(&directory.path().join("descendant")).parse().unwrap();
             process_handle(pid)
         });
+        if let Some(descendant) = &descendant {
+            child.capture_stop_members_with_capacity(1).unwrap();
+            assert!(!child.stop_members.is_empty(), "truncated PID snapshot must grow");
+            let mut member = 0;
+            let pid = wait_for_file(&directory.path().join("descendant"))
+                .parse::<u32>()
+                .unwrap();
+            let query = query_process_handle(pid);
+            check(unsafe { IsProcessInJob(query.as_raw_handle(), child.job.as_raw_handle(), &mut member) }).unwrap();
+            assert_ne!(member, 0);
+            assert_ne!(
+                unsafe { WaitForSingleObject(descendant.as_raw_handle(), 0) },
+                WAIT_OBJECT_0
+            );
+        }
         let start = Instant::now();
         child.stop(Duration::from_millis(100)).await.unwrap();
         assert!(start.elapsed() < Duration::from_secs(5));
         assert_exits(&root);
         if let Some(descendant) = descendant {
-            assert_exits(&descendant);
+            assert_eq!(
+                unsafe { WaitForSingleObject(descendant.as_raw_handle(), 0) },
+                WAIT_OBJECT_0,
+                "successful stop itself must be the observed-member barrier"
+            );
         }
         if mode == "eof" {
             assert!(directory.path().join("eof").exists());
         }
     }
+
+    // This helper is born only after the first stop snapshot closes stdin.
+    // Existing job-wide termination must cover it without any launch change.
+    let directory = tempfile::tempdir().unwrap();
+    let mut child = suspended("late_tree", directory.path()).resume().unwrap();
+    let job = child.job.try_clone().unwrap();
+    wait_for_file(&directory.path().join("started"));
+    let mut stop = Box::pin(child.stop(Duration::from_secs(1)));
+    assert!(tokio::time::timeout(Duration::from_millis(30), &mut stop)
+        .await
+        .is_err());
+    let pid = wait_for_file(&directory.path().join("descendant"))
+        .parse::<u32>()
+        .unwrap();
+    let helper = query_process_handle(pid);
+    let mut member = 0;
+    check(unsafe { IsProcessInJob(helper.as_raw_handle(), job.as_raw_handle(), &mut member) }).unwrap();
+    assert_ne!(member, 0);
+    stop.await.unwrap();
+    assert_eq!(unsafe { WaitForSingleObject(helper.as_raw_handle(), 0) }, WAIT_OBJECT_0);
+    assert!(child.wait_empty(Duration::ZERO).await.unwrap());
 }
 
 #[tokio::test]

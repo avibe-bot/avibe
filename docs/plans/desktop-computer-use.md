@@ -468,9 +468,14 @@ arguments are unchanged.
   `__AVIBE_DESKTOP_COMPUTER_USE__` marker still advertises On only. Old shells must
   not show an actionable Off switch; use the tray instead. Browser/remote pages
   remain read-only, regardless of the status endpoint's value.
-- A successful native reply means the off record was published and owned driver
-  teardown (including the Windows Job's helpers) completed. macOS also cancels
-  and joins its permission probe. Pending Computer Use actions lose their driver;
+- A successful native reply means the off record was published and **no process
+  of the owned job is still running when the command resolves**. Windows retains
+  waitable handles for the root and members observed in its stop-time snapshots,
+  requires those handles to be signaled and `ActiveProcesses == 0`, and uses the
+  existing bounded Job termination for remaining members. It does not reconcile
+  historical `TotalProcesses` or claim individual signal proofs for members that
+  exited before the snapshots. macOS also cancels and joins its permission probe.
+  Pending Computer Use actions lose their driver;
   the tray, ordinary apps, unsaved app state and other Agent tools are untouched.
   On Windows a helper that ignores graceful EOF is terminated by the existing
   bounded Job cleanup, not a process-name search or a new launch contract.
@@ -488,8 +493,8 @@ arguments are unchanged.
   the pending Off publication/teardown; repeated Off also retries it. Pending is
   memory-only, and successful persistence/teardown clears it without spawning.
   No second persistent recovery state is added.
-  Teardown failure retains the waitable driver/job owner, so a repeated Off
-  cannot mistake a dropped handle for an observed exit. A failed macOS probe
+  Teardown failure retains the waitable driver/job and captured member handles,
+  so a repeated Off cannot mistake a dropped handle for an observed exit. A failed macOS probe
   join remains unconfirmed rather than acknowledging a later Off.
   Teardown failure also rejects even if the off record was successfully written;
   the UI must retain the invocation failure rather than treating the matching
@@ -508,8 +513,8 @@ arguments are unchanged.
 
 Validation uses hermetic Controller request/reply tests, saved-state/API tests,
 capability/caller tests and the existing ordinary-user Windows hosted process
-harness. That harness covers off publication before teardown, helper completion,
-failed off publication, repeated failed teardown retaining the same owner,
+harness. That harness covers off publication before teardown, exact-Job membership and captured-helper
+completion, late-spawn cleanup, failed off publication, repeated failed teardown retaining the same owner,
 repeated Off, no automatic respawn, eventual pending-write recovery and old-record
 restart semantics. These are source/CI checks, not installed-app or owner-desktop acceptance.
 
