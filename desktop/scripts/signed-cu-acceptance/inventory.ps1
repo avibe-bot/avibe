@@ -9,6 +9,15 @@ function Get-AcceptanceHelpers {
     $Evidence.candidate_count = 0; $Evidence.enumeration_succeeded = $false; $Evidence.enumerated_process_count = $null
     try {
         $rows = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        # Get-Process is the same-user discovery/image path. CIM is only used
+        # for parent relations/descendants; its ExecutablePath is never a gate.
+        $named = @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($DriverPath)) -ErrorAction SilentlyContinue)
+        foreach ($candidate in $named) {
+            if (-not @($rows | Where-Object { [int]$_.ProcessId -eq $candidate.Id }).Count) {
+                $rows += [pscustomobject]@{ProcessId=$candidate.Id; Name=[IO.Path]::GetFileName($DriverPath); ParentProcessId=0}
+            }
+            $candidate.Dispose()
+        }
         $Evidence.enumeration_succeeded = $true; $Evidence.enumerated_process_count = $rows.Count
         $visited = [Collections.Generic.HashSet[int]]::new()
         $driverName = [IO.Path]::GetFileName($DriverPath)
@@ -34,7 +43,9 @@ function Get-AcceptanceHelpers {
                 try {
                     $process = [AcceptanceNative]::ObserveProcess($id)
                     try {
-                        $image = $process.ImagePath()
+                        $lookup = Get-Process -Id $id -ErrorAction Stop
+                        try { $image = $lookup.Path } finally { $lookup.Dispose() }
+                        if (-not $image) { throw 'same_user_process_path_unavailable' }
                         $item.path_basename = [IO.Path]::GetFileName($image)
                         $item.path_match = [string]::Equals([IO.Path]::GetFullPath($image), [IO.Path]::GetFullPath($DriverPath), [StringComparison]::OrdinalIgnoreCase)
                     } catch { $item.query_errors += @{call='image'; error_class=$_.Exception.GetBaseException().GetType().FullName} }

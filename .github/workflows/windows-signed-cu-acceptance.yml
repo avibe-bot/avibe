@@ -25,6 +25,7 @@ env:
   # Stop-loss: signed execution stays disabled until hosted dry evidence and
   # independent review are complete; changing this is an explicit lane gate.
   ACCEPTANCE_MODE: dry
+  HELPER_IDENTITY_OPTIONAL: 'false'
   CANDIDATE_SOURCE_SHA: bcc71bc8d6430fc72697eb4695caef5d15da55ba
   CANDIDATE_DRIVER_SHA256: 931310cd70e4c571af416c77cdce56719bda3e1e1240ba4128ce913610b0294e
   CANDIDATE_DRIVER_SIZE: '34074624'
@@ -67,7 +68,7 @@ jobs:
         env:
           # Read-only, ephemeral admission token, never passed to the test user.
           GH_TOKEN: ${{ github.token }}
-        run: ./desktop/scripts/signed-cu-acceptance/run.ps1 -ReleaseTag $env:RELEASE_TAG -Mode $env:ACCEPTANCE_MODE -UpdateTag $env:UPDATE_TAG -CandidateSourceSha $env:CANDIDATE_SOURCE_SHA -CandidateDriverHash $env:CANDIDATE_DRIVER_SHA256 -CandidateDriverSize $env:CANDIDATE_DRIVER_SIZE
+        run: ./desktop/scripts/signed-cu-acceptance/run.ps1 -ReleaseTag $env:RELEASE_TAG -Mode $env:ACCEPTANCE_MODE -UpdateTag $env:UPDATE_TAG -CandidateSourceSha $env:CANDIDATE_SOURCE_SHA -CandidateDriverHash $env:CANDIDATE_DRIVER_SHA256 -CandidateDriverSize $env:CANDIDATE_DRIVER_SIZE -AllowUnverifiedHelpers:([bool]::Parse($env:HELPER_IDENTITY_OPTIONAL))
       - name: Publish value-free verdict
         if: always()
         shell: pwsh

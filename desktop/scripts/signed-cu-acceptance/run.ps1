@@ -4,7 +4,8 @@ param(
     [ValidatePattern('^gh-v3\.2\.7rc[0-9]+$')][string] $UpdateTag = 'gh-v3.2.7rc4',
     [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string] $CandidateSourceSha,
     [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string] $CandidateDriverHash,
-    [Parameter(Mandatory)][ValidateRange(1, 2147483647)][long] $CandidateDriverSize
+    [Parameter(Mandatory)][ValidateRange(1, 2147483647)][long] $CandidateDriverSize,
+    [switch] $AllowUnverifiedHelpers
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -171,7 +172,7 @@ try {
     Copy-AcceptanceHarness $PSScriptRoot $root
     Set-FixtureAccess $root 'ReadAndExecute'
     Set-FixtureAccess $work 'Modify'
-    $config = @{ installer = $installer; driver_hash = $hash; driver_provenance = $release.Provenance; driver_size = if ($Mode -eq 'update') { 0 } else { $CandidateDriverSize }; mode = $Mode; release_version = ($ReleaseTag -replace '^gh-v', ''); expected_sid = $user.SID.Value; target_app = $targetApp; target_app_hash = $targetHash }
+    $config = @{ allow_unverified_helpers = [bool]$AllowUnverifiedHelpers; installer = $installer; driver_hash = $hash; driver_provenance = $release.Provenance; driver_size = if ($Mode -eq 'update') { 0 } else { $CandidateDriverSize }; mode = $Mode; release_version = ($ReleaseTag -replace '^gh-v', ''); expected_sid = $user.SID.Value; target_app = $targetApp; target_app_hash = $targetHash }
     if ($updateRelease) { $config.update = @{ version = $updateRelease.Version; desktop_version = $updateRelease.DesktopVersion; installer_hash = $updateRelease.InstallerHash; driver_hash = $updateRelease.DriverHash; driver_size = $CandidateDriverSize; driver_provenance = $updateRelease.Provenance } }
     $config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $root 'input.json')
     Assert-ReleaseIdle

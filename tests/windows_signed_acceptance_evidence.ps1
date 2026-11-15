@@ -15,9 +15,10 @@ Merge-AcceptanceWorker $parent $worker 1
 try { throw 'input_parent_postcheck' } catch { Add-AcceptanceFailure $parent 'postcheck' $_ }
 Complete-AcceptanceGate $parent
 if ($parent.required_cases_passed -or $parent.failure.call -ne 'type_js' -or $parent.cleanup_errors.Count -ne 1) { throw 'aggregate_lost_failure' }
-foreach ($scenario in @('worker_nonzero', 'required_missing', 'cleanup_only')) {
+foreach ($scenario in @('worker_nonzero', 'required_missing', 'cleanup_only', 'helper_unverified')) {
     $parent = [ordered]@{required_cases=@('case'); cases=[ordered]@{case=@{verdict='NOT RUN'}}}
     $worker = @{cases=@{case=@{verdict=$(if($scenario -eq 'required_missing'){'NOT RUN'}else{'PASS'})}}}
+    if ($scenario -eq 'helper_unverified') { $worker.helper_identity_verified = $false }
     if ($scenario -eq 'cleanup_only') { try { throw 'input_cleanup_failure' } catch { Add-AcceptanceFailure $worker 'cleanup' $_ -Cleanup } }
     Merge-AcceptanceWorker $parent $worker $(if($scenario -eq 'worker_nonzero'){1}else{0})
     Complete-AcceptanceGate $parent

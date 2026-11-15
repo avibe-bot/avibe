@@ -43,7 +43,7 @@ function Merge-AcceptanceWorker([Collections.IDictionary] $Record, [Collections.
         if ($Worker.cases[$id].verdict -notin @('PASS', 'FAIL', 'NOT RUN')) { throw 'input_worker_verdict_invalid' }
         $Record.cases[$id] = $Worker.cases[$id]
     }
-    foreach ($field in @('failure', 'cleanup_errors', 'secondary_errors', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'default_off_probe_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified', 'installed_driver_sha256')) {
+    foreach ($field in @('helper_identity_verified', 'failure', 'cleanup_errors', 'secondary_errors', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'default_off_probe_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified', 'installed_driver_sha256')) {
         if ($Worker.Contains($field)) { $Record[$field] = $Worker[$field] }
     }
     $Record.worker_exit_code = $ExitCode
@@ -51,6 +51,7 @@ function Merge-AcceptanceWorker([Collections.IDictionary] $Record, [Collections.
 function Complete-AcceptanceGate([Collections.IDictionary] $Record) {
     $Record.missing_required_cases = @($Record.required_cases | Where-Object { $Record.cases[$_].verdict -ne 'PASS' })
     $Record.required_cases_passed = $Record.missing_required_cases.Count -eq 0 -and
+        (-not $Record.Contains('helper_identity_verified') -or $Record.helper_identity_verified -eq $true) -and
         (-not $Record.Contains('worker_exit_code') -or $Record.worker_exit_code -eq 0) -and
         (-not $Record.Contains('failure')) -and
         (-not $Record.Contains('cleanup_errors') -or $Record.cleanup_errors.Count -eq 0)

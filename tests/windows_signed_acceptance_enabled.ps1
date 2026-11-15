@@ -14,8 +14,18 @@ if (-not $OneCase) {
     try {
     & (Join-Path $PSScriptRoot 'windows_signed_acceptance_inventory.ps1') -Source (Join-Path $SourceRoot 'inventory.ps1') -Work (Join-Path $Work 'inventory-unit')
     if ($windowsHost) {
-        & (Join-Path $PSScriptRoot 'windows_signed_acceptance_inventory.ps1') -Source (Join-Path $SourceRoot 'inventory.ps1') -Work (Join-Path $Work 'inventory-hosted') -Hosted
-        $inventoryProof = Get-Content -LiteralPath (Join-Path $Work 'inventory-hosted/inventory-native-proof.json') -Raw | ConvertFrom-Json
+        $inventoryControlError = $null
+        try {
+            & (Join-Path $PSScriptRoot 'windows_signed_acceptance_inventory.ps1') -Source (Join-Path $SourceRoot 'inventory.ps1') -Work (Join-Path $Work 'inventory-hosted') -Hosted
+        } catch {
+            $inventoryControlError = @{phase='hosted_inventory_control'; error_class=$_.Exception.GetBaseException().GetType().FullName; script_line=$_.InvocationInfo.ScriptLineNumber}
+            $inventoryProof = @{passed=$false; failure=$inventoryControlError}
+        }
+        $inventoryPath = Join-Path $Work 'inventory-hosted/inventory-native-proof.json'
+        if (Test-Path -LiteralPath $inventoryPath) { $inventoryProof = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json -AsHashtable }
+        if ($inventoryControlError) { $inventoryProof.passed = $false; $inventoryProof.control_error = $inventoryControlError }
+        # Explicit stop-loss: still exercise the input evidence pipeline when
+        # helper identity is unverified. That gap is NOT a helper/product PASS.
     }
     $activeFault = 'evidence_finalization'
     & (Join-Path $PSScriptRoot 'windows_signed_acceptance_evidence.ps1') -Source (Join-Path $SourceRoot 'evidence.ps1') -Work $Work

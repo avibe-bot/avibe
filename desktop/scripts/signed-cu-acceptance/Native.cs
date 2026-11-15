@@ -34,7 +34,6 @@ public static class AcceptanceNative {
     [DllImport("advapi32.dll", SetLastError=true)] private static extern bool GetKernelObjectSecurity(IntPtr handle, uint info, byte[] descriptor, uint length, out uint needed);
     [DllImport("advapi32.dll", SetLastError=true)] private static extern bool SetKernelObjectSecurity(IntPtr handle, uint info, byte[] descriptor);
 
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder path, ref int size);
     [DllImport("kernel32.dll", SetLastError=true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
     [DllImport("advapi32.dll", EntryPoint="GetTokenInformation", SetLastError=true)] private static extern bool GetTokenPointer(IntPtr token, int kind, IntPtr value, int length, out int returned);
 
@@ -47,11 +46,6 @@ public static class AcceptanceNative {
             handle = OpenProcess(0x1000 | 0x100000, false, pid);
             if (handle == IntPtr.Zero) throw new Win32Exception();
             Id = pid;
-        }
-        public string ImagePath() {
-            var path = new StringBuilder(32768); int size = path.Capacity;
-            if (!QueryFullProcessImageName(handle, 0, path, ref size)) throw new Win32Exception();
-            return path.ToString();
         }
         public string OwnerSid() {
             IntPtr token = IntPtr.Zero, data = IntPtr.Zero;

@@ -56,14 +56,25 @@ The inventory correction keeps the shipped lifecycle: a persistent Desktop-owned
 installed daemon plus same-image runtime MCP proxies, not per-call or temporary
 copies. CIM supplies candidate names and parent links only: its `ExecutablePath`
 property has a documented debug-privilege qualifier, unsuitable as an existence
-oracle for a Users-only worker. Query-only retained handles now bind native image,
-installed hash and token SID; unknown identity blocks acceptance. Bounded candidate
+oracle for a Users-only worker. The bounded follow-up uses `Get-Process -Name`
+and same-user `.Path`, then compares the installed path/hash and queries token
+SID on retained handles. Bounded candidate
 rows record basename, nullable path/hash/owner matches, parent relation and error
 class without full paths. This diagnoses future misses; it does not prove which
 field caused the earlier miss. Replacement/descendant scans use the same observer.
 
-The workflow is **dry-only** while this correction is verified. The authorized
-sequence is one hosted dry run, then one further signed attempt after fresh
+The workflow is **dry-only** while this correction is verified. The first new
+ordinary-user control (`43726782304`) exited nonzero without its inner error
+receipt; that setup/query failure remains unclassified. The single follow-up
+control records worker phase/class/exit before aggregation. If it still cannot
+verify identity, the explicitly authorized `HELPER_IDENTITY_OPTIONAL` switch may
+allow the signed run to execute app-survival/security cases anyway, retaining
+`helper_identity: NOT VERIFIED` and never claiming helper exit/ownership PASS.
+A false `helper_identity_verified` keeps the overall acceptance gate false even
+if the separately observed product cases pass. The precise target HWND/text and
+security refusal predicates remain mandatory; uncertain processes are not killed.
+
+The authorized sequence is one hosted dry run, then one further signed attempt after fresh
 release admission; independent review runs in parallel. Only the explicit mode
 change enables that attempt. This PR never merges.
 

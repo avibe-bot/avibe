@@ -465,7 +465,15 @@ try {
                 if (-not $diagnostics.typed_attempted) { throw 'shipped_type_not_attempted_readiness_or_focus_unproven' }
                 if (-not [AcceptanceNative]::UnsavedTextEquals($window, $text)) { throw 'shipped_type_did_not_create_unsaved_text' }
                 Set-CasePhase 'helper_inventory'
-                $helpers = Driver-Handles $target.Id
+                try {
+                    $helpers = Driver-Handles $target.Id
+                    $result.cu_input_diagnostics[$operationId].helper_identity = @{status='VERIFIED'; reason_class=$null}
+                } catch {
+                    if (-not $inputData.ContainsKey('allow_unverified_helpers') -or -not $inputData.allow_unverified_helpers) { throw }
+                    $result.helper_identity_verified = $false
+                    $result.cu_input_diagnostics[$operationId].helper_identity = @{status='NOT VERIFIED'; reason_class=$_.Exception.GetBaseException().GetType().FullName}
+                    Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
+                }
                 Set-CasePhase ('lifecycle_' + $operation)
                 if ($operation -eq 'off') {
                     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -483,17 +491,20 @@ try {
                     $Context.Desktop.Kill()
                     if (-not $Context.Desktop.WaitForExit(10000)) { throw 'desktop_crash_not_observed' }
                 }
-                Set-CasePhase 'helper_exit'
-                $deadline = (Get-Date).AddSeconds(30)
-                foreach ($helper in $helpers) {
-                    $remaining = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalMilliseconds)
-                    if (-not $helper.WaitForExit($remaining)) { throw 'driver_or_helper_survived_shutdown' }
+                if ($null -ne $helpers) {
+                    Set-CasePhase 'helper_exit'
+                    $deadline = (Get-Date).AddSeconds(30)
+                    foreach ($helper in $helpers) {
+                        $remaining = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalMilliseconds)
+                        if (-not $helper.WaitForExit($remaining)) { throw 'driver_or_helper_survived_shutdown' }
+                    }
+                    Set-CasePhase 'replacement_driver_probe'
+                    Assert-NoReplacementDriver $helpers $target.Id
                 }
-                Set-CasePhase 'replacement_driver_probe'
-                Assert-NoReplacementDriver $helpers $target.Id
                 Set-CasePhase 'unsaved_text_after'
                 if ($target.HasExited -or -not [AcceptanceNative]::UnsavedTextEquals($window, $text)) { throw 'original_app_or_unsaved_text_did_not_survive' }
-                Verdict $currentCase 'PASS' 'original_app_and_unsaved_text_survived_pinned_helpers_exited_and_no_replacement_generation'
+                $survivalReason = if ($null -eq $helpers) { 'original_app_and_unsaved_text_survived_helper_identity_and_exit_NOT_VERIFIED' } else { 'original_app_and_unsaved_text_survived_pinned_helpers_exited_and_no_replacement_generation' }
+                Verdict $currentCase 'PASS' $survivalReason
             } catch {
                 Add-AcceptanceFailure $result $result.cu_input_diagnostics[$operationId].phase $_
                 throw

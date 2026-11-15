@@ -4,28 +4,40 @@ $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
 New-Item -ItemType Directory -Force $Work | Out-Null
 . $Source
 if ($NativeWorker) {
-    $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-    if ($identity.User.Value -ne $ExpectedSid -or ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'inventory_worker_not_ordinary' }
-    $env:TEMP=$Work; $env:TMP=$Work
-    Add-Type -Path (Join-Path (Split-Path $Source) 'Native.cs')
-    $image=Join-Path $Work 'cua-driver.exe'
-    Add-Type -TypeDefinition 'public class IdleFixture { public static void Main() { System.Threading.Thread.Sleep(45000); } }' -OutputAssembly $image -OutputType ConsoleApplication
+    $phase='identity'; $e=[ordered]@{}; $nativeFailure=$null; $nativePassed=$false; $ordinaryUser=$false
     $child=$null; $handles=$null
     try {
+    $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($identity.User.Value -ne $ExpectedSid -or ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'inventory_worker_not_ordinary' }
+    $ordinaryUser=$true
+    $env:TEMP=$Work; $env:TMP=$Work
+    $phase='compile_observer'
+    Add-Type -Path (Join-Path (Split-Path $Source) 'Native.cs')
+    $image=Join-Path $Work 'cua-driver.exe'
+    $phase='compile_fixture'
+    Add-Type -TypeDefinition 'public class IdleFixture { public static void Main() { System.Threading.Thread.Sleep(45000); } }' -OutputAssembly $image -OutputType ConsoleApplication
+        $phase='start_fixture'
         $psi=[Diagnostics.ProcessStartInfo]::new(); $psi.FileName=$image; $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true
         $child=[Diagnostics.Process]::Start($psi); $null=$child.SafeHandle
         $hash=(Get-FileHash -LiteralPath $image).Hash
         $e=[ordered]@{}
+        $phase='inventory_query'
         $handles=Get-AcceptanceHelpers -DriverPath $image -DriverHash $hash -OwnerSid $ExpectedSid -AppPid 0 -DesktopPid $PID -Known ([Collections.Generic.HashSet[int]]::new()) -Evidence $e
+        $phase='identity_assertions'
         if ($handles.Count -ne 1 -or $handles[0].Id -ne $child.Id -or $handles[0].HasExited) { throw 'ordinary_user_inventory_positive_failed' }
         $candidate=@($e.candidates | Where-Object { $_.pid -eq $child.Id })[0]
         if ($candidate.hash_match -ne $true -or $candidate.owner_match -ne $true -or $candidate.path_match -ne $true -or $candidate.parent_relation -ne 'desktop') { throw 'ordinary_user_identity_not_bound' }
+        $phase='retained_exit'
         $child.Kill(); if (-not $handles[0].WaitForExit(10000)) { throw 'retained_exit_not_observed' }
-        @{passed=$true; ordinary_user=$true; powershell_version=$PSVersionTable.PSVersion.ToString(); evidence=$e; retained_exit=$true} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Work 'native-inventory.json') -Encoding utf8
+        $nativePassed=$true
+    } catch {
+        $nativeFailure=@{phase=$phase; error_class=$_.Exception.GetBaseException().GetType().FullName; script_line=$_.InvocationInfo.ScriptLineNumber}
     } finally {
         if ($null -ne $handles) { foreach ($p in $handles) { $p.Dispose() } }
         if ($child) { if (-not $child.HasExited) { $child.Kill(); $null=$child.WaitForExit(10000) }; $child.Dispose() }
+        @{passed=$nativePassed; ordinary_user=$ordinaryUser; powershell_version=$PSVersionTable.PSVersion.ToString(); evidence=$e; failure=$nativeFailure; retained_exit=$nativePassed} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Work 'native-inventory.json') -Encoding utf8
     }
+    if (-not $nativePassed) { exit 1 }
     exit 0
 }
 if ($Hosted) {
@@ -55,10 +67,11 @@ if ($Hosted) {
         foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $root 'test.ps1'),'-Source',(Join-Path $root 'inventory.ps1'),'-Work',$root,'-NativeWorker','-ExpectedSid',$user.SID.Value)) { $psi.ArgumentList.Add($arg) }
         $worker=[Diagnostics.Process]::Start($psi); $null=$worker.SafeHandle
         if (-not $worker.WaitForExit(60000)) { throw 'ordinary_inventory_worker_timeout' }
-        if ($worker.ExitCode -ne 0) { throw 'ordinary_inventory_worker_failed' }
-        $proof=Get-Content -LiteralPath (Join-Path $root 'native-inventory.json') -Raw | ConvertFrom-Json
-        if (-not $proof.passed -or -not $proof.ordinary_user) { throw 'ordinary_inventory_proof_missing' }
+        $proof=if (Test-Path -LiteralPath (Join-Path $root 'native-inventory.json')) { Get-Content -LiteralPath (Join-Path $root 'native-inventory.json') -Raw | ConvertFrom-Json } else { @{passed=$false; failure=@{phase='worker_proof_missing'; exit_code=$worker.ExitCode}} }
+        $proof | Add-Member -NotePropertyName worker_exit_code -NotePropertyValue $worker.ExitCode -Force
         $proof | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $Work 'inventory-native-proof.json') -Encoding utf8
+        if ($worker.ExitCode -ne 0 -or -not $proof.passed) { throw 'ordinary_inventory_worker_failed_see_proof' }
+        if (-not $proof.ordinary_user) { throw 'ordinary_inventory_proof_missing' }
     } finally {
         if ($worker) { if (-not $worker.HasExited) { $worker.Kill($true); $null=$worker.WaitForExit(10000) }; $worker.Dispose() }
         if ($user) {
@@ -81,6 +94,7 @@ public static class AcceptanceNative {
  public static string Image;
  public sealed class Observed : IDisposable {
   public int Id; public bool Disposed;
+  public string Path { get { return ImagePath(); } }
   public string ImagePath() { if (Fault=="image") throw new InvalidOperationException(); return Image; }
   public string OwnerSid() { if (Fault=="owner") throw new InvalidOperationException(); return Fault=="wrong_owner" ? "other" : "owner"; }
   public bool HasExited { get { return Fault=="exited"; } }
@@ -94,6 +108,7 @@ $image=Join-Path $Work 'cua-driver.exe'; Set-Content -LiteralPath $image -Value 
 [AcceptanceNative]::Image=$image
 $hash=(Get-FileHash -LiteralPath $image).Hash
 function Get-CimInstance { param($ClassName,$ErrorAction) if ([AcceptanceNative]::Fault -eq 'enumeration') { throw 'injected_enumeration_failure' }; if ([AcceptanceNative]::Fault -eq 'none_found') { return @() }; return @([pscustomobject]@{Name='cua-driver.exe'; ProcessId=201; ParentProcessId=100; ExecutablePath=$null}, [pscustomobject]@{Name='cua-driver.exe'; ProcessId=202; ParentProcessId=101; ExecutablePath=$null}, [pscustomobject]@{Name='helper.exe'; ProcessId=203; ParentProcessId=201; ExecutablePath=$null}, [pscustomobject]@{Name='app.exe'; ProcessId=204; ParentProcessId=201; ExecutablePath=$null}) }
+function Get-Process { param($Name,$Id,$ErrorAction) if ($Name) { return @() }; $p=[AcceptanceNative+Observed]::new(); $p.Id=$Id; return $p }
 foreach ($fault in @('none','open','image','owner','wrong_owner','exited','hash','replacement','enumeration','none_found')) {
     [AcceptanceNative]::Fault=$fault; $e=[ordered]@{}; $found=$null; $failed=$false
     try {
