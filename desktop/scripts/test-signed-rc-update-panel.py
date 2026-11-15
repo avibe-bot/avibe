@@ -241,7 +241,11 @@ def windows_button(window, label, *, version=False):
     return sorted(candidates, key=lambda c: c.rectangle().top)[0]
 
 
-FIRST_RUN_BUTTONS = ("Get started", "Set up later", "Start using this Mac", "Continue on this Mac")
+FIRST_RUN_BUTTONS = (
+    "Get started", "Set up later",
+    "Start using this Mac", "Continue on this Mac",
+    "Start using this PC", "Continue on this PC",
+)
 
 
 def windows_first_run(app):
@@ -408,8 +412,8 @@ set needle to item 3 of argv
     end try
     set dumpText to dumpText & elementRole & tab & elementName & tab & elementValue & tab & elementDescription & linefeed
     set labelMatch to elementName is needle or elementValue is needle or elementDescription is needle
-    if operation is "version" then
-     set labelMatch to elementName contains needle or elementValue contains needle or elementDescription contains needle
+    if operation is "version" or operation is "version-available" then
+     set labelMatch to elementRole is "AXButton" and (elementName contains needle or elementValue contains needle or elementDescription contains needle)
     end if
     if labelMatch then
      try
@@ -421,7 +425,7 @@ set needle to item 3 of argv
    if (count candidateControls) is 0 then error "no matching enabled AXPress control: " & needle
    if (count candidateControls) is not 1 and needle is not "Check for updates" then error "ambiguous AXPress control: " & needle
    set chosen to item 1 of candidateControls
-   if operation is "available" then return "ready"
+   if operation is "available" or operation is "version-available" then return "ready"
    if operation is "state" then return value of chosen as text
    perform action "AXPress" of chosen
    return "clicked:" & needle
@@ -445,14 +449,19 @@ def mac_has_version(text, version):
                for row in text.splitlines() for field in row.split("\t"))
 
 
+def mac_version_button_ready(pid, native_version):
+    try:
+        return mac_ax(pid, "version-available", native_version) == "ready"
+    except subprocess.CalledProcessError:
+        return False
+
+
 def mac_first_run(pid):
     clicked = set()
     def ready():
         text = mac_snapshot(pid, "first-run-macos")
-        if mac_has_version(text, SOURCE_SHORT):
-            # Do not mistake the startup dialog's Current-version text for a badge.
-            if "Download and Install" not in text:
-                return True
+        if "Download and Install" not in text and mac_version_button_ready(pid, SOURCE_VERSION):
+            return True
         labels = ("Later",) if "Download and Install" in text else FIRST_RUN_BUTTONS
         for label in labels:
             if label not in text or (label in clicked and label != "Later"):
@@ -476,11 +485,11 @@ def mac_first_run(pid):
 def mac_panel(pid: int, version: str, stage: str):
     if stage == "rc2":
         mac_first_run(pid)
-    def loaded():
-        text = mac_snapshot(pid, stage + "-before")
-        return mac_has_version(text, version)
-    wait_for(loaded, 300, f"{stage}: macOS version trigger unavailable after cold start")
     native_version = SOURCE_VERSION if normalize_version(version) == normalize_version(SOURCE_VERSION) else TARGET_VERSION
+    def loaded():
+        mac_snapshot(pid, stage + "-before")
+        return mac_version_button_ready(pid, native_version)
+    wait_for(loaded, 300, f"{stage}: macOS version trigger unavailable after cold start")
     receipt = mac_ax(pid, "version", native_version)
     record("click-version", version=version, platform="macos", receipt=receipt)
     def current():

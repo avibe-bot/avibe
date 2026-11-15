@@ -92,9 +92,10 @@ def test_powershell_preserves_env_and_fails_closed(observer):
         observer.powershell('throw')
 
 
-def test_first_run_dismisses_offer_then_completes_no_key_setup(observer):
+@pytest.mark.parametrize('local_button', ['Start using this Mac', 'Start using this PC'])
+def test_first_run_dismisses_offer_then_completes_no_key_setup(observer, local_button):
     from unittest.mock import Mock
-    labels = ['Later', 'Get started', 'Set up later', observer.SOURCE_SHORT]
+    labels = ['Later', 'Get started', 'Set up later', local_button, observer.SOURCE_SHORT]
     phase = [0]
     clicked = []
     window = Mock()
@@ -117,8 +118,16 @@ def test_first_run_dismisses_offer_then_completes_no_key_setup(observer):
         raise AssertionError('first-run flow did not finish')
     with patch.object(observer, 'windows_button', side_effect=button), patch.object(observer, 'windows_tree', return_value=[]), patch.object(observer, 'wait_for', side_effect=poll):
         observer.windows_first_run(app)
-    assert clicked == ['Later', 'Get started', 'Set up later']
+    assert clicked == ['Later', 'Get started', 'Set up later', local_button]
     assert all(a['action'] != 'click-update' for a in observer.ACTIONS)
+
+
+def test_mac_badge_readiness_uses_nonclicking_native_button_lookup(observer):
+    with patch.object(observer, 'mac_ax', return_value='ready') as lookup:
+        assert observer.mac_version_button_ready(123, observer.SOURCE_VERSION)
+        lookup.assert_called_once_with(123, 'version-available', '3.2.7-rc.2')
+    assert 'elementRole is "AXButton"' in observer.MAC_AX
+    assert 'elementName contains needle' in observer.MAC_AX
 
 
 def test_mac_version_requires_exact_field(observer):
