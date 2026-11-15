@@ -271,17 +271,38 @@ def _append_source(
             base_url = official_api_key_base_url(source.vendor)
         if not base_url:
             raise EngineStateError("OpenAI-compatible source requires a base URL")
-        payload.setdefault("openai-compatibility", []).append(
-            {
-                "name": source.prefix,
-                "prefix": source.prefix,
-                "base-url": openai_compatible_endpoint(base_url),
-                "api-key-entries": [{"api-key": api_key}],
-                "models": models,
-            }
-        )
+        entry = {
+            "name": source.prefix,
+            "prefix": source.prefix,
+            "base-url": openai_compatible_endpoint(base_url),
+            "api-key-entries": [{"api-key": api_key}],
+            "models": models,
+        }
+        headers = _upstream_forwarded_headers(base_url)
+        if headers:
+            entry["headers"] = headers
+        payload.setdefault("openai-compatibility", []).append(entry)
         return
     raise EngineStateError("unsupported source protocol")
+
+
+# OpenCode Go (https://opencode.ai/inference/go/...) rejects a request without
+# ``x-opencode-session`` (HTTP 400 ``missing_session_id``). OpenCode sends its own session id to
+# every non-``opencode`` provider as ``X-Session-Id``; the engine copies a downstream header
+# into the upstream request when a ``headers`` value starts with ``$`` (and omits it when the
+# client sent none), so the per-conversation id survives the local proxy without a fixed value.
+_OPENCODE_GO_HOSTS: Final = frozenset({"opencode.ai", "www.opencode.ai"})
+_OPENCODE_GO_PATH_PREFIX: Final = "/inference/go"
+
+
+def _upstream_forwarded_headers(base_url: str) -> dict[str, str]:
+    """Headers an OpenAI-compatible entry forwards from the client; provider-specific, else empty."""
+    parts = urlsplit(base_url)
+    host = (parts.hostname or "").lower()
+    path = parts.path.rstrip("/") + "/"
+    if host in _OPENCODE_GO_HOSTS and path.startswith(_OPENCODE_GO_PATH_PREFIX + "/"):
+        return {"x-opencode-session": "$X-Session-Id"}
+    return {}
 
 
 def registered_model_ids(source: SourceRecord) -> tuple[str, ...]:
