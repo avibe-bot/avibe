@@ -197,7 +197,9 @@ private final class SheetFixtureRootViewController: UIViewController {
     /// the same MobileOnboardingViewController sheet owner used by Runtime;
     /// the bundled page is never asked to open its own route.
     private func presentRuntimeFixture() {
-        let origin = WebOrigin(scheme: "https", host: "current.example.invalid", port: nil)
+        guard let origin = WebOrigin(scheme: "https", host: "current.example.invalid", port: nil) else {
+            preconditionFailure("The fixed Runtime fixture origin must be valid")
+        }
         let runtime = WKWebView(
             frame: .zero,
             configuration: NativeBridgeConfiguration.make(
