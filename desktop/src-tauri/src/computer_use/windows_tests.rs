@@ -1,6 +1,6 @@
 use super::*;
 use std::io::Read;
-use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::System::Threading::{
     OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
@@ -38,24 +38,99 @@ fn windows_requires_explicit_runtime_capability_not_legacy_schema_one() {
 
 #[test]
 fn windows_health_requires_its_real_provider_not_macos_tcc_passes() {
-    let mut report = json!({"schema_version":"1", "platform":"win32", "driver_version":"0.31.0", "overall":"ok",
+    let report = json!({"schema_version":"1", "platform":"win32", "driver_version":"0.31.0", "overall":"ok",
     "checks":[
-        {"name":"binary_version","status":"pass"}, {"name":"platform_supported","status":"pass"},
-        {"name":"session_active","status":"pass"}, {"name":"ax_capability","status":"pass"},
-        {"name":"screen_capture_capability","status":"pass"}, {"name":"bundle_identity","status":"skip"},
-        {"name":"tcc_accessibility","status":"skip"}, {"name":"tcc_screen_recording","status":"skip"}
+        {"name":"binary_version","status":"pass","message":"ok"},
+        {"name":"platform_supported","status":"pass","message":"ok"},
+        {"name":"session_active","status":"pass","message":"ok"},
+        {"name":"bundle_identity","status":"skip","message":"not applicable on Windows"},
+        {"name":"tcc_accessibility","status":"skip","message":"not applicable on Windows"},
+        {"name":"tcc_screen_recording","status":"skip","message":"not applicable on Windows"},
+        {"name":"ax_capability","status":"pass","message":"ok"},
+        {"name":"screen_capture_capability","status":"pass","message":"ok"}
     ]});
     assert!(validate_health(&json!({"structuredContent":report})).is_ok());
-    for index in 0..5 {
-        report["checks"][index]["status"] = json!("fail");
-        assert!(validate_health(&json!({"structuredContent":report})).is_err());
-        report["checks"][index]["status"] = json!("pass");
+    // Startup must reject incomplete or misleading provider evidence. The old
+    // validator accepted omitted Windows skips, extra checks, and TCC passes.
+    for index in 0..8 {
+        let mut missing = report.clone();
+        missing["checks"].as_array_mut().unwrap().remove(index);
+        assert!(validate_health(&json!({"structuredContent":missing})).is_err());
+        let mut wrong = report.clone();
+        wrong["checks"][index]["status"] = json!(if (3..6).contains(&index) { "pass" } else { "fail" });
+        assert!(validate_health(&json!({"structuredContent":wrong})).is_err());
+        let mut duplicate = report.clone();
+        duplicate["checks"][index] = report["checks"][(index + 1) % 8].clone();
+        assert!(validate_health(&json!({"structuredContent":duplicate})).is_err());
     }
-    report["platform"] = json!("darwin");
-    assert!(validate_health(&json!({"structuredContent":report})).is_err());
+    for index in 3..6 {
+        let mut misleading = report.clone();
+        misleading["checks"][index]["message"] = json!("permission granted");
+        assert!(validate_health(&json!({"structuredContent":misleading})).is_err());
+    }
+    let mut extra = report.clone();
+    extra["checks"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"unknown","status":"pass"}));
+    assert!(validate_health(&json!({"structuredContent":extra})).is_err());
+    let mut wrong_platform = report;
+    wrong_platform["platform"] = json!("darwin");
+    assert!(validate_health(&json!({"structuredContent":wrong_platform})).is_err());
     assert!(validate_capture(&json!({"content":[{"type":"text","text":"captured"}]})).is_err());
     assert!(validate_capture(&json!({"content":[{"type":"image","data":""}]})).is_err());
     assert!(validate_capture(&json!({"content":[{"type":"image","data":"fixture"}]})).is_ok());
+}
+
+#[test]
+fn windows_security_refusals_survive_lifecycle_normalization() {
+    // Low-level connected-object/token failures must remain a pipe refusal,
+    // not get laundered into the generic health error in the published record.
+    for reason in ["object_unverified", "token_unverified", "pipe_unverified"] {
+        let mut lifecycle = ComputerUseLifecycle::off();
+        lifecycle.set_error(stable_error(&io::Error::other(reason), "health_failed"));
+        assert_eq!(lifecycle.reason(), Some("pipe_unverified"));
+    }
+}
+
+#[test]
+fn windows_unavailable_activation_controls_preserve_the_off_route() {
+    // Capability alone used to enable a no-op tray/Settings action when assets
+    // or saving failed. Test the shared production command/tray decision.
+    let mut view = MenuView {
+        available: true,
+        ..MenuView::default()
+    };
+    assert!(crate::computer_use_control_enabled(&view));
+    for (assets, save, enabled, expected) in [
+        (true, false, false, false),
+        (false, true, false, false),
+        (true, false, true, true),
+        (false, true, true, true),
+    ] {
+        view.asset_error = assets;
+        view.save_failed = save;
+        view.enabled = enabled;
+        assert_eq!(crate::computer_use_control_enabled(&view), expected);
+    }
+    view = MenuView {
+        available: true,
+        invalid_state: true,
+        ..MenuView::default()
+    };
+    assert!(
+        crate::computer_use_control_enabled(&view),
+        "recovered invalid state can be enabled"
+    );
+    view.initialization_error = true;
+    assert!(!crate::computer_use_control_enabled(&view));
+    view.initialization_error = false;
+    view.available = false;
+    view.enabled = true;
+    assert!(
+        !crate::computer_use_control_enabled(&view),
+        "rollback disables the tray"
+    );
 }
 
 #[test]

@@ -356,7 +356,12 @@ def parse_computer_use_state(payload: Any) -> ComputerUseState:
 def read_computer_use_state(path: Path | None = None) -> ComputerUseState | None:
     target = path or computer_use_state_path()
     try:
-        raw = target.read_text(encoding="utf-8")
+        if os.name == "nt":
+            from core.computer_windows import read_state_text
+
+            raw = read_state_text(target)
+        else:
+            raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError) as exc:

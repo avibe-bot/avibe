@@ -1,0 +1,17 @@
+[package]
+name = "avibe-computer-use-windows"
+description = "Bounded Win32 Computer Use security and private-state operations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_RemoteDesktop",
+  "Win32_System_StationsAndDesktops", "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"

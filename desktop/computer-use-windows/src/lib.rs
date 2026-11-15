@@ -1,12 +1,16 @@
 //! Windows Computer Use's ordinary-user, private-object and interactive boundary.
 //! No repair, elevation, desktop switching, or endpoint reclamation occurs here.
+//! This crate confines Win32 FFI so runtime-host retains `forbid(unsafe_code)`.
+
+#![cfg(windows)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read};
 use std::mem::{size_of, size_of_val, zeroed};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::null_mut;
 
@@ -182,7 +186,7 @@ fn sid_string(sid: *mut std::ffi::c_void) -> io::Result<String> {
 }
 
 /// Verify the descriptor of the already-open object, never a pathname lookup.
-pub fn require_private_handle(handle: HANDLE) -> io::Result<()> {
+fn require_private_handle(handle: HANDLE) -> io::Result<()> {
     let (mut owner, mut dacl, mut sd) = (null_mut(), null_mut::<ACL>(), null_mut());
     let result = unsafe {
         GetSecurityInfo(
@@ -274,7 +278,10 @@ fn open_private(path: &Path, disposition: u32, access: u32) -> io::Result<File> 
 }
 
 /// Called while the shell retains the exact live OwnedDriver process HANDLE.
-pub fn verify_owned_pipe(handle: HANDLE, expected_pid: u32) -> io::Result<()> {
+/// Verify a live, borrowed pipe without taking ownership or retaining it.
+/// The borrow keeps the handle valid for every native query in this call.
+pub fn verify_owned_pipe(pipe: BorrowedHandle<'_>, expected_pid: u32) -> io::Result<()> {
+    let handle = pipe.as_raw_handle();
     require_ordinary_user()?;
     let session = interactive_session()?;
     require_private_handle(handle)?;

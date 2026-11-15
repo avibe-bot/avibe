@@ -4,7 +4,7 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::AsHandle;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -107,7 +107,7 @@ impl Controller {
         let _ = self.sender.send(Event::Toggle);
     }
     pub(crate) fn turn_on(&self) -> Result<(), String> {
-        if !self.view().available {
+        if !crate::computer_use_control_enabled(&self.view()) {
             return Err("Computer Use is unavailable.".to_owned());
         }
         self.sender
@@ -421,19 +421,19 @@ impl RuntimeState {
                 }
                 match ClientOptions::new().open(&self.endpoint) {
                     Ok(pipe) => {
-                        verify_owned_pipe(pipe.as_raw_handle(), driver.id())?;
+                        verify_owned_pipe(pipe.as_handle(), driver.id())?;
                         let report = call(pipe, "health_report", json!({})).await?;
                         validate_health(&report)?;
                         if full {
                             let pipe = ClientOptions::new().open(&self.endpoint)?;
-                            verify_owned_pipe(pipe.as_raw_handle(), driver.id())?;
+                            verify_owned_pipe(pipe.as_handle(), driver.id())?;
                             let capture = call(pipe, "get_desktop_state", json!({"max_image_dimension":64})).await?;
                             validate_capture(&capture)?;
                         }
                         // Bind the publication to a fresh connected pipe and
                         // the still-owned child after all asynchronous probes.
                         let pipe = ClientOptions::new().open(&self.endpoint)?;
-                        verify_owned_pipe(pipe.as_raw_handle(), driver.id())?;
+                        verify_owned_pipe(pipe.as_handle(), driver.id())?;
                         if driver.has_exited()? {
                             return Err(io::Error::other("daemon_exited"));
                         }
@@ -535,7 +535,7 @@ fn stable_error(error: &io::Error, fallback: &'static str) -> &'static str {
         "session_locked" => "session_locked",
         "session_unavailable" => "session_unavailable",
         "session_mismatch" => "session_mismatch",
-        "pipe_unverified" => "pipe_unverified",
+        "pipe_unverified" | "object_unverified" | "token_unverified" => "pipe_unverified",
         "daemon_exited" => "daemon_exited",
         "daemon_stop_failed" => "daemon_stop_failed",
         _ => fallback,
@@ -622,21 +622,29 @@ fn validate_health(result: &Value) -> io::Result<()> {
         .get("checks")
         .and_then(Value::as_array)
         .ok_or_else(|| io::Error::other("health_protocol"))?;
-    for name in [
-        "binary_version",
-        "platform_supported",
-        "session_active",
-        "ax_capability",
-        "screen_capture_capability",
-    ] {
+    // Pin the complete provider map: Windows-inapplicable checks are explicit
+    // skips, never absent or falsely reported as permission passes.
+    let expected = [
+        ("binary_version", "pass"),
+        ("platform_supported", "pass"),
+        ("session_active", "pass"),
+        ("bundle_identity", "skip"),
+        ("tcc_accessibility", "skip"),
+        ("tcc_screen_recording", "skip"),
+        ("ax_capability", "pass"),
+        ("screen_capture_capability", "pass"),
+    ];
+    if checks.len() != expected.len() {
+        return Err(io::Error::other("health_protocol"));
+    }
+    for (name, status) in expected {
         let mut matching = checks
             .iter()
             .filter(|check| check.get("name").and_then(Value::as_str) == Some(name));
-        if matching
-            .next()
-            .and_then(|check| check.get("status"))
-            .and_then(Value::as_str)
-            != Some("pass")
+        let check = matching.next().ok_or_else(|| io::Error::other("health_protocol"))?;
+        if check.get("status").and_then(Value::as_str) != Some(status)
+            || check.get("message").and_then(Value::as_str).is_none()
+            || (status == "skip" && check.get("message").and_then(Value::as_str) != Some("not applicable on Windows"))
             || matching.next().is_some()
         {
             return Err(io::Error::other("health_failed"));

@@ -133,6 +133,19 @@ def _kernel_platform_supported() -> bool:
     return os.name == "posix" or (os.name == "nt" and windows_computer_use_supported())
 
 
+def _status_invalidation_reason(status: Any) -> str | None:
+    if getattr(status, "status", None) == "off":
+        return "computer_use_off"
+    if os.name == "nt" and (
+        getattr(status, "status", None) == "needs_runtime"
+        or getattr(status, "reason", None) in {
+            "runtime_too_old", "runtime_unavailable", "platform_unsupported", "unsupported_architecture",
+        }
+    ):
+        return "runtime_unavailable"
+    return None
+
+
 def _default_status() -> Any:
     from core.computer_use import effective_computer_use_status
 
@@ -372,15 +385,17 @@ class ComputerJsKernelManager:
         status = await self._computer_use_status()
         if slot.invalidated is not None or call.cancel.done():
             return self._cancelled(call)
-        if getattr(status, "status", None) == "off":
+        invalidation = _status_invalidation_reason(status)
+        if invalidation is not None:
             for session_id, candidate in list(self._slots.items()):
                 if candidate is slot:
-                    self._invalidate_slot(session_id, "computer_use_off")
+                    self._invalidate_slot(session_id, invalidation)
             return _failed(
                 _envelope(
                     "computer_use_unavailable",
-                    "Computer Use is off.",
-                    params={"status": "off", "reason": getattr(status, "reason", None)},
+                    "Computer Use is off." if invalidation == "computer_use_off"
+                    else "Computer Use needs a compatible Runtime.",
+                    params={"status": getattr(status, "status", None), "reason": getattr(status, "reason", None)},
                 )
             )
         kernel_fresh = False
@@ -774,8 +789,8 @@ class ComputerJsKernelManager:
             if not _kernel_platform_supported():
                 for session_id in list(self._slots):
                     self._invalidate_slot(session_id, "platform_unsupported")
-            elif getattr(status, "status", None) == "off":
+            elif (reason := _status_invalidation_reason(status)) is not None:
                 # Executing and queued calls are cancelled with the kernel:
-                # they report js_kernel_reset, and no binding outlives off.
+                # no binding outlives off or a Windows Runtime rollback.
                 for session_id in list(self._slots):
-                    self._invalidate_slot(session_id, "computer_use_off")
+                    self._invalidate_slot(session_id, reason)

@@ -17,8 +17,9 @@ schema-v1 state/lock and owned-process foundations rather than changing their
 wire contract. macOS admission, lifecycle and snapshot pins are unchanged.
 The Windows adapter is `desktop/src-tauri/src/computer_use/windows.rs`; native
 private-object and interactive checks are in
-`desktop/runtime-host/src/computer_use_windows.rs`; Runtime admission is in
-`core/computer_windows.py`.
+`desktop/computer-use-windows/src/lib.rs`; Runtime admission is in
+`core/computer_windows.py`. The small Windows-only FFI crate exposes safe owned
+file/borrowed-handle APIs and leaves `runtime-host`'s `forbid(unsafe_code)` intact.
 
 The single availability guard is
 `core/computer_use.py:COMPUTER_USE_WINDOWS_SCHEMA_VERSION = 1`. Its ordinary
@@ -61,7 +62,9 @@ No model credentials belong on hosted runners.
   means “probably live”. The probe verifies the opened regular-file identity,
   current-user owner, and DACL permitting only that user and optionally SYSTEM.
   State and lock artifacts must both be owner-private; the probe never repairs
-  ACLs, creates a missing lock, or accepts a reparse point.
+  ACLs, creates a missing lock, or accepts a reparse point. Python state reads
+  use read-only `OPEN_EXISTING` with delete sharing, allowing the Rust shell to
+  atomically publish the next generation while readers retain the old one.
 - Windows ready Runtime admission requires: valid state and the Windows snapshot;
   enabled/ready state; the shell lock is held; the exact published named pipe
   opens; the pipe server has a live PID in the same nonzero interactive session
@@ -113,8 +116,10 @@ No model credentials belong on hosted runners.
   The foundation's earlier target-survival fixture enabled breakaway only in the
   test; activation removes that test-only setup. Its old PASS is **not** evidence
   that the previously shipped production Job flags supported target survival.
-- Startup checks the Windows health report (version/platform, core reachability,
-  UIA and D3D11), then an in-memory bounded desktop capture, and rechecks the exact
+- Startup checks the complete eight-entry Windows health report (version/platform,
+  core reachability, UIA and D3D11 pass; bundle/TCC entries explicitly skip with
+  `not applicable on Windows`), then an in-memory bounded desktop capture, and
+  rechecks the exact
   live driver's pipe before publishing ready. Idle health does not capture.
   Shell health uses the pinned driver's authenticated named-pipe `call` protocol,
   without a separate health-proxy child. No screenshot is saved by these probes.

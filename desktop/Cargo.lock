@@ -228,6 +228,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "avibe-computer-use-windows"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "avibe-desktop"
 version = "0.1.0"
 dependencies = [
@@ -275,6 +283,7 @@ name = "avibe-runtime-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "avibe-computer-use-windows",
  "base64 0.23.1",
  "chrono",
  "cookie",
@@ -290,7 +299,6 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
- "windows-sys 0.61.2",
  "zip",
 ]
 

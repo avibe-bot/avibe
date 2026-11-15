@@ -9,8 +9,34 @@ from __future__ import annotations
 import contextlib
 import ctypes
 from ctypes import wintypes
+from pathlib import Path
 
 from core.private_fs import windows_security
+
+
+def read_state_text(path: Path) -> str:
+    """Read one generation without blocking the shell's atomic replacement."""
+    import io
+    import msvcrt
+    import os
+
+    security = windows_security()
+
+    def opener(name: str, _flags: int) -> int:
+        # READ | WRITE | DELETE sharing is essential: the shell publishes the
+        # next generation by replacing this path while readers retain the old
+        # handle. OPEN_EXISTING neither creates nor repairs state.
+        handle = security.kernel32.CreateFileW(name, 0x80000000, 7, None, 3, 0x80, None)
+        if handle in (None, ctypes.c_void_p(-1).value):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        except BaseException:
+            security.kernel32.CloseHandle(handle)
+            raise
+
+    with io.open(path, "r", encoding="utf-8", opener=opener) as stream:
+        return stream.read()
 
 
 class AdmissionRefused(OSError):

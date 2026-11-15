@@ -123,9 +123,19 @@ def write_ready(directory: Path, *, shell_pid: int | None = None) -> Path:
     return state
 
 
+@pytest.fixture
+def windows_state_reader(monkeypatch):
+    # These portable admission tests supply state bytes, not Win32 file I/O;
+    # the native overlapping-reader regression below exercises the real open.
+    if os.name != "nt":
+        from core import computer_windows
+
+        monkeypatch.setattr(computer_windows, "read_state_text", lambda path: path.read_text(encoding="utf-8"))
+
+
 @pytest.mark.parametrize("reason", [None, "pipe_unverified", "elevated_runtime", "session_unavailable", "session_locked", "session_mismatch", "daemon_unreachable"])
 @pytest.mark.parametrize("injected", [False, True])
-def test_windows_ready_requires_security_admission(tmp_path, monkeypatch, reason, injected):
+def test_windows_ready_requires_security_admission(tmp_path, monkeypatch, reason, injected, windows_state_reader):
     from core import computer_windows
 
     state = write_ready(tmp_path)
@@ -148,7 +158,7 @@ def test_windows_ready_requires_security_admission(tmp_path, monkeypatch, reason
 
 
 @pytest.mark.parametrize("machine,capability,reason", [("ARM64", 1, "unsupported_architecture"), ("AMD64", 0, "platform_unsupported")])
-def test_windows_capability_rollback_refuses_ready_shell_and_js(tmp_path, monkeypatch, machine, capability, reason):
+def test_windows_capability_rollback_refuses_ready_shell_and_js(tmp_path, monkeypatch, machine, capability, reason, windows_state_reader):
     from core import computer_js_kernels, computer_windows
 
     state = write_ready(tmp_path)
@@ -165,7 +175,7 @@ def test_windows_capability_rollback_refuses_ready_shell_and_js(tmp_path, monkey
     assert computer_js_kernels._kernel_platform_supported() is False
 
 
-def test_windows_rejects_macos_snapshot_before_opening_pipe(tmp_path, monkeypatch):
+def test_windows_rejects_macos_snapshot_before_opening_pipe(tmp_path, monkeypatch, windows_state_reader):
     from core import computer_windows
 
     state = write_ready(tmp_path)
@@ -184,6 +194,39 @@ def test_windows_rejects_macos_snapshot_before_opening_pipe(tmp_path, monkeypatc
 # Native tests run only on Windows. CI must select these explicitly and assert
 # an exact count and zero skips, rather than treating a skipped suite as evidence.
 native = pytest.mark.skipif(os.name != "nt", reason="Windows Win32 integration")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows sharing semantics")
+def test_windows_native_state_read_allows_atomic_replacement(tmp_path, monkeypatch):
+    import io
+
+    state = write_ready(tmp_path)
+    replacement = tmp_path / "next-state.json"
+    next_record = json.loads(state.read_text(encoding="utf-8"))
+    next_record["instance_id"] = "next-shell"
+    replacement.write_text(json.dumps(next_record), encoding="utf-8")
+    original_open = io.open
+    replaced = []
+
+    def overlapping_open(file, *args, **kwargs):
+        stream = original_open(file, *args, **kwargs)
+        if Path(file) == state:
+            try:
+                # Deterministically overlap the real production reader handle
+                # with the same atomic replace used by the Rust state writer.
+                os.replace(replacement, state)
+                replaced.append(True)
+            except BaseException:
+                stream.close()
+                raise
+        return stream
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(io, "open", overlapping_open)
+        observed = cu.read_computer_use_state(state)
+    assert replaced == [True]
+    assert observed.instance_id == "test"  # pinned old generation, not mixed bytes
+    assert cu.read_computer_use_state(state).instance_id == "next-shell"
 
 
 def private_lock(path: Path) -> None:

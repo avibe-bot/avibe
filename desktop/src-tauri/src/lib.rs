@@ -317,9 +317,11 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
 #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
 fn computer_use_control_enabled(view: &computer_use::MenuView) -> bool {
     #[cfg(target_os = "windows")]
-    if !view.available {
+    if !view.available || (!view.enabled && (view.asset_error || view.save_failed)) {
         return false;
     }
+    // An enabled feature must keep its OFF route even if assets/state fail.
+    // A recovered invalid record is already rewritten off and may be enabled.
     !view.initialization_error
 }
 

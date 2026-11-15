@@ -325,8 +325,11 @@ def test_pipe_admission_failure_closes_handle_and_pending_accept(monkeypatch, ap
     asyncio.run(asyncio.wait_for(scenario(), 30))
 
 
-def test_public_js_route_stays_disabled_on_windows_with_prior_enabled_state(monkeypatch):
-    from core import computer_js_kernels as kernels
+def test_public_js_rollback_refuses_windows_prior_enabled_state(monkeypatch):
+    from core import computer_js_kernels as kernels, computer_use
+
+    monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 0)
+    monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
 
     async def scenario():
         monkeypatch.setattr(kernels, "os", SimpleNamespace(name="nt"))
