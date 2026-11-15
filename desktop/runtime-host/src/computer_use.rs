@@ -222,8 +222,12 @@ impl ComputerUseStateStore {
         if let Err(error) = (|| {
             file.write_all(&payload)?;
             file.sync_all()?;
+            #[cfg(windows)]
+            let result = crate::computer_use_windows::publish_private_file(&file, &self.path);
             drop(file);
-            fs::rename(&temporary, &self.path)
+            #[cfg(not(windows))]
+            let result = fs::rename(&temporary, &self.path);
+            result
         })() {
             let _ = fs::remove_file(&temporary);
             return Err(error);
@@ -858,6 +862,37 @@ mod tests {
             proxy_executable: (state == ComputerUsePhase::Ready).then(|| temporary.join("cua-driver")),
             host_bundle_id: (state == ComputerUsePhase::Ready).then(|| "bot.avibe.desktop.test".to_owned()),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn state_publication_replaces_an_open_reader_without_mixing_generations() {
+        use std::io::Read;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(COMPUTER_USE_STATE_FILE);
+        let store = ComputerUseStateStore::new(path.clone());
+        let old = record(ComputerUsePhase::Ready, true);
+        store.write(&old).unwrap();
+        // Rust's file reader has READ/WRITE/DELETE sharing, matching the Python
+        // reader's separately native-tested contract. Legacy rename still fails
+        // with this handle open; exercise the real writer, not a mock publisher.
+        let mut reader = File::open(&path).unwrap();
+        let mut next = old.clone();
+        next.generation += 1;
+        next.state = ComputerUsePhase::Off;
+        next.enabled = false;
+        store.write(&next).unwrap();
+        let mut old_bytes = Vec::new();
+        reader.read_to_end(&mut old_bytes).unwrap();
+        let observed: ComputerUseRecord = serde_json::from_slice(&old_bytes).unwrap();
+        assert_eq!(observed.generation, old.generation);
+        assert_eq!(observed.state, ComputerUsePhase::Ready);
+        let StoredComputerUseState::Current(observed) = store.read() else {
+            panic!("published state is not private/readable")
+        };
+        assert_eq!(observed.generation, next.generation);
+        assert_eq!(observed.state, ComputerUsePhase::Off);
     }
 
     #[test]

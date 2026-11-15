@@ -130,11 +130,11 @@ class WindowsAdmission:
         size = wintypes.DWORD()
         self.advapi.GetTokenInformation(token, kind, None, 0, ctypes.byref(size))
         if not 0 < size.value <= 65536:
-            raise AdmissionRefused("pipe_unverified")
+            raise AdmissionRefused("pipe_unverified") from ctypes.WinError(ctypes.get_last_error())
         # Win32 structures contain pointers; use pointer-aligned storage.
         buffer = (ctypes.c_size_t * ((size.value + ctypes.sizeof(ctypes.c_size_t) - 1) // ctypes.sizeof(ctypes.c_size_t)))()
         if not self.advapi.GetTokenInformation(token, kind, buffer, ctypes.sizeof(buffer), ctypes.byref(size)):
-            raise AdmissionRefused("pipe_unverified")
+            raise AdmissionRefused("pipe_unverified") from ctypes.WinError(ctypes.get_last_error())
         return buffer
 
     def ordinary_token(self, process: object, *, reason: str) -> None:

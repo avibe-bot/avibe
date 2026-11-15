@@ -63,8 +63,13 @@ No model credentials belong on hosted runners.
   current-user owner, and DACL permitting only that user and optionally SYSTEM.
   State and lock artifacts must both be owner-private; the probe never repairs
   ACLs, creates a missing lock, or accepts a reparse point. Python state reads
-  use read-only `OPEN_EXISTING` with delete sharing, allowing the Rust shell to
-  atomically publish the next generation while readers retain the old one.
+  use read-only `OPEN_EXISTING` with read/write/delete sharing. The Rust writer
+  publishes its still-open private staging file using `FileRenameInfoEx` with
+  `REPLACE_IF_EXISTS | POSIX_SEMANTICS`; old readers retain the previous record
+  and subsequent opens see the next generation. Delete sharing alone does not
+  make legacy rename replace an open destination. Native regressions separately
+  prove Python delete sharing and the actual Rust StateStore held-reader
+  publication; neither a mock publisher nor a local cross-build proves this.
 - Windows ready Runtime admission requires: valid state and the Windows snapshot;
   enabled/ready state; the shell lock is held; the exact published named pipe
   opens; the pipe server has a live PID in the same nonzero interactive session

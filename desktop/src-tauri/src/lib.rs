@@ -199,7 +199,9 @@ struct NativeComputerUseCatalog {
     needs_permission: String,
     needs_permission_accessibility: String,
     needs_permission_screen_recording: String,
+    #[cfg(target_os = "macos")]
     screen_recording_title: String,
+    #[cfg(target_os = "macos")]
     screen_recording_guide: String,
     needs_runtime: String,
     runtime_unavailable: String,

@@ -197,25 +197,27 @@ native = pytest.mark.skipif(os.name != "nt", reason="Windows Win32 integration")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows sharing semantics")
-def test_windows_native_state_read_allows_atomic_replacement(tmp_path, monkeypatch):
+def test_windows_native_state_read_allows_delete_sharing(tmp_path, monkeypatch):
     import io
+    from core.private_fs import windows_security
 
     state = write_ready(tmp_path)
-    replacement = tmp_path / "next-state.json"
-    next_record = json.loads(state.read_text(encoding="utf-8"))
-    next_record["instance_id"] = "next-shell"
-    replacement.write_text(json.dumps(next_record), encoding="utf-8")
     original_open = io.open
-    replaced = []
+    checked = []
+    security = windows_security()
 
     def overlapping_open(file, *args, **kwargs):
         stream = original_open(file, *args, **kwargs)
         if Path(file) == state:
             try:
-                # Deterministically overlap the real production reader handle
-                # with the same atomic replace used by the Rust state writer.
-                os.replace(replacement, state)
-                replaced.append(True)
+                # Probe DELETE access while the production reader is open.
+                # Publication itself is tested at the Rust StateStore owner:
+                # legacy MoveFileEx replacement is not a valid overlap oracle.
+                handle = security.kernel32.CreateFileW(str(state), 0x00010000, 7, None, 3, 0x80, None)
+                if handle in (None, ctypes.c_void_p(-1).value):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                security.kernel32.CloseHandle(handle)
+                checked.append(True)
             except BaseException:
                 stream.close()
                 raise
@@ -224,9 +226,8 @@ def test_windows_native_state_read_allows_atomic_replacement(tmp_path, monkeypat
     with monkeypatch.context() as scoped:
         scoped.setattr(io, "open", overlapping_open)
         observed = cu.read_computer_use_state(state)
-    assert replaced == [True]
-    assert observed.instance_id == "test"  # pinned old generation, not mixed bytes
-    assert cu.read_computer_use_state(state).instance_id == "next-shell"
+    assert checked == [True]
+    assert observed.instance_id == "test"
 
 
 def private_lock(path: Path) -> None:
@@ -271,6 +272,27 @@ def test_windows_native_lock_free_and_missing(tmp_path):
 
 @native
 def test_windows_native_lock_contention_and_ready_refusal(tmp_path):
+    from core.computer_windows import AdmissionRefused, WindowsAdmission
+
+    # Exercise native construction and token evidence outside the stable-status
+    # wrapper: ABI errors must retain their traceback, not look like a valid
+    # unavailable endpoint. Both an ordinary runner and a real elevated refusal
+    # are valid; unknown token/pipe evidence is not.
+    admission = WindowsAdmission()
+    try:
+        admission.ordinary_token(admission.kernel.GetCurrentProcess(), reason="elevated_runtime")
+    except AdmissionRefused as exc:
+        if exc.reason != "elevated_runtime":
+            raise
+
+    # Also expose the complete native call chain before the fail-closed status
+    # adapter. Unexpected refusals retain the originating Win32 call/traceback.
+    expected = {"elevated_runtime", "session_unavailable", "session_locked", "daemon_unreachable"}
+    with pytest.raises(AdmissionRefused) as refusal:
+        admission.verify(r"\\.\pipe\avibe-cu-test", os.getpid())
+    if refusal.value.reason not in expected:
+        raise refusal.value
+
     path = tmp_path / "computer-use.lock"
     private_lock(path)
     # Create with explicit current-user owner even on elevated CI runners.
@@ -287,7 +309,7 @@ def test_windows_native_lock_contention_and_ready_refusal(tmp_path):
         assert cu._windows_lock_probe(path) == "held"
         status = cu.effective_computer_use_status(state_path=state, verifier=cu.SnapshotVerifier())
         assert status.status == "unavailable"
-        assert status.reason in {"elevated_runtime", "session_unavailable", "session_locked", "daemon_unreachable"}
+        assert status.reason in expected
     finally:
         if child.is_alive():
             parent.send("release")

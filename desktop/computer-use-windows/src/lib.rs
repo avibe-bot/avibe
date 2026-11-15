@@ -25,9 +25,9 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_ALWAYS, OPEN_EXISTING,
+    CreateFileW, FileRenameInfoEx, GetFileInformationByHandle, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows_sys::Win32::System::RemoteDesktop::{
@@ -233,7 +233,47 @@ fn require_private_handle(handle: HANDLE) -> io::Result<()> {
 /// Create private state/lock objects without a world-readable intermediate.
 /// Existing locks must already be safe; no ACL repair or reparse traversal.
 pub fn open_private_file(path: &Path, create_new: bool) -> io::Result<File> {
-    open_private(path, if create_new { CREATE_NEW } else { OPEN_ALWAYS }, 0xC0000000)
+    // Only newly created staging files need DELETE for handle-bound publication;
+    // existing shell locks retain their original access and ownership contract.
+    open_private(
+        path,
+        if create_new { CREATE_NEW } else { OPEN_ALWAYS },
+        0xC0000000 | if create_new { 0x00010000 } else { 0 },
+    )
+}
+
+/// Publish a flushed private staging file while readers retain the old record.
+/// The owned file stays open: no reopen-by-path or delete-then-rename gap.
+pub fn publish_private_file(file: &File, target: &Path) -> io::Result<()> {
+    require_private_handle(file.as_raw_handle())?;
+    let target = std::path::absolute(target)?;
+    let name = wide(target.as_os_str())?;
+    let name_bytes = (name.len() - 1).checked_mul(2).ok_or_else(|| refused("invalid_path"))?;
+    let size = size_of::<FILE_RENAME_INFO>()
+        .checked_add(name_bytes)
+        .ok_or_else(|| refused("invalid_path"))?;
+    let native_size: u32 = size.try_into().map_err(|_| refused("invalid_path"))?;
+    let mut storage = vec![0usize; size.div_ceil(size_of::<usize>())];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: pointer-aligned, zero-initialized storage covers the fixed header
+    // plus the entire UTF-16 name; the borrowed File and buffer live through the
+    // synchronous call. Length excludes NUL, which remains in the zeroed tail.
+    unsafe {
+        (*info).Anonymous.Flags = 0x1 | 0x2; // REPLACE_IF_EXISTS | POSIX_SEMANTICS
+        (*info).RootDirectory = null_mut();
+        (*info).FileNameLength = name_bytes as u32;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len() - 1,
+        );
+        check(SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfoEx,
+            info.cast(),
+            native_size,
+        ))
+    }
 }
 
 pub fn read_private_file(path: &Path) -> io::Result<Vec<u8>> {
