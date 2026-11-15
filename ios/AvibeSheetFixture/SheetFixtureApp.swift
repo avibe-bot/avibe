@@ -440,11 +440,10 @@ private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHa
       let rowErrorReported = false;
       const reportRowError = () => {
         if (rowErrorReported) return;
-        const row = [...document.querySelectorAll("button")].find(button => button.textContent.includes("Lab"));
         const alert = [...document.querySelectorAll('[role="alert"]')].find(element =>
           element.textContent.includes("Lab")
         );
-        if (!row || !alert) return;
+        if (!alert) return;
         rowErrorReported = true;
         receipt("row-error-rendered");
       };

@@ -50,7 +50,10 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
     func testMidListDownwardDragScrollsBeforeTheSheetDismisses() throws {
         launchFixture()
-        _ = SheetFixtureReadiness.waitForGeometry(in: app)
+        guard SheetFixtureReadiness.waitForGeometry(in: app) != nil else {
+            XCTFail("Native geometry receipt did not become ready before the mid-list drag")
+            return
+        }
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let initialOffset = app.webViews.firstMatch.staticTexts["scroll-offset-0"]
@@ -84,7 +87,10 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
     func testTopDownwardDragDismissesTheSheet() {
         launchFixture()
-        _ = SheetFixtureReadiness.waitForGeometry(in: app)
+        guard SheetFixtureReadiness.waitForGeometry(in: app) != nil else {
+            XCTFail("Native geometry receipt did not become ready before the top drag")
+            return
+        }
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
@@ -95,7 +101,10 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
     func testFastFlickAtTheTopDismissesTheSheet() {
         launchFixture()
-        _ = SheetFixtureReadiness.waitForGeometry(in: app)
+        guard SheetFixtureReadiness.waitForGeometry(in: app) != nil else {
+            XCTFail("Native geometry receipt did not become ready before the fast flick")
+            return
+        }
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
