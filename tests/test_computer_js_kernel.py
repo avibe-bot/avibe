@@ -514,6 +514,7 @@ def test_computer_use_off_cancels_an_executing_call(monkeypatch, cause) -> None:
     from core import computer_js_kernels, computer_use
 
     if cause.startswith("windows_"):
+        monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 1)
         monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
         monkeypatch.setattr(computer_js_kernels, "_kernel_platform_supported", computer_use.windows_computer_use_supported)
     if cause == "windows_runtime_rollback":

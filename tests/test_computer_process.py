@@ -325,10 +325,12 @@ def test_pipe_admission_failure_closes_handle_and_pending_accept(monkeypatch, ap
     asyncio.run(asyncio.wait_for(scenario(), 30))
 
 
-def test_public_js_rollback_refuses_windows_prior_enabled_state(monkeypatch):
+@pytest.mark.parametrize("capability", [None, 0])
+def test_public_js_rollback_refuses_windows_prior_enabled_state(monkeypatch, capability):
     from core import computer_js_kernels as kernels, computer_use
 
-    monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 0)
+    if capability is not None:
+        monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", capability)
     monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
 
     async def scenario():

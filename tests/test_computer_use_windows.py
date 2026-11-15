@@ -138,6 +138,7 @@ def windows_state_reader(monkeypatch):
 def test_windows_ready_requires_security_admission(tmp_path, monkeypatch, reason, injected, windows_state_reader):
     from core import computer_windows
 
+    monkeypatch.setattr(cu, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 1)
     state = write_ready(tmp_path)
     monkeypatch.setattr(cu, "os", types.SimpleNamespace(name="nt"))
     monkeypatch.setattr(cu.platform_module, "machine", lambda: "AMD64")
@@ -157,7 +158,7 @@ def test_windows_ready_requires_security_admission(tmp_path, monkeypatch, reason
     assert cu._endpoint_accepts(r"\\.\pipe\avibe-cu-test") is False
 
 
-@pytest.mark.parametrize("machine,capability,reason", [("ARM64", 1, "unsupported_architecture"), ("AMD64", 0, "platform_unsupported")])
+@pytest.mark.parametrize("machine,capability,reason", [("ARM64", 1, "unsupported_architecture"), ("AMD64", 0, "platform_unsupported"), ("AMD64", None, "platform_unsupported")])
 def test_windows_capability_rollback_refuses_ready_shell_and_js(tmp_path, monkeypatch, machine, capability, reason, windows_state_reader):
     from core import computer_js_kernels, computer_windows
 
@@ -165,7 +166,8 @@ def test_windows_capability_rollback_refuses_ready_shell_and_js(tmp_path, monkey
     monkeypatch.setattr(cu, "os", types.SimpleNamespace(name="nt"))
     monkeypatch.setattr(computer_js_kernels, "os", types.SimpleNamespace(name="nt"))
     monkeypatch.setattr(cu.platform_module, "machine", lambda: machine)
-    monkeypatch.setattr(cu, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", capability)
+    if capability is not None:
+        monkeypatch.setattr(cu, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", capability)
     monkeypatch.setattr(cu, "_windows_private_artifact_is_safe", lambda *a, **kw: True)
     monkeypatch.setattr(cu, "_windows_lock_probe", lambda p: "held")
     monkeypatch.setattr(computer_windows, "windows_ready_refusal", lambda *_: pytest.fail("disabled platform opened a pipe"))
@@ -178,6 +180,7 @@ def test_windows_capability_rollback_refuses_ready_shell_and_js(tmp_path, monkey
 def test_windows_rejects_macos_snapshot_before_opening_pipe(tmp_path, monkeypatch, windows_state_reader):
     from core import computer_windows
 
+    monkeypatch.setattr(cu, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 1)
     state = write_ready(tmp_path)
     payload = json.loads(state.read_text())
     snapshot = tmp_path / "tools.json"
@@ -296,8 +299,10 @@ def test_windows_native_token_information_matches_exact_dword_oracle():
 
 
 @native
-def test_windows_native_lock_contention_and_ready_refusal(tmp_path):
+def test_windows_native_lock_contention_and_ready_refusal(tmp_path, monkeypatch):
     from core.computer_windows import AdmissionRefused, WindowsAdmission
+
+    monkeypatch.setattr(cu, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 1)
 
     # Exercise native construction and token evidence outside the stable-status
     # wrapper: ABI errors must retain their traceback, not look like a valid

@@ -20,7 +20,7 @@ def host_platform(request, monkeypatch):
     return request.param
 
 
-@pytest.mark.parametrize("os_name,windows_schema", [("posix", 0), ("posix", 1), ("nt", 0), ("nt", 1)])
+@pytest.mark.parametrize("os_name,windows_schema", [("posix", 0), ("posix", 1), ("nt", 0), ("nt", 1), ("nt", None)])
 def test_controller_ipc_owns_desktop_capability_and_identity(monkeypatch, os_name, windows_schema) -> None:
     """The UI process must not infer support from its own package version."""
     from core import computer_use
@@ -28,13 +28,14 @@ def test_controller_ipc_owns_desktop_capability_and_identity(monkeypatch, os_nam
     controller = SimpleNamespace(controller_id="controller-test")
     client = TestClient(internal_server.create_app(controller))
     monkeypatch.setattr(internal_server, "os", SimpleNamespace(name=os_name))
-    monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", windows_schema)
+    if windows_schema is not None:
+        monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", windows_schema)
     monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
     response = client.get("/internal/desktop/capabilities")
     assert response.status_code == 200
     expected = {"computer_use_schema": 1, "controller_id": "controller-test"}
     if os_name == "nt":
-        expected["computer_use_windows_schema"] = windows_schema
+        expected["computer_use_windows_schema"] = 0 if windows_schema is None else windows_schema
     assert response.json() == expected
 
 
@@ -317,16 +318,22 @@ def test_host_platform_is_derived_from_server_process(monkeypatch, platform, os_
     assert ui_server._desktop_host_platform() == expected
 
 
+@pytest.mark.parametrize("capability", [None, 0])
 def test_workbench_status_reports_server_host_platform_for_unsupported_windows_host(
-    monkeypatch,
+    monkeypatch, capability,
 ) -> None:
     monkeypatch.setattr(ui_server, "_desktop_host_platform", lambda: "windows")
     # Exercise the actual Windows rollback guard, not a fake supported result.
     from core import computer_use
 
-    monkeypatch.setattr(computer_use, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(computer_use, "os", SimpleNamespace(**{**vars(computer_use.os), "name": "nt"}))
+    monkeypatch.setattr(
+        computer_use, "computer_use_state_path",
+        lambda: pytest.fail("unsupported Windows host accessed desktop state"),
+    )
     monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
-    monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 0)
+    if capability is not None:
+        monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", capability)
 
     response = app.test_client().get(
         "/api/desktop/computer-use/status",

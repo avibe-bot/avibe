@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 COMPUTER_USE_SCHEMA_VERSION = 1
 # Windows Preview's single availability/rollback guard. Setting this to zero
 # disables admission, JS and Settings without changing macOS or saved opt-in.
-COMPUTER_USE_WINDOWS_SCHEMA_VERSION = 1
+COMPUTER_USE_WINDOWS_SCHEMA_VERSION = 0
 COMPUTER_USE_WINDOWS_TOOL_SNAPSHOT_SHA256 = (
     "0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293"
 )
