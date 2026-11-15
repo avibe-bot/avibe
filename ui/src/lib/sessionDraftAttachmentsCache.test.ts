@@ -102,6 +102,18 @@ describe('SessionDraftAttachmentsCache', () => {
     expect(cache.read('session-a')).toEqual([attachment]);
   });
 
+  it('removes a stale stored draft when an empty persist cannot overwrite it', () => {
+    const storage = new FlakyStorage();
+    storage.failWrites = false;
+    const cache = new SessionDraftAttachmentsCache(storage);
+
+    cache.write('session-a', [attachment]);
+    storage.failWrites = true;
+    cache.clear('session-a');
+
+    expect(new SessionDraftAttachmentsCache(storage).read('session-a')).toEqual([]);
+  });
+
   it('only recovers a rejected send when its generation is still current', () => {
     const cache = new SessionDraftAttachmentsCache(new MemoryStorage());
     const sendGeneration = cache.clear('session-a');

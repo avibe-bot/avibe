@@ -202,8 +202,17 @@ export class SessionDraftAttachmentsCache {
       );
       next.persistenceFailed = false;
     } catch {
-      next.persistenceFailed = true;
-      // The in-memory entry remains authoritative until a later write succeeds.
+      if (next.attachments.length === 0) {
+        try {
+          target.removeItem(this.key(sessionId));
+          next.persistenceFailed = false;
+        } catch {
+          next.persistenceFailed = true;
+        }
+      } else {
+        next.persistenceFailed = true;
+        // The in-memory entry remains authoritative until a later write succeeds.
+      }
     }
     this.memory.set(sessionId, next);
     return next.generation;
