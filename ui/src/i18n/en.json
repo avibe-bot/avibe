@@ -810,8 +810,6 @@
         "launch": "The Agent starts desktop apps it can reliably locate on this PC. Store apps, and apps it cannot reliably locate, need you to open them first: the Agent asks, then continues in that window.",
         "stop": "Turning Computer Use off, quitting Avibe, or Avibe closing unexpectedly stops the driver and ends any action in progress; apps you opened stay open.",
         "readyDetail": "Agents can now see and operate apps on this computer.",
-        "enableDetail": "Turns on Computer Use for this PC. It stays off until you turn it on.",
-        "actionFailed": "The desktop app did not respond. Try again, or quit and reopen Avibe.",
         "unsupportedDetail": "Computer Use is set up from the Avibe desktop app on this Windows PC. Open the desktop app to continue.",
         "remoteNotice": "Complete this step in the Avibe desktop app on the Windows PC. This page shows its progress.",
         "switch": {

@@ -347,7 +347,7 @@ export const SettingsComputerUsePage: FC = () => {
               {/* Windows speaks in plain terms: off points at the switch above when this page can
                   turn it on (otherwise the shared native-control text stays), and ready says what
                   Agents can do. macOS keeps the shared copy. */}
-              {windows && status?.status === 'off' && actions?.enable
+              {windows && status?.status === 'off' && windowsSwitch.canTurnOn
                 ? t('settings.computerUse.windows.switch.offDetail')
                 : windows && status?.status === 'ready'
                   ? t('settings.computerUse.windows.readyDetail')
@@ -395,9 +395,7 @@ export const SettingsComputerUsePage: FC = () => {
                   </p>
                   {actionable && failedStep === step && (
                     <GuideNote testId="computer-use-action-failed" tone="destructive">
-                      {windows
-                        ? t('settings.computerUse.windows.actionFailed')
-                        : t('settings.computerUse.actionFailed')}
+                      {t('settings.computerUse.actionFailed')}
                     </GuideNote>
                   )}
                   {step === 'screenRecording' && screenRecordingRequested && state !== 'complete' && (

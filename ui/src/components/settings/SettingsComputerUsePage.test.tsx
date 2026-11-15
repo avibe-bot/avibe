@@ -713,8 +713,9 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     const first = render(<SettingsComputerUsePage />);
     const control = await switchControl();
     await user.click(control);
-    expect((await screen.findByTestId('computer-use-switch-failed')).textContent)
-      .toBe('settings.computerUse.windows.switch.failed');
+    const note = await screen.findByTestId('computer-use-switch-failed');
+    expect(note.textContent).toBe('settings.computerUse.windows.switch.failed');
+    expect(note.getAttribute('role')).toBe('alert');
     expect(control.getAttribute('aria-checked')).toBe('false');
     expect((control as HTMLButtonElement).disabled).toBe(false);
     first.unmount();
@@ -731,6 +732,50 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(again.getAttribute('data-switch-state')).toBe('off');
     expect((again as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByTestId('computer-use-switch-failed')).toBeTruthy();
+  });
+
+  it('lets a tray change after a confirmed switch change stand, without a false failure', async () => {
+    enterSwitchShell();
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    const control = await switchControl();
+    statusSequence({ ...windowsHost, enabled: true, status: 'ready', reason: null });
+    await user.click(control);
+    await waitFor(() => expect(control.getAttribute('data-switch-state')).toBe('on'), { timeout: 4_000 });
+
+    // Turned off from the tray afterwards.
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'toggle_off' });
+    await user.click(screen.getByRole('button', { name: /settings\.computerUse\.recheck/ }));
+    await waitFor(() => expect(control.getAttribute('data-switch-state')).toBe('off'));
+    expect(screen.queryByTestId('computer-use-switch-pending')).toBeNull();
+    expect(screen.queryByTestId('computer-use-switch-failed')).toBeNull();
+  });
+
+  it('ignores the late answer of a change that already timed out', async () => {
+    const calls: { resolve: () => void }[] = [];
+    enterSwitchShell(vi.fn(() => new Promise<undefined>((resolve) => { calls.push({ resolve: () => resolve(undefined) }); })));
+    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    render(<SettingsComputerUsePage />);
+    const control = await switchControl();
+    await act(async () => { fireEvent.click(control); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(COMPUTER_USE_SWITCH_SETTLE_MS + 500); });
+    expect(control.getAttribute('data-switch-state')).toBe('off');
+
+    // A second change starts; then the first, timed-out call finally answers.
+    await act(async () => { fireEvent.click(control); });
+    expect(calls).toHaveLength(2);
+    statusSequence({ ...windowsHost, enabled: true, status: 'starting', reason: null });
+    await act(async () => calls[0].resolve());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    // Only the second call's own answer may let a read confirm it.
+    expect(control.getAttribute('data-switch-state')).toBe('pending');
+    await act(async () => calls[1].resolve());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(control.getAttribute('data-switch-state')).toBe('on');
   });
 
   it('follows a change made from the tray', async () => {
@@ -785,6 +830,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
   it.each([
     ['an unreadable state', { enabled: null, status: 'unavailable', reason: 'invalid_state_file' }],
     ['an older server without the field', { status: 'error', reason: 'daemon_exited' }],
+    ['an older server without the field, while off', { status: 'off', reason: 'never_enabled' }],
   ])('shows no switch for %s, never a guessed on or off', async (_case, body) => {
     enterSwitchShell();
     statusSequence({ ...windowsHost, ...body });
@@ -794,6 +840,8 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(await screen.findByTestId('computer-use-switch-unknown')).toBeTruthy();
     expect(screen.queryByRole('switch')).toBeNull();
     expect(screen.getByTestId('computer-use-switch-state-unknown').textContent).toBe('settings.computerUse.windows.switch.stateUnknown');
+    // With no switch to use, the band does not point at one.
+    expect(screen.queryByText('settings.computerUse.windows.switch.offDetail')).toBeNull();
   });
 
   it('keeps the unsupported notice for an unsupported Windows host, in Windows terms and in Preview', async () => {

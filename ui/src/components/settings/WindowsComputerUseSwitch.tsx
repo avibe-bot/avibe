@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch';
 export const COMPUTER_USE_SWITCH_SETTLE_MS = 15_000;
 
 /** `confirmFrom`: the first read that may confirm; `null` until the native call settles. */
-type Pending = { target: boolean; startedAt: number; confirmFrom: number | null };
+type Pending = { id: number; target: boolean; startedAt: number; confirmFrom: number | null };
 
 const noteClass = 'flex max-w-2xl items-start gap-1.5 text-[12px] leading-relaxed';
 
@@ -43,11 +43,14 @@ export function useWindowsComputerUseSwitch({
   disable: (() => Promise<void>) | null;
   /** Re-read the status now; the page keeps polling regardless. */
   refresh: () => void;
-}): { control: ReactNode; notice: ReactNode } {
+}): { control: ReactNode; notice: ReactNode; canTurnOn: boolean } {
   const { t } = useTranslation();
   const [change_, setPending] = useState<Pending | null>(null);
   const [failed, setFailed] = useState(false);
   const mounted = useRef(true);
+  // The change whose native call may still settle it; an older call's answer is ignored.
+  const active = useRef<number | null>(null);
+  const changes = useRef(0);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -56,6 +59,8 @@ export function useWindowsComputerUseSwitch({
   // A change ends when a read that began after its native call reports the target.
   const confirmed = change_ !== null && change_.confirmFrom !== null
     && readSeq >= change_.confirmFrom && enabled === change_.target;
+  // A confirmed change is over: drop it, so a later read (a tray change) is not taken for it.
+  if (confirmed) setPending(null);
   const pending = confirmed ? null : change_;
 
   // An unconfirmed change gives up after the bound.
@@ -64,6 +69,7 @@ export function useWindowsComputerUseSwitch({
     const left = pending.startedAt + COMPUTER_USE_SWITCH_SETTLE_MS - Date.now();
     const timer = window.setTimeout(() => {
       if (!mounted.current) return;
+      active.current = null;
       setPending(null);
       setFailed(true);
     }, Math.max(0, left));
@@ -73,18 +79,21 @@ export function useWindowsComputerUseSwitch({
   const change = (next: boolean) => {
     const action = next ? enable : disable;
     if (!action || pending) return;
+    const id = ++changes.current;
+    active.current = id;
     setFailed(false);
-    setPending({ target: next, startedAt: Date.now(), confirmFrom: null });
+    setPending({ id, target: next, startedAt: Date.now(), confirmFrom: null });
     void action().then(
       () => {
-        if (!mounted.current) return;
+        if (!mounted.current || active.current !== id) return;
         // Reads already under way may predate the change; only a later one confirms it.
         const confirmFrom = nextReadSeq();
-        setPending((current) => current && { ...current, confirmFrom });
+        setPending((current) => (current?.id === id ? { ...current, confirmFrom } : current));
         refresh();
       },
       () => {
-        if (!mounted.current) return;
+        if (!mounted.current || active.current !== id) return;
+        active.current = null;
         setPending(null);
         setFailed(true);
         refresh();
@@ -123,7 +132,7 @@ export function useWindowsComputerUseSwitch({
   );
 
   const notice = failed ? (
-    <p data-testid="computer-use-switch-failed" className={`${noteClass} text-destructive-ink`}>
+    <p role="alert" data-testid="computer-use-switch-failed" className={`${noteClass} text-destructive-ink`}>
       <CircleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
       <span>{t('settings.computerUse.windows.switch.failed')}</span>
     </p>
@@ -139,5 +148,5 @@ export function useWindowsComputerUseSwitch({
     </p>
   ) : null;
 
-  return { control, notice };
+  return { control, notice, canTurnOn: !pending && enabled === false && enable !== null };
 }
