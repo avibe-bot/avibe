@@ -64,6 +64,12 @@ export const avaultFixtures = (version: string, overrides?: Parameters<typeof va
   '/api/dependencies': { deps: [{ id: 'avault', kind: 'tool', required: true, installed: true, version, status: 'ready' }] },
 }, overrides);
 
+/** avault ready, and another key already named COLD_WALLET (the name the protected frames type). */
+export const nameTakenFixtures = vaultFixtures({
+  ...vaultApi({ secrets: [...vaultSecrets, secret('COLD_WALLET')], grants: [], requests: [] }),
+  '/api/dependencies': { deps: [{ id: 'avault', kind: 'tool', required: true, installed: true, version: '0.1.12', status: 'ready' }] },
+});
+
 /** A member who can create secrets but not manage the instance (account settings need a manager). */
 export const editorCapabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_read_instance: true, can_chat: true, can_use_agents: true, can_use_vault_secrets: true };
 

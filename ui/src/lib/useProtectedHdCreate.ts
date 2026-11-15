@@ -36,6 +36,9 @@ export type ProtectedHdPhase =
   | { kind: 'checking'; refusal: ProtectedHdRefusal | null }
   | { kind: 'unconfirmed'; refusal: ProtectedHdRefusal | null }
   | { kind: 'mismatch' }
+  /** Refused because another key has the name: this wallet was not saved (the sealed result is bound
+   *  to the name, so it can't be saved under another one). The name is editable again. */
+  | { kind: 'nameTaken'; mode: 'create' | 'import' }
   | { kind: 'done'; name: string; account0: ProtectedHdAccount0 };
 
 /** Whether the page must stay as it is: the window is open, or a save may already be in Avibe. */
@@ -54,6 +57,10 @@ export type ProtectedHdStart = {
   metadata: Pick<VaultCreatePayload, 'description' | 'tags' | 'links' | 'provision_request_id'>;
   seal: (name: string, mode: 'create' | 'import', authorizationWindow: string) => Promise<Sealed>;
   onSaved: () => void;
+  /** Whether the name is still free, asked with the window reserved but before anything is made in it. */
+  precheck?: () => Promise<boolean>;
+  /** Called when the save was refused because another key has the name. */
+  onNameTaken?: () => void;
 };
 
 const LAUNCH_FAILURES: Record<string, ProtectedHdLaunchFailure> = {
@@ -84,6 +91,12 @@ const refusalOf = (result: { code?: string; message?: string } | null | undefine
   const code = result?.code?.trim() || null;
   const text = result?.message?.trim() || code;
   return text ? { code, text } : null;
+};
+
+/** Whether two #0 address sets are the same wallet's (every listed chain's address equal). */
+const sameAccount0 = (a: Record<string, string>, b: Record<string, string>) => {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
 };
 
 export function useProtectedHdCreate() {
@@ -152,6 +165,13 @@ export function useProtectedHdCreate() {
     openWindow.current = authorization;
     setPhase({ kind: 'waiting' });
     return (async () => {
+      if (input.precheck && !(await input.precheck())) {
+        // The name is taken: nothing is made; the form says why.
+        authorization.close();
+        openWindow.current = null;
+        if (alive.current) setPhase({ kind: 'idle' });
+        return;
+      }
       let sealed: Sealed;
       try {
         sealed = await input.seal(input.name, input.mode, authorization.id);
@@ -210,6 +230,30 @@ export function useProtectedHdCreate() {
         holdsBlock.current = false;
         if (blockedBefore) blockHdWallet(input.name);
         else unblockHdWallet(input.name);
+      }
+      if (created && created.ok === false && (created.code === 'secret_exists' || created.code === 'secret_name_case_conflict')) {
+        // This request inserted nothing (a definite refusal), and an operation sends one save. New
+        // words were never saved before, so for a created wallet the record under this name is
+        // another key's. Imported words may have been saved by an earlier attempt: unless the record
+        // there is readable and is a different wallet, say what is known (unconfirmed), not "not saved".
+        setPhase({ kind: 'checking', refusal: refusalOf(created) });
+        let other = input.mode === 'create';
+        try {
+          const result = await api.getVaultHdReconciliation(input.name);
+          if (result?.ok && confirmWith(result.reconciliation) === 'match') return;
+          const parsed = result?.ok ? parseProtectedHdReconciliation(result.reconciliation) : null;
+          // Another seed's wallet, or a record that is not a protected seed wallet at all.
+          if (parsed && !sameAccount0(parsed.expected_account0, sealed.expectedAccount0)) other = true;
+          if (result?.ok === false && result.code === 'invalid_hd_wallet') other = true;
+        } catch {
+          // Unreadable: decided by the mode alone.
+        }
+        if (other) {
+          operation.current = null;
+          if (alive.current) setPhase({ kind: 'nameTaken', mode: input.mode });
+          input.onNameTaken?.();
+          return;
+        }
       }
       await check(created ? refusalOf(created) : null);
     })();
