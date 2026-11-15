@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^gh-v3\.2\.7rc[0-9]+$')][string] $ReleaseTag = 'gh-v3.2.7rc3',
-    [ValidateSet('preparation', 'enabled', 'update')][string] $Mode = 'preparation',
+    [ValidateSet('preparation', 'enabled', 'security', 'update')][string] $Mode = 'preparation',
     [ValidatePattern('^gh-v3\.2\.7rc[0-9]+$')][string] $UpdateTag = 'gh-v3.2.7rc4',
     [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string] $CandidateSourceSha,
     [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string] $CandidateDriverHash,
@@ -26,7 +26,7 @@ $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_de
 $cases.second_interactive_session.reason = 'second_local_account_is_not_a_second_interactive_session'
 $cases.real_agent_turn.reason = 'no_model_credentials_owner_real_machine_check_required'
 $requiredCases = @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'uninstall', 'cleanup')
-if ($Mode -eq 'enabled') { $requiredCases += @('webview_cdp_preflight', 'model_stub_tool_path', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture') }
+if ($Mode -in @('enabled', 'security')) { $requiredCases += @('webview_cdp_preflight', 'model_stub_tool_path', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture') }
 elseif ($Mode -eq 'update') { $requiredCases += @('webview_cdp_preflight', 'update_release_integrity', 'update_panel_start', 'update_installer', 'update_relaunch', 'update_versions') }
 else { $requiredCases += 'feature_disabled' }
 $record = [ordered]@{
@@ -214,17 +214,16 @@ try {
             Move-Item -LiteralPath ($queryReplyPath + '.tmp') -Destination $queryReplyPath
         }
         $securityRequest = Join-Path $work 'security-request.json'
-        if ($Mode -eq 'enabled' -and -not $security.Completed -and (Test-Path -LiteralPath $securityRequest)) {
+        if ($Mode -in @('enabled', 'security') -and -not $security.Completed -and (Test-Path -LiteralPath $securityRequest)) {
             $request = Get-Content -LiteralPath $securityRequest -Raw | ConvertFrom-Json
             if ($request.action -ne 'prepare-security-fixtures') { throw 'unknown_security_fixture_request' }
-            try { $securityReply = Invoke-SecurityFixtures $security } catch {
-                $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'security_fixture_failed' }
-                $security.Cases[$security.Stage] = @{ verdict = 'FAIL'; reason = $reason }
-                $securityReply = @{ ok = $false; reason = $reason; cases = $security.Cases }
-            }
+            $securityReply = Invoke-SecurityFixtureResponse $security
+            # Parent-owned immutable diagnostics survive worker overwrite or loss.
+            $record.security_fixture_receipt = $securityReply
+            Save-Report
             $security.Completed = $true
             $replyPath = Join-Path $work 'security-response.json'
-            $securityReply | ConvertTo-Json | Set-Content -LiteralPath ($replyPath + '.tmp') -Encoding utf8
+            $securityReply | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath ($replyPath + '.tmp') -Encoding utf8
             Move-Item -LiteralPath ($replyPath + '.tmp') -Destination $replyPath
         }
         if ((Get-Date) -gt $deadline) { throw 'ordinary_user_worker_timeout' }

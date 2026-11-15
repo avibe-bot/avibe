@@ -271,10 +271,10 @@ try {
             }
         } else { Verdict 'unified_update_panel_preflight' 'NOT RUN' 'shared_cu_fixture_prerequisite_not_proven_on_this_run' }
     }
-    if ($inputData.mode -eq 'enabled') {
+    if ($inputData.mode -in @('enabled', 'security')) {
         $stage = 'settings_enable'
         . (Join-Path $Root 'enabled.ps1')
-        $caseContext = @{ Desktop = $desktop }
+        $caseContext = @{ Desktop = $desktop; SecurityOnly = ($inputData.mode -eq 'security') }
         try { Invoke-EnabledCases $caseContext } finally { $desktop = $caseContext.Desktop }
     }
     }
@@ -293,7 +293,7 @@ try {
         }
         if ($stub) { if (-not $stub.HasExited) { $stub.Kill(); $null = $stub.WaitForExit(10000) }; $stub.Dispose() }
         # Preflight the real menu route; no target-app survival is claimed here.
-        if ($desktop -and -not $desktop.HasExited) {
+        if ($inputData.mode -ne 'security' -and $desktop -and -not $desktop.HasExited) {
             try {
                 Add-Type -Path (Join-Path $Root 'Native.cs')
                 $desktop.Refresh()

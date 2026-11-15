@@ -172,7 +172,10 @@ function Invoke-EnabledCases([hashtable] $Context) {
             Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
         }
         $reason = if ($original.Exception.Message -match '^[a-z][a-z0-9_]+$') { $original.Exception.Message } else { 'enabled_acceptance_operation_failed' }
-        Verdict $currentCase 'FAIL' $reason
+        # A generic worker error must not replace a specific parent case failure.
+        if (-not $result.cases.Contains($currentCase) -or $result.cases[$currentCase].verdict -ne 'FAIL') {
+            Verdict $currentCase 'FAIL' $reason
+        }
     }
     $operationId = [guid]::NewGuid().ToString('N')
     if (-not $result.ContainsKey('cu_input_diagnostics')) { $result.cu_input_diagnostics = [ordered]@{} }
@@ -190,10 +193,17 @@ function Invoke-EnabledCases([hashtable] $Context) {
         Verdict 'settings_enable' 'PASS' 'real_settings_preview_turn_on_button_reached_ready'
         $inputOnly = $Context.ContainsKey('InputOnly') -and $Context.InputOnly
         if (-not $inputOnly) { Verdict 'survival_cu_off' 'NOT RUN' 'tray_off_unproven_independent_cases_continue' }
-        $operations = if ($inputOnly) { @('off') } else { @('quit', 'crash') }
+        $securityOnly = $Context.ContainsKey('SecurityOnly') -and $Context.SecurityOnly
+        if ($securityOnly) {
+            foreach ($id in @('survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash')) {
+                Verdict $id 'NOT RUN' 'security_only_scope'
+            }
+        }
+        $operations = if ($inputOnly) { @('off') } elseif ($securityOnly) { @() } else { @('quit', 'crash') }
         foreach ($operation in $operations) {
             $currentCase = @{off='survival_cu_off'; quit='survival_desktop_quit'; crash='survival_desktop_crash'}[$operation]
-            $cleanupSafe = $true
+            # Safety is established by owned-target cleanup, not by reaching a catch.
+            $cleanupSafe = $false
             try {
             $operationId = [guid]::NewGuid().ToString('N')
             $receiptPath = Join-Path $work ("input-$operationId.json")
@@ -536,11 +546,12 @@ try {
                     try { $helper.Dispose() } catch { Add-AcceptanceFailure $result 'helper_handle_cleanup' $_ -Cleanup; $cleanupFailed = $true }
                 } }
                 try {
-                    if (-not $target.HasExited) { $target.Kill(); $null = $target.WaitForExit(10000) }
+                    if (-not $target.HasExited) { $target.Kill(); if (-not $target.WaitForExit(10000)) { throw 'target_cleanup_exit_unproven' } }
                 } catch { Add-AcceptanceFailure $result 'target_stop_cleanup' $_ -Cleanup; $cleanupFailed = $true }
                 try { $target.Dispose() } catch { Add-AcceptanceFailure $result 'target_handle_cleanup' $_ -Cleanup; $cleanupFailed = $true }
                 Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
-                if ($cleanupFailed) { $cleanupSafe = $false; throw 'input_cleanup_failed' }
+                $cleanupSafe = -not $cleanupFailed
+                if ($cleanupFailed) { throw 'input_cleanup_failed' }
             }
             } catch {
                 if ($inputOnly) { throw }
@@ -593,6 +604,7 @@ try {
         $currentCase = 'security_fixture'
         Set-CasePhase 'security_fixture_response'
         $securityResult = Get-Content -LiteralPath $response -Raw | ConvertFrom-Json -AsHashtable
+        $result.security_fixture_diagnostics = $securityResult.diagnostics
         foreach ($id in $securityResult.cases.Keys) {
             if ($id -notin @('security_fixture', 'elevated_driver_refused', 'second_user_pipe_lock')) { throw 'unknown_security_verdict' }
             Verdict $id $securityResult.cases[$id].verdict $securityResult.cases[$id].reason

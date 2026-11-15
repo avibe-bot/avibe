@@ -22,9 +22,9 @@ concurrency:
 
 env:
   RELEASE_TAG: gh-v3.2.7rc4
-  # Stop-loss: signed execution stays disabled until hosted dry evidence and
-  # independent review are complete; changing this is an explicit lane gate.
-  ACCEPTANCE_MODE: enabled
+  # Security-only follow-up: one dry gate before the separately authorized
+  # security mode. Never restore enabled (survival) or select update here.
+  ACCEPTANCE_MODE: dry
   HELPER_IDENTITY_OPTIONAL: 'true'
   CANDIDATE_SOURCE_SHA: bcc71bc8d6430fc72697eb4695caef5d15da55ba
   CANDIDATE_DRIVER_SHA256: 931310cd70e4c571af416c77cdce56719bda3e1e1240ba4128ce913610b0294e
@@ -62,6 +62,19 @@ jobs:
         if: env.ACCEPTANCE_MODE == 'dry'
         shell: pwsh
         run: ./tests/windows_signed_acceptance_enabled.ps1 -SourceRoot "$pwd/desktop/scripts/signed-cu-acceptance" -Work "$env:RUNNER_TEMP/signed-cu-dry work's Unicode-测试" -Evidence "$env:RUNNER_TEMP/signed-cu-evidence"
+      - name: Preserve security parent failures through the real response and merger
+        if: env.ACCEPTANCE_MODE == 'dry'
+        shell: pwsh
+        run: |
+          & (Get-Command pwsh).Source -NoProfile -NonInteractive -Command 'Add-Type -Path desktop/scripts/signed-cu-acceptance/Native.cs'
+          if ($LASTEXITCODE -ne 0) { throw 'parent_native_compile_failed' }
+          ./tests/windows_signed_acceptance_security.ps1 -Source "$pwd/desktop/scripts/signed-cu-acceptance/security.ps1" -Work "$env:RUNNER_TEMP/security-dry"
+          $path = "$env:RUNNER_TEMP/signed-cu-evidence/verdict.json"
+          $record = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+          $record.security_fixture_dry = @{ parent_native_compiled = $true; cases = @(Get-Content "$env:RUNNER_TEMP/security-dry/security-cases.json" -Raw | ConvertFrom-Json) }
+          . ./desktop/scripts/signed-cu-acceptance/evidence.ps1
+          Write-AcceptanceEvidence $record $path
+          Add-Content "$env:RUNNER_TEMP/signed-cu-evidence/verdict.md" "`nSecurity fixture: native parent compilation + $($record.security_fixture_dry.cases.Count) inert evidence/scope cases passed; no product security execution."
       - name: Verify and exercise the signed release as an ordinary user
         if: env.ACCEPTANCE_MODE != 'dry'
         shell: pwsh

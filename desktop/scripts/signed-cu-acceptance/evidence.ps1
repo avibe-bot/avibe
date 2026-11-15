@@ -15,7 +15,8 @@ function Add-AcceptanceFailure([Collections.IDictionary] $Record, [string] $Call
     $entry = [ordered]@{
         call = $Call; error_class = $Failure.Exception.GetType().FullName
         script_line = $Failure.InvocationInfo.ScriptLineNumber
-        script_role = if ([IO.Path]::GetFileName($Failure.InvocationInfo.ScriptName) -in @('enabled.ps1', 'user.ps1', 'run.ps1', 'evidence.ps1')) { [IO.Path]::GetFileName($Failure.InvocationInfo.ScriptName) } else { 'generated_or_test_script' }
+        script_role = if ([IO.Path]::GetFileName($Failure.InvocationInfo.ScriptName) -in @('enabled.ps1', 'user.ps1', 'run.ps1', 'security.ps1', 'evidence.ps1')) { [IO.Path]::GetFileName($Failure.InvocationInfo.ScriptName) } else { 'generated_or_test_script' }
+        base_error_class = $Failure.Exception.GetBaseException().GetType().FullName
         exit_code = $null; code = 'harness_operation_failed'
     }
     if ($Failure.Exception.Message -match '^child_process_exit_(-?\d+)$') {
@@ -23,7 +24,7 @@ function Add-AcceptanceFailure([Collections.IDictionary] $Record, [string] $Call
         $entry.code = 'child_process_nonzero'
     }
     # Codes from our fixed throws only; arbitrary messages/values never escape.
-    if ($Failure.Exception.Message -match '^(input|shipped|created|real|driver|replacement|original|explicit|expected|ready|security|elevated|fixture|native|uninstall|update|ordinary|harness|child)_[a-z_]{1,100}$') {
+    if ($Failure.Exception.Message -match '^(input|shipped|created|real|driver|replacement|original|explicit|expected|ready|security|elevated|fixture|native|uninstall|update|ordinary|harness|child|primary|runner|second)_[a-z_]{1,100}$') {
         $entry.code = $Failure.Exception.Message
     }
     if ($Cleanup) {
@@ -43,7 +44,7 @@ function Merge-AcceptanceWorker([Collections.IDictionary] $Record, [Collections.
         if ($Worker.cases[$id].verdict -notin @('PASS', 'FAIL', 'NOT RUN')) { throw 'input_worker_verdict_invalid' }
         $Record.cases[$id] = $Worker.cases[$id]
     }
-    foreach ($field in @('native_tray_off', 'helper_identity_verified', 'failure', 'cleanup_errors', 'secondary_errors', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'default_off_probe_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified', 'installed_driver_sha256')) {
+    foreach ($field in @('security_fixture_diagnostics', 'native_tray_off', 'helper_identity_verified', 'failure', 'cleanup_errors', 'secondary_errors', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'default_off_probe_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified', 'installed_driver_sha256')) {
         if ($Worker.Contains($field)) { $Record[$field] = $Worker[$field] }
     }
     $Record.worker_exit_code = $ExitCode

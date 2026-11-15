@@ -1,23 +1,56 @@
 # Parent-only security probes on the disposable runner. No credentialed egress.
+. (Join-Path $PSScriptRoot 'evidence.ps1')
+function Add-SecurityFailure([hashtable] $Context, $Failure) {
+    if (-not $Context.ContainsKey('Diagnostics')) { $Context.Diagnostics = [ordered]@{} }
+    if (-not $Context.Diagnostics.Contains($Context.Stage)) { $Context.Diagnostics[$Context.Stage] = [ordered]@{} }
+    $receipt = $Context.Diagnostics[$Context.Stage]
+    $first = -not $receipt.Contains('failure')
+    Add-AcceptanceFailure $receipt $Context.Phase $Failure
+    if ($first) { $receipt.failure.child_exit_code = $Context.ChildExit }
+    # Preserve the first exception separately from subsequent cleanup failures.
+    return $receipt.failure.code
+}
+function Invoke-SecurityFixtureResponse([hashtable] $Context) {
+    $Context.Phase = 'security_begin'
+    $Context.ChildExit = $null
+    $Context.Diagnostics = [ordered]@{}
+    try {
+        $reply = Invoke-SecurityFixtures $Context
+    } catch {
+        $reason = Add-SecurityFailure $Context $_
+        $Context.Cases[$Context.Stage] = @{verdict='FAIL'; reason=$reason}
+        $reply = @{ok=$false; reason=$reason; cases=$Context.Cases}
+    }
+    $reply.diagnostics = $Context.Diagnostics
+    return $reply
+}
 function Invoke-SecurityFixtures([hashtable] $Context) {
+    $Context.Phase = 'compile_native'
     Add-Type -Path (Join-Path $PSScriptRoot 'Native.cs')
+    $Context.Phase = 'runner_token'
     if (-not [AcceptanceNative]::IsElevated($PID)) { throw 'runner_elevation_not_proven' }
+    $Context.Phase = 'primary_profile'
     $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($Context.User.SID.Value)'"
     if (-not $profile) { throw 'primary_profile_missing' }
+    $Context.Phase = 'installed_driver_hash'
     $installed = Join-Path $profile.LocalPath 'AppData\Local\Programs\AvibeAcceptance'
     $driver = Join-Path $installed 'computer-use\cua-driver.exe'
     if ((Get-FileHash -LiteralPath $driver -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Context.DriverHash) { throw 'security_probe_driver_hash_mismatch' }
+    $Context.Phase = 'primary_state'
     $stateRoot = Join-Path $profile.LocalPath 'AppData\Roaming\bot.avibe.desktop'
     $state = Get-Content -LiteralPath (Join-Path $stateRoot 'computer-use.json') -Raw | ConvertFrom-Json
     $pipePrefix = '\\.\pipe\'
     if (-not $state.socket_path.StartsWith($pipePrefix) -or $state.state -ne 'ready') { throw 'primary_driver_not_ready' }
     $pipeLeaf = $state.socket_path.Substring($pipePrefix.Length)
+    $Context.Phase = 'primary_lock'
     $lockPath = Join-Path $stateRoot 'computer-use.lock'
     if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { throw 'primary_lock_missing' }
 
+    $Context.Phase = 'security_directory'
     $securityRoot = Join-Path $Context.Root 'security'
     New-Item -ItemType Directory -Path $securityRoot -Force | Out-Null
     $Context.Stage = 'elevated_driver_refused'
+    $Context.Phase = 'elevated_driver_start'
     $driverCleanupSafe = $true
     try {
     $refusalPipe = 'avibe-elevated-refusal-' + [guid]::NewGuid().ToString('N')
@@ -32,22 +65,29 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
     $psi.Environment['CUA_DRIVER_RS_TELEMETRY_ENABLED'] = 'false'
     $psi.Environment['CUA_DRIVER_RS_UPDATE_CHECK'] = 'false'
     foreach ($arg in @('serve', '--socket', ($pipePrefix + $refusalPipe), '--pid-file', $pidFile, '--no-overlay')) { $psi.ArgumentList.Add($arg) }
-    $process = [Diagnostics.Process]::Start($psi)
-    $Context.Stage = 'elevated_driver_refused'
-    $null = $process.SafeHandle
+    $process = $null
     try {
+        $process = [Diagnostics.Process]::Start($psi)
+        $null = $process.SafeHandle
         $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+        $Context.Phase = 'elevated_driver_return'
         if (-not $process.WaitForExit(15000)) { throw 'elevated_driver_served_or_hung' }
+        $Context.ChildExit = $process.ExitCode
         $errors = $stderr.GetAwaiter().GetResult(); $null = $stdout.GetAwaiter().GetResult()
         if ($process.ExitCode -eq 0 -or -not $errors.Contains('Computer Use does not run as administrator; start Avibe normally.') -or (Test-Path -LiteralPath $pidFile)) {
             throw 'elevated_driver_explicit_refusal_missing'
         }
+    } catch {
+        $null = Add-SecurityFailure $Context $_
+        throw
     } finally {
+        $Context.Phase = 'elevated_driver_cleanup'
         try {
-            if (-not $process.HasExited) { $process.Kill(); if (-not $process.WaitForExit(10000)) { throw 'elevated_driver_cleanup_unproven' } }
+            if ($process -and -not $process.HasExited) { $process.Kill(); if (-not $process.WaitForExit(10000)) { throw 'elevated_driver_cleanup_unproven' } }
         } catch { $driverCleanupSafe=$false; throw }
-        finally { $process.Dispose() }
+        finally { if ($process) { $process.Dispose() } }
     }
+    $Context.Phase = 'elevated_driver_pipe_absent'
     $client = [IO.Pipes.NamedPipeClientStream]::new('.', $refusalPipe, [IO.Pipes.PipeDirection]::InOut)
     try {
         $client.Connect(500)
@@ -56,11 +96,13 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
 
     $Context.Cases.elevated_driver_refused = @{ verdict = 'PASS'; reason = 'installed_driver_explicit_elevated_serve_refusal_and_no_residual_pipe' }
     } catch {
-        $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'elevated_driver_probe_failed' }
+        $reason = Add-SecurityFailure $Context $_
         $Context.Cases.elevated_driver_refused = @{verdict='FAIL'; reason=$reason}
         if (-not $driverCleanupSafe) { throw 'elevated_driver_cleanup_unproven' }
     }
-    $Context.Stage = 'security_fixture'
+    $Context.Stage = 'second_user_pipe_lock'
+    $Context.Phase = 'second_user_prepare'
+    $Context.ChildExit = $null
     $second = $null; $password = $null; $probe = $null
     try {
         $password = [Security.SecureString]::new()
@@ -91,17 +133,20 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
         foreach ($key in @('SystemRoot', 'SystemDrive', 'COMPUTERNAME')) { $psi.Environment[$key] = [Environment]::GetEnvironmentVariable($key) }
         foreach ($arg in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $Context.Root 'second-user.ps1'), '-InputFile', $inputFile, '-OutputFile', $outputFile)) { $psi.ArgumentList.Add($arg) }
         $Context.Stage = 'second_user_pipe_lock'
+        $Context.Phase = 'second_user_probe'
         $probe = [Diagnostics.Process]::Start($psi)
         $null = $probe.SafeHandle
-        if (-not $probe.WaitForExit(30000) -or $probe.ExitCode -ne 0) { throw 'second_user_boundary_probe_failed' }
+        if (-not $probe.WaitForExit(30000)) { throw 'second_user_boundary_probe_timeout' }
+        $Context.ChildExit = $probe.ExitCode
+        if ($probe.ExitCode -ne 0) { throw 'second_user_boundary_probe_failed' }
         $denial = Get-Content -LiteralPath $outputFile -Raw | ConvertFrom-Json
         if (-not ($denial.standard_user -and $denial.pipe_denied -and $denial.lock_denied)) { throw 'second_user_boundary_not_denied' }
         $Context.Cases.second_user_pipe_lock = @{ verdict = 'PASS'; reason = 'owner_pipe_open_positive_control_second_users_only_account_denied_pipe_and_lock' }
-        $Context.Stage = 'security_fixture'
     } catch {
-        $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'second_user_probe_failed' }
+        $reason = Add-SecurityFailure $Context $_
         $Context.Cases.second_user_pipe_lock = @{verdict='FAIL'; reason=$reason}
     } finally {
+        $Context.Phase = 'second_user_cleanup'
         # Keep the identity in parent state until ALL cleanup succeeds. Each
         # action is attempted even if an earlier profile/process action fails.
         $cleanupFailed = $false
@@ -126,6 +171,9 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
         if ($cleanupFailed) { throw 'second_fixture_cleanup_failed' }
         $Context.SecondUser = $null
     }
+    $Context.Stage = 'security_fixture'
+    $Context.Phase = 'elevated_target_prepare'
+    $Context.ChildExit = $null
     Initialize-ElevatedQueryTarget $Context
     $Context.Cases.security_fixture = @{ verdict = 'PASS'; reason = 'elevated_target_verified_and_secondary_fixture_removed' }
     return @{ ok = $true; cases = $Context.Cases; elevated_pid = $Context.ElevatedApp.Id; elevated_hwnd = $Context.ElevatedApp.MainWindowHandle.ToInt64() }
@@ -135,9 +183,11 @@ function Initialize-ElevatedQueryTarget([hashtable] $Context) {
     if (-not ('AcceptanceNative' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'Native.cs') }
     if (-not [AcceptanceNative]::IsElevated($PID)) { throw 'runner_elevation_not_proven' }
     if ($Context.ElevatedApp) { throw 'elevated_fixture_already_created' }
+    $Context.Phase = 'security_directory'
     $securityRoot = Join-Path $Context.Root 'security'
     New-Item -ItemType Directory -Path $securityRoot -Force | Out-Null
     # A real signed Win32 editor, no broker, model key, or inherited GH_TOKEN.
+    $Context.Phase = 'elevated_target_hash'
     if ((Get-FileHash -LiteralPath $Context.TargetApp -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Context.TargetHash) { throw 'target_fixture_executable_changed' }
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $Context.TargetApp; $psi.UseShellExecute = $false
@@ -145,8 +195,10 @@ function Initialize-ElevatedQueryTarget([hashtable] $Context) {
     $psi.Environment.Clear()
     foreach ($key in @('SystemRoot', 'SystemDrive', 'COMPUTERNAME', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData')) { $psi.Environment[$key] = [Environment]::GetEnvironmentVariable($key) }
     foreach ($key in @('HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')) { $psi.Environment[$key] = $securityRoot }
+    $Context.Phase = 'elevated_target_start'
     $Context.ElevatedApp = [Diagnostics.Process]::Start($psi)
     $null = $Context.ElevatedApp.SafeHandle
+    $Context.Phase = 'elevated_target_identity'
     $deadline = (Get-Date).AddSeconds(15)
     do {
         $Context.ElevatedApp.Refresh()
@@ -155,7 +207,9 @@ function Initialize-ElevatedQueryTarget([hashtable] $Context) {
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
     if ($Context.ElevatedApp.MainWindowHandle -eq 0 -or $Context.ElevatedApp.MainModule.FileName -ne $Context.TargetApp -or -not [AcceptanceNative]::IsElevated($Context.ElevatedApp.Id)) { throw 'elevated_notepad_identity_unproven' }
+    $Context.Phase = 'elevated_target_blank'
     if (-not [AcceptanceNative]::UnsavedTextEquals($Context.ElevatedApp.MainWindowHandle, '')) { throw 'elevated_notepad_not_blank' }
+    $Context.Phase = 'elevated_target_query_grant'
     [AcceptanceNative]::GrantFixtureTargetQuery($Context.ElevatedApp.SafeHandle.DangerousGetHandle(), $Context.User.SID.Value)
     if ($Context.ElevatedApp.HasExited) { throw 'elevated_target_exited_during_query_setup' }
 }
