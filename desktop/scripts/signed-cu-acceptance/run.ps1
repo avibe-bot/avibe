@@ -236,7 +236,7 @@ try {
         $cases[$id] = $result.cases[$id]
     }
     $record.installed_driver_sha256 = $result.installed_driver_sha256
-    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified')) {
+    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified')) {
         if ($result.Contains($field)) { $record[$field] = $result[$field] }
     }
     if ($worker.ExitCode -ne 0) { $failed = $true }

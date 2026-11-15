@@ -12,6 +12,8 @@ public static class AcceptanceNative {
     private delegate bool EnumProc(IntPtr window, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr window, EnumProc callback, IntPtr parameter);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int max);
@@ -131,6 +133,14 @@ public static class AcceptanceNative {
         if (button == IntPtr.Zero) return false;
         if (!PostMessage(button, 0xF5, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
         return true;
+    }
+    public static bool IsExactWindowOwnedByProcess(IntPtr window, int pid) {
+        if (window == IntPtr.Zero || !IsWindow(window)) return false;
+        uint owner; GetWindowThreadProcessId(window, out owner);
+        return owner == (uint)pid;
+    }
+    public static bool IsExactWindowVisibleAndForeground(IntPtr window) {
+        return window != IntPtr.Zero && IsWindow(window) && IsWindowVisible(window) && GetForegroundWindow() == window;
     }
     public static bool UnsavedTextEquals(IntPtr window, string expected) {
         bool found = false;

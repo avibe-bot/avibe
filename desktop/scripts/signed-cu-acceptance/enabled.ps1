@@ -97,23 +97,151 @@ function Invoke-EnabledCases([hashtable] $Context) {
             $targetSettings = Join-Path $work ("editor-$operation-settings")
             New-Item -ItemType Directory -Path $targetSettings -Force | Out-Null
             $targetArguments = @('-multiInst', '-nosession', '-noPlugin', ('-settingsDir=' + $targetSettings))
-            $source = @"
+            $launchSource = @"
 const target = await computer.app({path: $(ConvertTo-Json -InputObject $targetPath -Compress)});
 const started = await target.launch({additional_arguments: $(ConvertTo-Json -InputObject $targetArguments -Compress)});
 const win = await started.app.waitFor({onScreen: true}, {timeout: 15000});
-await win.observe({include_screenshot: false});
-await win.type($(ConvertTo-Json -InputObject $text -Compress));
-await win.observe({include_screenshot: false});
-({pid: started.app.pid, hwnd: win.windowId})
+const summarize = (observation) => ({
+  has_tree: typeof observation?.tree_markdown === 'string' && observation.tree_markdown.length > 0,
+  element_count: Array.isArray(observation?.elements) ? observation.elements.length : 0,
+  exact_handle_observed: true,
+});
+const stableProjection = (observation) => ({
+  app_name: observation?.app_name ?? null,
+  window_bounds: observation?.window_bounds ?? null,
+  tree_markdown: observation?.tree_markdown ?? null,
+  elements: Array.isArray(observation?.elements) ? observation.elements.map((element) => ({
+    role: element?.role ?? null,
+    label: element?.label ?? null,
+    value: element?.value ?? null,
+    enabled: element?.enabled ?? null,
+    selected: element?.selected ?? null,
+  })) : null,
+});
+const sameProjection = (left, right) => JSON.stringify(stableProjection(left)) === JSON.stringify(stableProjection(right));
+const observeStable = async () => {
+  let previous = await win.observe({include_screenshot: false});
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const current = await win.observe({include_screenshot: false});
+    if (sameProjection(previous, current)) return {observation: current, stable: true};
+    previous = current;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return {observation: previous, stable: false};
+};
+const ready = await observeStable();
+const readySummary = summarize(ready.observation);
+const effectSummary = (effect) => ({
+  effect: effect?.effect ?? null,
+  status: effect?.status ?? null,
+  route: effect?.route ?? null,
+  delivery: effect?.delivery?.mode ?? null,
+});
+const diagnostics = {
+  ready_stable: ready.stable,
+  ready_usable: readySummary.has_tree || readySummary.element_count > 0,
+  ready: readySummary,
+  typed_attempted: false,
+};
+if (!diagnostics.ready_stable || !diagnostics.ready_usable) {
+  ({pid: started.app.pid, hwnd: win.windowId, diagnostics})
+} else {
+  const activation = await win.activate();
+  ({pid: started.app.pid, hwnd: win.windowId, diagnostics: {
+    ...diagnostics,
+    activation: effectSummary(activation),
+  }})
+}
 "@
-            Set-Content -LiteralPath (Join-Path $work ("launch-$operation.js")) -Value $source -Encoding utf8
+            $typeSource = @"
+if (typeof win === 'undefined') throw new Error('computer_kernel_not_persistent');
+const effectSummary = (effect) => ({
+  effect: effect?.effect ?? null,
+  status: effect?.status ?? null,
+  route: effect?.route ?? null,
+  delivery: effect?.delivery?.mode ?? null,
+});
+const before = await win.observe({include_screenshot: false});
+let typed = null;
+let type_error = null;
+try {
+  typed = await win.type($(ConvertTo-Json -InputObject $text -Compress));
+} catch (error) {
+  type_error = {code: error?.code ?? null, name: error?.name ?? 'Error'};
+}
+const after = await win.observe({include_screenshot: false});
+({diagnostics: {
+  typed_attempted: true,
+  type: effectSummary(typed),
+  type_error,
+  after: {
+    has_tree: typeof after?.tree_markdown === 'string' && after.tree_markdown.length > 0,
+    element_count: Array.isArray(after?.elements) ? after.elements.length : 0,
+    exact_handle_observed: true,
+  },
+  observation_changed: JSON.stringify(stableProjection(before)) !== JSON.stringify(stableProjection(after)),
+}})
+"@
+            $nativePath = (Join-Path $Root 'Native.cs').Replace("'", "''")
+            $wrapperSource = @'
+param(
+    [Parameter(Mandatory)][string] $Python,
+    [Parameter(Mandatory)][string] $LaunchScript,
+    [Parameter(Mandatory)][string] $TypeScript
+)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+Add-Type -Path '__NATIVE_PATH__'
+function Invoke-ComputerJs([string] $Script) {
+    $errorPath = Join-Path $env:TEMP ('cu-js-' + [guid]::NewGuid().ToString('N') + '.err')
+    try {
+        $output = & $Python -I -B -m vibe computer js --code "@$Script" --timeout-ms 60000 2> $errorPath
+        if ($LASTEXITCODE -ne 0) { throw 'fixture_cli_exit' }
+        $text = ($output -join "`n")
+        if (-not $text) { throw 'fixture_cli_empty_result' }
+        return ($text | ConvertFrom-Json)
+    } finally { Remove-Item -LiteralPath $errorPath -Force -ErrorAction SilentlyContinue }
+}
+$launch = Invoke-ComputerJs $LaunchScript
+if (-not $launch.result.diagnostics.ready_stable -or -not $launch.result.diagnostics.ready_usable) {
+    $finalResult = $launch.result
+} else {
+    $focus = [AcceptanceNative]::IsExactWindowVisibleAndForeground([IntPtr][long]$launch.result.hwnd)
+    $diagnostics = [ordered]@{}
+    foreach ($property in $launch.result.diagnostics.PSObject.Properties) { $diagnostics[$property.Name] = $property.Value }
+    $diagnostics.native_focus_before_type = $focus
+    if (-not $focus) {
+        $diagnostics.typed_attempted = $false
+        $finalResult = [ordered]@{ pid = $launch.result.pid; hwnd = $launch.result.hwnd; diagnostics = $diagnostics }
+    } else {
+        $typed = Invoke-ComputerJs $TypeScript
+        foreach ($property in $typed.result.diagnostics.PSObject.Properties) { $diagnostics[$property.Name] = $property.Value }
+        $finalResult = [ordered]@{ pid = $launch.result.pid; hwnd = $launch.result.hwnd; diagnostics = $diagnostics }
+    }
+}
+[ordered]@{ ok = $true; kind = 'computer_js'; result = $finalResult } | ConvertTo-Json -Depth 10 -Compress
+'@.Replace('__NATIVE_PATH__', $nativePath)
+            Set-Content -LiteralPath (Join-Path $work ("launch-$operation.js")) -Value $launchSource -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $work ("launch-$operation-type.js")) -Value $typeSource -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $work ("launch-$operation.ps1")) -Value $wrapperSource -Encoding utf8
             $appResult = Run-CaseTurn "launch-$operation"
+            if (-not $appResult.diagnostics) { throw 'shipped_cu_diagnostics_missing' }
+            $diagnostics = [ordered]@{}
+            foreach ($property in $appResult.diagnostics.PSObject.Properties) { $diagnostics[$property.Name] = $property.Value }
+            $diagnostics.app_pid = [int]$appResult.pid
+            $diagnostics.window_id = [long]$appResult.hwnd
+            $result.cu_input_diagnostics = $diagnostics
+            $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $work 'result.json') -Encoding utf8
             $target = [Diagnostics.Process]::GetProcessById([int]$appResult.pid)
             $null = $target.SafeHandle
             $helpers = $null
             try {
                 if ($target.HasExited -or $target.MainModule.FileName -ne $targetPath -or [AcceptanceNative]::IsElevated($target.Id)) { throw 'real_created_standard_editor_not_proven' }
                 $window = [IntPtr][long]$appResult.hwnd
+                if (-not [AcceptanceNative]::IsExactWindowOwnedByProcess($window, $target.Id)) { throw 'created_window_owner_unproven' }
+                $diagnostics.target_identity = 'created_process_path_nonelevated_and_hwnd_owner_verified'
+                $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $work 'result.json') -Encoding utf8
+                if (-not $diagnostics.typed_attempted) { throw 'shipped_type_not_attempted_readiness_or_focus_unproven' }
                 if (-not [AcceptanceNative]::UnsavedTextEquals($window, $text)) { throw 'shipped_type_did_not_create_unsaved_text' }
                 $helpers = Driver-Handles $target.Id
                 if ($operation -eq 'off') {

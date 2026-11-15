@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,14 +47,25 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
     functions = [item.get("function", {}).get("name") for item in request.get("tools", []) if item.get("type") == "function"]
     if "powershell" not in functions:
         raise ValueError("shipped_windows_powershell_tool_required")
+    launch_case = marker.startswith("launch-")
     script = work / f"{marker}.js"
     output = work / f"{marker}.json"
     # Explicit pipe capture also works when the installed interpreter has no
     # console. It inherits the REAL tool environment; no caller ID is invented.
-    arguments = f'-I -B -m vibe computer js --code "@{script}" --timeout-ms 60000'
+    if launch_case:
+        wrapper = work / f"{marker}.ps1"
+        type_script = work / f"{marker}-type.js"
+        arguments = subprocess.list2cmdline([
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+            str(wrapper), "-Python", python, "-LaunchScript", str(script), "-TypeScript", str(type_script),
+        ])
+        file_line = "$p.FileName = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'"
+    else:
+        arguments = f'-I -B -m vibe computer js --code "@{script}" --timeout-ms 60000'
+        file_line = f"$p.FileName = {ps_quote(python)}"
     command = "\n".join([
         "$p = New-Object System.Diagnostics.ProcessStartInfo",
-        f"$p.FileName = {ps_quote(python)}",
+        file_line,
         f"$p.Arguments = {ps_quote(arguments)}",
         "$p.UseShellExecute = $false; $p.CreateNoWindow = $true",
         "$p.RedirectStandardOutput = $true; $p.RedirectStandardError = $true",

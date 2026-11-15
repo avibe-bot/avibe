@@ -97,6 +97,26 @@ def test_update_panel_oracle_rejects_stale_check_and_changed_offer(tmp_path):
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
 
 
+def test_enabled_fixture_observes_ready_exact_window_and_type_effect_before_native_readback() -> None:
+    source = (ROOT / "desktop/scripts/signed-cu-acceptance/enabled.ps1").read_text(encoding="utf-8")
+    assert "const stableProjection = (observation) =>" in source
+    assert "const sameProjection = (left, right)" in source
+    assert "ready_usable: readySummary.has_tree || readySummary.element_count > 0" in source
+    assert "launch-$operation-type.js" in source
+    assert "IsExactWindowVisibleAndForeground" in source
+    assert "const effectSummary = (effect) =>" in source
+    assert "const activation = await win.activate();" in source
+    assert "native_focus_before_type" in source
+    assert "type_error" in source
+    assert "observation_changed" in source
+    assert "if (-not $diagnostics.typed_attempted)" in source
+    assert "shipped_type_not_attempted_readiness_or_focus_unproven" in source
+    assert "IsExactWindowOwnedByProcess" in source
+    assert source.index("const ready = await observeStable();") < source.index("IsExactWindowVisibleAndForeground")
+    assert source.index("const effectSummary = (effect) =>") < source.index("typed = await win.type")
+    assert source.index("typed = await win.type") < source.index("UnsavedTextEquals")
+
+
 def request(marker="launch-off", tool="powershell"):
     return {
         "messages": [{"role": "user", "content": f"AVIBE_CU_CASE:{marker}"}],
@@ -105,16 +125,62 @@ def request(marker="launch-off", tool="powershell"):
 
 
 def test_windows_tool_and_real_cli_command_are_bound_to_fixture_marker(tmp_path):
-    reply, finish = stub.scripted_reply(request(), python="C:/installed/python.exe", work=tmp_path)
+    reply, finish = stub.scripted_reply(request(), python="C:/installed python.exe", work=Path("C:/acceptance work"))
     call = reply["tool_calls"][0]
     assert finish == "tool_calls"
     assert call["function"]["name"] == "powershell"
     args = json.loads(call["function"]["arguments"])
-    assert "-I -B -m vibe computer js" in args["command"]
+    assert '-File "C:/acceptance work/launch-off.ps1"' in args["command"]
+    assert '-Python "C:/installed python.exe"' in args["command"]
+    assert "-File '" not in args["command"]
     assert "launch-off.js" in args["command"]
+    assert "launch-off-type.js" in args["command"]
+    assert "WindowsPowerShell" in args["command"]
     assert "AVIBE_SESSION_ID" not in args["command"]
     assert args["watch"] is False
     assert args["timeout"] == 90
+
+
+def test_launch_wrapper_uses_native_windows_argv_handoff(tmp_path):
+    if os.name == "nt":
+        pytest.skip("POSIX ProcessStartInfo argv oracle; hosted Windows uses a native executable fixture")
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is required for the argv handoff oracle")
+    work = tmp_path / "acceptance work"
+    work.mkdir()
+    fake_root = tmp_path / "system root"
+    fake = fake_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    fake.parent.mkdir(parents=True)
+    fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_ARGV\"\n", encoding="utf-8")
+    fake.chmod(0o755)
+    argv_file = tmp_path / "argv.txt"
+    reply, _ = stub.scripted_reply(
+        request(), python=str(tmp_path / "python path.exe"), work=work
+    )
+    command = json.loads(reply["tool_calls"][0]["function"]["arguments"])["command"]
+    env = {key: value for key, value in os.environ.items() if key in {"PATH", "SystemRoot", "WINDIR"}}
+    for key in ("HOME", "USERPROFILE", "TMPDIR", "TEMP", "TMP", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        env[key] = str(tmp_path)
+    env.update({"SystemRoot": str(fake_root), "FAKE_ARGV": str(argv_file)})
+    outcome = subprocess.run(
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+    argv = argv_file.read_text(encoding="utf-8").splitlines()
+    assert argv[argv.index("-File") + 1] == str(work / "launch-off.ps1")
+    assert argv[argv.index("-Python") + 1] == str(tmp_path / "python path.exe")
+    assert argv[argv.index("-LaunchScript") + 1] == str(work / "launch-off.js")
+    assert argv[argv.index("-TypeScript") + 1] == str(work / "launch-off-type.js")
+
+
+def test_windows_probe_still_uses_direct_shipped_js_command(tmp_path):
+    reply, finish = stub.scripted_reply(request(marker="probe-context"), python="C:/installed/python.exe", work=tmp_path)
+    command = json.loads(reply["tool_calls"][0]["function"]["arguments"])["command"]
+    assert finish == "tool_calls"
+    assert "-I -B -m vibe computer js" in command
+    assert "probe-context.js" in command
 
 
 @pytest.mark.parametrize("payload", [request(tool="bash"), request(marker="delete-everything"), {"messages": [], "tools": []}])
