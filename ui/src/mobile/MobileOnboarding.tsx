@@ -1924,7 +1924,7 @@ export function MobileOnboarding() {
 }
 
 function MobileOnboardingScreens() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const startsOnAccount = useRef(
     window.location.hash === '#account' || window.location.hash === RUNTIME_ACCOUNT_HASH,
   );
@@ -2459,7 +2459,7 @@ function MobileOnboardingScreens() {
 
   const openGuide = () => {
     if (isOperationLocked()) return;
-    void openMobileExternal(installGuideUrl(i18n.language));
+    void openMobileExternal(installGuideUrl);
   };
 
   const openAccountSecurity = () => {
