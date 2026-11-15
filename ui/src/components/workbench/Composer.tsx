@@ -1684,6 +1684,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (pendingRef.current) return false;
       pendingRef.current = true;
       const sent = readyAttachments;
+      if (sessionId) sessionDraftAttachmentsCache.clear(sessionId);
       let started: boolean | void;
       try {
         started = await onSend(text, sent, undefined, metadata);
@@ -1693,6 +1694,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         pendingRef.current = false;
       }
       if (started === false) {
+        if (sessionId) {
+          sessionDraftAttachmentsCache.write(sessionId, sent.map(toSessionDraftAttachment));
+        }
         // Here, the take keeps the words (interrupted, send again). If the user has since left this
         // conversation, the take went with the composer: the words go to this session's draft,
         // as a refused typed message's do, unless a new draft was started.
@@ -2034,6 +2038,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const sentRefs = referencesRef.current;
     pendingRef.current = true;
     draftEditedRef.current = true;
+    if (sessionId) sessionDraftAttachmentsCache.clear(sessionId);
     // Clear optimistically so the box can't be re-submitted and a slow send can't
     // wipe text typed in the meantime.
     valueRef.current = '';
@@ -2089,7 +2094,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           onDraftChange?.(submitted);
         }
       } else {
-        if (sessionId) sessionDraftAttachmentsCache.clear(sessionId);
         void nativeHapticImpact('light');
         for (const attachment of sent) {
           if (stagedUrlsRef.current.delete(attachment.url)) URL.revokeObjectURL(attachment.url);

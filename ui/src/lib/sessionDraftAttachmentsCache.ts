@@ -79,23 +79,20 @@ export class SessionDraftAttachmentsCache {
   }
 
   read(sessionId: string): SessionDraftAttachment[] {
-    if (this.memory.has(sessionId)) {
-      return cloneAttachments(this.memory.get(sessionId) ?? []);
-    }
-
     const target = browserStorage(this.storage);
-    if (!target) return [];
+    if (!target) return cloneAttachments(this.memory.get(sessionId) ?? []);
     try {
       const key = this.key(sessionId);
       const record = parseRecord(target.getItem(key));
       if (!record) {
+        this.memory.delete(sessionId);
         target.removeItem(key);
         return [];
       }
       this.memory.set(sessionId, record.attachments);
       return cloneAttachments(record.attachments);
     } catch {
-      return [];
+      return cloneAttachments(this.memory.get(sessionId) ?? []);
     }
   }
 

@@ -2,7 +2,7 @@
 
 import { createInstance } from 'i18next';
 import { createRef, type ReactElement } from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -91,6 +91,35 @@ describe('Composer draft attachments', () => {
       <Composer sessionId="session-a" onSend={vi.fn()} />,
     ));
     await waitFor(() => expect(screen.queryByText('image.png')).toBeNull());
+  });
+
+  it('does not restore submitted attachments while the send is still in flight', async () => {
+    let resolveSend!: (value: boolean | undefined) => void;
+    sessionDraftAttachmentsCache.write('session-a', [readyAttachment]);
+    const onSend = vi.fn(() => new Promise<boolean | undefined>((resolve) => {
+      resolveSend = resolve;
+    }));
+    const view = render(providers(
+      <Composer
+        sessionId="session-a"
+        initialDraft="send this"
+        onSend={onSend}
+      />,
+    ));
+
+    await waitFor(() => expect(screen.getByText('image.png')).toBeTruthy());
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    expect(sessionDraftAttachmentsCache.read('session-a')).toEqual([]);
+
+    view.unmount();
+    render(providers(
+      <Composer sessionId="session-a" onSend={vi.fn()} />,
+    ));
+    await waitFor(() => expect(screen.queryByText('image.png')).toBeNull());
+
+    await act(async () => resolveSend(undefined));
+    expect(sessionDraftAttachmentsCache.read('session-a')).toEqual([]);
   });
 
   it('keeps attachments scoped to the session and supports attachment-only drafts', async () => {

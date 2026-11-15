@@ -69,4 +69,15 @@ describe('SessionDraftAttachmentsCache', () => {
     expect(cache.read('session-a')).toEqual([]);
     expect(cache.read('session-b')).toEqual([{ ...attachment, token: 'other-token' }]);
   });
+
+  it('reconciles a cached memory entry with storage changes from another tab', () => {
+    const storage = new MemoryStorage();
+    const cache = new SessionDraftAttachmentsCache(storage);
+    cache.write('session-a', [attachment]);
+    expect(cache.read('session-a')).toEqual([attachment]);
+
+    storage.removeItem(`${SESSION_DRAFT_ATTACHMENTS_STORAGE_PREFIX}session-a`);
+
+    expect(cache.read('session-a')).toEqual([]);
+  });
 });
