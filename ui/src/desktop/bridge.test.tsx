@@ -87,3 +87,36 @@ it('exposes only a current direct sign-out receipt and clears it on escape', asy
   await act(async () => { window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: state(3, 3) })); });
   expect(screen.getByText('none')).toBeTruthy();
 });
+
+// A5: older producers omit the new display metadata. The actual account hook
+// must normalize absence, then accept the native snapshot without inventing
+// a relationship from the committed target or an OS hostname.
+it('normalizes missing display proof and accepts the current native instance snapshot', async () => {
+  vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+  vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', state());
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: vi.fn(async (_command, { request }) => ({
+    version: 1, request_id: request.request_id, ok: true, state: state(),
+  })) });
+  function Probe() {
+    const { state: value } = useAccountClient();
+    return <p>{String(value?.local.slug)} / {String(value?.current_instance?.relationship ?? value?.current_instance)}</p>;
+  }
+  render(<Probe />);
+  await screen.findByText('null / null');
+  const next = {
+    ...state(2, 3),
+    account: { ...state().account, status: 'signed_in', identity: { id: 'user', email: 'user@example.test' } },
+    connection: {
+      status: 'remote_connected',
+      committed: { kind: 'remote', instance_id: 'shared-id', name: 'shared-slug', canonical_origin: 'https://shared.avibe.bot' },
+      pending: null,
+    },
+    local: { ...state().local, slug: 'registered-slug' },
+    current_instance: {
+      id: 'shared-id', name: 'shared-slug', host: 'shared.avibe.bot', url: 'https://shared.avibe.bot',
+      relationship: 'shared', owner_email: 'owner@example.test', available: true,
+    },
+  };
+  await act(async () => { window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: next })); });
+  expect(screen.getByText('registered-slug / shared')).toBeTruthy();
+});

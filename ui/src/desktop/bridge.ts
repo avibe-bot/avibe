@@ -24,7 +24,9 @@ export type DesktopClientState = {
     instance_id: string | null; error_code: string | null;
   };
   catalog: { status: 'idle' | 'loading' | 'ready' | 'error'; instances: Instance[] };
-  local: { name: string; instance_id?: string | null; remote_access_url?: string | null; remote_access: 'off' | 'starting' | 'on' | 'unavailable' };
+  /** Display proof for the committed remote; never used to authorize a switch. */
+  current_instance?: Instance | null;
+  local: { name: string; instance_id?: string | null; slug?: string | null; remote_access_url?: string | null; remote_access: 'off' | 'starting' | 'on' | 'unavailable' };
   desktop: { version: string; update: DesktopUpdateState };
   consent: null | { instance_id: string; instance_name: string; host: string; scope: string };
   remote_auxiliary: 'local' | 'disabled_incomplete';
@@ -112,10 +114,13 @@ export function presentDesktopClient(view: DesktopClientView | 'updates', presen
   return true;
 }
 
-/** Older shells have no local identity proof; never substitute enrollment/catalog. */
+/** Normalize absent metadata from older shells without inferring identity or ownership. */
 export function withLocalIdentity<T extends DesktopClientProjection>(state: T): T {
-  return { ...state, local: { ...state.local,
+  return { ...state,
+    ...(isClientState(state) ? { current_instance: state.current_instance ?? null } : {}),
+    local: { ...state.local,
     instance_id: typeof state.local.instance_id === 'string' ? state.local.instance_id : null,
+    slug: typeof state.local.slug === 'string' ? state.local.slug : null,
     remote_access_url: typeof state.local.remote_access_url === 'string' ? state.local.remote_access_url : null,
   } };
 }
