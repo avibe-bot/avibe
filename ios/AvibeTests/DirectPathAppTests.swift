@@ -12,16 +12,15 @@ final class DirectPathAppTests: XCTestCase {
         "https://instance-one.example"
     )!
 
-    // MARK: The App as shipped
+    // MARK: App composition controls
 
-    /// Built exactly as `AvibeApp` builds it, with no transport argument.
-    /// Observed from before the App exists and at every step: no `direct`
+    /// The compatibility path with no registered transport: no `direct`
     /// capability, `direct.status` unsupported, no event, WebKit's
     /// `proxyConfigurations` setter never called on any store, and no
-    /// listening socket. The next test, with a stand-in transport, is the
-    /// positive control: the same capability, count, and scan do move.
+    /// listening socket. The registered App's positive control is covered by
+    /// `testWithATransportTheRouteIsWrittenBeforeTheFirstLoadAndTheStatusReachesThePage`.
     @MainActor
-    func testTheAppAsShippedHasNoDirectCapabilityNoListenerAndNoRouteWrite() async throws {
+    func testWithoutATransportHasNoDirectCapabilityNoListenerAndNoRouteWrite() async throws {
         try assertSocketScanSeesListeners()
         let routeWrites = try ProxyConfigurationWrites.count()
         var listening: Set<ListeningSocket> = []
@@ -767,6 +766,10 @@ final class DirectPathAppTests: XCTestCase {
 
     // MARK: The App with a transport
 
+    /// The registered App's positive control, with a stand-in transport so
+    /// this test exercises the App/seam composition without native iroh:
+    /// the route is written before the first load, the capability reaches the
+    /// page, and direct path reports change its status.
     @MainActor
     func testWithATransportTheRouteIsWrittenBeforeTheFirstLoadAndTheStatusReachesThePage() async throws {
         let transport = StandInDirectTransport()

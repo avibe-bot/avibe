@@ -1,10 +1,8 @@
 import Foundation
 
-// The seam between the direct transport (iroh, the rendezvous, probing: not
-// in the App yet) and the local proxy that carries WebKit's connections.
-// Nothing in the App implements `DirectTransporting` and `AvibeApp` registers
-// none, so none of this runs: no listener, no route write, no `direct`
-// capability, no transport work.
+// The seam between the direct transport (iroh, the rendezvous, probing) and
+// the local proxy that carries WebKit's connections. `AvibeApp` registers
+// the binding-backed transport; it remains inactive until a runtime is ready.
 // Design: docs/plans/remote-direct-ios.md.
 
 /// An instance authority the local proxy may serve: an exact host, on port
