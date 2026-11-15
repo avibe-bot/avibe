@@ -52,9 +52,12 @@ random generator and sealing algorithm belong to avault.
   admission. Both new Avibe and the approved dependency are required for 8..11.
 - Typed provenance accepts 8..128 to preserve existing historical metadata;
   new generation is still bounded by the shared 8..100 admission range.
-- This writer prepares the managed 0.1.14 pin only from its published verified
-  manifest and real archive checksums/sizes. No guessed tuple or private binary.
-  avault's floor-8 contract must merge before the consuming PR opens.
+- The floor-8 avault contract merged as avault#56 at
+  `8aa3c6030107575517b4837db7cef85af884b9e7` before this consuming PR. The
+  managed 0.1.14 pin comes from the published manifest and all six real archive
+  checksums/sizes, independently compared with sidecars and GitHub digests;
+  the release lane also verified the direct mirror without fallback. The
+  keyless CI verifier stays on its separate oldest-compatible 0.1.10 floor.
 
 ## Provenance and public result
 
@@ -116,6 +119,12 @@ no provenance for it.
   format; generated plaintext is never returned to Python or test logs. Tests
   skip clearly when no explicit binary is supplied. Synthetic custody mocks
   prove orchestration, not end-to-end plaintext isolation.
+- Released 0.1.14 custody exercise: all six explicit-file-store cases pass
+  (passwords 8/11/12/100, hex, Base64). The silent intended child checks the
+  actual generated value is absent from serialized service result/audit and
+  captured output/log observations; Python never receives that value. This is
+  separate from mocked orchestration and from parent-owned Incus upgrade and
+  signing acceptance, which is not claimed by these generation-only cases.
 - No consuming PR before the avault primitive contract is merged and its final
   version known. B2/B3 and concurrent skill changes are consumed only from merged
   master. Release/pin, exact-head independent security review, merge and local
