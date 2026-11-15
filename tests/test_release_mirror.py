@@ -57,48 +57,55 @@ def test_selection_keeps_every_full_release_and_only_the_newest_prereleases():
     ]
 
 
-V326_UPDATER_ASSETS = tuple(
-    name
-    for target, suffix in (
-        ("aarch64-apple-darwin", ".app.tar.gz"),
-        ("x86_64-apple-darwin", ".app.tar.gz"),
-        ("x86_64-pc-windows-msvc", ".exe"),
-    )
-    for name in (
-        f"desktop-update-{target}.json",
-        f"desktop-update-{target}.json.sig",
-        f"Avibe_3.2.6_{target}{suffix}",
-    )
-)
-
-
-@pytest.mark.parametrize("missing", V326_UPDATER_ASSETS)
-def test_326_index_waits_for_each_target_manifest_signature_and_payload(missing):
-    assets = ("avibe_os-3.2.6-py3-none-any.whl", *(name for name in V326_UPDATER_ASSETS if name != missing))
-    (release,) = releases(github_release("v3.2.6", published_at="2026-11-14T00:00:00Z", assets=assets))
-    objects = {release.key(asset): asset.size for asset in release.assets}
-
-    result = mirror.plan(REPOSITORY, [release], objects, None)
-
-    assert json.loads(result.index)["releases"] == []
-    # Hiding discovery never removes or skips even the already-mirrored core
-    # objects; unindexed bytes still go through the normal verification path.
-    assert {key for key, _ in result.uploads} == set(objects)
-    assert result.deletions == ()
-    assert result.changed == ()
-
-
-def test_326_index_reappears_with_the_unchanged_complete_signed_set():
+def updater_assets(version):
+    """The signed desktop updater set every gated stable must carry, as the release pipeline names it."""
     from scripts import desktop_release, desktop_updater
 
-    canonical = set().union(*(desktop_updater.names("3.2.6", target) for target in desktop_release.TARGETS))
-    assert set(V326_UPDATER_ASSETS) == canonical
-    assets = ("avibe_os-3.2.6-py3-none-any.whl", *V326_UPDATER_ASSETS)
-    (release,) = releases(github_release("v3.2.6", published_at="2026-11-14T00:00:00Z", assets=assets))
+    return tuple(sorted(set().union(*(desktop_updater.names(version, target) for target in desktop_release.TARGETS))))
+
+
+V326_UPDATER_ASSETS = updater_assets("3.2.6")
+GATED_STABLES = ("3.2.6", "3.2.7", "3.3.0", "4.0.0")
+
+
+def test_the_gate_requires_exactly_the_pipelines_signed_set():
+    assert set(V326_UPDATER_ASSETS) == {
+        name
+        for target, suffix in (
+            ("aarch64-apple-darwin", ".app.tar.gz"),
+            ("x86_64-apple-darwin", ".app.tar.gz"),
+            ("x86_64-pc-windows-msvc", ".exe"),
+        )
+        for name in (f"desktop-update-{target}.json", f"desktop-update-{target}.json.sig", f"Avibe_3.2.6_{target}{suffix}")
+    }
+
+
+@pytest.mark.parametrize("version", GATED_STABLES)
+def test_a_stable_index_waits_for_each_target_manifest_signature_and_payload(version):
+    required = updater_assets(version)
+    for missing in required:
+        assets = (f"avibe_os-{version}-py3-none-any.whl", *(name for name in required if name != missing))
+        (release,) = releases(github_release(f"v{version}", published_at="2026-11-16T00:00:00Z", assets=assets))
+        objects = {release.key(asset): asset.size for asset in release.assets}
+
+        result = mirror.plan(REPOSITORY, [release], objects, None)
+
+        assert json.loads(result.index)["releases"] == [], missing
+        # Hiding discovery never removes or skips even the already-mirrored core
+        # objects; unindexed bytes still go through the normal verification path.
+        assert {key for key, _ in result.uploads} == set(objects)
+        assert result.deletions == ()
+        assert result.changed == ()
+
+
+@pytest.mark.parametrize("version", GATED_STABLES)
+def test_a_stable_index_appears_with_the_unchanged_complete_signed_set(version):
+    assets = (f"avibe_os-{version}-py3-none-any.whl", *updater_assets(version))
+    (release,) = releases(github_release(f"v{version}", published_at="2026-11-16T00:00:00Z", assets=assets))
     result = mirror.plan(REPOSITORY, [release], {}, None)
 
     (indexed,) = json.loads(result.index)["releases"]
-    assert indexed["tag"] == "v3.2.6"
+    assert indexed["tag"] == f"v{version}"
     assert indexed["commit"] == release.commit
     assert indexed["prerelease"] is False
     assert {asset["name"] for asset in indexed["assets"]} == set(assets)
@@ -106,16 +113,30 @@ def test_326_index_reappears_with_the_unchanged_complete_signed_set():
     assert result.deletions == ()
 
 
+def test_another_versions_signed_set_does_not_open_the_gate():
+    assets = ("avibe_os-3.2.7-py3-none-any.whl", *updater_assets("3.2.6"))
+    (release,) = releases(github_release("v3.2.7", published_at="2026-11-16T00:00:00Z", assets=assets))
+
+    assert json.loads(mirror.render_index(REPOSITORY, [release]))["releases"] == []
+
+
 @pytest.mark.parametrize(
     "repository, tag, prerelease",
     [
+        # Stables before the full signed set are already listed and stay listed.
         (REPOSITORY, "v3.2.5", False),
-        (REPOSITORY, "v3.2.7", False),
+        (REPOSITORY, "v3.1.3", False),
+        (REPOSITORY, "v2.3.5", False),
+        (REPOSITORY, "v1.0.0", False),
+        # Pre-releases ship two targets and are never gated.
+        (REPOSITORY, "gh-v3.2.7rc6", True),
         (REPOSITORY, "gh-v3.2.6rc16", True),
+        # Another repository's release has no desktop set.
+        ("avibe-bot/askill", "v3.2.7", False),
         ("avibe-bot/askill", "v3.2.6", False),
     ],
 )
-def test_326_index_gate_leaves_other_versions_and_repositories_unchanged(repository, tag, prerelease):
+def test_the_stable_gate_leaves_older_stables_prereleases_and_other_repositories_unchanged(repository, tag, prerelease):
     parsed = releases(
         github_release(tag, published_at="2026-11-14T00:00:00Z", prerelease=prerelease, repository=repository),
         repository=repository,
@@ -127,36 +148,41 @@ def test_326_index_gate_leaves_other_versions_and_repositories_unchanged(reposit
     assert [asset["name"] for asset in indexed["assets"]] == ["a.tgz"]
 
 
-def test_326_pending_index_preserves_existing_entries_objects_and_installer_aliases():
+@pytest.mark.parametrize("version", GATED_STABLES)
+def test_a_pending_stable_preserves_existing_entries_objects_and_installer_aliases(version):
+    previous = "3.2.5" if version == "3.2.6" else "3.2.6"
     stable = github_release(
-        "v3.2.5", published_at="2026-11-10T00:00:00Z",
+        f"v{previous}", published_at="2026-11-10T00:00:00Z",
         assets=(
-            "Avibe_3.2.5_aarch64-apple-darwin.dmg",
-            "Avibe_3.2.5_x86_64-apple-darwin.dmg",
-            "Avibe_3.2.5_x86_64-pc-windows-msvc.exe",
+            f"Avibe_{previous}_aarch64-apple-darwin.dmg",
+            f"Avibe_{previous}_x86_64-apple-darwin.dmg",
+            f"Avibe_{previous}_x86_64-pc-windows-msvc.exe",
+            *(updater_assets(previous) if previous != "3.2.5" else ()),
         ),
     )
-    rc = github_release("gh-v3.2.6rc16", published_at="2026-11-13T00:00:00Z", prerelease=True)
+    rc = github_release("gh-v3.2.7rc6", published_at="2026-11-13T00:00:00Z", prerelease=True)
     baseline = mirror.plan(REPOSITORY, releases(stable, rc), {}, None)
     objects = {key: asset.size for key, asset in baseline.uploads}
     objects.update({key: asset.size for key, _, asset in baseline.aliases})
     latest = {key: asset.sha256 for key, _, asset in baseline.aliases}
     pending = github_release(
-        "v3.2.6", published_at="2026-11-14T00:00:00Z", assets=("avibe_os-3.2.6-py3-none-any.whl",),
+        f"v{version}", published_at="2026-11-16T00:00:00Z", assets=(f"avibe_os-{version}-py3-none-any.whl",),
     )
 
     result = mirror.plan(REPOSITORY, releases(stable, rc, pending), objects, baseline.index, latest)
 
     assert result.index == baseline.index
-    assert [key for key, _ in result.uploads] == ["releases/v3.2.6/avibe_os-3.2.6-py3-none-any.whl"]
+    assert [key for key, _ in result.uploads] == [f"releases/v{version}/avibe_os-{version}-py3-none-any.whl"]
     assert (result.aliases, result.deletions, result.changed) == ((), (), ())
 
 
 @pytest.mark.parametrize("complete", [False, True])
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_326_reconcile_mirrors_core_before_advertising_complete_desktop(monkeypatch, complete, dry_run):
-    assets = ("avibe_os-3.2.6-py3-none-any.whl", *(V326_UPDATER_ASSETS if complete else ()))
-    item = github_release("v3.2.6", published_at="2026-11-14T00:00:00Z", assets=assets)
+@pytest.mark.parametrize("version", ["3.2.6", "3.2.7"])
+def test_reconcile_mirrors_core_before_advertising_a_complete_desktop_stable(monkeypatch, complete, dry_run, version):
+    tag = f"v{version}"
+    assets = (f"avibe_os-{version}-py3-none-any.whl", *(updater_assets(version) if complete else ()))
+    item = github_release(tag, published_at="2026-11-16T00:00:00Z", assets=assets)
     written_indexes = []
 
     class IndexBucket(RecordingBucket):
@@ -167,7 +193,7 @@ def test_326_reconcile_mirrors_core_before_advertising_complete_desktop(monkeypa
 
     bucket = IndexBucket({}, None)
     monkeypatch.setattr(mirror, "github_releases", lambda repository: [item])
-    monkeypatch.setattr(mirror, "tag_commits", lambda repository: {"v3.2.6": "0" * 40})
+    monkeypatch.setattr(mirror, "tag_commits", lambda repository: {tag: "0" * 40})
     monkeypatch.setattr(mirror, "download", lambda asset, destination: destination.write_bytes(b""))
 
     assert mirror.reconcile(REPOSITORY, bucket, keep_prereleases=20, dry_run=dry_run) == 0
@@ -175,8 +201,89 @@ def test_326_reconcile_mirrors_core_before_advertising_complete_desktop(monkeypa
         assert bucket.writes == []
         assert written_indexes == []
     else:
-        assert bucket.writes == [*(f"releases/v3.2.6/{name}" for name in sorted(assets)), mirror.INDEX_KEY]
-        assert [release["tag"] for release in written_indexes[0]["releases"]] == (["v3.2.6"] if complete else [])
+        assert bucket.writes == [*(f"releases/{tag}/{name}" for name in sorted(assets)), mirror.INDEX_KEY]
+        assert [release["tag"] for release in written_indexes[0]["releases"]] == ([tag] if complete else [])
+
+
+# Installed desktop shells read this index. These models transcribe each
+# shipped shell's stable selection; the PR records a run of the real Rust code.
+def _semver_stable(tag):
+    """desktop/runtime-host/src/update.rs Channel::Stable.version (v3.2.5:31-47, v3.2.6:32-47)."""
+    match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def desktop_325_offer(index, current, target):
+    """v3.2.5 find_update: Channel::latest (update.rs:63-69) picks the highest stable
+    before checking assets; a pick without its signed set is an update error."""
+    stable = [(v, r) for r in index["releases"] if not r["prerelease"] and (v := _semver_stable(r["tag"]))]
+    if not stable:
+        return None
+    version, release = max(stable, key=lambda item: item[0])
+    if version <= current:
+        return None
+    names = {asset["name"] for asset in release["assets"]}
+    manifest = f"desktop-update-{target}.json"
+    if manifest not in names or f"{manifest}.sig" not in names:
+        return "error: signed updater metadata unavailable"
+    return release["tag"]
+
+
+def desktop_326_offer(index, current, target):
+    """v3.2.6 find_update: Channel::latest_for_target (update.rs:82-100) keeps only
+    releases whose target has its complete signed set."""
+    candidates = []
+    for release in index["releases"]:
+        version = _semver_stable(release["tag"])
+        if release["prerelease"] or version is None:
+            continue
+        names = {asset["name"] for asset in release["assets"]}
+        if {f"desktop-update-{target}.json", f"desktop-update-{target}.json.sig"} | {
+            name for name in updater_assets(release["tag"][1:]) if name.startswith(f"Avibe_") and target in name
+        } <= names:
+            candidates.append((version, release))
+    if not candidates:
+        return None
+    version, release = max(candidates, key=lambda item: item[0])
+    return release["tag"] if version > current else None
+
+
+@pytest.mark.parametrize("target", ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"])
+@pytest.mark.parametrize(
+    "client, current",
+    [(desktop_325_offer, (3, 2, 5)), (desktop_325_offer, (3, 2, 6)), (desktop_326_offer, (3, 2, 6))],
+)
+def test_installed_desktop_shells_see_nothing_new_until_the_stables_desktop_set_exists(client, current, target):
+    v326 = github_release(
+        "v3.2.6", published_at="2026-11-14T00:00:00Z", assets=("avibe_os-3.2.6-py3-none-any.whl", *V326_UPDATER_ASSETS)
+    )
+    rc = github_release("gh-v3.2.7rc6", published_at="2026-11-15T00:00:00Z", prerelease=True)
+    core_only = github_release("v3.2.7", published_at="2026-11-16T00:00:00Z", assets=("avibe_os-3.2.7-py3-none-any.whl",))
+    complete = github_release(
+        "v3.2.7", published_at="2026-11-16T00:00:00Z", assets=("avibe_os-3.2.7-py3-none-any.whl", *updater_assets("3.2.7"))
+    )
+    before = client(json.loads(mirror.render_index(REPOSITORY, releases(v326, rc))), current, target)
+
+    pending = client(json.loads(mirror.render_index(REPOSITORY, releases(v326, rc, core_only))), current, target)
+    ready = client(json.loads(mirror.render_index(REPOSITORY, releases(v326, rc, complete))), current, target)
+
+    assert pending == before
+    assert ready == "v3.2.7"
+
+
+def test_without_the_gate_desktop_325_would_report_an_update_error():
+    # The failure the gate prevents: an ungated index lists the stable as soon as its core mirrors.
+    v326 = github_release(
+        "v3.2.6", published_at="2026-11-14T00:00:00Z", assets=("avibe_os-3.2.6-py3-none-any.whl", *V326_UPDATER_ASSETS)
+    )
+    core_only = github_release("v3.2.7", published_at="2026-11-16T00:00:00Z", assets=("avibe_os-3.2.7-py3-none-any.whl",))
+    parsed = releases(v326, core_only)
+    ungated = json.loads(mirror.render_index(REPOSITORY, parsed))
+    ungated["releases"] = [
+        {"tag": r.tag, "prerelease": r.prerelease, "assets": [{"name": a.name} for a in r.assets]} for r in parsed
+    ]
+
+    assert desktop_325_offer(ungated, (3, 2, 6), "aarch64-apple-darwin") == "error: signed updater metadata unavailable"
 
 
 def test_the_index_marks_only_releases_whose_notes_ask_for_silence():
