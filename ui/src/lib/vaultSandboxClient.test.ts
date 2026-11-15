@@ -336,7 +336,7 @@ describe('VaultSandboxClient protected seed-phrase wallet (contract rev0.7 §4)'
     const { instance, request } = client(withHd, sealed);
     await expect(instance.sealHdWallet({ name: 'COLD', mode: 'import', wrapMeta: '{"v":1}' }, 'win1')).resolves.toEqual(sealed);
     expect(request).toHaveBeenCalledExactlyOnceWith('sealHdWallet', { name: 'COLD', mode: 'import', wrapMeta: '{"v":1}' }, {
-      timeoutMs: 2_105_000, interactive: true, authorizationWindow: 'win1',
+      timeoutMs: 305_000, interactive: true, authorizationWindow: 'win1',
     });
   });
 
