@@ -9,12 +9,19 @@ const api = vi.hoisted(() => ({
   completeVaultSetup: vi.fn(),
 }));
 const sandbox = vi.hoisted(() => ({ setup: vi.fn(), status: vi.fn() }));
+const sandboxEvents = vi.hoisted(() => ({
+  listener: null as ((event: { state: 'locked'; reason: 'auto-lock' }) => void) | null,
+}));
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('./vaultEntry', () => ({ assertVaultEntryAvailable: vi.fn(), vaultEntryIssue: () => null }));
 vi.mock('./vaultSandboxClient', async (original) => ({
   ...await original<typeof import('./vaultSandboxClient')>(),
+  subscribeVaultStateEvents: (listener: (event: { state: 'locked'; reason: 'auto-lock' }) => void) => {
+    sandboxEvents.listener = listener;
+    return () => {};
+  },
   getVaultSandboxClient: async () => sandbox,
 }));
 
@@ -64,6 +71,12 @@ describe('protected setup failure from the create/unlock hook', () => {
       code: 'setup_failed',
     });
     expect(result.current.status).not.toBe('unlocked');
+    expect(vaultUnlocked()).toBe(false);
+    expect(vaultFreshSetup()).toBe(true);
+
+    await act(async () => {
+      sandboxEvents.listener?.({ state: 'locked', reason: 'auto-lock' });
+    });
     expect(vaultUnlocked()).toBe(false);
     expect(vaultFreshSetup()).toBe(true);
 

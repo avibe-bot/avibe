@@ -7,10 +7,11 @@ const api = vi.hoisted(() => ({
   getVaultSandboxRootMetadata: vi.fn(),
   completeVaultSetup: vi.fn(),
 }));
-const sandbox = vi.hoisted(() => ({ setup: vi.fn() }));
+const sandbox = vi.hoisted(() => ({ setup: vi.fn(), seal: vi.fn() }));
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
+vi.mock('./vaultEntry', () => ({ assertVaultEntryAvailable: vi.fn(), vaultEntryIssue: () => null }));
 vi.mock('./vaultSandboxClient', async (original) => ({
   ...await original<typeof import('./vaultSandboxClient')>(),
   getVaultSandboxClient: async () => sandbox,
@@ -45,6 +46,7 @@ describe('protected setup from the create/unlock hook', () => {
       authzRegistration: registration,
       state: 'unlocked',
     });
+    sandbox.seal.mockReset();
   });
 
   afterEach(() => {
@@ -69,6 +71,16 @@ describe('protected setup from the create/unlock hook', () => {
     expect(result.current.status).not.toBe('unlocked');
     expect(vaultUnlocked()).toBe(false);
     expect(vaultFreshSetup()).toBe(true);
+
+    const second = renderHook(() => useProtectedVault());
+    expect(second.result.current.status).not.toBe('unlocked');
+    await expect(act(async () => second.result.current.sealValue(
+      'PENDING',
+      'static',
+      { valueRef: { current: 'redacted' }, clear: vi.fn() },
+    ))).rejects.toThrow('vault-setup-pending');
+    expect(sandbox.seal).not.toHaveBeenCalled();
+    second.unmount();
 
     await act(async () => {
       resolveCommit({ ok: true, exists: true, wrap_meta: wrapMeta });

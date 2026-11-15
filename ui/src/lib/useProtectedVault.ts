@@ -110,8 +110,27 @@ function vaultStatusNow(): ProtectedVaultStatus {
   return sessionVault.durableSetupPending ? 'needs-setup' : sessionVault.status;
 }
 
-function clearUnlockState(): void {
+function assertDurableSetupReady(): void {
+  if (sessionVault.durableSetupPending) throw new Error('vault-setup-pending');
+}
+
+function hasPendingSetupProof(): boolean {
+  return Boolean(
+    sessionVault.durableSetupPending
+    && sessionVault.freshSetup
+    && sessionVault.wrapMeta
+    && sessionVault.authzFactorRegistration,
+  );
+}
+
+function clearUnlockState(options: { discardPendingSetup?: boolean } = {}): void {
   vaultLockExpiresAt = null;
+  // Ordinary sandbox lock/unload events must not destroy the exact tuple needed to retry an
+  // unresolved setup POST. Explicit abandonment or a final server refusal opts into discard.
+  if (hasPendingSetupProof() && !options.discardPendingSetup) {
+    sessionVault.status = 'needs-setup';
+    return;
+  }
   sessionVault.durableSetupPending = false;
   if (sessionVault.freshSetup) {
     // A fresh setup that never persisted a secret: locking reverts to needs-setup (the daemon has
@@ -309,7 +328,7 @@ export async function setupVaultDurably(
     const final = typeof committed.code === 'string' && committed.code !== 'network_error';
     if (final) {
       resetVaultSandboxClient();
-      clearUnlockState();
+      clearUnlockState({ discardPendingSetup: true });
       notifyVaultLockChange();
     }
     return { ok: false, code: committed.code || 'setup_failed' };
@@ -343,7 +362,7 @@ export async function setupVaultDurably(
 export function useProtectedVault() {
   const api = useApi();
   const { t } = useTranslation();
-  const [status, setStatus] = useState<ProtectedVaultStatus>(sessionVault.status);
+  const [status, setStatus] = useState<ProtectedVaultStatus>(vaultStatusNow());
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -397,12 +416,7 @@ export function useProtectedVault() {
           sessionVault.status = 'locked';
           vaultLockExpiresAt = null;
         }
-      } else if (
-        sessionVault.durableSetupPending
-        && sessionVault.freshSetup
-        && sessionVault.wrapMeta
-        && sessionVault.authzFactorRegistration
-      ) {
+      } else if (hasPendingSetupProof()) {
         // The setup POST may still be retryable after an unknown response. Do not discard the
         // exact root + registration proof merely because discovery raced before the commit landed.
         sessionVault.status = 'needs-setup';
@@ -436,6 +450,7 @@ export function useProtectedVault() {
   }, [api]);
 
   const unlockPasskey = useCallback(async () => {
+    assertDurableSetupReady();
     assertVaultEntryAvailable();
     const wrapMeta = sessionVault.wrapMeta;
     if (!wrapMeta) throw new Error('vault-not-setup');
@@ -458,6 +473,7 @@ export function useProtectedVault() {
       }
     > => {
       assertVaultEntryAvailable();
+      assertDurableSetupReady();
       const wrapMeta = sessionVault.wrapMeta;
       if (!wrapMeta) throw new Error('vault-locked');
       const sandbox = await getVaultSandboxClient();
@@ -488,11 +504,13 @@ export function useProtectedVault() {
   );
 
   const afterCreated = useCallback(() => {
+    if (sessionVault.durableSetupPending) return;
     sessionVault.freshSetup = false;
     sessionVault.authzFactorRegistration = null;
   }, []);
 
   const syncProtectedOperationStatus = useCallback(async (wrapMeta: string) => {
+    if (sessionVault.durableSetupPending) return;
     const sandbox = await getVaultSandboxClient();
     const baseWrapMeta = baseVmkWrapMeta(wrapMeta);
     const sandboxStatus = await sandbox.status(baseWrapMeta);
@@ -514,6 +532,7 @@ export function useProtectedVault() {
       context: VaultSignedOperationContext,
       authorizationWindow?: string,
     ): Promise<SignatureResult> => {
+      assertDurableSetupReady();
       const sandbox = await getVaultSandboxClient();
       try {
         // Approval cards include display metadata (kind/field); the sign RPC accepts
@@ -537,6 +556,7 @@ export function useProtectedVault() {
   const approveProtectedRelease = useCallback(
     async (items: ApproveReleaseItem[], authorizationWindow?: string): Promise<BlindBox[]> => {
       if (items.length === 0) return [];
+      assertDurableSetupReady();
       const sandbox = await getVaultSandboxClient();
       try {
         const result = await sandbox.approveRelease({ items }, authorizationWindow);
@@ -560,6 +580,7 @@ export function useProtectedVault() {
       context: VaultSignedOperationContext,
       authorizationWindow?: string,
     ): Promise<{ completed: boolean }> => {
+      assertDurableSetupReady();
       const sandbox = await getVaultSandboxClient();
       try {
         return await sandbox.reveal({ material, context }, authorizationWindow);
@@ -584,7 +605,7 @@ export function useProtectedVault() {
   }, []);
 
   const discardAndRefresh = useCallback(async () => {
-    clearUnlockState();
+    clearUnlockState({ discardPendingSetup: true });
     sessionVault.wrapMeta = null;
     sessionVault.freshSetup = false;
     sessionVault.authzFactorRegistration = null;
@@ -592,9 +613,9 @@ export function useProtectedVault() {
     await refresh();
   }, [refresh]);
 
-  const hasPasskey = useCallback(() => hasPasskeyCopy(sessionVault.wrapMeta), []);
+  const hasPasskey = useCallback(() => !sessionVault.durableSetupPending && hasPasskeyCopy(sessionVault.wrapMeta), []);
 
-  const passkeyUsableHere = useCallback(() => hasPasskeyCopy(sessionVault.wrapMeta), []);
+  const passkeyUsableHere = useCallback(() => !sessionVault.durableSetupPending && hasPasskeyCopy(sessionVault.wrapMeta), []);
 
   return {
     status,
