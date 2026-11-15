@@ -6,7 +6,7 @@ final class RealBundleCaptureUITests: XCTestCase {
     func testRealBundledPageCaptureMatrix() {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
-        let states = ["default", "offline-open", "open-failed", "stale", "account", "first-run"]
+        let states = ["default", "offline-open", "open-failed", "stale", "account", "first-run", "instances-named", "account-root"]
         for language in ["en", "zh"] {
             for theme in ["light", "dark"] {
                 for state in states {
@@ -23,6 +23,7 @@ final class RealBundleCaptureUITests: XCTestCase {
                         defer { app.terminate() }
                         let chinese = language == "zh"
                         SheetFixtureReadiness.waitForDocument(in: app)
+                        let isBRoute = state == "instances-named" || state == "account-root"
                         if state != "first-run" {
                             let refreshed = XCTNSPredicateExpectation(
                                 predicate: NSPredicate(format: "value == %@", "document-ready;fetch-2"),
@@ -30,13 +31,15 @@ final class RealBundleCaptureUITests: XCTestCase {
                             )
                             XCTAssertEqual(XCTWaiter.wait(for: [refreshed], timeout: 10), .completed)
                         }
-                        // Static gesture HTML cannot pass these localized real-page assertions.
+                        // B routes are opened over a capable runtime fixture and
+                        // therefore do not begin at the normal `#sheet` content.
+                        // Their route-specific assertions below are the readiness gate.
                         if state == "first-run" {
                             requireText(chinese ? "想从哪里开始？" : "Where shall we begin?", in: app)
                             XCTAssertFalse(app.webViews.firstMatch.buttons.matching(NSPredicate(
                                 format: "label CONTAINS %@", chinese ? "关闭，回到" : "Close and return to"
                             )).firstMatch.exists)
-                        } else {
+                        } else if !isBRoute {
                             requireText(chinese ? "正在使用" : "You’re in", in: app)
                             XCTAssertTrue(app.webViews.firstMatch.buttons[chinese ? "关闭，回到 Studio" : "Close and return to Studio"].waitForExistence(timeout: 10))
                             let settled = XCTNSPredicateExpectation(
@@ -47,6 +50,21 @@ final class RealBundleCaptureUITests: XCTestCase {
                             XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 10), .completed)
                         }
                         switch state {
+                        case "instances-named":
+                            requireText("Studio", in: app)
+                            XCTAssertTrue(app.webViews.firstMatch.buttons[
+                                chinese ? "关闭，回到 Studio" : "Close and return to Studio"
+                            ].waitForExistence(timeout: 10))
+                            XCTAssertFalse(app.webViews.firstMatch.staticTexts[chinese ? "账号" : "Account"].exists)
+                            XCTAssertFalse(app.webViews.firstMatch.buttons.matching(NSPredicate(
+                                format: "label CONTAINS %@", "alex@example.invalid"
+                            )).firstMatch.exists)
+                        case "account-root":
+                            requireText(chinese ? "账号" : "Account", in: app)
+                            XCTAssertTrue(app.webViews.firstMatch.buttons[chinese ? "关闭" : "Close"].waitForExistence(timeout: 10))
+                            XCTAssertFalse(app.webViews.firstMatch.buttons.matching(NSPredicate(
+                                format: "label CONTAINS %@", chinese ? "返回" : "Back"
+                            )).firstMatch.exists)
                         case "offline-open":
                             tapRow(containing: "Home", in: app)
                             requireText(chinese
