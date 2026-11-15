@@ -26,7 +26,7 @@ def read_state_text(path: Path) -> str:
         # READ | WRITE | DELETE sharing is essential: the shell publishes the
         # next generation by replacing this path while readers retain the old
         # handle. OPEN_EXISTING neither creates nor repairs state.
-        handle = security.kernel32.CreateFileW(name, 0x80000000, 7, None, 3, 0x80, None)
+        handle = security.kernel32.CreateFileW(name, 0x80000000, 7, None, 3, 0x00200080, None)
         if handle in (None, ctypes.c_void_p(-1).value):
             raise ctypes.WinError(ctypes.get_last_error())
         try:
@@ -35,8 +35,18 @@ def read_state_text(path: Path) -> str:
             security.kernel32.CloseHandle(handle)
             raise
 
+    from core.computer_use import _windows_private_artifact_is_safe
+
     with io.open(path, "r", encoding="utf-8", opener=opener) as stream:
-        return stream.read()
+        # Verify the very object that supplies enabled (including false), not
+        # a separate path observation that can name a replacement generation.
+        # No repair: an untrusted saved value is unknown, never an opt-in.
+        if not _windows_private_artifact_is_safe(path, fd=stream.fileno()):
+            raise AdmissionRefused("state_unverified")
+        text = stream.read()
+        if not _windows_private_artifact_is_safe(path, fd=stream.fileno()):
+            raise AdmissionRefused("state_unverified")
+        return text
 
 
 class AdmissionRefused(OSError):

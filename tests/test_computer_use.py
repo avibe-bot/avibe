@@ -245,3 +245,9 @@ def test_effective_status_table_is_total(
         verifier=SnapshotVerifier(),
     )
     assert (status.status, status.reason) == expected
+    expected_enabled = (
+        None if arrange in {"malformed", "newer"}
+        else arrange not in {"missing", "off"}
+    )
+    assert status.enabled is expected_enabled
+    assert status.as_dict()["enabled"] is expected_enabled
