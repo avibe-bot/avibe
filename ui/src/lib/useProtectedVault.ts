@@ -46,11 +46,14 @@ const sessionVault: {
   wrapMeta: string | null;
   freshSetup: boolean;
   authzFactorRegistration: VaultWebAuthnRegistrationPayload | null;
+  /** The sandbox root exists only in memory until POST /api/vault/setup succeeds. */
+  durableSetupPending: boolean;
 } = {
   status: 'needs-setup',
   wrapMeta: null,
   freshSetup: false,
   authzFactorRegistration: null,
+  durableSetupPending: false,
 };
 
 // The unlock-window deadline (ms epoch) is now owned by the sandbox — the parent only *mirrors*
@@ -89,14 +92,14 @@ export function subscribeVaultLock(listener: () => void): () => void {
 }
 
 export function vaultUnlockExpiresAt(): number | null {
-  return sessionVault.status === 'unlocked' ? vaultLockExpiresAt : null;
+  return vaultUnlocked() ? vaultLockExpiresAt : null;
 }
 
 export function vaultUnlocked(): boolean {
   // The sandbox is authoritative: it auto-locks and emits a `vault.state` event we mirror, so the
   // parent no longer second-guesses the clock. A rendered countdown reaching 0 is cosmetic; the
   // real transition arrives as an event (or the next `status` reconciliation).
-  return sessionVault.status === 'unlocked';
+  return sessionVault.status === 'unlocked' && !sessionVault.durableSetupPending;
 }
 
 export function vaultFreshSetup(): boolean {
@@ -104,11 +107,12 @@ export function vaultFreshSetup(): boolean {
 }
 
 function vaultStatusNow(): ProtectedVaultStatus {
-  return sessionVault.status;
+  return sessionVault.durableSetupPending ? 'needs-setup' : sessionVault.status;
 }
 
 function clearUnlockState(): void {
   vaultLockExpiresAt = null;
+  sessionVault.durableSetupPending = false;
   if (sessionVault.freshSetup) {
     // A fresh setup that never persisted a secret: locking reverts to needs-setup (the daemon has
     // no wrap_meta yet), so drop the in-memory handle rather than pretend a vault exists.
@@ -132,7 +136,7 @@ function applyVaultStateEvent(event: VaultStateEvent): void {
     if (!sessionVault.wrapMeta) return;
     sessionVault.status = 'unlocked';
     if (typeof event.expiresAt === 'number' && Number.isFinite(event.expiresAt)) vaultLockExpiresAt = event.expiresAt;
-    notifyVaultLockChange();
+    if (!sessionVault.durableSetupPending) notifyVaultLockChange();
     return;
   }
   clearUnlockState();
@@ -195,15 +199,19 @@ function commitUnlocked(
   freshSetup: boolean,
   expiresAt?: number | null,
   authzFactorRegistration: VaultWebAuthnRegistrationPayload | null = null,
+  options: { deferNotification?: boolean } = {},
 ): void {
   sessionVault.wrapMeta = baseVmkWrapMeta(wrapMeta);
   sessionVault.status = 'unlocked';
   sessionVault.freshSetup = freshSetup;
   sessionVault.authzFactorRegistration = authzFactorRegistration;
+  sessionVault.durableSetupPending = Boolean(options.deferNotification);
+  // A setup root is not usable by the create flow until its root+factor POST has answered. Keep the
+  // sandbox material for a same-proof retry, but do not notify hooks or expose an unlocked state.
   // Mirror the sandbox-provided deadline directly; the event stream keeps it fresh on renewal.
   vaultLockExpiresAt = typeof expiresAt === 'number' && Number.isFinite(expiresAt) ? expiresAt : null;
   getVaultLockChannel();
-  notifyVaultLockChange();
+  if (!options.deferNotification) notifyVaultLockChange();
 }
 
 function commitLocked(wrapMeta: string): void {
@@ -212,6 +220,7 @@ function commitLocked(wrapMeta: string): void {
   sessionVault.status = 'locked';
   sessionVault.freshSetup = false;
   sessionVault.authzFactorRegistration = null;
+  sessionVault.durableSetupPending = false;
   notifyVaultLockChange();
 }
 
@@ -232,7 +241,10 @@ type SetupApi = Pick<ApiContextType, 'createVaultAuthzWebAuthnOptions' | 'getVau
 
 /** The sandbox setup ceremony: a new Passkey and Vault root, held in this tab until something
  *  persists it (the first protected key, or {@link setupVaultDurably}). */
-async function runPasskeySetup(api: SetupApi, options: { onlyFirstFactor?: boolean } = {}): Promise<void> {
+async function runPasskeySetup(
+  api: SetupApi,
+  options: { onlyFirstFactor?: boolean; deferNotification?: boolean } = {},
+): Promise<void> {
   const sandbox = await getVaultSandboxClient();
   const [authzOptions, rootMetadata] = await Promise.all([
     api.createVaultAuthzWebAuthnOptions(),
@@ -253,7 +265,7 @@ async function runPasskeySetup(api: SetupApi, options: { onlyFirstFactor?: boole
     rootMetadata: rootMetadata.root_metadata,
   });
   const authzRegistration = registrationFromSandbox(result.authzRegistration);
-  commitUnlocked(result.wrapMeta, true, result.expiresAt, authzRegistration);
+  commitUnlocked(result.wrapMeta, true, result.expiresAt, authzRegistration, { deferNotification: options.deferNotification });
 }
 
 /**
@@ -273,7 +285,7 @@ export async function setupVaultDurably(
   if (sessionVault.wrapMeta && !pendingFresh) return { ok: false, code: 'vault_already_initialized' };
   if (!pendingFresh) {
     try {
-      await runPasskeySetup(api, { onlyFirstFactor: true });
+      await runPasskeySetup(api, { onlyFirstFactor: true, deferNotification: true });
     } catch (error) {
       if ((error as { code?: unknown } | null)?.code === 'vault_already_initialized') return { ok: false, code: 'vault_already_initialized' };
       throw error;
@@ -304,6 +316,7 @@ export async function setupVaultDurably(
   }
   sessionVault.freshSetup = false;
   sessionVault.authzFactorRegistration = null;
+  sessionVault.durableSetupPending = false;
   if (typeof committed.wrap_meta === 'string') sessionVault.wrapMeta = baseVmkWrapMeta(committed.wrap_meta);
   notifyVaultLockChange();
   return { ok: true };
@@ -335,7 +348,7 @@ export function useProtectedVault() {
       setError(vaultErrorMessage(t, error, t('errors.sandbox_entry_unavailable')));
       return;
     }
-    if (sessionVault.status === 'unlocked') {
+    if (sessionVault.status === 'unlocked' && !sessionVault.durableSetupPending) {
       // Already unlocked and kept honest by the event stream — don't flash a "checking" state or
       // re-query (a `status` call is silent but pointless here).
       setStatus('unlocked');
@@ -381,8 +394,9 @@ export function useProtectedVault() {
   }, [api, t]);
 
   const setupPasskey = useCallback(async () => {
-    await runPasskeySetup(api);
-    setStatus('unlocked');
+    const result = await setupVaultDurably(api);
+    if (!result.ok) throw Object.assign(new Error(result.code), { code: result.code });
+    setStatus(vaultStatusNow());
     setError(null);
   }, [api]);
 
