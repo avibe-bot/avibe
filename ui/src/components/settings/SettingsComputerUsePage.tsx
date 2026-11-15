@@ -344,14 +344,18 @@ export const SettingsComputerUsePage: FC = () => {
           <p className="font-semibold">{copy?.label ?? t('settings.computerUse.loading')}</p>
           {copy && (
             <p className="mt-0.5 text-[11px] opacity-80">
-              {/* Windows speaks in plain terms: off points at the switch above when this page can
-                  turn it on (otherwise the shared native-control text stays), and ready says what
-                  Agents can do. macOS keeps the shared copy. */}
-              {windows && status?.status === 'off' && windowsSwitch.canTurnOn
-                ? t('settings.computerUse.windows.switch.offDetail')
-                : windows && status?.status === 'ready'
-                  ? t('settings.computerUse.windows.readyDetail')
-                  : copy.detail}
+              {/* Off names the control the reader can reach: the switch above on a Windows page
+                  that can turn it on, the tray or menu bar in the desktop app, or the computer
+                  itself from a browser. */}
+              {status?.status === 'off'
+                ? windows && windowsSwitch.canTurnOn
+                  ? t('settings.computerUse.windows.switch.offDetail')
+                  : !desktopShell
+                    ? t('workbench.home.computerUse.offDetailRemote')
+                    : windows
+                      ? t('workbench.home.computerUse.offDetailWindows')
+                      : copy.detail
+                : copy.detail}
             </p>
           )}
         </div>
