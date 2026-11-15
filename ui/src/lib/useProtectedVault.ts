@@ -431,9 +431,13 @@ export async function setupVaultDurably(
     // drop the uncommitted root, here and in the sandbox (its iframe still holds it unlocked), so the
     // next attempt starts a fresh ceremony and discovery finds whatever root is durable.
     const final = typeof committed.code === 'string' && committed.code !== 'network_error';
-    if (final && stillPosted) {
+    if (final) {
+      // The sandbox still holds the refused root's VMK unlocked, even if this page has meanwhile
+      // learned another root (its `status` does not tell roots apart): always drop that client, so
+      // nothing is sealed under the refused key, and lock the mirror. The page's setup is discarded
+      // only if it is still the one that was posted.
       resetVaultSandboxClient();
-      clearUnlockState({ discardPendingSetup: true });
+      clearUnlockState({ discardPendingSetup: stillPosted });
       notifyVaultLockChange();
     }
     // Another tab committed first: adopt the root it committed, for every caller of this helper.

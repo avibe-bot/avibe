@@ -20,6 +20,7 @@ const sandbox = vi.hoisted(() => ({
   sealHdWallet: vi.fn(),
 }));
 const getClient = vi.hoisted(() => vi.fn());
+const resetClient = vi.hoisted(() => vi.fn());
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
@@ -27,6 +28,7 @@ vi.mock('./vaultEntry', () => ({ assertVaultEntryAvailable: vi.fn(), vaultEntryI
 vi.mock('./vaultSandboxClient', async (original) => ({
   ...await original<typeof import('./vaultSandboxClient')>(),
   getVaultSandboxClient: getClient,
+  resetVaultSandboxClient: resetClient,
 }));
 
 const passkeyRoot = (credentialId: string) => JSON.stringify({
@@ -66,6 +68,8 @@ beforeEach(async () => {
   sandbox.lock.mockReset().mockResolvedValue(undefined);
   sandbox.sealHdWallet.mockReset();
   getClient.mockReset().mockResolvedValue(sandbox);
+  // A fresh sandbox client holds no key, so it reports locked.
+  resetClient.mockReset().mockImplementation(() => { sandbox.status.mockResolvedValue({ state: 'locked' }); });
   // Every test starts from a page that has not discovered anything yet.
   vi.resetModules();
   vault = await import('./useProtectedVault');
@@ -173,6 +177,30 @@ describe('every setup conflict adopts the root the server already has', () => {
     expect(observer.result.current.hasPasskey()).toBe(true);
     expect(vault.vaultUnlocked()).toBe(false);
   });
+});
+
+it('drops the refused setup key from the sandbox even when the server root was adopted while its commit was out', async () => {
+  const commit = deferred<unknown>();
+  sandbox.setup.mockResolvedValue({ wrapMeta: LOSING_ROOT, authzRegistration: registration, state: 'unlocked' });
+  api.completeVaultSetup.mockReturnValue(commit.promise);
+  const hook = renderHook(() => vault.useProtectedVault());
+  let setup!: Promise<void>;
+  act(() => { setup = hook.result.current.setupPasskey(); });
+  await vi.waitFor(() => expect(api.completeVaultSetup).toHaveBeenCalledOnce());
+
+  // Another surface discovers the root another browser committed. The sandbox still holds the
+  // refused setup's key, and its `status` does not tell roots apart: it answers unlocked.
+  api.getVaultVmk.mockResolvedValue({ ok: true, exists: true, wrap_meta: SERVER_ROOT });
+  sandbox.status.mockResolvedValue({ state: 'unlocked', expiresAt: Date.now() + 60_000 });
+  const surface = renderHook(() => vault.useProtectedVault());
+  await act(async () => { await surface.result.current.refresh(); });
+
+  commit.resolve({ ok: false, code: 'vault_already_initialized' });
+  await act(async () => { await expect(setup).rejects.toMatchObject({ code: 'vault_already_initialized' }); });
+  expect(resetClient).toHaveBeenCalledOnce();
+  expect(vault.vaultUnlocked()).toBe(false);
+  expect(surface.result.current.status).toBe('locked');
+  expect(surface.result.current.hasPasskey()).toBe(true);
 });
 
 it('keeps an unanswered setup for an identical retry when an older empty read lands', async () => {
