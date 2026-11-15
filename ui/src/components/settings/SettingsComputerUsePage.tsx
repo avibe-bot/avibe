@@ -22,7 +22,7 @@ import {
 import { computerUseStatusCopy, type ComputerUseCopyKey } from '../workbench/computerUseStatusCopy';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsPanel } from './SettingsPrimitives';
-import { WindowsComputerUseSwitch } from './WindowsComputerUseSwitch';
+import { useWindowsComputerUseSwitch } from './WindowsComputerUseSwitch';
 
 const STEP_COPY: Record<ComputerUseGuideStep, { title: TranslationKey; detail: TranslationKey }> = {
   enable: {
@@ -228,6 +228,14 @@ export const SettingsComputerUsePage: FC = () => {
   // decides whether this page can run the native actions, never the host.
   const host = read?.host ?? 'macos';
   const windows = host === 'windows';
+  const windowsSwitch = useWindowsComputerUseSwitch({
+    enabled: read?.kind === 'status' ? read.enabled : null,
+    readSeq,
+    nextReadSeq: () => startedReads.current + 1,
+    enable: actions?.enable ?? null,
+    disable: actions?.disable ?? null,
+    refresh: () => void readStatus().then(() => readStatus()),
+  });
 
   if (read?.kind === 'unsupported') {
     return (
@@ -298,7 +306,9 @@ export const SettingsComputerUsePage: FC = () => {
             </span>
           )}
           description={t('settings.computerUse.windows.previewDetail')}
+          actions={windowsSwitch.control}
         >
+          {windowsSwitch.notice && <div className="px-5 pt-4">{windowsSwitch.notice}</div>}
           <ul className="flex flex-col gap-2.5 px-5 py-4" data-testid="computer-use-windows-notes">
             {WINDOWS_NOTES.map(({ testId, icon: Icon, text }) => (
               <li
@@ -325,32 +335,29 @@ export const SettingsComputerUsePage: FC = () => {
         data-computer-use-status={status?.status ?? 'loading'}
       >
         {status
-          ? <ComputerUseStatusIcon status={status.status} />
+          ? windows && status.status === 'off'
+            // Off is neither done nor a problem: a neutral mark, not the shared check.
+            ? <Power className="size-4 shrink-0" aria-hidden="true" />
+            : <ComputerUseStatusIcon status={status.status} />
           : <LoaderCircle className="size-4 shrink-0 animate-spin" aria-hidden="true" />}
         <div className="min-w-0">
           <p className="font-semibold">{copy?.label ?? t('settings.computerUse.loading')}</p>
           {copy && (
             <p className="mt-0.5 text-[11px] opacity-80">
-              {/* The shared "off" detail points at the native control; a Windows page that can
-                  switch it here points at its own switch instead. Older shells keep the shared text. */}
+              {/* Windows speaks in plain terms: off points at the switch above when this page can
+                  turn it on (otherwise the shared native-control text stays), and ready says what
+                  Agents can do. macOS keeps the shared copy. */}
               {windows && status?.status === 'off' && actions?.enable
                 ? t('settings.computerUse.windows.switch.offDetail')
-                : copy.detail}
+                : windows && status?.status === 'ready'
+                  ? t('settings.computerUse.windows.readyDetail')
+                  : copy.detail}
             </p>
           )}
         </div>
       </div>
 
-      {windows ? (
-        <WindowsComputerUseSwitch
-          enabled={read?.kind === 'status' ? read.enabled : null}
-          readSeq={readSeq}
-          nextReadSeq={() => startedReads.current + 1}
-          enable={actions?.enable ?? null}
-          disable={actions?.disable ?? null}
-          refresh={() => void readStatus().then(() => readStatus())}
-        />
-      ) : (
+      {!windows && (
       <SettingsPanel title={t('settings.computerUse.stepsTitle')}>
         <ol className="flex flex-col" data-testid="computer-use-steps">
           {COMPUTER_USE_GUIDE_STEPS.map((step, index) => {

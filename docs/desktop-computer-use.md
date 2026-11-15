@@ -131,15 +131,16 @@ a native desktop control it cannot own.
 
 ## Windows (Preview)
 
-On a Windows x64 host, the Settings page is labelled **Preview** and has one
-**Computer Use** switch that turns the feature on and off, like the tray item.
-The switch shows the opt-in the server reports (`enabled`): on means opted in,
-and the status above it says whether Computer Use is ready. A change holds the
-switch until a status read that began after the change reports it, for at
-most 15 seconds; a failed or unconfirmed change returns to the reported value
-with a note. When the opt-in cannot be read, the page shows no switch. A
-desktop app that can only turn Computer Use on shows the switch locked when on
-and points to the tray to turn it off. Windows has no Accessibility or Screen
+On a Windows x64 host, the Settings page is labelled **Preview**, and its
+Preview card carries one **Computer Use** switch in its header that turns the
+feature on and off, like the tray item. The switch shows the opt-in the server
+reports (`enabled`); the status below the card says whether Computer Use is
+ready. A change holds the switch until a status read that began after the
+change reports it, for at most 15 seconds; a failed or unconfirmed change
+returns to the reported value with a note. When the opt-in cannot be read,
+the page shows no switch. A desktop app that can only turn Computer Use on
+shows the switch locked when on and points to the tray to turn it off.
+Windows has no Accessibility or Screen
 Recording grants, so the macOS permission steps, **Open Settings** actions,
 and Quit & Reopen guidance never appear there. The page also states that:
 

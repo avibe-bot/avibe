@@ -576,8 +576,9 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(screen.getByTestId('computer-use-preview-badge').textContent)
       .toBe('settings.computerUse.windows.previewBadge');
     expect(screen.getByText('settings.computerUse.windows.subtitle')).toBeTruthy();
-    expect(screen.getByText('settings.computerUse.windows.switch.description')).toBeTruthy();
-    expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.stateOff');
+    // The switch sits in the Preview card's header; there is no separate switch card.
+    expect(screen.getByTestId('computer-use-windows-notes').closest('section')
+      ?.contains(screen.getByRole('switch'))).toBe(true);
     // The status band points at this switch, not only the native control.
     expect(screen.getByTestId('computer-use-guide-status').textContent).toContain('settings.computerUse.windows.switch.offDetail');
     expect(screen.queryByText('workbench.home.computerUse.offDetail')).toBeNull();
@@ -644,14 +645,14 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(invoke).toHaveBeenLastCalledWith('computer_use_enable');
     expect(control.getAttribute('aria-checked')).toBe('true');
     expect((control as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.turningOn');
+    expect(screen.getByRole('img', { name: 'settings.computerUse.windows.switch.turningOn' })).toBeTruthy();
 
     statusSequence({ ...windowsHost, enabled: true, status: 'starting', reason: null });
     // The page's own polling brings the confirming read.
     await waitFor(() => expect(control.getAttribute('data-switch-state')).toBe('on'), { timeout: 4_000 });
     expect((control as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByTestId('computer-use-switch-pending')).toBeNull();
     // On is the opt-in, not readiness: the status band still says starting.
-    expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.stateOn');
     expect(screen.getByTestId('computer-use-guide-status').getAttribute('data-computer-use-status')).toBe('starting');
   });
 
@@ -745,6 +746,18 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'));
   });
 
+  it('says what ready means in plain words on Windows, leaving the macOS copy as it is', async () => {
+    statusSequence({ ...windowsHost, enabled: true, status: 'ready', reason: null });
+    const windowsPage = render(<SettingsComputerUsePage />);
+    expect(await screen.findByText('settings.computerUse.windows.readyDetail')).toBeTruthy();
+    expect(screen.queryByText('workbench.home.computerUse.readyDetail')).toBeNull();
+    windowsPage.unmount();
+
+    statusSequence({ supported: true, host_platform: 'macos', status: 'ready', reason: null });
+    render(<SettingsComputerUsePage />);
+    expect(await screen.findByText('workbench.home.computerUse.readyDetail')).toBeTruthy();
+  });
+
   it('keeps the shared off detail where this page cannot switch it', async () => {
     statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
 
@@ -780,7 +793,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
 
     expect(await screen.findByTestId('computer-use-switch-unknown')).toBeTruthy();
     expect(screen.queryByRole('switch')).toBeNull();
-    expect(screen.getByTestId('computer-use-switch-state').textContent).toBe('settings.computerUse.windows.switch.stateUnknown');
+    expect(screen.getByTestId('computer-use-switch-state-unknown').textContent).toBe('settings.computerUse.windows.switch.stateUnknown');
   });
 
   it('keeps the unsupported notice for an unsupported Windows host, in Windows terms and in Preview', async () => {
@@ -814,7 +827,10 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(zh.workbench.home.setup.computer_use_windows.title).toContain('预览');
     expect(en.settings.computerUse.windows.elevated).toContain('administrator');
     expect(zh.settings.computerUse.windows.elevated).toContain('管理员');
-    expect(en.settings.computerUse.windows.switch.description).toBe('Turning this off stops Computer Use. Your apps stay open.');
-    expect(zh.settings.computerUse.windows.switch.description).toBe('关闭后停止电脑操作，已打开的应用保持打开。');
+    expect(zh.settings.computerUse.windows.stop)
+      .toBe('关闭电脑操作、退出 Avibe，或 Avibe 意外退出时，驱动会停止，正在进行的操作也会结束；你已打开的应用不受影响。');
+    expect(en.settings.computerUse.windows.stop).toContain('apps you opened stay open');
+    expect(zh.settings.computerUse.windows.readyDetail).toBe('Agent 现在可以查看并操作这台电脑上的应用。');
+    expect(en.settings.computerUse.windows.readyDetail).toBe('Agents can now see and operate apps on this computer.');
   });
 });
