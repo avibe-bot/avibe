@@ -1093,9 +1093,10 @@ export const VaultSecretForm: React.FC<{
           return;
         }
         if (created.code === 'vault_already_initialized') {
-          // Another tab established the vault first — drop the rejected local VMK and
-          // reload the server's wrap_meta so the user unlocks it instead of splitting keys.
-          await protectedVault.discardAndRefresh();
+          // Another tab established the vault first — drop the rejected local VMK (the root this
+          // save sealed under) and reload the server's wrap_meta so the user unlocks it instead of
+          // splitting keys.
+          await protectedVault.discardAndRefresh('sealed' in cryptoFields ? cryptoFields.sealed.wrap_meta : undefined);
           setError(t('vaults.protectedUnlock.errors.alreadyInitialized'));
           return;
         }
