@@ -238,9 +238,12 @@ try {
             try {
                 $panel = Run-Process $node @((Join-Path $Root 'cdp.mjs'), '--port', [string]$cdpPort, '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--action', 'update-inspect', '--current-version', $inputData.release_version) 90 | ConvertFrom-Json
                 if (-not ($panel.ok -and $panel.badge_clicked -and $panel.check_clicked) -or $panel.current -ne $inputData.release_version) { throw 'update_panel_preflight_unproven' }
-                $result.update_panel_preflight = @{ current = $panel.current; auto_update = $panel.auto_update; prereleases = $panel.prereleases }
+                $result.update_panel_preflight = @{ current = $panel.current; panel_view = $panel.panel_view; auto_update = $panel.auto_update; prereleases = $panel.prereleases }
                 Verdict 'unified_update_panel_preflight' 'PASS' 'real_version_badge_and_check_clicked_current_row_verified_no_update_attempt'
-            } catch { Verdict 'unified_update_panel_preflight' 'NOT RUN' 'unified_update_panel_click_unproven' }
+            } catch {
+                $reason = if ($result.Contains('cdp_detail') -and $result.cdp_detail -match '^update_[a-z_]+$') { $result.cdp_detail } else { 'unified_update_panel_click_unproven' }
+                Verdict 'unified_update_panel_preflight' 'NOT RUN' $reason
+            }
         } else { Verdict 'unified_update_panel_preflight' 'NOT RUN' 'shared_cdp_prerequisite_not_proven_on_this_run' }
     }
     if ($inputData.mode -eq 'enabled') {

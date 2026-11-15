@@ -18,7 +18,11 @@ foreach ($id in @('release_integrity', 'target_fixture_integrity', 'real_win32_f
 $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_desktop'
 $cases.second_interactive_session.reason = 'second_local_account_is_not_a_second_interactive_session'
 $cases.real_agent_turn.reason = 'no_model_credentials_owner_real_machine_check_required'
+$requiredCases = @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'uninstall', 'cleanup')
+if ($Mode -eq 'enabled') { $requiredCases += @('webview_cdp_preflight', 'model_stub_tool_path', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'security_fixture') }
+else { $requiredCases += 'feature_disabled' }
 $record = [ordered]@{
+    required_cases = $requiredCases; required_cases_passed = $false; missing_required_cases = @()
     schema_version = 1; release_tag = $ReleaseTag; mode = $Mode
     runner = 'GitHub-hosted windows-latest / Windows Server 2025 x64'
     actual_os_build = [Environment]::OSVersion.Version.ToString()
@@ -38,6 +42,7 @@ function Save-Report {
     $lines = @('# Signed Windows Computer Use acceptance', '', "Release: $ReleaseTag; mode: $Mode.", '',
         'GitHub-hosted **Windows Server 2025 x64** (`windows-latest`); not Windows 11.', '',
         'No screenshots, clipboard capture, secrets, raw process logs or LLM Turn. Preparation PASS is not enabled-feature acceptance.', '',
+        "Required cases passed: **$($record.required_cases_passed)**. Unexecuted cases keep NOT RUN and cannot satisfy the enabled gate.", '',
         '| Case | Verdict | Reason |', '| --- | --- | --- |')
     foreach ($entry in $cases.GetEnumerator()) { $lines += "| $($entry.Key) | $($entry.Value.verdict) | $($entry.Value.reason) |" }
     $lines += @('', 'Launch: ordinary Users-only local account via CreateProcessWithLogonW/profile loading, not a second interactive session.',
@@ -293,6 +298,9 @@ try {
     if ($cleanupFailed) { Verdict 'cleanup' 'FAIL' 'fixture_cleanup_failed'; $failed = $true }
     else { Verdict 'cleanup' 'PASS' 'owned_processes_profiles_accounts_and_work_removed' }
     if ($password) { $password.Dispose() }
+    $record.missing_required_cases = @($requiredCases | Where-Object { $cases[$_].verdict -ne 'PASS' })
+    $record.required_cases_passed = $record.missing_required_cases.Count -eq 0
+    if (-not $record.required_cases_passed) { $failed = $true }
     Save-Report
 }
 if ($failed) { throw 'Signed acceptance did not pass; see value-free verdict artifacts.' }

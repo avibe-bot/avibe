@@ -67,8 +67,12 @@ async function updatePanel() {
   }
   if (!opened) throw new Error('update_version_badge_click_unproven');
   const panelExpression = `(() => {
-    const panel = document.querySelector('[role="dialog"][aria-label="Version & Update"] [data-update-panel]');
-    if (!panel) return null;
+    const workbench = location.origin === ${JSON.stringify(origin.origin)};
+    const trusted = location.origin === 'http://tauri.localhost' && location.pathname === '/account/index.html';
+    if (!workbench && !trusted) return null;
+    const panels = [...document.querySelectorAll('[data-update-panel]')].filter(e => e.getClientRects().length);
+    if (panels.length !== 1) return null;
+    const panel = panels[0];
     const normalize = ${normalize.toString()};
     const label = [...panel.querySelectorAll('span')].find(e => e.textContent.trim() === 'Current version');
     const current = label?.nextElementSibling?.textContent;
@@ -76,13 +80,13 @@ async function updatePanel() {
     const setting = name => panel.querySelector('[role="switch"][aria-label="' + name + '"]');
     const state = element => element?.getAttribute('aria-checked') === 'true' ? true : element?.getAttribute('aria-checked') === 'false' ? false : null;
     const check = panel.querySelector('button[aria-label="Check for updates"]');
-    return { current: current ? normalize(current) : null, offered: offered ? normalize(offered) : null,
+    return { panel_view: trusted ? 'trusted_shell' : 'workbench', current: current ? normalize(current) : null, offered: offered ? normalize(offered) : null,
       status: panel.getAttribute('data-update-status'), auto_update: state(setting('Update automatically')),
       prereleases: state(setting('Get pre-release updates')), check_enabled: !!check && !check.disabled };
   })()`;
   let state;
   while (Date.now() < deadline) {
-    state = await evaluate(panelExpression);
+    try { state = await evaluate(panelExpression); } catch { state = null; }
     if (state?.current === current && typeof state.auto_update === 'boolean' && typeof state.prereleases === 'boolean') break;
     await pause(250);
   }
