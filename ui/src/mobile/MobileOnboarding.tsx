@@ -1528,6 +1528,11 @@ function Instances({
   );
 }
 
+/** The full-screen list as a view (props only); design frames draw it. */
+export function InstancesPage(props: Parameters<typeof Instances>[0]) {
+  return <Instances {...props} />;
+}
+
 /**
  * The sheet native opens over the selected instance (`#sheet`, ui/design: mobile-app/switcher/*):
  * where you are, the other instances by recent use, Add an instance, and the account. Close, the
@@ -1825,8 +1830,11 @@ function Account({
   );
 }
 
-/** The Account page as the sheet's root, as a view (props only); design frames draw it. */
-export function AccountSheetPage(props: Omit<Parameters<typeof Account>[0], 'inSheet'> & { onClose: () => void }) {
+/**
+ * Account in the sheet, as a view (props only); design frames draw it. With `onClose` it is the
+ * sheet's root (`#sheet-account`); without, it is pushed from the list, with Back.
+ */
+export function AccountSheetPage(props: Omit<Parameters<typeof Account>[0], 'inSheet'>) {
   return (
     <DocumentScroll.Provider value>
       <Account {...props} inSheet />
