@@ -173,7 +173,10 @@ def test_unread_types_match_current_queries(query: Any) -> None:
 
     expected = ("result",)
     assert types_with("unread") == expected
-    assert _message_type_sequences(connection.statements[-1]) == {expected}
+    # The catalog branch binds the unread types; the workspace-notice branch (a second
+    # statement for session counts) compares one literal type and binds no type set.
+    bound = set().union(*(_message_type_sequences(statement) for statement in connection.statements))
+    assert bound == {expected}
 
 
 def test_input_turn_pairs_match_current_constant() -> None:

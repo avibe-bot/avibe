@@ -260,6 +260,8 @@ def new_session_id(conn: Connection) -> str:
 #: produce one row and the loser simply reads it back — with no marker search, no new
 #: column and no migration.
 WORKSPACE_NOTICE_SESSION_ID = "ses-workspace-notices"
+# New notices opt into unread without changing the meaning of historical rows.
+WORKSPACE_NOTICE_UNREAD_METADATA_KEY = "workspace_unread"
 
 #: Its ``session_anchor``. Also outside the generated namespace, so the
 #: ``uq_agent_sessions_scope_anchor`` slot it occupies cannot be claimed by a thread.
