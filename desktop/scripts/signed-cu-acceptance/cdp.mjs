@@ -153,8 +153,10 @@ try {
   const response = await fetch(`http://127.0.0.1:${Number(values.port)}/json/list`, { signal: AbortSignal.timeout(5000) });
   const targets = await response.json();
   // Only the actual Workbench target, not a worker/iframe or unrelated page.
-  const target = targets.find((item) => item.type === 'page' && item.url.startsWith(origin.origin + '/'));
-  if (!target) throw new Error('cdp_workbench_target_missing');
+  const workbenches = targets.filter((item) => item.type === 'page' && item.url.startsWith(origin.origin + '/'));
+  if (!workbenches.length) throw new Error('cdp_workbench_target_missing');
+  if (workbenches.length !== 1) throw new Error('cdp_workbench_target_ambiguous');
+  const target = workbenches[0];
   const endpoint = new URL(target.webSocketDebuggerUrl);
   if (endpoint.protocol !== 'ws:' || !['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname) || Number(endpoint.port) !== Number(values.port)) {
     throw new Error('cdp_endpoint_not_local');

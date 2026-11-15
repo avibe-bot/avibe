@@ -52,25 +52,29 @@ def test_draft_workflow_cannot_dispatch_or_receive_release_write_authority():
     ]
 
 
-def test_release_reference_rejects_bad_provenance_signature_checksum_and_exhausted_budget(tmp_path):
-    # The new update mode shares the actual release verifier with preparation.
-    # Regressing either signature/provenance refusal or deadline admission must
-    # fail before any installer could run; this boundary has no existing test.
+@pytest.mark.parametrize(("fixture", "script", "receipt"), [
+    ("release", "release", "release_proof_fixture_cases_passed"),
+    ("observer", "update-observer", "update_observer_fixture_cases_passed"),
+])
+def test_powershell_acceptance_oracles_fail_closed(tmp_path, fixture, script, receipt):
+    # Real helpers, hermetic boundary substitutes: reject bad release proof,
+    # premature failure teardown, and stale/reused CDP generations. Existing
+    # provider/DOM tests cannot exercise these process-observer boundaries.
     pwsh = shutil.which("pwsh")
     if pwsh is None:
-        pytest.skip("PowerShell is required for the hermetic release verifier")
+        pytest.skip("PowerShell is required for the hermetic acceptance oracles")
     env = {key: value for key, value in os.environ.items() if key in {"PATH", "SystemRoot", "WINDIR"}}
     for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
         env[key] = str(tmp_path)
     outcome = subprocess.run(
         [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
-         str(ROOT / "tests/windows_signed_acceptance_release.ps1"),
-         "-Source", str(ROOT / "desktop/scripts/signed-cu-acceptance/release.ps1"),
+         str(ROOT / f"tests/windows_signed_acceptance_{fixture}.ps1"),
+         "-Source", str(ROOT / f"desktop/scripts/signed-cu-acceptance/{script}.ps1"),
          "-Work", str(tmp_path)],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
     )
     assert outcome.returncode == 0, outcome.stdout + outcome.stderr
-    assert "release_proof_fixture_cases_passed" in outcome.stdout
+    assert receipt in outcome.stdout
 
 
 def test_update_panel_oracle_rejects_stale_check_and_changed_offer(tmp_path):

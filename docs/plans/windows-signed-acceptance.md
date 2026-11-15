@@ -145,11 +145,18 @@ target is reference-only and is **never executed by the harness**.
 
 The observer runs concurrently with the same CDP Update client. It retains an
 actual standard-user `avibe-update-*/update.exe` process handle, verifies its
-bytes against the target reference and its exit status, requires the original
+bytes against the target reference and its exit status, and retains its real
+PowerShell transaction supervisor until a successful exit. Failure cleanup
+stops producers and the supervisor before its installer; if quiescence cannot
+be proved, ordinary worker Quit/uninstall is suppressed and the parent owns
+account-wide teardown. It requires the original
 Desktop to exit and a distinct exact-path owned Desktop window to appear, and
 resolves the new installed runtime manifest. It then checks Desktop and runtime
 versions, the installed driver hash, and the relaunched panel's Current version
-and unchanged settings. A click or an offered-version link alone cannot pass.
+and unchanged settings. Debugger listeners must belong to that retained live
+replacement's process lineage, with pinned listener handles across the proof;
+stale/ambiguous generations and an exited replacement are rejected. A click
+or an offered-version link alone cannot pass.
 Target not discoverable/shared CDP missing is a named NOT RUN blocker; required
 update cases that are NOT RUN or FAIL fail the run. No transition is claimed
 until this mode has run against the published candidate.

@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $inputData = Get-Content -LiteralPath (Join-Path $Root 'input.json') -Raw | ConvertFrom-Json
 $work = Join-Path $Root 'work'
 $result = @{ installed_driver_sha256 = $null; cases = [ordered]@{} }
-$stage = 'standard_user'; $failed = $false; $desktop = $null; $install = $null; $python = $null; $stub = $null; $caseContext = $null
+$stage = 'standard_user'; $failed = $false; $desktop = $null; $install = $null; $python = $null; $stub = $null; $caseContext = $null; $updateContext = $null
 function Verdict([string] $Id, [string] $Verdict, [string] $Reason) {
     $result.cases[$Id] = @{ verdict = $Verdict; reason = $Reason }
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $work 'result.json') -Encoding utf8
@@ -266,6 +266,12 @@ try {
     if ($reason -notin @('enabled_acceptance_case_failed', 'update_acceptance_case_failed')) { Verdict $stage 'FAIL' $reason }
 } finally {
     try {
+        if ($updateContext -and -not $updateContext.Quiesced) {
+            # Parent account teardown must first stop every owned process. Do
+            # not race an unproven updater transaction with Quit or uninstall.
+            $stage = 'uninstall'
+            throw 'update_transaction_cleanup_unproven_uninstall_suppressed'
+        }
         if ($stub) { if (-not $stub.HasExited) { $stub.Kill(); $null = $stub.WaitForExit(10000) }; $stub.Dispose() }
         # Preflight the real menu route; no target-app survival is claimed here.
         if ($desktop -and -not $desktop.HasExited) {
