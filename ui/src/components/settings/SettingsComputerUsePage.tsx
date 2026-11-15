@@ -348,7 +348,7 @@ export const SettingsComputerUsePage: FC = () => {
                   that can turn it on, the tray or menu bar in the desktop app, or the computer
                   itself from a browser. */}
               {status?.status === 'off'
-                ? windows && windowsSwitch.canTurnOn
+                ? windows && (windowsSwitch.canTurnOn || windowsSwitch.changing)
                   ? t('settings.computerUse.windows.switch.offDetail')
                   : !desktopShell
                     ? t('workbench.home.computerUse.offDetailRemote')

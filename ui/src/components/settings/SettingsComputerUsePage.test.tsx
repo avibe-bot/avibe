@@ -646,6 +646,8 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(control.getAttribute('aria-checked')).toBe('true');
     expect((control as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole('img', { name: 'settings.computerUse.windows.switch.turningOn' })).toBeTruthy();
+    // While it turns on, the band still points at this switch, not the tray.
+    expect(screen.getByText('settings.computerUse.windows.switch.offDetail')).toBeTruthy();
 
     statusSequence({ ...windowsHost, enabled: true, status: 'starting', reason: null });
     // The page's own polling brings the confirming read.
