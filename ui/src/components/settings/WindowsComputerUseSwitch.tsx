@@ -43,7 +43,7 @@ export function useWindowsComputerUseSwitch({
   disable: (() => Promise<void>) | null;
   /** Re-read the status now; the page keeps polling regardless. */
   refresh: () => void;
-}): { control: ReactNode; notice: ReactNode; canTurnOn: boolean } {
+}): { control: ReactNode; notice: ReactNode; canTurnOn: boolean; changing: boolean } {
   const { t } = useTranslation();
   const [change_, setPending] = useState<Pending | null>(null);
   const [failed, setFailed] = useState(false);
@@ -148,5 +148,5 @@ export function useWindowsComputerUseSwitch({
     </p>
   ) : null;
 
-  return { control, notice, canTurnOn: !pending && enabled === false && enable !== null };
+  return { control, notice, canTurnOn: !pending && enabled === false && enable !== null, changing: pending !== null };
 }

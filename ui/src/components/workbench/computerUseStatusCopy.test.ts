@@ -116,8 +116,12 @@ describe('computerUseStatusCopy', () => {
     ).detail).toBe('workbench.home.computerUse.unavailableDetail');
   });
 
-  it('keeps Controller-unavailable remediation aligned in both locales', () => {
-    expect(en.workbench.home.computerUse.controllerUnavailableDetail).toContain('Controller');
-    expect(zh.workbench.home.computerUse.controllerUnavailableDetail).toContain('Controller');
+  it('speaks to people, not in internal terms, in both locales', () => {
+    // The status band is read by people: no component names they cannot act on.
+    for (const locale of [en, zh]) {
+      for (const text of Object.values(locale.workbench.home.computerUse)) {
+        expect(text).not.toMatch(/Controller|CLI|managed|endpoint|snapshot|socket|contract|native|受管理|端点|快照|协议|原生/);
+      }
+    }
   });
 });

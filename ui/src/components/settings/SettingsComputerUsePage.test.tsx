@@ -646,6 +646,8 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(control.getAttribute('aria-checked')).toBe('true');
     expect((control as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole('img', { name: 'settings.computerUse.windows.switch.turningOn' })).toBeTruthy();
+    // While it turns on, the band still points at this switch, not the tray.
+    expect(screen.getByText('settings.computerUse.windows.switch.offDetail')).toBeTruthy();
 
     statusSequence({ ...windowsHost, enabled: true, status: 'starting', reason: null });
     // The page's own polling brings the confirming read.
@@ -819,24 +821,18 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'));
   });
 
-  it('says what ready means in plain words on Windows, leaving the macOS copy as it is', async () => {
-    statusSequence({ ...windowsHost, enabled: true, status: 'ready', reason: null });
-    const windowsPage = render(<SettingsComputerUsePage />);
-    expect(await screen.findByText('settings.computerUse.windows.readyDetail')).toBeTruthy();
-    expect(screen.queryByText('workbench.home.computerUse.readyDetail')).toBeNull();
-    windowsPage.unmount();
-
-    statusSequence({ supported: true, host_platform: 'macos', status: 'ready', reason: null });
-    render(<SettingsComputerUsePage />);
-    expect(await screen.findByText('workbench.home.computerUse.readyDetail')).toBeTruthy();
-  });
-
-  it('keeps the shared off detail where this page cannot switch it', async () => {
-    statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
+  it.each([
+    ['a browser', false, 'windows', 'workbench.home.computerUse.offDetailRemote'],
+    ['the Windows app without the switch actions', true, 'windows', 'workbench.home.computerUse.offDetailWindows'],
+    ['the Mac app', true, 'macos', 'workbench.home.computerUse.offDetail'],
+    ['a browser watching a Mac', false, 'macos', 'workbench.home.computerUse.offDetailRemote'],
+  ])('names the control the reader can reach when off, from %s', async (_case, shell, host, key) => {
+    if (shell) enterDesktopShell();
+    statusSequence({ supported: true, host_platform: host, enabled: false, status: 'off', reason: 'never_enabled' });
 
     render(<SettingsComputerUsePage />);
 
-    expect(await screen.findByText('workbench.home.computerUse.offDetail')).toBeTruthy();
+    expect(await screen.findByText(key)).toBeTruthy();
     expect(screen.queryByText('settings.computerUse.windows.switch.offDetail')).toBeNull();
   });
 
@@ -906,7 +902,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(zh.settings.computerUse.windows.stop)
       .toBe('关闭电脑操作、退出 Avibe，或 Avibe 意外退出时，驱动会停止，正在进行的操作也会结束；你已打开的应用不受影响。');
     expect(en.settings.computerUse.windows.stop).toContain('apps you opened stay open');
-    expect(zh.settings.computerUse.windows.readyDetail).toBe('Agent 现在可以查看并操作这台电脑上的应用。');
-    expect(en.settings.computerUse.windows.readyDetail).toBe('Agents can now see and operate apps on this computer.');
+    expect(zh.workbench.home.computerUse.readyDetail).toBe('Agent 现在可以查看并操作这台电脑上的应用。');
+    expect(en.workbench.home.computerUse.readyDetail).toBe('Agents can now see and operate apps on this computer.');
   });
 });
