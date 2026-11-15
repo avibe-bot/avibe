@@ -129,6 +129,36 @@ expose internal reason codes, turn the feature on, or issue permission changes. 
 desktop-managed macOS Runtime; a terminal-installed Avibe Runtime does not show
 a native desktop control it cannot own.
 
+## Windows (Preview)
+
+On a Windows x64 host, the Settings page is labelled **Preview** and shows one
+step: **Turn on**. Windows has no Accessibility or Screen Recording grants, so
+the macOS permission steps, **Open Settings** actions, and Quit & Reopen
+guidance never appear there. The page also states that:
+
+- Agents operate ordinary apps running under the user's Windows account.
+- App windows running as administrator are refused, and the Agent says so;
+  Avibe never raises its own rights. This differs from Avibe itself running
+  as administrator, which keeps Computer Use unavailable until Avibe is
+  reopened normally.
+- The Agent starts a desktop app only from the absolute path of its `.exe`,
+  which it finds through the app's registered install information, and it
+  never launches by name. Store apps, apps it cannot reliably locate, links,
+  and files that open in their default app are opened by the user; the Agent
+  asks, then continues in that window.
+- Turning Computer Use off, quitting Avibe, or Avibe closing unexpectedly
+  stops the driver and ends any action in progress.
+
+The host comes from the server: the status endpoint reports `host_platform`
+(`macos`, `windows`, `linux`, or `unknown`). A browser on any OS therefore
+describes the Runtime's host, and the desktop app only decides whether the
+page's actions can run. A server without the field is an older macOS-only
+release, and the page keeps the macOS guide. A Windows host that reports
+Computer Use unsupported shows the unsupported notice in Windows terms, still
+labelled Preview. The Home **Getting started** item reads the same field and
+on Windows asks to turn Computer Use on instead of granting permissions.
+`host_platform` describes the host only; it never turns Computer Use on.
+
 ## Agent CLI and Skill
 
 Agents use Computer Use through the Controller-owned CLI and the built-in
