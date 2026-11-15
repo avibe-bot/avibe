@@ -39,10 +39,10 @@ export async function installBrowserIsolation(context) {
     lock(document, 'execCommand', execCommand);
 
     // Avibe currently copies through the Web APIs above. Its desktop/mobile
-    // escape hatches are Tauri invoke and avibeNative.call. Never connect either
-    // to a host, including a future clipboard plugin. Do not advertise a native
-    // shell (no contract/platform/presentation flags) just to stub its transport.
-    const invoke = async () => { record('tauri'); throw new Error('Native IPC is isolated'); };
+    // escape hatches are Tauri invoke and avibeNative.call. No Tauri host exists
+    // here: pin that bridge absent, rather than advertise a rejecting invoke
+    // that would activate updater/settings actions in desktop design frames.
+    // Mobile mocks can supply presentation metadata without a host transport.
     let nativeMock = null;
     const nativeCall = async (method, ...args) => {
       record('native');
@@ -51,10 +51,9 @@ export async function installBrowserIsolation(context) {
       }
       throw new Error('Native IPC is isolated');
     };
-    const tauri = Object.freeze({ invoke });
     const native = {};
     lock(native, 'call', nativeCall);
-    lock(window, '__TAURI_INTERNALS__', tauri);
+    lock(window, '__TAURI_INTERNALS__', undefined);
     lock(window, 'avibeNative', native);
     // Headless Chromium has no OS window; ignore page requests to focus one too.
     const focus = () => { record('focus'); };
@@ -64,9 +63,10 @@ export async function installBrowserIsolation(context) {
       const fail = () => { throw new Error('Browser isolation self-check failed; refusing to proceed'); };
       // Check *all* references before invoking anything. A missing stub must
       // never cause the diagnostic itself to read or write the real clipboard.
+      const tauri = Object.getOwnPropertyDescriptor(window, '__TAURI_INTERNALS__');
       if (navigator.clipboard !== clipboard || Navigator.prototype.clipboard !== clipboard
         || document.execCommand !== execCommand || Document.prototype.execCommand !== execCommand
-        || window.__TAURI_INTERNALS__ !== tauri || tauri.invoke !== invoke
+        || !tauri || !('value' in tauri) || tauri.value !== undefined || tauri.configurable || tauri.writable
         || window.avibeNative !== native || native.call !== nativeCall || window.focus !== focus
         || (typeof Clipboard !== 'undefined'
           && Object.keys(clipboard).some((name) => Clipboard.prototype[name] !== clipboard[name]))) fail();
@@ -79,11 +79,10 @@ export async function installBrowserIsolation(context) {
         await clipboard.write([]);
         if ((await clipboard.read()).length !== 0) fail();
         for (const command of ['copy', 'cut', 'paste']) document.execCommand(command);
-        await tauri.invoke('plugin:clipboard-manager|write_text').catch(() => {});
         await native.call('clipboard.writeText').catch(() => {});
         window.focus();
         const expected = ['writeText', 'readText', 'write', 'read', 'execCommand:copy',
-          'execCommand:cut', 'execCommand:paste', 'tauri', 'native', 'focus'];
+          'execCommand:cut', 'execCommand:paste', 'native', 'focus'];
         if (JSON.stringify(calls.slice(start)) !== JSON.stringify(expected)) fail();
       } finally {
         text = previousText;

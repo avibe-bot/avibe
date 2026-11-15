@@ -45,8 +45,8 @@ test('self-check fails closed before exercising any API when a stub is missing',
     'globalThis.Document = class {}',
     'globalThis.Clipboard = class {}',
     'globalThis.window = { avibeNative: window.avibeNative, focus: window.focus }',
-    'globalThis.window = { __TAURI_INTERNALS__: window.__TAURI_INTERNALS__, focus: window.focus }',
-    'globalThis.window = { __TAURI_INTERNALS__: window.__TAURI_INTERNALS__, avibeNative: window.avibeNative }',
+    'globalThis.window = Object.defineProperty({ focus: window.focus }, "__TAURI_INTERNALS__", { value: undefined })',
+    'globalThis.window = Object.defineProperty({ avibeNative: window.avibeNative }, "__TAURI_INTERNALS__", { value: undefined })',
   ]) {
     const page = await realm();
     page.run('globalThis.savedGuard = window.__AVIBE_BROWSER_ISOLATION__');
@@ -61,6 +61,9 @@ test('self-check fails closed before exercising any API when a stub is missing',
 
 test('native presentation mocks cannot take over clipboard IPC', async () => {
   const page = await realm();
+  assert.equal(page.run('window.__TAURI_INTERNALS__'), undefined,
+    'an absent desktop host must not advertise updater/settings actions to design frames');
+  assert.equal(page.run(`Reflect.set(window, '__TAURI_INTERNALS__', { invoke() {} })`), false);
   page.run(`window.__AVIBE_BROWSER_ISOLATION__.setNativeMock({
     contract: 1, platform: 'ios', capabilities: {},
     call: async (method) => method === 'app.info' ? 'fixture' : 'must not reach mock',

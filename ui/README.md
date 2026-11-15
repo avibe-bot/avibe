@@ -49,8 +49,10 @@ try {
 
 Before page scripts (including frames/popups/navigation), a context init script
 replaces `navigator.clipboard` read/write APIs and `execCommand` copy/cut/paste,
-and isolates Tauri/native IPC. The launch self-check verifies identities before
-calling anything, exercises each stub, and closes the browser on failure. Calls
+and isolates native IPC (Tauri stays locked absent, rather than advertising a
+host that would change desktop fixture behavior). The launch self-check verifies
+identities before calling anything, exercises each stub, and closes the browser
+on failure. Calls
 are recorded as operation names only; text/items stay in page memory, never in
 logs or the OS clipboard. Native design fixtures use `setNativeMock` for their
 in-page peer; clipboard IPC still cannot reach it. This is browser automation
