@@ -1,4 +1,8 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +30,12 @@ const defaultDesktopInvoke = vi.hoisted(() => async (command: string) => {
   if (command === 'plugin:event|listen') return 1;
   return undefined;
 });
+// Execute the exact script included by the native shell, not a test copy of
+// its acknowledgement or duplicate-delivery behavior.
+const deliverNativeUpdateOpen = new Function(`return (${readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../../desktop/src-tauri/src/open_updates.js'), 'utf8',
+)})`)() as (requestId: string, legacyFallback: boolean) => 'handled' | 'unhandled';
+
 const desktopInvoke = vi.hoisted(() => vi.fn(defaultDesktopInvoke));
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
 const authorization = vi.hoisted(() => ({ remote: true, capabilities: { can_manage_instance: true, is_instance_owner: true } }));
@@ -46,6 +56,7 @@ afterEach(() => {
   desktopInvoke.mockImplementation(defaultDesktopInvoke);
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   delete (window as { __AVIBE_DESKTOP_VERSION__?: string }).__AVIBE_DESKTOP_VERSION__;
+  delete window.__AVIBE_DESKTOP_UPDATES_DELIVERED__;
   delete (window as { __AVIBE_DESKTOP_UPDATES_HANDLED__?: boolean }).__AVIBE_DESKTOP_UPDATES_HANDLED__;
   delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
@@ -63,6 +74,7 @@ function renderInShell(
     managed_by?: 'desktop';
     remote_request?: VersionInfo['remote_request'];
   },
+  strictMode = false,
 ) {
   Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
   Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', { value: appVersion, configurable: true });
@@ -81,7 +93,8 @@ function renderInShell(
     has_update: latest !== null,
     managed_by: 'desktop',
   });
-  render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+  const badge = <I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>;
+  return render(strictMode ? <StrictMode>{badge}</StrictMode> : badge);
 }
 
 async function openBrowserPopup(title: string) {
@@ -179,6 +192,102 @@ describe('desktop version ownership', () => {
     expect(window.dispatchEvent(event)).toBe(false);
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(window.__AVIBE_DESKTOP_UPDATES_HANDLED__).toBe(true);
+  });
+
+  it.each([false, true])('delivers an earlier request once after listener and updater readiness (StrictMode=%s)', async (strictMode) => {
+    let resolveState!: (state: DesktopUpdateState) => void;
+    const state = new Promise<DesktopUpdateState>((resolve) => { resolveState = resolve; });
+    const receipts: string[] = [];
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') return state;
+      if (command === 'desktop_update_panel_ready') {
+        // The transport delivers the retained request; the real shipped script
+        // and component decide whether it was consumed.
+        receipts.push(deliverNativeUpdateOpen('1', false));
+        return undefined;
+      }
+      return defaultDesktopInvoke(command);
+    });
+
+    expect(deliverNativeUpdateOpen('1', false)).toBe('unhandled');
+    renderInShell('3.2.2', '3.2.2', null, true, undefined, strictMode);
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_state'));
+    expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_panel_ready');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(deliverNativeUpdateOpen('1', false)).toBe('unhandled');
+    expect(window.__AVIBE_DESKTOP_UPDATES_DELIVERED__).toBeUndefined();
+
+    await act(async () => resolveState({
+      phase: 'available', latest: '3.2.3', channel: 'stable', skippedVersion: null, interactive: false,
+    }));
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(receipts).toEqual(['handled']);
+    await vi.waitFor(() => expect(desktopInvoke.mock.calls.filter(([command]) => command === 'desktop_update_check')).toHaveLength(1));
+
+    // Another readiness signal can arrive before the native eval callback
+    // clears its slot. It acknowledges the same id without a second UI action.
+    await act(async () => { await desktopInvoke('desktop_update_panel_ready'); });
+    expect(receipts).toEqual(['handled', 'handled']);
+    expect(desktopInvoke.mock.calls.filter(([command]) => command === 'desktop_update_check')).toHaveLength(1);
+    expect(window.__AVIBE_DESKTOP_UPDATES_DELIVERED__).toBe('1');
+  });
+
+  it('does not claim a pending open through a stale updater probe after unmount', async () => {
+    let resolveState!: (state: DesktopUpdateState) => void;
+    const state = new Promise<DesktopUpdateState>((resolve) => { resolveState = resolve; });
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') return state;
+      if (command === 'desktop_update_panel_ready') {
+        expect(deliverNativeUpdateOpen('2', false)).toBe('handled');
+        return undefined;
+      }
+      return defaultDesktopInvoke(command);
+    });
+    const mounted = renderInShell('3.2.2', '3.2.2', null, true);
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_state'));
+    mounted.unmount();
+    await act(async () => resolveState({
+      phase: 'current', latest: null, channel: 'stable', skippedVersion: null, interactive: false,
+    }));
+    expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_panel_ready');
+    expect(window.__AVIBE_DESKTOP_UPDATES_DELIVERED__).toBeUndefined();
+    renderInShell('3.2.2', '3.2.2', null, true);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(window.__AVIBE_DESKTOP_UPDATES_DELIVERED__).toBe('2');
+  });
+
+  it('keeps legacy event handling when an older shell lacks the readiness command', async () => {
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_panel_ready') throw new Error('unknown command');
+      return defaultDesktopInvoke(command);
+    });
+    renderInShell('3.2.2', '3.2.2', null, true);
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_panel_ready'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent(window, new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true }));
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(window.__AVIBE_DESKTOP_UPDATES_HANDLED__).toBe(true);
+  });
+
+  it('deduplicates a legacy listener receipt but never marks an unhandled request delivered', () => {
+    expect(deliverNativeUpdateOpen('3', false)).toBe('unhandled');
+    expect(window.__AVIBE_DESKTOP_UPDATES_DELIVERED__).toBeUndefined();
+    const legacy = vi.fn((event: Event) => {
+      window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = true;
+      event.preventDefault();
+    });
+    window.addEventListener(DESKTOP_OPEN_UPDATES_EVENT, legacy);
+    try {
+      expect(deliverNativeUpdateOpen('3', false)).toBe('handled');
+      expect(deliverNativeUpdateOpen('3', false)).toBe('handled');
+      expect(legacy).toHaveBeenCalledOnce();
+      expect(deliverNativeUpdateOpen('4', false)).toBe('handled');
+      expect(deliverNativeUpdateOpen('3', false)).toBe('handled');
+      expect(legacy).toHaveBeenCalledTimes(2);
+      expect(window.__AVIBE_DESKTOP_UPDATES_DELIVERED__).toBe('4');
+    } finally {
+      window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, legacy);
+    }
   });
 
   it('registers the native updater state listener for every event target', async () => {

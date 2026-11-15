@@ -19,6 +19,8 @@ declare global {
     readonly __AVIBE_NATIVE_APP_WINDOW__?: true;
     /** The current Workbench handled the shell's update-popover request. */
     __AVIBE_DESKTOP_UPDATES_HANDLED__?: boolean;
+    /** Last native open request accepted in this document; not install authority. */
+    __AVIBE_DESKTOP_UPDATES_DELIVERED__?: string;
   }
 }
 
@@ -278,6 +280,8 @@ type DesktopUpdateStateListener = (state: DesktopUpdateState) => void;
 /** The desktop updater controls available to the Workbench's version popover. */
 export type DesktopUpdateShellActions = {
   getState: () => Promise<DesktopUpdateState>;
+  /** Notify the shell only after the panel listener can consume an open event. */
+  panelReady: () => Promise<void>;
   check: () => Promise<void>;
   /** Install exactly the version the panel shows; an older shell ignores the argument. */
   install: (targetVersion: string) => Promise<void>;
@@ -293,6 +297,7 @@ export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
   if (!invoke) return null;
   return {
     getState: async () => (await invoke('desktop_update_state')) as DesktopUpdateState,
+    panelReady: async () => { await invoke('desktop_update_panel_ready'); },
     check: async () => { await invoke('desktop_update_check'); },
     install: async (targetVersion) => { await invoke('desktop_update_install', { targetVersion }); },
     skip: async () => { await invoke('desktop_update_skip'); },

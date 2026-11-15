@@ -9,6 +9,7 @@
   },
   "permissions": [
     "core:event:default",
+    "allow-desktop-update-panel-ready",
     "allow-desktop-update-state",
     "allow-desktop-update-check",
     "allow-desktop-update-install",
