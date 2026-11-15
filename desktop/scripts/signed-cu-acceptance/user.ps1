@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $inputData = Get-Content -LiteralPath (Join-Path $Root 'input.json') -Raw | ConvertFrom-Json
 $work = Join-Path $Root 'work'
 $result = @{ installed_driver_sha256 = $null; cases = [ordered]@{} }
-$stage = 'standard_user'; $failed = $false; $desktop = $null; $install = $null; $python = $null
+$stage = 'standard_user'; $failed = $false; $desktop = $null; $install = $null; $python = $null; $stub = $null
 function Verdict([string] $Id, [string] $Verdict, [string] $Reason) {
     $result.cases[$Id] = @{ verdict = $Verdict; reason = $Reason }
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $work 'result.json') -Encoding utf8
@@ -106,15 +106,22 @@ try {
     } while ((Get-Date) -lt $deadline)
     if (-not $status -or $desktop.MainWindowHandle -eq 0) { throw 'desktop_window_or_runtime_not_ready' }
     Verdict 'desktop_launch' 'PASS' 'installed_desktop_window_and_its_runtime_status_ready_under_standard_user'
+    $cdpPhase = 'http'
     try {
         $targets = @(Invoke-RestMethod -Uri "http://127.0.0.1:$cdpPort/json/list" -TimeoutSec 5)
+        $cdpPhase = 'workbench_target'
         $workbench = @($targets | Where-Object { $_.type -eq 'page' -and $_.url.StartsWith($origin.AbsoluteUri.TrimEnd('/') + '/') })
+        $result.cdp_diagnostics = @{ targets = $targets.Count; workbench_targets = $workbench.Count }
+        $cdpPhase = 'listener'
         $listeners = @(Get-NetTCPConnection -LocalPort $cdpPort -State Listen -ErrorAction Stop)
         if ($workbench.Count -lt 1 -or $listeners.Count -lt 1 -or @($listeners | Where-Object { $_.LocalAddress -notin @('127.0.0.1', '::1') }).Count) {
             throw 'cdp_target_or_loopback_binding_unproven'
         }
         Verdict 'webview_cdp_preflight' 'PASS' 'installed_webview_exposes_workbench_target_on_loopback_only'
-    } catch { Verdict 'webview_cdp_preflight' 'NOT RUN' 'signed_webview_cdp_unavailable_or_unproven' }
+    } catch {
+        $result.cdp_failure = @{ phase = $cdpPhase; exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber }
+        Verdict 'webview_cdp_preflight' 'NOT RUN' ('signed_webview_cdp_unproven_' + $cdpPhase)
+    }
 
     if ($inputData.mode -eq 'preparation') {
         $stage = 'feature_disabled'
@@ -131,6 +138,27 @@ try {
         $stage = 'settings_enable'
         throw 'enabled_acceptance_not_implemented_yet'
     }
+
+    $stage = 'model_stub_tool_path'
+    $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $portProbe.Start(); $stubPort = $portProbe.LocalEndpoint.Port; $portProbe.Stop()
+    $result.stub_port = $stubPort
+    $psi = [Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $python; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    foreach ($arg in @('-I', '-B', (Join-Path $Root 'model_stub.py'), '--port', [string]$stubPort, '--python', $python, '--work', $work)) { $psi.ArgumentList.Add($arg) }
+    $stub = [Diagnostics.Process]::Start($psi)
+    $null = $stub.SafeHandle
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        try { $catalog = Invoke-RestMethod -Uri "http://127.0.0.1:$stubPort/v1/models" -TimeoutSec 2; break } catch { Start-Sleep -Milliseconds 200 }
+    } while ((Get-Date) -lt $deadline)
+    if ($stub.HasExited) { throw 'deterministic_upstream_exited' }
+    $null = Run-Process $python @('-I', '-B', (Join-Path $Root 'configure_stub.py'), '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--port', [string]$stubPort, '--work', $work) 480
+    Set-Content -LiteralPath (Join-Path $work 'probe-context.js') -Value '({fixture_admission: true})' -Encoding utf8
+    $null = Run-Process $python @('-I', '-B', '-m', 'vibe', 'agent', 'run', '--agent', 'vibey', '--model', 'cu-acceptance', '--reasoning-effort', 'low', '--cwd', $work, '--message', 'AVIBE_CU_CASE:probe-context', '--sync', '--wait-timeout', '120') 180
+    $probe = Get-Content -LiteralPath (Join-Path $work 'probe-context.json') -Raw | ConvertFrom-Json
+    if ($probe.ok -ne $true -or $probe.kind -ne 'computer_js' -or $probe.result.fixture_admission -ne $true) { throw 'shipped_computer_js_admission_not_proven' }
+    Verdict 'model_stub_tool_path' 'PASS' 'real_controller_vibey_turn_and_shipped_cli_js_with_deterministic_model_stub_not_llm'
 } catch {
     $failed = $true
     $result.failure = @{ exception_type = $_.Exception.GetType().FullName; script_line = $_.InvocationInfo.ScriptLineNumber; hresult = $_.Exception.HResult }
@@ -138,6 +166,7 @@ try {
     Verdict $stage 'FAIL' $reason
 } finally {
     try {
+        if ($stub) { if (-not $stub.HasExited) { $stub.Kill(); $null = $stub.WaitForExit(10000) }; $stub.Dispose() }
         # This is preparation teardown, NOT the Desktop-quit acceptance case.
         if ($desktop -and -not $desktop.HasExited) { $desktop.Kill(); $null = $desktop.WaitForExit(10000) }
         if ($desktop) { $desktop.Dispose() }

@@ -12,7 +12,7 @@ $root = Join-Path $env:RUNNER_TEMP ('signed-cu-' + [guid]::NewGuid().ToString('N
 $work = Join-Path $root 'work'
 New-Item -ItemType Directory -Path $evidence, $root, $work -Force | Out-Null
 $cases = [ordered]@{}
-foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
+foreach ($id in @('release_integrity', 'standard_user', 'silent_install', 'driver_provenance', 'desktop_launch', 'webview_cdp_preflight', 'model_stub_tool_path', 'feature_disabled', 'settings_enable', 'survival_cu_off', 'survival_desktop_quit', 'survival_desktop_crash', 'elevated_app_refused', 'elevated_driver_refused', 'second_user_pipe_lock', 'locked_desktop', 'second_interactive_session', 'real_agent_turn', 'uninstall', 'cleanup')) {
     $cases[$id] = @{ verdict = 'NOT RUN'; reason = 'prerequisite_not_reached' }
 }
 $cases.locked_desktop.reason = 'hosted_runner_cannot_prove_locked_interactive_desktop'
@@ -135,7 +135,9 @@ try {
     if (-not (Get-LocalGroupMember -Group $group | Where-Object { $_.SID -eq $user.SID })) { Add-LocalGroupMember -Group $group -Member $user }
     $groups = @(Get-LocalGroup | Where-Object { @(Get-LocalGroupMember -Group $_ | Where-Object { $_.SID -eq $user.SID }).Count -gt 0 })
     if ($groups.Count -ne 1 -or $groups[0].SID.Value -ne 'S-1-5-32-545') { throw 'account_not_users_only' }
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'user.ps1') -Destination (Join-Path $root 'user.ps1')
+    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $root $file)
+    }
     Set-FixtureAccess $root 'ReadAndExecute'
     Set-FixtureAccess $work 'Modify'
     $config = @{ installer = $installer; driver_hash = $hash; mode = $Mode; expected_sid = $user.SID.Value }
@@ -167,7 +169,9 @@ try {
         $cases[$id] = $result.cases[$id]
     }
     $record.installed_driver_sha256 = $result.installed_driver_sha256
-    if ($result.Contains('failure')) { $record.failure = $result.failure }
+    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics')) {
+        if ($result.Contains($field)) { $record[$field] = $result[$field] }
+    }
     if ($worker.ExitCode -ne 0) { $failed = $true }
 } catch {
     $failed = $true
@@ -182,9 +186,11 @@ try {
     try {
         if ($user) {
             Stop-FixtureProcesses
-            if ($result -and $result.Contains('cdp_port')) {
-                $remaining = @(Get-NetTCPConnection -LocalPort $result.cdp_port -State Listen -ErrorAction SilentlyContinue)
-                if ($remaining.Count) { throw 'test_cdp_port_still_listening' }
+            foreach ($portField in @('cdp_port', 'stub_port')) {
+                if ($result -and $result.Contains($portField)) {
+                    $remaining = @(Get-NetTCPConnection -LocalPort $result[$portField] -State Listen -ErrorAction SilentlyContinue)
+                    if ($remaining.Count) { throw 'test_port_still_listening' }
+                }
             }
             $deadline = (Get-Date).AddSeconds(30)
             do {
