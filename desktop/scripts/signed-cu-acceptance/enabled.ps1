@@ -30,7 +30,10 @@ function Invoke-EnabledCases([hashtable] $Context) {
     function Enable-FromSettings {
         Set-CasePhase 'settings_status'
         $answer = Status
-        if ($answer.status -eq 'ready') { return }
+        if ($answer.status -eq 'ready') {
+            if ($answer.enabled -ne $true) { throw 'settings_enabled_not_confirmed' }
+            return
+        }
         if ($answer.status -ne 'off') { Wait-Status 'off' }
         Set-CasePhase 'settings_enable_click'
         $null = Run-Process $node @((Join-Path $Root 'cdp.mjs'), '--port', [string]$cdpPort, '--origin', $origin.GetLeftPart([UriPartial]::Authority), '--action', 'enable') 90
@@ -607,6 +610,21 @@ try {
                     $result.cu_input_diagnostics[$operationId].recovery_error = @{call='desktop_recovery'; error_class=$_.Exception.GetBaseException().GetType().FullName}
                     Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
                     return # Later cases remain NOT RUN, never inherit an unready runtime.
+                }
+            } else {
+                # Off leaves Computer Use off; the security cases need it on.
+                # Re-enable through the same Settings switch and require the
+                # authoritative enabled=true and ready, else security is NOT RUN.
+                try {
+                    Set-CasePhase 'reenable_after_off'
+                    Enable-FromSettings
+                    $answer = Status
+                    if ($answer.enabled -ne $true -or $answer.status -ne 'ready') { throw 'settings_reenable_not_confirmed' }
+                } catch {
+                    Add-AcceptanceFailure $result 'reenable_after_off' $_
+                    $result.cu_input_diagnostics[$operationId].recovery_error = @{call='reenable_after_off'; error_class=$_.Exception.GetBaseException().GetType().FullName}
+                    Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
+                    return # Security cases remain NOT RUN; never run them with Computer Use off.
                 }
             }
         }
