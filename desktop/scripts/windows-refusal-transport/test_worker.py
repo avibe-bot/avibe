@@ -61,6 +61,7 @@ class RefusalAssertionsTest(unittest.TestCase):
             MODULE["remove_owned_state"](work)
             self.assertFalse(state.exists())
 
+    @unittest.skipIf(sys.platform == "win32", "host-guard probe is for non-Windows hosts")
     def test_non_windows_entrypoint_refuses_before_import_or_side_effect(self):
         # Nonexistent paths prove no fixture/dependency imports or file creation
         # precede the host guard. Never launch a driver, editor or SDK locally.
