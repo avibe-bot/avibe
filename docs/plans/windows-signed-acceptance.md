@@ -42,6 +42,19 @@ runners, deferred to the owner's ten-minute real-machine check before Preview
 can be removed. The activation RC must be explicitly selected only after its
 activation PR has landed and its installer/Stage 2 provenance are published.
 
+## Selected enabled candidate
+
+The authorized enabled run selects `gh-v3.2.7rc4`, source
+`bcc71bc8d6430fc72697eb4695caef5d15da55ba`, after Stage 2 run `43695839638`.
+Its candidate driver is **34,074,624 bytes**, SHA256
+`931310cd70e4c571af416c77cdce56719bda3e1e1240ba4128ce913610b0294e`.
+The workflow supplies explicit candidate commit/hash/size pins. The verifier
+binds the public SOURCE fields to these pins, then checks the actual installed
+bytes and `computer-use/driver-provenance.json`; rc3's hash is not reused.
+For the later update mode, these same candidate pins describe the target rc4,
+not its starting rc3 installation. Candidate selection is not an acceptance
+result; required enabled cases must actually execute and pass.
+
 ## Evidence and current preparation
 
 The first full rc3 preparation passed in run `43670974577` on head `a08ef4cdb`

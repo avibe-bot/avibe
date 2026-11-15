@@ -81,10 +81,12 @@ try {
 
     $stage = 'driver_provenance'
     $driver = Join-Path $install 'computer-use\cua-driver.exe'
-    $hash = (Get-FileHash -LiteralPath $driver -Algorithm SHA256).Hash.ToLowerInvariant()
-    $result.installed_driver_sha256 = $hash
-    if ($hash -ne $inputData.driver_hash) { throw 'installed_driver_stage2_mismatch' }
-    Verdict 'driver_provenance' 'PASS' 'installed_bytes_equal_prepared_and_packaged_stage2_hashes'
+    . (Join-Path $Root 'release.ps1')
+    $driverProof = Assert-InstalledDriver $install $inputData.driver_hash $inputData.driver_size $inputData.driver_provenance
+    $result.installed_driver_sha256 = $driverProof.Hash
+    $result.installed_driver_size = $driverProof.Size
+    $result.installed_provenance_verified = $driverProof.ProvenanceVerified
+    Verdict 'driver_provenance' 'PASS' 'installed_bytes_size_and_provenance_equal_selected_candidate_and_stage2'
 
     $stage = 'desktop_launch'
     $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)

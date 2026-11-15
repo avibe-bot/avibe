@@ -1,7 +1,10 @@
 param(
     [ValidatePattern('^gh-v3\.2\.7rc[0-9]+$')][string] $ReleaseTag = 'gh-v3.2.7rc3',
     [ValidateSet('preparation', 'enabled', 'update')][string] $Mode = 'preparation',
-    [ValidatePattern('^gh-v3\.2\.7rc[0-9]+$')][string] $UpdateTag = 'gh-v3.2.7rc4'
+    [ValidatePattern('^gh-v3\.2\.7rc[0-9]+$')][string] $UpdateTag = 'gh-v3.2.7rc4',
+    [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string] $CandidateSourceSha,
+    [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{64}$')][string] $CandidateDriverHash,
+    [Parameter(Mandatory)][ValidateRange(1, 2147483647)][long] $CandidateDriverSize
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -27,6 +30,7 @@ else { $requiredCases += 'feature_disabled' }
 $record = [ordered]@{
     required_cases = $requiredCases; required_cases_passed = $false; missing_required_cases = @()
     schema_version = 1; release_tag = $ReleaseTag; mode = $Mode
+    candidate_source_sha = $CandidateSourceSha; candidate_driver_sha256 = $CandidateDriverHash; candidate_driver_size = $CandidateDriverSize
     runner = 'GitHub-hosted windows-latest / Windows Server 2025 x64'
     actual_os_build = [Environment]::OSVersion.Version.ToString()
     launch_method = 'ProcessStartInfo with UserName, LoadUserProfile (CreateProcessWithLogonW); not a second interactive session'
@@ -108,7 +112,9 @@ try {
     Assert-ReleaseIdle
     if ($Mode -eq 'update' -and ($ReleaseTag -ne 'gh-v3.2.7rc3' -or $UpdateTag -ne 'gh-v3.2.7rc4')) { throw 'only_authorized_rc3_to_rc4_update_allowed' }
     . (Join-Path $PSScriptRoot 'release.ps1')
-    $release = Get-VerifiedRelease $ReleaseTag (Join-Path $root 'base-release') $runDeadline { Assert-ReleaseIdle }
+    $sourcePin = if ($Mode -eq 'update') { '' } else { $CandidateSourceSha }
+    $driverPin = if ($Mode -eq 'update') { '' } else { $CandidateDriverHash }
+    $release = Get-VerifiedRelease $ReleaseTag (Join-Path $root 'base-release') $runDeadline { Assert-ReleaseIdle } $sourcePin $driverPin
     $installer = $release.Installer; $hash = $release.DriverHash
     $record.installer_sha256 = $release.InstallerHash
     $record.stage2_driver_sha256 = $hash
@@ -119,7 +125,7 @@ try {
         $stage = 'update_release_integrity'
         # Reference bytes only: the target installer is NEVER launched by the
         # harness. The real updater must discover/download/install its offer.
-        $updateRelease = Get-VerifiedRelease $UpdateTag (Join-Path $root 'update-reference') $runDeadline { Assert-ReleaseIdle }
+        $updateRelease = Get-VerifiedRelease $UpdateTag (Join-Path $root 'update-reference') $runDeadline { Assert-ReleaseIdle } $CandidateSourceSha $CandidateDriverHash
         $record.update_release = @{ tag = $UpdateTag; installer_sha256 = $updateRelease.InstallerHash; stage2_driver_sha256 = $updateRelease.DriverHash }
         Verdict 'update_release_integrity' 'PASS' 'target_reference_sha256sums_timestamped_certum_and_stage2_provenance_verified_not_executed'
     }
@@ -161,14 +167,14 @@ try {
     if (-not (Get-LocalGroupMember -Group $group | Where-Object { $_.SID -eq $user.SID })) { Add-LocalGroupMember -Group $group -Member $user }
     $groups = @(Get-LocalGroup | Where-Object { @(Get-LocalGroupMember -Group $_ | Where-Object { $_.SID -eq $user.SID }).Count -gt 0 })
     if ($groups.Count -ne 1 -or $groups[0].SID.Value -ne 'S-1-5-32-545') { throw 'account_not_users_only' }
-    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1', 'update.ps1', 'update-observer.ps1')) {
+    foreach ($file in @('user.ps1', 'Native.cs', 'model_stub.py', 'configure_stub.py', 'cdp.mjs', 'second-user.ps1', 'enabled.ps1', 'tray-off.ps1', 'update.ps1', 'update-observer.ps1', 'release.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $root $file)
     }
     Set-FixtureAccess $root 'ReadAndExecute'
     Set-FixtureAccess $work 'Modify'
-    $config = @{ installer = $installer; driver_hash = $hash; mode = $Mode; release_version = ($ReleaseTag -replace '^gh-v', ''); expected_sid = $user.SID.Value; target_app = $targetApp; target_app_hash = $targetHash }
-    if ($updateRelease) { $config.update = @{ version = $updateRelease.Version; desktop_version = $updateRelease.DesktopVersion; installer_hash = $updateRelease.InstallerHash; driver_hash = $updateRelease.DriverHash } }
-    $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'input.json')
+    $config = @{ installer = $installer; driver_hash = $hash; driver_provenance = $release.Provenance; driver_size = if ($Mode -eq 'update') { 0 } else { $CandidateDriverSize }; mode = $Mode; release_version = ($ReleaseTag -replace '^gh-v', ''); expected_sid = $user.SID.Value; target_app = $targetApp; target_app_hash = $targetHash }
+    if ($updateRelease) { $config.update = @{ version = $updateRelease.Version; desktop_version = $updateRelease.DesktopVersion; installer_hash = $updateRelease.InstallerHash; driver_hash = $updateRelease.DriverHash; driver_size = $CandidateDriverSize; driver_provenance = $updateRelease.Provenance } }
+    $config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $root 'input.json')
     Assert-ReleaseIdle
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = (Get-Command pwsh).Source
@@ -230,7 +236,7 @@ try {
         $cases[$id] = $result.cases[$id]
     }
     $record.installed_driver_sha256 = $result.installed_driver_sha256
-    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail', 'update_panel_preflight', 'update_transition')) {
+    foreach ($field in @('failure', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'stub_receipt', 'query_fixture_detail', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified')) {
         if ($result.Contains($field)) { $record[$field] = $result[$field] }
     }
     if ($worker.ExitCode -ne 0) { $failed = $true }

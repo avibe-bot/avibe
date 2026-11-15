@@ -112,8 +112,8 @@ function Invoke-UpdateCase([hashtable] $Context) {
         $phase = 'update_versions'
         $desktopVersion = $replacement.MainModule.FileVersionInfo.ProductVersion
         if ($desktopVersion -ne $inputData.update.desktop_version) { throw 'update_desktop_version_mismatch' }
-        $driverHash = (Get-FileHash -LiteralPath (Join-Path $install 'computer-use\cua-driver.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($driverHash -ne $inputData.update.driver_hash) { throw 'update_installed_driver_stage2_mismatch' }
+        $driverProof = Assert-InstalledDriver $install $inputData.update.driver_hash $inputData.update.driver_size $inputData.update.driver_provenance
+        $driverHash = $driverProof.Hash
         # Resolve the NEW installed runtime manifest, never retain the rc3 slot.
         $manifest = Get-Content -LiteralPath (Join-Path $install 'runtime\runtime-manifest.json') -Raw | ConvertFrom-Json
         $slot = Join-Path (Join-Path $runtime $manifest.runtime_version) $manifest.archive_sha256.Substring(0, 16)
@@ -147,6 +147,8 @@ function Invoke-UpdateCase([hashtable] $Context) {
         $result.update_transition.desktop_version = $desktopVersion
         $result.update_transition.runtime_version = $runtimeVersion.current
         $result.update_transition.installed_driver_sha256 = $driverHash
+        $result.update_transition.installed_driver_size = $driverProof.Size
+        $result.update_transition.installed_provenance_verified = $driverProof.ProvenanceVerified
         $result.update_transition.current_row_verified = $true
         Verdict 'update_versions' 'PASS' 'relaunched_desktop_runtime_current_panel_row_and_installed_stage2_driver_match_target_settings_preserved'
         $completed = $true; $Context.Quiesced = $true
