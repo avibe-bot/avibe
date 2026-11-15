@@ -21,6 +21,7 @@ from core.computer_server import (
     _fold_tool_result,
     _validate_input,
 )
+from core.private_fs import make_private_file
 from core.computer_use import (
     COMPUTER_USE_TOOL_NAMES,
     ComputerUseState,
@@ -81,6 +82,9 @@ def _state(
     }
     state_path = tmp_path / "computer-use.json"
     state_path.write_text(json.dumps(payload), encoding="utf-8")
+    # Match the shell's owner-private state publication on Windows as well as
+    # POSIX; inherited temp-directory ACLs are not a trusted saved opt-in.
+    make_private_file(state_path)
     return state_path, state
 
 
