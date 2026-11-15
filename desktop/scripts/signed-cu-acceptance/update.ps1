@@ -2,16 +2,19 @@
 # unified panel only.
 # Public target bytes are a reference, never an installation fallback.
 function Open-UpdateProcess($Row, [datetime] $Since) {
-    $owner = Invoke-CimMethod -InputObject $Row -MethodName GetOwnerSid -ErrorAction Stop
-    if ($owner.ReturnValue -ne 0 -or $owner.Sid -ne $inputData.expected_sid -or $Row.CreationDate.ToUniversalTime() -lt $Since) { return $null }
+    if ($Row.CreationDate -lt $Since) { return $null }
     $process = $null
     try {
         $process = [Diagnostics.Process]::GetProcessById([int]$Row.ProcessId)
         $null = $process.SafeHandle
         if ($process.HasExited) { $process.Dispose(); return $null }
+        # Owner from this account's own query-limited token read, not CIM.
+        $observed = [AcceptanceNative]::ObserveProcess($process.Id)
+        try { $owner = $observed.OwnerSid() } finally { $observed.Dispose() }
+        if ($owner -ne $inputData.expected_sid) { $process.Dispose(); return $null }
         $created = $process.StartTime.ToUniversalTime()
         $created = $created.AddTicks(-($created.Ticks % 10))
-        if ($created -ne $Row.CreationDate.ToUniversalTime() -or $process.MainModule.FileName -ne $Row.ExecutablePath) { throw 'update_process_identity_changed' }
+        if ($created -ne $Row.CreationDate -or $process.MainModule.FileName -ne $Row.ExecutablePath) { throw 'update_process_identity_changed' }
         return $process
     } catch [ArgumentException] { if ($process) { $process.Dispose() }; return $null }
     catch { if ($process) { $process.Dispose() }; throw }
@@ -19,8 +22,11 @@ function Open-UpdateProcess($Row, [datetime] $Since) {
 function Invoke-UpdateCase([hashtable] $Context) {
     $phase = 'update_panel_start'; $clicker = $null; $updater = $null; $replacement = $null; $supervisor = $null
     $original = $Context.Desktop; $since = [DateTime]::UtcNow; $completed = $false
+    $desktops = [ordered]@{}; $firstDesktopSeen = $null
+    $supervisorFound = $false; $installerFound = $false; $installerHashMatches = $null
     $Context.Quiesced = $false
     . (Join-Path $Root 'update-observer.ps1')
+    if (-not ('AcceptanceNative' -as [type])) { Add-Type -Path (Join-Path $Root 'Native.cs') }
     try {
         if ($result.cases.webview_cdp_preflight.verdict -ne 'PASS') { throw 'update_shared_cdp_prerequisite_unproven' }
         $executable = $original.MainModule.FileName
@@ -56,8 +62,8 @@ function Invoke-UpdateCase([hashtable] $Context) {
                 $phase = 'update_installer'
             }
             if (-not $clicker.HasExited -and (Get-Date) -gt $clickDeadline) { $phase = 'update_panel_start'; throw 'update_panel_client_timeout' }
-            $desktopName = [IO.Path]::GetFileName($executable).Replace("'", "''")
-            $rows = @(Get-CimInstance Win32_Process -Filter "Name='update.exe' OR Name='powershell.exe' OR Name='$desktopName'" -OperationTimeoutSec 5)
+            $desktopName = [IO.Path]::GetFileNameWithoutExtension($executable)
+            $rows = @(Get-UpdateProcessRows @('update', 'powershell', $desktopName))
             foreach ($row in $rows) {
                 $staging = Get-UpdateSupervisorStage $row $original.Id $env:TEMP
                 if (-not $staging -or ($supervisor -and $supervisor.Id -eq [int]$row.ProcessId)) { continue }
@@ -66,6 +72,7 @@ function Invoke-UpdateCase([hashtable] $Context) {
                 if ($candidate) {
                     if ($supervisor) { $candidate.Dispose(); throw 'update_multiple_transaction_supervisors' }
                     $supervisor = $candidate
+                    $supervisorFound = $true
                     $request = Get-Content -LiteralPath (Join-Path $staging 'request.json') -Raw | ConvertFrom-Json
                     if ([int]$request.pid -ne $original.Id -or ([string]$request.directory).Replace('\\?\', '') -ne $install -or ([string]$request.executable).Replace('\\?\', '') -ne $executable -or $request.version -ne $inputData.update.desktop_version) { throw 'update_supervisor_request_identity_mismatch' }
                 }
@@ -76,32 +83,58 @@ function Invoke-UpdateCase([hashtable] $Context) {
                     $candidate = Open-UpdateProcess $row $since
                     if ($candidate) {
                         $updater = $candidate
+                        $installerFound = $true
                         if (-not $supervisor -or [int]$row.ParentProcessId -ne $supervisor.Id) { throw 'update_installer_supervisor_unproven' }
-                        if ((Get-FileHash -LiteralPath $row.ExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $inputData.update.installer_hash) { throw 'update_running_installer_hash_mismatch' }
+                        $runningHash = (Get-FileHash -LiteralPath $row.ExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                        $installerHashMatches = $runningHash -eq $inputData.update.installer_hash
+                        if ($runningHash -ne $inputData.update.installer_hash) { throw 'update_running_installer_hash_mismatch' }
                     }
                 }
-                if ($row.ExecutablePath -eq $executable -and [int]$row.ProcessId -ne $original.Id) {
-                    if ($replacement -and $replacement.Id -eq [int]$row.ProcessId) { continue }
-                    $phase = 'update_relaunch'
+                if ($row.ExecutablePath -eq $executable -and [int]$row.ProcessId -ne $original.Id -and -not $desktops.Contains([int]$row.ProcessId)) {
                     $candidate = Open-UpdateProcess $row $since
                     if ($candidate) {
-                        if ($replacement) { $candidate.Dispose(); throw 'update_multiple_replacement_desktops' }
-                        $replacement = $candidate
-                        # Transfer cleanup ownership immediately, even if later
-                        # version/DOM checks fail. Keep the old handle for proof.
-                        $Context.Desktop = $replacement
+                        $parentPid = if ($null -ne $row.ParentProcessId) { [int]$row.ParentProcessId } else { $null }
+                        $relation = if ($null -eq $parentPid) { 'unknown' }
+                            elseif ($parentPid -eq $original.Id) { 'original' }
+                            elseif ($supervisor -and $parentPid -eq $supervisor.Id) { 'supervisor' }
+                            elseif ($updater -and $parentPid -eq $updater.Id) { 'installer' }
+                            elseif ($desktops.Contains($parentPid)) { 'replacement' } else { 'other' }
+                        if (-not $firstDesktopSeen) { $firstDesktopSeen = Get-Date }
+                        $desktops[[int]$row.ProcessId] = @{ process = $candidate; record = [ordered]@{
+                            pid = [int]$row.ProcessId; parent_pid = $parentPid; parent_relation = $relation
+                            started_after_click_ms = [int]($row.CreationDate - $since).TotalMilliseconds
+                            exited = $false; lifetime_ms = $null; exit_code = $null } }
+                        # Every candidate is owned for cleanup from first sight.
+                        if (-not $replacement) { $replacement = $candidate; $Context.Desktop = $candidate }
                     }
                 }
             }
-            if ($receipt -and $supervisor -and $supervisor.HasExited -and $updater -and $updater.HasExited -and $original.HasExited -and $replacement) { break }
+            foreach ($entry in $desktops.Values) {
+                if (-not $entry.record.exited -and $entry.process.HasExited) {
+                    $entry.record.exited = $true; $entry.record.exit_code = $entry.process.ExitCode
+                    $entry.record.lifetime_ms = [int]($entry.process.ExitTime.ToUniversalTime() - $entry.process.StartTime.ToUniversalTime()).TotalMilliseconds
+                }
+            }
+            # Settle: observe every post-click Desktop for 60 s after the first.
+            if ($receipt -and $supervisor -and $supervisor.HasExited -and $updater -and $updater.HasExited -and $original.HasExited -and $firstDesktopSeen -and ((Get-Date) - $firstDesktopSeen).TotalSeconds -ge 60) { break }
             Start-Sleep -Milliseconds 100
         } while ((Get-Date) -lt $deadline)
+        if (-not $result.Contains('update_transition')) { $result.update_transition = @{} }
+        $result.update_transition.supervisor_found = $supervisorFound
+        $result.update_transition.installer_found = $installerFound
+        $result.update_transition.installer_hash_matches_release = $installerHashMatches
+        $result.update_transition.desktop_processes = @($desktops.Values | ForEach-Object { $_.record })
         $phase = 'update_installer'
         if (-not $supervisor -or -not $supervisor.HasExited -or $supervisor.ExitCode -ne 0) { throw 'update_supervisor_settled_unproven' }
         if (-not $updater -or -not $updater.HasExited -or $updater.ExitCode -ne 0) { throw 'update_installer_exit_zero_unproven' }
         Verdict 'update_installer' 'PASS' 'observed_owned_updater_process_matching_signed_target_installer_hash_and_exit_zero'
         $phase = 'update_relaunch'
-        if (-not $original.HasExited -or -not $replacement -or $replacement.HasExited -or $original.ExitCode -ne 0) { throw 'update_real_relaunch_unproven' }
+        if (-not $original.HasExited -or $original.ExitCode -ne 0) { throw 'update_real_relaunch_unproven' }
+        $decision = Resolve-UpdateDesktops @($desktops.Values | ForEach-Object { $_.record })
+        $result.update_transition.single_instance_handoffs = @($desktops.Values | Where-Object { $_.record.exited } | ForEach-Object { $_.record.pid }).Count
+        if ($decision.reason) { throw $decision.reason }
+        $replacement = $desktops[$decision.survivor].process
+        $Context.Desktop = $replacement
         $deadline = (Get-Date).AddMinutes(3)
         do {
             $replacement.Refresh()
@@ -164,10 +197,16 @@ function Invoke-UpdateCase([hashtable] $Context) {
         try { Stop-UpdateHandle $clicker } finally {
             if ($clicker) { $clicker.Dispose() }
             if (-not $completed) {
-                try { Stop-UpdateTransaction $Context $original $replacement $supervisor $updater $since }
-                catch { Verdict 'update_installer' 'FAIL' 'update_transaction_cleanup_unproven_uninstall_suppressed' }
+                # Stop every post-click Desktop, not only the chosen one.
+                $extraFailed = $false
+                foreach ($entry in $desktops.Values) { if ($entry.process -ne $replacement) { try { Stop-UpdateHandle $entry.process } catch { $extraFailed = $true } } }
+                try {
+                    Stop-UpdateTransaction $Context $original $replacement $supervisor $updater $since
+                    if ($extraFailed) { $Context.Quiesced = $false; throw 'update_transaction_cleanup_unproven' }
+                } catch { Verdict 'update_installer' 'FAIL' 'update_transaction_cleanup_unproven_uninstall_suppressed' }
             }
             foreach ($process in @($supervisor, $updater)) { if ($process) { $process.Dispose() } }
+            foreach ($entry in $desktops.Values) { if ($entry.process -ne $Context.Desktop) { $entry.process.Dispose() } }
             if ($replacement) { $original.Dispose() }
         }
     }

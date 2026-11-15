@@ -280,11 +280,14 @@ try {
         if (-not $account) { continue }
         try { Stop-FixtureProcesses $account.SID.Value } catch { Add-AcceptanceFailure $record 'fixture_process_cleanup' $_ -Cleanup; $cleanupFailed = $true }
         try {
-            $deadline = (Get-Date).AddSeconds(30)
+            # A late process (e.g. an updater relaunch) can start after the first
+            # sweep and keep the profile loaded; sweep again while waiting.
+            $deadline = (Get-Date).AddSeconds(90)
             do {
                 $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($account.SID.Value)'"
                 if (-not $profile -or -not $profile.Loaded) { break }
-                Start-Sleep -Milliseconds 500
+                Stop-FixtureProcesses $account.SID.Value
+                Start-Sleep -Milliseconds 1000
             } while ((Get-Date) -lt $deadline)
             if ($profile -and $profile.Loaded) { throw 'profile_still_loaded' }
             if ($profile) { $profile | Remove-CimInstance }

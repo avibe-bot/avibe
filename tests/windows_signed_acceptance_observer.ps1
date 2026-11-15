@@ -24,11 +24,13 @@ function New-Row([int] $Id, [int] $Parent, [datetime] $Created, [string] $Image 
     $cimCreated = $Created.AddTicks(-7)
     return [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; CreationDate = $cimCreated; ExecutablePath = $Image; CommandLine = $Command }
 }
-function Get-CimInstance($Class, $Filter, $OperationTimeoutSec) {
+# The observer now reads same-user process rows (handle queries), never CIM.
+function Get-CimInstance { throw 'fixture_observer_used_cim' }
+function Get-UpdateProcessRows([string[]] $Names) {
     if ($script:Mode -eq 'lineage') { return $script:Rows }
     return @($script:Rows | Where-Object {
         -not $script:Processes[[int]$_.ProcessId].HasExited -and
-        (-not $Filter -or ($Filter -eq "Name='powershell.exe'" -and $_.ExecutablePath.EndsWith('powershell.exe')) -or ($Filter -eq "Name='update.exe'" -and $_.ExecutablePath.EndsWith('update.exe')))
+        (-not $Names -or (($_.ExecutablePath -split '\\')[-1] -replace '\.exe$', '') -in $Names)
     })
 }
 function Get-NetTCPConnection($LocalPort, $State, $ErrorAction) { return $script:Listeners }
@@ -95,4 +97,31 @@ foreach ($scenario in @('new_generation', 'stale_generation', 'mixed_listeners',
         foreach ($handle in $handles) { $handle.Dispose() }
     } else { Expect-Error { $null = Pin-UpdateDebugger $root 9222 } $errorCode }
 }
+# Same-user rows carry no command line: bind the supervisor by the single
+# staged request whose pid is the original Desktop; refuse ambiguity.
+$staging = Join-Path $Work 'temp'
+$first = Join-Path $staging 'avibe-update-one'
+New-Item -ItemType Directory -Path $first -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $first 'install.ps1') -Value '#'
+Set-Content -LiteralPath (Join-Path $first 'request.json') -Value '{"pid":10}'
+$plain = New-Row 20 10 $now $shell
+if ((Get-UpdateSupervisorStage $plain 10 $staging) -ne $first) { throw 'fixture_staged_request_binding_failed' }
+if (Get-UpdateSupervisorStage $plain 11 $staging) { throw 'fixture_other_desktop_request_accepted' }
+$second = Join-Path $staging 'avibe-update-two'
+New-Item -ItemType Directory -Path $second -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $second 'install.ps1') -Value '#'
+Set-Content -LiteralPath (Join-Path $second 'request.json') -Value '{"pid":10}'
+if (Get-UpdateSupervisorStage $plain 10 $staging) { throw 'fixture_ambiguous_staged_requests_accepted' }
+
+# Post-click Desktop classification over the settle window.
+$handoff = @([pscustomobject]@{ pid = 40; exited = $false }, [pscustomobject]@{ pid = 41; exited = $true })
+$decision = Resolve-UpdateDesktops $handoff
+if ($decision.reason -or $decision.survivor -ne 40) { throw 'fixture_single_instance_handoff_rejected' }
+$single = Resolve-UpdateDesktops @([pscustomobject]@{ pid = 42; exited = $false })
+if ($single.reason -or $single.survivor -ne 42) { throw 'fixture_single_relaunch_rejected' }
+$double = Resolve-UpdateDesktops @([pscustomobject]@{ pid = 43; exited = $false }, [pscustomobject]@{ pid = 44; exited = $false })
+if ($double.reason -ne 'update_product_double_launch') { throw 'fixture_double_launch_accepted' }
+$none = Resolve-UpdateDesktops @([pscustomobject]@{ pid = 45; exited = $true })
+if ($none.reason -ne 'update_real_relaunch_unproven') { throw 'fixture_no_survivor_accepted' }
+if ((Resolve-UpdateDesktops @()).reason -ne 'update_real_relaunch_unproven') { throw 'fixture_no_desktop_accepted' }
 Write-Output 'update_observer_fixture_cases_passed'
