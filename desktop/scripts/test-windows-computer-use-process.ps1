@@ -15,7 +15,8 @@ $tests = @(
     'failed_start_and_suspended_stop_leave_no_running_child',
     'stop_is_graceful_for_eof_and_forceful_for_remaining_descendants',
     'cancelled_stop_terminates_owned_child_and_allows_fresh_start',
-    'killed_shell_cleans_suspended_and_running_children_without_destructors'
+    'killed_shell_cleans_suspended_and_running_children_without_destructors',
+    'computer_use::tests::rollback_off_quit_and_failed_publication_retire_owned_driver'
 )
 # Cargo reports the current executable even on a fresh cache hit. Never select
 # an old artifact with a filename glob.
@@ -109,7 +110,8 @@ try {
         foreach ($entry in $testEnvironment.GetEnumerator()) {
             $startInfo.Environment[$entry.Key] = [string]$entry.Value
         }
-        foreach ($argument in @('--exact', "computer_use_process::tests::$TestName", '--ignored', '--nocapture')) {
+        $qualifiedName = if ($TestName.Contains('::')) { $TestName } else { "computer_use_process::tests::$TestName" }
+        foreach ($argument in @('--exact', $qualifiedName, '--ignored', '--nocapture')) {
             $startInfo.ArgumentList.Add($argument)
         }
         $process = [Diagnostics.Process]::new()
@@ -119,8 +121,9 @@ try {
     }
 
     foreach ($test in $tests) {
-        $stdout = Join-Path $logs "$test.out"
-        $stderr = Join-Path $logs "$test.err"
+        $logName = $test.Replace('::', '-')
+        $stdout = Join-Path $logs "$logName.out"
+        $stderr = Join-Path $logs "$logName.err"
         $process = $null
         try {
             $process = Start-DisposableTestProcess $test
@@ -153,7 +156,7 @@ try {
             }
         }
     }
-    if ($completed -ne 8) { throw 'Token evidence, parent-attribute proof, breakaway proof, and all five lifecycle tests must execute.' }
+    if ($completed -ne 9) { throw 'Token evidence, target separation, five process-lifecycle tests, and activation transition teardown must execute.' }
 } catch {
     $failure = $_
 } finally {

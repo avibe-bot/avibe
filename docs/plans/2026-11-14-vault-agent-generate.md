@@ -17,15 +17,15 @@ random generator and sealing algorithm belong to avault.
   invocation happens in the calling Agent CLI process. No offline fallback,
   install, service start or restart is attempted.
 - The service uses the merged shared recipe normalizer from B2, checks target
-  and metadata before custody, then calls avault >=0.1.13:
+  and metadata before custody, then calls avault >=0.1.14:
   `generate-secret --name RECORD --type password --length N` with optional
   `--no-digits`, `--no-symbols`, `--no-lookalikes`; hex/base64 use `--bytes N`.
   Only the existing three-string Sealed envelope returns to Python. Custody
   output is not echoed in errors. Version errors expose the fixed version floor.
-- Password defaults: 24 characters, 12..100. The user picks 8..100 in the
-  browser or a request preset; an Agent-generated password deliberately keeps
-  custody's floor of 12 (Product, 2026-11-14), and 8..11 is refused before
-  custody with a pointer to a request preset. Avibe refuses above 100.
+- Password defaults: 24 characters, **8..100 for both user and Agent**
+  (Product reversal, 2026-11-15). The shared recipe normalizer owns this range;
+  there is no separate Agent-only floor or short-password request hint. avault
+  0.1.14 accepts 8..128, but Avibe rejects 7 and 101 before custody.
   Letters always, digits/symbols on, lookalikes allowed. Hex/base64 default to
   32 bytes, 16..64. Cross-type, unknown, wrong-type or out-of-range recipe
   options reject the entire call. Python does not implement or test the RNG
@@ -39,6 +39,25 @@ random generator and sealing algorithm belong to avault.
   semantics. Omitted fields, unrelated tag categories and internal policy keys
   remain intact; a metadata change during custody is a conflict, not a lost
   update.
+
+## Version compatibility (2026-11-15)
+
+- New Avibe gates **all** generation at avault >=0.1.14: passwords 8, 11, 12,
+  100 and default 24, hex and Base64 alike. With old managed 0.1.13 it returns
+  `avault_upgrade_required`, `minimum_version: 0.1.14`, before the generation
+  subprocess and before any storage or audit writes. No truncation, script RNG,
+  offline path, dependency install or service restart is a fallback.
+- Older Avibe retains its shipped 12-character Agent floor and 0.1.13
+  capability behavior. Merely updating its avault binary cannot relax Python
+  admission. Both new Avibe and the approved dependency are required for 8..11.
+- Typed provenance accepts 8..128 to preserve existing historical metadata;
+  new generation is still bounded by the shared 8..100 admission range.
+- The floor-8 avault contract merged as avault#56 at
+  `8aa3c6030107575517b4837db7cef85af884b9e7` before this consuming PR. The
+  managed 0.1.14 pin comes from the published manifest and all six real archive
+  checksums/sizes, independently compared with sidecars and GitHub digests;
+  the release lane also verified the direct mirror without fallback. The
+  keyless CI verifier stays on its separate oldest-compatible 0.1.10 floor.
 
 ## Provenance and public result
 
@@ -84,8 +103,11 @@ no provenance for it.
 - Storage: new-name/new-field/default alias/kind/tier guards, actual concurrent
   commits, metadata race rejection, savepoint rollback, per-write-path
   provenance maintenance, strict masking and list/find/REST projection.
-- CLI/control: DB-free caller, no offline fallback or process start, parser
-  errors with help, typed IPC/recipe/metadata rejection, editor admission,
+- CLI/control: 8/11/12/100 accepted with exact length and provenance; 7/101
+  refused before custody; old 0.1.13 rejected with the 0.1.14 capability floor
+  for every recipe without generation/storage/audit; DB-free caller, no offline
+  fallback or process start, parser errors with help, typed IPC/recipe/metadata
+  rejection, editor admission,
   minimum-version errors, no spoofable provenance argument, stdout/stderr/log
   and audit sentinel checks.
 - Wrapper: exact flags, strict Sealed output, version floor before custody,
@@ -97,6 +119,12 @@ no provenance for it.
   format; generated plaintext is never returned to Python or test logs. Tests
   skip clearly when no explicit binary is supplied. Synthetic custody mocks
   prove orchestration, not end-to-end plaintext isolation.
+- Released 0.1.14 custody exercise: all six explicit-file-store cases pass
+  (passwords 8/11/12/100, hex, Base64). The silent intended child checks the
+  actual generated value is absent from serialized service result/audit and
+  captured output/log observations; Python never receives that value. This is
+  separate from mocked orchestration and from parent-owned Incus upgrade and
+  signing acceptance, which is not claimed by these generation-only cases.
 - No consuming PR before the avault primitive contract is merged and its final
   version known. B2/B3 and concurrent skill changes are consumed only from merged
   master. Release/pin, exact-head independent security review, merge and local

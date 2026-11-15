@@ -25,6 +25,9 @@ url.workspace = true
 uuid = { version = "1", features = ["v4"] }
 zip.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+avibe-computer-use-windows = { path = "../computer-use-windows" }
+
 [dev-dependencies]
 async-trait.workspace = true
 tokio = { version = "1", default-features = false, features = [

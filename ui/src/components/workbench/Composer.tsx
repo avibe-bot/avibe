@@ -82,6 +82,10 @@ import { inForegroundSurface } from './chatShortcuts';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
 import { revealComposerAfterNativeKeyboardResize } from '../../lib/nativeKeyboard';
+import {
+  sessionDraftAttachmentsCache,
+  type SessionDraftAttachment,
+} from '../../lib/sessionDraftAttachmentsCache';
 import type {
   MentionSearchResult,
   MentionEditorHandle,
@@ -125,6 +129,23 @@ const newLocalId = () => (
   globalThis.crypto?.randomUUID?.()
   ?? `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`
 );
+
+const toSessionDraftAttachment = (attachment: ComposerAttachment): SessionDraftAttachment => ({
+  token: attachment.token,
+  name: attachment.name,
+  mime: attachment.mime,
+  size: attachment.size,
+  kind: attachment.kind,
+  url: attachment.url,
+  ...(attachment.width !== undefined ? { width: attachment.width } : {}),
+  ...(attachment.height !== undefined ? { height: attachment.height } : {}),
+});
+
+const readySessionDraftAttachments = (
+  attachments: readonly ComposerAttachment[],
+): SessionDraftAttachment[] => attachments
+  .filter((attachment) => attachment.status === 'ready')
+  .map(toSessionDraftAttachment);
 
 // The leading slot of a staged-attachment chip: the spinner while the file
 // uploads, the paperclip for anything that is not a rendered image, and the
@@ -621,7 +642,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const cancelSeedRevealRef = useRef<() => void>(() => undefined);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentFilesRef = useRef(new Map<string, File>());
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>(() => (
+    sessionId
+      ? sessionDraftAttachmentsCache.read(sessionId).map((attachment): ComposerAttachment => ({
+        ...attachment,
+        localId: newLocalId(),
+        status: 'ready',
+      }))
+      : []
+  ));
+  const attachmentsHydratedRef = useRef(true);
   // Voice starts from the last known ``/api/asr/status`` answer for this reader
   // (lib/voiceAvailability), so the control is in place from the first frame;
   // the live read below then decides. Once shown, the control keeps its place
@@ -786,18 +816,33 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     };
   }, [clearRecordingTimers]);
 
-  // Clear staged attachments when the session changes so a chip uploaded in one
-  // chat can't ride into another — defense in depth on top of ChatPage keying
-  // the composer by session.
+  // Restore only durable ready chips when the session changes. In-flight uploads
+  // intentionally stay in this mount's state and disappear on navigation.
   useEffect(() => {
-    setAttachments([]);
+    attachmentsHydratedRef.current = false;
     attachmentFilesRef.current.clear();
+    const restored = sessionId
+      ? sessionDraftAttachmentsCache.read(sessionId).map((attachment): ComposerAttachment => ({
+        ...attachment,
+        localId: newLocalId(),
+        status: 'ready',
+      }))
+      : [];
+    setAttachments(restored);
+    attachmentsHydratedRef.current = true;
     setRealtimeAnnouncement('');
     setVoiceRetainedSession(null);
     setRestoringRecording(
       voiceKey != null && voiceSessionLocksDraft(voiceSessionsById.get(voiceKey)),
     );
   }, [sessionId, voiceKey]);
+
+  // Attachment persistence is independent from text draft CAS. It also covers
+  // image-only/file-only drafts, where the text callback never fires.
+  useEffect(() => {
+    if (!sessionId || !attachmentsHydratedRef.current) return;
+    sessionDraftAttachmentsCache.write(sessionId, readySessionDraftAttachments(attachments));
+  }, [attachments, sessionId]);
 
   useEffect(() => () => {
     for (const url of stagedUrlsRef.current) URL.revokeObjectURL(url);
@@ -813,7 +858,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const url = attachments.find((attachment) => attachment.localId === localId)?.url;
     if (url && stagedUrlsRef.current.delete(url)) URL.revokeObjectURL(url);
     attachmentFilesRef.current.delete(localId);
-    setAttachments((cur) => cur.filter((a) => a.localId !== localId));
+    const next = attachments.filter((attachment) => attachment.localId !== localId);
+    setAttachments(next);
+    if (sessionId && !pendingRef.current) {
+      sessionDraftAttachmentsCache.write(sessionId, readySessionDraftAttachments(next));
+    }
   };
 
   // Upload one already-staged file, then flip its chip to ready or retryable.
@@ -1635,6 +1684,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (pendingRef.current) return false;
       pendingRef.current = true;
       const sent = readyAttachments;
+      const sendGeneration = sessionId
+        ? sessionDraftAttachmentsCache.clear(sessionId)
+        : undefined;
       let started: boolean | void;
       try {
         started = await onSend(text, sent, undefined, metadata);
@@ -1644,6 +1696,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         pendingRef.current = false;
       }
       if (started === false) {
+        if (sessionId && sendGeneration !== undefined) {
+          sessionDraftAttachmentsCache.writeIfGeneration(
+            sessionId,
+            sendGeneration,
+            sent.map(toSessionDraftAttachment),
+          );
+        }
         // Here, the take keeps the words (interrupted, send again). If the user has since left this
         // conversation, the take went with the composer: the words go to this session's draft,
         // as a refused typed message's do, unless a new draft was started.
@@ -1984,6 +2043,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const sentRefs = referencesRef.current;
     pendingRef.current = true;
     draftEditedRef.current = true;
+    const sendGeneration = sessionId
+      ? sessionDraftAttachmentsCache.clear(sessionId)
+      : undefined;
     // Clear optimistically so the box can't be re-submitted and a slow send can't
     // wipe text typed in the meantime.
     valueRef.current = '';
@@ -2010,6 +2072,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         started = false;
       }
       if (started === false) {
+        if (sessionId && sendGeneration !== undefined) {
+          sessionDraftAttachmentsCache.writeIfGeneration(
+            sessionId,
+            sendGeneration,
+            sent.map(toSessionDraftAttachment),
+          );
+        }
         if (!unmountedRef.current) {
           setAttachments((cur) => (cur.length ? cur : sent));
         }

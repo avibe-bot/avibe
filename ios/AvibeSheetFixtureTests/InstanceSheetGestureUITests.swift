@@ -23,6 +23,16 @@ final class InstanceSheetGestureUITests: XCTestCase {
         ))
     }
 
+    /// Exercise the same single-tap path and real bridge receipt as the matrix.
+    func testOpenFailedSelectionReportsNativeRejectionAndRendersRowError() {
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_STATE"] = "open-failed"
+        app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = "light"
+        launchFixture()
+        SheetFixtureReadiness.tapRow(containing: "Lab", in: app)
+        SheetFixtureReadiness.requireFailedSelection("Couldn’t open Lab. Try again.", in: app)
+    }
+
     private func launchFixture() {
         app.launch()
         SheetFixtureReadiness.waitForDocument(in: app)
@@ -127,6 +137,52 @@ final class InstanceSheetGestureUITests: XCTestCase {
 /// assertions. The native marker is fixture-only and leaves the web subtree
 /// exposed; content is still checked through a fresh, scoped AX query.
 enum SheetFixtureReadiness {
+    static func requireFailedSelection(_ text: String, in app: XCUIApplication) {
+        let surface = app.otherElements["fixture-document-surface"]
+        let failed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                surface.label.contains("\"bridgeStage\":\"selection-rejected-invalid_instance\"")
+                    && app.webViews.firstMatch.staticTexts.matching(
+                        NSPredicate(format: "label == %@", text)
+                    ).firstMatch.exists
+            }, object: nil
+        )
+        let result = XCTWaiter.wait(for: [failed], timeout: 10)
+        XCTAssertEqual(result, .completed,
+                       "Expected native invalid_instance and row error; receipt=\(surface.label)")
+    }
+
+    @discardableResult
+    static func tapRow(containing name: String, in app: XCUIApplication) -> Bool {
+        let row = app.webViews.firstMatch.buttons.matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
+        guard row.waitForExistence(timeout: 10) else {
+            XCTFail("Row missing at the intended press: \(name)")
+            return false
+        }
+        if !row.isHittable { app.swipeUp(velocity: .slow) }
+        // Assert at the existing press point. Do not wait for a stalled/covered
+        // target to become actionable and thereby hide the missed-input defect.
+        let enabled = row.isEnabled
+        let hittable = row.isHittable
+        let frame = row.frame
+        let evidence = XCTAttachment(string: """
+        Intended XCTest row.tap center (window points): \(frame.midX), \(frame.midY)
+        XCUI row frame: \(frame); enabled: \(enabled); hittable: \(hittable)
+        Pre-press uptime: \(ProcessInfo.processInfo.systemUptime)
+        Native evidence (observed asynchronously): \(app.otherElements["fixture-document-surface"].label)
+        Actual synthesized coordinates remain in XCTest's Synthesized Event attachment.
+        """)
+        evidence.name = "\(name)-pre-press"
+        evidence.lifetime = .keepAlways
+        XCTContext.runActivity(named: "Record \(name) press geometry") { $0.add(evidence) }
+        guard enabled && hittable else {
+            XCTFail("Row not actionable at the intended press; no settling wait: \(name)")
+            return false
+        }
+        row.tap()
+        return true
+    }
+
     static func waitForDocument(
         in app: XCUIApplication,
         file: StaticString = #filePath,

@@ -7,6 +7,11 @@ on:
         description: "Exact merged master SHA (native + bundled page + capture infrastructure)"
         required: true
         type: string
+      stall_diagnostic:
+        description: "Informational only: ten synthetic main-thread-stall input trials (CI simulator only)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -78,6 +83,7 @@ jobs:
           xcrun simctl bootstatus "$simulator_id" -b
 
       - name: Build the fixture against the real bundle
+        id: fixture-build
         run: |
           set -euo pipefail
           xcodebuild \
@@ -106,10 +112,35 @@ jobs:
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -derivedDataPath "$RUNNER_TEMP/CaptureDerivedData" \
             -parallel-testing-enabled NO \
-            -only-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests \
+            -only-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests/testRealBundledPageCaptureMatrix \
             -resultBundlePath "$RUNNER_TEMP/MobileCaptures.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
             test-without-building
+
+      - name: Informational main-thread-stall input trials
+        if: ${{ always() && !cancelled() && inputs.stall_diagnostic && steps.fixture-build.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          # Deliberate stalls run only on this CI simulator, never the live Mac.
+          # This step and its result are diagnostic, not a capture acceptance gate.
+          status=0
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme AvibeSheetFixture \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/CaptureDerivedData" \
+            -parallel-testing-enabled NO \
+            -only-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests/testInformationalMainThreadStallInputReceipts \
+            -resultBundlePath "$RUNNER_TEMP/InputStallDiagnostics.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            test-without-building || status=$?
+          if [ -d "$RUNNER_TEMP/InputStallDiagnostics.xcresult" ]; then
+            xcrun xcresulttool export attachments \
+              --path "$RUNNER_TEMP/InputStallDiagnostics.xcresult" \
+              --output-path "$RUNNER_TEMP/input-stall-attachments" || status=$?
+          fi
+          exit "$status"
 
       - name: Export screenshot attachments
         if: ${{ always() && !cancelled() }}
@@ -131,5 +162,7 @@ jobs:
             ${{ runner.temp }}/MobileCaptures.xcresult
             ${{ runner.temp }}/capture-source-sha.txt
             ${{ runner.temp }}/capture-manifest.json
+            ${{ runner.temp }}/InputStallDiagnostics.xcresult
+            ${{ runner.temp }}/input-stall-attachments
           if-no-files-found: error
           retention-days: 14

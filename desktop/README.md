@@ -697,19 +697,23 @@ The native updater remains the sole update owner, while the Workbench version
 badge is its user interface. In a desktop window the badge turns yellow when a
 signed release is available and opens the Workbench popover. The native
 **Check for Desktop Updates…** menu item and `avibe://updates` deep link open the
-same popover and start an explicit check. The popover asks for confirmation
-before download and replacement, and offers **Skip this version**. Startup
-checks silently and lets the badge provide the prompt. A native dialog is used
-only when there is no reachable Workbench window or the fixed popover event
-cannot be dispatched, such as a check that finishes before the webview loads.
+same popover when the Workbench is ready. A request made earlier is remembered
+once and delivered when the Workbench reports that its listener and native update
+state are ready. Only the original user action restores/focuses the window; the
+readiness delivery does not poll or refocus. Older adopted Workbenches retain the
+existing explicit entry but require the new readiness handshake for delayed
+delivery. Startup checks only publish
+the signed availability result and never open the legacy native installer dialog,
+whether the Workbench is ready or whether unattended updates are enabled. The
+popover owns explicit checking, download, replacement, and **Skip this version**.
 Native state changes are pushed to the Workbench, including checks started by
-the **Get Pre-release Updates** menu item. The state marks whether an available release
-came from an explicit check, so an automatic check honors **Skip this version**
-while an explicit check can offer the same release again. If a newer Workbench
-runs under an older shell that rejects `desktop_update_state`, the Workbench
-uses Runtime version reads and the legacy `avibe://updates` native path until
-the shell is upgraded. The tray/menu shows checking, current, available,
-downloading, installing, disabled, and error states.
+the **Get Pre-release Updates** menu item. A previously skipped release remains
+visible as available in the unified panel; the saved skip is still enforced by
+the unattended installer. If a newer Workbench runs under an older shell that
+rejects `desktop_update_state`, the Workbench uses Runtime version reads and
+the legacy `avibe://updates` route until the shell is upgraded. The tray/menu
+shows checking, current, available, downloading, installing, disabled, and
+error states.
 The **Get Pre-release Updates** toggle (the `test` channel) persists beside the
 private Runtime, defaults on for prerelease app versions and off for stable
 versions, and never downgrades. On, it offers the newest of the stable and

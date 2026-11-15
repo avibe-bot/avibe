@@ -83,7 +83,6 @@ jobs:
         run: |
           simulator_id="$(python3 ios/scripts/run_direct_interop.py simulator)"
           echo "SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
-          xcrun simctl bootstatus "$simulator_id" -b
       - name: Run actual App/sidecar interop with independent host verdicts
         run: python3 ios/scripts/run_direct_interop.py run --simulator "$SIMULATOR_ID"
       - name: Verify linked iroh product
@@ -99,6 +98,7 @@ jobs:
         with:
           name: ios-direct-interop-evidence
           path: |
+            ${{ runner.temp }}/avibe-direct-interop/simulator-readiness
             ${{ runner.temp }}/avibe-direct-interop/dependencies.json
             ${{ runner.temp }}/avibe-direct-interop/sidecar/verified.json
             ${{ runner.temp }}/avibe-direct-interop/xcodebuild-pid.json

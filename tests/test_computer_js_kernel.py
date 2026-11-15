@@ -509,21 +509,41 @@ def test_a_queued_call_stays_bound_to_its_turn() -> None:
     assert calls == []
 
 
-def test_computer_use_off_cancels_an_executing_call() -> None:
-    async def scenario(h: _Harness) -> tuple[dict, int | None]:
+@pytest.mark.parametrize("cause", ["off", "windows_rollback", "windows_runtime_rollback"])
+def test_computer_use_off_cancels_an_executing_call(monkeypatch, cause) -> None:
+    from core import computer_js_kernels, computer_use
+
+    if cause.startswith("windows_"):
+        monkeypatch.setattr(computer_use.platform_module, "machine", lambda: "AMD64")
+        monkeypatch.setattr(computer_js_kernels, "_kernel_platform_supported", computer_use.windows_computer_use_supported)
+    if cause == "windows_runtime_rollback":
+        monkeypatch.setattr(computer_js_kernels, "os", SimpleNamespace(**{**vars(computer_js_kernels.os), "name": "nt"}))
+
+    async def scenario(h: _Harness) -> tuple[dict, int | None, dict]:
         await h.js("1")
         process = h.kernel_process()
         running = asyncio.create_task(h.js("await new Promise(() => {})", timeout_ms=10000))
         await asyncio.sleep(0.2)
-        h.status = "off"
+        if cause == "windows_rollback":
+            monkeypatch.setattr(computer_use, "COMPUTER_USE_WINDOWS_SCHEMA_VERSION", 0)
+        elif cause == "windows_runtime_rollback":
+            # This is the real shell's published state when its Runtime
+            # capability changes 1 -> 0; the local static guard stays enabled.
+            h.status = "needs_runtime"
+        else:
+            h.status = "off"
         report = await asyncio.wait_for(running, 5)
         await asyncio.wait_for(process.wait(), 5)
-        return report, process.returncode
+        return report, process.returncode, await h.js("1")
 
     scenario.options = {"status_poll_seconds": 0.05}
-    report, returncode = _run(scenario)
+    report, returncode, next_call = _run(scenario)
     assert report["error"]["code"] == "js_kernel_reset"
-    assert report["error"]["params"] == {"reason": "computer_use_off"}
+    assert report["error"]["params"] == {"reason": {
+        "off": "computer_use_off", "windows_rollback": "platform_unsupported",
+        "windows_runtime_rollback": "runtime_unavailable",
+    }[cause]}
+    assert next_call["error"]["code"] == ("platform_unsupported" if cause == "windows_rollback" else "computer_use_unavailable")
     assert returncode is not None
 
 
@@ -557,15 +577,27 @@ def test_invalidation_cancels_every_admitted_call(event, reason: str) -> None:
 
     async def scenario(h: _Harness) -> tuple[list[dict], list, Any]:
         await h.js("1")
+        slot = h.kernels._slots[SESSION]
+
+        async def wait_for_admission(count: int) -> None:
+            async def ready() -> None:
+                while len(slot.calls) != count or sum(call.executing for call in slot.calls) != 1:
+                    await asyncio.sleep(0.01)
+
+            # Client task creation does not mean its HTTP request has reached
+            # evaluate(). Invalidate only once this same slot owns every call,
+            # with the non-terminating first call holding the execution lock.
+            await asyncio.wait_for(ready(), 5)
+
         executing = asyncio.create_task(h.js("await new Promise(() => {})", timeout_ms=10000))
-        await asyncio.sleep(0.2)
+        await wait_for_admission(1)
         queued = [
             asyncio.create_task(
                 h.js("globalThis.executed = true; await computer.app({ bundleId: 'com.apple.mail' })")
             )
             for _ in range(3)
         ]
-        await asyncio.sleep(0.1)
+        await wait_for_admission(4)
         await event(h)
         reports = await asyncio.wait_for(asyncio.gather(executing, *queued), 5)
         await asyncio.sleep(0.2)
