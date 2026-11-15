@@ -529,7 +529,7 @@ def test_capability_probe_is_cached_by_binary_identity_outside_serialization(tmp
     assert probe.call_count == 2
 
 
-def test_protected_ordinary_capabilities_do_not_offer_ecdsa_bitcoin_or_probe_avault(runtime, monkeypatch):
+def test_protected_ordinary_packaged_capabilities_offer_all_forms_without_probing_avault(runtime, monkeypatch):
     from storage.vault_crypto import Sealed
     probe = Mock(side_effect=AssertionError("protected projection must not probe custody"))
     monkeypatch.setattr(api, "_hd_bitcoin_types_available", probe)
@@ -537,8 +537,8 @@ def test_protected_ordinary_capabilities_do_not_offer_ecdsa_bitcoin_or_probe_ava
         secret = vault_service.create_secret(conn, name="PROTECTED_BTC", kind="keypair", protection="protected",
             sealed=Sealed("opaque", "opaque", "opaque"), public_meta={
                 "signing_public_key": {"curve": "secp256k1", "public_key": table()[0]["bitcoin"]}})
-    assert api.vault_public_capabilities(secret)["bitcoin_address_types"] == ["p2tr"]
-    assert cli._vault_secret_row(secret)["bitcoin_address_types"] == ["p2tr"]
+    assert api.vault_public_capabilities(secret)["bitcoin_address_types"] == TYPES
+    assert cli._vault_secret_row(secret)["bitcoin_address_types"] == TYPES
     probe.assert_not_called()
 
 

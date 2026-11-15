@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from storage import vault_addresses, vault_hd, vault_policy
+from tests.test_vault_protected_bitcoin import legacy_cohort as legacy_cohort
 
 FIXTURES = Path(__file__).parent / "fixtures/vault_signing"
 VECTORS = json.loads((FIXTURES / "policy-downgrade-v1.json").read_text())["vectors"]
@@ -57,10 +58,10 @@ def _source_row(vector):
 
 
 @pytest.mark.parametrize("vector", VECTORS, ids=lambda v: v["id"])
-def test_storage_identity_projection_matches_frozen_public_vector(vector):
+def test_storage_identity_projection_matches_frozen_public_vector(vector, legacy_cohort):
     row = _source_row(vector)
     if vector["id"] == "ordinary-secp-protected":
-        # The old wire remains readable, but the packaged Taproot-only cohort
+        # The old wire remains readable, but retained Taproot-only cohorts
         # cannot issue a misleading all-three policy target on the new server.
         with pytest.raises(vault_policy.PolicyContextError, match="all-three"):
             vault_policy.target_state(row, None)

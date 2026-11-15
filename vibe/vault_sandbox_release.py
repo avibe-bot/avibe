@@ -21,10 +21,12 @@ _SUPPORT_KEYS = {"ordinary_input_types", "hd_input_types", "ecdsa_return_types"}
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _SRI = re.compile(r"sha256-[A-Za-z0-9+/]{43}=")
 
-# Reviewed fc013b7 and packaged f861216 signing cohorts retain ordinary Taproot
-# only in this registry. This does not enable HD or the new ECDSA input kinds.
-# The full pin digest was computed using the existing lossless C codec; changing
-# ANY resource, version, origin, build or manifest is a different registry key.
+# Retained fc013b7 and f861216 cohorts stay ordinary-Taproot-only here.
+# The reviewed 18570864 cohort implements all three ordinary and HD inputs,
+# including all three ECDSA return forms. Parent HD admission stays separately
+# constrained by its owning consumer; this registry describes sandbox support.
+# The full pin digest uses the existing lossless C codec; changing ANY resource,
+# version, origin, build or manifest is a different registry key.
 CAPABILITIES_BY_PIN_ID = MappingProxyType({
     "7f320bc014c0a2ee7d65f9c48c8b91b7e0c0fcc0effbfb3a36d3a3c30fa7c08b": MappingProxyType({
         "ordinary_input_types": ("p2tr",),
@@ -35,6 +37,11 @@ CAPABILITIES_BY_PIN_ID = MappingProxyType({
         "ordinary_input_types": ("p2tr",),
         "hd_input_types": (),
         "ecdsa_return_types": (),
+    }),
+    "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9": MappingProxyType({
+        "ordinary_input_types": _TYPES,
+        "hd_input_types": _TYPES,
+        "ecdsa_return_types": _TYPES,
     }),
 })
 

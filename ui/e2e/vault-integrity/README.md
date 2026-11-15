@@ -1,17 +1,19 @@
 # Offline Vault integrity and entry fixtures (AUTH-SETUP-136 / 137)
 
 `release/` is an exact copy of vault-sandbox's reviewed immutable release
-`retained/v/f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5/`
-from merged sandbox commit `8f1ac62b11ab6a133e7874b0520aeed1d00c44d4` (#43,
-tree-equal reviewed head `df64d4361454b3875c7d0d2c52fa1384f6d1f801`).
+`retained/v/185708641db830f2a02fa2f2d7169eff9aec0d3ec0564e2a4216761300ee3d67/`
+from reviewed sandbox commit `9aea61876c22eb2f2fb9284af916c4e9565879ee`; merged
+`d7d543580064407a34f985e47d96b68e57ab7a21` (#47) has identical release and
+`vercel.json` bytes.
 `source.json` lists source-input hashes; the sandbox commit containing this
 snapshot locates its source. It is reproduced twice using the owning repository's
 release tools, not fetched from a deployed host. The packaged authority is
 `vibe/data/vault_sandbox_release.json`; `hosting.json` copies sandbox `vercel.json`.
-The release adds protected-HD secure-window operations, but this pin fixture
-alone does not add the parent HD creation/signing consumers or backend APIs.
-Existing ordinary signing and policy operations remain the selected consumer
-scope until their separate integration changes land.
+The release implements protected Bitcoin Taproot, Legacy and Native SegWit
+input/return for ordinary and HD records. The parent enables the ordinary
+protected Legacy/Native consumer under this pin; the parent HD Legacy/Native
+consumer is unfinished and still refuses those inputs. This fixture adds no
+backend APIs.
 
 `legacy/` copies the frozen runtime HTML, JavaScript and CSS plus manifest from
 sandbox `retained/legacy/`, independently reproduced from reviewed commit

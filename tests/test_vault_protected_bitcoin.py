@@ -1,13 +1,15 @@
 """Protected ordinary BTC saved identity and atomic storage-owner regressions.
 
-The capable registry entry is an explicit hermetic fixture, NOT a shipped pin or
-browser support claim. All cryptographic keys below are public NEVER-FUND tests.
+Most cases isolate the storage boundary with an explicit hermetic cohort. The
+packaged-pin positive control uses the actual registry without capability mocks.
+All cryptographic keys below are public NEVER-FUND tests.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
@@ -22,7 +24,7 @@ from vibe import api, vault_sandbox_release as release
 @pytest.fixture
 def capable_cohort(monkeypatch):
     current = release.current_support()
-    assert current is not None and current.ordinary_input_types == ("p2tr",)
+    assert current is not None
     monkeypatch.setattr(release, "CAPABILITIES_BY_PIN_ID", {current.pin_id: {
         "ordinary_input_types": ("p2pkh", "p2wpkh", "p2tr"),
         "hd_input_types": (), "ecdsa_return_types": ("p2pkh", "p2wpkh", "p2tr"),
@@ -30,6 +32,19 @@ def capable_cohort(monkeypatch):
     monkeypatch.setattr(api, "_notify_vault_request_created", lambda *a, **k: None)
     monkeypatch.setattr(api, "_publish_vaults_updated", lambda *a, **k: None)
     return release.current_support()
+
+
+@pytest.fixture(params=[
+    "7f320bc014c0a2ee7d65f9c48c8b91b7e0c0fcc0effbfb3a36d3a3c30fa7c08b",
+    "9f1264cb022625f1d3880c16019cc4ddcf515fce252193ad482714fe30ad046a",
+], ids=["fc013", "f861"])
+def legacy_cohort(request, monkeypatch):
+    pins = json.loads((Path(__file__).parent / "fixtures" / "vault-sandbox-legacy-pins.json").read_text())
+    pin = pins[request.param]
+    monkeypatch.setattr(release, "load_packaged_pin", lambda: copy.deepcopy(pin))
+    support = release.current_support()
+    assert support is not None and support.pin_id == request.param
+    return support
 
 
 def _create():
@@ -243,17 +258,11 @@ def test_release_must_match_initial_capture_at_storage_completion(capable_cohort
         assert _state(conn, request["id"]) == ("pending", 0, 0)
 
 
-def test_packaged_f861_pin_preserves_existing_taproot_receive_metadata():
-    """A reviewed pin update must not erase the existing ordinary receive type.
-
-    No capable-cohort injection: bind the full actually packaged f861 pin, then
-    exercise the storage metadata owner with a public never-fund ordinary key.
-    """
+def test_retained_legacy_pins_preserve_existing_taproot_receive_metadata(legacy_cohort):
+    """The complete historical pins retain their old metadata, not new support."""
     _create()
     support = release.current_support()
-    assert support is not None
-    assert support.pin_id == "9f1264cb022625f1d3880c16019cc4ddcf515fce252193ad482714fe30ad046a"
-    assert support.build_hash == "f861216ffb5d366cc962fac8651da691434194c5b5459af8e249df0b956e1fa5"
+    assert support == legacy_cohort
     assert (support.ordinary_input_types, support.hd_input_types, support.ecdsa_return_types) == (("p2tr",), (), ())
     with api._vault_engine().connect() as conn:
         meta = vault_service.get_secret_meta(conn, "PUBLIC_TEST_BTC")
@@ -264,7 +273,7 @@ def test_packaged_f861_pin_preserves_existing_taproot_receive_metadata():
         assert conn.execute(select(func.count()).select_from(vault_requests)).scalar_one() == 0
 
 
-def test_current_legacy_pin_cannot_advertise_or_admit_new_inputs():
+def test_retained_legacy_pins_cannot_advertise_or_admit_new_inputs(legacy_cohort):
     _create()
     context = _case()
     with api._vault_engine().begin() as conn:
@@ -276,6 +285,30 @@ def test_current_legacy_pin_cannot_advertise_or_admit_new_inputs():
         with pytest.raises(vault_service.ProtectedBitcoinUnsupportedError):
             vault_service.create_sign_request(conn, "PUBLIC_TEST_BTC", scheme="ecdsa-secp256k1-der", digest=context["digest"], signing_context=context)
         assert conn.execute(select(func.count()).select_from(vault_requests)).scalar_one() == 0
+
+
+@pytest.mark.parametrize("address_type", ["p2pkh", "p2wpkh"])
+def test_packaged_pin_metadata_admission_and_settlement_without_capability_injection(monkeypatch, address_type):
+    # A synthetic capable entry cannot catch a wrong packaged pin or a missing
+    # exact-pin registry entry. Exercise the actual metadata/request/use owner.
+    monkeypatch.setattr(api, "_notify_vault_request_created", lambda *a, **k: None)
+    monkeypatch.setattr(api, "_publish_vaults_updated", lambda *a, **k: None)
+    support = release.current_support()
+    assert support is not None
+    assert support.pin_id == "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"
+    _create()
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "PUBLIC_TEST_BTC")
+        assert meta["bitcoin_address_types"] == ["p2pkh", "p2wpkh", "p2tr"]
+        assert all(meta["signing_addresses"][key] for key in ("btc_legacy", "btc_segwit", "btc_taproot"))
+    request, context = _request(address_type)
+    assert request["delivery"]["bitcoin_cohort"] == support.cohort
+    assert request["delivery"]["operation_context"]["release"]["sandboxCohort"] == {
+        "buildHash": support.build_hash, "manifestHash": support.manifest_hash,
+    }
+    with api._vault_engine().begin() as conn:
+        _complete(conn, request, context)
+        assert _state(conn, request["id"]) == ("approved", 1, 1)
 
 
 def test_no_headless_claim_and_completion_cannot_replay(capable_cohort):
