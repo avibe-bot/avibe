@@ -13,6 +13,7 @@ from threading import Thread
 from urllib.request import Request, urlopen
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -21,6 +22,30 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 stub = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(stub)
+
+
+def test_draft_workflow_cannot_dispatch_or_receive_release_write_authority():
+    # Observable workflow contract: an accidental broad trigger, write token,
+    # self-hosted runner, or long retention would violate this draft's mandate.
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/windows-signed-cu-acceptance.yml").read_text(),
+        Loader=yaml.BaseLoader,
+    )
+    assert set(workflow["on"]) == {"pull_request"}
+    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+    job = workflow["jobs"]["signed-installer"]
+    assert job["runs-on"] == "windows-latest"
+    assert job["timeout-minutes"] == "45"
+    assert "github.event.pull_request.number == 3785" in job["if"]
+    assert "github.event.pull_request.draft == true" in job["if"]
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in job["if"]
+    uploads = [step for step in job["steps"] if step.get("uses", "").startswith("actions/upload-artifact@")]
+    assert len(uploads) == 1
+    assert uploads[0]["with"]["retention-days"] == "7"
+    assert uploads[0]["with"]["path"].splitlines() == [
+        "${{ runner.temp }}/signed-cu-evidence/verdict.json",
+        "${{ runner.temp }}/signed-cu-evidence/verdict.md",
+    ]
 
 
 def request(marker="launch-off", tool="powershell"):

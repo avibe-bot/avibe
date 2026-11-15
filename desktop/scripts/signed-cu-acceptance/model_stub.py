@@ -47,10 +47,27 @@ def scripted_reply(request: dict, *, python: str, work: Path) -> tuple[dict, str
     if "powershell" not in functions:
         raise ValueError("shipped_windows_powershell_tool_required")
     script = work / f"{marker}.js"
-    command = (
-        f"& {ps_quote(python)} -I -B -m vibe computer js "
-        f"--code {ps_quote('@' + str(script))} --timeout-ms 60000"
-    )
+    output = work / f"{marker}.json"
+    # Explicit pipe capture also works when the installed interpreter has no
+    # console. It inherits the REAL tool environment; no caller ID is invented.
+    arguments = f'-I -B -m vibe computer js --code "@{script}" --timeout-ms 60000'
+    command = "\n".join([
+        "$p = New-Object System.Diagnostics.ProcessStartInfo",
+        f"$p.FileName = {ps_quote(python)}",
+        f"$p.Arguments = {ps_quote(arguments)}",
+        "$p.UseShellExecute = $false; $p.CreateNoWindow = $true",
+        "$p.RedirectStandardOutput = $true; $p.RedirectStandardError = $true",
+        "$child = [System.Diagnostics.Process]::Start($p)",
+        "$null = $child.SafeHandle",
+        "try {",
+        "  $out = $child.StandardOutput.ReadToEndAsync(); $err = $child.StandardError.ReadToEndAsync()",
+        "  if (-not $child.WaitForExit(75000)) { throw 'fixture_cli_timeout' }",
+        "  $text = $out.GetAwaiter().GetResult(); $errorText = $err.GetAwaiter().GetResult()",
+        f"  [IO.File]::WriteAllText({ps_quote(str(output))}, $text, (New-Object Text.UTF8Encoding $false))",
+        "  [Console]::Out.Write($text); [Console]::Error.Write($errorText)",
+        "  if ($child.ExitCode -ne 0) { throw ('fixture_cli_exit_' + $child.ExitCode) }",
+        "} finally { if (-not $child.HasExited) { $child.Kill(); $null = $child.WaitForExit(5000) }; $child.Dispose() }",
+    ])
     return {
         "role": "assistant",
         "tool_calls": [{"index": 0, "id": call_id, "type": "function", "function": {

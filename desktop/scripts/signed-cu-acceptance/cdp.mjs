@@ -51,8 +51,24 @@ try {
     if (message.error) request.reject(new Error('cdp_protocol_error'));
     else request.resolve(message.result);
   });
-  const destination = origin.origin + '/settings/computer-use';
-  await evaluate(`location.assign(${JSON.stringify(destination)}); true`);
+  // Navigate to Settings, then use the actual visible rail link. This proves
+  // a real Workbench DOM click, not merely a debugger listener or direct invoke.
+  await command('Page.navigate', { url: origin.origin + '/settings' });
+  let navigationClicked = false;
+  const navigationDeadline = Date.now() + 20000;
+  while (Date.now() < navigationDeadline) {
+    try {
+      navigationClicked = await evaluate(`(() => {
+        const a = [...document.querySelectorAll('a[href="/settings/computer-use"]')]
+          .find(e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
+        if (!a) return false;
+        a.click(); return true;
+      })()`);
+    } catch { /* A navigation can replace the execution context. */ }
+    if (navigationClicked) break;
+    await pause(250);
+  }
+  if (!navigationClicked) throw new Error('settings_navigation_click_unproven');
   const stateExpression = `(() => {
     const status = document.querySelector('[data-testid="computer-use-guide-status"]');
     const button = document.querySelector('[data-testid="computer-use-action-enable"]');
@@ -85,7 +101,7 @@ try {
     }
     if (state.status !== 'ready' || state.enable) throw new Error('settings_enable_not_ready');
   }
-  console.log(JSON.stringify({ ok: true, ...state }));
+  console.log(JSON.stringify({ ok: true, navigation_clicked: navigationClicked, ...state }));
 } catch (error) {
   const reason = typeof error.message === 'string' && /^[a-z][a-z0-9_]+$/.test(error.message) ? error.message : 'cdp_fixture_failed';
   console.log(JSON.stringify({ ok: false, reason }));
