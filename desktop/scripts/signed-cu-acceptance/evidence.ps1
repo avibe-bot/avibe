@@ -43,7 +43,7 @@ function Merge-AcceptanceWorker([Collections.IDictionary] $Record, [Collections.
         if ($Worker.cases[$id].verdict -notin @('PASS', 'FAIL', 'NOT RUN')) { throw 'input_worker_verdict_invalid' }
         $Record.cases[$id] = $Worker.cases[$id]
     }
-    foreach ($field in @('helper_identity_verified', 'failure', 'cleanup_errors', 'secondary_errors', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'default_off_probe_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified', 'installed_driver_sha256')) {
+    foreach ($field in @('native_tray_off', 'helper_identity_verified', 'failure', 'cleanup_errors', 'secondary_errors', 'cdp_failure', 'cdp_diagnostics', 'cdp_detail', 'stub_turn_diagnostics', 'default_off_probe_receipt', 'query_fixture_detail', 'cu_input_diagnostics', 'update_panel_preflight', 'update_transition', 'installed_driver_size', 'installed_provenance_verified', 'installed_driver_sha256')) {
         if ($Worker.Contains($field)) { $Record[$field] = $Worker[$field] }
     }
     $Record.worker_exit_code = $ExitCode

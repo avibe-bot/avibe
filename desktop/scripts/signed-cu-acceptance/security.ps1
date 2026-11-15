@@ -17,6 +17,9 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
 
     $securityRoot = Join-Path $Context.Root 'security'
     New-Item -ItemType Directory -Path $securityRoot -Force | Out-Null
+    $Context.Stage = 'elevated_driver_refused'
+    $driverCleanupSafe = $true
+    try {
     $refusalPipe = 'avibe-elevated-refusal-' + [guid]::NewGuid().ToString('N')
     $pidFile = Join-Path $securityRoot 'elevated-driver.pid'
     $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -39,7 +42,12 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
         if ($process.ExitCode -eq 0 -or -not $errors.Contains('Computer Use does not run as administrator; start Avibe normally.') -or (Test-Path -LiteralPath $pidFile)) {
             throw 'elevated_driver_explicit_refusal_missing'
         }
-    } finally { if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(10000) }; $process.Dispose() }
+    } finally {
+        try {
+            if (-not $process.HasExited) { $process.Kill(); if (-not $process.WaitForExit(10000)) { throw 'elevated_driver_cleanup_unproven' } }
+        } catch { $driverCleanupSafe=$false; throw }
+        finally { $process.Dispose() }
+    }
     $client = [IO.Pipes.NamedPipeClientStream]::new('.', $refusalPipe, [IO.Pipes.PipeDirection]::InOut)
     try {
         $client.Connect(500)
@@ -47,6 +55,11 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
     } catch [TimeoutException] { } finally { $client.Dispose() }
 
     $Context.Cases.elevated_driver_refused = @{ verdict = 'PASS'; reason = 'installed_driver_explicit_elevated_serve_refusal_and_no_residual_pipe' }
+    } catch {
+        $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'elevated_driver_probe_failed' }
+        $Context.Cases.elevated_driver_refused = @{verdict='FAIL'; reason=$reason}
+        if (-not $driverCleanupSafe) { throw 'elevated_driver_cleanup_unproven' }
+    }
     $Context.Stage = 'security_fixture'
     $second = $null; $password = $null; $probe = $null
     try {
@@ -85,6 +98,9 @@ function Invoke-SecurityFixtures([hashtable] $Context) {
         if (-not ($denial.standard_user -and $denial.pipe_denied -and $denial.lock_denied)) { throw 'second_user_boundary_not_denied' }
         $Context.Cases.second_user_pipe_lock = @{ verdict = 'PASS'; reason = 'owner_pipe_open_positive_control_second_users_only_account_denied_pipe_and_lock' }
         $Context.Stage = 'security_fixture'
+    } catch {
+        $reason = if ($_.Exception.Message -match '^[a-z][a-z0-9_]+$') { $_.Exception.Message } else { 'second_user_probe_failed' }
+        $Context.Cases.second_user_pipe_lock = @{verdict='FAIL'; reason=$reason}
     } finally {
         # Keep the identity in parent state until ALL cleanup succeeds. Each
         # action is attempted even if an earlier profile/process action fails.

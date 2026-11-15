@@ -157,6 +157,23 @@ function Invoke-EnabledCases([hashtable] $Context) {
             Start-Sleep -Milliseconds 500
         } while ((Get-Date) -lt $quietUntil)
     }
+    function Record-EnabledCaseFailure($original) {
+        Add-AcceptanceFailure $result $currentCase $original
+        if ($operationId -and $result.cu_input_diagnostics.Contains($operationId)) {
+            $record = $result.cu_input_diagnostics[$operationId]
+            if (-not $record.first_error) {
+                $record.first_error = @{
+                    call = $record.phase
+                    error_class = $original.Exception.GetType().FullName
+                    script_line = $original.InvocationInfo.ScriptLineNumber
+                    exit_code = if ($original.Exception.Message -match '^child_process_exit_(-?\d+)$') { [int]$Matches[1] } else { $null }
+                }
+            }
+            Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
+        }
+        $reason = if ($original.Exception.Message -match '^[a-z][a-z0-9_]+$') { $original.Exception.Message } else { 'enabled_acceptance_operation_failed' }
+        Verdict $currentCase 'FAIL' $reason
+    }
     $operationId = [guid]::NewGuid().ToString('N')
     if (-not $result.ContainsKey('cu_input_diagnostics')) { $result.cu_input_diagnostics = [ordered]@{} }
     $result.cu_input_diagnostics[$operationId] = [ordered]@{
@@ -171,8 +188,13 @@ function Invoke-EnabledCases([hashtable] $Context) {
         Set-CasePhase 'settings_enable'
         Enable-FromSettings
         Verdict 'settings_enable' 'PASS' 'real_settings_preview_turn_on_button_reached_ready'
-        foreach ($operation in @('off', 'quit', 'crash')) {
+        $inputOnly = $Context.ContainsKey('InputOnly') -and $Context.InputOnly
+        if (-not $inputOnly) { Verdict 'survival_cu_off' 'NOT RUN' 'tray_off_unproven_independent_cases_continue' }
+        $operations = if ($inputOnly) { @('off') } else { @('quit', 'crash') }
+        foreach ($operation in $operations) {
             $currentCase = @{off='survival_cu_off'; quit='survival_desktop_quit'; crash='survival_desktop_crash'}[$operation]
+            $cleanupSafe = $true
+            try {
             $operationId = [guid]::NewGuid().ToString('N')
             $receiptPath = Join-Path $work ("input-$operationId.json")
             if (-not $result.ContainsKey('cu_input_diagnostics')) { $result.cu_input_diagnostics = [ordered]@{} }
@@ -518,14 +540,35 @@ try {
                 } catch { Add-AcceptanceFailure $result 'target_stop_cleanup' $_ -Cleanup; $cleanupFailed = $true }
                 try { $target.Dispose() } catch { Add-AcceptanceFailure $result 'target_handle_cleanup' $_ -Cleanup; $cleanupFailed = $true }
                 Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
-                if ($cleanupFailed -and -not $result.ContainsKey('failure')) { throw 'input_cleanup_failed' }
+                if ($cleanupFailed) { $cleanupSafe = $false; throw 'input_cleanup_failed' }
+            }
+            } catch {
+                if ($inputOnly) { throw }
+                Record-EnabledCaseFailure $_
+            }
+            if (-not $cleanupSafe) {
+                Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
+                return # Unknown fixture cleanup is not a safe baseline for another case.
             }
             if ($operation -ne 'off') {
-                Set-CasePhase 'desktop_relaunch'
-                $Context.Desktop.Dispose()
-                $Context.Desktop = Start-Process -FilePath $apps[0].FullName -PassThru
-                $null = $Context.Desktop.SafeHandle
-                Wait-Status 'ready' 90
+                try {
+                    Set-CasePhase 'desktop_relaunch'
+                    # Each case gets a fresh owned Desktop. A failed Quit must
+                    # not make the following crash reuse the previous instance.
+                    if (-not $Context.Desktop.HasExited) {
+                        $Context.Desktop.Kill()
+                        if (-not $Context.Desktop.WaitForExit(10000)) { throw 'desktop_recovery_stop_failed' }
+                    }
+                    $Context.Desktop.Dispose()
+                    $Context.Desktop = Start-Process -FilePath $apps[0].FullName -PassThru
+                    $null = $Context.Desktop.SafeHandle
+                    Wait-Status 'ready' 90
+                } catch {
+                    Add-AcceptanceFailure $result 'desktop_recovery' $_
+                    $result.cu_input_diagnostics[$operationId].recovery_error = @{call='desktop_recovery'; error_class=$_.Exception.GetBaseException().GetType().FullName}
+                    Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
+                    return # Later cases remain NOT RUN, never inherit an unready runtime.
+                }
             }
         }
         $operationId = [guid]::NewGuid().ToString('N')
@@ -554,8 +597,9 @@ try {
             if ($id -notin @('security_fixture', 'elevated_driver_refused', 'second_user_pipe_lock')) { throw 'unknown_security_verdict' }
             Verdict $id $securityResult.cases[$id].verdict $securityResult.cases[$id].reason
         }
+        # Earlier security case failures stay in their own verdicts. Only a
+        # missing elevated fixture prevents the separate elevated-app probe.
         if (-not $securityResult.ok) { throw 'security_fixture_failed_see_individual_verdicts' }
-        if ($securityResult.cases.second_user_pipe_lock.verdict -ne 'PASS' -or $securityResult.cases.elevated_driver_refused.verdict -ne 'PASS') { throw 'security_verdict_missing' }
         Set-CasePhase 'elevated_query'
         try {
             if (-not [AcceptanceNative]::IsElevated([int]$securityResult.elevated_pid)) { throw 'elevated_target_query_access_unproven' }
@@ -577,22 +621,7 @@ try { await win.type('must-not-be-inserted'); } catch (error) { if (error.code =
         if ($refusal.protected_window -ne $true) { throw 'explicit_protected_window_refusal_missing' }
         Verdict 'elevated_app_refused' 'PASS' 'real_elevated_notepad_control_refused_with_protected_window'
     } catch {
-        $original = $_
-        Add-AcceptanceFailure $result $currentCase $original
-        if ($operationId -and $result.cu_input_diagnostics.Contains($operationId)) {
-            $record = $result.cu_input_diagnostics[$operationId]
-            if (-not $record.first_error) {
-                $record.first_error = @{
-                    call = $record.phase
-                    error_class = $original.Exception.GetType().FullName
-                    script_line = $original.InvocationInfo.ScriptLineNumber
-                    exit_code = if ($original.Exception.Message -match '^child_process_exit_(-?\d+)$') { [int]$Matches[1] } else { $null }
-                }
-            }
-            Write-AcceptanceEvidence $result (Join-Path $work 'result.json')
-        }
-        $reason = if ($original.Exception.Message -match '^[a-z][a-z0-9_]+$') { $original.Exception.Message } else { 'enabled_acceptance_operation_failed' }
-        Verdict $currentCase 'FAIL' $reason
+        Record-EnabledCaseFailure $_
         throw 'enabled_acceptance_case_failed'
     }
 }
