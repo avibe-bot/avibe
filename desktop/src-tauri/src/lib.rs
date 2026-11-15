@@ -156,7 +156,10 @@ impl PendingDesktopUpdateOpen {
             .is_ok()
     }
 
-    fn finish_attempt(&self) {
+    fn finish_attempt(&self, handled: bool) {
+        if handled {
+            self.complete();
+        }
         self.opening.store(false, Ordering::SeqCst);
     }
 
@@ -750,17 +753,14 @@ fn open_desktop_updates(app: &AppHandle, focus: bool) -> bool {
         return true;
     }
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
-        pending.finish_attempt();
+        pending.finish_attempt(false);
         return false;
     };
     if !pet::is_workbench(&window) {
         let accepted = instance_client::present_guarded(app, "updates");
-        pending.finish_attempt();
-        if accepted {
-            if focus {
-                focus_or_restore_main_window(app);
-            }
-            pending.complete();
+        pending.finish_attempt(accepted);
+        if accepted && focus {
+            focus_or_restore_main_window(app);
         }
         return accepted;
     }
@@ -771,14 +771,11 @@ fn open_desktop_updates(app: &AppHandle, focus: bool) -> bool {
     if window
         .eval_with_callback(open_updates_script(), move |result| {
             let pending = handle.state::<PendingDesktopUpdateOpen>();
-            if result.trim() == "\"handled\"" {
-                pending.complete();
-            }
-            pending.finish_attempt();
+            pending.finish_attempt(result.trim() == "\"handled\"");
         })
         .is_err()
     {
-        pending.finish_attempt();
+        pending.finish_attempt(false);
         return false;
     }
     true
@@ -2846,11 +2843,13 @@ mod tests {
         assert!(pending.requested());
         assert!(pending.begin_attempt());
         assert!(!pending.begin_attempt());
-        pending.finish_attempt();
+        pending.finish_attempt(false);
+        assert!(pending.requested());
         assert!(pending.begin_retry());
         assert!(!pending.begin_retry());
         pending.finish_retry();
-        pending.complete();
+        assert!(pending.begin_attempt());
+        pending.finish_attempt(true);
         assert!(!pending.requested());
     }
 
