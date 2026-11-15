@@ -57,6 +57,8 @@ export function ProtectedHdLaunchNotice({ phase, name }: { phase: ProtectedHdPha
           ) : null}
         </HdNotice>
       );
+    case 'nameTaken':
+      return <HdNotice tone="error" icon={TriangleAlert}>{t(phase.mode === 'create' ? 'vaults.hd.protected.nameTakenCreate' : 'vaults.hd.protected.nameTakenImport')}</HdNotice>;
     case 'mismatch':
       return <HdNotice tone="error" icon={TriangleAlert}>{t('vaults.hd.protected.notice.mismatch', { name })}</HdNotice>;
     default:

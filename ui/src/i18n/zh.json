@@ -6334,7 +6334,7 @@
       "browserNote": "桌面端无法使用 passkey。请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
       "openInBrowser": "在浏览器中打开",
       "errors": {
-        "prfUnavailable": "这个 passkey/浏览器不支持加密所需的 PRF 扩展。请改用平台 passkey(Touch ID / Windows Hello)。",
+        "prfUnavailable": "这个 Passkey 不支持保护档需要的加密，没有设置成功。在 Mac 上，浏览器问保存到哪里时请选 iCloud 钥匙串；在 Windows 上，可以用已登录 Google 账号的 Chrome，保存到 Google 密码管理工具。然后再试一次。",
         "cancelled": "passkey 提示被取消了。",
         "noPasskey": "这个保护层保险库没有配置 passkey。",
         "wrongFactor": "无法用这个 passkey 解锁。",
@@ -6434,7 +6434,11 @@
       "protectedBitcoinInfo": "保护档 Bitcoin 密钥只能在兼容的安全窗口里，从这把密钥显示的地址类型付款。",
       "moreInfo": "说明",
       "keySource": "密钥来源",
-      "signingImportHint": "粘贴后会显示它的地址，可以先核对再创建。"
+      "signingImportHint": "粘贴后会显示它的地址，可以先核对再创建。",
+      "nameTaken": "这个名称已被其他密钥使用，请换一个名称。",
+      "nameCaseConflict": "已有一个叫 {{name}} 的密钥，名称不能只靠大小写区分。请换一个名称。",
+      "nameRequired": "请先填写名称，再创建密钥。",
+      "nameRequiredWallet": "请先填写名称，再创建钱包。"
     },
     "requests": {
       "title": "待处理请求",
@@ -6694,7 +6698,7 @@
           "blocked": "浏览器拦住了安全窗口。允许这个网站弹出窗口后再点一次。",
           "cancelled": "已取消，什么都没有保存。可以再试一次。",
           "closed": "安全窗口关了，什么都没有保存。可以再试一次。",
-          "timeout": "安全窗口 5 分钟内没有完成，什么都没有保存。再试一次会重新开始。",
+          "timeout": "安全窗口 35 分钟内没有完成，什么都没有保存。再试一次会重新开始。",
           "reset": "保护档在这期间被锁定或重置，这次操作作废，什么都没有保存。",
           "unavailable": "当前版本的安全窗口还不能创建保护档助记词钱包，什么都没有保存。",
           "failed": "安全窗口没能完成，什么都没有保存。请再试一次。",
@@ -6715,8 +6719,12 @@
           "secret_exists": "已有同名密钥",
           "secret_name_case_conflict": "已有只差大小写的同名密钥",
           "vault_already_initialized": "保护档刚在别处完成设置"
-        }
-      }
+        },
+        "nameTakenCreate": "这个名称已被其他密钥使用，钱包没有保存。Avibe 里没有刚才那组助记词对应的钱包，请不要往它的地址转账。换一个名称重新创建，会生成一组新的助记词。",
+        "nameTakenImport": "这个名称已被其他密钥使用，钱包没有保存。Avibe 里没有刚才导入的钱包，请不要往它的地址转账。换一个名称重新导入，用同一组助记词即可。"
+      },
+      "nameTakenAfterSave": "这个名称已被其他密钥使用，钱包还没有保存。换一个名称再保存，助记词不变。",
+      "standardTierLine": "你选的是标准档：助记词在这个页面输入，加密后保存在运行 Avibe 的电脑上。"
     },
     "generate": {
       "password": "随机密码",
