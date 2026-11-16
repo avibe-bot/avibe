@@ -141,26 +141,25 @@ real ceremony; the joint browser exercise is a separate gate.
 ## Protected-HD secure-window release selection
 
 The current packaged pin and paired release fixture select sandbox build
-`185708641db830f2a02fa2f2d7169eff9aec0d3ec0564e2a4216761300ee3d67`, retained by
-reviewed commit `9aea61876c22eb2f2fb9284af916c4e9565879ee` (source-input snapshot
-from `7aff184`); merged `d7d543580064407a34f985e47d96b68e57ab7a21` (#47) has
-identical release and `vercel.json` bytes. The owning release tool derives
-the complete pin from that reviewed Git tree and retained snapshot. Deployment
-observations only confirm equality to those bytes; they never select authority.
-The same JSON remains the Web verifier and Python frame-CSP authority.
+`31abc4f68a989990b27423d7121fd22cbf0068276ed5ff3afaf3a2b5296888c4`, retained by
+merged commit `a113fb881e00855522c393ee69cf989b5cec2ddd` (#50). The owning release
+tool derives the complete pin from that reviewed Git tree and retained snapshot.
+Deployment observations only confirm equality to those bytes; they never select
+authority. The same JSON remains the Web verifier and Python frame-CSP authority.
 
-This selects the reviewed secure-window/HD runtime while leaving the parent
-consumer scope unchanged: the pin does not implement protected-HD API/storage,
-creation UI, purpose selection or reconciliation. Those are separate changes,
-not prerequisites copied into this pin update. The sandbox release implements
-protected Bitcoin Taproot, Legacy and Native SegWit input/return for both
-ordinary and HD records. This parent change enables only the already-merged
-ordinary protected Legacy/Native consumer under the new pin; the parent HD
-Legacy/Native consumer is unfinished and parent HD admission of those inputs
-remains refused. Existing ordinary operations, signing-policy v1.1,
-RP ID/origin, root metadata, credential and encrypted-record formats retain their
-existing contracts; no migration, custody fallback or feature flag is introduced.
-The frozen compatibility root is unchanged and earlier versioned releases remain
+The build keeps 18570864's Bitcoin owner sources byte-for-byte, so its registry
+entry carries the same protected Bitcoin support: Taproot, Legacy and Native
+SegWit input/return for ordinary and HD records. It adds one passkey when
+signing unlocks, the whole-secret reveal (`items[]`) in the secure window and
+`notAfter` on displays. Those arrive with the exact pinned build; no parent
+backend gate reads them, so the registry gains no new capability fields. The
+18570864 entry and every older entry stay recognized; unknown pins still fail
+closed. Recognizing a retained pin does not migrate grants: a pending protected
+Bitcoin request captured under 18570864 is refused as a changed cohort once
+31abc4f6 is current. Existing ordinary operations, signing-policy v1.1, RP
+ID/origin, root metadata, credential and encrypted-record formats keep their
+contracts; no migration, custody fallback or feature flag is introduced. The
+frozen compatibility root is unchanged and earlier versioned releases remain
 retained by the sandbox owner.
 
 Focused source/fixture checks and publication equality do not prove a real

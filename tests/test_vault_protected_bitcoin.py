@@ -295,7 +295,7 @@ def test_packaged_pin_metadata_admission_and_settlement_without_capability_injec
     monkeypatch.setattr(api, "_publish_vaults_updated", lambda *a, **k: None)
     support = release.current_support()
     assert support is not None
-    assert support.pin_id == "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"
+    assert support.pin_id == "7dd71441827268ca8d8314656521015bb7bab0c4ae5b73fa8d0f4ca24013bddd"
     _create()
     with api._vault_engine().connect() as conn:
         meta = vault_service.get_secret_meta(conn, "PUBLIC_TEST_BTC")
@@ -309,6 +309,28 @@ def test_packaged_pin_metadata_admission_and_settlement_without_capability_injec
     with api._vault_engine().begin() as conn:
         _complete(conn, request, context)
         assert _state(conn, request["id"]) == ("approved", 1, 1)
+
+
+def test_pending_request_from_retained_18570864_pin_is_refused_after_switch(monkeypatch):
+    # Real registry, real pins: retaining 18570864's entry never carries an
+    # older pending ECDSA request over to the new packaged cohort.
+    monkeypatch.setattr(api, "_notify_vault_request_created", lambda *a, **k: None)
+    monkeypatch.setattr(api, "_publish_vaults_updated", lambda *a, **k: None)
+    packaged = release.load_packaged_pin()
+    old = json.loads((Path(__file__).parent / "fixtures" / "vault-sandbox-legacy-pins.json").read_text())[
+        "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"]
+    monkeypatch.setattr(release, "load_packaged_pin", lambda: copy.deepcopy(old))
+    _create()
+    request, context = _request("p2wpkh")
+    assert request["delivery"]["bitcoin_cohort"]["buildHash"] == old["buildHash"]
+    monkeypatch.setattr(release, "load_packaged_pin", lambda: copy.deepcopy(packaged))
+    with pytest.raises(api.VaultApiError) as error:
+        api.get_vault_request(request["id"], audience=vault_service.REQUEST_AUDIENCE_UI)
+    assert error.value.code == "protected_bitcoin_cohort_changed"
+    with api._vault_engine().begin() as conn:
+        with pytest.raises(vault_service.ProtectedBitcoinCohortChangedError):
+            _complete(conn, request, context)
+        assert _state(conn, request["id"]) == ("pending", 0, 0)
 
 
 def test_no_headless_claim_and_completion_cannot_replay(capable_cohort):

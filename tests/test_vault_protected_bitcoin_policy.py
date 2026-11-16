@@ -59,7 +59,7 @@ def test_packaged_pin_policy_uses_actual_cohort_without_capability_injection():
     # the real challenge/assertion/storage path, not only a registry projection.
     support = release.current_support()
     assert support is not None
-    assert support.pin_id == "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"
+    assert support.pin_id == "7dd71441827268ca8d8314656521015bb7bab0c4ae5b73fa8d0f4ca24013bddd"
     create_target(protection="protected")
     credential, factor_id = enroll()
     context = issue()

@@ -24,14 +24,25 @@ def test_retained_legacy_full_pins_stay_taproot_only(pin_id):
     assert support.hd_input_types == support.ecdsa_return_types == ()
 
 
+def test_retained_18570864_full_pin_keeps_all_three_after_the_switch():
+    pins = json.loads((Path(__file__).parent / "fixtures" / "vault-sandbox-legacy-pins.json").read_text())
+    pin_id = "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"
+    support = release.support_for_pin(pins[pin_id])
+    assert support is not None and support.pin_id == pin_id
+    assert support.build_hash == "185708641db830f2a02fa2f2d7169eff9aec0d3ec0564e2a4216761300ee3d67"
+    assert support.ordinary_input_types == support.hd_input_types == support.ecdsa_return_types == ("p2pkh", "p2wpkh", "p2tr")
+    # Retaining the entry is recognition, not the current cohort.
+    assert support.cohort != release.current_support().cohort
+
+
 def test_exact_packaged_pin_advertises_only_implemented_input_classes():
     pin = release.load_packaged_pin()
     support = release.support_for_pin(pin)
     assert support is not None
-    assert support.pin_id == "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"
+    assert support.pin_id == "7dd71441827268ca8d8314656521015bb7bab0c4ae5b73fa8d0f4ca24013bddd"
     assert support.pin_id == hashlib.sha256(vault_policy.canonical_json(pin).encode()).hexdigest()
-    assert support.build_hash == "185708641db830f2a02fa2f2d7169eff9aec0d3ec0564e2a4216761300ee3d67"
-    assert support.manifest_hash == "sha256-PaxdZJ+2/lUAeszQgR/BCSXNa5TKL/5kxDAI5CqMUlQ="
+    assert support.build_hash == "31abc4f68a989990b27423d7121fd22cbf0068276ed5ff3afaf3a2b5296888c4"
+    assert support.manifest_hash == "sha256-EkygnRxkKuVmaSaCsKHGxlBbscvXunD5LTujDd5dm8M="
     assert support.ordinary_input_types == support.hd_input_types == support.ecdsa_return_types == ("p2pkh", "p2wpkh", "p2tr")
     assert support.cohort == {"pin_id": support.pin_id, "buildHash": pin["buildHash"], "manifestHash": pin["manifestHash"]}
 
