@@ -1248,7 +1248,7 @@ final class MobileOnboardingTests: XCTestCase {
         coordinator.activateAccountSurface()
         _ = try await coordinator.bootstrap()
         _ = try coordinator.selectInstance(id: instance.id)
-        try await settlePush(coordinator)
+        try await settlePush()
 
         // Sign out: the push installation is revoked for this account.
         coordinator.activateAccountSurface()
@@ -1265,7 +1265,7 @@ final class MobileOnboardingTests: XCTestCase {
             return XCTFail("Signing in again ended at \(signedIn).")
         }
         _ = try coordinator.selectInstance(id: instance.id)
-        try await settlePush(coordinator)
+        try await settlePush()
 
         // Turn notifications on.
         let beforeEnable = requests.count
@@ -1277,7 +1277,7 @@ final class MobileOnboardingTests: XCTestCase {
             vapidPublicKey: vapidPublicKey,
             instanceOrigin: instance.url.absoluteString
         )
-        try await settlePush(coordinator)
+        try await settlePush()
 
         XCTAssertGreaterThan(registrations, registrationsBeforeEnable)
         let enable = Array(requests[beforeEnable...])
@@ -1292,10 +1292,10 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertFalse(keychain.installation?.providerPatchPending ?? true)
     }
 
-    /// Lets the push coordinator's queued work (resume, recovery, a token
-    /// callback and its reconciliation) finish, and the account
-    /// coordinator become idle.
-    private func settlePush(_ coordinator: MobileSessionCoordinator) async throws {
+    /// Gives the push coordinator's queued main-actor work (resume,
+    /// recovery, a token callback and its reconciliation, all against
+    /// fakes) time to finish.
+    private func settlePush() async throws {
         for _ in 0..<5 {
             for _ in 0..<50 {
                 await Task.yield()

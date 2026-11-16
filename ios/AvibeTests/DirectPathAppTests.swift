@@ -830,7 +830,8 @@ final class DirectPathAppTests: XCTestCase {
             notifications: notifications,
             afterArrivals: 0,
             // The restore may have registered while the bootstrap was awaited.
-            afterRegistrations: 0
+            afterRegistrations: 0,
+            registration: registration
         ) {}
     }
 
@@ -857,6 +858,7 @@ final class DirectPathAppTests: XCTestCase {
                 root: root,
                 notifications: notifications,
                 afterArrivals: notifications.providerPatches.arrivals,
+                registration: registration,
                 step: "switch \(index + 1)"
             ) {
                 _ = try app.mobileSessionCoordinator.selectInstance(id: instanceID)
@@ -888,8 +890,20 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(controller.livePrimaryWebView)
         XCTAssertEqual(app.route, .onboarding(.instances))
 
-        notifications.providerPatches.releaseAll()
-        _ = await signOut.result
+        // Released until the sign-out ends: its cleanup may send one more
+        // provider update, which the gate would otherwise hold.
+        final class Finished {
+            var value = false
+        }
+        let signedOut = Finished()
+        Task { @MainActor in
+            _ = await signOut.result
+            signedOut.value = true
+        }
+        try await eventually {
+            notifications.providerPatches.releaseAll()
+            return signedOut.value
+        }
         trackStore(of: app)
         XCTAssertEqual(app.route, .onboarding(.instances))
     }
@@ -918,6 +932,9 @@ final class DirectPathAppTests: XCTestCase {
         _ = try? await app.mobileSessionCoordinator.requestOTP(email: "other@example.com")
         trackStore(of: app)
         XCTAssertFalse(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
+        // Every account transition moves the route synchronously, so the
+        // route check is what refuses here; the coordinator would too.
+        XCTAssertEqual(app.route, .onboarding(.instances))
         let management = try await holdPushManagement(hold, in: app)
         let controller = registerTheRootViewsController(for: runtime, in: app)
         XCTAssertNil(controller.livePrimaryWebView)
@@ -966,6 +983,9 @@ final class DirectPathAppTests: XCTestCase {
         }
         let second = try await openHoldingItsProviderUpdate("instance-2", in: app, notifications: notifications)
 
+        // The newer open moved the route, so the route check refuses the
+        // late WebView. The newer runtime's own WebView, registering while
+        // its update is in flight, is the part the fix keeps.
         let late = registerTheRootViewsController(for: first, in: app)
         XCTAssertNil(late.livePrimaryWebView)
         XCTAssertEqual(app.route, .browser(second))
@@ -1028,6 +1048,7 @@ final class DirectPathAppTests: XCTestCase {
         notifications: NotificationsOn,
         afterArrivals arrivals: Int,
         afterRegistrations registrationsBefore: Int? = nil,
+        registration: RootViewStandIn.Registration = .nextUpdate,
         step: String = "",
         file: StaticString = #filePath,
         line: UInt = #line,
@@ -1050,6 +1071,10 @@ final class DirectPathAppTests: XCTestCase {
             line: line
         )
         XCTAssertNotNil(made.controller.livePrimaryWebView, step, file: file, line: line)
+        if registration == .afterTheProviderUpdate {
+            // The race really happened: the update was in flight.
+            XCTAssertTrue(made.providerUpdateInFlight, step, file: file, line: line)
+        }
 
         // Released, including any follow-up update the coordinator sends.
         try await eventually {
@@ -3211,9 +3236,18 @@ private final class RootViewStandIn {
                     self.register(runtime, in: app)
                 }
             case .afterTheProviderUpdate:
-                Task { @MainActor in
+                Task { @MainActor [weak self, weak app] in
+                    let deadline = ContinuousClock.now.advanced(
+                        by: WebKitReadiness.standardTransportOperation
+                    )
                     while notifications.providerPatches.arrivals <= arrivals {
+                        guard ContinuousClock.now < deadline else {
+                            return
+                        }
                         try? await Task.sleep(for: .milliseconds(10))
+                    }
+                    guard let self, let app else {
+                        return
                     }
                     self.register(runtime, in: app)
                 }
