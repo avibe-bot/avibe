@@ -181,6 +181,14 @@ private struct PendingPushOpened {
 
 @MainActor
 final class AppModel: ObservableObject {
+    /// The total automatic budget of one opening attempt, measured in
+    /// foreground time. It equals WebKit's own request timeout: the
+    /// runtime's first load is a `URLRequest(url:)`, whose default
+    /// `timeoutInterval` is 60 seconds, so a slow but healthy first load (a
+    /// cold cache on a cellular network) is never cut off before WebKit
+    /// itself would give up on it.
+    static let runtimeOpenAutomaticBudget: Duration = .seconds(60)
+
     @Published private(set) var route: AppRoute = .loading
     /// Chosen once when the one runtime-preserving sheet opens. Repeated
     /// presentation requests never replace its document or change its mode.
@@ -210,6 +218,12 @@ final class AppModel: ObservableObject {
     private var runtimeOpenLifecycleObservers: [NSObjectProtocol] = []
     private var runtimeOpenDeadlineTimer: (any RuntimeOpenTimer)?
     private var runtimeOpenLongWaitTimer: (any RuntimeOpenTimer)?
+    /// When the App went to the background, on `runtimeOpenTiming`'s clock;
+    /// `nil` in the foreground. WebKit is suspended there, so the opening
+    /// budget is not charged for that time.
+    private var runtimeOpenBackgroundedAt: Duration?
+    /// The background time already excluded from the opening budget.
+    private var runtimeOpenBackgroundTime: Duration = .zero
     /// The direct transport, when this build has one. Without it there is no
     /// path controller: no `direct` capability, no listener, no route write,
     /// no event, and runtimes open exactly as they did before.
@@ -355,7 +369,7 @@ final class AppModel: ObservableObject {
         pushOpenedNow: @escaping () -> Date = Date.init,
         pushOpenedLifetime: TimeInterval = 120,
         runtimeOpenTiming: (any RuntimeOpenTiming)? = nil,
-        runtimeOpenBudget: Duration = .seconds(30),
+        runtimeOpenBudget: Duration = AppModel.runtimeOpenAutomaticBudget,
         runtimeOpenLongWait: Duration = .seconds(8),
         runtimeOpenNotificationCenter: NotificationCenter = .default,
         badgeCenter: AppBadgeCentering? = nil
@@ -385,6 +399,10 @@ final class AppModel: ObservableObject {
         self.runtimeOpenBudget = runtimeOpenBudget
         self.runtimeOpenLongWait = runtimeOpenLongWait
         self.runtimeOpenNotificationCenter = runtimeOpenNotificationCenter
+        // The App can be launched into the background.
+        if UIApplication.shared.applicationState == .background {
+            runtimeOpenBackgroundedAt = self.runtimeOpenTiming.now
+        }
         nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())
         sessionNotifications = SessionNotificationCleaner(
             center: pushNotificationCenter ?? SystemPushNotificationCenter()
@@ -393,6 +411,15 @@ final class AppModel: ObservableObject {
         _ = nativePushCoordinator
         _ = directPathController
         runtimeOpenLifecycleObservers = [
+            runtimeOpenNotificationCenter.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.runtimeOpenDidEnterBackground()
+                }
+            },
             runtimeOpenNotificationCenter.addObserver(
                 forName: UIApplication.willEnterForegroundNotification,
                 object: nil,
@@ -590,6 +617,15 @@ final class AppModel: ObservableObject {
         runtimeOpenLongWaitTimer = nil
     }
 
+    /// The clock every opening budget is measured on: `runtimeOpenTiming`'s
+    /// time with the App's background intervals left out, so it stands
+    /// still while the App is in the background. An attempt's
+    /// `automaticStartedAt` and `deadline` are on this clock.
+    private var runtimeOpenNow: Duration {
+        (runtimeOpenBackgroundedAt ?? runtimeOpenTiming.now)
+            - runtimeOpenBackgroundTime
+    }
+
     private func automaticRemaining(
         for attempt: RuntimeOpenAttempt,
         at now: Duration
@@ -606,6 +642,9 @@ final class AppModel: ObservableObject {
     private func scheduleRuntimeOpenTimers(attemptID: Int) {
         cancelRuntimeOpenTimers()
         guard
+            // The budget clock stands still in the background; the return
+            // to the foreground schedules the remainder.
+            runtimeOpenBackgroundedAt == nil,
             let attempt = runtimeOpenAttempt,
             attempt.id == attemptID,
             attempt.automaticStartedAt != nil
@@ -614,7 +653,7 @@ final class AppModel: ObservableObject {
         }
         let remaining = automaticRemaining(
             for: attempt,
-            at: runtimeOpenTiming.now
+            at: runtimeOpenNow
         )
         guard remaining > .zero else {
             terminateRuntimeOpen(
@@ -668,7 +707,7 @@ final class AppModel: ObservableObject {
         else {
             return false
         }
-        guard automaticRemaining(for: attempt, at: runtimeOpenTiming.now) <= .zero else {
+        guard automaticRemaining(for: attempt, at: runtimeOpenNow) <= .zero else {
             return false
         }
         terminateRuntimeOpen(
@@ -686,7 +725,7 @@ final class AppModel: ObservableObject {
         cancelRuntimeOpenTimers()
         runtimeOpenNotice = nil
         runtimeIdentity += 1
-        let now = runtimeOpenTiming.now
+        let now = runtimeOpenNow
         let attempt = RuntimeOpenAttempt(
             id: runtimeIdentity,
             runtime: runtime,
@@ -724,7 +763,7 @@ final class AppModel: ObservableObject {
         }
         attempt.remainingAutomaticBudget = automaticRemaining(
             for: attempt,
-            at: runtimeOpenTiming.now
+            at: runtimeOpenNow
         )
         attempt.automaticStartedAt = nil
         attempt.deadline = nil
@@ -753,7 +792,7 @@ final class AppModel: ObservableObject {
             )
             return false
         }
-        let now = runtimeOpenTiming.now
+        let now = runtimeOpenNow
         attempt.automaticStartedAt = now
         attempt.deadline = now + attempt.remainingAutomaticBudget
         runtimeOpenAttempt = attempt
@@ -825,24 +864,6 @@ final class AppModel: ObservableObject {
             return false
         }
         return openRuntime(attempt.runtime)
-    }
-
-    @discardableResult
-    func retryRuntimeOpenNotice() -> Bool {
-        guard
-            let notice = runtimeOpenNotice,
-            sessionCoordinator.currentInstances.contains(where: {
-                $0.id == notice.instanceID && $0.available
-            })
-        else {
-            return false
-        }
-        do {
-            _ = try sessionCoordinator.selectInstance(id: notice.instanceID)
-            return true
-        } catch {
-            return false
-        }
     }
 
     func dismissRuntimeOpenNotice() {
@@ -971,11 +992,30 @@ final class AppModel: ObservableObject {
         destination == .authentication || destination == .googleAuthentication
     }
 
+    /// WebKit is suspended in the background, so a slow open there is
+    /// paused, not failing: the budget clock stops here and its timers are
+    /// cancelled. Resigning active alone (Control Center, an alert) keeps
+    /// WebKit running and keeps charging the budget.
+    private func runtimeOpenDidEnterBackground() {
+        guard runtimeOpenBackgroundedAt == nil else {
+            return
+        }
+        runtimeOpenBackgroundedAt = runtimeOpenTiming.now
+        cancelRuntimeOpenTimers()
+    }
+
+    /// Restarts the budget clock and schedules only the running attempt's
+    /// remainder. A timer that could not fire on time (no background
+    /// interval was reported) ends its attempt here.
     private func runtimeOpenWillEnterForeground() {
+        if let backgroundedAt = runtimeOpenBackgroundedAt {
+            runtimeOpenBackgroundTime += runtimeOpenTiming.now - backgroundedAt
+            runtimeOpenBackgroundedAt = nil
+        }
         guard let attemptID = runtimeOpenAttempt?.id else {
             return
         }
-        _ = expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
+        scheduleRuntimeOpenTimers(attemptID: attemptID)
     }
 
     @discardableResult

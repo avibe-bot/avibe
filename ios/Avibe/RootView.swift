@@ -45,16 +45,21 @@ struct RootView: View {
             if appModel.route == .onboarding(.instances),
                let notice = appModel.runtimeOpenNotice
             {
+                // The page's current block is the one way to open the
+                // instance again; the notice only explains. At the bottom it
+                // leaves the page's title, account button and current block
+                // uncovered.
                 RuntimeOpenNoticeBanner(
                     notice: notice,
-                    retry: {
-                        _ = appModel.retryRuntimeOpenNotice()
-                    },
                     dismiss: appModel.dismissRuntimeOpenNotice
                 )
-                .frame(maxWidth: .infinity, alignment: .top)
                 .padding(.horizontal, 16)
-                .padding(.top, 12)
+                .padding(.bottom, 12)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: .bottom
+                )
             }
         }
         .sheet(
@@ -361,48 +366,42 @@ private struct RuntimeOpenAwaitingUserBanner: View {
 
 private struct RuntimeOpenNoticeBanner: View {
     let notice: RuntimeOpenNotice
-    let retry: () -> Void
     let dismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "clock.badge.exclamationmark")
-                    .font(.title2)
-                    .foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(
-                        String(
-                            format: NSLocalizedString(
-                                "runtime.open.timeout.title.named",
-                                comment: ""
-                            ),
-                            notice.instanceName
-                        )
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "clock.badge.exclamationmark")
+                .font(.title2)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(
+                    String(
+                        format: NSLocalizedString(
+                            "runtime.open.timeout.title.named",
+                            comment: ""
+                        ),
+                        notice.instanceName
                     )
-                    .font(.subheadline.weight(.semibold))
-                    Text(
-                        String(
-                            format: NSLocalizedString(
-                                "runtime.open.timeout.last_stage",
-                                comment: ""
-                            ),
-                            runtimeOpenPhaseLabel(notice.lastPhase)
-                        )
+                )
+                .font(.subheadline.weight(.semibold))
+                Text(
+                    String(
+                        format: NSLocalizedString(
+                            "runtime.open.timeout.last_stage",
+                            comment: ""
+                        ),
+                        runtimeOpenPhaseLabel(notice.lastPhase)
                     )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Button(action: dismiss) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text("runtime.open.timeout.dismiss"))
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
-            Button("browser.error.retry", action: retry)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("runtime.open.timeout.dismiss"))
         }
         .padding(14)
         .background(

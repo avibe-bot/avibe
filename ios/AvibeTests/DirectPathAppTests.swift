@@ -1,5 +1,6 @@
 import Combine
 import Network
+import SwiftUI
 import UIKit
 import UserNotifications
 import WebKit
@@ -496,7 +497,12 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
         XCTAssertEqual(app.route, .browser(runtime))
 
-        timing.advance(by: .seconds(22))
+        // The budget is WebKit's own 60-second request timeout.
+        timing.advance(by: .seconds(51))
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, attempt.id)
+
+        timing.advance(by: .seconds(1))
         XCTAssertTrue(isOnInstancePicker(app))
         XCTAssertNil(app.runtimeOpenAttempt)
         XCTAssertEqual(app.mobileSessionCoordinator.currentAccount?.id, "account-1")
@@ -506,11 +512,127 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.runtimeOpenNotice?.lastPhase, .connecting)
         XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
 
-        XCTAssertTrue(app.retryRuntimeOpenNotice())
+        // The page's current block opens the kept selection again.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         let retry = try XCTUnwrap(app.runtimeOpenAttempt)
         XCTAssertGreaterThan(retry.id, attempt.id)
         XCTAssertEqual(retry.phase, .connecting)
         XCTAssertNil(app.runtimeOpenNotice)
+    }
+
+    /// WebKit is suspended in the background, so a slow open there is not
+    /// failing: the budget is charged only for foreground time. The return
+    /// schedules the remainder, and the long-wait message keeps its place.
+    @MainActor
+    func testRuntimeOpenBudgetIsNotChargedWhileTheAppIsInTheBackground() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let notifications = NotificationCenter()
+        let app = try await makeApp(
+            directTransport: nil,
+            runtimeOpenTiming: timing,
+            runtimeOpenNotificationCenter: notifications
+        )
+        let runtime = try await select("instance-1", in: app)
+        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+
+        timing.advance(by: .seconds(5))
+        notifications.post(
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        timing.advance(by: .seconds(120))
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, attemptID)
+        XCTAssertNil(app.runtimeOpenNotice)
+
+        notifications.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, attemptID)
+        // Five seconds of foreground time so far.
+        XCTAssertFalse(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
+
+        timing.advance(by: .seconds(3))
+        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
+        timing.advance(by: .seconds(51))
+        XCTAssertEqual(app.route, .browser(runtime))
+        timing.advance(by: .seconds(1))
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
+    }
+
+    /// After a timeout the page's current block is the one way to open the
+    /// instance again. The native notice only explains, with no reopen of
+    /// its own, and sits in the lower half, clear of the page's title,
+    /// account button and current block.
+    @MainActor
+    func testRuntimeOpenTimeoutNoticeOffersNoSecondReopenAndLeavesThePageTopUncovered()
+        async throws
+    {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(
+            directTransport: nil,
+            runtimeOpenTiming: timing,
+            runtimeOpenNotificationCenter: NotificationCenter()
+        )
+        let runtime = try await select("instance-1", in: app)
+        timing.advance(by: .seconds(60))
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertNotNil(app.runtimeOpenNotice)
+        XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
+
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first
+        )
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.screen.bounds
+        window.windowLevel = .normal + 1
+        window.rootViewController = UIHostingController(
+            rootView: RootView().environmentObject(app)
+        )
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+
+        let title = String(
+            format: NSLocalizedString(
+                "runtime.open.timeout.title.named",
+                comment: ""
+            ),
+            "One"
+        )
+        let retry = NSLocalizedString("browser.error.retry", comment: "")
+        let dismiss = NSLocalizedString(
+            "runtime.open.timeout.dismiss",
+            comment: ""
+        )
+        var elements: [NativeAccessibilityElement] = []
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(15))
+        while clock.now < deadline {
+            window.layoutIfNeeded()
+            elements = nativeAccessibilityElements(in: window)
+            if elements.contains(where: { $0.label == title }),
+               elements.contains(where: { $0.label == dismiss })
+            {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let labels = elements.map(\.label)
+        let notice = try XCTUnwrap(
+            elements.first { $0.label == title },
+            "The timeout notice is not on screen: \(labels)"
+        )
+        XCTAssertTrue(labels.contains(dismiss), "\(labels)")
+        XCTAssertFalse(labels.contains(retry), "\(labels)")
+        XCTAssertGreaterThan(notice.frame.minY, window.bounds.midY)
     }
 
     @MainActor
@@ -737,7 +859,7 @@ final class DirectPathAppTests: XCTestCase {
         )
         let awaiting = try XCTUnwrap(app.runtimeOpenAttempt)
         XCTAssertEqual(awaiting.phase, .awaitingUser)
-        XCTAssertEqual(awaiting.remainingAutomaticBudget, .seconds(25))
+        XCTAssertEqual(awaiting.remainingAutomaticBudget, .seconds(55))
         XCTAssertNil(awaiting.deadline)
 
         timing.elapseWithoutFiring(by: .seconds(60))
@@ -756,10 +878,10 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
         XCTAssertEqual(
             app.runtimeOpenAttempt?.deadline,
-            timing.now + .seconds(25)
+            timing.now + .seconds(55)
         )
 
-        timing.advance(by: .seconds(24))
+        timing.advance(by: .seconds(54))
         XCTAssertEqual(app.route, .browser(runtime))
         timing.elapseWithoutFiring(by: .seconds(1))
         notifications.post(
@@ -816,7 +938,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertTrue(app.retryRuntimeOpen(attemptID: firstID))
         let retry = try XCTUnwrap(app.runtimeOpenAttempt)
         XCTAssertGreaterThan(retry.id, firstID)
-        XCTAssertEqual(retry.remainingAutomaticBudget, .seconds(30))
+        XCTAssertEqual(retry.remainingAutomaticBudget, .seconds(60))
         XCTAssertEqual(retry.phase, .connecting)
     }
 
@@ -839,7 +961,7 @@ final class DirectPathAppTests: XCTestCase {
 
         let handedOff = try XCTUnwrap(app.runtimeOpenAttempt)
         XCTAssertEqual(handedOff.phase, .connecting)
-        XCTAssertEqual(handedOff.remainingAutomaticBudget, .seconds(25))
+        XCTAssertEqual(handedOff.remainingAutomaticBudget, .seconds(55))
         XCTAssertNil(handedOff.deadline)
         XCTAssertFalse(handedOff.canResumeAutomaticBudget)
         XCTAssertEqual(
@@ -940,7 +1062,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .awaitingUser)
         XCTAssertEqual(
             app.runtimeOpenAttempt?.remainingAutomaticBudget,
-            .seconds(25)
+            .seconds(55)
         )
         XCTAssertTrue(app.runtimeOpenAttempt?.canResumeAutomaticBudget == true)
 
@@ -952,7 +1074,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
         XCTAssertEqual(
             app.runtimeOpenAttempt?.deadline,
-            timing.now + .seconds(25)
+            timing.now + .seconds(55)
         )
         app.handleRuntimeNavigation(
             RuntimeNavigationEvent(stage: .started, destination: .instance),
@@ -961,10 +1083,10 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(
             app.runtimeOpenAttempt?.deadline,
-            timing.now + .seconds(25)
+            timing.now + .seconds(55)
         )
 
-        timing.advance(by: .seconds(25))
+        timing.advance(by: .seconds(55))
         XCTAssertTrue(isOnInstancePicker(app))
         XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
     }
@@ -3562,6 +3684,64 @@ final class DirectPathAppTests: XCTestCase {
         }
         storeIdentifiers.removeAll()
     }
+}
+
+/// One element of the native accessibility tree.
+private struct NativeAccessibilityElement {
+    let label: String
+    let frame: CGRect
+}
+
+/// The native accessibility elements under `root`, as assistive technology
+/// reads them. A WebView's own page elements are left out.
+@MainActor
+private func nativeAccessibilityElements(
+    in root: NSObject
+) -> [NativeAccessibilityElement] {
+    var found: [NativeAccessibilityElement] = []
+    var visited = Set<ObjectIdentifier>()
+    func visit(_ object: NSObject, depth: Int) {
+        guard
+            depth < 64,
+            !(object is WKWebView),
+            visited.insert(ObjectIdentifier(object)).inserted
+        else {
+            return
+        }
+        if object.isAccessibilityElement {
+            found.append(
+                NativeAccessibilityElement(
+                    label: object.accessibilityLabel ?? "",
+                    frame: object.accessibilityFrame
+                )
+            )
+        }
+        if let children = object.accessibilityElements as? [NSObject],
+           !children.isEmpty
+        {
+            for child in children {
+                visit(child, depth: depth + 1)
+            }
+        } else {
+            let count = object.accessibilityElementCount()
+            if count != NSNotFound, count > 0 {
+                for index in 0..<count {
+                    if let child = object.accessibilityElement(at: index)
+                        as? NSObject
+                    {
+                        visit(child, depth: depth + 1)
+                    }
+                }
+            }
+        }
+        if let view = object as? UIView {
+            for subview in view.subviews {
+                visit(subview, depth: depth + 1)
+            }
+        }
+    }
+    visit(root, depth: 0)
+    return found
 }
 
 private final class RuntimeOpenManualTiming: RuntimeOpenTiming {

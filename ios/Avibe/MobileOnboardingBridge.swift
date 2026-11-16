@@ -388,7 +388,8 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     guard let id = request.params["id"] as? String else {
                         throw MobileAccountError.invalidRequest
                     }
-                    let instance = try coordinator.selectInstance(id: id)
+                    let instance = try await coordinator
+                        .selectInstanceAfterSelectionKeepingOperation(id: id)
                     reply(
                         replyHandler,
                         result: ["instance": instance.jsonObject]

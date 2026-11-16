@@ -540,6 +540,11 @@ final class MobileSessionCoordinator {
     /// Operation that is allowed to preserve the selected runtime while the
     /// account page refreshes or performs a push-management request.
     private var selectionKeepingOperation: UUID?
+    /// Opens waiting, each up to its bound, for `selectionKeepingOperation`
+    /// to finish.
+    private var selectionKeepingOperationWaiters: [
+        UUID: CheckedContinuation<Void, Never>
+    ] = [:]
     /// The operation that currently retains the transport after its surface
     /// closes. This token is separate from `selectionKeepingOperation`:
     /// selection and transport ownership have different invariants.
@@ -897,6 +902,46 @@ final class MobileSessionCoordinator {
                 )
             }
         }
+    }
+
+    /// The instance list's open (`session.selectInstance`). When the account
+    /// is held only by an operation that keeps the selection (a
+    /// push-management request the App makes on its own, as on a return to
+    /// the foreground, or a refresh of the signed-in account), it first
+    /// waits up to `bound` for that operation to finish, then selects once.
+    /// Any other operation, a reset or a sign-out still answers `busy` at
+    /// once. `selectInstance` itself and transport ownership are unchanged.
+    func selectInstanceAfterSelectionKeepingOperation(
+        id: String,
+        waitingAtMost bound: Duration = .seconds(10)
+    ) async throws -> MobileInstance {
+        if case .operation(let token) = phase,
+           token == selectionKeepingOperation
+        {
+            await selectionKeepingOperationFinished(token, atMost: bound)
+        }
+        return try selectInstance(id: id)
+    }
+
+    private func selectionKeepingOperationFinished(
+        _ token: UUID,
+        atMost bound: Duration
+    ) async {
+        let waiter = UUID()
+        let timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: bound)
+            self?.selectionKeepingOperationWaiters
+                .removeValue(forKey: waiter)?
+                .resume()
+        }
+        await withCheckedContinuation { continuation in
+            if selectionKeepingOperation == token {
+                selectionKeepingOperationWaiters[waiter] = continuation
+            } else {
+                continuation.resume()
+            }
+        }
+        timeout.cancel()
     }
 
     func selectInstance(id: String) throws -> MobileInstance {
@@ -1288,7 +1333,8 @@ final class MobileSessionCoordinator {
         // Keep its ownership token even if there was no transport on entry.
         transportOperationToken = token
         defer {
-            if selectionKeepingOperation == token {
+            let keptSelection = selectionKeepingOperation == token
+            if keptSelection {
                 selectionKeepingOperation = nil
             }
             if transportOperationToken == token {
@@ -1296,6 +1342,13 @@ final class MobileSessionCoordinator {
             }
             if phase == .operation(token) {
                 phase = .ready
+            }
+            if keptSelection {
+                let waiters = selectionKeepingOperationWaiters.values
+                selectionKeepingOperationWaiters = [:]
+                for waiter in waiters {
+                    waiter.resume()
+                }
             }
         }
         return try await operation()

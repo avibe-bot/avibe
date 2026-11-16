@@ -1413,6 +1413,153 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    /// The list's open (the current block after an open timed out, or any
+    /// row) made while a push request the App made on its own is running
+    /// waits for that request and then opens, instead of failing as busy.
+    func testTheListsOpenWaitsForAPushRequestAndOpensOnceItEnds() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened: [MobileRuntimeContext] = []
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { opened.append($0) }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        XCTAssertEqual(opened.count, 1)
+
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(opened.count, 1, "It opened while the request still ran.")
+
+        hold.release()
+        let reopened = try await reopen.value
+        try await request.value
+        XCTAssertEqual(reopened.id, instance.id)
+        XCTAssertEqual(opened.count, 2)
+        XCTAssertEqual(opened.last?.instance.id, instance.id)
+    }
+
+    /// Only an operation that keeps the selection is waited for: any other
+    /// one (here the first session read, before a list exists) still
+    /// answers busy at once.
+    func testTheListsOpenAnswersBusyAtOnceForAnOperationThatDoesNotKeepTheSelection()
+        async throws
+    {
+        let first = FakeMobileAuthTransport()
+        let session = snapshot(accountID: "account-1")
+        let hold = HeldCall()
+        first.fetchSessionHandler = {
+            await hold.wait()
+            return .signedIn(session)
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+        let bootstrap = Task { @MainActor in
+            _ = try await coordinator.bootstrap()
+        }
+        try await hold.waitUntilHeld()
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            _ = try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: instance.id
+            )
+            XCTFail("The open did not answer busy.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        XCTAssertLessThan(started.duration(to: clock.now), .seconds(2))
+
+        hold.release()
+        try await bootstrap.value
+    }
+
+    /// The wait is bounded: a push request that does not finish in time
+    /// leaves the open answering busy, not hanging.
+    func testTheListsOpenAnswersBusyWhenThePushRequestOutlastsTheWait()
+        async throws
+    {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            _ = try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: instance.id,
+                waitingAtMost: .milliseconds(300)
+            )
+            XCTFail("The open did not answer busy.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        let waited = started.duration(to: clock.now)
+        XCTAssertGreaterThanOrEqual(waited, .milliseconds(300))
+        XCTAssertLessThan(waited, .seconds(5))
+        XCTAssertEqual(opened, 1)
+
+        hold.release()
+        try await request.value
+        XCTAssertEqual(opened, 1)
+    }
+
     /// The instance list: the current instance first, then the ones opened on
     /// this device, most recent first, then the rest in avibe.bot's order.
     /// Each account keeps its own.
@@ -3878,6 +4025,39 @@ private final class WeakObjectReference<Value: AnyObject> {
 
     init(_ value: Value?) {
         self.value = value
+    }
+}
+
+/// A fake transport call that stays in flight until `release()`.
+@MainActor
+private final class HeldCall {
+    private var held = false
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        held = true
+        guard !released else {
+            return
+        }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilHeld() async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !held {
+            guard clock.now < deadline else {
+                throw MobileAccountError.network
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }
 
