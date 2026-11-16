@@ -150,6 +150,8 @@ it('protected: a name taken just before launch opens nothing in the window and m
   expect(vault.sealHdWallet).not.toHaveBeenCalled();
   expect(api.createVaultSecret).not.toHaveBeenCalled();
   expect((screen.getByRole('button', { name: p.launchCreate }) as HTMLButtonElement).disabled).toBe(true);
+  // Nothing was handed back to land on: focus is not moved to an empty notice.
+  expect(document.activeElement?.getAttribute('tabindex')).not.toBe('-1');
 });
 
 it.each(['secret_exists', 'secret_name_case_conflict'])('protected create refused for its name (%s): not saved, new words next time, still Protected', async (code) => {
@@ -383,4 +385,17 @@ it('adds no reason where a field already says what is wrong, or where nothing ca
   sandbox.warm = true;
   await openWallet('generate');
   expect(screen.getByText(d.createNeedsProtected)).toBeTruthy();
+});
+
+it('a name the server refused at save stays marked when a later list read misses it', async () => {
+  await openWallet('generate');
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'secret_exists', message: 'taken' });
+  api.getVaultHdReconciliation.mockResolvedValue({ ok: false, code: 'invalid_hd_wallet' });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: p.launchCreate })); });
+  expect(await screen.findByText(p.nameTakenCreate)).toBeTruthy();
+  // The list (cached, or not yet showing the other key) doesn't have the name: still taken.
+  taken();
+  await act(async () => { fireEvent.blur(nameBox()); });
+  expect(screen.getByText(d.nameTaken)).toBeTruthy();
+  expect((screen.getByRole('button', { name: p.launchCreate }) as HTMLButtonElement).disabled).toBe(true);
 });

@@ -6742,7 +6742,8 @@
           "vault_already_initialized": "The protected vault was just set up elsewhere"
         },
         "nameTakenCreate": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold a wallet for the words just shown; don’t send funds to its addresses. Create it again with a different name; you’ll get a new set of words.",
-        "nameTakenImport": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold the wallet you just imported; don’t send funds to its addresses. Import it again with a different name, using the same words."
+        "nameTakenImport": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold the wallet you just imported; don’t send funds to its addresses. Import it again with a different name, using the same words.",
+        "windowWhy": "The recovery words appear only in a separate secure window that Avibe can't read or cover, which keeps them safer."
       },
       "nameTakenAfterSave": "Another key already uses this name, so the wallet isn’t saved yet. Change the name and save again; your recovery words stay the same.",
       "standardTierLine": "You're using Standard: the words are entered on this page and stored encrypted on the computer that runs Avibe."
