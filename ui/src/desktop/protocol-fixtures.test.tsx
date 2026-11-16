@@ -803,3 +803,19 @@ it.each(['acknowledge', 'generation', 'native-sign-out', 'failure', 'unmount', '
     expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/instances?native_request=fresh&locale=en');
   },
 );
+
+// The popup uses AccountApp's panel, but must never participate in the Account
+// presentation handshake. Existing popup tests covered only Escape/backdrop.
+it.each(['en', 'zh'] as const)('update popup ignores Account presentation and receipts (%s)', async (lang) => {
+  window.history.replaceState(null, '', '/account/index.html?view=update-popover');
+  const assign = capturePresentationUrls();
+  await i18n.changeLanguage(lang);
+  const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id,
+    result: { type: 'sign_out_intent', intent_id: 'popup-must-not-consume', generation: states.signed_in.generation } }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  for (const detail of [...DESKTOP_CLIENT_VIEWS.map((view) => ({ view, presentationToken: 'popup/空' })), null, {}]) {
+    expect(askAccountPresentation(detail).defaultPrevented).toBe(false);
+  }
+  expect(assign).not.toHaveBeenCalled();
+  expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state']);
+});

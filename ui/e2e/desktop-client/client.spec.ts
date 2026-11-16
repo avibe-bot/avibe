@@ -465,3 +465,40 @@ for (const lang of ['en', 'zh'] as const) test(`A5 current shared snapshot and r
   await expect.poll(() => requests.at(-1)?.action.type).toBe('cancel');
   expect(state.connection.committed.instance_id).toBe(current.id);
 });
+
+// The actual bundled popup shares the updater panel, never the Account handshake.
+// The facade is synthetic; this does not open a native window or exercise OS focus.
+for (const lang of ['en', 'zh'] as const) test(`AUTH-SETUP-178 isolated update popup ${lang}`, async ({ page }, info) => {
+  await page.setViewportSize({ width: 880, height: 600 });
+  const denied = await isolateAccount(page);
+  const state = clientState(); signIn(state);
+  const requests = await installBridge(page, state, { signOutIntent: 'popup-no-account-receipt' });
+  await page.addInitScript(() => {
+    document.addEventListener('DOMContentLoaded', () => {
+      const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args: unknown) => unknown } }).__TAURI_INTERNALS__;
+      const invoke = internals.invoke;
+      internals.invoke = (command, args) => {
+        if (command === 'plugin:window|close') {
+          document.documentElement.dataset.fixturePopupCloses = String(Number(document.documentElement.dataset.fixturePopupCloses ?? '0') + 1);
+          return Promise.resolve();
+        }
+        return invoke(command, args);
+      };
+    });
+  });
+  await page.goto(`${ACCOUNT}?view=update-popover&locale=${lang}&theme=${lang === 'en' ? 'light' : 'dark'}`);
+  const copy = lang === 'en' ? en : zh;
+  await expect(page.getByRole('dialog', { name: copy.dashboard.versionAndUpdate })).toBeVisible();
+  await expect(page.getByText(copy.update.status.available)).toBeVisible();
+  expect(await page.evaluate(() => ['account', 'instances', 'setup-complete', 'sign-out', 'updates'].map((view) => {
+    const event = new CustomEvent('avibe:desktop-present', { cancelable: true, detail: { view, presentationToken: 'popup-test' } });
+    window.dispatchEvent(event); return event.defaultPrevented;
+  }))).toEqual([false, false, false, false, false]);
+  await page.screenshot({ animations: 'disabled', path: info.outputPath('update-popup.png') });
+  await page.keyboard.press('Escape');
+  await expect(page.locator('html')).toHaveAttribute('data-fixture-popup-closes', '1');
+  await page.locator('[data-update-popover]').click({ position: { x: 800, y: 20 } });
+  await expect(page.locator('html')).toHaveAttribute('data-fixture-popup-closes', '2');
+  expect(requests.map((request) => request.action.type)).toEqual(['get_state']);
+  expect(denied).toEqual([]);
+});

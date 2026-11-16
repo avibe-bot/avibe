@@ -142,6 +142,7 @@ export function AccountApp() {
   }, [state?.generation]);
   useEffect(() => () => { epoch.current += 1; recoveryProtection.current = null; }, []);
   useEffect(() => {
+    if (popover) return;
     const present = (event: Event) => {
       if (!hasDesktopClient() || !event.cancelable) return;
       // Consume malformed input as well: it must never become a tokenless fallback.
@@ -155,7 +156,7 @@ export function AccountApp() {
     };
     window.addEventListener(DESKTOP_PRESENT_EVENT, present);
     return () => window.removeEventListener(DESKTOP_PRESENT_EVENT, present);
-  }, [i18n]);
+  }, [i18n, popover]);
   const act = useCallback(async (action: DesktopClientAction): Promise<boolean> => {
     if (requestBusy.current) return false;
     requestBusy.current = true;
