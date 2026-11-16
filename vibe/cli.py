@@ -9823,6 +9823,30 @@ def _vault_page_payload(
     return result.items, _paginated_fields(result, command=command)["pagination"]
 
 
+_PROTECTED_BITCOIN_FORMS = (
+    ("p2tr", "Taproot key-path"),
+    ("p2pkh", "Legacy (with the parent transaction)"),
+    ("p2wpkh", "Native SegWit (with the BIP143 amount)"),
+)
+
+
+def _protected_bitcoin_signing_warning(secret: dict) -> str:
+    """Name only the input forms the projected, pin-derived ``bitcoin_address_types`` list."""
+
+    if secret.get("signer_kind") == "hd-seed":
+        listed = {kind for account in secret.get("accounts") or [] for kind in account.get("bitcoin_address_types") or []}
+    else:
+        listed = set(secret.get("bitcoin_address_types") or [])
+    forms = [label for kind, label in _PROTECTED_BITCOIN_FORMS if kind in listed]
+    if not forms:
+        return "No bitcoin_address_types are listed for this protected key; do not request Bitcoin signatures."
+    return (
+        f"Protected Bitcoin signing covers only the listed bitcoin_address_types: {', '.join(forms)}, "
+        "each with its typed, bounded signing context. Every request needs fresh browser approval; "
+        "the network is a requester-selected label, and signing does not broadcast."
+    )
+
+
 def _vault_secret_row(secret: dict) -> dict:
     """One ``vibe vault list`` / ``find`` row: what an Agent picks a secret by, never its value.
 
@@ -9872,7 +9896,7 @@ def _vault_secret_row(secret: dict) -> dict:
             "bitcoin_signing_warning": (
                 None
                 if secret.get("signing_curve") == "ed25519"
-                else "Protected Bitcoin signing is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; legacy and SegWit-v0 inputs remain unsupported, and network labels are requester-selected metadata."
+                else _protected_bitcoin_signing_warning(secret)
                 if secret.get("kind") == "keypair" and secret.get("protection") == "protected"
                 else "Taproot requires schnorr-secp256k1-bip341-keypath and a supporting avault build; raw BIP340 cannot spend these Taproot addresses."
                 if secret.get("kind") == "keypair" and (secret.get("signing_addresses") or {}).get("btc_taproot")
@@ -20137,7 +20161,7 @@ def build_parser():
     vault_sign_parser.add_argument("name", help="Keypair secret name")
     vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="HD only; selects chain and scheme")
     vault_sign_parser.add_argument("--account", type=int, help="HD index 0..19 (default: 0)")
-    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="Default p2tr; protected:p2tr only")
+    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="Default p2tr; must be listed in the account's bitcoin_address_types")
     vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",
