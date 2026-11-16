@@ -476,7 +476,7 @@ final class AppModel: ObservableObject {
         if let deferred = deferredOpen {
             if runtimeIdentity != deferred.identity || route != .loading {
                 deferredOpen = nil
-            } else if !sessionCoordinator.keepsSelectedRuntime(deferred.runtime) {
+            } else if !sessionCoordinator.isCurrentRuntime(deferred.runtime) {
                 // The selection ended underneath; do not leave the spinner.
                 // A push update in flight (one the open or the return to
                 // the foreground started) keeps it, as in `openRuntime`.
