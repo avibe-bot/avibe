@@ -138,7 +138,7 @@ jobs:
           SUPPORT="$HOME/Library/Application Support/bot.avibe.desktop"
 
           launch_and_watch() {
-            local tag="$1" seconds="$2"
+            local tag="$1" seconds="$2" step="${3:-1}"
             log stream --style syslog --level info \
               --predicate 'process == "Avibe" OR process == "avibe-desktop" OR process BEGINSWITH "com.apple.WebKit"' \
               > "$W/logs/$tag-system.log" 2>&1 &
@@ -149,12 +149,12 @@ jobs:
             open --stdout "$W/logs/$tag-stdout.log" --stderr "$W/logs/$tag-stderr.log" \
               --env RUST_BACKTRACE=1 /Applications/Avibe.app
             local sampled=0
-            for i in $(seq 0 "$seconds"); do
+            for i in $(seq 0 "$step" "$seconds"); do
               local target; target=$(python3 -c "print($start + $i)")
               python3 -c "import time; d=$target-time.time(); time.sleep(d if d>0 else 0)"
-              local n; n=$("$W/capwin" "$W/frames/$tag-t$(printf '%02d' "$i")s")
+              local n; n=$("$W/capwin" "$W/frames/$tag-t$(printf '%05.2f' "$i")s")
               echo "$tag t=${i}s windows=$n $(date -u +%H:%M:%S.%N)" >> "$W/logs/timeline.txt"
-              if [ "$sampled" = 0 ] && [ "$i" -ge 2 ]; then
+              if [ "$sampled" = 0 ] && [ "${i%.*}" -ge 2 ]; then
                 local pid; pid=$(pgrep -x avibe-desktop || pgrep -x Avibe || true)
                 if [ -n "$pid" ]; then
                   (sample "$pid" 3 -file "$W/logs/$tag-sample-t${i}s.txt" >/dev/null 2>&1 &)
@@ -170,11 +170,12 @@ jobs:
           launch_and_watch cold 45
 
           # Stop the shell and the Runtime it started, keeping the prepared files.
-          pkill -x avibe-desktop 2>/dev/null; pkill -x Avibe 2>/dev/null
+          pkill -x avibe-desktop 2>/dev/null || true
+          pkill -x Avibe 2>/dev/null || true
           sleep 3
           pkill -f "bot.avibe.desktop" 2>/dev/null || true
           sleep 3
-          launch_and_watch warm 25
+          launch_and_watch warm 20 0.25
 
           cp "$SUPPORT"/*.log "$W/logs/" 2>/dev/null || true
           find "$SUPPORT" -maxdepth 2 \( -name '*.log' -o -name '*.json' -o -name '*.jsonl' \) -size -5M \
@@ -185,6 +186,64 @@ jobs:
           done
           grep -iE 'console|bootstrap|ipc|webview|not allowed|acquire' "$W/logs/"*-system.log | head -200 > "$W/logs/system-grep.txt" || true
           cat "$W/logs/timeline.txt"
+
+      - name: WebKit probe (custom-scheme URL and navigator.languages per process)
+        if: always()
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -uo pipefail
+          W="$RUNNER_TEMP/diag"
+          mkdir -p "$W/probe-www"
+          echo '<!doctype html><title>b</title><body>b</body>' > "$W/probe-www/index.html"
+          (cd "$W/probe-www" && python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          cat > "$W/probe.swift" <<'SWIFT'
+          import Cocoa
+          import WebKit
+
+          final class Scheme: NSObject, WKURLSchemeHandler {
+            func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+              let body = "<!doctype html><title>a</title><body>a</body>".data(using: .utf8)!
+              task.didReceive(URLResponse(url: task.request.url!, mimeType: "text/html", expectedContentLength: body.count, textEncodingName: "utf-8"))
+              task.didReceive(body)
+              task.didFinish()
+            }
+            func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+          }
+
+          final class Probe: NSObject, WKNavigationDelegate {
+            var step = 0
+            let targets = ["tauri://localhost", "tauri://localhost/", "http://127.0.0.1:8765/"]
+            func next(_ webView: WKWebView) {
+              guard step < targets.count else { exit(0) }
+              print("LOAD \(targets[step])")
+              webView.load(URLRequest(url: URL(string: targets[step])!))
+            }
+            func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+              print("URL webView.url=\(webView.url?.absoluteString ?? "nil")")
+              webView.evaluateJavaScript("JSON.stringify([location.href, navigator.language, navigator.languages])") { value, error in
+                print("JS \(value ?? "nil") \(error.map { "\($0)" } ?? "")")
+                self.step += 1
+                self.next(webView)
+              }
+            }
+            func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { print("FAIL \(error)"); step += 1; next(webView) }
+            func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { print("FAILP \(error)"); step += 1; next(webView) }
+          }
+
+          let app = NSApplication.shared
+          app.setActivationPolicy(.prohibited)
+          let config = WKWebViewConfiguration()
+          config.setURLSchemeHandler(Scheme(), forURLScheme: "tauri")
+          let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: config)
+          let probe = Probe()
+          webView.navigationDelegate = probe
+          print("PREFERRED \(Locale.preferredLanguages)")
+          probe.next(webView)
+          DispatchQueue.main.asyncAfter(deadline: .now() + 60) { print("TIMEOUT"); exit(2) }
+          app.run()
+          SWIFT
+          swiftc -O -o "$W/probe" "$W/probe.swift" && "$W/probe" | tee "$W/logs/webkit-probe.txt"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
