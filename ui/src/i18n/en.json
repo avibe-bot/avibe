@@ -5439,7 +5439,7 @@
     "createDialog": {
       "title": "Talk to an agent to set up background work",
       "subtitle": "Writing cron is the tool era; describing intent is the colleague era.",
-      "body": "Scheduled tasks, watches, and (soon) webhooks all come from a chat with an agent. The agent translates your intent into vibe task add / vibe watch add arguments so you never have to remember cron syntax.",
+      "body": "Scheduled tasks and watches come from a chat with an agent. The agent turns your intent into vibe task add / vibe watch add arguments, so you never have to remember cron syntax.",
       "example": "Example: \"Every weekday at 9:30am, summarize yesterday's #ops activity and post to #ops.\" The agent picks the cron, builds the prompt, and binds it to this project.",
       "projectLabel": "Create in which project",
       "noProject": "No projects yet — add one from the sidebar + button first.",

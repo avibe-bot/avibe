@@ -143,7 +143,7 @@
       "skip": "跳过此版本",
       "cancel": "稍后",
       "confirm": "发现新版本。现在下载并安装吗？应用将重新启动，会保留会话和设置。",
-      "disabledDetail": "此构建尚未配置桌面自动更新，请手动安装新的签名版本。",
+      "disabledDetail": "此构建未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
     }
   },
@@ -5439,7 +5439,7 @@
     "createDialog": {
       "title": "和 Agent 对话来创建后台任务",
       "subtitle": "写 cron 是工具时代,描述意图是同事时代",
-      "body": "后台任务 / 等待器 / 未来的 Webhook 都通过和 Agent 对话创建。这样 Agent 能从你的真实意图里组装 vibe task add / vibe watch add 的参数,你不用记 cron 语法。",
+      "body": "后台任务和等待器都通过和 Agent 对话创建。Agent 会从你的真实意图里组装 vibe task add / vibe watch add 的参数，你不用记 cron 语法。",
       "example": "举例:「每天工作日早上 9:30 总结一下 ops 频道昨天的活动,发到 #ops。」Agent 会自动转换成 cron 表达式 + 注入 prompt 模板。",
       "projectLabel": "在哪个项目下创建",
       "noProject": "还没有项目 — 先到侧栏 + 按钮建一个吧。",

@@ -37,7 +37,10 @@ FORBIDDEN = re.compile(
         (
             # Development stages and roadmap.
             r"第\s*[一二三四五六七八九十\d]+\s*(?:阶段|期)",
-            r"首期|下一阶段|下个阶段|后续版本|后续\s*commit|未来版本|以后会支持|未来会支持",
+            r"首期|下一阶段|下个阶段|后续版本|后续\s*commit|以后会支持",
+            # A feature promised for later, as a parenthetical or a "future" noun.
+            r"未来(?:的|版本|会|将)|将来(?:的|会|将)|日后(?:会|将)",
+            r"\((?:soon|coming soon|later|planned|upcoming)\)|\bin (?:the|a) future\b",
             r"即将(?:推出|上线|开放|支持|就位)|敬请期待",
             r"\bphase\s*(?:\d+|one|two|three)\b",
             r"\bcoming soon\b|\bstay tuned\b|\bstill to come\b|\bon the way\b",
@@ -138,6 +141,8 @@ def test_pattern_catches_known_unfinished_copy() -> None:
         "This capability is still on the way — the full surface lands in a later release.",
         "Recovery phrases aren’t supported yet.",
         "Backend `x` does not support setup yet.",
+        "Scheduled tasks, watches, and (soon) webhooks all come from a chat.",
+        "后台任务 / 等待器 / 未来的 Webhook 都通过和 Agent 对话创建。",
     ):
         assert FORBIDDEN.search(sample), sample
     for sample in (
@@ -148,5 +153,7 @@ def test_pattern_catches_known_unfinished_copy() -> None:
         "Computer Use on Windows needs an x64 PC.",
         "The service has not confirmed Computer Use support yet.",
         "迁移中…",
+        "Hear as soon as work is done or needs you.",
+        "请先设置新的未来时间，再恢复它。",
     ):
         assert not FORBIDDEN.search(sample), sample
