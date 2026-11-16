@@ -977,15 +977,7 @@ final class MobileSessionCoordinator {
         let lease = accountSurfaceLeaseID
         let requestGeneration = generation
         let selection = storedSelection()
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: bound)
-        // Recovery can run such operations back to back, the next one
-        // starting before this wait resumes.
-        while isHeldBySelectionKeepingOperation, clock.now < deadline {
-            await selectionKeepingOperationFinished(
-                atMost: clock.now.duration(to: deadline)
-            )
-        }
+        await waitForSelectionKeepingOperations(atMost: bound)
         guard
             accountSurfaceLeaseID == lease,
             generation == requestGeneration,
@@ -996,7 +988,27 @@ final class MobileSessionCoordinator {
         return try selectInstance(id: id)
     }
 
-    private var isHeldBySelectionKeepingOperation: Bool {
+    /// Waits while only operations that keep the selection hold the
+    /// account, up to `bound` in all; returns at once when nothing, or
+    /// anything else, holds it.
+    func waitForSelectionKeepingOperations(
+        atMost bound: Duration = .seconds(10)
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: bound)
+        // Recovery can run such operations back to back, the next one
+        // starting before this wait resumes.
+        while isHeldBySelectionKeepingOperation, clock.now < deadline {
+            await selectionKeepingOperationFinished(
+                atMost: clock.now.duration(to: deadline)
+            )
+        }
+    }
+
+    /// The account is held only by an operation that keeps the selection: a
+    /// push-management request the App makes on its own, or a refresh of
+    /// the signed-in account.
+    var isHeldBySelectionKeepingOperation: Bool {
         if case .operation(let token) = phase {
             return token == selectionKeepingOperation
         }

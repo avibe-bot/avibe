@@ -1081,6 +1081,43 @@ final class NavigationPolicyTests: XCTestCase {
         }
     }
 
+    /// A shortcut usually arrives as the App returns to the foreground, when
+    /// the App may be refreshing the account or updating push on its own.
+    /// Those keep the selection, so the open waits for them and then opens
+    /// the main Bot's conversation instead of being dropped as busy.
+    @MainActor
+    func testMainBotShortcutWaitsForASelectionKeepingRefresh() async throws {
+        let held = HeldSessionReads()
+        addTeardownBlock { held.release.signal() }
+        let (appModel, _) = try await makeFixtureAppModel(
+            storedSelection: Self.instanceOneSelection,
+            heldSessionReads: held
+        )
+        try await waitUntil("The restored open") {
+            appModel.runtimeIdentity == 1
+        }
+        let refresh = Task { @MainActor in
+            try await appModel.mobileSessionCoordinator.refresh()
+        }
+        try await waitUntil("The refresh's session read") {
+            held.count.current == 2
+        }
+        XCTAssertTrue(
+            appModel.mobileSessionCoordinator.isHeldBySelectionKeepingOperation
+        )
+
+        appModel.openSelectedInstance(path: OpenMainBotIntent.path)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(appModel.runtimeIdentity, 1, "It opened during the refresh.")
+
+        held.release.signal()
+        _ = try await refresh.value
+        try await waitUntil("The shortcut's open after the refresh") {
+            appModel.runtimeIdentity == 2
+        }
+        _ = try await waitForPushRuntime(appModel, instanceID: "instance-1")
+    }
+
     /// The shortcut reaches Settings > Action Button only through the App
     /// Intents metadata Xcode extracts into the App bundle, with its
     /// localized title and Siri phrases beside it.
@@ -3606,6 +3643,7 @@ final class NavigationPolicyTests: XCTestCase {
         sessionResponse: LocalHTTPResponse? = nil,
         instanceOneAvailable: Bool = true,
         storedSelection: String? = nil,
+        heldSessionReads: HeldSessionReads? = nil,
         whenTheAppExists: @MainActor (AppModel) async throws -> Void = { _ in }
     ) async throws -> (AppModel, FixtureRequestLog) {
         let server = try LocalHTTPServer { request in
@@ -3613,7 +3651,8 @@ final class NavigationPolicyTests: XCTestCase {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
-                return sessionResponse ?? .json(
+                let read = heldSessionReads?.count.next() ?? 1
+                let response = sessionResponse ?? .json(
                     """
                     {
                       "account": {
@@ -3642,6 +3681,15 @@ final class NavigationPolicyTests: XCTestCase {
                       ]
                     }
                     """
+                )
+                guard let heldSessionReads, read > 1 else {
+                    return response
+                }
+                return LocalHTTPResponse(
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                    bodyRelease: heldSessionReads.release
                 )
             default:
                 return .status(404)
@@ -4292,6 +4340,31 @@ private final class KeyboardViewportFixture {
 
 private enum TestWaitError: Error {
     case timedOut
+}
+
+/// Holds the body of every account session read after the bootstrap's
+/// until `release` is signalled, counting the reads.
+private final class HeldSessionReads: @unchecked Sendable {
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            value += 1
+            return value
+        }
+
+        var current: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    let count = Counter()
+    let release = DispatchSemaphore(value: 0)
 }
 
 @MainActor

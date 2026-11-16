@@ -272,6 +272,10 @@ final class AppModel: ObservableObject {
     ] = []
     private var hasCompletedBootstrap = false
     private var pendingInstanceOpen: PendingInstanceOpen?
+    /// Advances with each open request after the bootstrap, so a shortcut
+    /// that waited for a selection-keeping operation does not open after a
+    /// newer request.
+    private var instanceOpenRequest = 0
     private var pendingPushOpened: PendingPushOpened?
     private var pendingPushOpenedExpiryTask: Task<Void, Never>?
 
@@ -1397,6 +1401,7 @@ final class AppModel: ObservableObject {
             pendingInstanceOpen = .pushTap(tap)
             return
         }
+        instanceOpenRequest += 1
         guard openInstance(
             accountID: tap.accountID,
             instanceOrigin: tap.instanceOrigin,
@@ -1414,11 +1419,32 @@ final class AppModel: ObservableObject {
     /// selected instance unavailable, or while the account may not leave the
     /// account page (account deletion), nothing changes: the App keeps the
     /// screen it shows, with no prompt.
+    ///
+    /// A refresh or push-management request the App runs on its own (as on
+    /// a return to the foreground, which is when a shortcut arrives) keeps
+    /// the selection but holds the account. The open waits for it, within
+    /// the bound the instance list's open uses, then opens once.
     func openSelectedInstance(path: String) {
         guard hasCompletedBootstrap else {
             pendingInstanceOpen = .selectedInstance(path: path)
             return
         }
+        instanceOpenRequest += 1
+        guard sessionCoordinator.isHeldBySelectionKeepingOperation else {
+            openSelectedInstanceNow(path: path)
+            return
+        }
+        let request = instanceOpenRequest
+        Task { [weak self] in
+            await self?.sessionCoordinator.waitForSelectionKeepingOperations()
+            guard let self, self.instanceOpenRequest == request else {
+                return
+            }
+            self.openSelectedInstanceNow(path: path)
+        }
+    }
+
+    private func openSelectedInstanceNow(path: String) {
         guard
             let account = sessionCoordinator.currentAccount,
             let instance = sessionCoordinator.selectedInstance,
