@@ -183,7 +183,11 @@ fn the_shell_enables_only_its_declared_capabilities() {
         serde_json::json!(["allow-desktop-client-request", "core:window:allow-close"])
     );
     let account = read_json(crate_dir().join("capabilities/main-instance-client.json"));
-    assert_eq!(account["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert!(
+        account.get("windows").is_none(),
+        "account authority must not match the physical main window"
+    );
+    assert_eq!(account["webviews"], serde_json::json!(["main-account-*"]));
     assert_eq!(account["local"], true);
     assert!(account.get("remote").is_none());
     assert_eq!(
@@ -694,8 +698,12 @@ fn installation_help_is_a_fixed_bootstrap_only_destination() {
         "the install action must use the product installation guide"
     );
     assert!(
-        source.contains("fn open_install_docs(window: WebviewWindow)"),
+        source.contains("fn open_install_docs(window: Webview)"),
         "the command must accept no URL or protocol argument from the WebView"
+    );
+    assert!(
+        source.contains("instance_client::is_current_runtime(window) && is_bootstrap_page_url(&url)"),
+        "bootstrap commands must check both the invoking role and its bundled page"
     );
 }
 
@@ -881,21 +889,25 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
         "the main window must be built by ensure_main_window, not auto-created"
     );
     let source = shipping_source("src/lib.rs");
-    let builder = source
-        .split("fn build_main_window(")
-        .nth(1)
-        .expect("main window builder")
-        .split("\n}\n")
-        .next()
-        .expect("builder body");
-    assert!(
-        builder.contains(".on_new_window(|url, _features| handle_new_window_request(url))"),
-        "the main window must register the new-window handler"
-    );
+    for name in ["fn build_main_window(", "fn build_main_child("] {
+        let builder = source
+            .split(name)
+            .nth(1)
+            .expect("main window or child builder")
+            .split("\n}\n")
+            .next()
+            .expect("builder body");
+        assert!(
+            builder.contains(".on_new_window(|url, _features| handle_new_window_request(url))"),
+            "{name} must register the new-window handler"
+        );
+    }
     let setup = &source[source.find(".setup(|app|").expect("shell setup")..];
     assert!(setup.contains("ensure_main_window(app.handle())"));
     assert!(source.contains("build_main_window(app, None, false, None)"));
-    assert!(shipping_source("src/instance_client.rs").contains("crate::build_main_window("));
+    let instance_client = shipping_source("src/instance_client.rs");
+    assert!(instance_client.contains("crate::build_main_child("));
+    assert!(instance_client.contains(".on_new_window(|url, _| crate::handle_new_window_request(url))"));
     let handler = source
         .split("fn handle_new_window_request(")
         .nth(1)
@@ -907,7 +919,7 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
     assert!(handler.contains("tauri_plugin_opener::open_url(url.as_str(), None::<&str>)"));
     for forbidden in ["NewWindowResponse::Allow", "NewWindowResponse::Create"] {
         assert!(
-            !source.contains(forbidden),
+            !source.contains(forbidden) && !instance_client.contains(forbidden),
             "the page must never get a second webview, found {forbidden:?}"
         );
     }
@@ -1027,7 +1039,7 @@ fn the_macos_overlay_title_bar_keeps_its_layout_and_defaults_to_no_inset() {
     assert_eq!(window["titleBarStyle"], "Overlay");
     assert_eq!(window["hiddenTitle"], true);
     assert_eq!(window["trafficLightPosition"]["x"], 12);
-    assert_eq!(window["trafficLightPosition"]["y"], 24);
+    assert_eq!(window["trafficLightPosition"]["y"], 16);
     // Bootstrap management and window gestures have separate capability grants.
     assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
     let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));
@@ -1056,7 +1068,7 @@ fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
 fn a_dropped_retry_is_reported_to_the_bootstrap_page() {
     let source = shipping_source("src/lib.rs");
     for required in [
-        "fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String>",
+        "fn bootstrap_retry(window: Webview, app: AppHandle) -> Result<bool, String>",
         "Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))",
         "fn spawn_bootstrap(app: AppHandle, trigger: BootstrapTrigger) -> bool",
         "return false",
@@ -1277,7 +1289,7 @@ fn settings_open_in_the_shown_workbench_and_only_while_one_is_shown() {
         .next()
         .expect("page-load hook body");
     assert!(page_load
-        .contains("webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished"));
+        .contains("instance_client::is_main_view(webview.app_handle(), webview.label()) && payload.event() == tauri::webview::PageLoadEvent::Finished"));
     assert!(
         page_load.contains("main_document_finished(webview);")
             && body("main_document_finished").contains("refresh_native_controls(webview.app_handle(), None);"),
