@@ -193,7 +193,9 @@ export const RuntimePill: React.FC<{
   read: RegionRead<RuntimeDependency>;
   starting: boolean;
   directCount?: number;
-}> = ({ read, starting, directCount }) => {
+  /** The own-login home with installed backends, every one switched off. */
+  allSwitchedOff?: boolean;
+}> = ({ read, starting, directCount, allSwitchedOff = false }) => {
   const { t } = useModelsTranslation();
   const projection = foldRegionRead<RuntimeDependency, { runtime: RuntimeDependency; authoritative: boolean } | null>(read, {
     loading: () => null,
@@ -213,7 +215,7 @@ export const RuntimePill: React.FC<{
   // The own-login home with every local backend switched off routes nothing, so it
   // does not claim the gateway is running.
   const allDirect = directHome && directCount > 0;
-  const allOff = directHome && directCount === 0;
+  const allOff = directHome && directCount === 0 && allSwitchedOff;
   const key = unread
     ? 'unread'
     : starting
@@ -1640,7 +1642,7 @@ export const SettingsModelsPage: React.FC = () => {
   return (
     <ModelHubShell
       rootRef={pageRef}
-      status={!landingLoading && <RuntimePill read={runtimeRead} starting={startingRuntime} directCount={directEmpty ? installedNativeAgents.length : undefined} />}
+      status={!landingLoading && <RuntimePill read={runtimeRead} starting={startingRuntime} directCount={directEmpty ? installedNativeAgents.length : undefined} allSwitchedOff={directEmpty && installedNativeAgents.length === 0 && switchedOffNativeAgents.length > 0} />}
       actions={!landingLoading && runtimeConfigurationVisible
         ? <div className="model-hub-shell-actions">
               {runtimeConfigurationVisible && migrationAvailable === true && (

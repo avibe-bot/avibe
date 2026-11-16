@@ -811,6 +811,8 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeNull();
     expect(screen.queryByText(/backends are direct|个后端均为直连/i)).toBeNull();
+    // Nothing is installed, so nothing was turned off.
+    expect(screen.queryByText(/^Local backends are all turned off$|^本机后端都已停用$/)).toBeNull();
   });
 
   it('publishes a newly discovered backend into the already-open page', async () => {
