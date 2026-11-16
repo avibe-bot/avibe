@@ -1502,7 +1502,8 @@ function InstanceListBody({
   return (
     <>
       {stale ? <StaleBanner disabled={refreshing || locked} onRetry={onRefresh} /> : null}
-      {selected ? (
+      {/* mutation check: the page renders without the current block */}
+      {selected && current.reportsOpening === false ? (
         <CurrentInstance
           instance={selected}
           label={current.label(selected.name)}
