@@ -3933,6 +3933,7 @@
         "enable": "开启通知",
         "enabled": "通知已开启",
         "enabledPwa": "PWA 通知已开启",
+        "enableFailed": "通知没能开启，请稍后再试。",
         "registering": "正在登记这台设备…",
         "disable": "关闭",
         "disablePending": "通知已关闭，设备清理仍在等待完成。",

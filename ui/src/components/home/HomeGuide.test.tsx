@@ -24,6 +24,7 @@ const authorization = vi.hoisted(() => ({
   capabilities: { can_read_instance: true, can_use_show_pages: true, can_use_vault_secrets: true, can_use_skills: true },
 }));
 const viewport = vi.hoisted(() => ({ desktop: true }));
+const toast = vi.hoisted(() => ({ showToast: vi.fn() }));
 
 vi.mock('../../context/ApiContext', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../context/ApiContext')>()),
@@ -41,6 +42,7 @@ vi.mock('../../lib/native', async (importOriginal) => ({
 vi.mock('../workbench/computerUseStatus', () => ({ readComputerUseStatus: () => computerUse.read() }));
 vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
 vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }));
+vi.mock('../../context/ToastContext', () => ({ useToast: () => toast }));
 
 import { BotsContext, type BotsState } from '../../context/BotsContext';
 import en from '../../i18n/en.json';
@@ -151,6 +153,34 @@ describe('Getting started reads what the UI already observes (ui/design: home/ho
     // Notifications turn on in place.
     await user.click(screen.getByRole('button', { name: 'Turn on' }));
     expect(push.enable).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['says so when turning notifications on fails', new Error('subscribe_failed'), true],
+    ['says nothing when the prompt was refused', new Error('permission_denied'), false],
+  ])('%s', async (_case, error, toasts) => {
+    push.state = 'off';
+    push.enable.mockRejectedValue(error);
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(items()).toEqual(['Turn on notifications']));
+    await user.click(screen.getByRole('button', { name: 'Turn on' }));
+    await waitFor(() => expect(push.read).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(toast.showToast).toHaveBeenCalledTimes(toasts ? 1 : 0));
+    if (toasts) {
+      expect(toast.showToast).toHaveBeenCalledWith(en.workbench.inbox.notifications.enableFailed, 'error');
+    }
+  });
+
+  it('says nothing when notifications turn on', async () => {
+    push.state = 'off';
+    push.enable.mockImplementation(async () => { push.state = 'on'; });
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(items()).toEqual(['Turn on notifications']));
+    await user.click(screen.getByRole('button', { name: 'Turn on' }));
+    await waitFor(() => expect(items()).toEqual([]));
+    expect(toast.showToast).not.toHaveBeenCalled();
   });
 
   it.each([
