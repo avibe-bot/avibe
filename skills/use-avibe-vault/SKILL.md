@@ -103,24 +103,24 @@ For tools that require a file, `inject` uses the same selectors and explicit out
 `vibe vault inject --tag deploy --out deploy.json --format json`
 
 Request approval before a protected `run` with an existing static secret:
-`vibe vault access GITHUB_LOGIN.password --skill deploy --command "Log in to GitHub" --egress "github.com"`
+`vibe vault access GITHUB_LOGIN.password --skill deploy --command 'Log in to GitHub' --egress 'github.com'`
 
 For protected `fetch`, run `vibe vault fetch`; it creates the correct fetch approval request when needed.
 
 Sign a 32-byte digest with a standard keypair secret. Protected keys additionally require a verifiable signing context and browser approval:
-`vibe vault sign WALLET_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme ecdsa-secp256k1-recoverable --command "sign deployment transaction"`
+`vibe vault sign WALLET_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme ecdsa-secp256k1-recoverable --command 'sign deployment transaction'`
 
 Standard-tier BIP86 Taproot scheme example (replace the example digest with the independently verified BIP341 transaction sighash):
-`vibe vault sign BTC_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme schnorr-secp256k1-bip341-keypath --command "sign verified Bitcoin key-path spend"`
+`vibe vault sign BTC_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme schnorr-secp256k1-bip341-keypath --command 'sign verified Bitcoin key-path spend'`
 
 Provide the complete protected context in a regular JSON file when needed. `$BITCOIN_SIGHASH_HEX` is the independently computed 32-byte digest also present in that file; this example keeps the listed Taproot scheme, requires approval and never broadcasts:
-`vibe vault sign PROTECTED_BTC --digest "$BITCOIN_SIGHASH_HEX" --scheme schnorr-secp256k1-bip341-keypath --signing-context-file context.json --command "sign verified Bitcoin payment"`
+`vibe vault sign PROTECTED_BTC --digest "$BITCOIN_SIGHASH_HEX" --scheme schnorr-secp256k1-bip341-keypath --signing-context-file context.json --command 'sign verified Bitcoin payment'`
 
 Sign a Solana transaction message with a standard Solana keypair secret. If signing requires approval, build it using the durable-nonce recipe above first. `$MESSAGE_HEX` is the complete serialized transaction message your code built (header, account keys, recent blockhash and instructions), as hex. It is the bytes every signer signs: it does not include the transaction's signature count or signatures, and it is not a hash. Never pass a partial or placeholder message:
-`vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX" --command "sign Solana transaction message"`
+`vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX" --command 'sign Solana transaction message'`
 
 For a protected Solana key, add the matching context; the command returns a pending browser signing request:
-`vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX" --signing-context-json "{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"$MESSAGE_HEX\"}" --command "sign Solana transaction message"`
+`vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX" --signing-context-json "{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"$MESSAGE_HEX\"}" --command 'sign Solana transaction message'`
 
 Sign with an enabled HD wallet account. Account indices are shared across chains; the list identifies the receiving address for each chain. `$EVM_DIGEST_HEX` and `$BITCOIN_SIGHASH_HEX` are independently validated 32-byte transaction digests; `$MESSAGE_HEX` is the complete serialized Solana message:
 `vibe vault sign AGENT_WALLET --chain evm --account 0 --digest "$EVM_DIGEST_HEX"`

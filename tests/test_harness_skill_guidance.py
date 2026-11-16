@@ -320,7 +320,7 @@ def test_guidance_teaches_receipts_and_no_reply_not_successful_callbacks() -> No
 def test_built_in_shell_examples_single_quote_free_text() -> None:
     # Double quotes let the shell expand `$`, backticks and `!` in model-written
     # text before vibe sees it ("Codex $500" became "Codex 00").
-    double_quoted = re.compile(r'--(?:title|name|message|reason|description|shell) "')
+    double_quoted = re.compile(r'--(?:title|name|message|reason|description|shell|command|egress) "')
     paths = [*ROOT.joinpath("core/prompts").glob("*.md"), *ROOT.joinpath("skills").rglob("*.md")]
     offenders = [
         f"{path.relative_to(ROOT)}:{number}"
